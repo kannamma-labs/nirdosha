@@ -13,7 +13,7 @@
 [![Roadmap](https://img.shields.io/badge/ROADMAP-view-purple)](./docs/PUBLIC_ROADMAP.md)
 [![Maintainers](https://img.shields.io/badge/maintainers-5-green)](./MAINTAINERS.md)
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/arunsoman)
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/arunsoman/nirdosha?quickstart=1)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)
 
 ![A themed dashboard with live SQLite data, a sortable/searchable table, and a role-gated approval action — the same screen under a lower-privileged identity, with a field dropped and an action disabled](./demo.gif)
 
@@ -139,15 +139,15 @@ Full comparison in the [wiki](https://github.com/kannamma-labs/nirdosha/wiki/Nir
 <summary><b>📦 Install (binaries, from source, or Codespaces)</b></summary>
 
 **No local toolchain at all?** Click
-[**Open in GitHub Codespaces**](https://codespaces.new/arunsoman/nirdosha?quickstart=1)
+[**Open in GitHub Codespaces**](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)
 — it builds the compiler for you (system Z3, ~1 min) and drops you into a
 VS Code shell in the browser with everything already checked out. From
 there:
 
 ```sh
 cd crates/compiler
-cargo run -- ../../examples/hello.nir
-cargo run -- serve ../../examples/store.nir --port 8080   # open via the Ports tab
+cargo run -- ../../examples/syntax/hello_nir.nir
+cargo run -- serve ../../examples/syntax/06_identity_and_declarative_ui.nir --port 8080   # open via the Ports tab
 ```
 
 **Don't want to learn the syntax first?** Paste
