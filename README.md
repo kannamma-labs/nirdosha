@@ -5,14 +5,15 @@
   No GC. No data races. No deadlocks. No buffer overflow. <i>Proven at build time — not promised, not tested.</i>
 </p>
 
-<p align="center">
-  <a href="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml"><img src="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml/badge.svg" alt="build"/></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"/></a>
-  <a href="https://github.com/kannamma-labs/nirdosha/wiki"><img src="https://img.shields.io/badge/docs-wiki-blue" alt="Wiki"/></a>
-  <a href="./docs/PUBLIC_ROADMAP.md"><img src="https://img.shields.io/badge/ROADMAP-view-purple" alt="Roadmap"/></a>
-  <a href="./MAINTAINERS.md"><img src="https://img.shields.io/badge/maintainers-5-green" alt="Maintainers"/></a>
-  <a href="https://github.com/sponsors/arunsoman"><img src="https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa" alt="Sponsor"/></a>
-</p>
+[![build](https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml/badge.svg)](https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Wiki](https://img.shields.io/badge/docs-wiki-blue)](https://github.com/kannamma-labs/nirdosha/wiki)
+[![Contributing](https://img.shields.io/badge/CONTRIBUTING-read-blue)](./CONTRIBUTING.md)
+[![Governance](https://img.shields.io/badge/GOVERNANCE-read-blue)](./GOVERNANCE.md)
+[![Roadmap](https://img.shields.io/badge/ROADMAP-view-purple)](./docs/PUBLIC_ROADMAP.md)
+[![Maintainers](https://img.shields.io/badge/maintainers-5-green)](./MAINTAINERS.md)
+[![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/arunsoman)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/arunsoman/nirdosha?quickstart=1)
 
 ![A themed dashboard with live SQLite data, a sortable/searchable table, and a role-gated approval action — the same screen under a lower-privileged identity, with a field dropped and an action disabled](./demo.gif)
 
@@ -137,7 +138,30 @@ Full comparison in the [wiki](https://github.com/kannamma-labs/nirdosha/wiki/Nir
 <details>
 <summary><b>📦 Install (binaries, from source, or Codespaces)</b></summary>
 
-Prebuilt binaries for **Linux, Windows, and Apple Silicon macOS** on every [release](https://github.com/kannamma-labs/nirdosha/releases):
+**No local toolchain at all?** Click
+[**Open in GitHub Codespaces**](https://codespaces.new/arunsoman/nirdosha?quickstart=1)
+— it builds the compiler for you (system Z3, ~1 min) and drops you into a
+VS Code shell in the browser with everything already checked out. From
+there:
+
+```sh
+cd crates/compiler
+cargo run -- ../../examples/hello.nir
+cargo run -- serve ../../examples/store.nir --port 8080   # open via the Ports tab
+```
+
+**Don't want to learn the syntax first?** Paste
+[`agent-skills/nirdosha/paste-anywhere-prompt.md`](./agent-skills/nirdosha/paste-anywhere-prompt.md)
+into any LLM chat and describe what you want in plain English — it writes
+the `.nir` code for you. This prompt has already been used, unmodified, to
+generate a working e-commerce store, a food-delivery platform, a telecom
+revenue-assurance system, and an online trading platform, each hundreds of
+lines, each by an LLM with no prior Nirdosha exposure. See
+[LLM Integration](https://github.com/kannamma-labs/nirdosha/wiki/LLM-Integration)
+for the full mechanism and evidence.
+
+**Install and run it yourself — no compiler needed, prebuilt binaries are
+published on every [release](https://github.com/kannamma-labs/nirdosha/releases):**
 
 ```sh
 # macOS / Linux — installer script, auto-detects your platform
