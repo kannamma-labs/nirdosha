@@ -343,15 +343,23 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
         // simple `let b: box i64 = ...` case: the `nir_free` call is
         // really there, right after `b`'s last use.
         Ty::Box(_) | Ty::Ref(_) => Ok("ptr".to_string()),
-        Ty::Thread(_) => unsupported(format!(
-            "codegen doesn't support `{}` yet — spawn/join are interpreter-only for now \
-             (real OS threads, not yet compiled to native code)",
-            ty.name()
-        )),
-        Ty::Channel(_) => unsupported(format!(
-            "codegen doesn't support `{}` yet — chan/send/recv are interpreter-only for now",
-            ty.name()
-        )),
+        // A spawned computation's handle — one opaque `i64`, exactly like
+        // `Ty::Tcp`/`Ty::File` above: everything the handle needs (the
+        // dedicated `Scope` a `spawn` call site created, the result word
+        // a `join` reads back) lives in `runtime-kernels`' own
+        // `HandleTable`, not in this value. `nir_thread_spawn`/
+        // `nir_thread_join` (`runtime-kernels/src/lib.rs`) are the
+        // backend `spawn`/`join` compile to — see `Codegen::expr`'s
+        // `Expr::Spawn`/`Expr::Join` arms for the real codegen and their
+        // doc comments for the disclosed narrower scope (word-sized
+        // arguments/results only, for now).
+        Ty::Thread(_) => Ok("i64".to_string()),
+        // A channel handle — same "opaque `i64` into a kernel-owned
+        // table" story as `Ty::Thread` just above. `nir_chan_new`/
+        // `nir_chan_send`/`nir_chan_recv` are the backend `chan`/`send`/
+        // `recv` compile to for a `Ty::Channel` operand (`Codegen::expr`'s
+        // `Expr::Chan`/`Expr::Send`/`Expr::Recv` arms).
+        Ty::Channel(_) => Ok("i64".to_string()),
         Ty::Sandbox => unsupported(
             "codegen doesn't support `sandbox` yet — sandbox/stop are interpreter-only for now",
         ),
@@ -940,25 +948,32 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
         // inside — same "walk, don't reject" treatment every other
         // already-supported unary-ish construct gets.
         Expr::Box(inner, _) | Expr::Deref(inner, _) | Expr::Ref(inner, _) => check_expr(inner, plugin_names, registry),
-        Expr::Spawn(_, _, _) | Expr::Join(_, _) => {
-            unsupported("codegen doesn't support `spawn`/`join` yet — interpreter-only for now")
+        // `spawn`/`join` land as of this phase (`runtime-kernels`'
+        // `nir_thread_spawn`/`nir_thread_join`) — this structural pre-pass
+        // has no type info (that's `Codegen::expr`'s job, at real IR-gen
+        // time, where a spawned function's own signature is checked for
+        // word-sized args/return), so it just recurses, same "walk,
+        // don't reject" treatment every other now-supported construct
+        // gets.
+        Expr::Spawn(_, args, _) => {
+            for a in args {
+                check_expr(a, plugin_names, registry)?;
+            }
+            Ok(())
         }
+        Expr::Join(inner, _) => check_expr(inner, plugin_names, registry),
         Expr::Acquire(_, _, _) => unsupported(
             "codegen doesn't support `acquire` yet — first-class/privileged functions \
              are interpreter-only for now",
         ),
-        // `chan` construction itself is still unsupported (Phase D2) —
-        // but `send`/`recv` are the same two AST nodes `tcp`'s I/O reuses
-        // (typeck.rs's `Expr::Send`/`Expr::Recv` arms dispatch on the
-        // operand's *type*, `Ty::Channel` vs `Ty::Tcp`), and this
-        // structural pre-pass has no type info to tell those apart (same
-        // "type-oblivious pre-pass, real check happens at IR-gen time"
-        // precedent `print`'s aggregate rejection already established —
-        // module doc). So both recurse here; `Codegen::expr`'s real
-        // `Expr::Send`/`Expr::Recv` arms are the ones that reject a
-        // `Ty::Channel` operand specifically, gracefully, once they can
-        // actually see its type via `local_ty_of`.
-        Expr::Chan(_) => unsupported("codegen doesn't support `chan` yet — interpreter-only for now"),
+        // `chan` construction itself needs no type info at all (every
+        // `Ty::Channel` value is the same `i64` handle regardless of its
+        // payload type — `llvm_ty`'s own `Ty::Channel` arm) — real per-
+        // payload-type validation happens where `send`/`recv` can see the
+        // channel's actual type via `local_ty_of`, same "type-oblivious
+        // pre-pass, real check happens at IR-gen time" precedent
+        // `print`'s aggregate rejection already established (module doc).
+        Expr::Chan(_) => Ok(()),
         Expr::Send(chan, value, _) => {
             check_expr(chan, plugin_names, registry)?;
             check_expr(value, plugin_names, registry)
@@ -1091,6 +1106,16 @@ struct Codegen<'a> {
     /// for a global referenced by name, so appending at the end rather
     /// than the true point of first use is fine.
     string_globals: String,
+    /// Every `spawn`'s own generated trampoline function (`spawn_thread`'s
+    /// doc comment) — same structural reason `string_globals` exists: a
+    /// top-level `define` is only valid at module scope, never written
+    /// mid-function the way `self.out` is being built, but a `spawn` can
+    /// appear anywhere inside any function body. Built by temporarily
+    /// swapping it into `self.out` (so every ordinary instruction-emitting
+    /// helper — `widen_to_i64`, `narrow_from_i64`, `llvm_ty`, ... — just
+    /// works unmodified), then swapping back; appended to `self.out` once
+    /// at the very end, alongside `string_globals`.
+    trampolines: String,
     tmp: usize,
     label: usize,
     smt_report: &'a SmtReport,
@@ -1222,6 +1247,7 @@ fn emit_llvm_ir_impl<'a>(
             out: String::new(),
             entry_allocas: String::new(),
             string_globals: String::new(),
+            trampolines: String::new(),
             tmp: 0,
             label: 0,
             smt_report,
@@ -1326,6 +1352,25 @@ fn emit_llvm_ir_impl<'a>(
     // site change, not a declare-list change too.
     writeln!(cg.out, "declare ptr @nir_alloc(i64)").unwrap();
     writeln!(cg.out, "declare void @nir_free(ptr)").unwrap();
+    // `chan`/`spawn`/`join`'s kernels (`runtime-kernels/src/lib.rs`'s
+    // "chan/spawn/join kernels" section) — every channel/thread payload
+    // crosses this boundary as one `i64` word (`Ty::Channel`/`Ty::Thread`'s
+    // own `llvm_ty` note); `nir_thread_spawn`'s first argument is a bare
+    // function pointer (this file's generated trampolines, `spawn_thread`'s
+    // own doc comment) — LLVM's opaque `ptr` covers that with no separate
+    // function-pointer type needed.
+    writeln!(cg.out, "declare i64 @nir_chan_new()").unwrap();
+    writeln!(cg.out, "declare i64 @nir_chan_send(i64, i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_chan_recv(i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_thread_spawn(ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_thread_join(i64)").unwrap();
+    // The APM kernel's flight recorder (`runtime-kernels/src/kernel/
+    // mod.rs`'s own doc comment) — declared unconditionally like every
+    // other kernel here, called exactly once by `emit_c_main` on every
+    // exit path, never by anything a `.nir` program itself writes (not
+    // in `ast::BUILTIN_NAMES` at all — there is no `Expr` that lowers to
+    // a `call` to this).
+    writeln!(cg.out, "declare void @nir_kernel_flight_recorder_dump()").unwrap();
     // "%lld\n\0" — 6 bytes (%, l, l, d, \n, \0), not 5; LLVM's array
     // constant size has to match the literal exactly, byte for byte.
     writeln!(cg.out, "@.int_fmt = private unnamed_addr constant [6 x i8] c\"%lld\\0A\\00\"").unwrap();
@@ -1371,6 +1416,9 @@ fn emit_llvm_ir_impl<'a>(
     // global constant, collected during function codegen since it can't
     // be written mid-function-body, appended here once at the end.
     cg.out.push_str(&cg.string_globals);
+    // See `trampolines`'s own doc — every `spawn` call site's generated
+    // trampoline function, appended here for the same reason.
+    cg.out.push_str(&cg.trampolines);
     // See `named_type_decls`'s own doc — every `%Name = type {...}`
     // declaration, collected during function codegen (a named type is
     // only discovered when a concrete instantiation is actually used)
@@ -2110,6 +2158,16 @@ impl Codegen<'_> {
                 Ty::Channel(inner) => *inner,
                 _ => Ty::I64,
             },
+            // Mirrors `typeck::infer_spawn`/the `Expr::Join` arm of
+            // `infer` exactly — needed for the same "directly-nested,
+            // no intervening `let`" case `Expr::Recv`'s own comment
+            // above explains (e.g. `join spawn worker(x)` with nothing
+            // ever bound to a name).
+            Expr::Spawn(name, _, _) => Ty::Thread(Box::new(self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64))),
+            Expr::Join(inner, _) => match self.local_ty_of(inner, scopes) {
+                Ty::Thread(t) => *t,
+                _ => Ty::I64,
+            },
             Expr::Box(inner, _) => Ty::Box(Box::new(self.local_ty_of(inner, scopes))),
             Expr::Ref(inner, _) => Ty::Ref(Box::new(self.local_ty_of(inner, scopes))),
             // `*e` unwraps exactly one pointer level — `ownership.rs`
@@ -2287,6 +2345,196 @@ impl Codegen<'_> {
         Ok(r)
     }
 
+    /// Converts `val` (of LLVM type `llty`) into the one `i64` machine
+    /// word every `chan`/`spawn` payload crosses the kernel ABI boundary
+    /// as (`runtime-kernels/src/lib.rs`'s "chan/spawn/join kernels"
+    /// section). Every integer type is already carried at full `i64`
+    /// width by the time it reaches here (module doc's own invariant,
+    /// enforced by `widen_to_i64`) — only `double`/`ptr`/`i1` need a real
+    /// conversion instruction.
+    fn to_i64_word(&mut self, val: &str, llty: &str) -> String {
+        match llty {
+            "ptr" => {
+                let r = self.fresh_reg("word_ptrtoint");
+                writeln!(self.out, "  {r} = ptrtoint ptr {val} to i64").unwrap();
+                r
+            }
+            "double" => {
+                let r = self.fresh_reg("word_bitcast");
+                writeln!(self.out, "  {r} = bitcast double {val} to i64").unwrap();
+                r
+            }
+            "i1" => {
+                let r = self.fresh_reg("word_zext");
+                writeln!(self.out, "  {r} = zext i1 {val} to i64").unwrap();
+                r
+            }
+            _ => val.to_string(),
+        }
+    }
+
+    /// The reverse of `to_i64_word` — unpacks a raw `i64` word (from
+    /// `nir_chan_recv`/`nir_thread_join`) back to `llty`'s real shape.
+    fn from_i64_word(&mut self, val: &str, llty: &str) -> String {
+        match llty {
+            "ptr" => {
+                let r = self.fresh_reg("word_inttoptr");
+                writeln!(self.out, "  {r} = inttoptr i64 {val} to ptr").unwrap();
+                r
+            }
+            "double" => {
+                let r = self.fresh_reg("word_bitcast");
+                writeln!(self.out, "  {r} = bitcast i64 {val} to double").unwrap();
+                r
+            }
+            "i1" => {
+                let r = self.fresh_reg("word_trunc");
+                writeln!(self.out, "  {r} = trunc i64 {val} to i1").unwrap();
+                r
+            }
+            _ => val.to_string(),
+        }
+    }
+
+    /// Whether `ty` fits in the one `i64` machine word `chan`/`spawn`'s
+    /// payload ABI uses today (`to_i64_word`/`from_i64_word`) — every
+    /// plain scalar (`i8`/.../`i64`/`bool`/`f64`), every pointer-shaped
+    /// handle (`box`/`ref`), and every existing `i64`-handle type
+    /// (`tcp`/`file`/`thread`/`chan`/`sandbox`) qualify; `str`/`dec128`
+    /// (two words) and any `Vector`/`Matrix`/struct/enum
+    /// (`Ty::is_aggregate()`) don't — a real, disclosed narrower scope
+    /// than `chan T`/`spawn`'s full type-level generality (each caller of
+    /// this fn explains the gap at its own rejection site).
+    fn is_word_sized(&mut self, ty: &Ty) -> Result<bool, CodegenError> {
+        if ty.is_aggregate() {
+            return Ok(false);
+        }
+        let llty = self.llvm_ty(ty)?;
+        Ok(matches!(llty.as_str(), "i1" | "i8" | "i16" | "i32" | "i64" | "double" | "ptr"))
+    }
+
+    /// `spawn name(args)`'s real codegen — see `runtime-kernels/src/
+    /// lib.rs`'s "chan/spawn/join kernels" section for the kernel side
+    /// this calls into. Every parameter and `name`'s return type must be
+    /// word-sized (`is_word_sized`) — checked here, not `check_supported`'s
+    /// structural pre-pass (which has no signature info), with a specific
+    /// reason rather than a confusing fallback error.
+    fn spawn_thread(&mut self, name: &str, args: &[Expr], span: Span, scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let _ = span;
+        // Cloned out of `self.sigs` field-by-field (not the whole
+        // `FnSig`, which doesn't derive `Clone`) — same pattern `call()`'s
+        // own `sig_params`/`sig_ret` locals already use, for the same
+        // reason: this function needs `&mut self` again immediately
+        // after, and a borrow of `self.sigs` can't outlive that.
+        let sig_params = self.sigs.get(name).expect("typeck.rs already resolved this call").params.clone();
+        let sig_ret = self.sigs.get(name).expect("typeck.rs already resolved this call").ret.clone();
+        for p in &sig_params {
+            if !self.is_word_sized(p)? {
+                return unsupported(format!(
+                    "codegen doesn't support spawning `{name}` yet — its parameter type `{p:?}` \
+                     isn't word-sized (only integers/bool/f64/box/ref/handles are supported as \
+                     spawn arguments so far, not str/dec128/struct/enum/Vector/Matrix)"
+                ));
+            }
+        }
+        if sig_ret != Ty::Unit && !self.is_word_sized(&sig_ret)? {
+            return unsupported(format!(
+                "codegen doesn't support spawning `{name}` yet — its return type `{sig_ret:?}` \
+                 isn't word-sized (only integers/bool/f64/box/ref/handles/unit are supported as \
+                 spawn results so far, not str/dec128/struct/enum/Vector/Matrix)"
+            ));
+        }
+
+        // The heap block `args` get marshaled into, laid out as one
+        // anonymous LLVM struct field per parameter — an empty struct
+        // (`{}`, `null` ctx pointer, never dereferenced) for a
+        // zero-argument spawn.
+        let param_lltys: Vec<String> = sig_params.iter().map(|p| self.llvm_ty(p)).collect::<Result<_, _>>()?;
+        let ctx_llty = format!("{{{}}}", param_lltys.join(", "));
+        let ctx_ptr = if sig_params.is_empty() {
+            "null".to_string()
+        } else {
+            let size = format!("ptrtoint (ptr getelementptr ({ctx_llty}, ptr null, i32 1) to i64)");
+            let p = self.fresh_reg("spawn_ctx");
+            writeln!(self.out, "  {p} = call ptr @nir_alloc(i64 {size})").unwrap();
+            p
+        };
+        for (i, (a, want)) in args.iter().zip(sig_params.iter()).enumerate() {
+            let v = self.expr(a, scopes)?;
+            let llty = self.llvm_ty(want)?;
+            let v = if want.is_integer() { self.narrow_from_i64(&v, want)? } else { v };
+            let field_ptr = self.fresh_reg("spawn_ctx_field");
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {ctx_llty}, ptr {ctx_ptr}, i32 0, i32 {i}").unwrap();
+            writeln!(self.out, "  store {llty} {v}, ptr {field_ptr}").unwrap();
+        }
+
+        let tramp_name = self.fresh_global("spawn_trampoline");
+        self.emit_spawn_trampoline(&tramp_name, name, &param_lltys, &ctx_llty, &sig_ret)?;
+
+        let handle = self.fresh_reg("thread_handle");
+        writeln!(self.out, "  {handle} = call i64 @nir_thread_spawn(ptr {tramp_name}, ptr {ctx_ptr})").unwrap();
+        self.guard_io_ok(&handle);
+        Ok(handle)
+    }
+
+    /// Emits one top-level trampoline function into `self.trampolines` —
+    /// the bridge `nir_thread_spawn`'s raw `extern "C" fn(*mut u8, *mut
+    /// i64)` signature needs between the kernel (which knows nothing
+    /// about `.nir` argument shapes) and `name`'s real, statically-known
+    /// LLVM signature: unpack `ctx`'s fields, free `ctx` (its only job
+    /// was carrying the args this far), call `name` for real, and write
+    /// its result — widened/converted to one `i64` word by the same
+    /// `widen_to_i64`/`to_i64_word` pair `expr()`/`chan` already use, or
+    /// left untouched for a `unit`-returning spawn — through
+    /// `result_slot`. Built by temporarily swapping `self.trampolines`
+    /// into `self.out` (`trampolines`'s own doc comment explains why a
+    /// second buffer is needed at all) so every ordinary instruction-
+    /// emitting helper this needs just works unmodified, then swapping
+    /// back.
+    fn emit_spawn_trampoline(
+        &mut self,
+        tramp_name: &str,
+        callee_name: &str,
+        param_lltys: &[String],
+        ctx_llty: &str,
+        ret_ty: &Ty,
+    ) -> Result<(), CodegenError> {
+        let ret_llty = self.llvm_ty(ret_ty)?;
+        let saved_out = std::mem::take(&mut self.out);
+        writeln!(self.out, "define void {tramp_name}(ptr %ctx, ptr %result_slot) {{").unwrap();
+        writeln!(self.out, "entry:").unwrap();
+        let mut call_args = Vec::with_capacity(param_lltys.len());
+        for (i, llty) in param_lltys.iter().enumerate() {
+            let field_ptr = self.fresh_reg("tramp_field");
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {ctx_llty}, ptr %ctx, i32 0, i32 {i}").unwrap();
+            let val = self.fresh_reg("tramp_arg");
+            writeln!(self.out, "  {val} = load {llty}, ptr {field_ptr}").unwrap();
+            call_args.push(format!("{llty} {val}"));
+        }
+        if !param_lltys.is_empty() {
+            // Every argument was already copied into registers above —
+            // the heap block `spawn_thread` allocated for them is only
+            // ever needed for this one moment, so it's freed right here
+            // rather than leaking one block per spawn forever.
+            writeln!(self.out, "  call void @nir_free(ptr %ctx)").unwrap();
+        }
+        if ret_llty == "void" {
+            writeln!(self.out, "  call void @{callee_name}({})", call_args.join(", ")).unwrap();
+        } else {
+            let r = self.fresh_reg("tramp_result");
+            writeln!(self.out, "  {r} = call {ret_llty} @{callee_name}({})", call_args.join(", ")).unwrap();
+            let widened = self.widen_to_i64(&r, ret_ty);
+            let word = self.to_i64_word(&widened, &ret_llty);
+            writeln!(self.out, "  store i64 {word}, ptr %result_slot").unwrap();
+        }
+        writeln!(self.out, "  ret void").unwrap();
+        writeln!(self.out, "}}").unwrap();
+        writeln!(self.out).unwrap();
+        self.trampolines.push_str(&self.out);
+        self.out = saved_out;
+        Ok(())
+    }
+
     /// Tier 1 vs Tier 2, for real: if `span` is in the SMT report's
     /// proven-safe set, `val` is used exactly as computed — no runtime
     /// check, no cost, matching docs/goal.md §4's Tier 1. Otherwise, emits an
@@ -2326,6 +2574,13 @@ impl Codegen<'_> {
         let fail = self.fresh_label("range_trap");
         writeln!(self.out, "  br i1 {ok}, label %{pass}, label %{fail}").unwrap();
         writeln!(self.out, "{fail}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{pass}:").unwrap();
@@ -2352,6 +2607,25 @@ impl Codegen<'_> {
                 let fd = self.fresh_reg("tcp.fd");
                 writeln!(self.out, "  {fd} = load i64, ptr {value_ptr}").unwrap();
                 writeln!(self.out, "  call i32 @nir_tcp_stop(i64 {fd})").unwrap();
+            }
+            // The real delivery of RFC 0006 Pillar 4's "no orphan
+            // threads" for this backend: a `thread` binding a function
+            // never explicitly `join`s is auto-joined right here, at
+            // every scope-closing point this function's `FreeMap` already
+            // walks for `box`/`tcp` — so a function genuinely cannot
+            // return while something it spawned (and didn't hand off
+            // elsewhere) is still outstanding, even though it isn't the
+            // RFC prototype's own lexical-`Scope`-per-function mechanism
+            // (`runtime-kernels/src/lib.rs`'s "chan/spawn/join kernels"
+            // section doc comment has the honest gap: every `spawn` gets
+            // its own one-job `Scope`, not one shared per spawning
+            // function). The result is discarded — the same "this
+            // binding's value was never going to be read again" posture
+            // `Ty::Box`'s own free above already has.
+            Ty::Thread(_) => {
+                let handle = self.fresh_reg("thread.handle");
+                writeln!(self.out, "  {handle} = load i64, ptr {value_ptr}").unwrap();
+                writeln!(self.out, "  call i64 @nir_thread_join(i64 {handle})").unwrap();
             }
             Ty::Named(name, args) => {
                 if let Some(fields) = self.registry.struct_fields(name) {
@@ -2478,6 +2752,13 @@ impl Codegen<'_> {
         let fail = self.fresh_label("idx_trap");
         writeln!(self.out, "  br i1 {ok}, label %{pass}, label %{fail}").unwrap();
         writeln!(self.out, "{fail}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{pass}:").unwrap();
@@ -2628,13 +2909,50 @@ impl Codegen<'_> {
                 // need to know it came from an assignment specifically.
                 Ok(val)
             }
-            Expr::Spawn(_, _, _)
-            | Expr::Acquire(_, _, _)
-            | Expr::Join(_, _)
-            | Expr::Chan(_)
-            | Expr::SpawnSandbox(_, _, _)
-            | Expr::Transact { .. } => {
+            Expr::Acquire(_, _, _) | Expr::SpawnSandbox(_, _, _) | Expr::Transact { .. } => {
                 unreachable!("check_supported already rejected this program")
+            }
+            // `chan`'s own construction — one opaque `i64` handle,
+            // identical for every payload type `T` (`llvm_ty`'s own
+            // `Ty::Channel` arm), so there's nothing here that needs to
+            // know what `T` is.
+            Expr::Chan(_span) => {
+                let handle = self.fresh_reg("chan_new");
+                writeln!(self.out, "  {handle} = call i64 @nir_chan_new()").unwrap();
+                Ok(handle)
+            }
+            // `spawn name(args)` — see `runtime-kernels/src/lib.rs`'s
+            // "chan/spawn/join kernels" section for the real
+            // `nir_thread_spawn` mechanics this lowers to: `args` are
+            // marshaled into a heap-allocated context block, a fresh
+            // per-call-site trampoline function unpacks that block, calls
+            // `name` for real, and writes its (widened-to-one-word)
+            // result back into a kernel-owned slot the eventual `join`
+            // reads. `typeck.rs::infer_spawn` already proved `args` type-
+            // check exactly like a call to `name` and rejected spawning a
+            // builtin — this only adds the narrower, disclosed-here
+            // restriction that every parameter and the return type must
+            // be word-sized (no `str`/`dec128`/struct/enum/Vector/Matrix
+            // yet — `is_word_sized`'s own doc comment).
+            Expr::Spawn(name, args, span) => self.spawn_thread(name, args, *span, scopes),
+            // `join t` — blocks on `t`'s own dedicated `Scope` (never any
+            // other spawn's), then unpacks its one-word result back to
+            // `T`'s real shape. `typeck.rs` already proved `t: thread<T>`.
+            Expr::Join(inner, _span) => {
+                let thread_ty = self.local_ty_of(inner, scopes);
+                let ret_ty = match thread_ty {
+                    Ty::Thread(t) => *t,
+                    other => unreachable!("typeck.rs already restricted join's operand to thread, got {other:?}"),
+                };
+                let handle = self.expr(inner, scopes)?;
+                let raw = self.fresh_reg("join_raw");
+                writeln!(self.out, "  {raw} = call i64 @nir_thread_join(i64 {handle})").unwrap();
+                if ret_ty == Ty::Unit {
+                    Ok("0".to_string()) // join's own value is unit; never read
+                } else {
+                    let ret_llty = self.llvm_ty(&ret_ty)?;
+                    Ok(self.from_i64_word(&raw, &ret_llty))
+                }
             }
             // `open(path, mode)` — `path`/`mode` are both `str`, matching
             // `nir_file_open`'s `{ptr, len}` x2 signature exactly
@@ -2788,15 +3106,16 @@ impl Codegen<'_> {
                 self.guard_io_ok(&fd);
                 Ok(fd)
             }
-            // `send`/`recv` share one AST node with `chan`'s I/O — a
-            // `Ty::Channel` operand is still unsupported (Phase D2); only
-            // the `Ty::Tcp` case has real codegen here (Phase B1's whole
-            // scope). `check_expr`'s structural pre-pass can't tell the
-            // two apart (no type info), so this — the one place that can
-            // see `local_ty_of` — is where the real, type-directed
-            // rejection lives, same "type-oblivious pre-pass, real check
-            // at IR-gen time" precedent `print`'s aggregate rejection
-            // already established (module doc).
+            // `send`/`recv` share one AST node with `chan`'s I/O.
+            // `check_expr`'s structural pre-pass can't tell a `Ty::Channel`
+            // operand from a `Ty::Tcp`/`Ty::File` one (no type info), so
+            // this — the one place that can see `local_ty_of` — is where
+            // the real, type-directed dispatch lives, same "type-oblivious
+            // pre-pass, real check at IR-gen time" precedent `print`'s
+            // aggregate rejection already established (module doc). A
+            // `Ty::Channel` payload additionally has to be word-sized
+            // (`is_word_sized`'s own doc comment) — real, disclosed, still-
+            // open future work for `str`/`dec128`/struct/enum payloads.
             Expr::Send(target, value, _span) => match self.local_ty_of(target, scopes) {
                 Ty::Tcp => {
                     let fd = self.expr(target, scopes)?;
@@ -2814,7 +3133,28 @@ impl Codegen<'_> {
                     self.guard_io_ok(&n);
                     Ok("0".to_string()) // send's own value is unit; never read
                 }
-                Ty::Channel(_) => unsupported("codegen doesn't support `chan` yet — interpreter-only for now"),
+                Ty::Channel(inner) => {
+                    if !self.is_word_sized(&inner)? {
+                        return unsupported(format!(
+                            "codegen doesn't support sending a `{inner:?}` over `chan` yet — only \
+                             word-sized payloads (integers, bool, f64, box/ref, or another handle) \
+                             are supported so far, not str/dec128/struct/enum/Vector/Matrix"
+                        ));
+                    }
+                    let handle = self.expr(target, scopes)?;
+                    let inner_llty = self.llvm_ty(&inner)?;
+                    let val = self.expr(value, scopes)?;
+                    let val64 = self.to_i64_word(&val, &inner_llty);
+                    let rc = self.fresh_reg("chan_send_rc");
+                    writeln!(self.out, "  {rc} = call i64 @nir_chan_send(i64 {handle}, i64 {val64})").unwrap();
+                    // Only reachable if every receiver for `handle` was
+                    // already dropped -- never happens today (nothing
+                    // ever removes a channel's table entry, `nir_chan_new`'s
+                    // own doc comment), kept as a real, checked trap
+                    // rather than a silently-ignored return value.
+                    self.guard_io_ok(&rc);
+                    Ok("0".to_string()) // send's own value is unit; never read
+                }
                 _ => unreachable!("typeck.rs already restricted send's first operand to tcp/chan/file"),
             },
             Expr::Recv(target, _span) => match self.local_ty_of(target, scopes) {
@@ -2866,7 +3206,20 @@ impl Codegen<'_> {
                     writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 {n}, 1").unwrap();
                     Ok(full)
                 }
-                Ty::Channel(_) => unsupported("codegen doesn't support `chan` yet — interpreter-only for now"),
+                Ty::Channel(inner) => {
+                    if !self.is_word_sized(&inner)? {
+                        return unsupported(format!(
+                            "codegen doesn't support receiving a `{inner:?}` from `chan` yet — only \
+                             word-sized payloads (integers, bool, f64, box/ref, or another handle) \
+                             are supported so far, not str/dec128/struct/enum/Vector/Matrix"
+                        ));
+                    }
+                    let handle = self.expr(target, scopes)?;
+                    let raw = self.fresh_reg("chan_recv_raw");
+                    writeln!(self.out, "  {raw} = call i64 @nir_chan_recv(i64 {handle})").unwrap();
+                    let inner_llty = self.llvm_ty(&inner)?;
+                    Ok(self.from_i64_word(&raw, &inner_llty))
+                }
                 _ => unreachable!("typeck.rs already restricted recv's operand to tcp/chan/file"),
             },
             // `stop` shares one AST node across `sandbox`/`tcp`/
@@ -4294,6 +4647,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("div_ok");
         writeln!(self.out, "  br i1 {is_zero}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -4318,6 +4678,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("singular_ok");
         writeln!(self.out, "  br i1 {is_fail}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -4338,6 +4705,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("io_ok");
         writeln!(self.out, "  br i1 {is_fail}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -4357,6 +4731,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("recv_ok");
         writeln!(self.out, "  br i1 {is_fail}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -5566,6 +5947,7 @@ impl Codegen<'_> {
         writeln!(self.out, "entry:").unwrap();
         if main_fn.ret == Ty::Unit {
             writeln!(self.out, "  call void @nir_main()").unwrap();
+            writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
             writeln!(self.out, "  ret i32 0").unwrap();
         } else if main_fn.ret == Ty::Str {
             // Same "no sensible exit code" reasoning as the aggregate
@@ -5589,6 +5971,7 @@ impl Codegen<'_> {
             let len_i32 = self.fresh_reg("main_str_len_i32");
             writeln!(self.out, "  {len_i32} = trunc i64 {len_reg} to i32").unwrap();
             writeln!(self.out, "  call i32 (ptr, ...) @printf(ptr @.str_fmt, i32 {len_i32}, ptr {ptr_reg})").unwrap();
+            writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
             writeln!(self.out, "  ret i32 0").unwrap();
         } else {
             let llty = self.llvm_ty(&main_fn.ret)?;
@@ -5628,6 +6011,7 @@ impl Codegen<'_> {
                     t
                 }
             };
+            writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
             writeln!(self.out, "  ret i32 {r32}").unwrap();
         }
         writeln!(self.out, "}}").unwrap();
