@@ -43,10 +43,11 @@ nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 | Boolean | `bool` | no | |
 | Unit | `unit` | no | No literal syntax — only reachable as a function's implicit return. |
 | String | `str` | no | UTF-8, `Arc<str>`-backed. Literal + escapes (`\"` `\\` `\n` `\t` `\r`) only — no concatenation, slicing, or indexing. May not be, or be part of, a user `fn`'s parameter or return type — see §6b. |
-| Heap cell | `box T` | **yes** | Single-owner heap allocation. `*expr` dereferences. |
+| Heap cell | `box T` | **yes** | Single-owner heap allocation. `*expr` dereferences. RFC 0006 Pillar 1's `Iso<T>` — already satisfied by this type's own affinity, no separate `iso` keyword. |
+| Frozen cell | `froze T` | no | 2026-09. RFC 0006 Pillar 1's `Froze<T>` — heap-allocated exactly like `box T`, but freely copyable and shareable across any number of concurrent computations at once (safe because nothing can write through one). `*expr` reads; rejected at compile time if `T` is itself affine, the same rule `&T`'s own deref uses (extracting affine content by value out from under a possibly-multiply-held handle would duplicate ownership). Compiled (§10). Leaked, not refcounted — a real, disclosed narrower scope than `Arc`. |
 | Shared reference | `&T` | no | Read-only borrow of a plain identifier only (`&x`, not `&(x+1)`). No `&mut`. |
-| Thread handle | `thread T` | **yes** | A spawned computation's real-OS-thread handle; `join` consumes it once. |
-| Channel | `chan T` | no | Unbounded MPMC queue; the handle is freely copyable, the *payload* moves through `send`. |
+| Thread handle | `thread T` | **yes** | A spawned computation's real-OS-thread handle; `join` consumes it once. Compiled (§10) — word-sized `T` only (see §10's own note); a real OS thread pool underneath (`runtime-kernels`), not simulated. |
+| Channel | `chan T` | no | Unbounded MPMC queue; the handle is freely copyable, the *payload* moves through `send`. Compiled (§10) — word-sized `T` only; a real cross-thread queue underneath, not simulated. A global runtime deadlock detector catches every concurrently-running thread being simultaneously blocked in `recv`/`join` and aborts with a diagnostic, rather than hanging forever (§7). |
 | Sandbox handle | `sandbox` | **yes** | A real, separate OS process; `stop` consumes it once. |
 | TCP connection | `tcp` | **yes** | A real TCP socket (client or accepted server side); `stop` closes it once. |
 | TCP listener | `tcp_listener` | **yes** | A real bound+listening TCP socket; `accept` doesn't consume it, `stop` does. |
@@ -606,31 +607,49 @@ stop(f)                               // closes the file (reuses tcp's keyword)
 
 `chan`/`sandbox` compose: a `chan T` (T a plain scalar) can cross into a
 sandboxed process as a real cross-process transport (a Unix domain
-socket under the hood). Race-freedom for concurrent code comes entirely
-from the ownership checker — an affine value moved into `spawn`/`send`
-can never be touched by the sender again.
+socket under the hood — interpreter-only, since `sandbox` itself is;
+see §10). Race-freedom for concurrent code comes entirely from the
+ownership checker — an affine value moved into `spawn`/`send` can never
+be touched by the sender again.
 
-**`spawn` is backed by a self-tuning, reused-worker OS thread pool
-(`thread_pool.rs`), not one fresh `std::thread::spawn` per call** —
-`.nir`-visible behavior is unchanged (still a real OS thread runs each
-`spawn`'d computation; `join` still blocks and consumes the handle
-exactly once, same affine semantics), but the runtime cost is not "one
-new OS thread, every time": a program that spawns many short-lived tasks
-over its lifetime reuses a small, roughly-peak-concurrency-sized set of
-real threads instead of paying a fresh thread-creation cost for each
-one, and a genuine OS-level failure to create a thread (real resource
-exhaustion under heavy load) is now a clean, catchable runtime error
-(`ErrorKind::ThreadSpawnFailed`) instead of an uncatchable process
-panic. **This is deliberately not Java-style virtual threads** —
-see `thread_pool.rs`'s own module doc comment for the full reasoning
-(Rust has no safe primitive for stackful continuation-switching the way
-the JVM does; the actually-correct Rust answer, an async rewrite of the
-whole interpreter, is a disclosed, scoped, not-yet-started next step,
-not attempted here) — a `spawn`'d task that calls a genuinely long
-blocking operation (a slow `db_query`, a `recv` waiting on a real
-external peer) still ties up one real worker thread for that duration,
-same as before this existed; what changed is reuse between tasks, not
-the cost of blocking itself.
+**`spawn`/`join`/`chan`/`send`/`recv` compile now (§10), backed by a
+real admission-controlled kernel, not just interpreted.** `spawn` runs
+on a self-tuning, reused-worker OS thread pool
+(`runtime-kernels/src/kernel/thread_pool.rs`'s `Scope`) — a program that
+spawns many short-lived tasks reuses a small, roughly-peak-concurrency-
+sized set of real threads rather than paying a fresh thread-creation
+cost every time, and a genuine OS-level failure to create a thread
+(real resource exhaustion) is a clean `-1`/trap, not an uncatchable
+process abort from the OS itself. Every outstanding `thread` handle
+(between `spawn` and its matching `join`) also counts against a real
+admission ceiling (`Domain::Thread`, `NIRDOSHA_KERNEL_MAX_THREAD`,
+default 10,000) — the same per-domain ceiling `tcp`/`file` already
+enforce, hit once a spawned-but-unjoined thread count gets that high.
+Word-sized `T` only for now (integers, `bool`, `f64`, `box`/`froze`/
+another handle) — `str`/`dec128`/struct/enum payloads are still
+interpreter-only, a real, disclosed narrower scope, not a silent gap.
+
+**A dynamic deadlock detector catches the one hazard `spawn`/`chan`
+alone don't rule out.** No mutex exists in the language, so lock-order
+deadlocks are unrepresentable — but two (or more) threads each blocked
+in `recv`/`join`, mutually waiting on something only another blocked
+thread could ever produce, is still constructible. The compiled runtime
+tracks how many concurrent participants exist against how many are
+simultaneously blocked in `join`/`recv` specifically (never `tcp`/`file`
+I/O, which can still resolve from outside the process); if every one of
+them is blocked at once, nothing left in the process could ever unblock
+any of them, and the program aborts immediately with a diagnostic
+naming the actual stuck handles, instead of hanging forever. This is
+detection, not the compile-time proof RFC 0006's own Pillar 5 would be
+— it only catches a *global* stall (the whole program stuck), not a
+local cycle between two threads while a third keeps making unrelated
+progress.
+
+**This is deliberately not Java-style virtual threads** — Rust has no
+safe primitive for stackful continuation-switching the way the JVM
+does; a `spawn`'d task that calls a genuinely long blocking operation
+still ties up one real worker thread for that duration. What changed is
+reuse between tasks, not the cost of blocking itself.
 
 ---
 
@@ -666,15 +685,37 @@ SplitMix64 stream stored **per `Interpreter` instance** (not a process
 global) — same seed, same OS, same run, byte-for-byte identical draws,
 every time. A `spawn`ed function gets its own independent, unseeded RNG
 by default (an honest, documented gap — see `Interpreter::rng`'s doc
-comment). `nirdosha build`'s compiled version of this (§10) necessarily
-uses a process-wide store instead — there's no "interpreter instance" in
-a native binary — but `thread`/`spawn` aren't compiled yet, so a
-compiled program has exactly one thread to own it regardless, matching
-the interpreter's per-instance guarantee in practice today; that
-equivalence stops holding the moment compiled `thread`/`spawn` lands, at
-which point this needs revisiting, not left as a stale assumption. No
-other source of nondeterminism exists in the language (no ambient
-clock/entropy reads anywhere in the builtin set).
+comment). `nirdosha build`'s compiled version of this (§10) matches
+that exactly, for real, as of 2026-09: a `thread_local!` stream, not a
+process-wide `static` (`runtime-kernels/src/lib.rs`'s "rand_seed/
+rand_f64/rand_gaussian kernel" section).
+
+**A real bug found and fixed, not just a design gap.** This was briefly
+a process-wide `static AtomicU64` stream — originally justified by
+"`thread`/`spawn` aren't compiled yet, so there's only ever one thread
+to own it," true when written, false once they compiled (§7, §10). Two
+real problems followed, both closed by the same fix: every
+concurrently-running thread shared one stream (the opposite of the
+interpreter's own "independent, unseeded per spawn" behavior), and the
+stream's own update (`splitmix64_next`: an atomic load, then a separate
+atomic store, not one compare-and-swap) wasn't safe against two threads
+calling `rand_f64`/`rand_gaussian` at the same instant — both could read
+the same state before either wrote back, silently drawing the same
+value or corrupting the stream's period. A `thread_local!` `Cell`
+(no atomics needed at all — nothing outside the owning thread ever
+touches it) closes both: each thread gets its own independent stream,
+started unseeded, restoring the interpreter's own semantics exactly
+rather than merely making the sharing race-free. Verified by two real
+compiled-and-run tests, not just reasoned about:
+`a_spawned_threads_rand_seed_does_not_perturb_the_spawning_threads_stream`
+(a spawned thread seeding/drawing its own stream leaves the spawning
+thread's own sequence byte-for-byte unchanged) and
+`a_freshly_spawned_thread_gets_its_own_unseeded_rng_by_default` (calling
+`rand_f64` inside a spawned thread that never seeded its own stream
+still aborts, even though the spawning thread already seeded its own —
+`crates/compiler/tests/codegen.rs`). No other source of nondeterminism
+exists in the language (no ambient clock/entropy reads anywhere in the
+builtin set).
 
 ---
 
@@ -694,6 +735,8 @@ a live TCP round trip — not by re-reading this section's own prose).
 | Scalar arith/comparison, `if`/`while`, calls incl. recursion, `print` | Yes | `print(bool)` → `1`/`0`, not `"true"`/`"false"` (cosmetic only). `print(unit)` → `"()"`. |
 | Tier-1/2 bounds + div-by-zero guards, `audited` | Yes | Elided where §8 proves safety. |
 | `box`/`&`/`*` | Yes | Real `nir_alloc` + automatic `nir_free` (`ownership.rs`'s `FreeMap`) — not a leak. |
+| `froze`/`*` | Yes | 2026-09. Same `nir_alloc` as `box`, but leaked, not freed — real, disclosed narrower scope than `Arc`; see §2's own `froze T` row. |
+| `thread`/`spawn`/`join`, `chan`/`send`/`recv` | Yes | 2026-09. Word-sized `T` only (integers/`bool`/`f64`/`box`/`froze`/another handle) — `str`/`dec128`/struct/enum payloads still interpreter-only. Real admission ceiling (`Domain::Thread`) and a dynamic deadlock detector — see §7. |
 | `str` | Yes | Literals, `==`/`!=`, `if`-condition, `print`, fn params/returns — `main() -> str` compiles directly. |
 | `tcp`/`tcp_listener` | Yes | `connect`/`listen`/`accept`/`send`/`recv`/`stop` over real sockets. |
 | `sha256_hex`/`constant_time_str_eq` | Yes | Isolated from-scratch SHA-256, bit-verified. Output buffer leaks — see below. |
@@ -701,7 +744,7 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `Vector`/`Matrix`, fully | Yes | Two codegen strategies — see below. |
 | `struct`/`enum`/`match`, non-affine payloads | Yes | Real LLVM types — see below. Affine payloads: no (Phase 4b). |
 | `struct`/`enum`/`match` with an affine field/payload | No | Phase 4b, deferred (below) — a non-affine one compiles now. |
-| `thread`/`spawn`/`join`, `chan`/`send`/`recv`, `sandbox`/`stop` | No | `chan` here means the channel type — distinct from the already-compiled `tcp`. |
+| `sandbox`/`stop` | No | Real, separate OS process — a larger scope than `thread`/`spawn` above, not touched by that update. |
 | `file`/`open` | No | `docs/PROTOLANG_PORT.md`'s file I/O port. |
 | `dec128` + `dec_*` builtins | No | Not yet in `Ty`/`codegen.rs`'s builtin allowlists. |
 | `json`/`db`/`mq`, Row 12 identity/session/API-key builtins | No | Identity ones also blocked on `VerifiedIdentity`/`RoleView`/`ClaimView` being structs. |
@@ -731,11 +774,10 @@ there's no scope-closing point to hook a `nir_free` onto (a real, small,
 disclosed leak, not a silent one — `runtime_kernels.rs::
 nir_sha256_hex`'s doc comment).
 
-**RNG.** A process-wide stream in `runtime_kernels.rs`, necessarily —
-there's no "interpreter instance" in a native binary the way §9's
-per-instance guarantee assumes (an honest equivalent today only because
-compiled `thread`/`spawn` don't exist yet; revisit when they do).
-Calling `rand_f64`/`rand_gaussian` before `rand_seed` aborts the
+**RNG.** A per-thread (`thread_local!`) stream, not process-wide — fixed
+2026-09, see §9 for the full story (it was briefly process-wide, which
+became a real race once `thread`/`spawn` compiled). Calling `rand_f64`/
+`rand_gaussian` before `rand_seed` **on that same thread** aborts the
 process, matching the interpreter's `RngNotSeeded` in spirit, via
 `abort()` instead of a catchable `Result`.
 

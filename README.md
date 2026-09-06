@@ -127,7 +127,11 @@ valid; `--format=json` gives a self-repair loop a structured proof
 obligation instead of a paragraph to guess at; `sandbox` is a real OS
 process and a language primitive, not a bolted-on Docker wrapper; there is
 no mutex in the language, so an agent literally cannot generate a
-lock-ordering deadlock. It isn't trying to be a better Rust — see the
+lock-ordering deadlock — and the one deadlock class that *is* still
+expressible (every thread mutually blocked on `chan`/`thread`, with no
+lock involved at all) is caught at runtime and aborted with a diagnostic
+naming the stuck handles, not left to hang forever. It isn't trying to
+be a better Rust — see the
 [wiki](https://github.com/arunsoman/nirdosha/wiki) for the full case,
 including where the design is still evolving, not a finished product.
 
@@ -147,10 +151,12 @@ including where the design is still evolving, not a finished product.
 **This isn't for you if:**
 - You want a general-purpose systems language for humans to write —
   that's Rust, and Rust is the honest answer (see the FAQ below).
-- You need `db`/`json`/`http`/`mq`/concurrency at all — there is no
-  interpreter fallback anymore, and none of these compile to native code
-  yet either, so none of it runs in any form until Track B lands (see
-  [ROADMAP](./docs/PUBLIC_ROADMAP.md)).
+- You need `db`/`json`/`http`/`mq` at all — there is no interpreter
+  fallback anymore, and none of these compile to native code yet either,
+  so none of it runs in any form until Track B lands (see
+  [ROADMAP](./docs/PUBLIC_ROADMAP.md)). Basic concurrency (`spawn`/
+  `join`/`thread`, `chan`/`send`/`recv`) does compile now — `sandbox`
+  still doesn't.
 - You need something production-ready this quarter — nothing here
   claims that.
 
@@ -162,7 +168,7 @@ Full picture: [Who It's For](https://github.com/arunsoman/nirdosha/wiki/Who-Its-
 |---|---|---|---|---|
 | Target use case | LLM-written backend services, compliance CRUD | General-purpose systems | Cloud-native services | AI/ML-first, Python-compatible |
 | Data-race freedom | Static | Static | Dynamic only | Not yet fully guaranteed |
-| Deadlock freedom | No mutex primitive exists at all | Possible | Possible | Not a current guarantee |
+| Deadlock freedom | No mutex primitive exists at all (lock-order deadlocks unrepresentable); a `chan`/`thread` global stall is dynamically detected and aborted, not left to hang | Possible | Possible | Not a current guarantee |
 | LLM writability | LL(1) grammar exported to GBNF for constrained decoding | LLMs default to Python 90–97% of the time | No constrained decoding built in | No published GBNF integration |
 
 Full comparison, plus the honest "why not just use Rust" answer, in the
