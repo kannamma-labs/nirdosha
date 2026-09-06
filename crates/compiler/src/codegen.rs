@@ -479,10 +479,15 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
             }
             Ok(format!("%{}", mangle_ty(ty)))
         }
-        Ty::Fn(_, _) => unsupported(
-            "codegen doesn't support `fn(..)->..` yet — first-class/privileged functions \
-             (requires/acquire) are interpreter-only for now",
-        ),
+        // A first-class function value (ordinary or `acquire`d) is a
+        // plain function-pointer word, freely copyable like any other
+        // scalar (`Ty::is_affine`'s own doc comment on why `Ty::Fn` is
+        // deliberately excluded there) — no separate handle table, no
+        // refcounting, just `ptr`. Compiled for real, 2026-09: see
+        // `Expr::Ident`'s and `Expr::Acquire`'s own codegen arms for how
+        // a value of this type is actually produced, and `Codegen::call`/
+        // `call_ptr`'s own local-variable check for how it's called.
+        Ty::Fn(_, _) => Ok("ptr".to_string()),
         Ty::Error => unreachable!("a program with a type error is never handed to codegen"),
     }
 }
@@ -521,8 +526,19 @@ fn mangle_ty(ty: &Ty) -> String {
         Ty::Named(name, args) => {
             format!("{name}${}", args.iter().map(mangle_ty).collect::<Vec<_>>().join("$"))
         }
+        // A real generic type argument since `acquire` started compiling
+        // (2026-09): `acquire fn_name(proof)` evaluates to
+        // `Result(Ty::Fn(params, ret), str)`, a genuinely new instantiation
+        // per acquired signature. `Ty::name()`'s own `"fn(i64) -> i64"`
+        // Display form contains `(`/`)`/`,`/` `/`->`, none of them legal
+        // in an unquoted LLVM identifier — a dedicated arm instead of the
+        // fallback below, which would leave the `-`/`>` from `->`
+        // unescaped and produce unparseable IR.
+        Ty::Fn(params, ret) => {
+            format!("fn{}to{}", params.iter().map(|p| format!("_{}", mangle_ty(p))).collect::<String>(), mangle_ty(ret))
+        }
         // Every other `Ty` (`Box`/`Ref`/`Thread`/`Channel`/`Sandbox`/
-        // `Tcp`/`TcpListener`/`File`/`Json`/`Db`/`Mq`/`Fn`/`Error`) is
+        // `Tcp`/`TcpListener`/`File`/`Json`/`Db`/`Mq`/`Error`) is
         // either affine (already rejected before this can run on one) or
         // otherwise never legally a struct/enum generic type argument —
         // this arm is a defensive fallback, not expected to actually run
@@ -999,10 +1015,11 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
             Ok(())
         }
         Expr::Join(inner, _) => check_expr(inner, plugin_names, registry),
-        Expr::Acquire(_, _, _) => unsupported(
-            "codegen doesn't support `acquire` yet — first-class/privileged functions \
-             are interpreter-only for now",
-        ),
+        // Compiled for real, 2026-09 (`Codegen::emit_acquire`) — this
+        // structural pre-pass has no type info (same reasoning
+        // `Expr::Spawn`'s own arm above already gives), so it just
+        // recurses into `proof`.
+        Expr::Acquire(_, proof, _) => check_expr(proof, plugin_names, registry),
         // `chan` construction itself needs no type info at all (every
         // `Ty::Channel` value is the same `i64` handle regardless of its
         // payload type — `llvm_ty`'s own `Ty::Channel` arm) — real per-
@@ -1115,6 +1132,16 @@ impl Scopes {
 struct FnSig {
     params: Vec<Ty>,
     ret: Ty,
+    /// `FnDecl::requires`'s own copy — `None` for a native plugin (never
+    /// gated) and for every ordinary `.nir` fn. `Some(req)` is what
+    /// `Codegen::emit_acquire` checks a `proof` against, and what makes
+    /// `name` callable only as `acquire name(proof)` rather than
+    /// directly (`typeck.rs`'s `PrivilegedFnNotAcquired`, already
+    /// enforced before codegen runs — this field exists purely so
+    /// `emit_acquire` can look the requirement back up by name, since
+    /// `Codegen` doesn't otherwise keep a reference to the whole
+    /// `Program`).
+    requires: Option<Requirement>,
 }
 
 struct Codegen<'a> {
@@ -1288,7 +1315,9 @@ fn emit_llvm_ir_impl<'a>(
     let mut sigs: HashMap<String, FnSig> = program
         .fns
         .iter()
-        .map(|f| (f.name.clone(), FnSig { params: f.params.iter().map(|p| p.ty.clone()).collect(), ret: f.ret.clone() }))
+        .map(|f| {
+            (f.name.clone(), FnSig { params: f.params.iter().map(|p| p.ty.clone()).collect(), ret: f.ret.clone(), requires: f.requires.clone() })
+        })
         .collect();
     // A native plugin's signature slots into the exact same table a
     // user `fn`'s does — `Codegen::call`'s existing generic fallback
@@ -1297,7 +1326,7 @@ fn emit_llvm_ir_impl<'a>(
     // `declare` line below (in place of a real `define`) and the linked
     // staticlib (`build_with_native_plugins`) are new.
     for np in native_plugins {
-        sigs.insert(np.name.clone(), FnSig { params: np.params.clone(), ret: np.ret.clone() });
+        sigs.insert(np.name.clone(), FnSig { params: np.params.clone(), ret: np.ret.clone(), requires: None });
     }
     // Trusts the program already passed `ownership::check_ownership` (the
     // caller's job, same as `typecheck_and_own`'s existing precedent) —
@@ -2241,7 +2270,18 @@ impl Codegen<'_> {
             Expr::Float(_, _) => Ty::F64,
             Expr::Bool(_, _) => Ty::Bool,
             Expr::Str(_, _) => Ty::Str,
-            Expr::Ident(name, _) => scopes.get(name).map(|(t, _)| t).unwrap_or(Ty::I64),
+            // A local variable first; if `name` isn't one, it's a bare
+            // reference to an ordinary (ungated) top-level `fn` used as a
+            // first-class value (`apply(double, 21)`, LANGUAGE.md §6a) —
+            // `Ty::Fn`, not `Ty::I64`. A `requires`-gated fn's name has no
+            // such reference at all (`TypeErrorKind::PrivilegedFnNotAcquired`,
+            // already enforced before codegen runs), so `self.sigs.get`
+            // finding one here always means an ungated fn.
+            Expr::Ident(name, _) => scopes
+                .get(name)
+                .map(|(t, _)| t)
+                .or_else(|| self.sigs.get(name).map(|s| Ty::Fn(s.params.clone(), Box::new(s.ret.clone()))))
+                .unwrap_or(Ty::I64),
             Expr::Unary(UnOp::Not, _, _) => Ty::Bool,
             Expr::Unary(UnOp::Neg, inner, _) => self.local_ty_of(inner, scopes),
             Expr::Binary(op, l, r, _) => match op {
@@ -2291,7 +2331,17 @@ impl Codegen<'_> {
             Expr::Call(name, args, _) if self.registry.is_struct(name) || self.registry.find_variant(name).is_some() => {
                 self.ctor_ty(name, args, scopes).unwrap_or_else(|| Ty::Named(name.to_string(), Vec::new()))
             }
-            Expr::Call(name, _, _) => self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64),
+            // `name` here can be a local variable holding an acquired/
+            // passed-in `Ty::Fn` value, not just a top-level `fn` —
+            // `f(x)` where `f: fn(i64) -> i64` is a parameter parses to
+            // the same `Expr::Call("f", ...)` shape a direct call does
+            // (`parser.rs::parse_call` doesn't distinguish), so `scopes`
+            // is checked first; `self.sigs` (top-level fns only) would
+            // otherwise never find `f` and wrongly fall back to `Ty::I64`.
+            Expr::Call(name, _, _) => match scopes.get(name) {
+                Some((Ty::Fn(_, ret), _)) => *ret,
+                _ => self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64),
+            },
             // Row 11: `base.field`'s type is `base`'s struct type's
             // substituted field type — factored through
             // `field_index_and_ty` so `expr()`/`expr_ptr()`'s own
@@ -2328,6 +2378,17 @@ impl Codegen<'_> {
             // above explains (e.g. `join spawn worker(x)` with nothing
             // ever bound to a name).
             Expr::Spawn(name, _, _) => Ty::Thread(Box::new(self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64))),
+            // `acquire name(proof)` -> `Result(Ty::Fn(params, ret), str)` —
+            // `name`'s own declared signature, unchanged; `acquire` only
+            // ever gates *whether* the value is obtained, never its shape.
+            Expr::Acquire(name, _, _) => {
+                let sig = self.sigs.get(name);
+                let fn_ty = Ty::Fn(
+                    sig.map(|s| s.params.clone()).unwrap_or_default(),
+                    Box::new(sig.map(|s| s.ret.clone()).unwrap_or(Ty::I64)),
+                );
+                Ty::Named("Result".to_string(), vec![fn_ty, Ty::Str])
+            }
             Expr::Join(inner, _) => match self.local_ty_of(inner, scopes) {
                 Ty::Thread(t) => *t,
                 _ => Ty::I64,
@@ -2961,10 +3022,27 @@ impl Codegen<'_> {
             return Ok("false".to_string());
         };
         let (view_ty, view_ptr) = scopes.get(&param_name).expect("scanned directly from this function's own params");
+        self.emit_str_field_eq_check(&view_ty, &view_ptr, field_name, expected)
+    }
+
+    /// The shared core `emit_requirement_check` (a `RoleView`/`ClaimView`
+    /// *parameter* of the current function) and `emit_acquire` (an
+    /// arbitrary `proof` expression's own pointer) both reduce to: GEP to
+    /// `field_name` on a value of type `view_ty` at `view_ptr`, load its
+    /// `str`, and compare against the compile-time-known `expected`
+    /// string via `nir_str_eq` — the one real runtime check either
+    /// mechanism ever does. Returns a fresh `i1` SSA register.
+    fn emit_str_field_eq_check(
+        &mut self,
+        view_ty: &Ty,
+        view_ptr: &str,
+        field_name: &str,
+        expected: &str,
+    ) -> Result<String, CodegenError> {
         let (idx, _) = self
-            .field_index_and_ty(&view_ty, field_name)
+            .field_index_and_ty(view_ty, field_name)
             .expect("RoleView/ClaimView always declares this field, ast::prelude_structs");
-        let view_llty = self.llvm_ty(&view_ty)?;
+        let view_llty = self.llvm_ty(view_ty)?;
         let field_ptr = self.fresh_reg("req_field_ptr");
         writeln!(self.out, "  {field_ptr} = getelementptr inbounds {view_llty}, ptr {view_ptr}, i32 0, i32 {idx}").unwrap();
         let field_val = self.fresh_reg("req_field_val");
@@ -3125,7 +3203,20 @@ impl Codegen<'_> {
                 Ok(full)
             }
             Expr::Ident(name, _) => {
-                let (ty, ptr) = scopes.get(name).expect("typeck.rs already proved this resolves");
+                let Some((ty, ptr)) = scopes.get(name) else {
+                    // Not a local variable — the one other thing an
+                    // `Ident` can name is a bare reference to an ordinary
+                    // (ungated) top-level `fn` used as a first-class
+                    // value (`apply(double, 21)`, LANGUAGE.md §6a). A
+                    // function's own address is a compile-time-known
+                    // constant operand in LLVM IR (`ptr @name`) — no
+                    // `load` needed, unlike a real variable's storage.
+                    // `typeck.rs`'s `PrivilegedFnNotAcquired` already
+                    // guarantees a `requires`-gated fn's name never
+                    // reaches here directly.
+                    self.sigs.get(name).expect("typeck.rs already proved this resolves (local var or top-level fn)");
+                    return Ok(format!("@{name}"));
+                };
                 if ty.is_aggregate() {
                     // Every well-behaved caller checks `is_aggregate()`
                     // first and calls `expr_ptr()` instead — this is a
@@ -3603,6 +3694,19 @@ impl Codegen<'_> {
     }
 
     fn call(&mut self, name: &str, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        // `name` is a local variable holding a `Ty::Fn` value (an
+        // acquired or passed-in first-class function), not a top-level
+        // `fn` — `f(x)` where `f` is such a variable parses to the same
+        // `Expr::Call("f", ...)` shape a direct call does
+        // (`parser.rs::parse_call`), so this has to be checked before
+        // anything below assumes `name` names a global. Only reached for
+        // a non-aggregate `sig_ret` (`local_ty_of`'s own `Ty::Fn` fork
+        // routes an aggregate-returning one to `call_ptr` instead).
+        if let Some((Ty::Fn(params, ret), fn_slot)) = scopes.get(name) {
+            let fn_ptr = self.fresh_reg(&format!("{name}.fnval"));
+            writeln!(self.out, "  {fn_ptr} = load ptr, ptr {fn_slot}").unwrap();
+            return self.call_indirect(&fn_ptr, &params, &ret, args, scopes);
+        }
         // Row 11: a struct/variant constructor is always aggregate-valued
         // (`is_aggregate()` now covers `Ty::Named`), so a scalar `expr()`
         // result is the wrong shape for it — every well-typed caller
@@ -3937,6 +4041,52 @@ impl Codegen<'_> {
             arg_vals.push(format!("{llty} {v}"));
         }
         Ok(arg_vals)
+    }
+
+    /// Calls through an already-loaded function-pointer *value*
+    /// (`fn_ptr` — a register holding the address, not a variable's own
+    /// storage slot) — the shared implementation `call()`'s and
+    /// `call_ptr()`'s own "`name` is a local `Ty::Fn` variable" branches
+    /// both route through. The only real difference from an ordinary
+    /// direct call (`call <ret> @name(...)`) is the callee operand (a
+    /// loaded `ptr` register instead of a named global) and having to
+    /// spell out the full `<ret>(<params>)` function type at the call
+    /// site — LLVM requires this for any indirect call, since the
+    /// callee isn't a named `@fn` whose own `define` already states it
+    /// (the exact same `call <functy> <callee>(<args>)` shape this
+    /// module already uses for `@printf`'s varargs signature).
+    fn call_indirect(
+        &mut self,
+        fn_ptr: &str,
+        params: &[Ty],
+        ret: &Ty,
+        args: &[Expr],
+        scopes: &mut Scopes,
+    ) -> Result<String, CodegenError> {
+        let arg_vals = self.call_args(args, params, scopes)?;
+        let param_lltys: Vec<String> =
+            params.iter().map(|p| if p.is_aggregate() { Ok("ptr".to_string()) } else { self.llvm_ty(p) }).collect::<Result<_, _>>()?;
+        if ret.is_aggregate() {
+            let agg_llty = self.llvm_ty(ret)?;
+            let dest = self.fresh_reg("indirect_call_result.addr");
+            self.emit_alloca(&dest, &agg_llty);
+            let mut all_param_lltys = vec!["ptr".to_string()];
+            all_param_lltys.extend(param_lltys);
+            let mut all_args = vec![format!("ptr {dest}")];
+            all_args.extend(arg_vals);
+            writeln!(self.out, "  call void ({}) {fn_ptr}({})", all_param_lltys.join(", "), all_args.join(", ")).unwrap();
+            Ok(dest)
+        } else {
+            let ret_llty = self.llvm_ty(ret)?;
+            if ret_llty == "void" {
+                writeln!(self.out, "  call void ({}) {fn_ptr}({})", param_lltys.join(", "), arg_vals.join(", ")).unwrap();
+                Ok("0".to_string())
+            } else {
+                let r = self.fresh_reg("indirect_call_result");
+                writeln!(self.out, "  {r} = call {ret_llty} ({}) {fn_ptr}({})", param_lltys.join(", "), arg_vals.join(", ")).unwrap();
+                Ok(self.widen_to_i64(&r, ret))
+            }
+        }
     }
 
     /// Every Phase-4 builtin that yields a plain scalar (`f64`/`i64`/
@@ -4717,6 +4867,10 @@ impl Codegen<'_> {
                 self.if_expr(cond, then_block, else_block.as_deref(), *span, scopes)
             }
             Expr::Match { scrutinee, arms, span } => self.match_expr(scrutinee, arms, *span, scopes),
+            // `acquire name(proof)` — always aggregate-valued
+            // (`Result(Ty::Fn(..), str)`), so it belongs here, not in
+            // `expr()`.
+            Expr::Acquire(name, proof, _) => self.emit_acquire(name, proof, scopes),
             _ => unsupported(
                 "codegen doesn't support this aggregate expression form yet — only \
                  identifiers, literals, assignment, binary operators, dereferencing a boxed/\
@@ -4771,6 +4925,13 @@ impl Codegen<'_> {
     /// hand that same pointer back as this call expression's own
     /// "value" — exactly `expr_ptr`'s contract.
     fn call_ptr(&mut self, name: &str, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        // Same "`name` may be a local `Ty::Fn` variable, not a global"
+        // check `call()` opens with — see its own comment for why.
+        if let Some((Ty::Fn(params, ret), fn_slot)) = scopes.get(name) {
+            let fn_ptr = self.fresh_reg(&format!("{name}.fnval"));
+            writeln!(self.out, "  {fn_ptr} = load ptr, ptr {fn_slot}").unwrap();
+            return self.call_indirect(&fn_ptr, &params, &ret, args, scopes);
+        }
         if PHASE4_BUILTINS.contains(&name)
             || matches!(name, "inv" | "solve" | "kf_update_state" | "kf_update_cov")
         {
@@ -4869,6 +5030,91 @@ impl Codegen<'_> {
         writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
         let msg_full = self.fresh_reg("check_role_err_msg_full");
         writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", MSG.len()).unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `acquire name(proof)` — `docs/LANGUAGE.md` §6a, compiled for real
+    /// 2026-09. `name` must be a `requires`-gated top-level fn
+    /// (`typeck.rs` already proved this; `FnSig::requires` is this
+    /// codegen's own copy of `FnDecl::requires`, looked up here since
+    /// `Codegen` doesn't otherwise keep a reference to the whole
+    /// `Program`). Builds a real `Result(Ty::Fn(params, ret), str)` by
+    /// hand, the same tag-then-payload shape `emit_check_role` already
+    /// uses: `Ok(f)` stores the target function's own address (`ptr
+    /// @name` — a compile-time-known constant operand, no instruction
+    /// needed) as the payload; `Err(reason)` stores a fresh string
+    /// literal naming exactly which requirement `proof` failed to
+    /// prove. The actual check is `emit_str_field_eq_check` against
+    /// `proof`'s own `role`/`value` field — the same runtime comparison
+    /// `emit_requirement_check` does for a *parameter*-shaped proof,
+    /// just against an arbitrary expression's pointer instead.
+    fn emit_acquire(&mut self, name: &str, proof: &Expr, scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let params = self.sigs.get(name).expect("typeck.rs already resolved this acquire target").params.clone();
+        let ret = self.sigs.get(name).expect("typeck.rs already resolved this acquire target").ret.clone();
+        let req = self
+            .sigs
+            .get(name)
+            .expect("typeck.rs already resolved this acquire target")
+            .requires
+            .clone()
+            .expect("typeck.rs only allows acquire on a requires-gated fn");
+        let fn_ty = Ty::Fn(params, Box::new(ret));
+        let result_ty = Ty::Named("Result".to_string(), vec![fn_ty, Ty::Str]);
+
+        let (proof_ty, field_name, expected): (Ty, &str, String) = match &req {
+            Requirement::Role(r) => (Ty::Named("RoleView".to_string(), vec![]), "role", r.clone()),
+            Requirement::Claim(_, v) => (Ty::Named("ClaimView".to_string(), vec![]), "value", v.clone()),
+        };
+        let proof_ptr = self.expr_ptr_expected(proof, &proof_ty, scopes)?;
+        let authorized = self.emit_str_field_eq_check(&proof_ty, &proof_ptr, field_name, &expected)?;
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("acquire_result.addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("acquire_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("acquire_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("acquire_ok");
+        let err_label = self.fresh_label("acquire_err");
+        let merge_label = self.fresh_label("acquire_merge");
+        writeln!(self.out, "  br i1 {authorized}, label %{ok_label}, label %{err_label}").unwrap();
+
+        // `Ok(f)` — variant 0. The target function's own address is a
+        // compile-time constant operand (`ptr @name`), not a value that
+        // needs computing — functions are already global values of
+        // pointer type in LLVM IR.
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store ptr @{name}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        // `Err("...")` — variant 1. Same "the payload's first two words
+        // are directly a `str` value" shape `emit_check_role`'s own
+        // `Err` arm uses.
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let msg = match &req {
+            Requirement::Role(r) => format!("{name} requires role \"{r}\", which the given proof doesn't have"),
+            Requirement::Claim(c, v) => format!("{name} requires claim \"{c}\"=\"{v}\", which the given proof doesn't have"),
+        };
+        let msg_global = self.fresh_global("acquire_err_msg");
+        writeln!(
+            self.string_globals,
+            "{msg_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            msg.len(),
+            llvm_escape_bytes(msg.as_bytes())
+        )
+        .unwrap();
+        let msg_partial = self.fresh_reg("acquire_err_msg_partial");
+        writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
+        let msg_full = self.fresh_reg("acquire_err_msg_full");
+        writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", msg.len()).unwrap();
         writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
         writeln!(self.out, "  br label %{merge_label}").unwrap();
 

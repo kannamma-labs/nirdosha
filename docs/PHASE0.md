@@ -1183,6 +1183,80 @@ passes through untouched, and a role the identity's `claims_json`
 doesn't carry at all fails at `check_role` itself, before a `RoleView`
 is ever produced.
 
+**Twenty-first update:** `fn(..)->..`/`acquire`/`requires(role/claim:
+...)` on a *function* — first-class and privileged functions,
+§6a — compiled for real, closing the one gap the Twentieth update's own
+closing line named ("`acquire`... still has zero codegen"). Two pieces,
+both new:
+
+*Ordinary first-class functions.* A bare top-level `fn` name used as a
+value (`apply(double, 21)`, no `requires(...)` involved) now evaluates
+to its own address — `codegen.rs::Expr::Ident`'s one new fallback, hit
+only when `name` isn't a local variable — and calling a `fn(..)->..`-
+typed value (a parameter, a match-bound name, anything) emits a real
+indirect call (`codegen.rs::call_indirect`), spelling out the full
+`<ret>(<params>)` function type LLVM requires at an indirect call site.
+`Ty::Fn` itself needed a real `llvm_ty` mapping for the first time
+(plain `ptr` — it's freely copyable and non-affine already, `Ty::
+is_affine`'s own doc comment says so, so nothing else about the
+ownership story had to change) and a dedicated `mangle_ty` case (its
+`Display` form contains `(`/`)`/`,`/`->`, none legal in an unquoted
+LLVM identifier — the generic fallback would have produced unparseable
+IR for `Result(fn(..)->.., str)`'s own synthesized name, caught by
+actually trying to link the output, not by inspection).
+
+*`acquire name(proof)`.* Builds a genuine `Result(fn(params) -> ret,
+str)` by hand — the same tag-then-payload shape `check_role`'s own
+compiled implementation already uses (`Ok(f)` stores the target
+function's real address as the payload; `Err(reason)` names exactly
+which requirement wasn't met), with the actual check itself
+(`emit_str_field_eq_check`, factored out of the Twentieth update's own
+`emit_requirement_check` so both a function-level proof and a
+field-masking proof share one implementation) identical to what
+field-masking already does: GEP to the proof's `role`/`value` field,
+`nir_str_eq` against the requirement's compile-time-known string.
+
+**A real, disclosed ordering constraint, found by actually compiling a
+`match` shaped this way, not by reading the codegen plan in advance:**
+`match_expr`'s own result type is inferred from its *first* arm's body
+— evaluated *before* that arm's own bindings exist in scope, a
+pre-existing property of `match_expr`'s design that simply never had a
+way to surface before now, since every previous arm binding was always
+a plain value used directly, never called *as a function*. `Ok(f) =>
+f(...)` written as a match's first arm hits this: `f` isn't bound yet
+at the point its type needs inferring, so the callee resolves to
+nothing and the match's whole result type comes out wrong. Not a
+compiler bug to fix here — reordering (`Err(...)` first) is a complete,
+correct workaround, and the real examples/tests below all use it.
+
+**Real, compiled-and-run verification**, matching every other update's
+own standard: `check_role_produces_real_role_view_that_drives_field_masking`'s
+function-level sibling, `acquire_produces_real_callable_fn_value_gated_by_check_role`
+(`crates/compiler/tests/codegen.rs`) — an identity that proves
+`get_employee`'s required role (`"hr_staff"`) gets a real, callable
+function back and a real return value from calling it; one that
+doesn't gets a real `Err`, never reaching `get_employee`'s body at all.
+`ordinary_first_class_function_value_compiles_and_calls_indirectly`
+covers the ungated half the same way. `examples/features/
+50_field_masking_and_check_role.nir` — the README's own hero example —
+now composes *both* mechanisms on one function: `get_employee
+requires(role: "hr_staff")` gates who can call it at all, `salary
+requires(role: "admin")` separately gates what a successful caller sees
+back, and the two roles are genuinely independent (an hr_staff member
+who isn't also an admin gets real records with `salary` redacted; an
+outsider who's neither can't obtain a callable `get_employee` in the
+first place).
+
+**Still real, still open, unaffected by this update:** `extract_claim`/
+`oidc_validate_token` (the claim/OIDC half of §6a's own worked example,
+`examples/features/33_privileged_functions.nir`) remain interpreter-
+only-designed with the interpreter now gone, so a claim-gated flow
+built on real JWT/JWKS validation still doesn't run end to end — only
+the role-gated, `check_role`-driven path does. The Phase-4b affine-in-
+struct/enum gap (a `struct`/`enum` whose payload transitively contains
+`box`/`&`/`thread`/`chan`/`tcp`/`file`/`db`/`mq`) is unrelated and still
+open, same as before.
+
 ---
 
 

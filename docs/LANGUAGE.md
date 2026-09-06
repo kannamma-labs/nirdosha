@@ -287,15 +287,34 @@ acquired value is an ordinary first-class function once obtained: pass
 it to code that has no idea it was privileged, store it in a struct,
 return it, call it many times — the check happens exactly once, at
 acquisition, not smeared across (or missing from) every call site.
-Interpreter-only for now, like every construct past §10's compiled
-subset — `nirdosha build` rejects `fn(..)->..`/`acquire` with a specific
-reason, never silently mis-compiles one. **`check_role` itself is the
-exception (2026-09, §10)**: it's fully compiled, so a real `RoleView`
-*is* obtainable in a compiled binary today — it's `acquire` (the step
-that would consume that `RoleView` to gate a first-class function) that
-still has zero codegen. A `RoleView` produced this way is not wasted,
-though: §6e's field-level `requires(...)` masking consumes it directly,
-with no `acquire` involved at all.
+
+**Compiled for real, 2026-09** (`docs/PHASE0.md`'s "Twenty-first
+update") — both halves of this mechanism, not just `check_role`: a
+plain top-level `fn` used as a first-class value (`apply(double, 21)`,
+no `requires(...)` involved at all) evaluates to its own address, and
+calling a `fn(..)->..`-typed value — whether an ordinary one or an
+`acquire`d one — emits a real indirect call (`codegen.rs::
+call_indirect`). `acquire name(proof)` itself builds a genuine
+`Result(fn(params) -> ret, str)` by hand, the same tag+payload shape
+`check_role`'s own compiled implementation uses: `proof`'s field is
+checked against `name`'s declared requirement via the identical
+`nir_str_eq` comparison §6e's field masking already does, `Ok(f)`
+stores the target function's real address, `Err(reason)` names exactly
+which requirement wasn't met. `crates/compiler/tests/codegen.rs`'s
+`acquire_produces_real_callable_fn_value_gated_by_check_role` is the
+real compiled-and-run proof: an identity that proves the required role
+gets a real, callable function back and a real result from calling it;
+one that doesn't gets a real `Err`, never reaching the function's body
+at all.
+
+One real, disclosed ordering wrinkle, found by actually compiling a
+`match` shaped this way, not by reading the codegen plan in advance:
+`match`'s own result type is inferred from its *first* arm's body,
+evaluated *before* that arm's own bindings exist in scope — so
+`Ok(f) => f(...)` can't be the first arm of a `match acquire
+name(proof) { ... }` (`f` isn't bound yet at the point its type would
+need inferring); put `Err(...)` first instead. A real, narrow
+constraint on arm order, not a defect in `acquire` itself.
 
 ### 6b. `str` at function boundaries ("enum favoring")
 
@@ -858,7 +877,7 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `http_get`/`http_post`/`https_get`/`https_post` | No | Not in `codegen.rs`'s builtin allowlists. |
 | `transact` | No | |
 | `workflow` | No | Desugars to `send_email`/`send_sms`/`send_push`/`notify`/`__workflow_*`, none compiled. |
-| `fn(..)->..`/`acquire`/`requires(role/claim: ...)` on a *function* | No | First-class/privileged functions (§6a) — distinct from field-level `requires(...)` masking (§6e), which **is** compiled. |
+| `fn(..)->..`/`acquire`/`requires(role/claim: ...)` on a *function* | Yes | 2026-09. First-class/privileged functions (§6a) — a plain fn value is its own address, an acquired one is a real, hand-built `Result(fn(..)->.., str)`; calling either emits a real indirect call. `sandbox` scoping this exact mechanism is unrelated; `extract_claim`/`oidc_validate_token` (the claim/OIDC half of §6a's own example) remain interpreter-only-designed, so a claim-gated flow still doesn't run end to end. |
 | `screen`/`dashboard` | Inert, not rejected | `codegen.rs` never inspects these — a program containing them compiles cleanly with nothing to lower to. |
 
 **Scalar width mechanics.** Same LLVM widths as the signed types for
