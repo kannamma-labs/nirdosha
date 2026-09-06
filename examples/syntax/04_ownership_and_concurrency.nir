@@ -1,5 +1,6 @@
-// Level 4 -- ownership and concurrency: `box`/`&`/move semantics,
-// `spawn`/`join`/`thread`, `chan`/`send`/`recv`, and `sandbox`.
+// Level 4 -- ownership and concurrency: `box`/`froze`/`&`/move
+// semantics, `spawn`/`join`/`thread`, `chan`/`send`/`recv`, and
+// `sandbox`.
 
 // `box`/`*` (deref)/move semantics. `consume` takes ownership -- calling
 // it moves the argument away from the caller; a second call with the
@@ -10,6 +11,16 @@ fn consume(b: box i64) -> i64 {
 
 fn make_boxed(n: i64) -> box i64 {
     return box n
+}
+
+// `froze`/`*` -- RFC 0006 Pillar 1's `Froze<T>`. Heap-allocated exactly
+// like `box`, but deliberately not affine: `read_frozen` can be called
+// with the same handle more than once (see `main` below), unlike
+// `consume` above, because nothing can ever write through a `froze`
+// handle -- safe to share with any number of readers, including
+// concurrently across threads.
+fn read_frozen(f: froze i64) -> i64 {
+    return *f
 }
 
 // Shared borrows (`&`). `peek` reads through a reference without taking
@@ -54,6 +65,12 @@ fn main() {
 
     let b: box i64 = make_boxed(32)
     print(*b + 10) // 42
+
+    // froze -- freely copyable, unlike box above: `f` is used twice
+    // below with no move error.
+    let f: froze i64 = froze 21
+    print(read_frozen(f))
+    print(read_frozen(f) * 2) // 42
 
     // & / shared borrow
     let n: i64 = 41

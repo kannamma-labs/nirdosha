@@ -63,7 +63,12 @@ messages.
 - **LLVM codegen, real native binaries** — `-O2` optimization; row 5's
   "hardware speed" claim.
 - **Concurrency, first pass** — `spawn`/`join`/`thread<T>`,
-  `chan`/`send`/`recv` — rows 2–3, interpreter-only.
+  `chan`/`send`/`recv` — rows 2–3. Compiled now too (2026-09), backed by
+  a real admission-controlled kernel and a dynamic deadlock detector
+  (`docs/LANGUAGE.md` §7/§10); `sandbox` remains interpreter-only.
+- **RFC 0006 Pillar 1, `Iso`/`Froze`** — `box` already satisfied `Iso`;
+  `froze` (a new keyword, immutable/freely-shareable heap handle) built
+  for real (2026-09) — `docs/LANGUAGE.md` §2. `Lend` not attempted.
 - **`sandbox`/`stop`** — an affine real-OS-process handle
   (`docs/SANDBOXING.md` layer 1), then cross-process `chan` IPC over it
   (layer 2).
@@ -1923,10 +1928,12 @@ claim, though that section is currently accurate).
    vendored — dynamically links system OpenSSL on Linux unless the
    `vendored` feature is turned on; decide that as part of this item,
    not silently at deploy time.
-6. `[OPEN]` **B6. Concurrency + sandboxing codegen** —
-   `thread`/`spawn`/`join`, `chan`/`send`/`recv`, `sandbox`/`stop`,
-   `file`/`open`. Lower general priority — sequence based on what's
-   actually needed once B1–B5 are done, not abstractly now.
+6. `thread`/`spawn`/`join`, `chan`/`send`/`recv` `[DONE]` (2026-09) —
+   compiled, backed by a real admission-controlled kernel
+   (`runtime-kernels`) and a dynamic deadlock detector
+   (`docs/LANGUAGE.md` §7/§10). **B6. Sandboxing codegen** `[OPEN]` —
+   `sandbox`/`stop` remains, a separate and larger scope (a real,
+   separate OS process, not a thread) not touched by the above.
 7. `[OPEN]` **B7. First-class functions codegen** — `fn(..)->..`/
    `acquire`/`requires(...)`, and the Phase-4b affine-in-struct/enum
    case (a `struct`/`enum` whose payload transitively contains
