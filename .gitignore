@@ -18,6 +18,10 @@
 *.db
 *.db.lock
 
+# Flight recorder dump — a compiled `.nir` binary's own runtime output
+# (kernel::recorder's default NIRDOSHA_KERNEL_RECORDER_PATH), not source
+*flight_recorder*.log.gz
+
 # Claude Code local session/state (never commit)
 /.claude
 

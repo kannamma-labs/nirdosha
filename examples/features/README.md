@@ -59,6 +59,8 @@ that's the one file here meant to be read, not run, on its own.
 | 45 | `45_module_namespacing.nir` (+ `..._helper.nir`) | `module Ident { pub ... }` real namespacing + `use` |
 | 46 | `46_db_schema_and_role_mapping_conventions.nir` | `serve --db` auto schema migrations + `RoleMapping` identity cache (pure convention, no new syntax) |
 | 47 | `47_external_service_boundary.nir` | plugin-backed `db`/`mq` by URL scheme (`db_connect`/`mq_connect_via`) |
+| 49 | `49_nfr.nir` | `nfr(latency_ms:/error_rate_max:/throughput_min_per_sec:/concurrency_max:)` — compiled, automatic APM tracking |
+| 50 | `50_field_masking_and_check_role.nir` | field-level `requires(role/claim:...)` masking + compiled `check_role` — the README's own hero example |
 
 ## Deliberately not given their own file
 

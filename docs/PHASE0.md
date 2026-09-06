@@ -1108,6 +1108,81 @@ spawning thread's own sequence byte-for-byte unchanged, and a spawned
 thread that never seeds its own stream still aborts on `rand_f64`, same
 as `main` already does.
 
+**Twentieth update:** three additions, all compiled (not interpreter-
+only) from day one, that together make identity-aware authorization a
+real, end-to-end compiled feature instead of a design sketch: `nfr(...)`
+(non-functional requirements as a first-class fn annotation),
+field-level `requires(role/claim: ...)` masking, and `check_role`
+compiled for real. `docs/LANGUAGE.md` §6e/§6f have the full writeup;
+this is the summary, plus what each one actually depended on landing
+first.
+
+*`nfr(...)` — `docs/LANGUAGE.md` §6f.* `nfr(latency_ms:`,
+`error_rate_max:`, `throughput_min_per_sec:`, `concurrency_max:` (all
+optional) on a `fn` wires `runtime-kernels::kernel::nfr`'s tracking in
+automatically at every call — `codegen.rs` emits `nir_nfr_call_begin`/
+`nir_nfr_call_end` around every return path, no code at any call site.
+A crossed threshold escalates via an async, fire-and-forget HTTP POST
+to `NIRDOSHA_OBSERVABILITY_URL` (unset = never escalates, not an
+error), on its own dedicated `ThreadPool` so a slow/unreachable
+endpoint can't block a caller. Real, disclosed simplifications, not
+hidden ones: latency is a running max, not a p99 histogram; error rate
+and throughput are cumulative since the function's first call, not
+windowed; concurrency is the exact live count. Verified against a real
+Python socket server receiving a correctly-shaped JSON POST, not just
+unit-tested in isolation.
+
+*`check_role` compiled for real.* Previously true of the whole identity
+surface (`docs/LANGUAGE.md` §10's table): interpreter-only, and after
+this session's earlier interpreter removal, `check_role` had *zero*
+working execution path anywhere in the codebase. `runtime-kernels`
+gains `nir_check_role`, reading a `VerifiedIdentity`'s `claims_json` as
+a plain comma-separated role list (exact match per entry) — a
+disclosed simplification, not real JSON parsing, since no JSON parser
+is linked into `runtime-kernels`; this deliberately keeps
+`oidc_validate_token` (real JWT/JWKS crypto) out of scope as a separate,
+larger, still-interpreter-only gap. `codegen.rs::emit_check_role`
+hand-constructs the `Ok(RoleView(role))`/`Err(...)` `Result` (no `Expr`
+node exists to recurse through the generic `construct()` path for a
+kernel-computed boolean, so it mirrors `construct_variant`'s tag+payload
+shape directly). `VerifiedIdentity` was already freely constructible
+(only `RoleView`/`ClaimView` are blocked from direct construction,
+`TypeErrorKind::UnforgeableProofConstruction`) — that asymmetry is what
+made this a scoped, tractable fix rather than a change to the trust
+model itself: a genuine, unforgeable `RoleView` is now obtainable in a
+compiled binary, even though `acquire` (the mechanism that would
+*consume* one to gate a first-class function, §6a) still has zero
+codegen.
+
+*Field-level `requires(...)` masking — `docs/LANGUAGE.md` §6e.* A
+struct field's own `requires(role: "...")`/`requires(claim: "...", "...")`
+(reusing `ast::Requirement`, the exact vocabulary §6a's function-level
+`requires(...)` already uses — one enum, two attachment points) is
+checked, per masked field, at every point a value of that struct type
+is returned: present and matching a `RoleView`/`ClaimView` *parameter*
+of the *returning function* → the real value passes through; absent or
+mismatched → zeroed to the field's own zero value. Fail-closed by
+construction, not by a runtime check that could be forgotten: no
+`RoleView` parameter on the function at all is exactly as safe as one
+present with the wrong role, since both take the "zero it" branch.
+Restricted to scalar fields (`TypeErrorKind::MaskRequiresNeedsScalarField`)
+— an aggregate or affine field has no well-defined zero value, and
+masking never performs a free/move an affine field would need. This is
+deliberately *not* `acquire`/`requires(...)`-on-a-function's mechanism
+reused: there's no gate on `get_employee`'s callability here, every
+caller can call it — they just don't all see the same struct back. The
+three pieces compose directly: `check_role(identity, role)` → `match`
+→ a real `RoleView` in the `Ok` arm → passed straight into a
+function returning a masked struct, with no `acquire` anywhere in that
+chain. `crates/compiler/tests/codegen.rs`'s
+`check_role_produces_real_role_view_that_drives_field_masking` is the
+real compiled-and-run proof: an admin `VerifiedIdentity` sees a real
+`150000.0` salary back, a guest identity's own genuine `RoleView` (role
+`"guest"`, not `"admin"`) sees it zeroed while an unmasked `name` field
+passes through untouched, and a role the identity's `claims_json`
+doesn't carry at all fails at `check_role` itself, before a `RoleView`
+is ever produced.
+
 ---
 
 
