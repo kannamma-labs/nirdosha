@@ -1090,6 +1090,24 @@ section already discloses it was never implemented or tested even in
 the Rust evidence prototype, so there is no existing design to port;
 building it means designing the mechanism itself.
 
+**Nineteenth update:** the compiled RNG race the Eighteenth update's own
+docs pass surfaced (`rand_seed`/`rand_f64`/`rand_gaussian` sharing one
+process-wide `static AtomicU64` stream, unsafe against two threads
+calling it at once now that `spawn` actually compiles) is fixed, not
+just documented. `runtime-kernels/src/lib.rs` now keeps the stream in a
+`thread_local!` `Cell` — no atomics needed at all, since nothing outside
+the owning thread ever touches it — which closes the race and, as a
+free consequence of the fix rather than a second change, restores the
+interpreter's own documented "a spawned function gets its own
+independent, unseeded RNG by default" behavior exactly: a freshly
+spawned thread's stream starts unseeded regardless of whether the
+spawning thread already seeded its own. Verified by two new compiled-
+and-run tests (`crates/compiler/tests/codegen.rs`), not just reasoned
+about: seeding and drawing from a spawned thread's own stream leaves the
+spawning thread's own sequence byte-for-byte unchanged, and a spawned
+thread that never seeds its own stream still aborts on `rand_f64`, same
+as `main` already does.
+
 ---
 
 

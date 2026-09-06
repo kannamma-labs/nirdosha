@@ -975,69 +975,83 @@ pub unsafe extern "C" fn nir_constant_time_str_eq(a_ptr: *const u8, a_len: i64, 
 // fixed seed, not just against a re-reading of the same algorithm
 // description (`crates/compiler/tests/codegen.rs`'s `rand_*` tests).
 //
-// **Process-wide state, not per-"instance."** The interpreter's own
-// `RngState` is deliberately *not* a global (its doc comment: "carried
-// in the interpreter environment, not a global," so independent/
-// concurrent interpreter runs never share a stream) -- but a compiled
-// Nirdosha binary has exactly one logical owner for this state per
-// process: `thread`/`spawn` aren't compiled yet (`docs/LANGUAGE.md` §10), so
-// there's only ever one thread to own it, making a process-wide static
-// the honest equivalent of "this process's one `Interpreter` instance,"
-// not a shortcut around the interpreter's own stated reasoning.
-static RAND_SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static RAND_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// **Per-thread state, not process-wide — fixed (2026-09), not just
+// disclosed.** This used to be a `static AtomicU64`, justified as
+// "`thread`/`spawn` aren't compiled yet, so there's only ever one
+// thread to own this state regardless" — true when written, false once
+// they compiled (this crate's "chan/spawn/join kernels" section), and
+// genuinely broken even for a single caller: the old `splitmix64_next`
+// was an atomic *load* then a separate atomic *store*, not one
+// compare-and-swap, so two threads calling `nir_rand_f64`/
+// `nir_rand_gaussian` at the same instant could both read the same
+// state before either wrote back, silently drawing the same value or
+// corrupting the stream's period. `thread_local!` below closes both
+// problems at once, not just the race: each OS thread gets its own
+// independent `Cell` (no atomics needed at all — nothing outside this
+// thread ever touches it, so there's nothing to race), and a freshly
+// spawned thread's stream starts **unseeded**, restoring the
+// interpreter's own documented "independent, unseeded RNG per spawn"
+// behavior (`Interpreter::rng`'s doc comment) exactly, rather than
+// silently inheriting the spawning thread's seed/position.
+thread_local! {
+    static RAND_SEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RAND_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-fn splitmix64_next(state: &std::sync::atomic::AtomicU64) -> u64 {
-    use std::sync::atomic::Ordering;
-    let mut s = state.load(Ordering::Relaxed).wrapping_add(0x9E3779B97F4A7C15);
-    state.store(s, Ordering::Relaxed);
-    s = (s ^ (s >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    s = (s ^ (s >> 27)).wrapping_mul(0x94D049BB133111EB);
-    s ^ (s >> 31)
+fn splitmix64_next() -> u64 {
+    RAND_STATE.with(|state| {
+        let mut s = state.get().wrapping_add(0x9E3779B97F4A7C15);
+        state.set(s);
+        s = (s ^ (s >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        s = (s ^ (s >> 27)).wrapping_mul(0x94D049BB133111EB);
+        s ^ (s >> 31)
+    })
 }
 
 fn rand_next_f64() -> f64 {
-    (splitmix64_next(&RAND_STATE) >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    (splitmix64_next() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
-/// Seeds the process-wide stream. `codegen.rs` compiles `rand_seed(n)`
-/// for any integer type `n` (`typeck.rs`'s `t.is_integer()` check) --
-/// every one of them arrives here already widened to `i64` (this
-/// backend's own internal convention, `widen_to_i64`'s doc comment), so
-/// this only ever needs to accept one width.
+/// Seeds the *calling thread's* stream only — `codegen.rs` compiles
+/// `rand_seed(n)` for any integer type `n` (`typeck.rs`'s
+/// `t.is_integer()` check) -- every one of them arrives here already
+/// widened to `i64` (this backend's own internal convention,
+/// `widen_to_i64`'s doc comment), so this only ever needs to accept one
+/// width. A thread spawned after this call does **not** inherit the
+/// seed — see this section's own doc comment for why that's the
+/// intended behavior, not a gap.
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_rand_seed(seed: i64) {
-    use std::sync::atomic::Ordering;
-    RAND_STATE.store(seed as u64, Ordering::Relaxed);
-    RAND_SEEDED.store(true, Ordering::Relaxed);
+    RAND_STATE.with(|s| s.set(seed as u64));
+    RAND_SEEDED.with(|s| s.set(true));
 }
 
-/// Aborts if called before `nir_rand_seed` -- the same "the checker
-/// can't catch this statically, so trap at runtime rather than return a
-/// silently-wrong value" treatment every other unrecoverable runtime
-/// condition in this backend gets (div-by-zero, integer overflow,
-/// `nir_alloc` failure), enforced in Rust here rather than threading an
-/// extra codegen-side branch-and-trap sequence through every call site:
-/// `interpreter.rs`'s own `ErrorKind::RngNotSeeded` is a real, catchable
-/// `RuntimeError` there because the interpreter *can* return one; a
-/// compiled binary's equivalent of "stop, this precondition was
-/// violated" is `abort()`, same as `nir_alloc`'s allocation-failure path
-/// already uses.
+/// Aborts if called before `nir_rand_seed` **on this same thread** --
+/// the same "the checker can't catch this statically, so trap at
+/// runtime rather than return a silently-wrong value" treatment every
+/// other unrecoverable runtime condition in this backend gets
+/// (div-by-zero, integer overflow, `nir_alloc` failure), enforced in
+/// Rust here rather than threading an extra codegen-side branch-and-trap
+/// sequence through every call site: `interpreter.rs`'s own
+/// `ErrorKind::RngNotSeeded` is a real, catchable `RuntimeError` there
+/// because the interpreter *can* return one; a compiled binary's
+/// equivalent of "stop, this precondition was violated" is `abort()`,
+/// same as `nir_alloc`'s allocation-failure path already uses.
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_rand_f64() -> f64 {
-    if !RAND_SEEDED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !RAND_SEEDED.with(|s| s.get()) {
         std::process::abort();
     }
     rand_next_f64()
 }
 
-/// Same not-yet-seeded guard as `nir_rand_f64`, then the interpreter's
-/// exact Box-Muller transform (`next_f64()` clamped away from `0.0`
-/// before `.ln()`, same sharp-edge note as `RngState::next_gaussian`'s
-/// own doc comment).
+/// Same not-yet-seeded guard as `nir_rand_f64` (per-thread, same
+/// caveat), then the interpreter's exact Box-Muller transform
+/// (`next_f64()` clamped away from `0.0` before `.ln()`, same
+/// sharp-edge note as `RngState::next_gaussian`'s own doc comment).
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_rand_gaussian(mean: f64, stddev: f64) -> f64 {
-    if !RAND_SEEDED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !RAND_SEEDED.with(|s| s.get()) {
         std::process::abort();
     }
     let u1 = rand_next_f64().max(f64::MIN_POSITIVE);
