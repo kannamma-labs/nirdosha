@@ -369,7 +369,7 @@ impl Refiner {
                 scopes.set(name, iv);
                 iv
             }
-            Expr::Box(inner, _) => {
+            Expr::Box(inner, _) | Expr::Froze(inner, _) => {
                 self.expr(inner, scopes);
                 Interval::unknown()
             }
@@ -590,6 +590,7 @@ fn assigned_names(stmts: &[Stmt]) -> HashSet<String> {
             Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::Str(_, _) | Expr::Ident(_, _) | Expr::Chan(_) => {}
             Expr::Unary(_, inner, _)
             | Expr::Box(inner, _)
+            | Expr::Froze(inner, _)
             | Expr::Deref(inner, _)
             | Expr::Ref(inner, _)
             | Expr::Join(inner, _)

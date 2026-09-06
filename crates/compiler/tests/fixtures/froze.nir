@@ -1,0 +1,21 @@
+// Exercises `froze` — RFC 0006 Pillar 1's `Froze<T>` (`Ty::Froze`'s own
+// doc comment in ast.rs has the full story). `froze 21` heap-allocates
+// exactly like `box 21` would, but the resulting handle is deliberately
+// not affine: unlike a `box i64`, the same `f` binding below is legally
+// handed to two separate `spawn`s at once, and each of those two
+// concurrently-running threads reads through it via `*f`. This is the
+// actual Pillar 1 claim in action, not simulated: two real OS threads
+// hold the same heap pointer and only ever read it, which is exactly
+// what makes sharing it safe without any lock.
+fn reader(f: froze i64) -> i64 {
+    return *f
+}
+
+fn main() {
+    let f: froze i64 = froze 21
+    let h1: thread i64 = spawn reader(f)
+    let h2: thread i64 = spawn reader(f)
+    let a: i64 = join h1
+    let b: i64 = join h2
+    print(a + b) // 42
+}

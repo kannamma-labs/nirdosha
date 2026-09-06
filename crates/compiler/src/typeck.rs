@@ -2591,12 +2591,28 @@ impl<'a> Checker<'a> {
                     Ty::Box(Box::new(it))
                 }
             }
+            Expr::Froze(inner, _span) => {
+                let it = self.infer(inner, expected_ret, scopes);
+                if it == Ty::Error {
+                    Ty::Error
+                } else {
+                    Ty::Froze(Box::new(it))
+                }
+            }
             Expr::Deref(inner, span) => {
                 let it = self.infer(inner, expected_ret, scopes);
                 match it {
                     Ty::Error => Ty::Error,
                     Ty::Box(t) => *t,
-                    Ty::Ref(t) => {
+                    // `Ty::Froze` gets exactly `Ty::Ref`'s own rule, not
+                    // `Ty::Box`'s: a `froze` handle may have other live
+                    // copies (it's deliberately not affine — `Ty::Froze`'s
+                    // own doc comment), so extracting affine content out
+                    // of it *by value* would silently duplicate
+                    // ownership the same way extracting it through a
+                    // shared `&` would — the identical hazard, so the
+                    // identical rejection.
+                    Ty::Ref(t) | Ty::Froze(t) => {
                         if self.registry.is_affine(&t) {
                             self.error(TypeErrorKind::CannotMoveOutOfReference { content: *t }, *span);
                             Ty::Error
@@ -4794,6 +4810,7 @@ fn bind_type_params(decl_ty: &Ty, concrete_ty: &Ty, type_params: &[String], subs
             subst.entry(name.clone()).or_insert_with(|| concrete_ty.clone());
         }
         (Ty::Box(a), Ty::Box(b))
+        | (Ty::Froze(a), Ty::Froze(b))
         | (Ty::Ref(a), Ty::Ref(b))
         | (Ty::Thread(a), Ty::Thread(b))
         | (Ty::Channel(a), Ty::Channel(b)) => bind_type_params(a, b, type_params, subst),

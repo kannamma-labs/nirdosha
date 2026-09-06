@@ -342,7 +342,11 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
         // lists — confirmed in generated IR (`nirdosha emit-llvm`) for a
         // simple `let b: box i64 = ...` case: the `nir_free` call is
         // really there, right after `b`'s last use.
-        Ty::Box(_) | Ty::Ref(_) => Ok("ptr".to_string()),
+        // `Ty::Froze` is exactly `Ty::Box`'s own representation, one
+        // heap pointer — see `Ty::Froze`'s own doc comment for why
+        // there's no extra runtime shape (leaked, not refcounted, for
+        // now) to encode here.
+        Ty::Box(_) | Ty::Froze(_) | Ty::Ref(_) => Ok("ptr".to_string()),
         // A spawned computation's handle — one opaque `i64`, exactly like
         // `Ty::Tcp`/`Ty::File` above: everything the handle needs (the
         // dedicated `Scope` a `spawn` call site created, the result word
@@ -947,7 +951,9 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
         // job, at real IR-gen time), so it just recurses into whatever's
         // inside — same "walk, don't reject" treatment every other
         // already-supported unary-ish construct gets.
-        Expr::Box(inner, _) | Expr::Deref(inner, _) | Expr::Ref(inner, _) => check_expr(inner, plugin_names, registry),
+        Expr::Box(inner, _) | Expr::Froze(inner, _) | Expr::Deref(inner, _) | Expr::Ref(inner, _) => {
+            check_expr(inner, plugin_names, registry)
+        }
         // `spawn`/`join` land as of this phase (`runtime-kernels`'
         // `nir_thread_spawn`/`nir_thread_join`) — this structural pre-pass
         // has no type info (that's `Codegen::expr`'s job, at real IR-gen
@@ -1446,6 +1452,7 @@ fn bind_type_params_owned(decl_ty: &Ty, concrete_ty: &Ty, type_params: &[String]
             subst.entry(name.clone()).or_insert_with(|| concrete_ty.clone());
         }
         (Ty::Box(a), Ty::Box(b))
+        | (Ty::Froze(a), Ty::Froze(b))
         | (Ty::Ref(a), Ty::Ref(b))
         | (Ty::Thread(a), Ty::Thread(b))
         | (Ty::Channel(a), Ty::Channel(b)) => bind_type_params_owned(a, b, type_params, subst),
@@ -2169,15 +2176,17 @@ impl Codegen<'_> {
                 _ => Ty::I64,
             },
             Expr::Box(inner, _) => Ty::Box(Box::new(self.local_ty_of(inner, scopes))),
+            Expr::Froze(inner, _) => Ty::Froze(Box::new(self.local_ty_of(inner, scopes))),
             Expr::Ref(inner, _) => Ty::Ref(Box::new(self.local_ty_of(inner, scopes))),
             // `*e` unwraps exactly one pointer level — `ownership.rs`
-            // already proved `e`'s type is `Box`/`Ref` for any program
-            // that reaches codegen, and (per its own move-checking) that
-            // unwrapping affine content out of a shared `Ref` never
-            // typechecks in the first place, so this never needs to
-            // reject anything itself, only report the unwrapped type.
+            // already proved `e`'s type is `Box`/`Ref`/`Froze` for any
+            // program that reaches codegen, and (per its own move-
+            // checking) that unwrapping affine content out of a shared
+            // `Ref`/`Froze` never typechecks in the first place, so this
+            // never needs to reject anything itself, only report the
+            // unwrapped type.
             Expr::Deref(inner, _) => match self.local_ty_of(inner, scopes) {
-                Ty::Box(t) | Ty::Ref(t) => *t,
+                Ty::Box(t) | Ty::Ref(t) | Ty::Froze(t) => *t,
                 _ => Ty::I64,
             },
             // Aggregate-result `if`/`match`: typeck already proved every
@@ -3031,6 +3040,27 @@ impl Codegen<'_> {
                 let inner_ty = self.local_ty_of(inner, scopes);
                 let size = ty_byte_size(&inner_ty, &self.registry);
                 let heap_ptr = self.fresh_reg("box_heap");
+                writeln!(self.out, "  {heap_ptr} = call ptr @nir_alloc(i64 {size})").unwrap();
+                if inner_ty.is_aggregate() {
+                    let src = self.expr_ptr(inner, scopes)?;
+                    writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {heap_ptr}, ptr {src}, i64 {size}, i1 false)").unwrap();
+                } else {
+                    let v = self.expr(inner, scopes)?;
+                    let llty = self.llvm_ty(&inner_ty)?;
+                    let v = if inner_ty.is_integer() { self.narrow_from_i64(&v, &inner_ty)? } else { v };
+                    writeln!(self.out, "  store {llty} {v}, ptr {heap_ptr}").unwrap();
+                }
+                Ok(heap_ptr)
+            }
+            // `froze e` — identical construction to `Expr::Box` above
+            // (same heap layout, `Ty::Froze`'s own `llvm_ty` arm), only
+            // the resulting *type* differs (non-affine, freely copyable
+            // instead of affine) — see `Ty::Froze`'s own doc comment for
+            // why this is genuinely the same allocation, never freed.
+            Expr::Froze(inner, _) => {
+                let inner_ty = self.local_ty_of(inner, scopes);
+                let size = ty_byte_size(&inner_ty, &self.registry);
+                let heap_ptr = self.fresh_reg("froze_heap");
                 writeln!(self.out, "  {heap_ptr} = call ptr @nir_alloc(i64 {size})").unwrap();
                 if inner_ty.is_aggregate() {
                     let src = self.expr_ptr(inner, scopes)?;

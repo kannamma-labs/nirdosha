@@ -79,7 +79,53 @@ pub enum Ty {
     /// copyable, so there was nothing for ownership to say anything about
     /// until this existed. See `ownership.rs` for what actually enforces
     /// single ownership; this type just makes it meaningful to ask.
+    ///
+    /// **This is `rfcs/0006-structured-concurrency.md` Pillar 1's `Iso<T>`
+    /// already, not a type that RFC ever had to add** — the RFC says so
+    /// directly ("`box`'s existing affine (`iso`-equivalent) behavior").
+    /// `Iso`'s whole contract (uniquely owned, moved on use, safe to hand
+    /// to another concurrent computation because nothing else can still
+    /// reference it) is exactly what `is_affine()` plus `ownership.rs`'s
+    /// move-checker already give `box` today — `spawn`'s own argument-
+    /// passing is checked exactly like an ordinary call's, which is
+    /// already Iso's race-freedom argument in full. Nothing to build here.
     Box(Box<Ty>),
+    /// `rfcs/0006-structured-concurrency.md` Pillar 1's `Froze<T>` — an
+    /// immutable, freely-shareable handle, deliberately **not** affine
+    /// (unlike `Box`, unlimited simultaneous holders — even across
+    /// threads — are always sound, since nothing can ever write through
+    /// one). `froze e` heap-allocates and stores `e`'s value, the same
+    /// construction shape `box e` already has (`Expr::Froze` mirrors
+    /// `Expr::Box`'s own codegen exactly) — the only real difference is
+    /// this type's own affinity.
+    ///
+    /// **What "immutable" costs today: nothing extra to enforce.** This
+    /// language has no deref-*write* form at all yet (no `*b = v` for any
+    /// pointer-shaped type, `Box` included) — so `Froze` doesn't need a
+    /// dedicated mutation check the way Rust's `Froze<T>` needs "no
+    /// `DerefMut` impl" to matter; there is no mutation path to close.
+    /// `*f` (read) is restricted exactly like `Ty::Ref`'s own deref is:
+    /// legal only when the frozen content isn't itself affine (extracting
+    /// an affine value *by value* out from under a handle that might have
+    /// other live copies would silently duplicate ownership — the same
+    /// `CannotMoveOutOfReference` rejection `&`'s own deref already uses,
+    /// reused verbatim rather than inventing a second error for the
+    /// identical hazard).
+    ///
+    /// **Real, disclosed narrower scope than "Arc": leaked, not
+    /// refcounted.** A `Froze` value is never in `ownership.rs`'s
+    /// `FreeMap` (that machinery only ever tracks *affine* bindings'
+    /// last use — `still_owned_affine`'s own filter), so `codegen.rs`
+    /// never emits a matching `nir_free` for one, the same simplification
+    /// `Ty::Channel` handles already make (never closed, so never freed).
+    /// True `Arc`-style refcounting (retain on every copy — assignment,
+    /// call argument, return, struct field — release at every scope exit)
+    /// is real, substantially bigger follow-up work: it needs
+    /// `ownership.rs` to track a second, non-move-checked kind of
+    /// "still-live copies of this value" fact that doesn't exist yet for
+    /// *any* type in this language, affine or not. Named here as the
+    /// honest next step, not attempted in this pass.
+    Froze(Box<Ty>),
     /// A shared, read-only borrow — `&i64`, `&box i64`. Unlike `Ty::Box`,
     /// this is **not** affine: unlimited simultaneous `&T`s are always
     /// sound (many readers, no writers), the same as Rust. There is no
@@ -344,6 +390,7 @@ impl Ty {
             Ty::Bool => "bool".to_string(),
             Ty::Unit => "unit".to_string(),
             Ty::Box(inner) => format!("box {}", inner.name()),
+            Ty::Froze(inner) => format!("froze {}", inner.name()),
             Ty::Ref(inner) => format!("&{}", inner.name()),
             Ty::Thread(inner) => format!("thread {}", inner.name()),
             Ty::Channel(inner) => format!("chan {}", inner.name()),
@@ -384,6 +431,7 @@ impl Ty {
                 | Ty::Unit
                 | Ty::Error
                 | Ty::Box(_)
+                | Ty::Froze(_)
                 | Ty::Ref(_)
                 | Ty::Thread(_)
                 | Ty::Channel(_)
@@ -468,7 +516,7 @@ impl Ty {
         match self {
             Ty::Str => true,
             Ty::Named(_, args) => args.iter().any(Ty::contains_str),
-            Ty::Box(inner) | Ty::Ref(inner) | Ty::Thread(inner) | Ty::Channel(inner) => inner.contains_str(),
+            Ty::Box(inner) | Ty::Froze(inner) | Ty::Ref(inner) | Ty::Thread(inner) | Ty::Channel(inner) => inner.contains_str(),
             Ty::Vector(inner, _) | Ty::Matrix(inner, _, _) => inner.contains_str(),
             Ty::Fn(params, ret) => params.iter().any(Ty::contains_str) || ret.contains_str(),
             _ => false,
@@ -557,6 +605,7 @@ impl Ty {
             Ty::Bool
             | Ty::Unit
             | Ty::Box(_)
+            | Ty::Froze(_)
             | Ty::Ref(_)
             | Ty::Thread(_)
             | Ty::Channel(_)
@@ -1242,6 +1291,11 @@ pub enum Expr {
     /// `box expr` — heap-allocate `expr`'s value. The only expression form
     /// that produces an affine (`Ty::Box`) value.
     Box(Box<Expr>, Span),
+    /// `froze expr` — heap-allocate `expr`'s value, exactly like `box`,
+    /// but produce the non-affine, freely-shareable `Ty::Froze` instead
+    /// (`Ty::Froze`'s own doc comment has the full Pillar 1 story). The
+    /// only expression form that produces one.
+    Froze(Box<Expr>, Span),
     /// `*expr` — read the value out of a box or through a reference. Does
     /// **not** move the box/reference itself when what comes out is
     /// freely copyable; see `ownership.rs`'s doc comment for the type-
@@ -1490,6 +1544,7 @@ impl Expr {
             | Expr::If { span: s, .. }
             | Expr::Assign(_, _, s)
             | Expr::Box(_, s)
+            | Expr::Froze(_, s)
             | Expr::Deref(_, s)
             | Expr::Ref(_, s)
             | Expr::Spawn(_, _, s)
@@ -2185,6 +2240,7 @@ pub fn substitute_ty(ty: &Ty, subst: &HashMap<&str, &Ty>) -> Ty {
             Ty::Named(name.clone(), args.iter().map(|a| substitute_ty(a, subst)).collect())
         }
         Ty::Box(inner) => Ty::Box(Box::new(substitute_ty(inner, subst))),
+        Ty::Froze(inner) => Ty::Froze(Box::new(substitute_ty(inner, subst))),
         Ty::Ref(inner) => Ty::Ref(Box::new(substitute_ty(inner, subst))),
         Ty::Thread(inner) => Ty::Thread(Box::new(substitute_ty(inner, subst))),
         Ty::Channel(inner) => Ty::Channel(Box::new(substitute_ty(inner, subst))),

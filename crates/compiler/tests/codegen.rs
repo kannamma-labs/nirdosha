@@ -123,6 +123,16 @@ fn channels_example_compiles_and_matches_interpreter() {
     assert_eq!(code, 0);
 }
 
+// ---- `froze` — RFC 0006 Pillar 1's `Froze<T>` --------------------------
+
+#[test]
+fn froze_example_compiles_and_shares_a_value_across_two_real_threads() {
+    let src = include_str!("fixtures/froze.nir");
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
 /// A genuine "nested reply-obligation" deadlock (RFC 0006's own Pillar 5
 /// evidence class — see `fixtures/deadlock.nir`'s own doc comment) must
 /// be caught by `runtime-kernels`' dynamic stall detector

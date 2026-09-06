@@ -441,6 +441,7 @@ param       ::= ident ":" type
 // the real parser.
 type        ::= "&" type
               | "box" type
+              | "froze" type
               | "thread" type
               | "chan" type
               | "sandbox"
@@ -661,7 +662,7 @@ multiplicative ::= unary (("*" | "/" | ".*" | "./") unary)*
 // fits the same fixed-arity `"(" ... ")"` shape `send` already
 // established, just under its own keyword (it's not consuming an
 // existing handle the way `send`/`recv`/`stop` are — it *produces* one).
-unary       ::= ("!" | "-" | "*" | "box" | "&") unary
+unary       ::= ("!" | "-" | "*" | "box" | "froze" | "&") unary
               | "spawn" call
               | "join" unary
               | "chan"
