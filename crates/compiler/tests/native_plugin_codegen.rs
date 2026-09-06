@@ -17,15 +17,13 @@
 
 use nirdosha::ast::Ty;
 use nirdosha::codegen;
-use nirdosha::interpreter::Value;
 use nirdosha::ownership::check_ownership;
 use nirdosha::parser::Parser;
-use nirdosha::plugin::{NativePluginBuiltin, PluginBuiltin};
+use nirdosha::plugin::NativePluginBuiltin;
 use nirdosha::smt::analyze;
 use nirdosha::token::Lexer;
-use nirdosha::typeck::typecheck_with_plugins;
+use nirdosha::typeck::typecheck_with_native_plugins;
 use std::process::Command;
-use std::sync::Arc;
 
 /// Compiles a tiny real Rust source file to a `staticlib` via a direct
 /// `rustc` invocation (the same "shell out to a real toolchain" posture
@@ -57,10 +55,10 @@ fn compile_native_plugin_staticlib(fn_name: &str, rust_src: &str) -> Vec<u8> {
 /// checked `Program` — mirrors `main.rs::typecheck_and_own_impl`, minus
 /// the file-loader indirection (inline source here) and `validate`'s
 /// contract check (irrelevant to this test).
-fn typecheck_and_own_with_plugins(src: &str, plugins: &[PluginBuiltin]) -> nirdosha::ast::Program {
+fn typecheck_and_own_with_plugins(src: &str, plugins: &[NativePluginBuiltin]) -> nirdosha::ast::Program {
     let toks = Lexer::new(src).tokenize().expect("lex should succeed");
     let program = Parser::new(toks).parse_program().expect("parse should succeed");
-    typecheck_with_plugins(&program, plugins).expect("typecheck_with_plugins should accept this program");
+    typecheck_with_native_plugins(&program, plugins).expect("typecheck_with_native_plugins should accept this program");
     check_ownership(&program).expect("ownership check should accept this program");
     program
 }
@@ -87,24 +85,11 @@ fn a_native_plugin_call_compiles_and_the_native_binary_runs_correctly() {
         }
     "#;
 
-    // The interpreter-facing half (`PluginBuiltin`, required for
-    // `typecheck_with_plugins` -- every `.nir`-visible plugin builtin
-    // needs *some* interpreted implementation, even one this test never
-    // actually runs) and the codegen-facing half (`NativePluginBuiltin`)
-    // both declare the identical name/params/ret, the real invariant
-    // `NativePluginBuiltin`'s own doc comment states.
-    let plugin = PluginBuiltin {
-        name: "plugin_scale".to_string(),
-        params: vec![Ty::I64],
-        ret: Ty::I64,
-        effects: Default::default(),
-        call: Arc::new(|_args, _span| unreachable!("this test only exercises the compiled path")),
-    };
     let native_plugin =
         NativePluginBuiltin { name: "plugin_scale".to_string(), params: vec![Ty::I64], ret: Ty::I64, static_lib: Box::leak(lib_bytes.into_boxed_slice()) };
     native_plugin.validate().expect("a scalar i64->i64 signature must validate");
 
-    let program = typecheck_and_own_with_plugins(src, std::slice::from_ref(&plugin));
+    let program = typecheck_and_own_with_plugins(src, std::slice::from_ref(&native_plugin));
     let report = analyze(&program);
 
     let out_dir = std::env::temp_dir().join(format!("nirdosha_native_plugin_test_bin_{}", std::process::id()));
@@ -143,46 +128,3 @@ fn a_str_typed_native_plugin_is_rejected_by_validate_not_left_to_fail_in_clang()
     assert!(err.contains("bad_plugin") && err.contains("scalar"), "expected a named, actionable reason, got: {err}");
 }
 
-/// An interpreter-only plugin (no native form) mixed into the same
-/// program as a native-callable one is still cleanly rejected by
-/// `check_supported_with_plugins` -- `emit_llvm_ir_with_native_plugins`
-/// doesn't silently accept every plugin call just because *some*
-/// plugins in the program have a native form.
-#[test]
-fn a_mixed_program_still_rejects_the_interpreter_only_plugin_call() {
-    let src = r#"
-        fn main() -> i64 {
-            let a: i64 = plugin_scale(20)
-            let b: i64 = interpreter_only_plugin()
-            return a + b
-        }
-    "#;
-    let native_plugin_stub = PluginBuiltin {
-        name: "plugin_scale".to_string(),
-        params: vec![Ty::I64],
-        ret: Ty::I64,
-        effects: Default::default(),
-        call: Arc::new(|_args, _span| Ok(Value::Int(0))),
-    };
-    let interp_only = PluginBuiltin {
-        name: "interpreter_only_plugin".to_string(),
-        params: vec![],
-        ret: Ty::I64,
-        effects: Default::default(),
-        call: Arc::new(|_args, _span| Ok(Value::Int(0))),
-    };
-    let plugins = [native_plugin_stub, interp_only];
-    let program = typecheck_and_own_with_plugins(src, &plugins);
-    let report = analyze(&program);
-
-    let native_plugin =
-        NativePluginBuiltin { name: "plugin_scale".to_string(), params: vec![Ty::I64], ret: Ty::I64, static_lib: &[] };
-    let reject: std::collections::HashSet<String> = ["interpreter_only_plugin".to_string()].into_iter().collect();
-
-    let err = codegen::emit_llvm_ir_with_native_plugins(&program, &report, std::slice::from_ref(&native_plugin), &reject)
-        .expect_err("the interpreter-only plugin call must still be rejected even though plugin_scale has a native form");
-    assert!(
-        err.to_string().contains("interpreter_only_plugin"),
-        "expected the rejection to name the actual interpreter-only plugin, got: {err}"
-    );
-}
