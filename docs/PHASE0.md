@@ -914,6 +914,62 @@ than one TCP read. No TLS — `connect` is plaintext-only, so an `https://`
 target isn't reachable at all yet, only bare HTTP or any other
 plaintext-TCP protocol.
 
+**Sixteenth update:** `spawn`/`join`/`chan`/`send`/`recv` — the
+Eleventh/Twelfth updates' concurrency primitives are now real, compiled
+codegen, not interpreter-only. `Ty::Thread`/`Ty::Channel` both lower to a
+plain `i64` handle in `llvm_ty`, exactly like `tcp`/`file`'s own opaque
+fds — the handle itself carries nothing; everything it needs lives in a
+new `runtime-kernels` handle table. Two `runtime-kernels/src/kernel`
+modules built earlier as unwired prototypes (`mailbox`, a non-blocking-
+send/multi-consumer-receive queue; `thread_pool::Scope`, structured spawn
+tracking) are what `chan`/`spawn` actually compile to now, via five new
+`extern "C"` kernels in `lib.rs`'s "chan/spawn/join kernels" section:
+`nir_chan_new`/`nir_chan_send`/`nir_chan_recv` and `nir_thread_spawn`/
+`nir_thread_join`.
+
+*How `spawn` crosses the ABI boundary.* The kernel crate can't know
+`.nir`'s argument/return shapes (the usual cross-compilation-unit wall
+this whole backend works around, `nir_tcp_*`'s own doc comments), so
+`spawn name(args)` generates its own one-off trampoline function per call
+site: `codegen.rs`'s `spawn_thread` marshals `args` into a heap-allocated
+anonymous-struct context block, `emit_spawn_trampoline` emits a small
+`extern "C" fn(ctx, result_slot)` that unpacks that block, frees it,
+calls `name` for real, and writes its result back as one `i64` word;
+`nir_thread_spawn` just runs that trampoline on a dedicated one-job
+`Scope` and hands back a handle immediately. `join` blocks on that exact
+`Scope`, then unpacks the one-word result back to its real type
+(`double`/`ptr`/`i1` bitcast/ptrtoint/trunc as needed — plain integers
+were already carried at full `i64` width). `chan`'s payload crosses the
+same one-`i64`-word shape.
+
+*The real, disclosed narrower scope, twice over.* First: every `chan`
+payload and every `spawn` argument/return must be word-sized
+(`codegen.rs`'s `is_word_sized`) — `str`/`dec128` (two machine words) and
+any struct/enum/Vector/Matrix aren't supported yet, rejected with a
+specific `unsupported(...)` message at the exact `send`/`recv`/`spawn`
+call site that hits one, the same "type-oblivious pre-pass, real check at
+IR-gen time" pattern `print`'s own aggregate rejection already
+established. Second: Pillar 4's full promise ("every spawned thread is
+tracked by the `Scope` covering its spawning function body") isn't the
+exact mechanism here — each `spawn` gets its own dedicated one-job
+`Scope` instead of one shared per spawning function, so a `join` really
+does wait for (and only for) that one spawn. What *is* real: a `thread`
+handle a function never explicitly `join`s gets auto-joined by
+`codegen.rs`'s `emit_affine_free` at every scope-closing point (the same
+`FreeMap`-driven mechanism `box`/`tcp` already use to auto-free/auto-stop)
+— so an orphan, never-joined thread is structurally impossible in a
+well-typed program, even without the RFC prototype's own lexical-scope
+mechanism.
+
+`tests/codegen.rs`'s `threads_example_compiles_and_matches_interpreter`/
+`channels_example_compiles_and_matches_interpreter` replace the old
+"must be rejected" tests with real compile-and-run checks against
+`examples/threads.nir`/`examples/channels.nir` — both produce the same
+output as the interpreter, on real OS threads with a real cross-thread
+handoff, not simulated. `sandbox`/`stop` (docs/SANDBOXING.md) stay exactly
+as interpreter-only as before this update — a separate, larger scope not
+touched here.
+
 ---
 
 
@@ -983,7 +1039,7 @@ test result: ok. 146 passed; 0 failed
 | Row | Status |
 |---|---|
 | 1 — No GC, no `free()` | **Started, real content.** `box`/`*`, shared borrows (`&`), and a static move-checker (`ownership.rs`) — see the "Second" and "Third" update sections above for what's actually proved and what still isn't (no `&mut`, no `Drop` hook, no place expressions). Regions/bulk-arena allocation is still not started. |
-| 2 — No data races | **Started, first implementation.** `spawn`/`join`, `thread <T>` (real OS threads under the hood — see the "Eleventh update" for the Java-virtual-threads framing) and `chan`/`send`/`recv` (see the "Twelfth update"). Race-freedom for both comes entirely from `ownership.rs` reusing its existing move-checker — `spawn`'s arguments and `join`'s handle for threads, `send`'s payload for channels — no new concurrency-specific safety logic exists either time. `codegen.rs` doesn't support any of it yet (interpreter-only, like `box`/`&` before their own codegen work). |
+| 2 — No data races | **Started, first implementation, now compiled too.** `spawn`/`join`, `thread <T>` (real OS threads under the hood — see the "Eleventh update" for the Java-virtual-threads framing) and `chan`/`send`/`recv` (see the "Twelfth update"). Race-freedom for both comes entirely from `ownership.rs` reusing its existing move-checker — `spawn`'s arguments and `join`'s handle for threads, `send`'s payload for channels — no new concurrency-specific safety logic exists either time. `codegen.rs` compiles all of it now for word-sized payloads/arguments/results (see the "Sixteenth update") — `str`/`dec128`/struct/enum payloads are still interpreter-only. |
 | 3 — No deadlocks | **Started, narrower than proof-by-construction — see the "Twelfth update" for the honest scope.** docs/goal.md's own row 3 design says exactly this: default to async messages, keep shared-memory locks opt-in and gated. Channels are now that default (no `mutex`/`lock` primitive exists in the language, so the classic "two locks in opposite order" failure docs/goal.md cites for Rust is genuinely not expressible) — but `recv` is a real blocking wait, so a well-typed Nirdosha program can still hang forever on a `recv` nobody `send`s to. That's a liveness bug, not the aliased-lock-order failure mode row 3's Pony comparison is about, but it means the *proof-by-construction* claim isn't fully earned yet — true Pony-style non-blocking mailbox dispatch would need actors/behaviors, not yet built. `thread <T>` handles being affine (forming a DAG by construction) still holds on its own, narrower terms. |
 | 4 — No int/buffer overflow | **Started, and now backed by real SMT.** `Ty::in_range` + `check_ty` still catch everything dynamically (Tier 2, unchanged). Two static Tier-1 passes exist: `crates/compiler/src/refine.rs` (interval analysis, built when this environment had no Z3) and `crates/compiler/src/smt.rs` (real Z3 4.16, once the user installed it — see the "Fifth update" section below), the latter now the primary checker since it's strictly more capable. 68/68 tests pass, including a flagship test that runs the *same* program through both passes and confirms SMT proves something interval analysis structurally cannot (condition-based narrowing). Not wired to elide the interpreter's runtime check — see below for why. |
 | 5 — Native speed | **Started, real native binaries.** `crates/compiler/src/codegen.rs` emits textual LLVM IR and shells out to the system `clang` (LLVM 22) — see the "Sixth update" section below. Scoped to signed integers/bool/unit, no `box`/`&`/`*` yet. 78/78 tests pass; three genuine bugs were found and fixed by actually running compiled binaries, not by review — see below. |
@@ -1070,8 +1126,12 @@ Three candidates, none blocking the others:
   recursion, just on its own OS thread, so the note remains aspirational
   until an M:N scheduler is actually built). The non-blocking mailbox
   dispatch above would likely be built on the same scheduler.
-- **`codegen.rs` support for `spawn`/`join`/`chan`/`send`/`recv`** —
-  currently interpreter-only; needs an ABI decision for what a native
-  `thread T`/`chan T` handle even is (an OS thread/queue handle again,
-  or already the lightweight scheduler's unit) before it's worth
-  building.
+- ~~**`codegen.rs` support for `spawn`/`join`/`chan`/`send`/`recv`**~~ —
+  **done, see the Sixteenth update.** The ABI decision this bullet was
+  waiting on landed as the simplest one available: a `thread`/`chan`
+  handle is a plain `i64` into a `runtime-kernels`-owned table, exactly
+  like `tcp`/`file` already are, backed by real OS threads
+  (`kernel::thread_pool::Scope`) — not the lightweight-scheduler unit
+  the M:N bullet above still describes as aspirational. Still
+  interpreter-only: `str`/`dec128`/struct/enum payloads (word-sized
+  scalars only compile today).
