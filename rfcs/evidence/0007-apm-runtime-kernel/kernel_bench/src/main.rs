@@ -41,6 +41,27 @@ extern "C" {
     fn nir_file_write(handle: i64, buf_ptr: *const u8, buf_len: i64) -> i64;
     fn nir_file_read(handle: i64, buf_ptr: *mut u8, buf_cap: i64) -> i64;
     fn nir_file_stop(handle: i64) -> i32;
+    // `spawn`/`join`/`chan` kernels (`crates/runtime-kernels/src/lib.rs`'s
+    // "chan/spawn/join kernels" section) — added alongside this RFC's own
+    // dynamic deadlock detector and `Domain::Thread` admission ceiling,
+    // both benchmarked in sections 7-8 below. Unlike `nir_tcp_*`/
+    // `nir_file_*` above (added with *zero* admission logic in front of
+    // them, this file's own original point), these two already carry
+    // real overhead on top of the bare mechanism: `nir_thread_spawn`/
+    // `nir_thread_join` do a `Domain::Thread` acquire/release plus the
+    // stall detector's bookkeeping, and `nir_chan_recv` does a `try_recv`
+    // peek plus the same bookkeeping. Sections 7-8 measure the *whole*
+    // round trip as a `.nir` program actually pays it today, not an
+    // artificially isolated zero-admission baseline.
+    fn nir_thread_spawn(trampoline: extern "C" fn(*mut u8, *mut i64), ctx: *mut u8) -> i64;
+    fn nir_thread_join(handle: i64) -> i64;
+    fn nir_chan_new() -> i64;
+    fn nir_chan_send(handle: i64, value: i64) -> i64;
+    fn nir_chan_recv(handle: i64) -> i64;
+}
+
+extern "C" fn bench_trampoline(_ctx: *mut u8, result_slot: *mut i64) {
+    unsafe { *result_slot = 42 };
 }
 
 fn bench(label: &str, iters: u64, mut f: impl FnMut()) {
@@ -386,6 +407,54 @@ fn main() {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 7. Thread spawn + join round trip ---------------------------
+    // Raw baseline: bare `std::thread::spawn`/`join`, no scope, no
+    // admission -- the floor. `nir_thread_spawn`/`nir_thread_join` add,
+    // on top of that floor: a `kernel::thread_pool::Scope` per spawn
+    // (worker-pool reuse instead of a fresh OS thread — should make this
+    // *faster* than raw spawn after the first few calls, not slower),
+    // one `Domain::Thread` admission acquire/release, and the deadlock
+    // detector's `concurrency_thread_started`/`_finished`/`already_done`
+    // bookkeeping (`kernel::concurrency_wait_begin`'s own doc comment).
+    {
+        bench("7a. raw std::thread::spawn(|| 42) + join", 5_000, || {
+            let h = std::thread::spawn(|| 42i64);
+            assert_eq!(h.join().unwrap(), 42);
+        });
+
+        bench("7b. nir_thread_spawn + nir_thread_join", 5_000, || unsafe {
+            let h = nir_thread_spawn(bench_trampoline, std::ptr::null_mut());
+            assert!(h >= 0, "nir_thread_spawn failed (OS refusal or Domain::Thread admission denial)");
+            let result = nir_thread_join(h);
+            assert_eq!(result, 42);
+        });
+    }
+
+    // ---- 8. Chan send + recv round trip -------------------------------
+    // Raw baseline: `crossbeam_channel::unbounded` (the exact library
+    // `kernel::mailbox` wraps — RFC 0006's own bench.rs measured this
+    // shape at 47.5 ns/iter on different hardware; re-measured here
+    // against this run's own CPU for a same-machine comparison instead
+    // of citing that number directly). Same-thread round trip (send
+    // immediately followed by its own recv) — never actually blocks
+    // either side, so `nir_chan_recv`'s `try_recv`-first fast path
+    // (`lib.rs`'s own doc comment) is exactly what this exercises: the
+    // deadlock detector's bookkeeping is never even reached.
+    {
+        let (raw_tx, raw_rx) = crossbeam_channel::unbounded::<i64>();
+        bench("8a. raw crossbeam_channel send + recv (same thread)", 50_000, || {
+            raw_tx.send(42).unwrap();
+            assert_eq!(raw_rx.recv().unwrap(), 42);
+        });
+
+        let h = unsafe { nir_chan_new() };
+        assert!(h >= 0);
+        bench("8b. nir_chan_send + nir_chan_recv (same thread)", 50_000, || unsafe {
+            assert_eq!(nir_chan_send(h, 42), 0);
+            assert_eq!(nir_chan_recv(h), 42);
+        });
     }
 
     println!();

@@ -970,6 +970,71 @@ handoff, not simulated. `sandbox`/`stop` (docs/SANDBOXING.md) stay exactly
 as interpreter-only as before this update — a separate, larger scope not
 touched here.
 
+**Seventeenth update:** a dynamic deadlock detector — the concurrency
+architecture is now genuinely two layers, not one, and this update is
+what makes that a real combination rather than two features that
+happen to share a file. See `rfcs/0007-apm-runtime-kernel.md` §8 for
+the full writeup; this is the summary.
+
+*The two layers.* `rfcs/0006-structured-concurrency.md`'s Pillar 5 (a
+compile-time, lexical-scope-level proof that the "nested reply-
+obligation" deadlock shape can't type-check at all) is the real,
+still-deferred answer — nothing below substitutes for it. What exists
+today instead is a **runtime backstop** in `runtime-kernels/src/kernel/
+mod.rs`: `concurrency_wait_begin`/`_end` (called from `nir_thread_join`/
+`nir_chan_recv`, the Sixteenth update's own real blocking primitives)
+track how many `.nir`-level participants exist (`live`) against how
+many are simultaneously blocked in one of those two operations
+specifically — never `tcp`/`file`, which can still resolve from outside
+the process. If every live participant is blocked at once, nothing left
+could ever unblock any of them; the kernel reports which handle each
+one is stuck on and aborts, rather than hanging forever. Same technique
+Go's own runtime uses ("all goroutines are asleep - deadlock!"), same
+honest limitation: it only catches a *global* stall, not a local cycle
+between two threads while a third keeps making progress — real Pillar 5
+would catch that too, ahead of time.
+
+*A real correctness bug, caught by running the existing suite, not by
+review.* The first version counted a thread as "blocked" the instant it
+called `join`/`recv`, before checking whether the call would actually
+block — a fast-finishing `spawn` (a producer that already sent
+everything and returned) could race a slower `recv` into a false
+positive, caught immediately by `channels_example_compiles_and_matches_
+interpreter` going from printing `42` to aborting. Fixed by trying the
+non-blocking path first (`Receiver::try_recv`, a new `Scope::
+already_done`) and only ever registering a wait once that's confirmed
+empty — plus moving the "this job is no longer live" decrement to the
+point `join` itself confirms completion, not the instant the job's own
+code returns (two separately-locked counters with no ordering between
+them otherwise). `fixtures/deadlock.nir` — the real nested-reply-
+obligation shape (A sends a request and blocks on the reply; B needs
+one more answer from A, which A is no longer running any code to
+provide) — now aborts in well under a second, every time, verified
+across dozens of repeated runs of both the deadlocking and the
+non-deadlocking fixture, not asserted once and trusted.
+
+*Housekeeping, not just detection.* `thread` now has its own admission
+`Domain` (`Domain::Thread`, `NIRDOSHA_KERNEL_MAX_THREAD`) — the same
+concurrently-held ceiling `tcp`/`file` already enforce, acquired at
+`spawn` and released at the `join` that closes it. `chan` deliberately
+has none (never released, so a held-ceiling doesn't fit its lifecycle).
+
+*Why not real prevention.* Considered and rejected, honestly: true
+prevention (refuse the one request that would create a cycle, before
+blocking) needs a well-defined resource *owner* to check against, the
+way a mutex has one. `chan` doesn't — any of potentially many senders
+could satisfy a `recv`, so there's no wait-for edge to test ahead of
+time. That gap is exactly why Pillar 5's real answer is a type-level
+constraint (levels), not a runtime graph. `join` has nothing to prevent
+in the first place — affine `thread` handles already form a DAG by
+construction, so a join-cycle can't exist in a well-typed program.
+`db`/`mq` are explicitly out of the detector's scope even once they
+compile, for the same reason `tcp`/`file` are: both can block on a
+genuinely external system that might resolve from outside the process
+at any time, and counting them as "unblockable except by another
+participant" would reopen exactly the false-positive class this update
+just closed.
+
 ---
 
 

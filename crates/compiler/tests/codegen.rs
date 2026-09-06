@@ -123,6 +123,78 @@ fn channels_example_compiles_and_matches_interpreter() {
     assert_eq!(code, 0);
 }
 
+/// A genuine "nested reply-obligation" deadlock (RFC 0006's own Pillar 5
+/// evidence class — see `fixtures/deadlock.nir`'s own doc comment) must
+/// be caught by `runtime-kernels`' dynamic stall detector
+/// (`kernel::concurrency_wait_begin`) and turned into a fast, clean
+/// process abort — never a silent, unbounded hang. Polls with its own
+/// hard deadline rather than calling `Command::output()` directly
+/// (which would block forever, hanging this whole test binary, if
+/// detection ever regressed) — a timeout here is a real test failure
+/// ("detection didn't fire"), not a flake to retry past.
+#[test]
+fn a_nested_reply_obligation_deadlock_is_detected_and_aborted_not_hung() {
+    let program = parse_checked(include_str!("fixtures/deadlock.nir"));
+    let report = analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
+    codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect("codegen::build should succeed for this program");
+
+    let mut recorder_path = std::env::temp_dir();
+    recorder_path.push(format!("nirdosha_test_deadlock_recorder_{}_{}.log.gz", std::process::id(), unique_suffix()));
+
+    let mut child = Command::new(&out_path)
+        .env("NIRDOSHA_KERNEL_RECORDER_PATH", &recorder_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("compiled binary should start");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait should succeed") {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&recorder_path);
+
+    let Some(status) = status else {
+        panic!("compiled deadlock.nir hung past a 10s deadline -- the runtime deadlock detector did not fire");
+    };
+    assert!(
+        !status.success(),
+        "compiled deadlock.nir must abort, not exit cleanly, once every thread is blocked with nothing left to unblock it"
+    );
+
+    // Read the piped stderr directly, not via `wait_with_output()` --
+    // `try_wait()` above already reaped the child (a second `wait()`
+    // call on an already-reaped process is an error on Unix), and the
+    // exit status is already in hand.
+    use std::io::Read;
+    let mut stderr = String::new();
+    child.stderr.take().expect("stderr was piped").read_to_string(&mut stderr).expect("reading stderr should succeed");
+    assert!(
+        stderr.contains("deadlock detected"),
+        "expected the kernel's own deadlock diagnostic on stderr, got:\n{stderr}"
+    );
+    // The richer diagnostic (`kernel::WaitTarget`/`waiting_registry`) —
+    // names the actual stuck call kind, not just a bare thread count,
+    // so a `.nir` author can find the two `recv` call sites that formed
+    // the cycle.
+    assert!(
+        stderr.matches("is blocked in `recv` on chan handle").count() == 2,
+        "expected both blocked threads' `recv` targets named individually, got:\n{stderr}"
+    );
+}
+
 // ---- box/&/* are honestly rejected, not silently mis-compiled ----------
 
 #[test]

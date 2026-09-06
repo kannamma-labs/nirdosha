@@ -135,6 +135,18 @@ use std::sync::{Mutex, OnceLock};
 pub enum Domain {
     Tcp,
     File,
+    /// One outstanding `thread` handle (between `spawn` and its
+    /// matching `join`) — the same ceiling-on-concurrently-held
+    /// resources tcp/file already get, now that `spawn`/`join` are real
+    /// (`nir_thread_spawn`/`nir_thread_join`, `lib.rs`'s "chan/spawn/
+    /// join kernels" section). `chan` deliberately has no domain here:
+    /// unlike a thread handle, a channel handle is never released
+    /// (`Ty::Channel` has no `stop` case — `nir_chan_new`'s own doc
+    /// comment), so a concurrently-*held* ceiling doesn't fit its
+    /// lifecycle the way it fits an affine handle's acquire/release
+    /// pair; a total-ever-created cap would be a different, not-yet-
+    /// asked-for kind of limit.
+    Thread,
 }
 
 impl Domain {
@@ -147,6 +159,7 @@ impl Domain {
         match self {
             Domain::Tcp => "NIRDOSHA_KERNEL_MAX_TCP",
             Domain::File => "NIRDOSHA_KERNEL_MAX_FILE",
+            Domain::Thread => "NIRDOSHA_KERNEL_MAX_THREAD",
         }
     }
 
@@ -175,11 +188,13 @@ impl DomainCounters {
 
 static TCP: DomainCounters = DomainCounters::new();
 static FILE: DomainCounters = DomainCounters::new();
+static THREAD: DomainCounters = DomainCounters::new();
 
 fn counters_for(domain: Domain) -> &'static DomainCounters {
     match domain {
         Domain::Tcp => &TCP,
         Domain::File => &FILE,
+        Domain::Thread => &THREAD,
     }
 }
 
@@ -258,7 +273,7 @@ pub fn stats(domain: Domain) -> (i64, u64, u64) {
 /// it's ever seen, not just a diagnostic curiosity.
 pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
-    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File)] {
+    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread)] {
         let (held, grants, denials) = stats(domain);
         out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials}\n"));
     }
@@ -325,6 +340,174 @@ impl<T> HandleTable<T> {
     }
 }
 
+/// A cheap, **exact** dynamic backstop for `rfcs/0006-structured-
+/// concurrency.md`'s still-unbuilt, still-deferred Pillar 5 (the
+/// compile-time, lexical-scope-level deadlock-freedom proof) — the same
+/// relationship this whole module has to admission control in general:
+/// a runtime mechanism standing in for a static guarantee the type
+/// checker doesn't make yet, honestly scoped rather than oversold.
+///
+/// **The technique**: the same one Go's own runtime uses ("fatal error:
+/// all goroutines are asleep - deadlock!"), not a general wait-for-graph
+/// cycle detector. Track how many `.nir`-level concurrent participants
+/// currently exist (`live` — the main thread, plus one per outstanding
+/// `spawn` job) against how many are, right now, blocked in exactly the
+/// two operations that can only ever be unblocked by *another* one of
+/// those participants (`join`, `recv` — never `tcp`/`file` I/O, which
+/// can always still resolve from outside the process). If every live
+/// participant is simultaneously in that state, nothing left in the
+/// process could ever run the `send`/return that would unblock any of
+/// them — a certain, permanent stall, not a heuristic guess.
+///
+/// **Why this is exact, not probabilistic**, unlike a timeout-based
+/// guess: `live`/`blocked` only ever change while holding `STALL`'s own
+/// lock, so a thread cannot be "about to do something that would
+/// unblock everyone" without that fact already being reflected in
+/// `live` before the check runs (a not-yet-submitted `spawn` hasn't
+/// incremented `live` yet, so it correctly doesn't count as a possible
+/// rescuer; once submitted, it does, before its job could possibly
+/// reach a `join`/`recv` of its own).
+///
+/// **What this deliberately doesn't catch**: a *local* deadlock — two
+/// threads cyclically stuck on each other while a third, unrelated
+/// thread keeps making progress on something else. Pillar 5's own real
+/// proof-by-construction (once built) would catch that too, ahead of
+/// time; this only fires once the *whole* program can never move again,
+/// same as Go's detector, and for the same reason (correctly telling
+/// "some of it is still running" from "literally none of it can ever
+/// run again" needs exactly the global count this uses, not a partial
+/// one). See `rfcs/0007-apm-runtime-kernel.md` §8 for why this and
+/// Pillar 5 are genuinely separate deadlock classes to begin with
+/// (resource-acquisition cycles vs. reply-obligation cycles) — this
+/// mechanism is a backstop for the *reply-obligation* class only.
+struct StallTracker {
+    live: usize,
+    blocked: usize,
+}
+
+static STALL: Mutex<StallTracker> = Mutex::new(StallTracker { live: 1, blocked: 0 });
+
+/// What one currently-blocked thread is actually waiting on — purely
+/// diagnostic (`concurrency_wait_begin`'s abort message), never
+/// consulted by the deadlock decision itself (`register_wait_and_check_
+/// stall` only ever looks at `STALL`'s plain counts). Naming the real
+/// stuck handle/call kind is the difference between "all 2 threads are
+/// blocked" and "thread A is blocked in `recv` on channel 3, thread B
+/// is blocked in `join` on thread 5" — the latter is what actually lets
+/// a `.nir` author find the two call sites that made a cycle, without
+/// this crate attempting anything like real prevention (this section's
+/// own doc comment on why a general wait-for graph doesn't fit `chan`'s
+/// no-single-owner semantics).
+#[derive(Clone, Copy, Debug)]
+pub enum WaitTarget {
+    ChanRecv(i64),
+    ThreadJoin(i64),
+}
+
+impl std::fmt::Display for WaitTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaitTarget::ChanRecv(handle) => write!(f, "`recv` on chan handle {handle}"),
+            WaitTarget::ThreadJoin(handle) => write!(f, "`join` on thread handle {handle}"),
+        }
+    }
+}
+
+/// A separate lock from `STALL`, deliberately — this map is read only
+/// for the abort message itself (after `STALL` has already decided a
+/// deadlock is real), never as part of the decision, so it doesn't need
+/// to share `STALL`'s own ordering guarantees. A brief window where this
+/// map and `STALL.blocked` disagree by one entry (registered just before
+/// vs. just after the count) only affects the diagnostic's completeness,
+/// never whether a deadlock is correctly detected.
+fn waiting_registry() -> &'static Mutex<HashMap<std::thread::ThreadId, WaitTarget>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<std::thread::ThreadId, WaitTarget>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Call exactly once, synchronously, at the point a `spawn` job is
+/// actually handed off to run (`nir_thread_spawn`, after a successful
+/// submit — never on a failed one, which never runs at all) — this
+/// job is now a real concurrent participant that could, in principle,
+/// be the one to unblock someone else.
+pub fn concurrency_thread_started() {
+    STALL.lock().unwrap().live += 1;
+}
+
+/// Call exactly once, synchronously, once `nir_thread_join` has
+/// confirmed (via `thread_pool::Scope::already_done`/`join`) that a
+/// spawned job's own code has fully finished running — it can no
+/// longer unblock anyone.
+///
+/// **Deliberately not called from inside the spawned job itself, at the
+/// instant its own code returns** — that would create a real, if
+/// narrow, race: this counter and `thread_pool::Scope`'s own completion
+/// state are two separate locks with no ordering relationship between
+/// them, so a joiner's non-blocking "is it done yet" check could
+/// observe "not yet" a few instructions after this counter had already
+/// dropped, undercounting `live` for a job that (from the joiner's own
+/// perspective) hasn't finished. Decrementing only once `join` itself
+/// has *confirmed* completion ties this counter to the one fact a
+/// caller can already prove, closing that gap — at the cost of a
+/// finished-but-not-yet-joined job still counting as `live` (a real,
+/// narrower detection gap, not a correctness one: it can only make this
+/// detector miss a deadlock it otherwise would have caught, never
+/// report one that isn't real).
+pub fn concurrency_thread_finished() {
+    STALL.lock().unwrap().live -= 1;
+}
+
+/// The actual decision, factored out from the real `nir_*` entry points
+/// (`concurrency_wait_begin`) so it's unit-testable without triggering
+/// a real `process::abort()` inside the test binary itself. `true`
+/// means this call is the one that made every live participant blocked
+/// at once — a certain deadlock, already registered (the caller is
+/// still counted as blocked either way; there is no valid "un-register"
+/// for a call that's about to abort the process).
+fn register_wait_and_check_stall() -> (bool, usize) {
+    let mut s = STALL.lock().unwrap();
+    s.blocked += 1;
+    (s.blocked >= s.live, s.live)
+}
+
+/// Call immediately before the real blocking wait inside `nir_thread_
+/// join`/`nir_chan_recv`, naming what this specific call is about to
+/// wait on (purely for the abort message — see `waiting_registry`'s own
+/// doc comment) — see this section's own doc comment for the exact
+/// detection guarantee. Aborts immediately on a detected deadlock
+/// rather than letting the calling thread actually block forever: the
+/// same "trap now, with a real diagnostic, rather than hang silently"
+/// contract every other unrecoverable condition in this backend already
+/// has (division-by-zero, out-of-bounds, narrow-type overflow — see
+/// `codegen.rs`'s `guard_io_ok`/`guard_recv_ok`), extended here to a
+/// failure kind only this runtime kernel, not generated LLVM IR, can
+/// actually observe.
+pub fn concurrency_wait_begin(target: WaitTarget) {
+    waiting_registry().lock().unwrap().insert(std::thread::current().id(), target);
+    let (deadlocked, live) = register_wait_and_check_stall();
+    if deadlocked {
+        let mut lines: Vec<String> =
+            waiting_registry().lock().unwrap().iter().map(|(tid, target)| format!("  {tid:?} is blocked in {target}")).collect();
+        lines.sort();
+        eprintln!(
+            "nirdosha: deadlock detected -- all {live} concurrently-running thread(s) are \
+             blocked, with nothing left in the process that could ever unblock any of them:\n{}",
+            lines.join("\n")
+        );
+        recorder::flush_remaining();
+        std::process::abort();
+    }
+}
+
+/// Call immediately after a `join`/`recv` call actually completes
+/// (successfully or not — see `concurrency_wait_begin`'s doc comment,
+/// there is no "unblock" path once a deadlock has already been
+/// reported, since the process has already aborted by then).
+pub fn concurrency_wait_end() {
+    waiting_registry().lock().unwrap().remove(&std::thread::current().id());
+    STALL.lock().unwrap().blocked -= 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +516,14 @@ mod tests {
     // concurrently (`cargo test`'s default) without one test's grants
     // skewing another's -- these are real `static` counters, process-
     // wide, not reset between tests.
+
+    // `STALL`, unlike the per-domain counters above, has no such "each
+    // test picks its own" escape hatch -- there's only one of it, for
+    // the same reason there's only one real deadlock question for a
+    // whole process. The two tests that touch it share this lock so
+    // `cargo test`'s default parallelism can't interleave their
+    // increments/decrements into a spurious pass or failure.
+    static STALL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn acquire_then_release_returns_to_zero_held() {
@@ -385,5 +576,65 @@ mod tests {
         assert_eq!(table.len(), 2);
         table.remove(a);
         assert_eq!(table.len(), 1);
+    }
+
+    // `STALL` is one process-wide static, and nothing else in this test
+    // binary touches it (only `lib.rs`'s `nir_thread_*`/`nir_chan_recv`
+    // do, exercised by the compiler crate's own integration tests, not
+    // here) -- still balanced back to its starting point explicitly,
+    // the same discipline `recorder.rs`'s own shared-state tests use,
+    // so this test's own effect on global state is self-contained.
+    // Deliberately only ever calls the pure `register_wait_and_check_
+    // stall` -- never `concurrency_wait_begin`, which calls
+    // `std::process::abort()` on a real detection and would kill this
+    // whole test binary, not just fail one test.
+    #[test]
+    fn every_live_participant_blocked_at_once_is_detected_exactly_once() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
+        // Two more participants join (three "live" total, including the
+        // baseline "main thread" `STALL` starts with).
+        concurrency_thread_started();
+        concurrency_thread_started();
+
+        // Two of the three block -- not everyone yet, so no detection.
+        let (deadlocked_1, live_1) = register_wait_and_check_stall();
+        let (deadlocked_2, live_2) = register_wait_and_check_stall();
+        assert!(!deadlocked_1, "only 1 of {live_1} live participants is blocked so far");
+        assert!(!deadlocked_2, "only 2 of {live_2} live participants is blocked so far");
+
+        // The third (and last) blocks too -- now every live participant
+        // is blocked at once, with nothing left that could ever run the
+        // send/return that would unblock any of them.
+        let (deadlocked_3, live_3) = register_wait_and_check_stall();
+        assert!(deadlocked_3, "all {live_3} live participants are now blocked -- this must be reported as a real deadlock");
+
+        // Restore the exact starting state -- three waits registered,
+        // three ended; two participants started, two finished.
+        concurrency_wait_end();
+        concurrency_wait_end();
+        concurrency_wait_end();
+        concurrency_thread_finished();
+        concurrency_thread_finished();
+
+        let s = STALL.lock().unwrap();
+        assert_eq!((s.live, s.blocked), (1, 0), "must return to the exact baseline once every registered wait/spawn is matched");
+    }
+
+    // A thread that's still running real work (not blocked at all) is
+    // never mistaken for a rescuer that's "about to" unblock someone --
+    // `live` only ever counts participants that *exist*, `blocked` only
+    // ever counts ones that are actually stuck; a live-but-unblocked
+    // participant keeps `blocked < live` correctly, with no detection.
+    #[test]
+    fn a_still_running_participant_prevents_a_false_positive() {
+        let _guard = STALL_TEST_LOCK.lock().unwrap();
+        concurrency_thread_started(); // two live: main + this one
+        let (deadlocked, _) = register_wait_and_check_stall(); // only main blocks
+        assert!(!deadlocked, "the second participant is still running, not blocked -- must not be reported as a deadlock");
+        concurrency_wait_end();
+        concurrency_thread_finished();
+
+        let s = STALL.lock().unwrap();
+        assert_eq!((s.live, s.blocked), (1, 0));
     }
 }
