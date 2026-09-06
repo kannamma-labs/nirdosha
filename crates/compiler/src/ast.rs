@@ -79,7 +79,53 @@ pub enum Ty {
     /// copyable, so there was nothing for ownership to say anything about
     /// until this existed. See `ownership.rs` for what actually enforces
     /// single ownership; this type just makes it meaningful to ask.
+    ///
+    /// **This is `rfcs/0006-structured-concurrency.md` Pillar 1's `Iso<T>`
+    /// already, not a type that RFC ever had to add** — the RFC says so
+    /// directly ("`box`'s existing affine (`iso`-equivalent) behavior").
+    /// `Iso`'s whole contract (uniquely owned, moved on use, safe to hand
+    /// to another concurrent computation because nothing else can still
+    /// reference it) is exactly what `is_affine()` plus `ownership.rs`'s
+    /// move-checker already give `box` today — `spawn`'s own argument-
+    /// passing is checked exactly like an ordinary call's, which is
+    /// already Iso's race-freedom argument in full. Nothing to build here.
     Box(Box<Ty>),
+    /// `rfcs/0006-structured-concurrency.md` Pillar 1's `Froze<T>` — an
+    /// immutable, freely-shareable handle, deliberately **not** affine
+    /// (unlike `Box`, unlimited simultaneous holders — even across
+    /// threads — are always sound, since nothing can ever write through
+    /// one). `froze e` heap-allocates and stores `e`'s value, the same
+    /// construction shape `box e` already has (`Expr::Froze` mirrors
+    /// `Expr::Box`'s own codegen exactly) — the only real difference is
+    /// this type's own affinity.
+    ///
+    /// **What "immutable" costs today: nothing extra to enforce.** This
+    /// language has no deref-*write* form at all yet (no `*b = v` for any
+    /// pointer-shaped type, `Box` included) — so `Froze` doesn't need a
+    /// dedicated mutation check the way Rust's `Froze<T>` needs "no
+    /// `DerefMut` impl" to matter; there is no mutation path to close.
+    /// `*f` (read) is restricted exactly like `Ty::Ref`'s own deref is:
+    /// legal only when the frozen content isn't itself affine (extracting
+    /// an affine value *by value* out from under a handle that might have
+    /// other live copies would silently duplicate ownership — the same
+    /// `CannotMoveOutOfReference` rejection `&`'s own deref already uses,
+    /// reused verbatim rather than inventing a second error for the
+    /// identical hazard).
+    ///
+    /// **Real, disclosed narrower scope than "Arc": leaked, not
+    /// refcounted.** A `Froze` value is never in `ownership.rs`'s
+    /// `FreeMap` (that machinery only ever tracks *affine* bindings'
+    /// last use — `still_owned_affine`'s own filter), so `codegen.rs`
+    /// never emits a matching `nir_free` for one, the same simplification
+    /// `Ty::Channel` handles already make (never closed, so never freed).
+    /// True `Arc`-style refcounting (retain on every copy — assignment,
+    /// call argument, return, struct field — release at every scope exit)
+    /// is real, substantially bigger follow-up work: it needs
+    /// `ownership.rs` to track a second, non-move-checked kind of
+    /// "still-live copies of this value" fact that doesn't exist yet for
+    /// *any* type in this language, affine or not. Named here as the
+    /// honest next step, not attempted in this pass.
+    Froze(Box<Ty>),
     /// A shared, read-only borrow — `&i64`, `&box i64`. Unlike `Ty::Box`,
     /// this is **not** affine: unlimited simultaneous `&T`s are always
     /// sound (many readers, no writers), the same as Rust. There is no
@@ -344,6 +390,7 @@ impl Ty {
             Ty::Bool => "bool".to_string(),
             Ty::Unit => "unit".to_string(),
             Ty::Box(inner) => format!("box {}", inner.name()),
+            Ty::Froze(inner) => format!("froze {}", inner.name()),
             Ty::Ref(inner) => format!("&{}", inner.name()),
             Ty::Thread(inner) => format!("thread {}", inner.name()),
             Ty::Channel(inner) => format!("chan {}", inner.name()),
@@ -384,6 +431,7 @@ impl Ty {
                 | Ty::Unit
                 | Ty::Error
                 | Ty::Box(_)
+                | Ty::Froze(_)
                 | Ty::Ref(_)
                 | Ty::Thread(_)
                 | Ty::Channel(_)
@@ -468,7 +516,7 @@ impl Ty {
         match self {
             Ty::Str => true,
             Ty::Named(_, args) => args.iter().any(Ty::contains_str),
-            Ty::Box(inner) | Ty::Ref(inner) | Ty::Thread(inner) | Ty::Channel(inner) => inner.contains_str(),
+            Ty::Box(inner) | Ty::Froze(inner) | Ty::Ref(inner) | Ty::Thread(inner) | Ty::Channel(inner) => inner.contains_str(),
             Ty::Vector(inner, _) | Ty::Matrix(inner, _, _) => inner.contains_str(),
             Ty::Fn(params, ret) => params.iter().any(Ty::contains_str) || ret.contains_str(),
             _ => false,
@@ -557,6 +605,7 @@ impl Ty {
             Ty::Bool
             | Ty::Unit
             | Ty::Box(_)
+            | Ty::Froze(_)
             | Ty::Ref(_)
             | Ty::Thread(_)
             | Ty::Channel(_)
@@ -596,6 +645,26 @@ pub struct Param {
 pub struct Field {
     pub name: String,
     pub ty: Ty,
+    /// `salary: f64 requires(role: "admin")` — this field is
+    /// automatically masked (replaced with `ty`'s zero value) whenever a
+    /// value of this struct's type is returned from a function that does
+    /// **not** have a matching `RoleView`/`ClaimView` parameter proving
+    /// the required role/claim — no separate opt-in call, the language
+    /// itself enforces it at every `return` (`codegen.rs`'s
+    /// `emit_field_masking`). `None` (the common case) means this field
+    /// is never masked. Deliberately reuses `Requirement` (the same
+    /// `role`/`claim` vocabulary `FnDecl::requires` already has) rather
+    /// than inventing a parallel type for the identical concept at a
+    /// different grammar site.
+    ///
+    /// **Real, disclosed scope**: only a non-affine, non-aggregate
+    /// (`is_aggregate() == false`) field type can be masked — there's an
+    /// obvious "zero value" for a scalar/handle (`0`, `0.0`, an empty
+    /// `str`) but not a well-defined one for a nested struct/enum/
+    /// Vector/Matrix without a much bigger design question about what
+    /// "masked" means recursively. `typeck.rs` rejects `mask_requires`
+    /// on any other field type rather than silently masking nothing.
+    pub mask_requires: Option<Requirement>,
 }
 
 /// `struct Point { x: f64, y: f64 }` — Row 11's product type. `name` is
@@ -878,8 +947,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "HttpResponse".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "status".to_string(), ty: Ty::I64 },
-                Field { name: "body".to_string(), ty: Ty::Str },
+                Field { name: "status".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "body".to_string(), ty: Ty::Str, mask_requires: None },
             ],
             span,
             module: None,
@@ -894,12 +963,12 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "VerifiedIdentity".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "subject".to_string(), ty: Ty::Str },
-                Field { name: "issuer".to_string(), ty: Ty::Str },
-                Field { name: "audience".to_string(), ty: Ty::Str },
-                Field { name: "expires_at".to_string(), ty: Ty::I64 },
-                Field { name: "issued_at".to_string(), ty: Ty::I64 },
-                Field { name: "claims_json".to_string(), ty: Ty::Str },
+                Field { name: "subject".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "issuer".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "audience".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "expires_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "issued_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "claims_json".to_string(), ty: Ty::Str, mask_requires: None },
             ],
             span,
             module: None,
@@ -909,7 +978,7 @@ pub fn prelude_structs() -> Vec<StructDecl> {
         StructDecl {
             name: "RoleView".to_string(),
             type_params: vec![],
-            fields: vec![Field { name: "role".to_string(), ty: Ty::Str }],
+            fields: vec![Field { name: "role".to_string(), ty: Ty::Str, mask_requires: None }],
             span,
             module: None,
             ns: None,
@@ -918,7 +987,7 @@ pub fn prelude_structs() -> Vec<StructDecl> {
         StructDecl {
             name: "ClaimView".to_string(),
             type_params: vec![],
-            fields: vec![Field { name: "value".to_string(), ty: Ty::Str }],
+            fields: vec![Field { name: "value".to_string(), ty: Ty::Str, mask_requires: None }],
             span,
             module: None,
             ns: None,
@@ -931,12 +1000,12 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "ApplicationSession".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "session_id".to_string(), ty: Ty::Str },
-                Field { name: "identity_subject".to_string(), ty: Ty::Str },
-                Field { name: "identity_issuer".to_string(), ty: Ty::Str },
-                Field { name: "created_at".to_string(), ty: Ty::I64 },
-                Field { name: "expires_at".to_string(), ty: Ty::I64 },
-                Field { name: "last_accessed_at".to_string(), ty: Ty::I64 },
+                Field { name: "session_id".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "identity_subject".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "identity_issuer".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "created_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "expires_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "last_accessed_at".to_string(), ty: Ty::I64, mask_requires: None },
             ],
             span,
             module: None,
@@ -949,8 +1018,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "RefreshTokenHandle".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "handle".to_string(), ty: Ty::Box(Box::new(Ty::I64)) },
-                Field { name: "expires_at".to_string(), ty: Ty::I64 },
+                Field { name: "handle".to_string(), ty: Ty::Box(Box::new(Ty::I64)), mask_requires: None },
+                Field { name: "expires_at".to_string(), ty: Ty::I64, mask_requires: None },
             ],
             span,
             module: None,
@@ -963,8 +1032,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "Pair".to_string(),
             type_params: vec!["A".to_string(), "B".to_string()],
             fields: vec![
-                Field { name: "first".to_string(), ty: Ty::Named("A".to_string(), vec![]) },
-                Field { name: "second".to_string(), ty: Ty::Named("B".to_string(), vec![]) },
+                Field { name: "first".to_string(), ty: Ty::Named("A".to_string(), vec![]), mask_requires: None },
+                Field { name: "second".to_string(), ty: Ty::Named("B".to_string(), vec![]), mask_requires: None },
             ],
             span,
             module: None,
@@ -986,8 +1055,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "Money".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "amount".to_string(), ty: Ty::Dec128 },
-                Field { name: "currency".to_string(), ty: Ty::Named("CurrencyCode".to_string(), vec![]) },
+                Field { name: "amount".to_string(), ty: Ty::Dec128, mask_requires: None },
+                Field { name: "currency".to_string(), ty: Ty::Named("CurrencyCode".to_string(), vec![]), mask_requires: None },
             ],
             span,
             module: None,
@@ -1006,8 +1075,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "Measure".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "value".to_string(), ty: Ty::Dec128 },
-                Field { name: "unit_code".to_string(), ty: Ty::Named("UnitCode".to_string(), vec![]) },
+                Field { name: "value".to_string(), ty: Ty::Dec128, mask_requires: None },
+                Field { name: "unit_code".to_string(), ty: Ty::Named("UnitCode".to_string(), vec![]), mask_requires: None },
             ],
             span,
             module: None,
@@ -1106,12 +1175,74 @@ pub struct FnDecl {
     /// `typeck.rs::check_fn`'s "does this fn need `requires(public)`?"
     /// check for the full reachability rule that warning implements.
     pub explicit_public: bool,
+    /// `nfr(latency_ms: 100, error_rate_max: 0.01, throughput_min_per_sec: 50,
+    /// concurrency_max: 10)` — `None` when the declaration has no
+    /// `nfr(...)` at all (the common case: not monitored, zero runtime
+    /// cost). `Some(spec)` means every call to this function is timed and
+    /// counted by the compiled runtime kernel (`runtime-kernels/src/
+    /// kernel/nfr.rs`), and a call that violates any declared threshold
+    /// escalates — see `NfrSpec`'s own doc comment for what each field
+    /// means and the real, disclosed simplifications each one makes
+    /// versus a "real" APM system's equivalent metric.
+    pub nfr: Option<NfrSpec>,
     /// Same meaning as `StructDecl::module` — see its doc comment.
     pub module: Option<String>,
     /// Same meaning as `StructDecl::ns` — see its doc comment.
     pub ns: Option<String>,
     /// Same meaning as `StructDecl::exported` — see its doc comment.
     pub exported: bool,
+}
+
+/// A function's declared non-functional requirements — every field
+/// optional and independently declarable, the same "subset, not
+/// all-or-nothing" shape `effect(...)` already has. Each present field
+/// is checked automatically by the compiled runtime (`runtime-kernels`'
+/// APM kernel, `rfcs/0007-apm-runtime-kernel.md`), with **no separate
+/// opt-in call** — the same "hidden behind a keyword that already
+/// exists" pattern this project's `chan`/`spawn` codegen already
+/// established, extended here to a genuinely new keyword since NFRs
+/// have no existing syntax to hide behind.
+///
+/// **Real, disclosed simplifications, not a full APM system's worth of
+/// precision** — each one traded a materially bigger implementation for
+/// an honest, cheaper metric that still catches the failure mode that
+/// matters:
+/// - `latency_ms`: **max observed latency**, not a true p99 (a real
+///   percentile needs a histogram/sketch — disproportionate to this
+///   feature's first slice). Escalates the instant *any single call*
+///   exceeds the threshold, which is arguably closer to what an SLA
+///   violation actually means than a windowed percentile is.
+/// - `error_rate_max`: **cumulative since process start**, not a
+///   sliding window — `total_errors / total_calls`, checked only once a
+///   minimum sample size exists (so one early failure doesn't read as
+///   "100% error rate"). Only meaningful for a `Result(_, _)`-returning
+///   function — `typeck.rs` rejects declaring it on any other return
+///   type, rather than silently never firing.
+/// - `throughput_min_per_sec`: **average since process start**
+///   (`total_calls / elapsed_seconds`), not a recent-window rate — won't
+///   catch a throughput *drop* partway through a long-running process
+///   as quickly as a real windowed rate would.
+/// - `concurrency_max`: the one field with no simplification — a real,
+///   exact in-flight-call counter, checked at call entry.
+///
+/// No debouncing: a sustained violation escalates on every single call
+/// that trips it, not just the first — real, disclosed follow-up work
+/// if that turns out to spam the observability server in practice.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NfrSpec {
+    pub latency_ms: Option<i64>,
+    pub error_rate_max: Option<f64>,
+    pub throughput_min_per_sec: Option<i64>,
+    pub concurrency_max: Option<i64>,
+}
+
+impl NfrSpec {
+    pub fn is_empty(&self) -> bool {
+        self.latency_ms.is_none()
+            && self.error_rate_max.is_none()
+            && self.throughput_min_per_sec.is_none()
+            && self.concurrency_max.is_none()
+    }
 }
 
 /// What `acquire` (`Expr::Acquire`) demands proof of before a `requires`-
@@ -1242,6 +1373,11 @@ pub enum Expr {
     /// `box expr` — heap-allocate `expr`'s value. The only expression form
     /// that produces an affine (`Ty::Box`) value.
     Box(Box<Expr>, Span),
+    /// `froze expr` — heap-allocate `expr`'s value, exactly like `box`,
+    /// but produce the non-affine, freely-shareable `Ty::Froze` instead
+    /// (`Ty::Froze`'s own doc comment has the full Pillar 1 story). The
+    /// only expression form that produces one.
+    Froze(Box<Expr>, Span),
     /// `*expr` — read the value out of a box or through a reference. Does
     /// **not** move the box/reference itself when what comes out is
     /// freely copyable; see `ownership.rs`'s doc comment for the type-
@@ -1490,6 +1626,7 @@ impl Expr {
             | Expr::If { span: s, .. }
             | Expr::Assign(_, _, s)
             | Expr::Box(_, s)
+            | Expr::Froze(_, s)
             | Expr::Deref(_, s)
             | Expr::Ref(_, s)
             | Expr::Spawn(_, _, s)
@@ -2185,6 +2322,7 @@ pub fn substitute_ty(ty: &Ty, subst: &HashMap<&str, &Ty>) -> Ty {
             Ty::Named(name.clone(), args.iter().map(|a| substitute_ty(a, subst)).collect())
         }
         Ty::Box(inner) => Ty::Box(Box::new(substitute_ty(inner, subst))),
+        Ty::Froze(inner) => Ty::Froze(Box::new(substitute_ty(inner, subst))),
         Ty::Ref(inner) => Ty::Ref(Box::new(substitute_ty(inner, subst))),
         Ty::Thread(inner) => Ty::Thread(Box::new(substitute_ty(inner, subst))),
         Ty::Channel(inner) => Ty::Channel(Box::new(substitute_ty(inner, subst))),

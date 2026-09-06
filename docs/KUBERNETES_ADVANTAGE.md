@@ -87,11 +87,19 @@ at compile time (`smt.rs`, 68/68 tests, including a case interval
 analysis alone cannot prove). No GC means no stop-the-world pause
 skewing p99 latency exactly when an HPA is watching it. **Honest
 caveat, stated the way this project states its own limits**: this
-closes off *lock-order* deadlocks specifically — a `recv` with no
-matching `send` can still hang forever, a disclosed liveness gap, not
-a hidden one (`docs/PHASE0.md`'s "Twelfth update"). "No lock-order
-deadlocks by construction" is the accurate claim; "deadlock-proof,
-full stop" is not.
+closes off *lock-order* deadlocks specifically — a real, if narrower,
+liveness gap remains (`docs/PHASE0.md`'s "Twelfth update"), so "no
+lock-order deadlocks by construction" is the accurate claim, not
+"deadlock-proof, full stop." A compiled program no longer just hangs
+silently when it hits that gap, though: a dynamic detector (2026-09)
+catches the case where every concurrently-running thread is blocked in
+`recv`/`join` at once — nothing left in the process could ever unblock
+any of them — and aborts immediately with a diagnostic naming the
+stuck handles, instead of running forever with no signal at all
+(`docs/PHASE0.md`'s "Seventeenth update"). It's still detection, not
+the compile-time proof a real fix needs, and it only catches a *global*
+stall, not a local cycle between two threads while a third keeps making
+unrelated progress.
 
 ## Side-by-side
 

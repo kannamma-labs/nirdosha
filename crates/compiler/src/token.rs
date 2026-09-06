@@ -35,6 +35,7 @@ pub enum Tok {
     Else,
     While,
     Box,
+    Froze,
     Spawn,
     Join,
     Thread,
@@ -71,6 +72,15 @@ pub enum Tok {
     /// within one specific syntactic slot" treatment `effect(...)`'s own
     /// names already get.
     Requires,
+    /// `nfr(...)` — a `fn` declaration's optional non-functional-
+    /// requirements annotation (see `ast::NfrSpec`). `latency_ms`/
+    /// `error_rate_max`/`throughput_min_per_sec`/`concurrency_max` inside
+    /// the parens are deliberately **not** reserved keywords of their
+    /// own — matched by identifier text inside `nfr(...)`'s parens only
+    /// (`parser.rs::parse_nfr_annotation`), the same "keyword only within
+    /// one specific syntactic slot" treatment `effect(...)`/`requires(...)`'s
+    /// own names already get.
+    Nfr,
     /// `acquire name(proof)` — turns a `requires`-gated function into a
     /// first-class, callable value once `proof` (a `RoleView`/`ClaimView`)
     /// is checked against the requirement (`Expr::Acquire`). Shaped like
@@ -411,6 +421,7 @@ impl<'a> Lexer<'a> {
                     "else" => Tok::Else,
                     "while" => Tok::While,
                     "box" => Tok::Box,
+                    "froze" => Tok::Froze,
                     "spawn" => Tok::Spawn,
                     "join" => Tok::Join,
                     "thread" => Tok::Thread,
@@ -425,6 +436,7 @@ impl<'a> Lexer<'a> {
                     "open" => Tok::Open,
                     "effect" => Tok::Effect,
                     "requires" => Tok::Requires,
+                    "nfr" => Tok::Nfr,
                     "acquire" => Tok::Acquire,
                     "audited" => Tok::Audited,
                     "transact" => Tok::Transact,

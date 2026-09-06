@@ -1,0 +1,30 @@
+// Exercises the runtime deadlock detector (`kernel::concurrency_wait_begin`,
+// `runtime-kernels/src/kernel/mod.rs`) against the real class of hazard
+// RFC 0006's own Pillar 5 evidence names: "nested reply-obligation".
+// `main` sends `responder` a request and blocks waiting for its reply;
+// `responder` needs one more value from `main` before it can compute that
+// reply -- but `main` is not running any code that could ever send it (it
+// is parked in exactly one blocking `recv`, waiting only for the reply).
+// Every concurrently-running thread ends up blocked at once, with nothing
+// left in the process that could ever unblock either one -- a real,
+// permanent deadlock this backend cannot yet prevent by construction
+// (Pillar 5 is still deferred, see docs/PHASE0.md), but can and does
+// detect and report instead of hanging forever.
+fn responder(req: chan i64, needs_from_main: chan i64, reply: chan i64) -> unit {
+    let request: i64 = recv(req)
+    let extra: i64 = recv(needs_from_main)
+    send(reply, request + extra)
+    return
+}
+
+fn main() {
+    let req: chan i64 = chan
+    let needs_from_main: chan i64 = chan
+    let reply: chan i64 = chan
+    let h: thread unit = spawn responder(req, needs_from_main, reply)
+
+    send(req, 21)
+    let answer: i64 = recv(reply) // blocks forever -- responder needs `needs_from_main` first, which main never sends
+    join h
+    print(answer)
+}

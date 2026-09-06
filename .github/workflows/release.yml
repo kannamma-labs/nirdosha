@@ -4,8 +4,9 @@ name: release
 # Release whenever a `v*` tag is pushed. Z3 is statically vendored (the
 # `dist` feature, see crates/compiler/Cargo.toml) on Linux/Windows, so those
 # binaries need no system `libz3` — `clang` is still required on the
-# *user's* machine at runtime, but only for `nirdosha build`/`emit-llvm`
-# (native codegen); interpreting, `emit-ast`, `emit-ui`, and `serve` all
+# *user's* machine at runtime, for `nirdosha build`/`emit-llvm` (native
+# codegen), which is now the only way to execute a `.nir` program at all
+# (the interpreter, and `run`/`serve`, were removed); `emit-ast`/`emit-ui`
 # work with zero extra system deps.
 #
 # macOS is the one disclosed exception: `z3-src` 416.0.2 (the version
@@ -144,10 +145,16 @@ jobs:
           Get-FileHash ${{ matrix.asset }} -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
 
       - name: Smoke test the built binary
+        # No interpreter/`run` mode anymore -- `build` a real native
+        # binary from the fixture, then execute *that*, matching
+        # `tests/codegen.rs::hello_compiles_and_matches_interpreter`'s
+        # own expectation (main prints `add(5, 3)` = 8, exits 0).
         if: runner.os != 'Windows'
         run: |
           chmod +x target/${{ matrix.target }}/release/nirdosha
-          target/${{ matrix.target }}/release/nirdosha crates/compiler/tests/fixtures/hello.nir
+          target/${{ matrix.target }}/release/nirdosha build crates/compiler/tests/fixtures/hello.nir -o /tmp/nirdosha_smoke_test
+          output="$(/tmp/nirdosha_smoke_test)"
+          test "$output" = "8"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

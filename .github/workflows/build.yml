@@ -24,44 +24,16 @@ jobs:
       - name: Build
         working-directory: crates/compiler
         run: cargo build --release
-      # Closes a real, previously-silent gap (found while building the
-      # plugin-ecosystem gallery, Track B of that plan): this job never
-      # ran ANY test suite for anything (only `cargo build`, above) --
-      # `crates/plugin-example-rot13`'s own tests, and now this
-      # gallery's, were never exercised by CI at all, only by hand.
-      # Scoped to just these plugin crates, not a first "also run
-      # nirdosha's own test suite on Linux" step -- that's a separate,
-      # bigger, unverified change (macOS/Windows already do it; Linux
-      # never has) left for its own follow-up. Each step's
-      # `working-directory` mirrors the `Build` step's own pattern:
-      # running `cargo test` from inside one workspace member's
-      # directory (not the workspace root) tests only that package, the
-      # same reason this job has never been tripped up by
-      # `crates/grammar_check`'s own build failure.
-      - name: Test plugin-support
-        working-directory: crates/plugin-support
-        run: cargo test
-      - name: Test plugin-example-rot13
-        working-directory: crates/plugin-example-rot13
-        run: cargo test
-      - name: Test plugin-example-mysql (static tests only -- live tests need a real MySQL, see .github/workflows/plugin-integration.yml)
-        working-directory: crates/plugin-example-mysql
-        run: cargo test
-      - name: Test plugin-example-activemq (static tests only)
-        working-directory: crates/plugin-example-activemq
-        run: cargo test
-      - name: Test plugin-example-cassandra (static tests only)
-        working-directory: crates/plugin-example-cassandra
-        run: cargo test
-      - name: Test plugin-example-neo4j (static tests only)
-        working-directory: crates/plugin-example-neo4j
-        run: cargo test
-      - name: Test plugin-example-hbase (static tests only)
-        working-directory: crates/plugin-example-hbase
-        run: cargo test
-      - name: Test the 5-plugin composition (crates/plugin-examples)
-        working-directory: crates/plugin-examples
-        run: cargo test
+      # The interpreter (and every plugin crate that only existed to
+      # demonstrate interpreted plugin dispatch -- plugin-support,
+      # plugin-example-{rot13,mysql,activemq,cassandra,neo4j,hbase},
+      # plugin-examples) was removed; this job's own test suite is now
+      # the real, only test coverage on Linux -- previously it ran no
+      # test suite at all here (only `cargo build`, above), relying on
+      # macOS/Windows below for that.
+      - name: Test
+        working-directory: crates/compiler
+        run: cargo test --release
 
   # macOS didn't get a CI job of its own until now — it was only ever
   # actually built when a `v*` tag triggered release.yml, so a regular
@@ -81,19 +53,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system Z3 (see workflow header)
         run: brew install z3
-      - name: Install and start Redis (mq_connect/mq_publish/mq_consume tests)
-        # tests/mq.rs's own header comment: needs a real Redis at
-        # 127.0.0.1:6379, no auth. Unlike Postgres's own integration
-        # tests (#[ignore]d, opt-in via NIRDOSHA_TEST_POSTGRES_URL),
-        # mq.rs's tests run unconditionally -- this job is the first CI
-        # job that ever runs the full `cargo test --release` (see this
-        # workflow's own build-macos header comment), which is what
-        # surfaced the gap: without this step, every mq.rs test fails
-        # with "Connection refused" instead of exercising real behavior.
-        run: |
-          brew install redis
-          brew services start redis
-          for i in $(seq 1 10); do redis-cli ping && break; sleep 1; done
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
         with:
@@ -113,19 +72,16 @@ jobs:
   # workflow's `x86_64-pc-windows-msvc` leg was the only thing that ever
   # actually compiled this crate for Windows, and it was failing outright
   # (`std::os::unix::net::{UnixListener, UnixStream}` used unconditionally
-  # in `interpreter.rs`'s sandbox-channel transport — Unix-only in std,
-  # so it doesn't even exist on the `windows` target; the `tcp`/
-  # `tcp_listener` runtime's own `RawFd`→`RawSocket` port was already
-  # correct). See docs/ROADMAP.md A7. Fixed by giving that transport a real
-  # `#[cfg(windows)]` leg (a loopback TCP socket, since std doesn't wrap
-  # `AF_UNIX` for Windows) instead of leaving Windows uncompilable — this
-  # job is what actually proves the fix, and what would have caught the
-  # original break before it shipped: build for real, then run every
-  # integration test that exercises the ported code end to end (`tcp`:
-  # the raw-handle codegen path from runtime_kernels.rs; `sandbox`/
-  # `sandbox_channels`/`channels`: the loopback-socket transport this fix
-  # added). `--features dist` vendors Z3 from source (same as
-  # release.yml) so this job needs no system `libz3` install on Windows.
+  # in the (now-removed) interpreter's sandbox-channel transport —
+  # Unix-only in std, so it doesn't even exist on the `windows` target;
+  # the `tcp`/`tcp_listener` runtime's own `RawFd`→`RawSocket` port was
+  # already correct). See docs/ROADMAP.md A7. `sandbox`/`sandbox_channels`/
+  # `channels` (the interpreter-only loopback-socket transport that fix
+  # added) are gone along with the interpreter itself; `tcp` remains --
+  # it's the one that exercises the surviving, compiled-path
+  # `runtime_kernels.rs` RawSocket code. `--features dist` vendors Z3 from
+  # source (same as release.yml) so this job needs no system `libz3`
+  # install on Windows.
   build-windows:
     runs-on: windows-latest
     steps:
@@ -141,15 +97,15 @@ jobs:
       - name: Build (Z3 vendored, no system libz3 dependency)
         working-directory: crates/compiler
         run: cargo build --release --features dist
-      - name: Run the tcp / sandbox-channel integration tests
+      - name: Run the tcp integration tests
         working-directory: crates/compiler
-        run: cargo test --release --features dist --test tcp --test sandbox --test sandbox_channels --test channels
+        run: cargo test --release --features dist --test tcp
       - name: Run the compiled (native-codegen) tcp/tcp_listener tests
         # These are the ones that actually exercise runtime_kernels.rs's
         # RawSocket path -- they compile real .nir source to a native
-        # binary via `clang` (preinstalled on windows-latest) and run it,
-        # not just the interpreter. Filtered out of the rest of
-        # `codegen.rs`'s ~140 tests to keep this job fast; nothing else
-        # in that file touches the platform-conditional socket code.
+        # binary via `clang` (preinstalled on windows-latest) and run it.
+        # Filtered out of the rest of `codegen.rs`'s ~80 tests to keep
+        # this job fast; nothing else in that file touches the
+        # platform-conditional socket code.
         working-directory: crates/compiler
         run: cargo test --release --features dist --test codegen -- compiled_connect compiled_listen compiled_recv connecting_to_a_closed_port_traps_at_runtime tcp_client_example

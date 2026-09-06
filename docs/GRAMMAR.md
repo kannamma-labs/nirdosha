@@ -127,7 +127,7 @@ item        ::= fn_decl | struct_decl | enum_decl | screen_decl | dashboard_decl
 // declaration's own canonical key exactly.
 qualified_ident ::= ident ("::" ident)*
 
-fn_decl     ::= "fn" ident "(" params? ")" ("->" type)? effect_annotation? requires_annotation? block
+fn_decl     ::= "fn" ident "(" params? ")" ("->" type)? effect_annotation? requires_annotation? nfr_annotation? block
 
 // `effect(pure)` / `effect(io, network, ...)` -- `None` (fully inferred,
 // the common case) if absent. `parser.rs::parse_effect_annotation`:
@@ -153,6 +153,25 @@ effect_name ::= "pure" | "rng" | "io" | "concurrent" | "network"
 // silencing `typeck::ungated_fn_warnings`' warning for that one fn.
 requires_annotation ::= "requires" "(" ("role" ":" str | "claim" ":" str "," str | "public") ")"
 
+// `nfr(latency_ms: 200, error_rate_max: 0.01, throughput_min_per_sec: 50,
+// concurrency_max: 100)` -- 2026-09, `docs/LANGUAGE.md` §6f. All four
+// fields optional (at least one required -- an empty `nfr()` is a parse
+// error), any order, each name matched at most once. Field names are
+// matched by identifier text only in this one slot, same treatment
+// `requires_annotation`'s `role`/`claim`/`public` already get above.
+// `latency_ms`/`throughput_min_per_sec`/`concurrency_max` take an int
+// literal (`> 0`); `error_rate_max` takes a float **or** a bare int
+// literal (`0`/`1` accepted as `0.0`/`1.0`), constrained to `[0.0, 1.0]`.
+// `error_rate_max`'s presence additionally requires the enclosing
+// `fn_decl`'s return type to be `Result(_, _)`
+// (`TypeErrorKind::NfrErrorRateNeedsResultReturn`, a `typeck.rs` check,
+// not expressible in this EBNF shape).
+nfr_annotation ::= "nfr" "(" nfr_field ("," nfr_field)* ")"
+nfr_field ::= "latency_ms" ":" int
+            | "error_rate_max" ":" (float | int)
+            | "throughput_min_per_sec" ":" int
+            | "concurrency_max" ":" int
+
 // Row 11 (`docs/nirdosha_row11_amendment.md`) — product and sum types.
 // `type_params` (layer 6, generics) is an optional bare-name list, empty
 // for a fully concrete struct (`Point`); `struct Pair(A, B) { .. }`'s `A`/
@@ -167,7 +186,18 @@ requires_annotation ::= "requires" "(" ("role" ":" str | "claim" ":" str "," str
 // multi-line field lists are the common case, so a dangling comma from
 // reordering fields shouldn't be a parse error).
 struct_decl ::= "struct" ident type_param_list? "{" field ("," field)* ","? "}"
-field       ::= ident ":" type
+field       ::= ident ":" type field_mask_requires?
+
+// `salary: f64 requires(role: "admin")` -- 2026-09, `docs/LANGUAGE.md`
+// §6e. Same `role`/`claim` slot shape and identifier-text-only matching
+// as `requires_annotation` above (reuses the identical `Requirement`
+// AST enum) -- but `public` is not a legal alternative here, since
+// field masking has no "gate" to opt out of; a field with no
+// `requires(...)` at all is simply never masked. `typeck.rs` additionally
+// requires the field's own `type` be a scalar, not an aggregate or
+// affine one (`TypeErrorKind::MaskRequiresNeedsScalarField`, not
+// expressible in this EBNF shape).
+field_mask_requires ::= "requires" "(" ("role" ":" str | "claim" ":" str "," str) ")"
 type_param_list ::= "(" ident ("," ident)* ")"
 
 // An enum's own name is a type only — never itself callable; each
@@ -441,6 +471,7 @@ param       ::= ident ":" type
 // the real parser.
 type        ::= "&" type
               | "box" type
+              | "froze" type
               | "thread" type
               | "chan" type
               | "sandbox"
@@ -661,7 +692,7 @@ multiplicative ::= unary (("*" | "/" | ".*" | "./") unary)*
 // fits the same fixed-arity `"(" ... ")"` shape `send` already
 // established, just under its own keyword (it's not consuming an
 // existing handle the way `send`/`recv`/`stop` are — it *produces* one).
-unary       ::= ("!" | "-" | "*" | "box" | "&") unary
+unary       ::= ("!" | "-" | "*" | "box" | "froze" | "&") unary
               | "spawn" call
               | "join" unary
               | "chan"

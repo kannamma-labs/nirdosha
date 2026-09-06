@@ -25,6 +25,7 @@ that's the one file here meant to be read, not run, on its own.
 | 12 | `12_vector_matrix_linalg.nir` | `Vector(T,N)`/`Matrix(T,R,C)` + dense linear-algebra builtins |
 | 13 | `13_deterministic_simulation.nir` | `rand_seed`/`rand_f64`/`rand_gaussian`, geometry (ECEF/ENU/bearing/distance), Kalman filter steps |
 | 14 | `14_ownership_box.nir` | `box T`, `*` deref, affine move semantics |
+| 48 | `48_froze.nir` | `froze T` (RFC 0006 Pillar 1) — non-affine, freely-shareable heap cell; added later, numbered out of thematic order (see 14) to avoid renumbering this whole catalogue |
 | 15 | `15_borrowing.nir` | `&T` shared borrow |
 | 16 | `16_effects.nir` | `effect(pure \| rng \| io \| concurrent \| network)` |
 | 17 | `17_audited_block.nir` | `audited "justification" { ... }` guard-suppression escape hatch |
@@ -58,6 +59,8 @@ that's the one file here meant to be read, not run, on its own.
 | 45 | `45_module_namespacing.nir` (+ `..._helper.nir`) | `module Ident { pub ... }` real namespacing + `use` |
 | 46 | `46_db_schema_and_role_mapping_conventions.nir` | `serve --db` auto schema migrations + `RoleMapping` identity cache (pure convention, no new syntax) |
 | 47 | `47_external_service_boundary.nir` | plugin-backed `db`/`mq` by URL scheme (`db_connect`/`mq_connect_via`) |
+| 49 | `49_nfr.nir` | `nfr(latency_ms:/error_rate_max:/throughput_min_per_sec:/concurrency_max:)` — compiled, automatic APM tracking |
+| 50 | `50_field_masking_and_check_role.nir` | field-level `requires(role/claim:...)` masking + compiled `check_role` — the README's own hero example |
 
 ## Deliberately not given their own file
 

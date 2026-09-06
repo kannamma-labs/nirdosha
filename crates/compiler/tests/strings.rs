@@ -5,11 +5,12 @@
 //! other way -- see `tests/tcp.rs` for what that's actually for.
 
 use nirdosha::ast::Ty;
-use nirdosha::interpreter::Value;
+use nirdosha::codegen;
+use nirdosha::ownership::check_ownership;
 use nirdosha::parser::Parser;
-use nirdosha::run;
 use nirdosha::token::Lexer;
 use nirdosha::typeck::{typecheck, TypeErrorKind};
+use std::process::Command;
 
 fn parse_ok(src: &str) -> nirdosha::ast::Program {
     let toks = Lexer::new(src).tokenize().expect("lex should succeed");
@@ -24,52 +25,74 @@ fn first_type_error(src: &str) -> TypeErrorKind {
     }
 }
 
-// ---- the example, run end to end ----------------------------------------
+fn unique_suffix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
-#[test]
-fn example_strings_runs_to_completion() {
-    let src = include_str!("fixtures/strings.nir");
-    assert_eq!(run(src), Ok(Value::Unit));
+/// Compiles `src` (real path, not the interpreter) and returns what it
+/// printed. `str` can't be `main`'s return type either (`StrInFnSignature`
+/// -- no exception for `main`, despite `emit_c_main` having dead code for
+/// that case), so every caller here uses `fn main() { print(...) }`
+/// instead, the same pattern `tests/codegen.rs`'s own
+/// `main_printing_a_str_directly_compiles_and_prints_it` establishes.
+fn compile_and_run_str(src: &str) -> String {
+    let program = parse_ok(src);
+    typecheck(&program).expect("should typecheck cleanly");
+    check_ownership(&program).expect("should ownership-check cleanly");
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_strings_{}_{}", std::process::id(), unique_suffix()));
+    codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect("codegen::build should succeed");
+    let output = Command::new(&out_path).output().expect("compiled binary should run");
+    let _ = std::fs::remove_file(&out_path);
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// Same as `compile_and_run_str`, for a `bool`-returning `main` --
+/// `emit_c_main`'s generic integer path widens `true`/`false` to exit
+/// code `1`/`0`.
+fn compile_and_run_bool(src: &str) -> bool {
+    let program = parse_ok(src);
+    typecheck(&program).expect("should typecheck cleanly");
+    check_ownership(&program).expect("should ownership-check cleanly");
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_strings_{}_{}", std::process::id(), unique_suffix()));
+    codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect("codegen::build should succeed");
+    let status = Command::new(&out_path).status().expect("compiled binary should run");
+    let _ = std::fs::remove_file(&out_path);
+    match status.code() {
+        Some(0) => false,
+        _ => true, // bool true main-return sign-extends to i32 -1, exit code 255 -- any nonzero code means true
+    }
 }
 
 // ---- literals and escapes ------------------------------------------------
 
 #[test]
 fn a_plain_string_literal_round_trips() {
+    // `str` can't be `main`'s return type (`StrInFnSignature`, no
+    // exception for `main`) -- `print` it instead, the same pattern
+    // `tests/codegen.rs::main_printing_a_str_directly_compiles_and_prints_it`
+    // establishes as the real, working one.
     let src = r#"
-        struct Text {
-            value: str,
-        }
-        fn main() -> Text {
-            return Text("hello")
+        fn main() {
+            print("hello")
         }
     "#;
-    match run(src) {
-        Ok(Value::Struct(name, fields)) if &*name == "Text" => match &fields[0] {
-            Value::Str(s) => assert_eq!(&**s, "hello"),
-            other => panic!("expected Text(Str(\"hello\")), got Text({other:?})"),
-        },
-        other => panic!("expected Ok(Text(\"hello\")), got {other:?}"),
-    }
+    assert_eq!(compile_and_run_str(src), "hello\n");
 }
 
 #[test]
 fn escape_sequences_are_interpreted_correctly() {
     let src = r#"
-        struct Text {
-            value: str,
-        }
-        fn main() -> Text {
-            return Text("a\nb\tc\\d\"e\rf")
+        fn main() {
+            print("a\nb\tc\\d\"e\rf")
         }
     "#;
-    match run(src) {
-        Ok(Value::Struct(name, fields)) if &*name == "Text" => match &fields[0] {
-            Value::Str(s) => assert_eq!(&**s, "a\nb\tc\\d\"e\rf"),
-            other => panic!("expected Text(Str(escaped)), got Text({other:?})"),
-        },
-        other => panic!("expected the escaped string, got {other:?}"),
-    }
+    assert_eq!(compile_and_run_str(src), "a\nb\tc\\d\"e\rf\n");
 }
 
 #[test]
@@ -102,17 +125,12 @@ fn text_passes_through_function_parameters_and_returns_unchanged() {
         fn pass_through(s: Text) -> Text {
             return s
         }
-        fn main() -> Text {
-            return pass_through(Text("passed through"))
+        fn main() {
+            let result: Text = pass_through(Text("passed through"))
+            print(result.value)
         }
     "#;
-    match run(src) {
-        Ok(Value::Struct(name, fields)) if &*name == "Text" => match &fields[0] {
-            Value::Str(s) => assert_eq!(&**s, "passed through"),
-            other => panic!("expected Text(Str(\"passed through\")), got Text({other:?})"),
-        },
-        other => panic!("expected the passed-through Text, got {other:?}"),
-    }
+    assert_eq!(compile_and_run_str(src), "passed through\n");
 }
 
 // ---- equality (found missing at runtime once, fixed, pinned here) --------
@@ -126,7 +144,7 @@ fn equal_strings_compare_equal() {
             return a == b
         }
     "#;
-    assert_eq!(run(src), Ok(Value::Bool(true)));
+    assert!(compile_and_run_bool(src));
 }
 
 #[test]
@@ -138,7 +156,7 @@ fn different_strings_compare_unequal() {
             return a != b
         }
     "#;
-    assert_eq!(run(src), Ok(Value::Bool(true)));
+    assert!(compile_and_run_bool(src));
 }
 
 // ---- static rejections (a real gap found and fixed, pinned here) --------

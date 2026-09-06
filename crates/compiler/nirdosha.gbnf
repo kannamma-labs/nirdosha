@@ -39,6 +39,21 @@
 # trap this file's own note two paragraphs below already names, just not
 # yet applied there when `dashboard-item` was added.
 #
+# 2026-09-06: brought current after `nfr(...)` (function-level NFR
+# tracking, `docs/LANGUAGE.md` §6f) and field-level `requires(role/claim:
+# ...)` masking (§6e) were added to `fn_decl`/`field` in docs/GRAMMAR.md --
+# `nfr-annotation`/`nfr-field` and `field-mask-requires` here mirror those
+# new productions production-for-production, same as every other entry
+# in this changelog. `tests/fidelity.rs`'s
+# `every_shipped_example_is_accepted_by_both...` caught a second, real,
+# pre-existing drift while re-running it for this change (not introduced
+# by it): `froze`/`*froze` (docs/GRAMMAR.md's own `type`/`unary`
+# productions have had it since the Eighteenth `docs/PHASE0.md` update)
+# was entirely missing from `type`/`unary` here, rejecting
+# `examples/syntax/04_ownership_and_concurrency.nir` outright -- fixed
+# alongside, same "found by the real check, not by re-reading this file"
+# pattern as everything else in this changelog.
+#
 # Found by that real check, not by re-reading this file more carefully:
 # llama.cpp's GBNF parser requires a rule's *entire* multi-line body to
 # sit inside one already-open, unclosed group — not just multi-line
@@ -91,7 +106,7 @@ item        ::= fn-decl | struct-decl | enum-decl | screen-decl | dashboard-decl
 # alternative, and `variant-arm`'s pattern.
 qualified-ident ::= ident (ws "::" ws ident)*
 
-fn-decl     ::= "fn" ws ident ws "(" ws params? ws ")" ws ret-type? (ws effect-annotation)? (ws requires-annotation)? ws block
+fn-decl     ::= "fn" ws ident ws "(" ws params? ws ")" ws ret-type? (ws effect-annotation)? (ws requires-annotation)? (ws nfr-annotation)? ws block
 
 effect-annotation ::= "effect" ws "(" ws effect-name (ws "," ws effect-name)* ws ")"
 effect-name ::= "pure" | "rng" | "io" | "concurrent" | "network"
@@ -102,9 +117,32 @@ requires-annotation ::= "requires" ws "(" ws (
                          | "public"
                        ) ws ")"
 
+# `nfr(latency_ms: 200, error_rate_max: 0.01, throughput_min_per_sec: 50,
+# concurrency_max: 100)` -- all four fields optional, any order, each
+# name matched at most once (not enforced by this grammar, same as
+# `requires-annotation`'s own field-name slot). No trailing comma
+# (unlike `field`/`variant` below) -- `parser.rs::parse_nfr_annotation`
+# has no trailing-comma branch.
+nfr-annotation ::= "nfr" ws "(" ws nfr-field (ws "," ws nfr-field)* ws ")"
+nfr-field ::= (
+                ("latency_ms" ws ":" ws int-lit)
+              | ("error_rate_max" ws ":" ws (float-lit | int-lit))
+              | ("throughput_min_per_sec" ws ":" ws int-lit)
+              | ("concurrency_max" ws ":" ws int-lit)
+              )
+
 struct-decl ::= "struct" ws ident (ws type-param-list)? ws "{" ws field (ws "," ws field)* (ws ",")? ws "}"
-field       ::= ident ws ":" ws type
+field       ::= ident ws ":" ws type (ws field-mask-requires)?
 type-param-list ::= "(" ws ident (ws "," ws ident)* ws ")"
+
+# `salary: f64 requires(role: "admin")` -- field-level masking
+# (`docs/LANGUAGE.md` §6e). Same `role`/`claim` shape as
+# `requires-annotation` above, minus the `public` alternative (field
+# masking has no gate to opt out of).
+field-mask-requires ::= "requires" ws "(" ws (
+                           ("role" ws ":" ws str-lit)
+                         | ("claim" ws ":" ws str-lit ws "," ws str-lit)
+                       ) ws ")"
 
 enum-decl   ::= "enum" ws ident (ws type-param-list)? ws "{" ws variant (ws "," ws variant)* (ws ",")? ws "}"
 variant     ::= ident (ws "(" ws type (ws "," ws type)* ws ")")?
@@ -189,6 +227,7 @@ ret-type    ::= "->" ws type
 type        ::= (
                   "&" ws type
                 | "box" ws type
+                | "froze" ws type
                 | "thread" ws type
                 | "chan" ws type
                 | "sandbox"
@@ -245,7 +284,7 @@ additive    ::= multiplicative (ws ("+" | "-") ws multiplicative)*
 multiplicative ::= unary (ws (".*" | "./" | "*" | "/") ws unary)*
 
 unary       ::= (
-                  ("!" | "-" | "*" | "box" | "&") ws unary
+                  ("!" | "-" | "*" | "box" | "froze" | "&") ws unary
                 | "spawn" ws call
                 | "join" ws unary
                 | "chan"

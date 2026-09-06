@@ -17,8 +17,14 @@ Status tags: `[DONE]` (verified — tests pass or run end-to-end),
   independent LALR(1) generator (`crates/grammar_check/`)
 - [DONE] Static type checker
 - [DONE] Ownership/affine types (`box`/`&`) — no GC, no manual `free()`
-- [DONE] Concurrency primitives (`spawn`/`thread`, `chan`) — no mutex in
-  the language, so a deadlock isn't expressible
+- [DONE] Concurrency primitives (`spawn`/`thread`, `chan`) — compiled to
+  native code (2026-09), backed by a real admission-controlled kernel;
+  no mutex in the language, so a lock-order deadlock isn't expressible,
+  and the one deadlock class that is (a global `chan`/`thread` stall) is
+  caught by a dynamic detector and aborted, not left to hang
+- [DONE] `froze` — RFC 0006 Pillar 1's `Froze<T>`, an immutable,
+  freely-shareable heap handle (`box` already satisfied Pillar 1's
+  `Iso<T>`)
 - [DONE] `struct`/`enum`/`match`, generics, `Option(T)`/`Result(T, E)`
 - [DONE] SMT-backed integer/buffer-overflow proofs (Z3), tiered with a
   runtime-guard fallback
@@ -106,14 +112,24 @@ critical apps on the interpreted path)
   ships
 
 **Track B — Full compilation** (`json`/`http`/`mq`/identity/`transact`/
-concurrency/sandboxing remain interpreter-only; native codegen covers
-the numeric/control-flow subset, `tcp`/`tcp_listener`, and, as of this
-pass, `file`, scalar-only native plugin calls, and `dec128` arithmetic)
+sandboxing remain interpreter-only; native codegen covers the numeric/
+control-flow subset, `tcp`/`tcp_listener`, `file`, scalar-only native
+plugin calls, `dec128` arithmetic, and, as of 2026-09, basic
+concurrency — `thread`/`spawn`/`join`, `chan`/`send`/`recv`, `froze`)
 - [DONE] `file` (`open`/`send`/`recv`/`stop`) — linked `nir_file_*`
   kernels, the same "declare + link a staticlib" pattern `tcp` already
   used; `examples/file_io.nir` compiles and runs as a native binary
   unchanged, verified against the interpreter's own output
   (`crates/compiler/tests/codegen.rs`)
+- [DONE] Basic concurrency — `thread`/`spawn`/`join`, `chan`/`send`/
+  `recv` (2026-09), plus RFC 0006 Pillar 1's `froze`. Contrary to this
+  section's own earlier framing below ("not a kernel to link"), it
+  shipped *as* a kernel to link: `runtime-kernels`' `nir_thread_spawn`/
+  `nir_thread_join`/`nir_chan_*`, a real admission ceiling
+  (`Domain::Thread`), and a dynamic global-stall deadlock detector
+  (`docs/LANGUAGE.md` §7/§10, `rfcs/0007-apm-runtime-kernel.md` §8).
+  Word-sized payloads/arguments/results only; `sandbox` is unaffected,
+  still open below.
 - [DONE] Scalar-only native plugin calls (Kind A plugins) —
   `plugin::NativePluginBuiltin`/`codegen::build_with_native_plugins`
   (`rfcs/0005-plugin-boundary-safety-and-performance.md` §3), ~250x
@@ -137,15 +153,15 @@ pass, `file`, scalar-only native plugin calls, and `dec128` arithmetic)
   — a real, deliberately deferred design question, not a shortcut;
   cleanly rejected in the meantime.
 - [OPEN] `transact` → `db`/`json` → `mq` → identity → `http`/`https` →
-  concurrency/sandboxing → first-class functions → compiled `serve` mode,
-  roughly in that order. `db`/`json`/`mq` share `file`'s "linked
-  handle-based kernel" shape but need a real dynamically-typed value
-  representation for query results first (`Ty::Handle`'s own affine
-  fix, `rfcs/0005` §1, generalizes to a `db`/`mq` connection handle for
-  free once that representation exists). Concurrency/sandboxing are a
-  materially harder, separate design question (a native thread-spawn +
-  cross-thread `box`-ownership model, not a kernel to link) — see
-  `rfcs/0005` §0's own difficulty ranking for the fuller breakdown.
+  sandboxing → first-class functions → compiled `serve` mode, roughly in
+  that order. `db`/`json`/`mq` share `file`'s "linked handle-based
+  kernel" shape but need a real dynamically-typed value representation
+  for query results first (`Ty::Handle`'s own affine fix, `rfcs/0005`
+  §1, generalizes to a `db`/`mq` connection handle for free once that
+  representation exists). `sandbox` (a real, separate OS *process*, not
+  a thread) remains a materially harder, separate design question from
+  the concurrency work above — see `rfcs/0005` §0's own difficulty
+  ranking for the fuller breakdown.
 
 **Track C — Agent-facing HTTP API** (the spec exists —
 [`docs/nirdosha-agent-api.md`](./docs/nirdosha-agent-api.md) — about half the

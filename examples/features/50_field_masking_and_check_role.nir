@@ -1,0 +1,81 @@
+// Feature: field-level `requires(role/claim: ...)` masking (LANGUAGE.md
+// §6e) driven by a real, compiled `check_role` (§10, PHASE0.md's
+// "Twentieth update") -- plus `effect(...)` (checked against the real
+// inferred effect set, not decorative) and `nfr(...)` (§6f) on the same
+// function, and a Z3-proven `validate` contract (§16) alongside it. The
+// flagship example this README's own hero code block is drawn from.
+//
+// `salary` masks itself to zero on every `return` of an `Employee`
+// unless the returning function's own `RoleView`/`ClaimView` parameter
+// proves the "admin" role -- fail-closed, no `acquire` involved at all.
+// A `RoleView` is unforgeable by direct construction; the only way to
+// get a real one is `check_role(identity, role)` succeeding against a
+// real `VerifiedIdentity`'s claims.
+
+struct Text {
+    value: str,
+}
+
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),
+}
+
+// A real Hoare contract: Z3 proves this at build time, for every
+// possible `years`, not just the ones a test happens to try.
+fn tenure_bonus_pct(years: i64) -> i64 {
+    if years >= 10 {
+        return 20
+    }
+    if years >= 5 {
+        return 10
+    }
+    return 0
+}
+validate tenure_bonus_pct {
+    pre: years >= 0
+    post: result >= 0
+    post: result <= 20
+}
+
+// The one function: `effect(pure)` is checked against what the body
+// actually does (a lie here is a build error, not a comment nobody
+// reads); `nfr(...)` wires real per-call latency/concurrency tracking
+// into the APM kernel with zero code at any call site; the `salary`
+// field masks itself on the way out, driven entirely by whether
+// `caller` proves the "admin" role -- no branch in this function's own
+// body decides that.
+fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
+    effect(pure)
+    nfr(latency_ms: 50, concurrency_max: 1000)
+{
+    return Employee(name.value, department.value, salary)
+}
+
+fn main() {
+    let bonus: i64 = tenure_bonus_pct(7)
+    print(bonus) // 10 -- proven in [0, 20] for every possible input, not just this one
+
+    // A real VerifiedIdentity carrying "admin" -- check_role hands back
+    // a genuine, unforgeable RoleView; get_employee sees it and lets
+    // salary through untouched.
+    let admin_identity: VerifiedIdentity = VerifiedIdentity("alice", "https://idp.example.com", "payroll-app", 0, 0, "admin")
+    let admin_view: Employee = match check_role(admin_identity, "admin") {
+        Ok(role) => get_employee(role, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+        Err(e) => Employee("", "", -1.0),
+    }
+    print(admin_view.salary) // 150000
+
+    // A real VerifiedIdentity that only carries "guest" -- its own
+    // genuine RoleView proves "guest", not "admin", so the same
+    // function masks salary to zero while every other field still
+    // passes through untouched.
+    let guest_identity: VerifiedIdentity = VerifiedIdentity("bob", "https://idp.example.com", "payroll-app", 0, 0, "guest")
+    let guest_view: Employee = match check_role(guest_identity, "guest") {
+        Ok(role) => get_employee(role, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+        Err(e) => Employee("", "", -1.0),
+    }
+    print(guest_view.salary) // 0 -- masked
+    print(guest_view.name)   // Ada Lovelace -- unmasked fields pass through
+}

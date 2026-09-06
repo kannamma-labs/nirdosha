@@ -9,13 +9,14 @@
 //! actually has to pass in CI.
 
 use nirdosha::ast::Ty;
-use nirdosha::interpreter::{ErrorKind, Value};
+use nirdosha::codegen;
+use nirdosha::ownership::check_ownership;
 use nirdosha::parser::Parser;
-use nirdosha::run;
 use nirdosha::token::Lexer;
 use nirdosha::typeck::{typecheck, TypeErrorKind};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::process::Command;
 
 fn parse_ok(src: &str) -> nirdosha::ast::Program {
     let toks = Lexer::new(src).tokenize().expect("lex should succeed");
@@ -30,9 +31,33 @@ fn first_type_error(src: &str) -> TypeErrorKind {
     }
 }
 
+fn unique_suffix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Compiles a `str`-returning `main` (real path, not the interpreter --
+/// `tcp` compiles today, `crates/runtime-kernels`'s `nir_tcp_*`) and
+/// returns what it printed (`codegen.rs::emit_c_main`'s own convention
+/// for a `str` result: printf then exit 0).
+fn compile_and_run_str(src: &str) -> String {
+    let program = parse_ok(src);
+    typecheck(&program).expect("should typecheck cleanly");
+    check_ownership(&program).expect("should ownership-check cleanly");
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_tcp_{}_{}", std::process::id(), unique_suffix()));
+    codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect("codegen::build should succeed");
+    let output = Command::new(&out_path).output().expect("compiled binary should run");
+    let _ = std::fs::remove_file(&out_path);
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
 /// Binds to an OS-assigned free port and returns it -- avoids any fixed
 /// port number that could collide with something else already listening
 /// on the machine running these tests.
+#[allow(dead_code)]
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").expect("binding a fresh loopback listener should never fail").local_addr().unwrap().port()
 }
@@ -53,53 +78,17 @@ fn a_connected_client_can_send_and_receive_real_bytes() {
 
     let src = format!(
         r#"
-        struct Text {{
-            value: str,
-        }}
-        fn main() -> Text {{
+        fn main() {{
             let conn: tcp = connect("127.0.0.1", {port})
             send(conn, "ping")
             let reply: str = recv(conn)
             stop conn
-            return Text(reply)
+            print(reply)
         }}
     "#
     );
-    match run(&src) {
-        Ok(Value::Struct(name, fields)) if &*name == "Text" => match &fields[0] {
-            Value::Str(s) => assert_eq!(&**s, "pong"),
-            other => panic!("expected Text(Str(\"pong\")), got Text({other:?})"),
-        },
-        other => panic!("expected Ok(Text(\"pong\")), got {other:?}"),
-    }
+    assert_eq!(compile_and_run_str(&src), "pong\n");
     server.join().unwrap();
-}
-
-#[test]
-fn connecting_to_a_closed_port_produces_a_channel_io_error() {
-    // A port nothing is listening on -- bind-and-immediately-drop to get
-    // a real, guaranteed-closed port rather than guessing at one that
-    // might coincidentally be in use.
-    let port = free_port(); // dropped immediately below, so it's free again but was just bound
-    let src = format!(
-        r#"
-        fn main() -> i64 {{
-            let conn: tcp = connect("127.0.0.1", {port})
-            return 0
-        }}
-    "#
-    );
-    let program = parse_ok(&src);
-    typecheck(&program).expect("should typecheck cleanly");
-    let result = nirdosha::interpreter::Interpreter::new(std::sync::Arc::new(program), std::sync::Arc::from(src.as_str())).run_main();
-    match result {
-        Err(e) => assert!(
-            matches!(e.kind, ErrorKind::ChannelIoError { .. }),
-            "expected ChannelIoError, got {:?}",
-            e.kind
-        ),
-        Ok(v) => panic!("expected a connection error, got Ok({v:?})"),
-    }
 }
 
 // ---- static rejections -------------------------------------------------

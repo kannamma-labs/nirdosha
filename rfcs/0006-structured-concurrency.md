@@ -1,8 +1,3 @@
----
-state: draft
-shepherd: (unassigned)
----
-
 # RFC 0006: Structured concurrency for native threads — Pillars 1-4
 
 ## Motivation
@@ -36,6 +31,17 @@ supposed to send on first). Closing that gap for real is exactly what
 `nirdosha_concurrency_spec.md`'s Pillar 5 targets; nothing in Nirdosha's
 shipped design does yet.
 
+> **Update (2026-09, `docs/PHASE0.md`'s "Seventeenth update")**: a real
+> dynamic backstop for exactly this gap now exists — a global-stall
+> detector that catches every concurrently-running thread being blocked
+> in `recv`/`join` at once and aborts with a diagnostic naming the stuck
+> handles, instead of hanging forever. It is detection, not Pillar 5's
+> own compile-time proof (still not built, still deferred below), and it
+> only catches a *global* stall, not a local cycle while an unrelated
+> third thread keeps running — see `rfcs/0007-apm-runtime-kernel.md` §8
+> for the full design and the reasoning for why it's a genuinely
+> separate mechanism from Pillar 5, not a substitute for it.
+
 Per the user's own direction, this RFC does not adopt either document
 on paper. It builds a standalone evidence prototype of Pillars 1-4
 first (`rfcs/evidence/0006-structured-concurrency/`), runs the brief's
@@ -59,12 +65,17 @@ list that turned out to be wrong when checked.
 - No mutex/lock primitive exists in the grammar — already true, already
   the README's headline claim, and preserved by every option
   considered below.
-- Not yet true: full deadlock-freedom (the gap above), and native
-  compilation of any of this (`Ty::Thread`/`Ty::Channel`/`Ty::Sandbox`
-  are still hard `codegen.rs` rejections — see
-  `rfcs/0005-plugin-boundary-safety-and-performance.md` §0's own
-  difficulty ranking, which already named this the one genuinely hard,
-  foundational remaining Track B item).
+- Not yet true (at the time this RFC was written): full deadlock-
+  freedom (the gap above), and native compilation of any of this
+  (`Ty::Thread`/`Ty::Channel`/`Ty::Sandbox` were still hard `codegen.rs`
+  rejections — see `rfcs/0005-plugin-boundary-safety-and-performance.md`
+  §0's own difficulty ranking, which already named this the one
+  genuinely hard, foundational remaining Track B item).
+  **Update (2026-09)**: `Ty::Thread`/`Ty::Channel` compile now (word-
+  sized payloads only) — `Ty::Sandbox` remains a hard rejection, a
+  separate and larger scope. Full deadlock-freedom is still not true;
+  see the "Update" note above the Motivation section for the dynamic
+  backstop that now exists instead.
 
 ### 1. The prototype, and the central finding
 
@@ -102,6 +113,16 @@ running any of this from *compiled* `.nir` code means either linking a
 Rust runtime that does what this prototype does (a materially bigger
 linked-kernel effort than `tcp`/`file`/`dec128` combined) or hand-rolling
 these primitives from raw OS threading — neither attempted here.
+
+> **Update (2026-09)**: the hand-rolling path is what actually shipped.
+> `spawn`/`join`/`chan`/`send`/`recv` now compile via `runtime-kernels`
+> (a linked kernel, in the same style as `tcp`/`file`/`dec128`, not a
+> full linked Rust concurrency runtime) — `kernel::thread_pool::Scope`
+> and `kernel::mailbox` are real, tested ports of this RFC's own
+> prototype mechanics, not a from-scratch reinvention. `froze` (Pillar
+> 1's `Froze<T>`) also got the real `ownership.rs`/codegen work named
+> above as still-needed — see `docs/PHASE0.md`'s "Eighteenth update."
+> `Lend<T>` remains genuinely unbuilt.
 
 ### 2. Adversarial results (the brief's own Phase 6 list, run for real)
 
@@ -199,10 +220,14 @@ project already treats `Arc::clone`'s O(1) cost as
   `dec128` combined — those wrap a handful of syscalls or a pure
   arithmetic library; this would wrap an entire scheduler-adjacent
   runtime) or hand-rolling structured concurrency from raw OS threads
-  inside `codegen.rs` — neither designed here. **Overclaiming "Pillars
-  1-4 are basically done" from this prototype would be a real
+  inside `codegen.rs` — neither designed here (**update, 2026-09**: the
+  hand-rolled path is what shipped — see §1's own "Update" note above
+  for what actually landed and what's still open). **Overclaiming
+  "Pillars 1-4 are basically done" from this prototype would be a real
   mistake.**
-- **`lend`'s actual semantics were not tested.** This prototype only
+- **`lend`'s actual semantics were not tested.** Still true as of the
+  2026-09 update above — `froze` (Pillar 1's other new capability) got
+  real design and implementation work; `lend` did not. This prototype only
   checked that an *unbounded* reference can't cross a channel (trivial
   — `rustc` already rejects any non-`'static` borrow in that position
   for any reason). `nirdosha_concurrency_spec.md`'s real `lend` claim
@@ -238,18 +263,29 @@ project already treats `Arc::clone`'s O(1) cost as
   The hard, unbuilt part is making any of this run from *compiled*
   `.nir` code and extending `ownership.rs` with real `froze`/`lend`
   capability tracking — both bigger than anything shipped so far this
-  cycle (`Ty::Handle`, `file`, native plugin calls, `dec128`).
+  cycle (`Ty::Handle`, `file`, native plugin calls, `dec128`). **Update
+  (2026-09)**: both have since happened, in part — compiled `spawn`/
+  `chan`/`thread` and real `froze`/`ownership.rs` work are both done;
+  `lend` is not.
 - **Defer Pillar 5 exactly as its own spec stages it** — syntax
   reserved, not shipped in v1. Revisit once real Pillars-1-4 usage
   shows whether the tree-mediation constraint it would impose is
-  actually livable.
+  actually livable. Still deferred as of the 2026-09 update — a dynamic
+  backstop exists instead (§0's "Update" note), not Pillar 5 itself.
 - **A real, considered alternative this RFC does not recommend, but
   names honestly**: ship native codegen for `spawn`/`thread`/`chan`
   *exactly as they exist today*, without adopting the capability model
   at all. Smaller, non-breaking, and would close Track B's concurrency
   gap sooner — at the cost of leaving the deadlock-freedom question
   (and the README's slightly-overclaimed comparison-table row)
-  unaddressed indefinitely. See Rejected Alternatives.
+  unaddressed indefinitely. See Rejected Alternatives. **This is,
+  concretely, what shipped (2026-09)** — native codegen for `spawn`/
+  `chan`/`thread` as they already existed, plus a separate, smaller
+  `froze` addition (not the full Pillar 1-4 capability-model adoption
+  this RFC's own Compatibility section below describes as breaking).
+  The deadlock-freedom question is no longer fully unaddressed, but
+  also not fully closed: a dynamic detector catches the global-stall
+  case, not the general one.
 
 ## Effect on the permission model
 
@@ -305,13 +341,23 @@ unlike the additive fixes in RFC 0005.
 
 - **`scope` vs. retrofitted `spawn`**: does Nirdosha need a new
   keyword/grammar form, or can `spawn`/`join`'s existing shape be given
-  Pillar 4's guarantees without new syntax? Not resolved here.
+  Pillar 4's guarantees without new syntax? Resolved in practice
+  (2026-09), not by design decision: `spawn`'s existing shape got a real
+  structured-spawn guarantee with no new syntax — every `spawn` gets its
+  own dedicated `Scope`, auto-joined at scope end if the function itself
+  never consumes the handle (`codegen.rs`'s `emit_affine_free`) — a
+  narrower mechanism than a shared per-function `Scope` would be, not
+  the exact guarantee this question originally asked about, but real.
 - **`froze`/`lend` surface syntax and `ownership.rs` integration**: real
-  language-surface design, not attempted.
+  language-surface design, not attempted. **Update (2026-09)**: `froze`
+  resolved — a new keyword, real `ownership.rs`/`typeck.rs`/`codegen.rs`
+  support, `docs/PHASE0.md`'s "Eighteenth update." `lend` unresolved.
 - **Native compilation strategy**: link a Rust concurrency runtime
   (bigger scope than any linked kernel shipped so far) vs. hand-rolled
   OS-thread codegen — a real Track-B-scale question, explicitly out of
-  scope for this RFC.
+  scope for this RFC. **Resolved (2026-09)**: hand-rolled, via a linked
+  kernel in `tcp`/`file`/`dec128`'s own style (`runtime-kernels`), not a
+  full linked Rust concurrency runtime.
 - **Whether `nirdosha_concurrency_spec.md`'s own Phase 7 deadlock
   examples should be corrected upstream** given this RFC's finding that
   one of them doesn't reproduce as stated.

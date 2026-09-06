@@ -195,6 +195,11 @@ impl Parser {
             let inner = self.expect_type()?;
             return Ok(Ty::Box(Box::new(inner)));
         }
+        if self.peek().tok == Tok::Froze {
+            self.bump();
+            let inner = self.expect_type()?;
+            return Ok(Ty::Froze(Box::new(inner)));
+        }
         if self.peek().tok == Tok::Thread {
             self.bump();
             let inner = self.expect_type()?;
@@ -976,7 +981,7 @@ impl Parser {
                 let fname = self.expect_ident()?;
                 self.expect(&Tok::Colon, "`:`")?;
                 let fty = self.expect_type()?;
-                fields.push(Field { name: fname, ty: fty });
+                fields.push(Field { name: fname, ty: fty, mask_requires: None });
                 if self.peek().tok == Tok::Comma {
                     self.bump();
                     if self.peek().tok == Tok::RBrace {
@@ -1131,7 +1136,8 @@ impl Parser {
                 let fname = self.expect_ident()?;
                 self.expect(&Tok::Colon, "`:`")?;
                 let fty = self.expect_type()?;
-                fields.push(Field { name: fname, ty: fty });
+                let mask_requires = self.parse_field_mask_requires()?;
+                fields.push(Field { name: fname, ty: fty, mask_requires });
                 if self.peek().tok == Tok::Comma {
                     self.bump();
                     if self.peek().tok == Tok::RBrace {
@@ -1144,6 +1150,43 @@ impl Parser {
         }
         self.expect(&Tok::RBrace, "`}`")?;
         Ok(StructDecl { name, type_params, fields, span, module: None, ns: None, exported: true })
+    }
+
+    /// `salary: f64 requires(role: "admin")` — a struct field's optional
+    /// masking gate (`ast::Field::mask_requires`). Same `role`/`claim`
+    /// vocabulary `parse_requires_annotation`'s fn-level `requires(...)`
+    /// uses (deliberately not factored into one shared function: the
+    /// fn-level form also accepts `requires(public)`, which has no
+    /// meaning on a field — an error here, not a silently-ignored no-op).
+    fn parse_field_mask_requires(&mut self) -> PResult<Option<Requirement>> {
+        if self.peek().tok != Tok::Requires {
+            return Ok(None);
+        }
+        self.bump();
+        self.expect(&Tok::LParen, "`(`")?;
+        let kind_span = self.span();
+        let kind = self.expect_ident()?;
+        let result = match kind.as_str() {
+            "role" => {
+                self.expect(&Tok::Colon, "`:`")?;
+                Requirement::Role(self.expect_str_lit("a role name")?)
+            }
+            "claim" => {
+                self.expect(&Tok::Colon, "`:`")?;
+                let name = self.expect_str_lit("a claim name")?;
+                self.expect(&Tok::Comma, "`,`")?;
+                let value = self.expect_str_lit("the claim's required value")?;
+                Requirement::Claim(name, value)
+            }
+            other => {
+                return Err(ParseError {
+                    message: format!("unknown field requirement `{other}` — expected `role` or `claim` (a field can't be `requires(public)`)"),
+                    span: kind_span,
+                });
+            }
+        };
+        self.expect(&Tok::RParen, "`)`")?;
+        Ok(Some(result))
     }
 
     // enum_decl ::= "enum" ident ("(" ident ("," ident)* ")")?
@@ -1219,8 +1262,9 @@ impl Parser {
         };
         let declared_effects = self.parse_effect_annotation()?;
         let (requires, explicit_public) = self.parse_requires_annotation()?;
+        let nfr = self.parse_nfr_annotation()?;
         let body = self.parse_block()?;
-        Ok(FnDecl { name, params, ret, body, span, declared_effects, requires, explicit_public, module: None, ns: None, exported: true })
+        Ok(FnDecl { name, params, ret, body, span, declared_effects, requires, explicit_public, nfr, module: None, ns: None, exported: true })
     }
 
     /// `effect(pure)` / `effect(io, network)` / ... — `None` if there's no
@@ -1318,6 +1362,127 @@ impl Parser {
         };
         self.expect(&Tok::RParen, "`)`")?;
         Ok(result)
+    }
+
+    /// `nfr(latency_ms: 100, error_rate_max: 0.01, throughput_min_per_sec: 50,
+    /// concurrency_max: 10)` — `None` if there's no `nfr(...)` at all (the
+    /// common, unmonitored case). Every field is optional and independently
+    /// declarable (`ast::NfrSpec`'s own doc comment), matched by identifier
+    /// text the same "keyword only within this one slot" way `effect(...)`'s
+    /// own names are.
+    fn parse_nfr_annotation(&mut self) -> PResult<Option<NfrSpec>> {
+        if self.peek().tok != Tok::Nfr {
+            return Ok(None);
+        }
+        self.bump();
+        self.expect(&Tok::LParen, "`(`")?;
+        let mut spec = NfrSpec { latency_ms: None, error_rate_max: None, throughput_min_per_sec: None, concurrency_max: None };
+        loop {
+            let span = self.span();
+            let name = self.expect_ident()?;
+            self.expect(&Tok::Colon, "`:`")?;
+            match name.as_str() {
+                "latency_ms" => {
+                    let v = self.expect_i64_lit("latency_ms")?;
+                    if v <= 0 {
+                        return Err(ParseError { message: format!("`latency_ms` must be positive, found `{v}`"), span });
+                    }
+                    spec.latency_ms = Some(v);
+                }
+                "error_rate_max" => {
+                    let v = self.expect_f64_lit("error_rate_max")?;
+                    if !(0.0..=1.0).contains(&v) {
+                        return Err(ParseError {
+                            message: format!("`error_rate_max` must be between 0.0 and 1.0, found `{v}`"),
+                            span,
+                        });
+                    }
+                    spec.error_rate_max = Some(v);
+                }
+                "throughput_min_per_sec" => {
+                    let v = self.expect_i64_lit("throughput_min_per_sec")?;
+                    if v <= 0 {
+                        return Err(ParseError {
+                            message: format!("`throughput_min_per_sec` must be positive, found `{v}`"),
+                            span,
+                        });
+                    }
+                    spec.throughput_min_per_sec = Some(v);
+                }
+                "concurrency_max" => {
+                    let v = self.expect_i64_lit("concurrency_max")?;
+                    if v <= 0 {
+                        return Err(ParseError { message: format!("`concurrency_max` must be positive, found `{v}`"), span });
+                    }
+                    spec.concurrency_max = Some(v);
+                }
+                other => {
+                    return Err(ParseError {
+                        message: format!(
+                            "unknown NFR `{other}` — expected `latency_ms`, `error_rate_max`, \
+                             `throughput_min_per_sec`, or `concurrency_max`"
+                        ),
+                        span,
+                    });
+                }
+            }
+            if self.peek().tok == Tok::Comma {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        self.expect(&Tok::RParen, "`)`")?;
+        if spec.is_empty() {
+            return Err(ParseError { message: "`nfr()` with no fields declares nothing to monitor".to_string(), span: self.span() });
+        }
+        Ok(Some(spec))
+    }
+
+    /// A bare integer literal (optionally negated), for `nfr(...)`'s own
+    /// slots that need a plain number rather than as part of a general
+    /// expression.
+    fn expect_i64_lit(&mut self, what: &str) -> PResult<i64> {
+        let span = self.span();
+        let negative = if self.peek().tok == Tok::Minus {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        match self.peek().tok.clone() {
+            Tok::Int(n) => {
+                self.bump();
+                Ok(if negative { -n } else { n })
+            }
+            other => Err(ParseError { message: format!("expected an integer for `{what}`, found {other:?}"), span }),
+        }
+    }
+
+    /// Same as `expect_i64_lit`, but also accepts a bare integer literal
+    /// as a whole-number float (`nfr(error_rate_max: 0)` should typecheck
+    /// the same as `nfr(error_rate_max: 0.0)` — no reason to force a
+    /// decimal point on a boundary value).
+    fn expect_f64_lit(&mut self, what: &str) -> PResult<f64> {
+        let span = self.span();
+        let negative = if self.peek().tok == Tok::Minus {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        let v = match self.peek().tok.clone() {
+            Tok::Float(f) => {
+                self.bump();
+                f
+            }
+            Tok::Int(n) => {
+                self.bump();
+                n as f64
+            }
+            other => return Err(ParseError { message: format!("expected a number for `{what}`, found {other:?}"), span }),
+        };
+        Ok(if negative { -v } else { v })
     }
 
     /// A bare string literal, for the handful of grammar slots (`requires`'
@@ -1767,6 +1932,10 @@ impl Parser {
             Tok::Box => {
                 self.bump();
                 Ok(Expr::Box(Box::new(self.parse_unary()?), span))
+            }
+            Tok::Froze => {
+                self.bump();
+                Ok(Expr::Froze(Box::new(self.parse_unary()?), span))
             }
             Tok::Amp => {
                 self.bump();

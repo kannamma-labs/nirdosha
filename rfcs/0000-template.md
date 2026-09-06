@@ -1,8 +1,3 @@
----
-state: draft
-shepherd: (unassigned)
----
-
 # RFC NNNN: Title
 
 ## Motivation

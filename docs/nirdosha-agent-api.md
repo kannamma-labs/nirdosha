@@ -593,17 +593,17 @@ Response (200 OK):
 }
 ```
 
-If the source uses interpreter-only features (`spawn`/`thread`/`chan`,
-an affine-containing `struct`/`enum`/`match`, `file`, `json`/`db`/`mq`,
-etc. — see `docs/LANGUAGE.md` §10 for the current compiled-vs-interpreter
-boundary):
+If the source uses interpreter-only features (`sandbox`, an affine-
+containing `struct`/`enum`/`match`, `json`/`db`/`mq`, etc. — see
+`docs/LANGUAGE.md` §10 for the current compiled-vs-interpreter
+boundary; `spawn`/`thread`/`chan`/`send`/`recv` and `file` compile now):
 ```
 {
   "binary_path": null,
   "error": "UNSUPPORTED_FEATURES",
   "unsupported_features": [
-    { "feature": "spawn", "location": { "line": 2, "col": 10 },
-      "reason": "codegen doesn't support `thread` yet — spawn/join are interpreter-only for now" }
+    { "feature": "sandbox", "location": { "line": 2, "col": 10 },
+      "reason": "codegen doesn't support `sandbox` yet — sandbox/stop are interpreter-only for now" }
   ]
 }
 ```
@@ -669,23 +669,29 @@ Response (200 OK):
     { "name": "bool", "category": "boolean", "affine": false,
       "compiled": true },
     { "name": "str", "category": "string", "affine": false,
-      "compiled": false,
+      "compiled": true,
       "notes": "UTF-8, Arc<str>-backed. Literals + escapes only." },
     { "name": "box T", "category": "heap", "affine": true,
-      "compiled": false },
+      "compiled": true },
+    { "name": "froze T", "category": "heap", "affine": false,
+      "compiled": true,
+      "notes": "Immutable, freely-shareable heap handle (RFC 0006 Pillar 1). Leaked, not refcounted." },
     { "name": "Vector(T, N)", "category": "array", "affine": false,
-      "compiled": false,
+      "compiled": true,
       "notes": "Fixed-length. N is a compile-time literal." },
     { "name": "Matrix(T, R, C)", "category": "array", "affine": false,
-      "compiled": false,
+      "compiled": true,
       "notes": "Fixed-shape, row-major. R/C are compile-time literals." },
+    { "name": "thread T", "category": "concurrency", "affine": true,
+      "compiled": true,
+      "notes": "Real OS thread pool underneath. Word-sized T only." },
     { "name": "chan T", "category": "channel", "affine": false,
-      "compiled": false,
-      "notes": "Unbounded MPMC. Handle is copyable, payload moves." },
+      "compiled": true,
+      "notes": "Unbounded MPMC. Handle is copyable, payload moves. Word-sized T only; a dynamic deadlock detector catches a global chan/thread stall." },
     { "name": "sandbox", "category": "process", "affine": true,
       "compiled": false },
     { "name": "tcp", "category": "network", "affine": true,
-      "compiled": false },
+      "compiled": true },
     ...
   ]
 }

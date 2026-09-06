@@ -98,6 +98,14 @@ fn unsupported<T>(msg: impl Into<String>) -> Result<T, CodegenError> {
 /// resolved bytes (the lexer/parser already turned `\n`/`\t`/etc. into
 /// real bytes — see `Expr::Str`'s doc) can contain anything, not just the
 /// hand-picked printable text `@.int_fmt`/`@.float_fmt` use.
+/// LLVM's own hex-float literal format for a `double` constant operand —
+/// factored out of `Expr::Float`'s own codegen (see that arm's doc
+/// comment for why this exact bit-pattern format, not a plain decimal
+/// literal, is the only representation guaranteed to round-trip).
+fn llvm_f64_literal(f: f64) -> String {
+    format!("0x{:016X}", f.to_bits())
+}
+
 fn llvm_escape_bytes(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for &b in bytes {
@@ -206,6 +214,28 @@ const RAND_BUILTINS: &[&str] = &["rand_seed", "rand_f64", "rand_gaussian"];
 /// someone picks this convention question up; cleanly rejected in the
 /// meantime, same as before.
 const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "dec_scale"];
+
+/// `check_role` — the first compiled builtin to actually construct a
+/// real `Result(_, _)` value as its return (`DEC128_BUILTINS`'s own
+/// "not yet included: `dec_from_str`" doc comment names exactly this
+/// gap; this is that convention, established for real). Deliberately
+/// scoped narrower than the interpreter's own `check_role`, which reads
+/// `identity.claims_json` as real JSON — this reads it as a plain
+/// comma-separated role list instead (`nir_check_role`,
+/// `runtime-kernels/src/lib.rs`), since a real JSON parser isn't linked
+/// into this crate. `oidc_validate_token` (the only way to produce a
+/// `VerifiedIdentity` *with* a real, cryptographically-verified
+/// `claims_json`) stays interpreter-only — `VerifiedIdentity` itself is
+/// freely constructible either way (`typeck.rs`'s own
+/// `infer_struct_construction`, unlike `RoleView`/`ClaimView`), so this
+/// compiles the real *authorization* pipeline (`check_role` producing an
+/// unforgeable `RoleView`, consumed by field masking) end to end, while
+/// *authentication* (verifying the identity claims themselves came from
+/// a real signed token) remains the disclosed, separate, larger gap
+/// it already was. `extract_claim`/`check_role_path`/
+/// `extract_claim_path` are not included — real, narrower follow-up
+/// work, not attempted here.
+const IDENTITY_BUILTINS: &[&str] = &["check_role"];
 
 /// WGS84 ellipsoid constants — mirrors `interpreter.rs`'s own
 /// `WGS84_A`/`WGS84_F`/`wgs84_e2()` exactly (same values, same derived
@@ -342,16 +372,28 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
         // lists — confirmed in generated IR (`nirdosha emit-llvm`) for a
         // simple `let b: box i64 = ...` case: the `nir_free` call is
         // really there, right after `b`'s last use.
-        Ty::Box(_) | Ty::Ref(_) => Ok("ptr".to_string()),
-        Ty::Thread(_) => unsupported(format!(
-            "codegen doesn't support `{}` yet — spawn/join are interpreter-only for now \
-             (real OS threads, not yet compiled to native code)",
-            ty.name()
-        )),
-        Ty::Channel(_) => unsupported(format!(
-            "codegen doesn't support `{}` yet — chan/send/recv are interpreter-only for now",
-            ty.name()
-        )),
+        // `Ty::Froze` is exactly `Ty::Box`'s own representation, one
+        // heap pointer — see `Ty::Froze`'s own doc comment for why
+        // there's no extra runtime shape (leaked, not refcounted, for
+        // now) to encode here.
+        Ty::Box(_) | Ty::Froze(_) | Ty::Ref(_) => Ok("ptr".to_string()),
+        // A spawned computation's handle — one opaque `i64`, exactly like
+        // `Ty::Tcp`/`Ty::File` above: everything the handle needs (the
+        // dedicated `Scope` a `spawn` call site created, the result word
+        // a `join` reads back) lives in `runtime-kernels`' own
+        // `HandleTable`, not in this value. `nir_thread_spawn`/
+        // `nir_thread_join` (`runtime-kernels/src/lib.rs`) are the
+        // backend `spawn`/`join` compile to — see `Codegen::expr`'s
+        // `Expr::Spawn`/`Expr::Join` arms for the real codegen and their
+        // doc comments for the disclosed narrower scope (word-sized
+        // arguments/results only, for now).
+        Ty::Thread(_) => Ok("i64".to_string()),
+        // A channel handle — same "opaque `i64` into a kernel-owned
+        // table" story as `Ty::Thread` just above. `nir_chan_new`/
+        // `nir_chan_send`/`nir_chan_recv` are the backend `chan`/`send`/
+        // `recv` compile to for a `Ty::Channel` operand (`Codegen::expr`'s
+        // `Expr::Chan`/`Expr::Send`/`Expr::Recv` arms).
+        Ty::Channel(_) => Ok("i64".to_string()),
         Ty::Sandbox => unsupported(
             "codegen doesn't support `sandbox` yet — sandbox/stop are interpreter-only for now",
         ),
@@ -873,6 +915,7 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
                 && !STR_CRYPTO_BUILTINS.contains(&name.as_str())
                 && !RAND_BUILTINS.contains(&name.as_str())
                 && !DEC128_BUILTINS.contains(&name.as_str())
+                && !IDENTITY_BUILTINS.contains(&name.as_str())
             {
                 // Every builtin not in `PHASE4_BUILTINS` (unrolled IR),
                 // `PHASE5_BUILTINS`/`STR_CRYPTO_BUILTINS` (linked runtime
@@ -939,26 +982,35 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
         // job, at real IR-gen time), so it just recurses into whatever's
         // inside — same "walk, don't reject" treatment every other
         // already-supported unary-ish construct gets.
-        Expr::Box(inner, _) | Expr::Deref(inner, _) | Expr::Ref(inner, _) => check_expr(inner, plugin_names, registry),
-        Expr::Spawn(_, _, _) | Expr::Join(_, _) => {
-            unsupported("codegen doesn't support `spawn`/`join` yet — interpreter-only for now")
+        Expr::Box(inner, _) | Expr::Froze(inner, _) | Expr::Deref(inner, _) | Expr::Ref(inner, _) => {
+            check_expr(inner, plugin_names, registry)
         }
+        // `spawn`/`join` land as of this phase (`runtime-kernels`'
+        // `nir_thread_spawn`/`nir_thread_join`) — this structural pre-pass
+        // has no type info (that's `Codegen::expr`'s job, at real IR-gen
+        // time, where a spawned function's own signature is checked for
+        // word-sized args/return), so it just recurses, same "walk,
+        // don't reject" treatment every other now-supported construct
+        // gets.
+        Expr::Spawn(_, args, _) => {
+            for a in args {
+                check_expr(a, plugin_names, registry)?;
+            }
+            Ok(())
+        }
+        Expr::Join(inner, _) => check_expr(inner, plugin_names, registry),
         Expr::Acquire(_, _, _) => unsupported(
             "codegen doesn't support `acquire` yet — first-class/privileged functions \
              are interpreter-only for now",
         ),
-        // `chan` construction itself is still unsupported (Phase D2) —
-        // but `send`/`recv` are the same two AST nodes `tcp`'s I/O reuses
-        // (typeck.rs's `Expr::Send`/`Expr::Recv` arms dispatch on the
-        // operand's *type*, `Ty::Channel` vs `Ty::Tcp`), and this
-        // structural pre-pass has no type info to tell those apart (same
-        // "type-oblivious pre-pass, real check happens at IR-gen time"
-        // precedent `print`'s aggregate rejection already established —
-        // module doc). So both recurse here; `Codegen::expr`'s real
-        // `Expr::Send`/`Expr::Recv` arms are the ones that reject a
-        // `Ty::Channel` operand specifically, gracefully, once they can
-        // actually see its type via `local_ty_of`.
-        Expr::Chan(_) => unsupported("codegen doesn't support `chan` yet — interpreter-only for now"),
+        // `chan` construction itself needs no type info at all (every
+        // `Ty::Channel` value is the same `i64` handle regardless of its
+        // payload type — `llvm_ty`'s own `Ty::Channel` arm) — real per-
+        // payload-type validation happens where `send`/`recv` can see the
+        // channel's actual type via `local_ty_of`, same "type-oblivious
+        // pre-pass, real check happens at IR-gen time" precedent
+        // `print`'s aggregate rejection already established (module doc).
+        Expr::Chan(_) => Ok(()),
         Expr::Send(chan, value, _) => {
             check_expr(chan, plugin_names, registry)?;
             check_expr(value, plugin_names, registry)
@@ -1091,6 +1143,16 @@ struct Codegen<'a> {
     /// for a global referenced by name, so appending at the end rather
     /// than the true point of first use is fine.
     string_globals: String,
+    /// Every `spawn`'s own generated trampoline function (`spawn_thread`'s
+    /// doc comment) — same structural reason `string_globals` exists: a
+    /// top-level `define` is only valid at module scope, never written
+    /// mid-function the way `self.out` is being built, but a `spawn` can
+    /// appear anywhere inside any function body. Built by temporarily
+    /// swapping it into `self.out` (so every ordinary instruction-emitting
+    /// helper — `widen_to_i64`, `narrow_from_i64`, `llvm_ty`, ... — just
+    /// works unmodified), then swapping back; appended to `self.out` once
+    /// at the very end, alongside `string_globals`.
+    trampolines: String,
     tmp: usize,
     label: usize,
     smt_report: &'a SmtReport,
@@ -1116,6 +1178,31 @@ struct Codegen<'a> {
     /// `ret <ty> <val>`. `None` for every scalar-returning function
     /// (including `unit`), which still just `ret`s normally.
     current_fn_sret: Option<String>,
+    /// `Some(spec)` while generating a function that declared `nfr(...)`
+    /// — `Stmt::Return`'s own arms (and `function()`'s implicit fall-
+    /// off-the-end path) consult `error_rate_max.is_some()` to decide
+    /// whether a `Result`-tagged return value's `Err`-ness needs
+    /// computing at all. `None` (the common case) means every return
+    /// site's `nir_nfr_call_end` (if any — see the next two fields) just
+    /// passes a literal `0`.
+    current_fn_nfr: Option<NfrSpec>,
+    /// The two per-invocation SSA registers `nir_nfr_call_begin`
+    /// produced at function entry — `Some((id, start))` exactly when
+    /// `current_fn_nfr` is `Some`, threaded separately (not recomputed
+    /// from `current_fn_nfr`) since they're register *names*, not
+    /// values, valid only within this one function's own IR.
+    current_fn_nfr_regs: Option<(String, String)>,
+    /// The name of this function's own first `RoleView`-typed parameter,
+    /// if it has one — `emit_field_masking`'s only source of "does the
+    /// caller have proof of the role a returned field's `requires(role:
+    /// ...)` demands." `None` means every role-masked field this
+    /// function returns is unconditionally masked (fail-closed: no
+    /// proof present is treated the same as proof of the wrong role,
+    /// never as "trust it anyway").
+    current_fn_role_view_param: Option<String>,
+    /// Same as `current_fn_role_view_param`, for `ClaimView` and
+    /// `requires(claim: ...)`.
+    current_fn_claim_view_param: Option<String>,
     /// Once a block's been given a terminator (`br`/`ret`), any further
     /// statements in the same source block are unreachable — this stops
     /// codegen from emitting a second terminator into an already-closed
@@ -1222,6 +1309,7 @@ fn emit_llvm_ir_impl<'a>(
             out: String::new(),
             entry_allocas: String::new(),
             string_globals: String::new(),
+            trampolines: String::new(),
             tmp: 0,
             label: 0,
             smt_report,
@@ -1230,6 +1318,10 @@ fn emit_llvm_ir_impl<'a>(
             current_fn_ret: Ty::Unit,
             current_fn_name: String::new(),
             current_fn_sret: None,
+            current_fn_nfr: None,
+            current_fn_nfr_regs: None,
+            current_fn_role_view_param: None,
+            current_fn_claim_view_param: None,
             terminated: false,
             audited: false,
             registry,
@@ -1326,6 +1418,37 @@ fn emit_llvm_ir_impl<'a>(
     // site change, not a declare-list change too.
     writeln!(cg.out, "declare ptr @nir_alloc(i64)").unwrap();
     writeln!(cg.out, "declare void @nir_free(ptr)").unwrap();
+    // `chan`/`spawn`/`join`'s kernels (`runtime-kernels/src/lib.rs`'s
+    // "chan/spawn/join kernels" section) — every channel/thread payload
+    // crosses this boundary as one `i64` word (`Ty::Channel`/`Ty::Thread`'s
+    // own `llvm_ty` note); `nir_thread_spawn`'s first argument is a bare
+    // function pointer (this file's generated trampolines, `spawn_thread`'s
+    // own doc comment) — LLVM's opaque `ptr` covers that with no separate
+    // function-pointer type needed.
+    writeln!(cg.out, "declare i64 @nir_chan_new()").unwrap();
+    writeln!(cg.out, "declare i64 @nir_chan_send(i64, i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_chan_recv(i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_thread_spawn(ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_thread_join(i64)").unwrap();
+    // `nfr(...)`'s kernels (`runtime-kernels/src/lib.rs`'s "nfr kernels"
+    // section) — `nir_nfr_register` runs once per tracked function, in
+    // `emit_c_main`'s own prologue (`declare_nfr_globals`/the
+    // registration loop there); `nir_nfr_call_begin`/`_end` bracket
+    // every call to it (`Codegen::function`, `Stmt::Return`'s own arms).
+    writeln!(cg.out, "declare i64 @nir_nfr_register(ptr, i64, i64, double, i64, i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_nfr_call_begin(i64)").unwrap();
+    writeln!(cg.out, "declare void @nir_nfr_call_end(i64, i64, i32)").unwrap();
+    // `check_role`'s real implementation (`IDENTITY_BUILTINS`'s own doc
+    // comment) — `1` if `role` appears in `claims`'s comma-separated
+    // list, `0` otherwise.
+    writeln!(cg.out, "declare i32 @nir_check_role(ptr, i64, ptr, i64)").unwrap();
+    // The APM kernel's flight recorder (`runtime-kernels/src/kernel/
+    // mod.rs`'s own doc comment) — declared unconditionally like every
+    // other kernel here, called exactly once by `emit_c_main` on every
+    // exit path, never by anything a `.nir` program itself writes (not
+    // in `ast::BUILTIN_NAMES` at all — there is no `Expr` that lowers to
+    // a `call` to this).
+    writeln!(cg.out, "declare void @nir_kernel_flight_recorder_dump()").unwrap();
     // "%lld\n\0" — 6 bytes (%, l, l, d, \n, \0), not 5; LLVM's array
     // constant size has to match the literal exactly, byte for byte.
     writeln!(cg.out, "@.int_fmt = private unnamed_addr constant [6 x i8] c\"%lld\\0A\\00\"").unwrap();
@@ -1362,6 +1485,17 @@ fn emit_llvm_ir_impl<'a>(
     }
     writeln!(cg.out).unwrap();
 
+    // One process-wide storage slot per `nfr(...)`-tracked function,
+    // populated once by `emit_c_main`'s own prologue (`nir_nfr_register`)
+    // before `nir_main` runs, then read by that same function's own
+    // entry prologue (`Codegen::function`) on every call — see this
+    // module's "nfr kernels" declares above for the kernel side.
+    for f in &program.fns {
+        if f.nfr.is_some() {
+            writeln!(cg.out, "@nfr_id.{} = global i64 0", f.name).unwrap();
+        }
+    }
+
     for f in &program.fns {
         cg.function(f)?;
     }
@@ -1371,6 +1505,9 @@ fn emit_llvm_ir_impl<'a>(
     // global constant, collected during function codegen since it can't
     // be written mid-function-body, appended here once at the end.
     cg.out.push_str(&cg.string_globals);
+    // See `trampolines`'s own doc — every `spawn` call site's generated
+    // trampoline function, appended here for the same reason.
+    cg.out.push_str(&cg.trampolines);
     // See `named_type_decls`'s own doc — every `%Name = type {...}`
     // declaration, collected during function codegen (a named type is
     // only discovered when a concrete instantiation is actually used)
@@ -1398,6 +1535,7 @@ fn bind_type_params_owned(decl_ty: &Ty, concrete_ty: &Ty, type_params: &[String]
             subst.entry(name.clone()).or_insert_with(|| concrete_ty.clone());
         }
         (Ty::Box(a), Ty::Box(b))
+        | (Ty::Froze(a), Ty::Froze(b))
         | (Ty::Ref(a), Ty::Ref(b))
         | (Ty::Thread(a), Ty::Thread(b))
         | (Ty::Channel(a), Ty::Channel(b)) => bind_type_params_owned(a, b, type_params, subst),
@@ -1859,6 +1997,32 @@ impl Codegen<'_> {
             }
         }
 
+        // Field masking's only source of "who's calling" — the first
+        // `RoleView`/`ClaimView`-typed parameter, if either exists (this
+        // function's own doc comment on `current_fn_role_view_param`).
+        // A plain linear scan of the signature, not a scope lookup: this
+        // runs once per function, at codegen time, over a handful of
+        // params, not on any hot path.
+        self.current_fn_role_view_param =
+            f.params.iter().find(|p| matches!(&p.ty, Ty::Named(n, args) if n == "RoleView" && args.is_empty())).map(|p| p.name.clone());
+        self.current_fn_claim_view_param =
+            f.params.iter().find(|p| matches!(&p.ty, Ty::Named(n, args) if n == "ClaimView" && args.is_empty())).map(|p| p.name.clone());
+
+        // `nfr(...)` entry instrumentation — see `current_fn_nfr`/
+        // `current_fn_nfr_regs`'s own doc comments and `emit_nfr_call_end`
+        // for the matching exit side, emitted at every one of this
+        // function's own return points.
+        self.current_fn_nfr = f.nfr.clone();
+        self.current_fn_nfr_regs = if f.nfr.is_some() {
+            let id_reg = self.fresh_reg("nfr_id");
+            writeln!(self.out, "  {id_reg} = load i64, ptr @nfr_id.{}", f.name).unwrap();
+            let start_reg = self.fresh_reg("nfr_start");
+            writeln!(self.out, "  {start_reg} = call i64 @nir_nfr_call_begin(i64 {id_reg})").unwrap();
+            Some((id_reg, start_reg))
+        } else {
+            None
+        };
+
         self.stmts(&f.body.stmts, &mut scopes)?;
 
         // A function whose body definitely returns on every path
@@ -1872,6 +2036,11 @@ impl Codegen<'_> {
                 self.emit_frees_for_names(&names, &scopes);
             }
             if f.ret == Ty::Unit {
+                // Only reachable for `unit` (typeck's definite-return
+                // analysis rules out every other return type falling
+                // through) — never `Result`-typed, so `was_err` is
+                // unconditionally `"0"` here, no tag inspection needed.
+                self.emit_nfr_call_end("0");
                 writeln!(self.out, "  ret void").unwrap();
             } else {
                 // typeck.rs's definite-return analysis already rules
@@ -1949,6 +2118,15 @@ impl Codegen<'_> {
                         let ret_ty = self.current_fn_ret.clone();
                         if ret_ty.is_aggregate() {
                             let src = self.expr_ptr_expected(e, &ret_ty, scopes)?;
+                            // Masks in place, before the value is copied
+                            // out to the caller's own `sret` slot below —
+                            // see `emit_field_masking`'s own doc comment.
+                            // Safe to mutate `src` even when it's an
+                            // existing local's own storage (e.g. `return
+                            // e` for some `let e: Employee = ...`): this
+                            // is a `return`, so nothing in this function
+                            // reads that binding again either way.
+                            self.emit_field_masking(&src, &ret_ty, scopes)?;
                             let sret = self
                                 .current_fn_sret
                                 .clone()
@@ -1956,6 +2134,32 @@ impl Codegen<'_> {
                             let bytes = agg_byte_size_operand(&ret_ty, &self.registry);
                             writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {sret}, ptr {src}, i64 {bytes}, i1 false)").unwrap();
                             self.emit_frees_for_names(&free_names, scopes);
+                            // `nfr(error_rate_max: ...)` needs to know
+                            // whether this specific return was `Err` —
+                            // `typeck.rs` already proved `ret_ty` is
+                            // `Result(_, _)` whenever that field is
+                            // declared (`NfrErrorRateNeedsResultReturn`),
+                            // so the tag word at offset 0 (`Ok` = 0,
+                            // `Err` = 1, `ast::prelude_enums`' own
+                            // declaration order) is exactly the flag
+                            // needed. Every other `nfr(...)` field (or no
+                            // `nfr(...)` at all) skips this entirely — no
+                            // reason to inspect a tag nothing will check.
+                            let was_err = if self.current_fn_nfr.as_ref().is_some_and(|n| n.error_rate_max.is_some()) {
+                                let agg_llty = self.llvm_ty(&ret_ty)?;
+                                let tag_ptr = self.fresh_reg("nfr_tag_ptr");
+                                writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {agg_llty}, ptr {src}, i32 0, i32 0").unwrap();
+                                let tag = self.fresh_reg("nfr_tag");
+                                writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+                                let is_err = self.fresh_reg("nfr_is_err");
+                                writeln!(self.out, "  {is_err} = icmp ne i64 {tag}, 0").unwrap();
+                                let is_err_i32 = self.fresh_reg("nfr_is_err_i32");
+                                writeln!(self.out, "  {is_err_i32} = zext i1 {is_err} to i32").unwrap();
+                                is_err_i32
+                            } else {
+                                "0".to_string()
+                            };
+                            self.emit_nfr_call_end(&was_err);
                             writeln!(self.out, "  ret void").unwrap();
                         } else {
                             let val = self.expr(e, scopes)?;
@@ -1969,12 +2173,17 @@ impl Codegen<'_> {
                             let val = self.guard_in_range(&val, &ret_ty, *span)?;
                             let val = if ret_ty.is_integer() { self.narrow_from_i64(&val, &ret_ty)? } else { val };
                             self.emit_frees_for_names(&free_names, scopes);
+                            // Never `Result`-typed here — `Result` is
+                            // always `is_aggregate()` (routed through the
+                            // branch above), so `was_err` is always `"0"`.
+                            self.emit_nfr_call_end("0");
                             let ret_llty = self.llvm_ty(&ret_ty)?;
                             writeln!(self.out, "  ret {} {val}", ret_llty).unwrap();
                         }
                     }
                     None => {
                         self.emit_frees_for_names(&free_names, scopes);
+                        self.emit_nfr_call_end("0");
                         writeln!(self.out, "  ret void").unwrap();
                     }
                 }
@@ -2065,6 +2274,9 @@ impl Codegen<'_> {
             Expr::Call(name, _, _) if name == "dec_from_i64" || name == "dec_round" => Ty::Dec128,
             Expr::Call(name, _, _) if name == "dec_to_str" => Ty::Str,
             Expr::Call(name, _, _) if name == "dec_scale" => Ty::U32,
+            Expr::Call(name, _, _) if name == "check_role" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("RoleView".to_string(), vec![]), Ty::Str])
+            }
             // Row 11: a struct/variant constructor call produces a
             // `Ty::Named` value (the struct's own type, or the owning
             // enum's), not the `Ty::I64` the `self.sigs.get` fallback
@@ -2110,16 +2322,28 @@ impl Codegen<'_> {
                 Ty::Channel(inner) => *inner,
                 _ => Ty::I64,
             },
+            // Mirrors `typeck::infer_spawn`/the `Expr::Join` arm of
+            // `infer` exactly — needed for the same "directly-nested,
+            // no intervening `let`" case `Expr::Recv`'s own comment
+            // above explains (e.g. `join spawn worker(x)` with nothing
+            // ever bound to a name).
+            Expr::Spawn(name, _, _) => Ty::Thread(Box::new(self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64))),
+            Expr::Join(inner, _) => match self.local_ty_of(inner, scopes) {
+                Ty::Thread(t) => *t,
+                _ => Ty::I64,
+            },
             Expr::Box(inner, _) => Ty::Box(Box::new(self.local_ty_of(inner, scopes))),
+            Expr::Froze(inner, _) => Ty::Froze(Box::new(self.local_ty_of(inner, scopes))),
             Expr::Ref(inner, _) => Ty::Ref(Box::new(self.local_ty_of(inner, scopes))),
             // `*e` unwraps exactly one pointer level — `ownership.rs`
-            // already proved `e`'s type is `Box`/`Ref` for any program
-            // that reaches codegen, and (per its own move-checking) that
-            // unwrapping affine content out of a shared `Ref` never
-            // typechecks in the first place, so this never needs to
-            // reject anything itself, only report the unwrapped type.
+            // already proved `e`'s type is `Box`/`Ref`/`Froze` for any
+            // program that reaches codegen, and (per its own move-
+            // checking) that unwrapping affine content out of a shared
+            // `Ref`/`Froze` never typechecks in the first place, so this
+            // never needs to reject anything itself, only report the
+            // unwrapped type.
             Expr::Deref(inner, _) => match self.local_ty_of(inner, scopes) {
-                Ty::Box(t) | Ty::Ref(t) => *t,
+                Ty::Box(t) | Ty::Ref(t) | Ty::Froze(t) => *t,
                 _ => Ty::I64,
             },
             // Aggregate-result `if`/`match`: typeck already proved every
@@ -2287,6 +2511,196 @@ impl Codegen<'_> {
         Ok(r)
     }
 
+    /// Converts `val` (of LLVM type `llty`) into the one `i64` machine
+    /// word every `chan`/`spawn` payload crosses the kernel ABI boundary
+    /// as (`runtime-kernels/src/lib.rs`'s "chan/spawn/join kernels"
+    /// section). Every integer type is already carried at full `i64`
+    /// width by the time it reaches here (module doc's own invariant,
+    /// enforced by `widen_to_i64`) — only `double`/`ptr`/`i1` need a real
+    /// conversion instruction.
+    fn to_i64_word(&mut self, val: &str, llty: &str) -> String {
+        match llty {
+            "ptr" => {
+                let r = self.fresh_reg("word_ptrtoint");
+                writeln!(self.out, "  {r} = ptrtoint ptr {val} to i64").unwrap();
+                r
+            }
+            "double" => {
+                let r = self.fresh_reg("word_bitcast");
+                writeln!(self.out, "  {r} = bitcast double {val} to i64").unwrap();
+                r
+            }
+            "i1" => {
+                let r = self.fresh_reg("word_zext");
+                writeln!(self.out, "  {r} = zext i1 {val} to i64").unwrap();
+                r
+            }
+            _ => val.to_string(),
+        }
+    }
+
+    /// The reverse of `to_i64_word` — unpacks a raw `i64` word (from
+    /// `nir_chan_recv`/`nir_thread_join`) back to `llty`'s real shape.
+    fn from_i64_word(&mut self, val: &str, llty: &str) -> String {
+        match llty {
+            "ptr" => {
+                let r = self.fresh_reg("word_inttoptr");
+                writeln!(self.out, "  {r} = inttoptr i64 {val} to ptr").unwrap();
+                r
+            }
+            "double" => {
+                let r = self.fresh_reg("word_bitcast");
+                writeln!(self.out, "  {r} = bitcast i64 {val} to double").unwrap();
+                r
+            }
+            "i1" => {
+                let r = self.fresh_reg("word_trunc");
+                writeln!(self.out, "  {r} = trunc i64 {val} to i1").unwrap();
+                r
+            }
+            _ => val.to_string(),
+        }
+    }
+
+    /// Whether `ty` fits in the one `i64` machine word `chan`/`spawn`'s
+    /// payload ABI uses today (`to_i64_word`/`from_i64_word`) — every
+    /// plain scalar (`i8`/.../`i64`/`bool`/`f64`), every pointer-shaped
+    /// handle (`box`/`ref`), and every existing `i64`-handle type
+    /// (`tcp`/`file`/`thread`/`chan`/`sandbox`) qualify; `str`/`dec128`
+    /// (two words) and any `Vector`/`Matrix`/struct/enum
+    /// (`Ty::is_aggregate()`) don't — a real, disclosed narrower scope
+    /// than `chan T`/`spawn`'s full type-level generality (each caller of
+    /// this fn explains the gap at its own rejection site).
+    fn is_word_sized(&mut self, ty: &Ty) -> Result<bool, CodegenError> {
+        if ty.is_aggregate() {
+            return Ok(false);
+        }
+        let llty = self.llvm_ty(ty)?;
+        Ok(matches!(llty.as_str(), "i1" | "i8" | "i16" | "i32" | "i64" | "double" | "ptr"))
+    }
+
+    /// `spawn name(args)`'s real codegen — see `runtime-kernels/src/
+    /// lib.rs`'s "chan/spawn/join kernels" section for the kernel side
+    /// this calls into. Every parameter and `name`'s return type must be
+    /// word-sized (`is_word_sized`) — checked here, not `check_supported`'s
+    /// structural pre-pass (which has no signature info), with a specific
+    /// reason rather than a confusing fallback error.
+    fn spawn_thread(&mut self, name: &str, args: &[Expr], span: Span, scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let _ = span;
+        // Cloned out of `self.sigs` field-by-field (not the whole
+        // `FnSig`, which doesn't derive `Clone`) — same pattern `call()`'s
+        // own `sig_params`/`sig_ret` locals already use, for the same
+        // reason: this function needs `&mut self` again immediately
+        // after, and a borrow of `self.sigs` can't outlive that.
+        let sig_params = self.sigs.get(name).expect("typeck.rs already resolved this call").params.clone();
+        let sig_ret = self.sigs.get(name).expect("typeck.rs already resolved this call").ret.clone();
+        for p in &sig_params {
+            if !self.is_word_sized(p)? {
+                return unsupported(format!(
+                    "codegen doesn't support spawning `{name}` yet — its parameter type `{p:?}` \
+                     isn't word-sized (only integers/bool/f64/box/ref/handles are supported as \
+                     spawn arguments so far, not str/dec128/struct/enum/Vector/Matrix)"
+                ));
+            }
+        }
+        if sig_ret != Ty::Unit && !self.is_word_sized(&sig_ret)? {
+            return unsupported(format!(
+                "codegen doesn't support spawning `{name}` yet — its return type `{sig_ret:?}` \
+                 isn't word-sized (only integers/bool/f64/box/ref/handles/unit are supported as \
+                 spawn results so far, not str/dec128/struct/enum/Vector/Matrix)"
+            ));
+        }
+
+        // The heap block `args` get marshaled into, laid out as one
+        // anonymous LLVM struct field per parameter — an empty struct
+        // (`{}`, `null` ctx pointer, never dereferenced) for a
+        // zero-argument spawn.
+        let param_lltys: Vec<String> = sig_params.iter().map(|p| self.llvm_ty(p)).collect::<Result<_, _>>()?;
+        let ctx_llty = format!("{{{}}}", param_lltys.join(", "));
+        let ctx_ptr = if sig_params.is_empty() {
+            "null".to_string()
+        } else {
+            let size = format!("ptrtoint (ptr getelementptr ({ctx_llty}, ptr null, i32 1) to i64)");
+            let p = self.fresh_reg("spawn_ctx");
+            writeln!(self.out, "  {p} = call ptr @nir_alloc(i64 {size})").unwrap();
+            p
+        };
+        for (i, (a, want)) in args.iter().zip(sig_params.iter()).enumerate() {
+            let v = self.expr(a, scopes)?;
+            let llty = self.llvm_ty(want)?;
+            let v = if want.is_integer() { self.narrow_from_i64(&v, want)? } else { v };
+            let field_ptr = self.fresh_reg("spawn_ctx_field");
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {ctx_llty}, ptr {ctx_ptr}, i32 0, i32 {i}").unwrap();
+            writeln!(self.out, "  store {llty} {v}, ptr {field_ptr}").unwrap();
+        }
+
+        let tramp_name = self.fresh_global("spawn_trampoline");
+        self.emit_spawn_trampoline(&tramp_name, name, &param_lltys, &ctx_llty, &sig_ret)?;
+
+        let handle = self.fresh_reg("thread_handle");
+        writeln!(self.out, "  {handle} = call i64 @nir_thread_spawn(ptr {tramp_name}, ptr {ctx_ptr})").unwrap();
+        self.guard_io_ok(&handle);
+        Ok(handle)
+    }
+
+    /// Emits one top-level trampoline function into `self.trampolines` —
+    /// the bridge `nir_thread_spawn`'s raw `extern "C" fn(*mut u8, *mut
+    /// i64)` signature needs between the kernel (which knows nothing
+    /// about `.nir` argument shapes) and `name`'s real, statically-known
+    /// LLVM signature: unpack `ctx`'s fields, free `ctx` (its only job
+    /// was carrying the args this far), call `name` for real, and write
+    /// its result — widened/converted to one `i64` word by the same
+    /// `widen_to_i64`/`to_i64_word` pair `expr()`/`chan` already use, or
+    /// left untouched for a `unit`-returning spawn — through
+    /// `result_slot`. Built by temporarily swapping `self.trampolines`
+    /// into `self.out` (`trampolines`'s own doc comment explains why a
+    /// second buffer is needed at all) so every ordinary instruction-
+    /// emitting helper this needs just works unmodified, then swapping
+    /// back.
+    fn emit_spawn_trampoline(
+        &mut self,
+        tramp_name: &str,
+        callee_name: &str,
+        param_lltys: &[String],
+        ctx_llty: &str,
+        ret_ty: &Ty,
+    ) -> Result<(), CodegenError> {
+        let ret_llty = self.llvm_ty(ret_ty)?;
+        let saved_out = std::mem::take(&mut self.out);
+        writeln!(self.out, "define void {tramp_name}(ptr %ctx, ptr %result_slot) {{").unwrap();
+        writeln!(self.out, "entry:").unwrap();
+        let mut call_args = Vec::with_capacity(param_lltys.len());
+        for (i, llty) in param_lltys.iter().enumerate() {
+            let field_ptr = self.fresh_reg("tramp_field");
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {ctx_llty}, ptr %ctx, i32 0, i32 {i}").unwrap();
+            let val = self.fresh_reg("tramp_arg");
+            writeln!(self.out, "  {val} = load {llty}, ptr {field_ptr}").unwrap();
+            call_args.push(format!("{llty} {val}"));
+        }
+        if !param_lltys.is_empty() {
+            // Every argument was already copied into registers above —
+            // the heap block `spawn_thread` allocated for them is only
+            // ever needed for this one moment, so it's freed right here
+            // rather than leaking one block per spawn forever.
+            writeln!(self.out, "  call void @nir_free(ptr %ctx)").unwrap();
+        }
+        if ret_llty == "void" {
+            writeln!(self.out, "  call void @{callee_name}({})", call_args.join(", ")).unwrap();
+        } else {
+            let r = self.fresh_reg("tramp_result");
+            writeln!(self.out, "  {r} = call {ret_llty} @{callee_name}({})", call_args.join(", ")).unwrap();
+            let widened = self.widen_to_i64(&r, ret_ty);
+            let word = self.to_i64_word(&widened, &ret_llty);
+            writeln!(self.out, "  store i64 {word}, ptr %result_slot").unwrap();
+        }
+        writeln!(self.out, "  ret void").unwrap();
+        writeln!(self.out, "}}").unwrap();
+        writeln!(self.out).unwrap();
+        self.trampolines.push_str(&self.out);
+        self.out = saved_out;
+        Ok(())
+    }
+
     /// Tier 1 vs Tier 2, for real: if `span` is in the SMT report's
     /// proven-safe set, `val` is used exactly as computed — no runtime
     /// check, no cost, matching docs/goal.md §4's Tier 1. Otherwise, emits an
@@ -2326,6 +2740,13 @@ impl Codegen<'_> {
         let fail = self.fresh_label("range_trap");
         writeln!(self.out, "  br i1 {ok}, label %{pass}, label %{fail}").unwrap();
         writeln!(self.out, "{fail}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{pass}:").unwrap();
@@ -2352,6 +2773,25 @@ impl Codegen<'_> {
                 let fd = self.fresh_reg("tcp.fd");
                 writeln!(self.out, "  {fd} = load i64, ptr {value_ptr}").unwrap();
                 writeln!(self.out, "  call i32 @nir_tcp_stop(i64 {fd})").unwrap();
+            }
+            // The real delivery of RFC 0006 Pillar 4's "no orphan
+            // threads" for this backend: a `thread` binding a function
+            // never explicitly `join`s is auto-joined right here, at
+            // every scope-closing point this function's `FreeMap` already
+            // walks for `box`/`tcp` — so a function genuinely cannot
+            // return while something it spawned (and didn't hand off
+            // elsewhere) is still outstanding, even though it isn't the
+            // RFC prototype's own lexical-`Scope`-per-function mechanism
+            // (`runtime-kernels/src/lib.rs`'s "chan/spawn/join kernels"
+            // section doc comment has the honest gap: every `spawn` gets
+            // its own one-job `Scope`, not one shared per spawning
+            // function). The result is discarded — the same "this
+            // binding's value was never going to be read again" posture
+            // `Ty::Box`'s own free above already has.
+            Ty::Thread(_) => {
+                let handle = self.fresh_reg("thread.handle");
+                writeln!(self.out, "  {handle} = load i64, ptr {value_ptr}").unwrap();
+                writeln!(self.out, "  call i64 @nir_thread_join(i64 {handle})").unwrap();
             }
             Ty::Named(name, args) => {
                 if let Some(fields) = self.registry.struct_fields(name) {
@@ -2456,6 +2896,128 @@ impl Codegen<'_> {
         }
     }
 
+    /// Emits `nir_nfr_call_end` at one of this function's own return
+    /// points — a no-op if this function has no `nfr(...)` at all
+    /// (`current_fn_nfr_regs` is `None`). `was_err` is a literal `"0"`/
+    /// `"1"` or an `i32`-typed SSA register — whichever the caller
+    /// already computed (only the `Result`-returning, `error_rate_max`-
+    /// declaring case needs a real one; every other return site just
+    /// passes `"0"`, this function's own doc comment on `current_fn_nfr`).
+    fn emit_nfr_call_end(&mut self, was_err: &str) {
+        if let Some((id, start)) = self.current_fn_nfr_regs.clone() {
+            writeln!(self.out, "  call void @nir_nfr_call_end(i64 {id}, i64 {start}, i32 {was_err})").unwrap();
+        }
+    }
+
+    /// Masks every `requires(...)`-annotated field of a struct value
+    /// about to be returned — `src` is a pointer to the already-fully-
+    /// constructed value (masking happens *in place*, before the caller
+    /// copies it out, so the copied-out value is the masked one). A
+    /// no-op for any `ret_ty` that isn't a struct with at least one
+    /// masked field — the overwhelmingly common case, and deliberately
+    /// checked as plain data lookups (no branch emitted at all) rather
+    /// than emitting dead always-false checks for functions that never
+    /// need any of this.
+    fn emit_field_masking(&mut self, src: &str, ret_ty: &Ty, scopes: &mut Scopes) -> Result<(), CodegenError> {
+        let Ty::Named(name, args) = ret_ty else { return Ok(()) };
+        let Some(fields) = self.registry.struct_fields(name) else { return Ok(()) };
+        if !fields.iter().any(|f| f.mask_requires.is_some()) {
+            return Ok(());
+        }
+        let type_params = self.registry.struct_type_params(name).unwrap_or(&[]);
+        let subst = zip_type_params(type_params, args);
+        let struct_llty = self.llvm_ty(ret_ty)?;
+        for (i, field) in fields.iter().enumerate() {
+            let Some(req) = field.mask_requires.clone() else { continue };
+            let field_ty = substitute_ty(&field.ty, &subst);
+            let authorized = self.emit_requirement_check(&req, scopes)?;
+            let do_label = self.fresh_label("mask_do");
+            let skip_label = self.fresh_label("mask_skip");
+            writeln!(self.out, "  br i1 {authorized}, label %{skip_label}, label %{do_label}").unwrap();
+            writeln!(self.out, "{do_label}:").unwrap();
+            let field_ptr = self.fresh_reg("mask_field_ptr");
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {struct_llty}, ptr {src}, i32 0, i32 {i}").unwrap();
+            let zero = self.emit_zero_value(&field_ty)?;
+            let field_llty = self.llvm_ty(&field_ty)?;
+            writeln!(self.out, "  store {field_llty} {zero}, ptr {field_ptr}").unwrap();
+            writeln!(self.out, "  br label %{skip_label}").unwrap();
+            writeln!(self.out, "{skip_label}:").unwrap();
+        }
+        Ok(())
+    }
+
+    /// Whether the *current function's own* proof parameter
+    /// (`current_fn_role_view_param`/`current_fn_claim_view_param`)
+    /// satisfies `req`, as a fresh `i1` SSA register — `"false"`
+    /// (fail-closed) if this function has no such parameter at all, the
+    /// same "absence of proof is not proof of absence of a requirement"
+    /// posture `requires(...)`'s own fn-level gating already has.
+    fn emit_requirement_check(&mut self, req: &Requirement, scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let (param_name, expected, field_name): (Option<String>, &str, &str) = match req {
+            Requirement::Role(r) => (self.current_fn_role_view_param.clone(), r, "role"),
+            Requirement::Claim(_, v) => (self.current_fn_claim_view_param.clone(), v, "value"),
+        };
+        let Some(param_name) = param_name else {
+            return Ok("false".to_string());
+        };
+        let (view_ty, view_ptr) = scopes.get(&param_name).expect("scanned directly from this function's own params");
+        let (idx, _) = self
+            .field_index_and_ty(&view_ty, field_name)
+            .expect("RoleView/ClaimView always declares this field, ast::prelude_structs");
+        let view_llty = self.llvm_ty(&view_ty)?;
+        let field_ptr = self.fresh_reg("req_field_ptr");
+        writeln!(self.out, "  {field_ptr} = getelementptr inbounds {view_llty}, ptr {view_ptr}, i32 0, i32 {idx}").unwrap();
+        let field_val = self.fresh_reg("req_field_val");
+        writeln!(self.out, "  {field_val} = load {{ptr, i64}}, ptr {field_ptr}").unwrap();
+        let actual_ptr = self.fresh_reg("req_actual_ptr");
+        writeln!(self.out, "  {actual_ptr} = extractvalue {{ptr, i64}} {field_val}, 0").unwrap();
+        let actual_len = self.fresh_reg("req_actual_len");
+        writeln!(self.out, "  {actual_len} = extractvalue {{ptr, i64}} {field_val}, 1").unwrap();
+        let lit_global = self.fresh_global("req_expected");
+        let escaped = llvm_escape_bytes(expected.as_bytes());
+        writeln!(self.string_globals, "{lit_global} = private unnamed_addr constant [{} x i8] c\"{escaped}\"", expected.len()).unwrap();
+        let eq = self.fresh_reg("req_eq");
+        writeln!(
+            self.out,
+            "  {eq} = call i32 @nir_str_eq(ptr {actual_ptr}, i64 {actual_len}, ptr {lit_global}, i64 {})",
+            expected.len()
+        )
+        .unwrap();
+        let authorized = self.fresh_reg("req_authorized");
+        writeln!(self.out, "  {authorized} = icmp ne i32 {eq}, 0").unwrap();
+        Ok(authorized)
+    }
+
+    /// The zero value for a masked field's own type, as an operand ready
+    /// to `store` — a bare literal for a true scalar, or a couple of
+    /// `insertvalue` instructions (returning a fresh SSA register) for
+    /// the two-word non-aggregate shapes (`str`, `dec128`). Never reached
+    /// for an aggregate or affine type — `typeck.rs`'s
+    /// `MaskRequiresNeedsScalarField` already rejects those.
+    fn emit_zero_value(&mut self, ty: &Ty) -> Result<String, CodegenError> {
+        let llty = self.llvm_ty(ty)?;
+        Ok(match llty.as_str() {
+            "i1" => "false".to_string(),
+            "double" => llvm_f64_literal(0.0),
+            "ptr" => "null".to_string(),
+            "{ptr, i64}" => {
+                let partial = self.fresh_reg("mask_zero_str");
+                writeln!(self.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr null, 0").unwrap();
+                let full = self.fresh_reg("mask_zero_str");
+                writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 0, 1").unwrap();
+                full
+            }
+            "{i64, i64}" => {
+                let partial = self.fresh_reg("mask_zero_dec");
+                writeln!(self.out, "  {partial} = insertvalue {{i64, i64}} undef, i64 0, 0").unwrap();
+                let full = self.fresh_reg("mask_zero_dec");
+                writeln!(self.out, "  {full} = insertvalue {{i64, i64}} {partial}, i64 0, 1").unwrap();
+                full
+            }
+            _ => "0".to_string(), // every remaining case is a plain integer width
+        })
+    }
+
     /// The array-bounds analog of `guard_in_range` — checks `0 <= idx <
     /// dim` (same two-sided AND-combine shape), elided when `span` is
     /// already covered by `SmtReport::proven_index_bounds`. That set was
@@ -2478,6 +3040,13 @@ impl Codegen<'_> {
         let fail = self.fresh_label("idx_trap");
         writeln!(self.out, "  br i1 {ok}, label %{pass}, label %{fail}").unwrap();
         writeln!(self.out, "{fail}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{pass}:").unwrap();
@@ -2628,13 +3197,50 @@ impl Codegen<'_> {
                 // need to know it came from an assignment specifically.
                 Ok(val)
             }
-            Expr::Spawn(_, _, _)
-            | Expr::Acquire(_, _, _)
-            | Expr::Join(_, _)
-            | Expr::Chan(_)
-            | Expr::SpawnSandbox(_, _, _)
-            | Expr::Transact { .. } => {
+            Expr::Acquire(_, _, _) | Expr::SpawnSandbox(_, _, _) | Expr::Transact { .. } => {
                 unreachable!("check_supported already rejected this program")
+            }
+            // `chan`'s own construction — one opaque `i64` handle,
+            // identical for every payload type `T` (`llvm_ty`'s own
+            // `Ty::Channel` arm), so there's nothing here that needs to
+            // know what `T` is.
+            Expr::Chan(_span) => {
+                let handle = self.fresh_reg("chan_new");
+                writeln!(self.out, "  {handle} = call i64 @nir_chan_new()").unwrap();
+                Ok(handle)
+            }
+            // `spawn name(args)` — see `runtime-kernels/src/lib.rs`'s
+            // "chan/spawn/join kernels" section for the real
+            // `nir_thread_spawn` mechanics this lowers to: `args` are
+            // marshaled into a heap-allocated context block, a fresh
+            // per-call-site trampoline function unpacks that block, calls
+            // `name` for real, and writes its (widened-to-one-word)
+            // result back into a kernel-owned slot the eventual `join`
+            // reads. `typeck.rs::infer_spawn` already proved `args` type-
+            // check exactly like a call to `name` and rejected spawning a
+            // builtin — this only adds the narrower, disclosed-here
+            // restriction that every parameter and the return type must
+            // be word-sized (no `str`/`dec128`/struct/enum/Vector/Matrix
+            // yet — `is_word_sized`'s own doc comment).
+            Expr::Spawn(name, args, span) => self.spawn_thread(name, args, *span, scopes),
+            // `join t` — blocks on `t`'s own dedicated `Scope` (never any
+            // other spawn's), then unpacks its one-word result back to
+            // `T`'s real shape. `typeck.rs` already proved `t: thread<T>`.
+            Expr::Join(inner, _span) => {
+                let thread_ty = self.local_ty_of(inner, scopes);
+                let ret_ty = match thread_ty {
+                    Ty::Thread(t) => *t,
+                    other => unreachable!("typeck.rs already restricted join's operand to thread, got {other:?}"),
+                };
+                let handle = self.expr(inner, scopes)?;
+                let raw = self.fresh_reg("join_raw");
+                writeln!(self.out, "  {raw} = call i64 @nir_thread_join(i64 {handle})").unwrap();
+                if ret_ty == Ty::Unit {
+                    Ok("0".to_string()) // join's own value is unit; never read
+                } else {
+                    let ret_llty = self.llvm_ty(&ret_ty)?;
+                    Ok(self.from_i64_word(&raw, &ret_llty))
+                }
             }
             // `open(path, mode)` — `path`/`mode` are both `str`, matching
             // `nir_file_open`'s `{ptr, len}` x2 signature exactly
@@ -2725,6 +3331,27 @@ impl Codegen<'_> {
                 }
                 Ok(heap_ptr)
             }
+            // `froze e` — identical construction to `Expr::Box` above
+            // (same heap layout, `Ty::Froze`'s own `llvm_ty` arm), only
+            // the resulting *type* differs (non-affine, freely copyable
+            // instead of affine) — see `Ty::Froze`'s own doc comment for
+            // why this is genuinely the same allocation, never freed.
+            Expr::Froze(inner, _) => {
+                let inner_ty = self.local_ty_of(inner, scopes);
+                let size = ty_byte_size(&inner_ty, &self.registry);
+                let heap_ptr = self.fresh_reg("froze_heap");
+                writeln!(self.out, "  {heap_ptr} = call ptr @nir_alloc(i64 {size})").unwrap();
+                if inner_ty.is_aggregate() {
+                    let src = self.expr_ptr(inner, scopes)?;
+                    writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {heap_ptr}, ptr {src}, i64 {size}, i1 false)").unwrap();
+                } else {
+                    let v = self.expr(inner, scopes)?;
+                    let llty = self.llvm_ty(&inner_ty)?;
+                    let v = if inner_ty.is_integer() { self.narrow_from_i64(&v, &inner_ty)? } else { v };
+                    writeln!(self.out, "  store {llty} {v}, ptr {heap_ptr}").unwrap();
+                }
+                Ok(heap_ptr)
+            }
             // `&x` — parser-enforced identifier-only (`typeck.rs` asserts
             // this), so codegen never has to evaluate an arbitrary
             // expression here: `x`'s own storage pointer (its `let`/param
@@ -2788,15 +3415,16 @@ impl Codegen<'_> {
                 self.guard_io_ok(&fd);
                 Ok(fd)
             }
-            // `send`/`recv` share one AST node with `chan`'s I/O — a
-            // `Ty::Channel` operand is still unsupported (Phase D2); only
-            // the `Ty::Tcp` case has real codegen here (Phase B1's whole
-            // scope). `check_expr`'s structural pre-pass can't tell the
-            // two apart (no type info), so this — the one place that can
-            // see `local_ty_of` — is where the real, type-directed
-            // rejection lives, same "type-oblivious pre-pass, real check
-            // at IR-gen time" precedent `print`'s aggregate rejection
-            // already established (module doc).
+            // `send`/`recv` share one AST node with `chan`'s I/O.
+            // `check_expr`'s structural pre-pass can't tell a `Ty::Channel`
+            // operand from a `Ty::Tcp`/`Ty::File` one (no type info), so
+            // this — the one place that can see `local_ty_of` — is where
+            // the real, type-directed dispatch lives, same "type-oblivious
+            // pre-pass, real check at IR-gen time" precedent `print`'s
+            // aggregate rejection already established (module doc). A
+            // `Ty::Channel` payload additionally has to be word-sized
+            // (`is_word_sized`'s own doc comment) — real, disclosed, still-
+            // open future work for `str`/`dec128`/struct/enum payloads.
             Expr::Send(target, value, _span) => match self.local_ty_of(target, scopes) {
                 Ty::Tcp => {
                     let fd = self.expr(target, scopes)?;
@@ -2814,7 +3442,28 @@ impl Codegen<'_> {
                     self.guard_io_ok(&n);
                     Ok("0".to_string()) // send's own value is unit; never read
                 }
-                Ty::Channel(_) => unsupported("codegen doesn't support `chan` yet — interpreter-only for now"),
+                Ty::Channel(inner) => {
+                    if !self.is_word_sized(&inner)? {
+                        return unsupported(format!(
+                            "codegen doesn't support sending a `{inner:?}` over `chan` yet — only \
+                             word-sized payloads (integers, bool, f64, box/ref, or another handle) \
+                             are supported so far, not str/dec128/struct/enum/Vector/Matrix"
+                        ));
+                    }
+                    let handle = self.expr(target, scopes)?;
+                    let inner_llty = self.llvm_ty(&inner)?;
+                    let val = self.expr(value, scopes)?;
+                    let val64 = self.to_i64_word(&val, &inner_llty);
+                    let rc = self.fresh_reg("chan_send_rc");
+                    writeln!(self.out, "  {rc} = call i64 @nir_chan_send(i64 {handle}, i64 {val64})").unwrap();
+                    // Only reachable if every receiver for `handle` was
+                    // already dropped -- never happens today (nothing
+                    // ever removes a channel's table entry, `nir_chan_new`'s
+                    // own doc comment), kept as a real, checked trap
+                    // rather than a silently-ignored return value.
+                    self.guard_io_ok(&rc);
+                    Ok("0".to_string()) // send's own value is unit; never read
+                }
                 _ => unreachable!("typeck.rs already restricted send's first operand to tcp/chan/file"),
             },
             Expr::Recv(target, _span) => match self.local_ty_of(target, scopes) {
@@ -2866,7 +3515,20 @@ impl Codegen<'_> {
                     writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 {n}, 1").unwrap();
                     Ok(full)
                 }
-                Ty::Channel(_) => unsupported("codegen doesn't support `chan` yet — interpreter-only for now"),
+                Ty::Channel(inner) => {
+                    if !self.is_word_sized(&inner)? {
+                        return unsupported(format!(
+                            "codegen doesn't support receiving a `{inner:?}` from `chan` yet — only \
+                             word-sized payloads (integers, bool, f64, box/ref, or another handle) \
+                             are supported so far, not str/dec128/struct/enum/Vector/Matrix"
+                        ));
+                    }
+                    let handle = self.expr(target, scopes)?;
+                    let raw = self.fresh_reg("chan_recv_raw");
+                    writeln!(self.out, "  {raw} = call i64 @nir_chan_recv(i64 {handle})").unwrap();
+                    let inner_llty = self.llvm_ty(&inner)?;
+                    Ok(self.from_i64_word(&raw, &inner_llty))
+                }
                 _ => unreachable!("typeck.rs already restricted recv's operand to tcp/chan/file"),
             },
             // `stop` shares one AST node across `sandbox`/`tcp`/
@@ -4114,6 +4776,9 @@ impl Codegen<'_> {
         {
             return self.call_builtin_agg(name, args, scopes);
         }
+        if name == "check_role" {
+            return self.emit_check_role(args, scopes);
+        }
         let sig_params = self.sigs.get(name).expect("typeck.rs already resolved this call").params.clone();
         let sig_ret = self.sigs.get(name).expect("typeck.rs already resolved this call").ret.clone();
         let arg_vals = self.call_args(args, &sig_params, scopes)?;
@@ -4124,6 +4789,90 @@ impl Codegen<'_> {
         let mut all_args = vec![format!("ptr {dest}")];
         all_args.extend(arg_vals);
         writeln!(self.out, "  call void @{name}({})", all_args.join(", ")).unwrap();
+        Ok(dest)
+    }
+
+    /// `check_role(identity, role) -> Result(RoleView, str)` — the real
+    /// compiled implementation (`IDENTITY_BUILTINS`'s own doc comment
+    /// has the full scope/disclosure). Reads `identity.claims_json` as a
+    /// comma-separated role list (`nir_check_role`,
+    /// `runtime-kernels/src/lib.rs`) and constructs a real `Ok(RoleView(role))`
+    /// or `Err("...")` by hand — the same tag-then-payload shape
+    /// `construct_variant`'s generic path already uses, just written
+    /// directly rather than through it (no `Expr` exists for "the string
+    /// this kernel call already computed" the generic path could recurse
+    /// on).
+    fn emit_check_role(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let role_view_ty = Ty::Named("RoleView".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![role_view_ty.clone(), Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("check_role_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("check_role_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("check_role_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("check_role_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+        let role_val = self.expr(&args[1], scopes)?;
+        let role_ptr = self.fresh_reg("check_role_role_ptr");
+        writeln!(self.out, "  {role_ptr} = extractvalue {{ptr, i64}} {role_val}, 0").unwrap();
+        let role_len = self.fresh_reg("check_role_role_len");
+        writeln!(self.out, "  {role_len} = extractvalue {{ptr, i64}} {role_val}, 1").unwrap();
+
+        let found = self.fresh_reg("check_role_found");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_check_role(ptr {claims_ptr}, i64 {claims_len}, ptr {role_ptr}, i64 {role_len})"
+        )
+        .unwrap();
+        let is_found = self.fresh_reg("check_role_is_found");
+        writeln!(self.out, "  {is_found} = icmp ne i32 {found}, 0").unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("check_role_result.addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("check_role_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("check_role_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("check_role_ok");
+        let err_label = self.fresh_label("check_role_err");
+        let merge_label = self.fresh_label("check_role_merge");
+        writeln!(self.out, "  br i1 {is_found}, label %{ok_label}, label %{err_label}").unwrap();
+
+        // `Ok(RoleView(role))` — variant 0 (`ast::prelude_enums`'
+        // `Result` declaration order). `RoleView`'s own sole field is
+        // `role: str`, so its whole value *is* the same `{ptr, i64}`
+        // word pair already computed above — stored straight into the
+        // payload's first two words, no separate temp/memcpy needed.
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {role_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        // `Err("...")` — variant 1. Same "the payload's first two words
+        // are directly a `str` value" shape as `Ok` above.
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let msg_global = self.fresh_global("check_role_err_msg");
+        const MSG: &str = "role not present in identity's claims";
+        writeln!(self.string_globals, "{msg_global} = private unnamed_addr constant [{} x i8] c\"{}\"", MSG.len(), llvm_escape_bytes(MSG.as_bytes()))
+            .unwrap();
+        let msg_partial = self.fresh_reg("check_role_err_msg_partial");
+        writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
+        let msg_full = self.fresh_reg("check_role_err_msg_full");
+        writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", MSG.len()).unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
         Ok(dest)
     }
 
@@ -4294,6 +5043,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("div_ok");
         writeln!(self.out, "  br i1 {is_zero}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -4318,6 +5074,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("singular_ok");
         writeln!(self.out, "  br i1 {is_fail}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -4338,6 +5101,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("io_ok");
         writeln!(self.out, "  br i1 {is_fail}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -4357,6 +5127,13 @@ impl Codegen<'_> {
         let ok = self.fresh_label("recv_ok");
         writeln!(self.out, "  br i1 {is_fail}, label %{trap}, label %{ok}").unwrap();
         writeln!(self.out, "{trap}:").unwrap();
+        // The flight recorder (`runtime-kernels/src/kernel/mod.rs`'s own
+        // doc comment) fires here too, not just on `emit_c_main`'s normal
+        // `ret` paths -- `abort()` bypasses that entirely, and a
+        // recorder that goes silent on exactly the failures worth
+        // recording (a trap, an admission denial) would defeat the
+        // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
         writeln!(self.out, "{ok}:").unwrap();
@@ -5564,8 +6341,34 @@ impl Codegen<'_> {
         }
         writeln!(self.out, "define i32 @main() {{").unwrap();
         writeln!(self.out, "entry:").unwrap();
+        // `nfr(...)` registration — once per tracked function, before
+        // `nir_main` (the `.nir` program's own `main`) ever runs, so
+        // every `nir_nfr_call_begin`/`_end` inside it already has a real
+        // id to look up (`@nfr_id.<name>`, declared alongside the
+        // per-function global-storage loop in `emit_llvm_ir_impl`).
+        for f in &program.fns {
+            let Some(nfr) = &f.nfr else { continue };
+            let name_bytes = f.name.as_bytes();
+            let name_global = self.fresh_global("nfr_name");
+            let escaped = llvm_escape_bytes(name_bytes);
+            writeln!(self.string_globals, "{name_global} = private unnamed_addr constant [{} x i8] c\"{escaped}\"", name_bytes.len())
+                .unwrap();
+            let latency = nfr.latency_ms.unwrap_or(-1);
+            let error_rate = llvm_f64_literal(nfr.error_rate_max.unwrap_or(-1.0));
+            let throughput = nfr.throughput_min_per_sec.unwrap_or(-1);
+            let concurrency = nfr.concurrency_max.unwrap_or(-1);
+            let id_reg = self.fresh_reg("nfr_registered_id");
+            writeln!(
+                self.out,
+                "  {id_reg} = call i64 @nir_nfr_register(ptr {name_global}, i64 {}, i64 {latency}, double {error_rate}, i64 {throughput}, i64 {concurrency})",
+                name_bytes.len()
+            )
+            .unwrap();
+            writeln!(self.out, "  store i64 {id_reg}, ptr @nfr_id.{}", f.name).unwrap();
+        }
         if main_fn.ret == Ty::Unit {
             writeln!(self.out, "  call void @nir_main()").unwrap();
+            writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
             writeln!(self.out, "  ret i32 0").unwrap();
         } else if main_fn.ret == Ty::Str {
             // Same "no sensible exit code" reasoning as the aggregate
@@ -5589,6 +6392,7 @@ impl Codegen<'_> {
             let len_i32 = self.fresh_reg("main_str_len_i32");
             writeln!(self.out, "  {len_i32} = trunc i64 {len_reg} to i32").unwrap();
             writeln!(self.out, "  call i32 (ptr, ...) @printf(ptr @.str_fmt, i32 {len_i32}, ptr {ptr_reg})").unwrap();
+            writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
             writeln!(self.out, "  ret i32 0").unwrap();
         } else {
             let llty = self.llvm_ty(&main_fn.ret)?;
@@ -5628,6 +6432,7 @@ impl Codegen<'_> {
                     t
                 }
             };
+            writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
             writeln!(self.out, "  ret i32 {r32}").unwrap();
         }
         writeln!(self.out, "}}").unwrap();

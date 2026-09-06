@@ -914,6 +914,275 @@ than one TCP read. No TLS — `connect` is plaintext-only, so an `https://`
 target isn't reachable at all yet, only bare HTTP or any other
 plaintext-TCP protocol.
 
+**Sixteenth update:** `spawn`/`join`/`chan`/`send`/`recv` — the
+Eleventh/Twelfth updates' concurrency primitives are now real, compiled
+codegen, not interpreter-only. `Ty::Thread`/`Ty::Channel` both lower to a
+plain `i64` handle in `llvm_ty`, exactly like `tcp`/`file`'s own opaque
+fds — the handle itself carries nothing; everything it needs lives in a
+new `runtime-kernels` handle table. Two `runtime-kernels/src/kernel`
+modules built earlier as unwired prototypes (`mailbox`, a non-blocking-
+send/multi-consumer-receive queue; `thread_pool::Scope`, structured spawn
+tracking) are what `chan`/`spawn` actually compile to now, via five new
+`extern "C"` kernels in `lib.rs`'s "chan/spawn/join kernels" section:
+`nir_chan_new`/`nir_chan_send`/`nir_chan_recv` and `nir_thread_spawn`/
+`nir_thread_join`.
+
+*How `spawn` crosses the ABI boundary.* The kernel crate can't know
+`.nir`'s argument/return shapes (the usual cross-compilation-unit wall
+this whole backend works around, `nir_tcp_*`'s own doc comments), so
+`spawn name(args)` generates its own one-off trampoline function per call
+site: `codegen.rs`'s `spawn_thread` marshals `args` into a heap-allocated
+anonymous-struct context block, `emit_spawn_trampoline` emits a small
+`extern "C" fn(ctx, result_slot)` that unpacks that block, frees it,
+calls `name` for real, and writes its result back as one `i64` word;
+`nir_thread_spawn` just runs that trampoline on a dedicated one-job
+`Scope` and hands back a handle immediately. `join` blocks on that exact
+`Scope`, then unpacks the one-word result back to its real type
+(`double`/`ptr`/`i1` bitcast/ptrtoint/trunc as needed — plain integers
+were already carried at full `i64` width). `chan`'s payload crosses the
+same one-`i64`-word shape.
+
+*The real, disclosed narrower scope, twice over.* First: every `chan`
+payload and every `spawn` argument/return must be word-sized
+(`codegen.rs`'s `is_word_sized`) — `str`/`dec128` (two machine words) and
+any struct/enum/Vector/Matrix aren't supported yet, rejected with a
+specific `unsupported(...)` message at the exact `send`/`recv`/`spawn`
+call site that hits one, the same "type-oblivious pre-pass, real check at
+IR-gen time" pattern `print`'s own aggregate rejection already
+established. Second: Pillar 4's full promise ("every spawned thread is
+tracked by the `Scope` covering its spawning function body") isn't the
+exact mechanism here — each `spawn` gets its own dedicated one-job
+`Scope` instead of one shared per spawning function, so a `join` really
+does wait for (and only for) that one spawn. What *is* real: a `thread`
+handle a function never explicitly `join`s gets auto-joined by
+`codegen.rs`'s `emit_affine_free` at every scope-closing point (the same
+`FreeMap`-driven mechanism `box`/`tcp` already use to auto-free/auto-stop)
+— so an orphan, never-joined thread is structurally impossible in a
+well-typed program, even without the RFC prototype's own lexical-scope
+mechanism.
+
+`tests/codegen.rs`'s `threads_example_compiles_and_matches_interpreter`/
+`channels_example_compiles_and_matches_interpreter` replace the old
+"must be rejected" tests with real compile-and-run checks against
+`examples/threads.nir`/`examples/channels.nir` — both produce the same
+output as the interpreter, on real OS threads with a real cross-thread
+handoff, not simulated. `sandbox`/`stop` (docs/SANDBOXING.md) stay exactly
+as interpreter-only as before this update — a separate, larger scope not
+touched here.
+
+**Seventeenth update:** a dynamic deadlock detector — the concurrency
+architecture is now genuinely two layers, not one, and this update is
+what makes that a real combination rather than two features that
+happen to share a file. See `rfcs/0007-apm-runtime-kernel.md` §8 for
+the full writeup; this is the summary.
+
+*The two layers.* `rfcs/0006-structured-concurrency.md`'s Pillar 5 (a
+compile-time, lexical-scope-level proof that the "nested reply-
+obligation" deadlock shape can't type-check at all) is the real,
+still-deferred answer — nothing below substitutes for it. What exists
+today instead is a **runtime backstop** in `runtime-kernels/src/kernel/
+mod.rs`: `concurrency_wait_begin`/`_end` (called from `nir_thread_join`/
+`nir_chan_recv`, the Sixteenth update's own real blocking primitives)
+track how many `.nir`-level participants exist (`live`) against how
+many are simultaneously blocked in one of those two operations
+specifically — never `tcp`/`file`, which can still resolve from outside
+the process. If every live participant is blocked at once, nothing left
+could ever unblock any of them; the kernel reports which handle each
+one is stuck on and aborts, rather than hanging forever. Same technique
+Go's own runtime uses ("all goroutines are asleep - deadlock!"), same
+honest limitation: it only catches a *global* stall, not a local cycle
+between two threads while a third keeps making progress — real Pillar 5
+would catch that too, ahead of time.
+
+*A real correctness bug, caught by running the existing suite, not by
+review.* The first version counted a thread as "blocked" the instant it
+called `join`/`recv`, before checking whether the call would actually
+block — a fast-finishing `spawn` (a producer that already sent
+everything and returned) could race a slower `recv` into a false
+positive, caught immediately by `channels_example_compiles_and_matches_
+interpreter` going from printing `42` to aborting. Fixed by trying the
+non-blocking path first (`Receiver::try_recv`, a new `Scope::
+already_done`) and only ever registering a wait once that's confirmed
+empty — plus moving the "this job is no longer live" decrement to the
+point `join` itself confirms completion, not the instant the job's own
+code returns (two separately-locked counters with no ordering between
+them otherwise). `fixtures/deadlock.nir` — the real nested-reply-
+obligation shape (A sends a request and blocks on the reply; B needs
+one more answer from A, which A is no longer running any code to
+provide) — now aborts in well under a second, every time, verified
+across dozens of repeated runs of both the deadlocking and the
+non-deadlocking fixture, not asserted once and trusted.
+
+*Housekeeping, not just detection.* `thread` now has its own admission
+`Domain` (`Domain::Thread`, `NIRDOSHA_KERNEL_MAX_THREAD`) — the same
+concurrently-held ceiling `tcp`/`file` already enforce, acquired at
+`spawn` and released at the `join` that closes it. `chan` deliberately
+has none (never released, so a held-ceiling doesn't fit its lifecycle).
+
+*Why not real prevention.* Considered and rejected, honestly: true
+prevention (refuse the one request that would create a cycle, before
+blocking) needs a well-defined resource *owner* to check against, the
+way a mutex has one. `chan` doesn't — any of potentially many senders
+could satisfy a `recv`, so there's no wait-for edge to test ahead of
+time. That gap is exactly why Pillar 5's real answer is a type-level
+constraint (levels), not a runtime graph. `join` has nothing to prevent
+in the first place — affine `thread` handles already form a DAG by
+construction, so a join-cycle can't exist in a well-typed program.
+`db`/`mq` are explicitly out of the detector's scope even once they
+compile, for the same reason `tcp`/`file` are: both can block on a
+genuinely external system that might resolve from outside the process
+at any time, and counting them as "unblockable except by another
+participant" would reopen exactly the false-positive class this update
+just closed.
+
+**Eighteenth update:** RFC 0006 Pillar 1, in two parts — `Iso<T>` closed
+out (no code: `box`'s existing affine semantics already are Iso, stated
+directly in the RFC itself) and `Froze<T>` built for real. `froze e`
+heap-allocates exactly like `box e` (same `nir_alloc`, same `llvm_ty`
+"ptr" shape), but produces a deliberately non-affine `Ty::Froze` handle
+— freely copyable, safe to hand to any number of concurrent
+computations at once, since nothing can ever write through one (this
+language has no deref-*write* form at all yet, for any pointer type, so
+"immutable" costs nothing extra to enforce). `*f`'s read is restricted
+exactly like `&`'s own deref: legal only when the frozen content isn't
+itself affine, reusing `CannotMoveOutOfReference` verbatim rather than
+inventing a second error for the identical hazard (extracting affine
+content by value out from under a handle that may have other live
+copies would silently duplicate ownership).
+
+`fixtures/froze.nir` is the real proof, not a simulated one: `froze 21`
+constructed once in `main`, the *same* handle passed to two separate
+`spawn`s, each of the two real OS threads reading it via `*f` — both
+Pillar 1's actual "shared, immutable, any number of threads" claim and
+the fact that it isn't affine (a `box` used the same way would be a
+compile-time `UseAfterMove`), verified by actually compiling and
+running it, not just typechecking it.
+
+**A real, pre-existing bug found while wiring this in, unrelated to
+`froze` itself**: `Ty::is_integer()` is written as an *inverted* list
+("true unless it's one of these") — a shape that silently accepts any
+new `Ty` variant nobody remembers to add to the exclusion list, unlike
+every exhaustive `match` elsewhere in this codebase (which the compiler
+itself catches immediately, per this update's own experience adding
+`Ty::Froze`/`Expr::Froze` and fixing eleven non-exhaustive-match errors
+across `codegen.rs`/`typeck.rs`/`ownership.rs`/`refine.rs`/`smt.rs`/
+`effects.rs`/`contract_check.rs` in one pass). Found immediately by
+actually compiling `fixtures/froze.nir` (`sext ptr to i64`, an invalid
+LLVM cast clang rejected outright) rather than by review — fixed by
+adding `Ty::Froze` to the exclusion list. `Ty::Handle(_)` is missing
+from the same list too, a real, separate, pre-existing gap spotted
+while fixing this one but not touched here (out of scope for this
+update, disclosed rather than silently left for the next person to
+rediscover the hard way).
+
+**Real, disclosed narrower scope than "Arc": leaked, not refcounted.**
+`Froze` values are never in `ownership.rs`'s `FreeMap` (non-affine, so
+never tracked for a last-use free), the same simplification `Ty::Channel`
+handles already make. True `Arc`-style refcounting (retain on every
+copy, release at every scope exit) is real, larger follow-up work — it
+needs `ownership.rs` to track a kind of "still-live copies" fact that
+doesn't exist for *any* type in this language yet, affine or not. Named
+here as the honest next step, not attempted in this pass. `Lend<T>`
+(Pillar 1's third capability, "a reference bound to the owner's scope,
+held by another thread only while the owner is suspended at a defined
+rendezvous") is untouched by this update — RFC 0006's own critic
+section already discloses it was never implemented or tested even in
+the Rust evidence prototype, so there is no existing design to port;
+building it means designing the mechanism itself.
+
+**Nineteenth update:** the compiled RNG race the Eighteenth update's own
+docs pass surfaced (`rand_seed`/`rand_f64`/`rand_gaussian` sharing one
+process-wide `static AtomicU64` stream, unsafe against two threads
+calling it at once now that `spawn` actually compiles) is fixed, not
+just documented. `runtime-kernels/src/lib.rs` now keeps the stream in a
+`thread_local!` `Cell` — no atomics needed at all, since nothing outside
+the owning thread ever touches it — which closes the race and, as a
+free consequence of the fix rather than a second change, restores the
+interpreter's own documented "a spawned function gets its own
+independent, unseeded RNG by default" behavior exactly: a freshly
+spawned thread's stream starts unseeded regardless of whether the
+spawning thread already seeded its own. Verified by two new compiled-
+and-run tests (`crates/compiler/tests/codegen.rs`), not just reasoned
+about: seeding and drawing from a spawned thread's own stream leaves the
+spawning thread's own sequence byte-for-byte unchanged, and a spawned
+thread that never seeds its own stream still aborts on `rand_f64`, same
+as `main` already does.
+
+**Twentieth update:** three additions, all compiled (not interpreter-
+only) from day one, that together make identity-aware authorization a
+real, end-to-end compiled feature instead of a design sketch: `nfr(...)`
+(non-functional requirements as a first-class fn annotation),
+field-level `requires(role/claim: ...)` masking, and `check_role`
+compiled for real. `docs/LANGUAGE.md` §6e/§6f have the full writeup;
+this is the summary, plus what each one actually depended on landing
+first.
+
+*`nfr(...)` — `docs/LANGUAGE.md` §6f.* `nfr(latency_ms:`,
+`error_rate_max:`, `throughput_min_per_sec:`, `concurrency_max:` (all
+optional) on a `fn` wires `runtime-kernels::kernel::nfr`'s tracking in
+automatically at every call — `codegen.rs` emits `nir_nfr_call_begin`/
+`nir_nfr_call_end` around every return path, no code at any call site.
+A crossed threshold escalates via an async, fire-and-forget HTTP POST
+to `NIRDOSHA_OBSERVABILITY_URL` (unset = never escalates, not an
+error), on its own dedicated `ThreadPool` so a slow/unreachable
+endpoint can't block a caller. Real, disclosed simplifications, not
+hidden ones: latency is a running max, not a p99 histogram; error rate
+and throughput are cumulative since the function's first call, not
+windowed; concurrency is the exact live count. Verified against a real
+Python socket server receiving a correctly-shaped JSON POST, not just
+unit-tested in isolation.
+
+*`check_role` compiled for real.* Previously true of the whole identity
+surface (`docs/LANGUAGE.md` §10's table): interpreter-only, and after
+this session's earlier interpreter removal, `check_role` had *zero*
+working execution path anywhere in the codebase. `runtime-kernels`
+gains `nir_check_role`, reading a `VerifiedIdentity`'s `claims_json` as
+a plain comma-separated role list (exact match per entry) — a
+disclosed simplification, not real JSON parsing, since no JSON parser
+is linked into `runtime-kernels`; this deliberately keeps
+`oidc_validate_token` (real JWT/JWKS crypto) out of scope as a separate,
+larger, still-interpreter-only gap. `codegen.rs::emit_check_role`
+hand-constructs the `Ok(RoleView(role))`/`Err(...)` `Result` (no `Expr`
+node exists to recurse through the generic `construct()` path for a
+kernel-computed boolean, so it mirrors `construct_variant`'s tag+payload
+shape directly). `VerifiedIdentity` was already freely constructible
+(only `RoleView`/`ClaimView` are blocked from direct construction,
+`TypeErrorKind::UnforgeableProofConstruction`) — that asymmetry is what
+made this a scoped, tractable fix rather than a change to the trust
+model itself: a genuine, unforgeable `RoleView` is now obtainable in a
+compiled binary, even though `acquire` (the mechanism that would
+*consume* one to gate a first-class function, §6a) still has zero
+codegen.
+
+*Field-level `requires(...)` masking — `docs/LANGUAGE.md` §6e.* A
+struct field's own `requires(role: "...")`/`requires(claim: "...", "...")`
+(reusing `ast::Requirement`, the exact vocabulary §6a's function-level
+`requires(...)` already uses — one enum, two attachment points) is
+checked, per masked field, at every point a value of that struct type
+is returned: present and matching a `RoleView`/`ClaimView` *parameter*
+of the *returning function* → the real value passes through; absent or
+mismatched → zeroed to the field's own zero value. Fail-closed by
+construction, not by a runtime check that could be forgotten: no
+`RoleView` parameter on the function at all is exactly as safe as one
+present with the wrong role, since both take the "zero it" branch.
+Restricted to scalar fields (`TypeErrorKind::MaskRequiresNeedsScalarField`)
+— an aggregate or affine field has no well-defined zero value, and
+masking never performs a free/move an affine field would need. This is
+deliberately *not* `acquire`/`requires(...)`-on-a-function's mechanism
+reused: there's no gate on `get_employee`'s callability here, every
+caller can call it — they just don't all see the same struct back. The
+three pieces compose directly: `check_role(identity, role)` → `match`
+→ a real `RoleView` in the `Ok` arm → passed straight into a
+function returning a masked struct, with no `acquire` anywhere in that
+chain. `crates/compiler/tests/codegen.rs`'s
+`check_role_produces_real_role_view_that_drives_field_masking` is the
+real compiled-and-run proof: an admin `VerifiedIdentity` sees a real
+`150000.0` salary back, a guest identity's own genuine `RoleView` (role
+`"guest"`, not `"admin"`) sees it zeroed while an unmasked `name` field
+passes through untouched, and a role the identity's `claims_json`
+doesn't carry at all fails at `check_role` itself, before a `RoleView`
+is ever produced.
+
 ---
 
 
@@ -983,7 +1252,7 @@ test result: ok. 146 passed; 0 failed
 | Row | Status |
 |---|---|
 | 1 — No GC, no `free()` | **Started, real content.** `box`/`*`, shared borrows (`&`), and a static move-checker (`ownership.rs`) — see the "Second" and "Third" update sections above for what's actually proved and what still isn't (no `&mut`, no `Drop` hook, no place expressions). Regions/bulk-arena allocation is still not started. |
-| 2 — No data races | **Started, first implementation.** `spawn`/`join`, `thread <T>` (real OS threads under the hood — see the "Eleventh update" for the Java-virtual-threads framing) and `chan`/`send`/`recv` (see the "Twelfth update"). Race-freedom for both comes entirely from `ownership.rs` reusing its existing move-checker — `spawn`'s arguments and `join`'s handle for threads, `send`'s payload for channels — no new concurrency-specific safety logic exists either time. `codegen.rs` doesn't support any of it yet (interpreter-only, like `box`/`&` before their own codegen work). |
+| 2 — No data races | **Started, first implementation, now compiled too.** `spawn`/`join`, `thread <T>` (real OS threads under the hood — see the "Eleventh update" for the Java-virtual-threads framing) and `chan`/`send`/`recv` (see the "Twelfth update"). Race-freedom for both comes entirely from `ownership.rs` reusing its existing move-checker — `spawn`'s arguments and `join`'s handle for threads, `send`'s payload for channels — no new concurrency-specific safety logic exists either time. `codegen.rs` compiles all of it now for word-sized payloads/arguments/results (see the "Sixteenth update") — `str`/`dec128`/struct/enum payloads are still interpreter-only. |
 | 3 — No deadlocks | **Started, narrower than proof-by-construction — see the "Twelfth update" for the honest scope.** docs/goal.md's own row 3 design says exactly this: default to async messages, keep shared-memory locks opt-in and gated. Channels are now that default (no `mutex`/`lock` primitive exists in the language, so the classic "two locks in opposite order" failure docs/goal.md cites for Rust is genuinely not expressible) — but `recv` is a real blocking wait, so a well-typed Nirdosha program can still hang forever on a `recv` nobody `send`s to. That's a liveness bug, not the aliased-lock-order failure mode row 3's Pony comparison is about, but it means the *proof-by-construction* claim isn't fully earned yet — true Pony-style non-blocking mailbox dispatch would need actors/behaviors, not yet built. `thread <T>` handles being affine (forming a DAG by construction) still holds on its own, narrower terms. |
 | 4 — No int/buffer overflow | **Started, and now backed by real SMT.** `Ty::in_range` + `check_ty` still catch everything dynamically (Tier 2, unchanged). Two static Tier-1 passes exist: `crates/compiler/src/refine.rs` (interval analysis, built when this environment had no Z3) and `crates/compiler/src/smt.rs` (real Z3 4.16, once the user installed it — see the "Fifth update" section below), the latter now the primary checker since it's strictly more capable. 68/68 tests pass, including a flagship test that runs the *same* program through both passes and confirms SMT proves something interval analysis structurally cannot (condition-based narrowing). Not wired to elide the interpreter's runtime check — see below for why. |
 | 5 — Native speed | **Started, real native binaries.** `crates/compiler/src/codegen.rs` emits textual LLVM IR and shells out to the system `clang` (LLVM 22) — see the "Sixth update" section below. Scoped to signed integers/bool/unit, no `box`/`&`/`*` yet. 78/78 tests pass; three genuine bugs were found and fixed by actually running compiled binaries, not by review — see below. |
@@ -1070,8 +1339,12 @@ Three candidates, none blocking the others:
   recursion, just on its own OS thread, so the note remains aspirational
   until an M:N scheduler is actually built). The non-blocking mailbox
   dispatch above would likely be built on the same scheduler.
-- **`codegen.rs` support for `spawn`/`join`/`chan`/`send`/`recv`** —
-  currently interpreter-only; needs an ABI decision for what a native
-  `thread T`/`chan T` handle even is (an OS thread/queue handle again,
-  or already the lightweight scheduler's unit) before it's worth
-  building.
+- ~~**`codegen.rs` support for `spawn`/`join`/`chan`/`send`/`recv`**~~ —
+  **done, see the Sixteenth update.** The ABI decision this bullet was
+  waiting on landed as the simplest one available: a `thread`/`chan`
+  handle is a plain `i64` into a `runtime-kernels`-owned table, exactly
+  like `tcp`/`file` already are, backed by real OS threads
+  (`kernel::thread_pool::Scope`) — not the lightweight-scheduler unit
+  the M:N bullet above still describes as aspirational. Still
+  interpreter-only: `str`/`dec128`/struct/enum payloads (word-sized
+  scalars only compile today).
