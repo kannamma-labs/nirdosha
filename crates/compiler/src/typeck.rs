@@ -479,6 +479,21 @@ pub enum TypeErrorKind {
     /// must stay a plain `str` scalar for WAL durability
     /// (`Ty::is_transact_scalar`), so `check_fn` skips this check for it.
     StrInFnSignature { fn_name: String, param_name: Option<String> },
+    /// `nfr(error_rate_max: ...)` on a function that doesn't return
+    /// `Result(_, _)` — `error_rate_max` needs a way to tell a failed
+    /// call from a successful one, and `Result`'s own `Err` variant is
+    /// the only such signal this language has (`ast::NfrSpec`'s own doc
+    /// comment). Caught here rather than silently never firing.
+    NfrErrorRateNeedsResultReturn { fn_name: String, found: Ty },
+    /// `requires(role: ...)` on a struct field whose type isn't a plain,
+    /// freely-copyable scalar — masking replaces the field with `ty`'s
+    /// zero value (`ast::Field::mask_requires`'s own doc comment), which
+    /// has no sound meaning for an affine type (zeroing a `box`/`thread`/
+    /// `tcp` handle would silently leak or double-close whatever it
+    /// pointed to) or an aggregate one (a nested struct/enum/`Vector`/
+    /// `Matrix` needs a much bigger design question about what "masked"
+    /// means recursively, not attempted here).
+    MaskRequiresNeedsScalarField { struct_name: String, field: String, found: Ty },
     /// `__workflow_advance`/`__workflow_link_advance`'s `event` argument
     /// wasn't a value of some declared `enum` type — every
     /// `workflow_lower.rs`-synthesized `<Workflow>Event` is one, but this
@@ -936,6 +951,19 @@ impl std::fmt::Display for TypeError {
                  it: `struct Text {{ value: str }}`, change the signature to `-> Text`, and return \
                  `Text(the_string)` instead of the bare `str`"
             ),
+            TypeErrorKind::NfrErrorRateNeedsResultReturn { fn_name, found } => write!(
+                f,
+                "{line}:{col}: `fn {fn_name}` declares `nfr(error_rate_max: ...)` but returns {found:?}, \
+                 not `Result(_, _)` — `error_rate_max` needs a way to tell a failed call from a \
+                 successful one, and a `Result`'s own `Err` variant is the only such signal this \
+                 language has"
+            ),
+            TypeErrorKind::MaskRequiresNeedsScalarField { struct_name, field, found } => write!(
+                f,
+                "{line}:{col}: `{struct_name}.{field}` declares a masking `requires(...)` but its type \
+                 is {found:?}, not a plain scalar — masking only knows how to replace a field with a \
+                 zero value, which isn't well-defined for an affine handle or a nested aggregate"
+            ),
             TypeErrorKind::WorkflowEventArgMustBeEnum { fn_name, found } => write!(
                 f,
                 "{line}:{col}: `{fn_name}`'s `event` argument must be a workflow event enum value, found {found:?}"
@@ -1361,6 +1389,16 @@ fn typecheck_impl(
             if !field_names.insert(field.name.as_str()) {
                 c.error(
                     TypeErrorKind::DuplicateField { struct_name: s.name.clone(), field: field.name.clone() },
+                    s.span,
+                );
+            }
+            if field.mask_requires.is_some() && (field.ty.is_aggregate() || c.registry.is_affine(&field.ty)) {
+                c.error(
+                    TypeErrorKind::MaskRequiresNeedsScalarField {
+                        struct_name: s.name.clone(),
+                        field: field.name.clone(),
+                        found: field.ty.clone(),
+                    },
                     s.span,
                 );
             }
@@ -2253,6 +2291,13 @@ impl<'a> Checker<'a> {
         }
         if f.ret.contains_str() {
             self.error(TypeErrorKind::StrInFnSignature { fn_name: f.name.clone(), param_name: None }, f.span);
+        }
+
+        if let Some(nfr) = &f.nfr
+            && nfr.error_rate_max.is_some()
+            && !matches!(&f.ret, Ty::Named(name, _) if name == "Result")
+        {
+            self.error(TypeErrorKind::NfrErrorRateNeedsResultReturn { fn_name: f.name.clone(), found: f.ret.clone() }, f.span);
         }
 
         let mut scopes = Scopes::new();
