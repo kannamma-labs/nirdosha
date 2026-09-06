@@ -98,6 +98,14 @@ fn unsupported<T>(msg: impl Into<String>) -> Result<T, CodegenError> {
 /// resolved bytes (the lexer/parser already turned `\n`/`\t`/etc. into
 /// real bytes — see `Expr::Str`'s doc) can contain anything, not just the
 /// hand-picked printable text `@.int_fmt`/`@.float_fmt` use.
+/// LLVM's own hex-float literal format for a `double` constant operand —
+/// factored out of `Expr::Float`'s own codegen (see that arm's doc
+/// comment for why this exact bit-pattern format, not a plain decimal
+/// literal, is the only representation guaranteed to round-trip).
+fn llvm_f64_literal(f: f64) -> String {
+    format!("0x{:016X}", f.to_bits())
+}
+
 fn llvm_escape_bytes(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for &b in bytes {
@@ -206,6 +214,28 @@ const RAND_BUILTINS: &[&str] = &["rand_seed", "rand_f64", "rand_gaussian"];
 /// someone picks this convention question up; cleanly rejected in the
 /// meantime, same as before.
 const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "dec_scale"];
+
+/// `check_role` — the first compiled builtin to actually construct a
+/// real `Result(_, _)` value as its return (`DEC128_BUILTINS`'s own
+/// "not yet included: `dec_from_str`" doc comment names exactly this
+/// gap; this is that convention, established for real). Deliberately
+/// scoped narrower than the interpreter's own `check_role`, which reads
+/// `identity.claims_json` as real JSON — this reads it as a plain
+/// comma-separated role list instead (`nir_check_role`,
+/// `runtime-kernels/src/lib.rs`), since a real JSON parser isn't linked
+/// into this crate. `oidc_validate_token` (the only way to produce a
+/// `VerifiedIdentity` *with* a real, cryptographically-verified
+/// `claims_json`) stays interpreter-only — `VerifiedIdentity` itself is
+/// freely constructible either way (`typeck.rs`'s own
+/// `infer_struct_construction`, unlike `RoleView`/`ClaimView`), so this
+/// compiles the real *authorization* pipeline (`check_role` producing an
+/// unforgeable `RoleView`, consumed by field masking) end to end, while
+/// *authentication* (verifying the identity claims themselves came from
+/// a real signed token) remains the disclosed, separate, larger gap
+/// it already was. `extract_claim`/`check_role_path`/
+/// `extract_claim_path` are not included — real, narrower follow-up
+/// work, not attempted here.
+const IDENTITY_BUILTINS: &[&str] = &["check_role"];
 
 /// WGS84 ellipsoid constants — mirrors `interpreter.rs`'s own
 /// `WGS84_A`/`WGS84_F`/`wgs84_e2()` exactly (same values, same derived
@@ -885,6 +915,7 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
                 && !STR_CRYPTO_BUILTINS.contains(&name.as_str())
                 && !RAND_BUILTINS.contains(&name.as_str())
                 && !DEC128_BUILTINS.contains(&name.as_str())
+                && !IDENTITY_BUILTINS.contains(&name.as_str())
             {
                 // Every builtin not in `PHASE4_BUILTINS` (unrolled IR),
                 // `PHASE5_BUILTINS`/`STR_CRYPTO_BUILTINS` (linked runtime
@@ -1147,6 +1178,31 @@ struct Codegen<'a> {
     /// `ret <ty> <val>`. `None` for every scalar-returning function
     /// (including `unit`), which still just `ret`s normally.
     current_fn_sret: Option<String>,
+    /// `Some(spec)` while generating a function that declared `nfr(...)`
+    /// — `Stmt::Return`'s own arms (and `function()`'s implicit fall-
+    /// off-the-end path) consult `error_rate_max.is_some()` to decide
+    /// whether a `Result`-tagged return value's `Err`-ness needs
+    /// computing at all. `None` (the common case) means every return
+    /// site's `nir_nfr_call_end` (if any — see the next two fields) just
+    /// passes a literal `0`.
+    current_fn_nfr: Option<NfrSpec>,
+    /// The two per-invocation SSA registers `nir_nfr_call_begin`
+    /// produced at function entry — `Some((id, start))` exactly when
+    /// `current_fn_nfr` is `Some`, threaded separately (not recomputed
+    /// from `current_fn_nfr`) since they're register *names*, not
+    /// values, valid only within this one function's own IR.
+    current_fn_nfr_regs: Option<(String, String)>,
+    /// The name of this function's own first `RoleView`-typed parameter,
+    /// if it has one — `emit_field_masking`'s only source of "does the
+    /// caller have proof of the role a returned field's `requires(role:
+    /// ...)` demands." `None` means every role-masked field this
+    /// function returns is unconditionally masked (fail-closed: no
+    /// proof present is treated the same as proof of the wrong role,
+    /// never as "trust it anyway").
+    current_fn_role_view_param: Option<String>,
+    /// Same as `current_fn_role_view_param`, for `ClaimView` and
+    /// `requires(claim: ...)`.
+    current_fn_claim_view_param: Option<String>,
     /// Once a block's been given a terminator (`br`/`ret`), any further
     /// statements in the same source block are unreachable — this stops
     /// codegen from emitting a second terminator into an already-closed
@@ -1262,6 +1318,10 @@ fn emit_llvm_ir_impl<'a>(
             current_fn_ret: Ty::Unit,
             current_fn_name: String::new(),
             current_fn_sret: None,
+            current_fn_nfr: None,
+            current_fn_nfr_regs: None,
+            current_fn_role_view_param: None,
+            current_fn_claim_view_param: None,
             terminated: false,
             audited: false,
             registry,
@@ -1370,6 +1430,18 @@ fn emit_llvm_ir_impl<'a>(
     writeln!(cg.out, "declare i64 @nir_chan_recv(i64)").unwrap();
     writeln!(cg.out, "declare i64 @nir_thread_spawn(ptr, ptr)").unwrap();
     writeln!(cg.out, "declare i64 @nir_thread_join(i64)").unwrap();
+    // `nfr(...)`'s kernels (`runtime-kernels/src/lib.rs`'s "nfr kernels"
+    // section) — `nir_nfr_register` runs once per tracked function, in
+    // `emit_c_main`'s own prologue (`declare_nfr_globals`/the
+    // registration loop there); `nir_nfr_call_begin`/`_end` bracket
+    // every call to it (`Codegen::function`, `Stmt::Return`'s own arms).
+    writeln!(cg.out, "declare i64 @nir_nfr_register(ptr, i64, i64, double, i64, i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_nfr_call_begin(i64)").unwrap();
+    writeln!(cg.out, "declare void @nir_nfr_call_end(i64, i64, i32)").unwrap();
+    // `check_role`'s real implementation (`IDENTITY_BUILTINS`'s own doc
+    // comment) — `1` if `role` appears in `claims`'s comma-separated
+    // list, `0` otherwise.
+    writeln!(cg.out, "declare i32 @nir_check_role(ptr, i64, ptr, i64)").unwrap();
     // The APM kernel's flight recorder (`runtime-kernels/src/kernel/
     // mod.rs`'s own doc comment) — declared unconditionally like every
     // other kernel here, called exactly once by `emit_c_main` on every
@@ -1412,6 +1484,17 @@ fn emit_llvm_ir_impl<'a>(
         writeln!(cg.out, "declare {ret_llty} @{}({})", np.name, param_lltys.join(", ")).unwrap();
     }
     writeln!(cg.out).unwrap();
+
+    // One process-wide storage slot per `nfr(...)`-tracked function,
+    // populated once by `emit_c_main`'s own prologue (`nir_nfr_register`)
+    // before `nir_main` runs, then read by that same function's own
+    // entry prologue (`Codegen::function`) on every call — see this
+    // module's "nfr kernels" declares above for the kernel side.
+    for f in &program.fns {
+        if f.nfr.is_some() {
+            writeln!(cg.out, "@nfr_id.{} = global i64 0", f.name).unwrap();
+        }
+    }
 
     for f in &program.fns {
         cg.function(f)?;
@@ -1914,6 +1997,32 @@ impl Codegen<'_> {
             }
         }
 
+        // Field masking's only source of "who's calling" — the first
+        // `RoleView`/`ClaimView`-typed parameter, if either exists (this
+        // function's own doc comment on `current_fn_role_view_param`).
+        // A plain linear scan of the signature, not a scope lookup: this
+        // runs once per function, at codegen time, over a handful of
+        // params, not on any hot path.
+        self.current_fn_role_view_param =
+            f.params.iter().find(|p| matches!(&p.ty, Ty::Named(n, args) if n == "RoleView" && args.is_empty())).map(|p| p.name.clone());
+        self.current_fn_claim_view_param =
+            f.params.iter().find(|p| matches!(&p.ty, Ty::Named(n, args) if n == "ClaimView" && args.is_empty())).map(|p| p.name.clone());
+
+        // `nfr(...)` entry instrumentation — see `current_fn_nfr`/
+        // `current_fn_nfr_regs`'s own doc comments and `emit_nfr_call_end`
+        // for the matching exit side, emitted at every one of this
+        // function's own return points.
+        self.current_fn_nfr = f.nfr.clone();
+        self.current_fn_nfr_regs = if f.nfr.is_some() {
+            let id_reg = self.fresh_reg("nfr_id");
+            writeln!(self.out, "  {id_reg} = load i64, ptr @nfr_id.{}", f.name).unwrap();
+            let start_reg = self.fresh_reg("nfr_start");
+            writeln!(self.out, "  {start_reg} = call i64 @nir_nfr_call_begin(i64 {id_reg})").unwrap();
+            Some((id_reg, start_reg))
+        } else {
+            None
+        };
+
         self.stmts(&f.body.stmts, &mut scopes)?;
 
         // A function whose body definitely returns on every path
@@ -1927,6 +2036,11 @@ impl Codegen<'_> {
                 self.emit_frees_for_names(&names, &scopes);
             }
             if f.ret == Ty::Unit {
+                // Only reachable for `unit` (typeck's definite-return
+                // analysis rules out every other return type falling
+                // through) — never `Result`-typed, so `was_err` is
+                // unconditionally `"0"` here, no tag inspection needed.
+                self.emit_nfr_call_end("0");
                 writeln!(self.out, "  ret void").unwrap();
             } else {
                 // typeck.rs's definite-return analysis already rules
@@ -2004,6 +2118,15 @@ impl Codegen<'_> {
                         let ret_ty = self.current_fn_ret.clone();
                         if ret_ty.is_aggregate() {
                             let src = self.expr_ptr_expected(e, &ret_ty, scopes)?;
+                            // Masks in place, before the value is copied
+                            // out to the caller's own `sret` slot below —
+                            // see `emit_field_masking`'s own doc comment.
+                            // Safe to mutate `src` even when it's an
+                            // existing local's own storage (e.g. `return
+                            // e` for some `let e: Employee = ...`): this
+                            // is a `return`, so nothing in this function
+                            // reads that binding again either way.
+                            self.emit_field_masking(&src, &ret_ty, scopes)?;
                             let sret = self
                                 .current_fn_sret
                                 .clone()
@@ -2011,6 +2134,32 @@ impl Codegen<'_> {
                             let bytes = agg_byte_size_operand(&ret_ty, &self.registry);
                             writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {sret}, ptr {src}, i64 {bytes}, i1 false)").unwrap();
                             self.emit_frees_for_names(&free_names, scopes);
+                            // `nfr(error_rate_max: ...)` needs to know
+                            // whether this specific return was `Err` —
+                            // `typeck.rs` already proved `ret_ty` is
+                            // `Result(_, _)` whenever that field is
+                            // declared (`NfrErrorRateNeedsResultReturn`),
+                            // so the tag word at offset 0 (`Ok` = 0,
+                            // `Err` = 1, `ast::prelude_enums`' own
+                            // declaration order) is exactly the flag
+                            // needed. Every other `nfr(...)` field (or no
+                            // `nfr(...)` at all) skips this entirely — no
+                            // reason to inspect a tag nothing will check.
+                            let was_err = if self.current_fn_nfr.as_ref().is_some_and(|n| n.error_rate_max.is_some()) {
+                                let agg_llty = self.llvm_ty(&ret_ty)?;
+                                let tag_ptr = self.fresh_reg("nfr_tag_ptr");
+                                writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {agg_llty}, ptr {src}, i32 0, i32 0").unwrap();
+                                let tag = self.fresh_reg("nfr_tag");
+                                writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+                                let is_err = self.fresh_reg("nfr_is_err");
+                                writeln!(self.out, "  {is_err} = icmp ne i64 {tag}, 0").unwrap();
+                                let is_err_i32 = self.fresh_reg("nfr_is_err_i32");
+                                writeln!(self.out, "  {is_err_i32} = zext i1 {is_err} to i32").unwrap();
+                                is_err_i32
+                            } else {
+                                "0".to_string()
+                            };
+                            self.emit_nfr_call_end(&was_err);
                             writeln!(self.out, "  ret void").unwrap();
                         } else {
                             let val = self.expr(e, scopes)?;
@@ -2024,12 +2173,17 @@ impl Codegen<'_> {
                             let val = self.guard_in_range(&val, &ret_ty, *span)?;
                             let val = if ret_ty.is_integer() { self.narrow_from_i64(&val, &ret_ty)? } else { val };
                             self.emit_frees_for_names(&free_names, scopes);
+                            // Never `Result`-typed here — `Result` is
+                            // always `is_aggregate()` (routed through the
+                            // branch above), so `was_err` is always `"0"`.
+                            self.emit_nfr_call_end("0");
                             let ret_llty = self.llvm_ty(&ret_ty)?;
                             writeln!(self.out, "  ret {} {val}", ret_llty).unwrap();
                         }
                     }
                     None => {
                         self.emit_frees_for_names(&free_names, scopes);
+                        self.emit_nfr_call_end("0");
                         writeln!(self.out, "  ret void").unwrap();
                     }
                 }
@@ -2120,6 +2274,9 @@ impl Codegen<'_> {
             Expr::Call(name, _, _) if name == "dec_from_i64" || name == "dec_round" => Ty::Dec128,
             Expr::Call(name, _, _) if name == "dec_to_str" => Ty::Str,
             Expr::Call(name, _, _) if name == "dec_scale" => Ty::U32,
+            Expr::Call(name, _, _) if name == "check_role" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("RoleView".to_string(), vec![]), Ty::Str])
+            }
             // Row 11: a struct/variant constructor call produces a
             // `Ty::Named` value (the struct's own type, or the owning
             // enum's), not the `Ty::I64` the `self.sigs.get` fallback
@@ -2737,6 +2894,128 @@ impl Codegen<'_> {
             };
             self.emit_affine_free(&stack_ptr, &ty);
         }
+    }
+
+    /// Emits `nir_nfr_call_end` at one of this function's own return
+    /// points — a no-op if this function has no `nfr(...)` at all
+    /// (`current_fn_nfr_regs` is `None`). `was_err` is a literal `"0"`/
+    /// `"1"` or an `i32`-typed SSA register — whichever the caller
+    /// already computed (only the `Result`-returning, `error_rate_max`-
+    /// declaring case needs a real one; every other return site just
+    /// passes `"0"`, this function's own doc comment on `current_fn_nfr`).
+    fn emit_nfr_call_end(&mut self, was_err: &str) {
+        if let Some((id, start)) = self.current_fn_nfr_regs.clone() {
+            writeln!(self.out, "  call void @nir_nfr_call_end(i64 {id}, i64 {start}, i32 {was_err})").unwrap();
+        }
+    }
+
+    /// Masks every `requires(...)`-annotated field of a struct value
+    /// about to be returned — `src` is a pointer to the already-fully-
+    /// constructed value (masking happens *in place*, before the caller
+    /// copies it out, so the copied-out value is the masked one). A
+    /// no-op for any `ret_ty` that isn't a struct with at least one
+    /// masked field — the overwhelmingly common case, and deliberately
+    /// checked as plain data lookups (no branch emitted at all) rather
+    /// than emitting dead always-false checks for functions that never
+    /// need any of this.
+    fn emit_field_masking(&mut self, src: &str, ret_ty: &Ty, scopes: &mut Scopes) -> Result<(), CodegenError> {
+        let Ty::Named(name, args) = ret_ty else { return Ok(()) };
+        let Some(fields) = self.registry.struct_fields(name) else { return Ok(()) };
+        if !fields.iter().any(|f| f.mask_requires.is_some()) {
+            return Ok(());
+        }
+        let type_params = self.registry.struct_type_params(name).unwrap_or(&[]);
+        let subst = zip_type_params(type_params, args);
+        let struct_llty = self.llvm_ty(ret_ty)?;
+        for (i, field) in fields.iter().enumerate() {
+            let Some(req) = field.mask_requires.clone() else { continue };
+            let field_ty = substitute_ty(&field.ty, &subst);
+            let authorized = self.emit_requirement_check(&req, scopes)?;
+            let do_label = self.fresh_label("mask_do");
+            let skip_label = self.fresh_label("mask_skip");
+            writeln!(self.out, "  br i1 {authorized}, label %{skip_label}, label %{do_label}").unwrap();
+            writeln!(self.out, "{do_label}:").unwrap();
+            let field_ptr = self.fresh_reg("mask_field_ptr");
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {struct_llty}, ptr {src}, i32 0, i32 {i}").unwrap();
+            let zero = self.emit_zero_value(&field_ty)?;
+            let field_llty = self.llvm_ty(&field_ty)?;
+            writeln!(self.out, "  store {field_llty} {zero}, ptr {field_ptr}").unwrap();
+            writeln!(self.out, "  br label %{skip_label}").unwrap();
+            writeln!(self.out, "{skip_label}:").unwrap();
+        }
+        Ok(())
+    }
+
+    /// Whether the *current function's own* proof parameter
+    /// (`current_fn_role_view_param`/`current_fn_claim_view_param`)
+    /// satisfies `req`, as a fresh `i1` SSA register — `"false"`
+    /// (fail-closed) if this function has no such parameter at all, the
+    /// same "absence of proof is not proof of absence of a requirement"
+    /// posture `requires(...)`'s own fn-level gating already has.
+    fn emit_requirement_check(&mut self, req: &Requirement, scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let (param_name, expected, field_name): (Option<String>, &str, &str) = match req {
+            Requirement::Role(r) => (self.current_fn_role_view_param.clone(), r, "role"),
+            Requirement::Claim(_, v) => (self.current_fn_claim_view_param.clone(), v, "value"),
+        };
+        let Some(param_name) = param_name else {
+            return Ok("false".to_string());
+        };
+        let (view_ty, view_ptr) = scopes.get(&param_name).expect("scanned directly from this function's own params");
+        let (idx, _) = self
+            .field_index_and_ty(&view_ty, field_name)
+            .expect("RoleView/ClaimView always declares this field, ast::prelude_structs");
+        let view_llty = self.llvm_ty(&view_ty)?;
+        let field_ptr = self.fresh_reg("req_field_ptr");
+        writeln!(self.out, "  {field_ptr} = getelementptr inbounds {view_llty}, ptr {view_ptr}, i32 0, i32 {idx}").unwrap();
+        let field_val = self.fresh_reg("req_field_val");
+        writeln!(self.out, "  {field_val} = load {{ptr, i64}}, ptr {field_ptr}").unwrap();
+        let actual_ptr = self.fresh_reg("req_actual_ptr");
+        writeln!(self.out, "  {actual_ptr} = extractvalue {{ptr, i64}} {field_val}, 0").unwrap();
+        let actual_len = self.fresh_reg("req_actual_len");
+        writeln!(self.out, "  {actual_len} = extractvalue {{ptr, i64}} {field_val}, 1").unwrap();
+        let lit_global = self.fresh_global("req_expected");
+        let escaped = llvm_escape_bytes(expected.as_bytes());
+        writeln!(self.string_globals, "{lit_global} = private unnamed_addr constant [{} x i8] c\"{escaped}\"", expected.len()).unwrap();
+        let eq = self.fresh_reg("req_eq");
+        writeln!(
+            self.out,
+            "  {eq} = call i32 @nir_str_eq(ptr {actual_ptr}, i64 {actual_len}, ptr {lit_global}, i64 {})",
+            expected.len()
+        )
+        .unwrap();
+        let authorized = self.fresh_reg("req_authorized");
+        writeln!(self.out, "  {authorized} = icmp ne i32 {eq}, 0").unwrap();
+        Ok(authorized)
+    }
+
+    /// The zero value for a masked field's own type, as an operand ready
+    /// to `store` — a bare literal for a true scalar, or a couple of
+    /// `insertvalue` instructions (returning a fresh SSA register) for
+    /// the two-word non-aggregate shapes (`str`, `dec128`). Never reached
+    /// for an aggregate or affine type — `typeck.rs`'s
+    /// `MaskRequiresNeedsScalarField` already rejects those.
+    fn emit_zero_value(&mut self, ty: &Ty) -> Result<String, CodegenError> {
+        let llty = self.llvm_ty(ty)?;
+        Ok(match llty.as_str() {
+            "i1" => "false".to_string(),
+            "double" => llvm_f64_literal(0.0),
+            "ptr" => "null".to_string(),
+            "{ptr, i64}" => {
+                let partial = self.fresh_reg("mask_zero_str");
+                writeln!(self.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr null, 0").unwrap();
+                let full = self.fresh_reg("mask_zero_str");
+                writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 0, 1").unwrap();
+                full
+            }
+            "{i64, i64}" => {
+                let partial = self.fresh_reg("mask_zero_dec");
+                writeln!(self.out, "  {partial} = insertvalue {{i64, i64}} undef, i64 0, 0").unwrap();
+                let full = self.fresh_reg("mask_zero_dec");
+                writeln!(self.out, "  {full} = insertvalue {{i64, i64}} {partial}, i64 0, 1").unwrap();
+                full
+            }
+            _ => "0".to_string(), // every remaining case is a plain integer width
+        })
     }
 
     /// The array-bounds analog of `guard_in_range` — checks `0 <= idx <
@@ -4497,6 +4776,9 @@ impl Codegen<'_> {
         {
             return self.call_builtin_agg(name, args, scopes);
         }
+        if name == "check_role" {
+            return self.emit_check_role(args, scopes);
+        }
         let sig_params = self.sigs.get(name).expect("typeck.rs already resolved this call").params.clone();
         let sig_ret = self.sigs.get(name).expect("typeck.rs already resolved this call").ret.clone();
         let arg_vals = self.call_args(args, &sig_params, scopes)?;
@@ -4507,6 +4789,90 @@ impl Codegen<'_> {
         let mut all_args = vec![format!("ptr {dest}")];
         all_args.extend(arg_vals);
         writeln!(self.out, "  call void @{name}({})", all_args.join(", ")).unwrap();
+        Ok(dest)
+    }
+
+    /// `check_role(identity, role) -> Result(RoleView, str)` — the real
+    /// compiled implementation (`IDENTITY_BUILTINS`'s own doc comment
+    /// has the full scope/disclosure). Reads `identity.claims_json` as a
+    /// comma-separated role list (`nir_check_role`,
+    /// `runtime-kernels/src/lib.rs`) and constructs a real `Ok(RoleView(role))`
+    /// or `Err("...")` by hand — the same tag-then-payload shape
+    /// `construct_variant`'s generic path already uses, just written
+    /// directly rather than through it (no `Expr` exists for "the string
+    /// this kernel call already computed" the generic path could recurse
+    /// on).
+    fn emit_check_role(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let role_view_ty = Ty::Named("RoleView".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![role_view_ty.clone(), Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("check_role_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("check_role_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("check_role_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("check_role_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+        let role_val = self.expr(&args[1], scopes)?;
+        let role_ptr = self.fresh_reg("check_role_role_ptr");
+        writeln!(self.out, "  {role_ptr} = extractvalue {{ptr, i64}} {role_val}, 0").unwrap();
+        let role_len = self.fresh_reg("check_role_role_len");
+        writeln!(self.out, "  {role_len} = extractvalue {{ptr, i64}} {role_val}, 1").unwrap();
+
+        let found = self.fresh_reg("check_role_found");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_check_role(ptr {claims_ptr}, i64 {claims_len}, ptr {role_ptr}, i64 {role_len})"
+        )
+        .unwrap();
+        let is_found = self.fresh_reg("check_role_is_found");
+        writeln!(self.out, "  {is_found} = icmp ne i32 {found}, 0").unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("check_role_result.addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("check_role_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("check_role_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("check_role_ok");
+        let err_label = self.fresh_label("check_role_err");
+        let merge_label = self.fresh_label("check_role_merge");
+        writeln!(self.out, "  br i1 {is_found}, label %{ok_label}, label %{err_label}").unwrap();
+
+        // `Ok(RoleView(role))` — variant 0 (`ast::prelude_enums`'
+        // `Result` declaration order). `RoleView`'s own sole field is
+        // `role: str`, so its whole value *is* the same `{ptr, i64}`
+        // word pair already computed above — stored straight into the
+        // payload's first two words, no separate temp/memcpy needed.
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {role_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        // `Err("...")` — variant 1. Same "the payload's first two words
+        // are directly a `str` value" shape as `Ok` above.
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let msg_global = self.fresh_global("check_role_err_msg");
+        const MSG: &str = "role not present in identity's claims";
+        writeln!(self.string_globals, "{msg_global} = private unnamed_addr constant [{} x i8] c\"{}\"", MSG.len(), llvm_escape_bytes(MSG.as_bytes()))
+            .unwrap();
+        let msg_partial = self.fresh_reg("check_role_err_msg_partial");
+        writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
+        let msg_full = self.fresh_reg("check_role_err_msg_full");
+        writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", MSG.len()).unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
         Ok(dest)
     }
 
@@ -5975,6 +6341,31 @@ impl Codegen<'_> {
         }
         writeln!(self.out, "define i32 @main() {{").unwrap();
         writeln!(self.out, "entry:").unwrap();
+        // `nfr(...)` registration — once per tracked function, before
+        // `nir_main` (the `.nir` program's own `main`) ever runs, so
+        // every `nir_nfr_call_begin`/`_end` inside it already has a real
+        // id to look up (`@nfr_id.<name>`, declared alongside the
+        // per-function global-storage loop in `emit_llvm_ir_impl`).
+        for f in &program.fns {
+            let Some(nfr) = &f.nfr else { continue };
+            let name_bytes = f.name.as_bytes();
+            let name_global = self.fresh_global("nfr_name");
+            let escaped = llvm_escape_bytes(name_bytes);
+            writeln!(self.string_globals, "{name_global} = private unnamed_addr constant [{} x i8] c\"{escaped}\"", name_bytes.len())
+                .unwrap();
+            let latency = nfr.latency_ms.unwrap_or(-1);
+            let error_rate = llvm_f64_literal(nfr.error_rate_max.unwrap_or(-1.0));
+            let throughput = nfr.throughput_min_per_sec.unwrap_or(-1);
+            let concurrency = nfr.concurrency_max.unwrap_or(-1);
+            let id_reg = self.fresh_reg("nfr_registered_id");
+            writeln!(
+                self.out,
+                "  {id_reg} = call i64 @nir_nfr_register(ptr {name_global}, i64 {}, i64 {latency}, double {error_rate}, i64 {throughput}, i64 {concurrency})",
+                name_bytes.len()
+            )
+            .unwrap();
+            writeln!(self.out, "  store i64 {id_reg}, ptr @nfr_id.{}", f.name).unwrap();
+        }
         if main_fn.ret == Ty::Unit {
             writeln!(self.out, "  call void @nir_main()").unwrap();
             writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();

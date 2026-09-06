@@ -238,7 +238,7 @@ mod tests {
     const SPAN: Span = Span { line: 0, col: 0 };
 
     fn mk_field(name: &str, ty: Ty) -> Field {
-        Field { name: name.to_string(), ty }
+        Field { name: name.to_string(), ty, mask_requires: None }
     }
 
     fn empty_program() -> Program {

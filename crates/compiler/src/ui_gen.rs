@@ -648,7 +648,7 @@ fn build_field(program: &Program, name: &str, ty: &Ty, visiting: &mut Vec<String
             // expandable single-field group instead of an ordinary input.
             if n == "Text" {
                 if let Some(s) = resolve_struct(program, n) {
-                    if let [Field { name: field_name, ty: Ty::Str }] = s.fields.as_slice() {
+                    if let [Field { name: field_name, ty: Ty::Str, .. }] = s.fields.as_slice() {
                         if field_name == "value" {
                             return base("text", true);
                         }

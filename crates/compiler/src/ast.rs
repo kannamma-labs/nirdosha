@@ -645,6 +645,26 @@ pub struct Param {
 pub struct Field {
     pub name: String,
     pub ty: Ty,
+    /// `salary: f64 requires(role: "admin")` — this field is
+    /// automatically masked (replaced with `ty`'s zero value) whenever a
+    /// value of this struct's type is returned from a function that does
+    /// **not** have a matching `RoleView`/`ClaimView` parameter proving
+    /// the required role/claim — no separate opt-in call, the language
+    /// itself enforces it at every `return` (`codegen.rs`'s
+    /// `emit_field_masking`). `None` (the common case) means this field
+    /// is never masked. Deliberately reuses `Requirement` (the same
+    /// `role`/`claim` vocabulary `FnDecl::requires` already has) rather
+    /// than inventing a parallel type for the identical concept at a
+    /// different grammar site.
+    ///
+    /// **Real, disclosed scope**: only a non-affine, non-aggregate
+    /// (`is_aggregate() == false`) field type can be masked — there's an
+    /// obvious "zero value" for a scalar/handle (`0`, `0.0`, an empty
+    /// `str`) but not a well-defined one for a nested struct/enum/
+    /// Vector/Matrix without a much bigger design question about what
+    /// "masked" means recursively. `typeck.rs` rejects `mask_requires`
+    /// on any other field type rather than silently masking nothing.
+    pub mask_requires: Option<Requirement>,
 }
 
 /// `struct Point { x: f64, y: f64 }` — Row 11's product type. `name` is
@@ -927,8 +947,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "HttpResponse".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "status".to_string(), ty: Ty::I64 },
-                Field { name: "body".to_string(), ty: Ty::Str },
+                Field { name: "status".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "body".to_string(), ty: Ty::Str, mask_requires: None },
             ],
             span,
             module: None,
@@ -943,12 +963,12 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "VerifiedIdentity".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "subject".to_string(), ty: Ty::Str },
-                Field { name: "issuer".to_string(), ty: Ty::Str },
-                Field { name: "audience".to_string(), ty: Ty::Str },
-                Field { name: "expires_at".to_string(), ty: Ty::I64 },
-                Field { name: "issued_at".to_string(), ty: Ty::I64 },
-                Field { name: "claims_json".to_string(), ty: Ty::Str },
+                Field { name: "subject".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "issuer".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "audience".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "expires_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "issued_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "claims_json".to_string(), ty: Ty::Str, mask_requires: None },
             ],
             span,
             module: None,
@@ -958,7 +978,7 @@ pub fn prelude_structs() -> Vec<StructDecl> {
         StructDecl {
             name: "RoleView".to_string(),
             type_params: vec![],
-            fields: vec![Field { name: "role".to_string(), ty: Ty::Str }],
+            fields: vec![Field { name: "role".to_string(), ty: Ty::Str, mask_requires: None }],
             span,
             module: None,
             ns: None,
@@ -967,7 +987,7 @@ pub fn prelude_structs() -> Vec<StructDecl> {
         StructDecl {
             name: "ClaimView".to_string(),
             type_params: vec![],
-            fields: vec![Field { name: "value".to_string(), ty: Ty::Str }],
+            fields: vec![Field { name: "value".to_string(), ty: Ty::Str, mask_requires: None }],
             span,
             module: None,
             ns: None,
@@ -980,12 +1000,12 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "ApplicationSession".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "session_id".to_string(), ty: Ty::Str },
-                Field { name: "identity_subject".to_string(), ty: Ty::Str },
-                Field { name: "identity_issuer".to_string(), ty: Ty::Str },
-                Field { name: "created_at".to_string(), ty: Ty::I64 },
-                Field { name: "expires_at".to_string(), ty: Ty::I64 },
-                Field { name: "last_accessed_at".to_string(), ty: Ty::I64 },
+                Field { name: "session_id".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "identity_subject".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "identity_issuer".to_string(), ty: Ty::Str, mask_requires: None },
+                Field { name: "created_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "expires_at".to_string(), ty: Ty::I64, mask_requires: None },
+                Field { name: "last_accessed_at".to_string(), ty: Ty::I64, mask_requires: None },
             ],
             span,
             module: None,
@@ -998,8 +1018,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "RefreshTokenHandle".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "handle".to_string(), ty: Ty::Box(Box::new(Ty::I64)) },
-                Field { name: "expires_at".to_string(), ty: Ty::I64 },
+                Field { name: "handle".to_string(), ty: Ty::Box(Box::new(Ty::I64)), mask_requires: None },
+                Field { name: "expires_at".to_string(), ty: Ty::I64, mask_requires: None },
             ],
             span,
             module: None,
@@ -1012,8 +1032,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "Pair".to_string(),
             type_params: vec!["A".to_string(), "B".to_string()],
             fields: vec![
-                Field { name: "first".to_string(), ty: Ty::Named("A".to_string(), vec![]) },
-                Field { name: "second".to_string(), ty: Ty::Named("B".to_string(), vec![]) },
+                Field { name: "first".to_string(), ty: Ty::Named("A".to_string(), vec![]), mask_requires: None },
+                Field { name: "second".to_string(), ty: Ty::Named("B".to_string(), vec![]), mask_requires: None },
             ],
             span,
             module: None,
@@ -1035,8 +1055,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "Money".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "amount".to_string(), ty: Ty::Dec128 },
-                Field { name: "currency".to_string(), ty: Ty::Named("CurrencyCode".to_string(), vec![]) },
+                Field { name: "amount".to_string(), ty: Ty::Dec128, mask_requires: None },
+                Field { name: "currency".to_string(), ty: Ty::Named("CurrencyCode".to_string(), vec![]), mask_requires: None },
             ],
             span,
             module: None,
@@ -1055,8 +1075,8 @@ pub fn prelude_structs() -> Vec<StructDecl> {
             name: "Measure".to_string(),
             type_params: vec![],
             fields: vec![
-                Field { name: "value".to_string(), ty: Ty::Dec128 },
-                Field { name: "unit_code".to_string(), ty: Ty::Named("UnitCode".to_string(), vec![]) },
+                Field { name: "value".to_string(), ty: Ty::Dec128, mask_requires: None },
+                Field { name: "unit_code".to_string(), ty: Ty::Named("UnitCode".to_string(), vec![]), mask_requires: None },
             ],
             span,
             module: None,
@@ -1155,12 +1175,74 @@ pub struct FnDecl {
     /// `typeck.rs::check_fn`'s "does this fn need `requires(public)`?"
     /// check for the full reachability rule that warning implements.
     pub explicit_public: bool,
+    /// `nfr(latency_ms: 100, error_rate_max: 0.01, throughput_min_per_sec: 50,
+    /// concurrency_max: 10)` — `None` when the declaration has no
+    /// `nfr(...)` at all (the common case: not monitored, zero runtime
+    /// cost). `Some(spec)` means every call to this function is timed and
+    /// counted by the compiled runtime kernel (`runtime-kernels/src/
+    /// kernel/nfr.rs`), and a call that violates any declared threshold
+    /// escalates — see `NfrSpec`'s own doc comment for what each field
+    /// means and the real, disclosed simplifications each one makes
+    /// versus a "real" APM system's equivalent metric.
+    pub nfr: Option<NfrSpec>,
     /// Same meaning as `StructDecl::module` — see its doc comment.
     pub module: Option<String>,
     /// Same meaning as `StructDecl::ns` — see its doc comment.
     pub ns: Option<String>,
     /// Same meaning as `StructDecl::exported` — see its doc comment.
     pub exported: bool,
+}
+
+/// A function's declared non-functional requirements — every field
+/// optional and independently declarable, the same "subset, not
+/// all-or-nothing" shape `effect(...)` already has. Each present field
+/// is checked automatically by the compiled runtime (`runtime-kernels`'
+/// APM kernel, `rfcs/0007-apm-runtime-kernel.md`), with **no separate
+/// opt-in call** — the same "hidden behind a keyword that already
+/// exists" pattern this project's `chan`/`spawn` codegen already
+/// established, extended here to a genuinely new keyword since NFRs
+/// have no existing syntax to hide behind.
+///
+/// **Real, disclosed simplifications, not a full APM system's worth of
+/// precision** — each one traded a materially bigger implementation for
+/// an honest, cheaper metric that still catches the failure mode that
+/// matters:
+/// - `latency_ms`: **max observed latency**, not a true p99 (a real
+///   percentile needs a histogram/sketch — disproportionate to this
+///   feature's first slice). Escalates the instant *any single call*
+///   exceeds the threshold, which is arguably closer to what an SLA
+///   violation actually means than a windowed percentile is.
+/// - `error_rate_max`: **cumulative since process start**, not a
+///   sliding window — `total_errors / total_calls`, checked only once a
+///   minimum sample size exists (so one early failure doesn't read as
+///   "100% error rate"). Only meaningful for a `Result(_, _)`-returning
+///   function — `typeck.rs` rejects declaring it on any other return
+///   type, rather than silently never firing.
+/// - `throughput_min_per_sec`: **average since process start**
+///   (`total_calls / elapsed_seconds`), not a recent-window rate — won't
+///   catch a throughput *drop* partway through a long-running process
+///   as quickly as a real windowed rate would.
+/// - `concurrency_max`: the one field with no simplification — a real,
+///   exact in-flight-call counter, checked at call entry.
+///
+/// No debouncing: a sustained violation escalates on every single call
+/// that trips it, not just the first — real, disclosed follow-up work
+/// if that turns out to spam the observability server in practice.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NfrSpec {
+    pub latency_ms: Option<i64>,
+    pub error_rate_max: Option<f64>,
+    pub throughput_min_per_sec: Option<i64>,
+    pub concurrency_max: Option<i64>,
+}
+
+impl NfrSpec {
+    pub fn is_empty(&self) -> bool {
+        self.latency_ms.is_none()
+            && self.error_rate_max.is_none()
+            && self.throughput_min_per_sec.is_none()
+            && self.concurrency_max.is_none()
+    }
 }
 
 /// What `acquire` (`Expr::Acquire`) demands proof of before a `requires`-

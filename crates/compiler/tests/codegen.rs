@@ -2067,3 +2067,111 @@ fn nested_struct_field_access_compiles() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "7\n3\n");
 }
+
+/// End-to-end: `check_role` compiled for real (not just a signature that
+/// typechecks) hands back a genuine, unforgeable `RoleView` when a
+/// `VerifiedIdentity`'s `claims_json` (read as a plain comma-separated
+/// role list — `check_role`'s disclosed simplification, not real JSON
+/// parsing) contains the requested role, and a real `Err` when it
+/// doesn't. That `RoleView` is then the *only* way a caller can prove a
+/// role to a `requires(role: ...)`-masked struct field: matching role ->
+/// the real value passes through on return; non-matching role -> the
+/// field is zeroed; `check_role` failing outright means no `RoleView` is
+/// ever produced at all (fail-closed at the proof layer, before masking
+/// even runs).
+#[test]
+fn check_role_produces_real_role_view_that_drives_field_masking() {
+    let src = r#"
+        struct Text {
+            value: str,
+        }
+        struct Employee {
+            name: str,
+            department: str,
+            salary: f64 requires(role: "admin"),
+        }
+        fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee {
+            return Employee(name.value, department.value, salary)
+        }
+        fn main() {
+            let admin_identity: VerifiedIdentity = VerifiedIdentity("alice", "https://example.com", "my-app", 0, 0, "admin,editor")
+            let guest_identity: VerifiedIdentity = VerifiedIdentity("bob", "https://example.com", "my-app", 0, 0, "guest")
+
+            let admin_employee: Employee = match check_role(admin_identity, "admin") {
+                Ok(admin_role) => get_employee(admin_role, Text("Ada"), Text("Engineering"), 150000.0),
+                Err(e) => Employee("", "", -1.0),
+            }
+            print(admin_employee.salary)
+
+            let guest_employee: Employee = match check_role(guest_identity, "guest") {
+                Ok(guest_role) => get_employee(guest_role, Text("Ada"), Text("Engineering"), 150000.0),
+                Err(e) => Employee("", "", -1.0),
+            }
+            print(guest_employee.salary)
+            print(guest_employee.name)
+
+            let denied: bool = match check_role(guest_identity, "admin") {
+                Ok(r) => true,
+                Err(e) => false,
+            }
+            print(denied)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "150000.000000\n0.000000\nAda\n0\n");
+}
+
+/// `nfr(...)`'s per-call instrumentation (registration global, the
+/// `nir_nfr_call_begin`/`nir_nfr_call_end` pair wrapped around every
+/// return path) must be fully transparent to a program that never
+/// crosses any of its thresholds — same return values, same control
+/// flow, as an unannotated function. Threshold-violation/escalation
+/// behavior itself is exercised manually (it's timing/HTTP-dependent,
+/// not a good fit for a deterministic unit test); this test is the
+/// permanent regression guard for the wiring itself.
+#[test]
+fn nfr_annotation_is_transparent_to_normal_execution() {
+    let src = r#"
+        fn add(a: i64, b: i64) -> i64 nfr(latency_ms: 1000, concurrency_max: 10) {
+            return a + b
+        }
+        fn main() {
+            print(add(2, 3))
+            print(add(10, 20))
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n30\n");
+}
+
+/// `nfr(error_rate_max: ...)` requires the tag+payload `Result` return
+/// shape so `call_end` can inspect the real tag (not just accept a
+/// literal "never errors") — this exercises that inspection on both the
+/// `Ok` and `Err` path through a real compiled-and-run binary.
+#[test]
+fn nfr_error_rate_tracks_real_result_tag_on_both_arms() {
+    let src = r#"
+        enum MyError { Bad }
+        fn risky(fail: bool) -> Result(i64, MyError) nfr(error_rate_max: 0.5) {
+            if fail {
+                return Err(Bad())
+            }
+            return Ok(42)
+        }
+        fn main() {
+            match risky(false) {
+                Ok(v) => print(v),
+                Err(e) => print(-1),
+            }
+            match risky(true) {
+                Ok(v) => print(v),
+                Err(e) => print(-1),
+            }
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n-1\n");
+}

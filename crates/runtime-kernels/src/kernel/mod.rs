@@ -115,6 +115,7 @@
 #![allow(dead_code)]
 
 pub mod mailbox;
+pub mod nfr;
 pub mod pool;
 pub mod recorder;
 pub mod thread_pool;

@@ -1396,6 +1396,76 @@ pub extern "C" fn nir_thread_join(handle: i64) -> i64 {
     result
 }
 
+// ---- nfr kernels (NFRs as a first-class, compiled-runtime feature) -------
+//
+// See `kernel::nfr`'s own module doc for the real design (four O(1)
+// tracked metrics, escalation only on violation, never on the hot
+// path). This is the `extern "C"` boundary `codegen.rs` compiles
+// `nfr(...)` to: `nir_nfr_register` once per tracked function at
+// program start, `nir_nfr_call_begin`/`nir_nfr_call_end` bracketing
+// every call to it.
+
+/// Registers one `nfr(...)`-declared function — `name_ptr`/`name_len`
+/// is a `{ptr, i64}` `str` value's own two halves (same convention
+/// every other kernel here taking a `str` argument uses). A negative
+/// `i64`/`f64` field means that NFR wasn't declared — `kernel::nfr::
+/// register`'s own doc comment. Returns the id `nir_nfr_call_begin`/
+/// `_end` pass back on every call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_nfr_register(
+    name_ptr: *const u8,
+    name_len: i64,
+    latency_ms: i64,
+    error_rate_max: f64,
+    throughput_min_per_sec: i64,
+    concurrency_max: i64,
+) -> i64 {
+    let name = unsafe { std::slice::from_raw_parts(name_ptr, name_len as usize) };
+    let name = String::from_utf8_lossy(name).into_owned();
+    kernel::nfr::register(name, latency_ms, error_rate_max, throughput_min_per_sec, concurrency_max)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_nfr_call_begin(id: i64) -> i64 {
+    kernel::nfr::call_begin(id)
+}
+
+/// `was_err` is `0`/`1`, not a real `i1`/`bool` at this ABI boundary —
+/// the same "every boolean-shaped flag crossing this file's `extern
+/// "C"` edge is a plain integer" convention this crate already uses
+/// throughout (`nir_str_eq`'s `i32` return, etc.), not an LLVM-`i1`-
+/// specific assumption.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_nfr_call_end(id: i64, start_ns: i64, was_err: i32) {
+    kernel::nfr::call_end(id, start_ns, was_err != 0)
+}
+
+// ---- check_role kernel (identity/RBAC, real authorization pipeline) ------
+//
+// `codegen.rs`'s `IDENTITY_BUILTINS`/`emit_check_role` doc comments have
+// the full scope: this is `check_role`'s real, compiled implementation,
+// deliberately narrower than the interpreter's own JSON-based one —
+// `claims` here is read as a plain comma-separated role list, not
+// parsed as JSON (no JSON parser is linked into this crate). Exact
+// per-entry matching, not a substring search — `"adm"` must never match
+// a claims list containing `"admin"`.
+
+/// `1` if `role` (as UTF-8 bytes) exactly equals one comma-separated
+/// entry of `claims` (each entry's surrounding whitespace trimmed, so
+/// `"admin, editor"` and `"admin,editor"` behave identically), `0`
+/// otherwise — including if either buffer isn't valid UTF-8, the same
+/// "fail closed on malformed input" posture every other identity check
+/// in this codebase already has.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_check_role(claims_ptr: *const u8, claims_len: i64, role_ptr: *const u8, role_len: i64) -> i32 {
+    let claims = unsafe { std::slice::from_raw_parts(claims_ptr, claims_len as usize) };
+    let role = unsafe { std::slice::from_raw_parts(role_ptr, role_len as usize) };
+    let (Ok(claims), Ok(role)) = (std::str::from_utf8(claims), std::str::from_utf8(role)) else {
+        return 0;
+    };
+    claims.split(',').any(|entry| entry.trim() == role) as i32
+}
+
 // ---- dec128 kernels ---------------------------------------------------
 //
 // The actual point of this crate's split into a real Cargo package
