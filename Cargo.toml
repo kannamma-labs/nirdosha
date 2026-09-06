@@ -4,16 +4,16 @@ members = [
     "crates/compiler",
     "crates/grammar_check",
     "crates/grammar_export",
-    "crates/bench",
     "crates/presence-gateway",
-    "crates/plugin-example-rot13",
-    "crates/plugin-support",
-    "crates/plugin-example-mysql",
-    "crates/plugin-example-activemq",
-    "crates/plugin-example-cassandra",
-    "crates/plugin-example-neo4j",
-    "crates/plugin-example-hbase",
-    "crates/plugin-examples",
+    # `crates/bench`, all six `plugin-example-*` crates, `plugin-support`,
+    # and `plugin-examples` are removed: each depended entirely on the
+    # interpreter (interpreted plugin dispatch via `PluginBuiltin`/
+    # `PluginFn`, or scoring an LLM-generated program's *interpreted*
+    # result value) — a mechanism that no longer exists now that the
+    # interpreter is gone. Native (`NativePluginBuiltin`) plugins for the
+    # compiled path are a different, scalar-only ABI these crates never
+    # used; nothing here ports mechanically. See git history if any of
+    # this is worth rebuilding against the compiled path later.
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

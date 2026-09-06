@@ -73,23 +73,15 @@ Small team, high-context contributions matter more than volume — see
 [`MAINTAINERS.md`](./MAINTAINERS.md) for who has write access and how
 active each is. Right now:
 
-- **Track B (full compilation)** — native codegen only covers the
-  numeric/control-flow subset; `db`/`json`/`http`/`mq`/identity/
-  `transact`/concurrency are interpreter-only *(fully functional
-  today — the `vendor_ops.nir` demo above combines all four live;
-  Track B is a latency/throughput project, not a capability gap, see
-  [ROADMAP](./docs/PUBLIC_ROADMAP.md))*. First gap to close:
-  `transact` → `db`/`json`.
-- **LLM eval harness** — [`crates/bench/`](./crates/bench) has a real pass@1 +
-  self-repair-rate scaffold, and now a real `Model` too:
-  `real_model::RealModel` (`--mode real`) talks to any OpenAI-compatible
-  `/chat/completions` endpoint (DeepSeek, Kimi/Moonshot, GLM/Zhipu — set
-  `NIRDOSHA_BENCH_API_BASE`/`_API_KEY`/`_MODEL`). Its request-building and
-  response-parsing are unit-tested, but it hasn't been run against a live
-  provider yet — no API key is set in this project's dev/CI environment.
-  Running it for real against one or more of the three providers, and
-  reporting the resulting pass@1/self-repair numbers, is the actual gap
-  left to close.
+- **Track B (full compilation) — now the only path to running any of
+  this, not a latency/throughput nice-to-have.** The interpreter (`run`/
+  `serve`) has been removed entirely, by deliberate decision, so that
+  the compiled path can't quietly stay second-class. Native codegen only
+  covers the numeric/control-flow/`tcp`/`file` subset today —
+  `db`/`json`/`http`/`mq`/identity/`transact`/concurrency don't run at
+  all right now, in any form, until each gets real codegen (see
+  [ROADMAP](./docs/PUBLIC_ROADMAP.md)). First gap to close: `transact` →
+  `db`/`json`.
 - **macOS verification** — release binaries link system Z3 because
   `z3-src` doesn't build against current AppleClang ([ADR
   0001](./docs/adr/0001-vendor-z3-except-macos.md), tracked as
@@ -99,10 +91,9 @@ active each is. Right now:
   [`.github/workflows/build.yml`](./.github/workflows/build.yml) mirrors
   release.yml's proven `brew install z3` + system-Z3 build on a real
   `macos-14` runner. Windows is CI-verified too: `build-windows` in the
-  same file builds and runs the `tcp`/`sandbox`/`sandbox_channels`/
-  `channels` suite plus the compiled-native-codegen TCP tests on a real
-  `windows-latest` runner on every push/PR (see [ROADMAP
-  A7](./docs/PUBLIC_ROADMAP.md)).
+  same file builds and runs the `tcp` suite plus the compiled-native-
+  codegen TCP tests on a real `windows-latest` runner on every push/PR
+  (see [ROADMAP A7](./docs/PUBLIC_ROADMAP.md)).
 
 Full list with status tags: [`docs/PUBLIC_ROADMAP.md`](./docs/PUBLIC_ROADMAP.md).
 Issues are labeled `good first issue` / `help wanted` / `compiler` /
@@ -147,18 +138,18 @@ including where the design is still evolving, not a finished product.
   backend code with no human reviewing it before it executes, and you
   need the *language* to make bug classes unrepresentable rather than
   catching them in review.
-- You want to try the constrained-decoding / self-repair mechanism on a
-  real compiler today, not a whitepaper — the GBNF grammar,
-  `--format=json` diagnostics, and `crates/bench/` all run now.
+- You want to try the constrained-decoding mechanism on a real compiler
+  today, not a whitepaper — the GBNF grammar and `emit-ast`'s structured
+  diagnostics run now, against the compiled path.
 - You're fine filing issues against a fast-moving pre-1.0 project, not
   pulling a finished 1.0 into a production stack.
 
 **This isn't for you if:**
 - You want a general-purpose systems language for humans to write —
   that's Rust, and Rust is the honest answer (see the FAQ below).
-- You need `db`/`json`/`http`/`mq`/concurrency compiled to native code
-  today — those run now in the interpreter (see the vendor_ops.nir demo
-  above), but aren't native-compiled until Track B lands (see
+- You need `db`/`json`/`http`/`mq`/concurrency at all — there is no
+  interpreter fallback anymore, and none of these compile to native code
+  yet either, so none of it runs in any form until Track B lands (see
   [ROADMAP](./docs/PUBLIC_ROADMAP.md)).
 - You need something production-ready this quarter — nothing here
   claims that.
