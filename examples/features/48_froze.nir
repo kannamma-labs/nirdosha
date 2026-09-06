@@ -1,0 +1,40 @@
+// Feature: `froze`/`*` -- RFC 0006 Pillar 1's `Froze<T>` (LANGUAGE.md
+// §2, §7). `froze expr` heap-allocates exactly like `box expr`, but the
+// resulting handle is deliberately *not* affine: unlike `box`, the same
+// binding can be used any number of times (passed to two separate
+// `spawn`s below, not moved by either) because nothing can ever write
+// through a `froze` handle. `*expr` reads it back.
+//
+// Compiled (LANGUAGE.md §10), unlike most of this catalogue's later
+// entries -- `froze`'s own two real OS threads below actually run
+// concurrently and actually share the same heap allocation when this
+// file is built with `nirdosha build`, not simulated.
+
+fn read_it(f: froze i64) -> i64 {
+    return *f
+}
+
+fn double_it(f: froze i64) -> i64 {
+    return *f * 2
+}
+
+fn main() {
+    let f: froze i64 = froze 21
+
+    // Freely copyable: `f` is used three times below with no move
+    // error, unlike a `box i64` (see 14_ownership_box.nir), which
+    // would only tolerate this if the language allowed borrowing it
+    // out (and even then, only for reading).
+    print(read_it(f))   // 21
+    print(double_it(f)) // 42
+
+    // The actual Pillar 1 claim: the *same* handle handed to two
+    // separate concurrent computations, each safely reading it without
+    // any lock -- safe specifically because nothing can write through
+    // a `froze` handle, so there is nothing for two readers to race on.
+    let h1: thread i64 = spawn read_it(f)
+    let h2: thread i64 = spawn double_it(f)
+    let a: i64 = join h1
+    let b: i64 = join h2
+    print(a + b) // 63
+}

@@ -1035,6 +1035,61 @@ at any time, and counting them as "unblockable except by another
 participant" would reopen exactly the false-positive class this update
 just closed.
 
+**Eighteenth update:** RFC 0006 Pillar 1, in two parts — `Iso<T>` closed
+out (no code: `box`'s existing affine semantics already are Iso, stated
+directly in the RFC itself) and `Froze<T>` built for real. `froze e`
+heap-allocates exactly like `box e` (same `nir_alloc`, same `llvm_ty`
+"ptr" shape), but produces a deliberately non-affine `Ty::Froze` handle
+— freely copyable, safe to hand to any number of concurrent
+computations at once, since nothing can ever write through one (this
+language has no deref-*write* form at all yet, for any pointer type, so
+"immutable" costs nothing extra to enforce). `*f`'s read is restricted
+exactly like `&`'s own deref: legal only when the frozen content isn't
+itself affine, reusing `CannotMoveOutOfReference` verbatim rather than
+inventing a second error for the identical hazard (extracting affine
+content by value out from under a handle that may have other live
+copies would silently duplicate ownership).
+
+`fixtures/froze.nir` is the real proof, not a simulated one: `froze 21`
+constructed once in `main`, the *same* handle passed to two separate
+`spawn`s, each of the two real OS threads reading it via `*f` — both
+Pillar 1's actual "shared, immutable, any number of threads" claim and
+the fact that it isn't affine (a `box` used the same way would be a
+compile-time `UseAfterMove`), verified by actually compiling and
+running it, not just typechecking it.
+
+**A real, pre-existing bug found while wiring this in, unrelated to
+`froze` itself**: `Ty::is_integer()` is written as an *inverted* list
+("true unless it's one of these") — a shape that silently accepts any
+new `Ty` variant nobody remembers to add to the exclusion list, unlike
+every exhaustive `match` elsewhere in this codebase (which the compiler
+itself catches immediately, per this update's own experience adding
+`Ty::Froze`/`Expr::Froze` and fixing eleven non-exhaustive-match errors
+across `codegen.rs`/`typeck.rs`/`ownership.rs`/`refine.rs`/`smt.rs`/
+`effects.rs`/`contract_check.rs` in one pass). Found immediately by
+actually compiling `fixtures/froze.nir` (`sext ptr to i64`, an invalid
+LLVM cast clang rejected outright) rather than by review — fixed by
+adding `Ty::Froze` to the exclusion list. `Ty::Handle(_)` is missing
+from the same list too, a real, separate, pre-existing gap spotted
+while fixing this one but not touched here (out of scope for this
+update, disclosed rather than silently left for the next person to
+rediscover the hard way).
+
+**Real, disclosed narrower scope than "Arc": leaked, not refcounted.**
+`Froze` values are never in `ownership.rs`'s `FreeMap` (non-affine, so
+never tracked for a last-use free), the same simplification `Ty::Channel`
+handles already make. True `Arc`-style refcounting (retain on every
+copy, release at every scope exit) is real, larger follow-up work — it
+needs `ownership.rs` to track a kind of "still-live copies" fact that
+doesn't exist for *any* type in this language yet, affine or not. Named
+here as the honest next step, not attempted in this pass. `Lend<T>`
+(Pillar 1's third capability, "a reference bound to the owner's scope,
+held by another thread only while the owner is suspended at a defined
+rendezvous") is untouched by this update — RFC 0006's own critic
+section already discloses it was never implemented or tested even in
+the Rust evidence prototype, so there is no existing design to port;
+building it means designing the mechanism itself.
+
 ---
 
 

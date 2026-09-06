@@ -58,6 +58,49 @@ fn moving_affine_content_out_through_a_shared_reference_is_rejected() {
     assert_eq!(kind, TypeErrorKind::CannotMoveOutOfReference { content: nirdosha::ast::Ty::Box(Box::new(nirdosha::ast::Ty::I64)) });
 }
 
+// ---- `froze` — RFC 0006 Pillar 1's `Froze<T>` -------------------------
+
+#[test]
+fn moving_affine_content_out_through_a_froze_handle_is_rejected() {
+    // `Ty::Froze` gets exactly `Ty::Ref`'s own `CannotMoveOutOfReference`
+    // rule, for the identical reason: a `froze` handle isn't affine (it
+    // may have other live copies), so extracting affine content out of
+    // it *by value* would silently duplicate ownership.
+    let kind = first_type_error(
+        r#"
+        fn main() -> i64 {
+            let f: froze box i64 = froze box 5
+            let stolen: box i64 = *f
+            return *stolen
+        }
+    "#,
+    );
+    assert_eq!(kind, TypeErrorKind::CannotMoveOutOfReference { content: nirdosha::ast::Ty::Box(Box::new(nirdosha::ast::Ty::I64)) });
+}
+
+#[test]
+fn a_froze_handle_is_freely_copyable_not_affine() {
+    // Unlike `box` (see `use_after_move_via_function_call_is_rejected`
+    // just below), passing the *same* `froze` binding to two separate
+    // calls is not a move at all — `Ty::Froze` is deliberately not
+    // affine (Pillar 1's whole point: shared, immutable, any number of
+    // holders). This must ownership-check cleanly.
+    let program = parse_ok(
+        r#"
+        fn read_it(f: froze i64) -> i64 {
+            return *f
+        }
+        fn main() -> i64 {
+            let f: froze i64 = froze 21
+            let a: i64 = read_it(f)
+            let b: i64 = read_it(f)
+            return a + b
+        }
+    "#,
+    );
+    check_ownership(&program).expect("a froze handle used twice must not be an ownership error");
+}
+
 #[test]
 fn borrowing_a_non_identifier_is_a_parse_error() {
     let toks = Lexer::new("fn main() { let x: i64 = &(1 + 1) }").tokenize().unwrap();

@@ -655,7 +655,13 @@ impl<'a> Checker<'a> {
                 let _ = span;
                 self.scopes.set_moved(name, false);
             }
-            Expr::Box(inner, _) => self.touch_expr(inner, true),
+            // `froze e` gets exactly `box e`'s own treatment: `e`'s
+            // value is moved into the new heap allocation, so any
+            // affine content `e` names is consumed here — `Ty::Froze`'s
+            // own non-affinity only governs the *resulting* handle
+            // (freely copyable from here on), not this construction
+            // step.
+            Expr::Box(inner, _) | Expr::Froze(inner, _) => self.touch_expr(inner, true),
             Expr::Ref(inner, _) => {
                 // Borrowing is, definitionally, not moving — that's the
                 // entire point of `&`. No liveness/exclusivity tracking

@@ -195,6 +195,11 @@ impl Parser {
             let inner = self.expect_type()?;
             return Ok(Ty::Box(Box::new(inner)));
         }
+        if self.peek().tok == Tok::Froze {
+            self.bump();
+            let inner = self.expect_type()?;
+            return Ok(Ty::Froze(Box::new(inner)));
+        }
         if self.peek().tok == Tok::Thread {
             self.bump();
             let inner = self.expect_type()?;
@@ -1767,6 +1772,10 @@ impl Parser {
             Tok::Box => {
                 self.bump();
                 Ok(Expr::Box(Box::new(self.parse_unary()?), span))
+            }
+            Tok::Froze => {
+                self.bump();
+                Ok(Expr::Froze(Box::new(self.parse_unary()?), span))
             }
             Tok::Amp => {
                 self.bump();
