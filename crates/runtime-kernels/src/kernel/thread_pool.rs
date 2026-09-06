@@ -320,6 +320,17 @@ impl Scope {
             count = cvar.wait(count).unwrap();
         }
     }
+
+    /// Non-blocking: `true` if every job spawned via this scope has
+    /// already completed (so a `join()` call right now would return
+    /// immediately, without ever actually waiting). Exists for
+    /// `nir_thread_join`'s own deadlock detector (`kernel::concurrency_
+    /// wait_begin`) — a `join` that was never going to block must never
+    /// be counted as a real wait, or a fast-finishing spawn racing a
+    /// slower caller could look indistinguishable from a genuine stall.
+    pub fn already_done(&self) -> bool {
+        *self.outstanding.0.lock().unwrap() == 0
+    }
 }
 
 impl Drop for Scope {
@@ -494,6 +505,23 @@ mod tests {
         }
         scope.join();
         assert_eq!(done.load(Ordering::SeqCst), 20, "join() must not return before every spawned job has actually completed");
+    }
+
+    #[test]
+    fn already_done_is_false_while_outstanding_and_true_once_every_job_finishes() {
+        let pool = real_pool();
+        let scope = Scope::new(&pool);
+        assert!(scope.already_done(), "a scope with nothing spawned yet has nothing outstanding");
+        let (tx, rx) = mpsc::channel::<()>();
+        scope
+            .spawn(Box::new(move || {
+                rx.recv().unwrap(); // held open until this test releases it below
+            }))
+            .unwrap();
+        assert!(!scope.already_done(), "a job is still genuinely outstanding");
+        tx.send(()).unwrap();
+        scope.join();
+        assert!(scope.already_done(), "join() only returns once every job has actually completed");
     }
 
     #[test]

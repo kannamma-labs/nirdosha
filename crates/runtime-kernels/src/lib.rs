@@ -1158,7 +1158,7 @@ pub unsafe extern "C" fn nir_free(ptr: *mut u8) {
 // thread is structurally impossible in a well-typed program, even though
 // it isn't the exact lexical-scope mechanism the RFC's own prototype uses.
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use kernel::HandleTable;
 use kernel::thread_pool::{Scope, ThreadPool};
 use std::sync::{Arc, OnceLock};
@@ -1199,12 +1199,31 @@ pub extern "C" fn nir_chan_send(handle: i64, value: i64) -> i64 {
 /// Pillar 3: blocks until a message is available. `0` on a closed channel
 /// (see `nir_chan_send`'s doc comment — not reachable today, but an inert
 /// `0` rather than a panic if it ever is).
+///
+/// Tries a non-blocking `try_recv` first, deliberately — this is one of
+/// exactly two operations (`nir_thread_join` is the other) the deadlock
+/// detector in `kernel::concurrency_wait_begin`'s own doc comment treats
+/// as "can only ever be unblocked by another concurrent participant,"
+/// and it must never register a wait for a call that was never actually
+/// going to block: a message already sitting in the mailbox (the
+/// overwhelmingly common case — a producer that already ran to
+/// completion before this `recv` even started) must be returned without
+/// ever touching the wait counters, or a fast-finishing sender racing a
+/// slower receiver could look indistinguishable from a real stall.
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_chan_recv(handle: i64) -> i64 {
     let Some(rx) = channel_table().with(handle, |(_tx, rx)| rx.clone()) else {
         return 0;
     };
-    kernel::mailbox::receive(&rx).unwrap_or(0)
+    match rx.try_recv() {
+        Ok(v) => return v,
+        Err(TryRecvError::Disconnected) => return 0,
+        Err(TryRecvError::Empty) => {}
+    }
+    kernel::concurrency_wait_begin(kernel::WaitTarget::ChanRecv(handle));
+    let result = kernel::mailbox::receive(&rx).unwrap_or(0);
+    kernel::concurrency_wait_end();
+    result
 }
 
 /// One spawned computation's kernel-owned bookkeeping — see this
@@ -1246,6 +1265,19 @@ fn thread_table() -> &'static HandleTable<ThreadHandle> {
 /// resource-creation kernel here already uses.
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_thread_spawn(trampoline: extern "C" fn(*mut u8, *mut i64), ctx: *mut u8) -> i64 {
+    // Admission first, at the resource-creation call only (this
+    // module's own "chan/spawn/join kernels" doc comment) -- one
+    // concurrently-outstanding `thread` handle held between `spawn` and
+    // its matching `join`, the same ceiling `nir_tcp_connect`/
+    // `nir_file_open` already enforce for their own domains.
+    if !kernel::acquire(kernel::Domain::Thread) {
+        unsafe {
+            if !ctx.is_null() {
+                nir_free(ctx);
+            }
+        }
+        return -1;
+    }
     let result_ptr = Box::into_raw(Box::new(0i64));
     let scope = Scope::new(global_thread_pool());
     // A tiny `Send` wrapper around the two raw pointers and the function
@@ -1269,12 +1301,32 @@ pub extern "C" fn nir_thread_spawn(trampoline: extern "C" fn(*mut u8, *mut i64),
         }
     }
     let payload = SpawnPayload(ctx, result_ptr, trampoline);
+    // Incremented *before* the job is submitted, not after -- a worker
+    // thread can start running the job the instant `scope.spawn` returns
+    // `Ok`, and that job's own code could reach a `join`/`recv` (and so
+    // `concurrency_wait_begin`'s live-count check) before this calling
+    // thread gets to run another instruction. Registering "this
+    // participant now exists" strictly before it could possibly wait on
+    // anything is what makes `concurrency_wait_begin`'s check exact
+    // rather than racy (see `kernel::concurrency_thread_started`'s own
+    // doc comment).
+    kernel::concurrency_thread_started();
+    // Deliberately *not* calling `kernel::concurrency_thread_finished()`
+    // from inside this closure once `payload.call()` returns -- see
+    // `concurrency_thread_finished`'s own doc comment for the race that
+    // would reopen (this counter and `Scope`'s own completion state are
+    // two separate locks with no ordering between them). `nir_thread_
+    // join` calls it instead, only once `Scope::already_done`/`join`
+    // has itself confirmed completion.
     let submitted = scope.spawn(Box::new(move || payload.call()));
     if submitted.is_err() {
-        // The OS refused to create a worker thread -- nothing was
-        // submitted, so `ctx`/`result_ptr` are still solely this
-        // function's to clean up (the trampoline that would otherwise
-        // free `ctx` never ran).
+        // The OS refused to create a worker thread -- the job never ran
+        // at all, so the optimistic increment above has to be rolled
+        // back here (nothing else ever will: this handle is never
+        // inserted into `thread_table`, so `nir_thread_join` will never
+        // run for it either).
+        kernel::concurrency_thread_finished();
+        kernel::release(kernel::Domain::Thread);
         unsafe {
             drop(Box::from_raw(result_ptr));
             if !ctx.is_null() {
@@ -1300,9 +1352,33 @@ pub extern "C" fn nir_thread_join(handle: i64) -> i64 {
     let Some(entry) = thread_table().remove(handle) else {
         return 0;
     };
-    entry.scope.join();
+    // Checked non-blockingly first, for the identical reason
+    // `nir_chan_recv`'s own `try_recv`-first does: a `join` on a job
+    // that already finished was never actually going to block, and must
+    // never be counted as a real wait (`concurrency_wait_begin`'s doc
+    // comment, and `Scope::already_done`'s own doc comment for exactly
+    // this hazard). Only when genuinely still outstanding does this
+    // become one of the two operations (`nir_chan_recv` is the other)
+    // the deadlock detector treats as "can only ever be unblocked by
+    // another concurrent participant."
+    if !entry.scope.already_done() {
+        kernel::concurrency_wait_begin(kernel::WaitTarget::ThreadJoin(handle));
+        entry.scope.join();
+        kernel::concurrency_wait_end();
+    }
+    // This job can no longer run any more code that could unblock
+    // someone else, whichever branch above got here — see `kernel::
+    // concurrency_thread_finished`'s own doc comment for why this is
+    // the one place that's called, rather than the job itself.
+    kernel::concurrency_thread_finished();
     let result = unsafe { *entry.result_ptr };
     unsafe { drop(Box::from_raw(entry.result_ptr)) };
+    // The `thread` handle's own admission slot (`nir_thread_spawn`'s own
+    // doc comment) is released here, at the one-time consuming `join`
+    // that closes it — the same acquire-at-creation/release-at-close
+    // pairing `nir_tcp_stop`/`nir_file_stop` already use for their own
+    // domains.
+    kernel::release(kernel::Domain::Thread);
     result
 }
 

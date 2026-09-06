@@ -135,6 +135,7 @@ fn domain_name(d: u8) -> &'static str {
     match d {
         0 => "tcp",
         1 => "file",
+        2 => "thread",
         _ => "unknown",
     }
 }

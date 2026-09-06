@@ -431,6 +431,91 @@ Pillar 5) remain genuinely separate concerns within that combined
 effort, and neither subsumes the other. `chan` stays out of kernel
 mediation regardless, once it compiles.
 
+**Update, now that `spawn`/`join`/`chan`/`send`/`recv` are genuinely
+compiled**: the paragraph above was written when neither existed in the
+compiled path at all — there was no real blocking wait for either
+deadlock graph's kernel-side half to observe yet. That's no longer
+true, and it opens a real, additive option this RFC's admission
+mechanism can now offer *the reply-obligation graph specifically*,
+without waiting for Pillar 5's own static proof (still deferred,
+`rfcs/0006-structured-concurrency.md`'s own recommendation, unchanged):
+a **dynamic stall detector**, `runtime-kernels/src/kernel/mod.rs`'s
+`concurrency_wait_begin`/`_end`/`concurrency_thread_started`/`_finished`,
+wired into `nir_thread_join`/`nir_chan_recv`. It tracks two counts —
+how many `.nir`-level concurrent participants exist (`live`: main, plus
+one per outstanding `spawn`) against how many are, right now, blocked
+in one of exactly the two operations that can only ever be unblocked by
+*another* one of those participants (never `tcp`/`file` I/O, which can
+always still resolve from outside the process). If every live
+participant is simultaneously in that state, nothing left in the
+process could ever run the `send`/return that would unblock any of
+them — reported and aborted immediately (this crate's own "trap now,
+don't hang silently" convention — `codegen.rs`'s `guard_io_ok`/
+`guard_recv_ok`), not left to hang.
+
+This is deliberately the same technique Go's own runtime uses ("fatal
+error: all goroutines are asleep - deadlock!"), not a general wait-for-
+graph cycle detector, and it inherits that technique's one real
+limitation honestly: it only fires once the *whole* program can never
+move again, not a *local* cycle between two threads while a third,
+unrelated one keeps making progress. Getting this exact — no false
+positives, ever, for a mechanism that is otherwise invisible to a
+`.nir` author and could otherwise silently kill a correct program — took
+one real correctness bug, found by actually running the existing
+`channels.nir` example repeatedly, not by inspection: naively
+incrementing `blocked` and checking it *before* confirming the wait
+would actually block raced a fast-finishing `spawn` (a producer that
+already sent everything and returned before its consumer's first
+`recv` even ran) into a spurious detection. Fixed by trying the
+non-blocking path first (`Receiver::try_recv`/`Scope::already_done`)
+and only registering a wait — ever — once that's confirmed empty/not-
+done, plus moving the `live` decrement for a finished job to the point
+its own `join` actually confirms completion (not the instant the job's
+code returns), closing a second, narrower race between two separately-
+locked counters. See `kernel::concurrency_thread_finished`'s own doc
+comment for the exact ordering argument.
+
+**How this relates to Pillar 5, precisely**: this is a real, working
+backstop for the reply-obligation deadlock class specifically —
+`tests/codegen.rs`'s `a_nested_reply_obligation_deadlock_is_detected_
+and_aborted_not_hung` compiles and runs `fixtures/deadlock.nir` (the
+exact shape RFC 0006's own Pillar 5 evidence names: A sends a request
+and blocks on the reply; B needs one more answer from A to compute it,
+which A is no longer running any code to provide) and confirms it
+aborts in under a second instead of hanging. It is *detection*, not
+*prevention* — it does not earn Pillar 5's actual proof-by-construction
+claim (a well-typed `.nir` program can express this shape perfectly
+well today, precisely because Pillar 5 doesn't exist yet to reject it
+at compile time), only makes hitting it fail fast and diagnosably —
+naming the actual stuck call sites (`kernel::WaitTarget`, e.g. "thread
+X is blocked in `recv` on chan handle 3") — instead of hanging forever
+with no signal at all. True *prevention* (refuse the specific request
+that would create the cycle, before blocking) doesn't fit `chan`
+either: unlike a mutex, a channel has no single "owner" to check a
+request against (any of potentially many senders could satisfy a
+`recv`), so there is no well-defined wait-for edge to test ahead of
+time the way there would be for an exclusive lock — this is exactly
+why Pillar 5's own answer is a *type-level* constraint (levels), not a
+runtime graph. `join`'s own graph has no cycles to prevent in the first
+place: affine `thread` handles already form a DAG by construction
+(`rfcs/0006-structured-concurrency.md`'s own claim). The resource-
+acquisition graph (tcp/file/thread ceilings, admission control) remains
+this RFC's own, separate concern, unaffected by any of this.
+
+**Housekeeping alongside it, same commit**: `thread` now has its own
+admission `Domain` (`Domain::Thread`, `NIRDOSHA_KERNEL_MAX_THREAD`),
+the same concurrently-held ceiling `tcp`/`file` already enforce,
+acquired at `spawn` and released at the `join` that closes it — `chan`
+deliberately still has none (a channel handle is never released, so a
+concurrently-*held* ceiling doesn't fit its lifecycle; a total-ever-
+created cap would be a different kind of limit, not built here). `db`/
+`mq` are explicitly out of scope for the stall detector even once they
+compile: both can block on a genuinely external system that might
+still resolve from outside the process, which is exactly the property
+that makes `tcp`/`file` safe to exclude today — counting them toward
+"can only ever be unblocked by another concurrent participant" would
+reintroduce false positives, not close a gap.
+
 ## 9. Security, tenancy, NFR governance, and operations
 
 **Multi-tenancy — deferred, not designed.** The decision document's
