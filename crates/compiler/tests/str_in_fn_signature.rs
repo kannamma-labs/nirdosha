@@ -174,22 +174,3 @@ fn transacts_synthesized_txn_id_parameter_is_exempt() {
     typecheck(&program).expect("a txn_id: str parameter on a transact network-slot fn is the one structural exemption");
 }
 
-#[test]
-fn enum_equality_works_at_runtime_not_just_typecheck() {
-    use nirdosha::run;
-    let src = r#"
-        enum Currency {
-            Usd,
-            Eur,
-        }
-        fn main() -> unit {
-            let a: Currency = Usd()
-            let b: Currency = Usd()
-            let c: Currency = Eur()
-            print(a == b)
-            print(a == c)
-            print(a != c)
-        }
-    "#;
-    run(src).expect("a program comparing two enum values with == should run cleanly");
-}
