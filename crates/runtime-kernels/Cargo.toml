@@ -35,12 +35,51 @@ crate-type = ["staticlib"]
 # purpose, instead of relying on the `c-repr`/`align16` feature flags'
 # internal struct layout.
 rust_decimal = "1"
+# Same "an existing, real `nirdosha` lib dependency, now reachable from
+# here too" story as `rust_decimal` above. `crates/compiler/src/pool.rs`
+# (interpreter-only, removed along with the interpreter) proved the
+# real design (`PoolConfig`/`PoolRegistry<M>`, ported into
+# `kernel/pool.rs`); r2d2 itself has no async runtime/tokio dependency
+# (`pool.rs`'s own original doc comment), so it links here exactly as
+# cleanly as it did in the interpreter-side crate.
+r2d2 = "0.8"
+# Same story again: already a real `nirdosha` lib dependency (used for
+# compiled-artifact/asset compression elsewhere), now reachable here too
+# for `kernel::recorder`'s flushed pages -- gzip via `flate2`'s pure-Rust
+# `miniz_oxide` backend (no system zlib dependency, so this links exactly
+# as cleanly as `r2d2`/`rust_decimal` did, no new C library to vendor).
+flate2 = "1"
+# Unlike the three above, not already a `nirdosha` lib dependency
+# elsewhere -- this one's provenance is `rfcs/evidence/0006-structured-
+# concurrency/concurrency_proto/`, which used it to prove RFC 0006's
+# Pillar 2/3 (non-blocking send, multi-consumer mailbox) mechanics are
+# real and fast. `kernel::mailbox` ports that proven design. Same "no
+# async runtime, no tokio" fit as everything else here -- crossbeam-
+# channel is itself sync-only, mature, and widely used well outside
+# this project.
+crossbeam-channel = "0.5"
 
 [profile.release]
-# Every kernel in this crate is called from a `nirdosha build` binary
-# that has no Rust panic/unwind runtime of its own linked in (the
-# generated `.ll`'s own convention, `codegen.rs`'s module doc) — a panic
-# reaching this crate's own ABI boundary with unwinding enabled would be
-# undefined behavior across that `extern "C"` edge, not a clean abort.
-# Matches the old bare-`rustc` invocation's `-C panic=abort` exactly.
-panic = "abort"
+# `unwind` (the default -- kept explicit here as a record of a real
+# decision, not an oversight), NOT `abort`. Previously `abort`, on the
+# reasoning that "a panic reaching this crate's own ABI boundary with
+# unwinding enabled would be undefined behavior across that `extern
+# "C"` edge." That reasoning was accurate for Rust before 1.71 and is
+# no longer accurate on the toolchain this project actually uses:
+# since 1.71, unwinding across a plain (non-`"C-unwind"`) `extern "C"`
+# boundary is defined behavior -- a safe abort at that exact boundary,
+# not UB. That safety net is what makes `unwind` here strictly better
+# than `abort`, not riskier: `kernel::thread_pool::worker_loop`'s
+# `catch_unwind` now genuinely contains a panicking job (verified, not
+# assumed -- see `rfcs/evidence/0007-apm-runtime-kernel/
+# panic_containment/`, a hand-written C program with zero Rust runtime
+# except this crate's own staticlib, linked exactly the way
+# `codegen.rs::build` links a real compiled `.nir` binary, run 5/5
+# clean), while an uncaught panic that somehow still reached one of
+# this crate's own `extern "C"` kernels would still abort at that
+# boundary -- the same safe-failure behavior `abort` gave everywhere,
+# now with `catch_unwind` actually able to intercept it before that
+# boundary in the first place. Re-verified against `kernel_bench`: no
+# measurable overhead on any `nir_tcp_*`/`nir_file_*` call -- unwind
+# tables are metadata, not a runtime cost, when no panic occurs.
+panic = "unwind"
