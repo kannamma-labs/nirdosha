@@ -414,9 +414,16 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
         Ty::Dec128 => Ok("{i64, i64}".to_string()),
         Ty::Json => unsupported("codegen doesn't support `json` yet — JSON is interpreter-only for now"),
         Ty::Db => unsupported("codegen doesn't support `db` yet — DB connectivity is interpreter-only for now"),
-        Ty::Handle(kind) => unsupported(&format!(
-            "codegen doesn't support plugin handle types (`{kind}`) — plugins are interpreter-only for now"
-        )),
+        // rfcs/0008-native-plugin-abi-widening.md Phase 1: a plugin-held
+        // resource id, exactly like `Ty::Thread`/`Ty::Channel`/`Ty::File`
+        // just above — one opaque `i64` into a table this compiler never
+        // looks inside (here, a table the *plugin's own* Rust code owns,
+        // not a `runtime-kernels` one). All of its safety comes from
+        // `ownership.rs`'s affine tracking at the type level (`Ty::
+        // is_affine()` already lists `Handle(_)`, rfcs/0005 §1); codegen
+        // itself just needs to pass the word through, identically to how
+        // it already treats a spawn/channel/file handle.
+        Ty::Handle(_) => Ok("i64".to_string()),
         Ty::Mq => unsupported("codegen doesn't support `mq` yet — message-queue connectivity is interpreter-only for now"),
         // A fixed-size, two-word value — pointer to the byte data plus an
         // explicit `i64` length, never NUL-terminated-only (a `str`'s

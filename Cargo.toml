@@ -5,15 +5,25 @@ members = [
     "crates/grammar_check",
     "crates/grammar_export",
     "crates/presence-gateway",
-    # `crates/bench`, all six `plugin-example-*` crates, `plugin-support`,
-    # and `plugin-examples` are removed: each depended entirely on the
-    # interpreter (interpreted plugin dispatch via `PluginBuiltin`/
-    # `PluginFn`, or scoring an LLM-generated program's *interpreted*
-    # result value) — a mechanism that no longer exists now that the
-    # interpreter is gone. Native (`NativePluginBuiltin`) plugins for the
-    # compiled path are a different, scalar-only ABI these crates never
-    # used; nothing here ports mechanically. See git history if any of
-    # this is worth rebuilding against the compiled path later.
+    # rfcs/0008-native-plugin-abi-widening.md Phase 1/4: the first two
+    # real, *compiled-path* reference plugins, built against
+    # `NativePluginBuiltin` directly (a plain `#[no_mangle] extern "C"`
+    # symbol, not the deleted interpreter's `PluginBuiltin` trait) — see
+    # each crate's own README for the plugin-author and app-author
+    # sides, and `crates/compiler/tests/native_plugin_examples.rs` for
+    # the automated "compiles and the real binary runs correctly" proof.
+    "crates/plugin-example-native-shout",
+    "crates/plugin-example-native-kv",
+    # `crates/bench`, the original six interpreter-era `plugin-example-*`
+    # crates, `plugin-support`, and `plugin-examples` stay removed: each
+    # depended entirely on the interpreter (interpreted plugin dispatch
+    # via `PluginBuiltin`/`PluginFn`, or scoring an LLM-generated
+    # program's *interpreted* result value) — a mechanism that no longer
+    # exists now that the interpreter is gone. See git history if any of
+    # this (a real MySQL/Cassandra/ActiveMQ/Neo4j/HBase plugin, ported
+    # onto the compiled-path ABI above instead of the deleted trait) is
+    # worth rebuilding — rfcs/0008 Phase 4 names this as the real
+    # remaining proof, not yet done.
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

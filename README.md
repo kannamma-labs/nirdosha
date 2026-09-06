@@ -11,16 +11,26 @@
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)
 
 > **A systems language built so an AI agent can write and run backend
-> code with no human reviewing every line first.** No garbage
+> code with no human reviewing every line first — and that humans can
+> also write with unusually strong static guarantees.** No garbage
 > collector, no data races, no deadlocks, no integer/buffer overflow —
 > proven in the compiler today, not promised for later. Linux, macOS,
 > and Windows binaries ship on every release, verified by CI on all
 > three on every push.
 
-Real, working software today: a real compiler (`crates/compiler/`) —
-**no interpreter fallback anymore**, removed entirely and deliberately
-so the compiled path can't quietly stay second-class. What that
-compiler proves and runs, natively, right now: an LL(1) grammar
+## The problem
+
+Existing languages were designed primarily for human developers. They
+assume the author understands the type system, the concurrency model,
+and the framework conventions.
+
+Nirdosha starts from a different assumption: the primary author may be
+an LLM that defaults to familiar patterns, forgets checks, and benefits
+from constraints that make entire classes of mistakes unexpressible.
+The same constraints turn out to be valuable for human developers who
+want high-assurance backend code.
+
+Real, working software today: a real compiler (`crates/compiler/`). What that compiler proves and runs, natively, right now: an LL(1) grammar
 exported to GBNF for constrained decoding, SMT-backed (Z3) integer/
 buffer-overflow proofs, ownership/affine types with no GC, real
 identity (`check_role` producing an unforgeable `RoleView`) driving
