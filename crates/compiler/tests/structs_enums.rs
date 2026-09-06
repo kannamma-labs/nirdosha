@@ -6,10 +6,8 @@
 //! in v1.
 
 use nirdosha::ast::Ty;
-use nirdosha::interpreter::Value;
 use nirdosha::ownership::check_ownership;
 use nirdosha::parser::Parser;
-use nirdosha::run;
 use nirdosha::token::Lexer;
 use nirdosha::typeck::{typecheck, TypeErrorKind};
 
@@ -27,46 +25,6 @@ fn first_type_error(src: &str) -> TypeErrorKind {
 }
 
 // ---- structs: construction + field access ----------------------------------
-
-#[test]
-fn struct_construction_and_field_access_round_trip() {
-    let src = r#"
-        struct Point {
-            x: f64,
-            y: f64,
-        }
-        fn main() -> f64 {
-            let p: Point = Point(3.0, 4.0)
-            return p.x + p.y
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(n)) => assert_eq!(n, 7.0),
-        other => panic!("expected Ok(Float(7.0)), got {other:?}"),
-    }
-}
-
-#[test]
-fn nested_field_access_through_two_structs() {
-    let src = r#"
-        struct Point {
-            x: f64,
-            y: f64,
-        }
-        struct Line {
-            from: Point,
-            to: Point,
-        }
-        fn main() -> f64 {
-            let l: Line = Line(Point(0.0, 0.0), Point(3.0, 4.0))
-            return l.to.x + l.to.y
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(n)) => assert_eq!(n, 7.0),
-        other => panic!("expected Ok(Float(7.0)), got {other:?}"),
-    }
-}
 
 #[test]
 fn struct_field_bounds_are_checked_like_any_other_boundary() {
@@ -132,74 +90,6 @@ fn field_access_on_a_non_struct_is_rejected_statically() {
 }
 
 // ---- enums: construction + match --------------------------------------------
-
-#[test]
-fn match_dispatches_to_the_right_arm_and_binds_the_payload() {
-    let src = r#"
-        enum Shape {
-            Circle(f64),
-            Rectangle(f64, f64),
-        }
-        fn area(s: Shape) -> f64 {
-            return match s {
-                Circle(r) => 3.0 * r * r,
-                Rectangle(w, h) => w * h,
-            }
-        }
-        fn main() -> f64 {
-            return area(Rectangle(3.0, 4.0))
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(n)) => assert_eq!(n, 12.0),
-        other => panic!("expected Ok(Float(12.0)), got {other:?}"),
-    }
-}
-
-#[test]
-fn a_zero_payload_variant_still_uses_call_syntax() {
-    let src = r#"
-        enum Signal {
-            Go,
-            Stop,
-        }
-        fn code(s: Signal) -> i64 {
-            return match s {
-                Go() => 1,
-                Stop() => 0,
-            }
-        }
-        fn main() -> i64 {
-            return code(Go())
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Int(1)) => {}
-        other => panic!("expected Ok(Int(1)), got {other:?}"),
-    }
-}
-
-#[test]
-fn match_used_as_a_bare_statement_does_not_need_arm_types_to_agree() {
-    let src = r#"
-        enum E {
-            A,
-            B,
-        }
-        fn main() -> i64 {
-            let e: E = A()
-            match e {
-                A() => print(1),
-                B() => 2,
-            }
-            return 0
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Int(0)) => {}
-        other => panic!("expected Ok(Int(0)), got {other:?}"),
-    }
-}
 
 #[test]
 fn non_exhaustive_match_is_rejected_statically() {
@@ -434,26 +324,6 @@ fn a_struct_holding_a_box_field_is_affine_and_moves_as_a_whole() {
 }
 
 #[test]
-fn a_struct_with_no_affine_fields_is_freely_copyable() {
-    let src = r#"
-        struct Point {
-            x: f64,
-            y: f64,
-        }
-        fn main() -> f64 {
-            let p: Point = Point(1.0, 2.0)
-            let p2: Point = p
-            let p3: Point = p
-            return p2.x + p3.x
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(n)) => assert_eq!(n, 2.0),
-        other => panic!("expected Ok(Float(2.0)), got {other:?}"),
-    }
-}
-
-#[test]
 fn extracting_an_affine_field_moves_the_whole_struct() {
     let src = r#"
         struct Handle {
@@ -613,14 +483,3 @@ fn a_box_indirected_self_referential_struct_still_compiles() {
 }
 
 // ---- worked example ----------------------------------------------------------
-
-#[test]
-fn example_structs_enums_runs_to_completion() {
-    let program = parse_ok(include_str!("fixtures/structs_enums.nir"));
-    typecheck(&program).expect("should typecheck cleanly");
-    check_ownership(&program).expect("should pass ownership checking");
-    match run(include_str!("fixtures/structs_enums.nir")) {
-        Ok(Value::Float(n)) => assert!((n - 29.56636).abs() < 1e-9, "got {n}"),
-        other => panic!("expected Ok(Float(~29.56636)), got {other:?}"),
-    }
-}

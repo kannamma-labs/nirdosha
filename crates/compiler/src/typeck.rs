@@ -1074,16 +1074,6 @@ pub fn typecheck(program: &Program) -> Result<(), Vec<TypeError>> {
     typecheck_impl(program, true, &HashMap::new(), &HashMap::new())
 }
 
-/// Same as `typecheck`, plus a plugin crate's declared builtin
-/// signatures (`docs/ROADMAP.md` Track G, G1 / `docs/ECOSYSTEM.md` §G1's
-/// Stage 1) — `plugin::signatures(plugins)`'s shape, so every call to a
-/// plugin builtin is checked exactly like a call to a real one:
-/// resolvable, right arity, right argument/return types, and unusable in
-/// a `spawn`/`transact` slot or as a `fn`/`struct`/variant name.
-pub fn typecheck_with_plugins(program: &Program, plugins: &[crate::plugin::PluginBuiltin]) -> Result<(), Vec<TypeError>> {
-    typecheck_impl(program, true, &crate::plugin::signatures(plugins), &crate::plugin::effect_map(plugins))
-}
-
 /// Same checks as `typecheck`, but does not require a `fn main()`. For
 /// callers that never execute an entrypoint — `nirdosha serve` (every
 /// `fn` is reached individually via `POST /api/<fn>`, not through
@@ -1099,18 +1089,14 @@ pub fn typecheck_optional_main(program: &Program) -> Result<(), Vec<TypeError>> 
     typecheck_impl(program, false, &HashMap::new(), &HashMap::new())
 }
 
-/// Same relationship `typecheck_with_plugins` has to `typecheck` --
-/// `typecheck_optional_main`'s own plugin-aware sibling, for a
-/// plugin-aware `serve`/`emit-ui`/`--sandbox-worker`-shaped caller
-/// (Track B of the plugin-ecosystem plan). The one function this
-/// pattern was missing: `typecheck`/`typecheck_with_plugins`/
-/// `typecheck_optional_main` already existed as a matched trio; this
-/// completes the square.
-pub fn typecheck_optional_main_with_plugins(
-    program: &Program,
-    plugins: &[crate::plugin::PluginBuiltin],
-) -> Result<(), Vec<TypeError>> {
-    typecheck_impl(program, false, &crate::plugin::signatures(plugins), &crate::plugin::effect_map(plugins))
+/// Same as `typecheck`, plus a native (compiled-path) plugin's declared
+/// signatures — `crate::plugin::NativePluginBuiltin` has no effects field
+/// (that's an interpreter-only concept removed along with `PluginBuiltin`),
+/// so this only registers name/params/ret for arity/type checking, the
+/// minimum a `.nir` program calling a linked native plugin symbol needs.
+pub fn typecheck_with_native_plugins(program: &Program, plugins: &[crate::plugin::NativePluginBuiltin]) -> Result<(), Vec<TypeError>> {
+    let sigs = plugins.iter().map(|p| (p.name.clone(), (p.params.clone(), p.ret.clone()))).collect();
+    typecheck_impl(program, true, &sigs, &HashMap::new())
 }
 
 /// A non-fatal diagnostic — unlike `TypeError`, this never blocks

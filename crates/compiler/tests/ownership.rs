@@ -4,12 +4,10 @@
 //! need their own coverage (both were real bugs caught while writing this
 //! module, not hypothetical edge cases added for completeness).
 
-use nirdosha::interpreter::Value;
 use nirdosha::ownership::{check_ownership, OwnershipErrorKind};
 use nirdosha::parser::Parser;
 use nirdosha::token::Lexer;
 use nirdosha::typeck::{typecheck, TypeErrorKind};
-use nirdosha::run;
 
 fn parse_ok(src: &str) -> nirdosha::ast::Program {
     let toks = Lexer::new(src).tokenize().expect("lex should succeed");
@@ -39,49 +37,6 @@ fn first_type_error(src: &str) -> TypeErrorKind {
 }
 
 // ---- shared borrows (`&`) ----------------------------------------------
-
-#[test]
-fn reading_through_a_shared_borrow_does_not_consume_it() {
-    let src = r#"
-        fn peek(r: &i64) -> i64 {
-            return *r + 1
-        }
-        fn main() -> i64 {
-            let n: i64 = 41
-            let a: i64 = peek(&n)
-            let b: i64 = peek(&n)
-            return a + b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(84)));
-}
-
-#[test]
-fn borrowing_a_box_repeatedly_does_not_consume_it() {
-    // Known, documented limitation (see `ownership.rs`'s module doc):
-    // reading the *scalar inside* a box reached through a `&` isn't
-    // supported at all yet -- `*r` for `r: &box i64` denotes the `box
-    // i64` itself, and extracting that is a move-out-of-a-reference
-    // error regardless (see the `CannotMoveOutOfReference` test above).
-    // Real Rust handles this via place-expression semantics (`**r` reads
-    // straight through both layers without ever treating the
-    // intermediate `Box` as a value to move); this language doesn't have
-    // that machinery yet. What *does* work, and is what this test
-    // covers: borrowing a box repeatedly without consuming it, and
-    // reading through the box directly (not through the borrow).
-    let src = r#"
-        fn touch(r: &box i64) -> bool {
-            return true
-        }
-        fn main() -> i64 {
-            let b: box i64 = box 7
-            let ok1: bool = touch(&b)
-            let ok2: bool = touch(&b)
-            return *b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(7)));
-}
 
 #[test]
 fn moving_affine_content_out_through_a_shared_reference_is_rejected() {
@@ -124,62 +79,7 @@ fn reference_to_reference_is_rejected_even_with_a_space() {
     assert!(result.is_err(), "`& &x` must be rejected even though it lexes as two Amp tokens");
 }
 
-#[test]
-fn a_reference_itself_is_freely_copyable_not_affine() {
-    // Unlike `box`, using a `&`-typed binding by name twice is fine --
-    // references aren't affine (Ty::is_affine returns false for Ty::Ref),
-    // since unlimited simultaneous shared borrows are always sound.
-    let src = r#"
-        fn peek(r: &i64) -> i64 { return *r }
-        fn main() -> i64 {
-            let n: i64 = 5
-            let r: &i64 = &n
-            let a: i64 = peek(r)
-            let b: i64 = peek(r)
-            return a + b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(10)));
-}
-
 // ---- the basics: box, deref, move -----------------------------------
-
-#[test]
-fn box_and_deref_run_end_to_end() {
-    let src = r#"
-        fn main() -> i64 {
-            let b: box i64 = box 42
-            return *b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(42)));
-}
-
-#[test]
-fn deref_does_not_move_the_box() {
-    // Reading `*b` twice must not be a use-after-move — a deref-read is
-    // exempt from move-checking (module doc). If this regresses, it means
-    // `touch_expr`'s `Expr::Deref` special case broke.
-    let src = r#"
-        fn main() -> i64 {
-            let b: box i64 = box 10
-            return *b + *b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(20)));
-}
-
-#[test]
-fn moving_a_box_into_a_new_binding_works() {
-    let src = r#"
-        fn main() -> i64 {
-            let b: box i64 = box 7
-            let c: box i64 = b
-            return *c
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(7)));
-}
 
 #[test]
 fn use_after_move_via_let_is_rejected() {
@@ -216,50 +116,7 @@ fn use_after_move_via_function_call_is_rejected() {
     assert_eq!(kind, OwnershipErrorKind::UseAfterMove { name: "b".to_string() });
 }
 
-#[test]
-fn moving_out_via_return_is_the_last_use_and_is_fine() {
-    let src = r#"
-        fn make_box(n: i64) -> box i64 {
-            let b: box i64 = box n
-            return b
-        }
-        fn main() -> i64 {
-            let b: box i64 = make_box(9)
-            return *b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(9)));
-}
-
-#[test]
-fn reassignment_clears_moved_status() {
-    // `b`'s original box is moved into `c`, but `b` is then given a fresh
-    // value — using `b` again afterward must be fine, since it no longer
-    // refers to the moved-away box at all.
-    let src = r#"
-        fn main() -> i64 {
-            let b: box i64 = box 1
-            let c: box i64 = b
-            b = box 2
-            return *b + *c
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(3)));
-}
-
 // ---- nested boxes: a real gap found while testing, fixed and pinned ---
-
-#[test]
-fn dereferencing_a_nested_box_once_works() {
-    let src = r#"
-        fn main() -> i64 {
-            let bb: box box i64 = box box 5
-            let inner: box i64 = *bb
-            return *inner
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(5)));
-}
 
 #[test]
 fn dereferencing_a_nested_box_twice_is_use_after_move() {
@@ -305,28 +162,6 @@ fn moving_in_only_one_if_branch_still_poisons_later_use() {
     assert_eq!(kind, OwnershipErrorKind::UseAfterMove { name: "b".to_string() });
 }
 
-#[test]
-fn moving_in_both_if_branches_then_reassigning_is_fine() {
-    // Both branches move `b` away, but `b` is unconditionally reassigned
-    // afterward — same "reassignment clears moved status" rule as above,
-    // just reached through a branch-merge first.
-    let src = r#"
-        fn sink(b: box i64) -> i64 { return *b }
-        fn main() -> i64 {
-            let b: box i64 = box 1
-            let cond: bool = false
-            if cond {
-                let x: i64 = sink(b)
-            } else {
-                let y: i64 = sink(b)
-            }
-            b = box 99
-            return *b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(99)));
-}
-
 // ---- the loop double-pass: catches a second-iteration-only move -------
 
 #[test]
@@ -355,28 +190,6 @@ fn moving_a_pre_loop_variable_inside_the_body_is_rejected() {
 }
 
 #[test]
-fn moving_a_variable_declared_fresh_inside_the_loop_body_each_time_is_fine() {
-    // Contrast with the test above: here the box is created *inside* the
-    // loop body on every iteration, so there's a fresh binding each time —
-    // nothing pre-loop ever gets moved, so this must type- and
-    // ownership-check cleanly.
-    let src = r#"
-        fn sink(b: box i64) -> i64 { return *b }
-        fn main() -> i64 {
-            let n: i64 = 0
-            let total: i64 = 0
-            while n < 3 {
-                let b: box i64 = box n
-                total = total + sink(b)
-                n = n + 1
-            }
-            return total
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Int(3))); // sink(0) + sink(1) + sink(2)
-}
-
-#[test]
 fn all_examples_pass_ownership_checking() {
     // The three Phase 0 examples don't use `box` at all, so for those this
     // is really a "the checker doesn't false-positive on ordinary scalar
@@ -397,16 +210,4 @@ fn all_examples_pass_ownership_checking() {
         let program = parse_ok(src);
         assert_eq!(check_ownership(&program), Ok(()));
     }
-}
-
-#[test]
-fn example_ownership_runs_to_completion() {
-    let src = include_str!("fixtures/ownership.nir");
-    assert_eq!(run(src), Ok(Value::Unit));
-}
-
-#[test]
-fn example_borrow_runs_to_completion() {
-    let src = include_str!("fixtures/borrow.nir");
-    assert_eq!(run(src), Ok(Value::Unit));
 }
