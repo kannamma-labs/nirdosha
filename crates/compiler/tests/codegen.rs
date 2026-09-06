@@ -604,6 +604,79 @@ fn rand_f64_before_seed_aborts_at_runtime() {
     assert_ne!(code, 0, "rand_f64 before rand_seed must not exit 0");
 }
 
+// ---- RNG is per-thread, not process-wide (fixed 2026-09) --------------
+
+#[test]
+fn a_spawned_threads_rand_seed_does_not_perturb_the_spawning_threads_stream() {
+    // The real race this backend used to have: a process-wide RNG
+    // stream meant a spawned thread's own `rand_seed`/`rand_f64` calls
+    // could silently corrupt the spawning thread's own draws. Proven
+    // fixed by comparing two independent draws with nothing interleaved
+    // against the same two draws with a real spawned thread seeding and
+    // drawing from its *own* stream in between -- if the fix holds, the
+    // spawning thread's own sequence must be byte-for-byte identical
+    // either way.
+    let control = r#"
+        fn main() {
+            rand_seed(42)
+            let a: f64 = rand_f64()
+            let b: f64 = rand_f64()
+            print(a)
+            print(b)
+        }
+    "#;
+    let (control_out, control_code) = compile_and_run(control);
+    assert_eq!(control_code, 0);
+
+    let with_spawn = r#"
+        fn worker() -> unit {
+            rand_seed(99)
+            let _: f64 = rand_f64()
+            return
+        }
+        fn main() {
+            rand_seed(42)
+            let a: f64 = rand_f64()
+            let h: thread unit = spawn worker()
+            join h
+            let b: f64 = rand_f64()
+            print(a)
+            print(b)
+        }
+    "#;
+    let (spawn_out, spawn_code) = compile_and_run(with_spawn);
+    assert_eq!(spawn_code, 0);
+
+    assert_eq!(
+        control_out, spawn_out,
+        "a spawned thread seeding/drawing its own RNG must not perturb the spawning thread's own stream -- got control={control_out:?} vs with_spawn={spawn_out:?}"
+    );
+}
+
+#[test]
+fn a_freshly_spawned_thread_gets_its_own_unseeded_rng_by_default() {
+    // Matches the interpreter's own documented behavior
+    // (`Interpreter::rng`'s doc comment): a spawned function's RNG
+    // starts unseeded even though the spawning thread already seeded
+    // its own -- calling `rand_f64` inside the spawned thread without
+    // seeding it there too must abort, the same as
+    // `rand_f64_before_seed_aborts_at_runtime` does for `main`, not
+    // silently inherit the spawning thread's seed/position.
+    let src = r#"
+        fn worker() -> f64 {
+            return rand_f64()
+        }
+        fn main() {
+            rand_seed(42)
+            let h: thread f64 = spawn worker()
+            let r: f64 = join h
+            print(r)
+        }
+    "#;
+    let (_, code) = compile_and_run(src);
+    assert_ne!(code, 0, "a spawned thread's own unseeded rand_f64 call must abort, not silently inherit the spawning thread's seed");
+}
+
 // ---- Tier 1 vs Tier 2 is real in the generated IR, not just documented -
 
 #[test]
