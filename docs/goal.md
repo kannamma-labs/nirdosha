@@ -65,6 +65,20 @@ of the others (§1, §7).
 
 ---
 
+> **Note, added 2026-09-06 — the one-sentence version of this whole
+> brief:** Nirdosha is not a general-purpose language that happens to be
+> safer. It solves a problem no existing language was designed for:
+> letting an AI agent write and run backend code with no human reviewing
+> every line. Row 7 below ("easy for an LLM to write and reason about")
+> reads as one requirement among eleven in the table that follows — in
+> practice it's the reason the other ten exist in this combination at
+> all. The conventional backend surface (`http`/`json`/`db`/`mq`, etc.)
+> is deliberately deprioritized relative to rows 1–5/11: those are the
+> parts hard to retrofit onto Rust/Go/Python after the fact, and the
+> parts that decide whether an agent-written service can run
+> unsupervised. See `README.md`'s "Why this exists" section for the
+> current, short version of this argument.
+
 ## 0. The constraint that shapes everything
 
 Before any design: one theorem sets the ceiling here, so it's worth stating

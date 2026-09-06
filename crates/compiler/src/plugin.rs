@@ -25,11 +25,40 @@ use crate::ast::Ty;
 ///
 /// Deliberately **not** a field on `PluginBuiltin` (which stays exactly
 /// as it was): a native-callable builtin is a *stricter* subset (no
-/// `str`/aggregate/`Db`/`Handle` — anything `codegen.rs::llvm_ty`
-/// doesn't already emit a scalar LLVM type for, checked by
-/// [`NativePluginBuiltin::validate`]), and keeping it a separate,
-/// explicit opt-in avoids ever silently expecting a `str`-taking plugin
-/// builtin to somehow compile.
+/// `Vector`/`Matrix`/`Db`/`Mq`/`Json`/`Ty::Named` — anything
+/// `codegen.rs::llvm_ty` doesn't already emit a plain-value LLVM type
+/// for, checked by [`NativePluginBuiltin::validate`]), and keeping it a
+/// separate, explicit opt-in avoids ever silently expecting an
+/// aggregate-taking plugin builtin to somehow compile.
+///
+/// rfcs/0008-native-plugin-abi-widening.md Phase 1: `str` and `handle`
+/// are *not* in that stricter subset — both already have a plain-value
+/// LLVM representation `codegen.rs::llvm_ty` emits for every ordinary
+/// `.nir` function today (`Ty::Str => "{ptr, i64}"`, passed/returned by
+/// value in registers exactly like `f64`/`Dec128Bits`, never through
+/// the `Vector`/`Matrix` sret/pointer convention; `Ty::Handle(_)` is a
+/// plain opaque `i64`, its only safety coming from `ownership.rs`'s
+/// affine tracking at the *type* level, same as `Ty::Thread`/
+/// `Ty::Channel`/`Ty::File`). `Codegen::call`'s generic `sigs`-driven
+/// dispatch (`codegen.rs:3952`) already handles both shapes correctly
+/// for a `declare`d native symbol with zero special-casing — the only
+/// thing that stopped a `str`/`handle`-typed native plugin from
+/// compiling was this validator's own scalar-only restriction, not a
+/// missing codegen capability.
+///
+/// `&handle(Kind)` (`Ty::Ref(Box::new(Ty::Handle(_)))`) is also accepted
+/// — deliberately narrower than "any `Ty::Ref`" — for the same reason
+/// the deleted interpreter-path `widget_query` test case needed it: a
+/// *read* of a stateful resource must **borrow**, not consume, or a
+/// handle could only ever be used once before its own `close` (rfcs/
+/// 0005 §1's affine guarantee would make every real "connect, query N
+/// times, close" plugin uncallable). `codegen.rs::llvm_ty` already
+/// renders any `Ty::Ref(_)` as a plain one-word `ptr` — the *address* of
+/// the underlying `i64` handle slot, not the handle value itself — so a
+/// native plugin function taking `&handle(Kind)` must dereference that
+/// pointer once to read the `i64` id (see `crates/plugin-example-
+/// native-kv`'s `kv_get`/`kv_set` for a real, working example of both
+/// the `.nir`-side `&h` call and the Rust-side `*const i64` deref).
 pub struct NativePluginBuiltin {
     /// Must equal the corresponding `PluginBuiltin.name` this native
     /// form backs, and must also be the exact `#[no_mangle] extern "C"`
@@ -51,34 +80,64 @@ pub struct NativePluginBuiltin {
 
 impl NativePluginBuiltin {
     /// Every param and the return type must be a type `codegen.rs`
-    /// already emits as a plain LLVM scalar (or `void`) — `str`,
-    /// `Vector`/`Matrix`, `Json`, `Db`/`Mq`/`Handle`, any `Ty::Named`
-    /// struct/enum, are all real ABI questions (multi-word values,
-    /// pointers with real ownership) this narrow mechanism doesn't
-    /// attempt to answer; see rfcs/0005 §3's own "harder, still-open
-    /// question" for why that's a separate, bigger design, not an
-    /// oversight here.
+    /// already emits as a plain *value* (passed/returned in registers,
+    /// never through the `sret`/by-pointer convention `Vector`/`Matrix`/
+    /// `Ty::Named` need) — scalars, `str` (a `{ptr, i64}` two-word
+    /// value), and `handle(Kind)` (a plain `i64`) all qualify.
+    /// `Vector`/`Matrix`/`Json`/`Db`/`Mq`/any `Ty::Named` struct/enum do
+    /// not: those are real ABI questions (variable-size aggregates,
+    /// pointers with real ownership beyond a single opaque word) this
+    /// narrow mechanism doesn't attempt to answer — see rfcs/0005 §3's
+    /// own "harder, still-open question" for why that's separate,
+    /// bigger design, not an oversight here.
+    ///
+    /// A `str` parameter crosses as the plugin author's own
+    /// `#[repr(C)]` struct of `(ptr: *const u8, len: i64)` passed by
+    /// value (matching `runtime-kernels/src/lib.rs`'s `Dec128Bits`
+    /// pattern for its own two-word `{i64, i64}` values) — **not**
+    /// NUL-terminated, `len` is load-bearing. A `str` return works the
+    /// same way in reverse: the plugin allocates its own buffer (e.g.
+    /// via `Box::leak`) and returns `(ptr, len)` by value; nothing on
+    /// the Nirdosha side ever frees a plugin-returned string, the same
+    /// permanent-leak posture `codegen.rs`'s own `sha256_hex` builtin
+    /// already has for the identical reason (`Ty::Str` isn't affine, so
+    /// there's no scope-closing point to hook a free onto) — see
+    /// `crates/plugin-example-native-shout` for a real, working example
+    /// of both directions.
     pub fn validate(&self) -> Result<(), String> {
-        fn is_native_scalar(ty: &Ty) -> bool {
+        fn is_native_value(ty: &Ty) -> bool {
             matches!(
                 ty,
-                Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Usize | Ty::F64 | Ty::Bool | Ty::Unit
-            )
+                Ty::I8
+                    | Ty::I16
+                    | Ty::I32
+                    | Ty::I64
+                    | Ty::U8
+                    | Ty::U16
+                    | Ty::U32
+                    | Ty::U64
+                    | Ty::Usize
+                    | Ty::F64
+                    | Ty::Bool
+                    | Ty::Unit
+                    | Ty::Str
+                    | Ty::Handle(_)
+            ) || matches!(ty, Ty::Ref(inner) if matches!(inner.as_ref(), Ty::Handle(_)))
         }
         for p in &self.params {
-            if !is_native_scalar(p) {
+            if !is_native_value(p) {
                 return Err(format!(
                     "native plugin builtin `{}`: parameter type `{}` isn't a supported native-ABI \
-                     scalar (only i8..usize/f64/bool are) -- str/aggregate/Db/Mq/Handle types can't \
-                     cross this boundary yet (rfcs/0005 §3)",
+                     value (i8..usize/f64/bool/str/handle(..)/&handle(..) are) -- Vector/Matrix/Json/Db/Mq/struct \
+                     types can't cross this boundary yet (rfcs/0005 §3, rfcs/0008 §Phase 1)",
                     self.name,
                     p.name()
                 ));
             }
         }
-        if !is_native_scalar(&self.ret) {
+        if !is_native_value(&self.ret) {
             return Err(format!(
-                "native plugin builtin `{}`: return type `{}` isn't a supported native-ABI scalar",
+                "native plugin builtin `{}`: return type `{}` isn't a supported native-ABI value",
                 self.name,
                 self.ret.name()
             ));

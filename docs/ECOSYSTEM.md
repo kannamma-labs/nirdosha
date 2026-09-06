@@ -222,6 +222,27 @@ crates.io-hosted `.nir`-source-only crate needs:
    resources, today a plain `i64` via `nirdosha-plugin-support`) remain
    real, named gaps — `rfcs/0001-package-manifest-format.md` and
    `rfcs/0003-plugin-abi-v2.md`'s own open questions, respectively.
+
+   **2026-09-06 — the interpreter, and everything Stage 1 above built on
+   it, was removed** (`remove-interpreter` branch, commit `c82fa1f`):
+   `PluginBuiltin`/`PluginFn`/`NirdoshaPlugin`, all five reference
+   plugins, and `nirdosha-plugin-support` are gone — this whole
+   numbered item is now a historical record of a design that was real
+   and shipped, not a description of the current tree. What survives is
+   `crates/compiler/src/plugin.rs`'s `NativePluginBuiltin` (§3 of
+   `rfcs/0005-plugin-boundary-safety-and-performance.md`), the
+   compiled-path answer this doc's own G1 opening paragraph named as a
+   real gap ("no stable calling convention from generated LLVM IR into
+   an opaque `Arc<dyn Fn>` exists") — and `rfcs/0008-native-plugin-abi-
+   widening.md` is that mechanism's own version of this Stage-1 arc:
+   Phase 1 (widening past scalars to `str`/`handle(Kind)`/
+   `&handle(Kind)`, and the first-class affine `Ty::Handle` this
+   section above still lists as a gap) is built and verified on the
+   compiled path, with two real reference crates
+   (`crates/plugin-example-native-{shout,kv}`) replacing `rot13` as the
+   proof. Auto-discovery (this doc's own next paragraph) is still not
+   built, now for the compiled path instead of the interpreted one —
+   see rfcs/0008 Phase 3.
 2. **Stage 2 — Kind B.** Only after Stage 1 is real and F2 itself has
    had more mileage; needs the resolver work above plus a decision (see
    open questions) on whether crates.io is even the right home for
