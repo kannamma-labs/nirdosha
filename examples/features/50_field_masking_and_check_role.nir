@@ -1,16 +1,26 @@
 // Feature: field-level `requires(role/claim: ...)` masking (LANGUAGE.md
-// §6e) driven by a real, compiled `check_role` (§10, PHASE0.md's
-// "Twentieth update") -- plus `effect(...)` (checked against the real
-// inferred effect set, not decorative) and `nfr(...)` (§6f) on the same
-// function, and a Z3-proven `validate` contract (§16) alongside it. The
-// flagship example this README's own hero code block is drawn from.
+// §6e) composed with function-level `requires(role: ...)` + `acquire`
+// (§6a) -- both driven by a real, compiled `check_role` (§10,
+// PHASE0.md's "Twentieth update"), plus `effect(...)` (checked against
+// the real inferred effect set, not decorative) and `nfr(...)` (§6f) on
+// the same function, and a Z3-proven `validate` contract (§16)
+// alongside it. The flagship example this README's own hero code block
+// is drawn from.
 //
-// `salary` masks itself to zero on every `return` of an `Employee`
-// unless the returning function's own `RoleView`/`ClaimView` parameter
-// proves the "admin" role -- fail-closed, no `acquire` involved at all.
-// A `RoleView` is unforgeable by direct construction; the only way to
-// get a real one is `check_role(identity, role)` succeeding against a
-// real `VerifiedIdentity`'s claims.
+// Two independent gates compose here, not one mechanism wearing two
+// hats: `get_employee requires(role: "hr_staff")` decides *who can call
+// it at all* -- obtaining a callable value requires a real `RoleView`
+// proving "hr_staff", via `acquire`. `salary requires(role: "admin")`
+// then separately decides *what a successful caller sees back* -- the
+// field masks itself to zero on every `return` of an `Employee` unless
+// the argument passed as `caller` proves "admin" specifically, fail-
+// closed. An hr_staff member who isn't also an admin can call the
+// function and get real employee records with salary redacted; anyone
+// who isn't hr_staff can't call it at all. Neither `RoleView` can be
+// forged (`RoleView("admin")` is a compile-time error) or fabricated by
+// this function's own logic -- the only way to get a real one is
+// `check_role(identity, role)` succeeding against a real
+// `VerifiedIdentity`'s claims.
 
 struct Text {
     value: str,
@@ -41,13 +51,17 @@ validate tenure_bonus_pct {
 
 // The one function: `effect(pure)` is checked against what the body
 // actually does (a lie here is a build error, not a comment nobody
-// reads); `nfr(...)` wires real per-call latency/concurrency tracking
-// into the APM kernel with zero code at any call site; the `salary`
-// field masks itself on the way out, driven entirely by whether
-// `caller` proves the "admin" role -- no branch in this function's own
-// body decides that.
+// reads); `requires(role: "hr_staff")` means this function has no
+// direct-call path at all -- `acquire get_employee(proof)` is the only
+// way to obtain a callable value, and it demands a real `RoleView`
+// proving "hr_staff"; `nfr(...)` wires real per-call latency/
+// concurrency tracking into the APM kernel with zero code at any call
+// site; the `salary` field masks itself on the way out, driven
+// entirely by whether `caller` *separately* proves the "admin" role --
+// no branch in this function's own body decides either gate.
 fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
     effect(pure)
+    requires(role: "hr_staff")
     nfr(latency_ms: 50, concurrency_max: 1000)
 {
     return Employee(name.value, department.value, salary)
@@ -57,25 +71,53 @@ fn main() {
     let bonus: i64 = tenure_bonus_pct(7)
     print(bonus) // 10 -- proven in [0, 20] for every possible input, not just this one
 
-    // A real VerifiedIdentity carrying "admin" -- check_role hands back
-    // a genuine, unforgeable RoleView; get_employee sees it and lets
-    // salary through untouched.
-    let admin_identity: VerifiedIdentity = VerifiedIdentity("alice", "https://idp.example.com", "payroll-app", 0, 0, "admin")
-    let admin_view: Employee = match check_role(admin_identity, "admin") {
-        Ok(role) => get_employee(role, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+    // Proves both "hr_staff" (to acquire get_employee at all) and
+    // "admin" (to pass as `caller`, so the masked field sees a matching
+    // proof and passes through untouched) -- two separate check_role
+    // calls, since a RoleView only ever proves the one role it was
+    // checked against.
+    let admin_identity: VerifiedIdentity = VerifiedIdentity("alice", "https://idp.example.com", "payroll-app", 0, 0, "hr_staff,admin")
+    let admin_view: Employee = match check_role(admin_identity, "hr_staff") {
         Err(e) => Employee("", "", -1.0),
+        Ok(hr_proof) => match acquire get_employee(hr_proof) {
+            Err(msg) => Employee("denied", "", -2.0),
+            Ok(f) => match check_role(admin_identity, "admin") {
+                Err(e) => f(hr_proof, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+                Ok(admin_proof) => f(admin_proof, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+            },
+        },
     }
-    print(admin_view.salary) // 150000
+    print(admin_view.salary) // 150000 -- caller proved "admin"
 
-    // A real VerifiedIdentity that only carries "guest" -- its own
-    // genuine RoleView proves "guest", not "admin", so the same
-    // function masks salary to zero while every other field still
-    // passes through untouched.
-    let guest_identity: VerifiedIdentity = VerifiedIdentity("bob", "https://idp.example.com", "payroll-app", 0, 0, "guest")
-    let guest_view: Employee = match check_role(guest_identity, "guest") {
-        Ok(role) => get_employee(role, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+    // Proves "hr_staff" only -- can acquire and call get_employee (the
+    // function-level gate is satisfied), but the only RoleView available
+    // to pass as `caller` proves "hr_staff", not "admin", so the
+    // field-level gate masks salary to zero while name still passes
+    // through untouched.
+    let hr_identity: VerifiedIdentity = VerifiedIdentity("carol", "https://idp.example.com", "payroll-app", 0, 0, "hr_staff")
+    let hr_view: Employee = match check_role(hr_identity, "hr_staff") {
         Err(e) => Employee("", "", -1.0),
+        Ok(hr_proof) => match acquire get_employee(hr_proof) {
+            Err(msg) => Employee("denied", "", -2.0),
+            Ok(f) => f(hr_proof, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+        },
     }
-    print(guest_view.salary) // 0 -- masked
-    print(guest_view.name)   // Ada Lovelace -- unmasked fields pass through
+    print(hr_view.salary) // 0 -- masked
+    print(hr_view.name)   // Ada Lovelace -- unmasked fields still pass through
+
+    // Proves neither role at all -- check_role itself fails, so there's
+    // no RoleView to offer `acquire` in the first place: get_employee's
+    // own function-level gate refuses to hand back a callable value,
+    // and the function body never runs -- fail-closed a full step
+    // earlier than the field-masking case above.
+    let outsider_identity: VerifiedIdentity = VerifiedIdentity("mallory", "https://idp.example.com", "payroll-app", 0, 0, "guest")
+    let outsider_view: Employee = match check_role(outsider_identity, "hr_staff") {
+        Err(e) => Employee("no_access", "", -3.0),
+        Ok(hr_proof) => match acquire get_employee(hr_proof) {
+            Err(msg) => Employee("denied", "", -3.0),
+            Ok(f) => f(hr_proof, Text("Ada Lovelace"), Text("Engineering"), 150000.0),
+        },
+    }
+    print(outsider_view.salary) // -3 -- never even reached get_employee's body
+    print(outsider_view.name)   // no_access
 }

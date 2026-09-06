@@ -2175,3 +2175,88 @@ fn nfr_error_rate_tracks_real_result_tag_on_both_arms() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "42\n-1\n");
 }
+
+/// Ordinary (ungated) first-class functions, compiled for real
+/// (2026-09): a bare top-level fn name used as a value (`apply(double,
+/// 21)`) evaluates to its own address (`Expr::Ident`'s fallback when
+/// `name` isn't a local variable), and calling a `fn(..)->..`-typed
+/// local (`apply`'s own `f` parameter) emits a real indirect call
+/// (`Codegen::call_indirect`) — no proof, no `acquire`, just a plain
+/// value like any other.
+#[test]
+fn ordinary_first_class_function_value_compiles_and_calls_indirectly() {
+    let src = r#"
+        fn double(x: i64) -> i64 {
+            return x * 2
+        }
+        fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+            return f(x)
+        }
+        fn main() {
+            print(apply(double, 21))
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "42\n");
+}
+
+/// `acquire name(proof)` compiled for real (2026-09, LANGUAGE.md §6a):
+/// a `requires`-gated fn's value is obtained only through a real
+/// `check_role`-produced `RoleView` matching its declared role —
+/// `Ok(f)` then calls the acquired function like any other `Ty::Fn`
+/// value (`call_indirect`), `Err(reason)` when the given identity's own
+/// real `RoleView` doesn't prove the required role. This is the
+/// function-level counterpart to
+/// `check_role_produces_real_role_view_that_drives_field_masking`'s
+/// field-level masking — both driven by the same compiled `check_role`,
+/// neither involving the interpreter in any way.
+///
+/// The inner `match`'s arms are deliberately `Err` before `Ok`:
+/// `Codegen::match_expr` infers the match's own result type from its
+/// *first* arm's body, evaluated before that arm's own bindings exist
+/// — `Ok(f) => f(...)` can't be first here, since `f` isn't in scope
+/// yet at that point. A real, disclosed ordering constraint, not a bug
+/// in this test.
+#[test]
+fn acquire_produces_real_callable_fn_value_gated_by_check_role() {
+    let src = r#"
+        struct Text { value: str }
+        struct Employee {
+            name: str,
+            department: str,
+            salary: f64,
+        }
+        fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
+            effect(pure)
+            requires(role: "admin")
+        {
+            return Employee(name.value, department.value, salary)
+        }
+        fn main() {
+            let admin_identity: VerifiedIdentity = VerifiedIdentity("alice", "https://idp", "app", 0, 0, "admin")
+            let admin_view: Employee = match check_role(admin_identity, "admin") {
+                Err(e) => Employee("", "", -1.0),
+                Ok(role) => match acquire get_employee(role) {
+                    Err(msg) => Employee("denied", "", -2.0),
+                    Ok(f) => f(role, Text("Ada"), Text("Eng"), 150000.0),
+                },
+            }
+            print(admin_view.salary)
+
+            let guest_identity: VerifiedIdentity = VerifiedIdentity("bob", "https://idp", "app", 0, 0, "guest")
+            let guest_view: Employee = match check_role(guest_identity, "guest") {
+                Err(e) => Employee("", "", -1.0),
+                Ok(role) => match acquire get_employee(role) {
+                    Err(msg) => Employee("denied", "", -2.0),
+                    Ok(f) => f(role, Text("Ada"), Text("Eng"), 150000.0),
+                },
+            }
+            print(guest_view.salary)
+            print(guest_view.name)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "150000.000000\n-2.000000\ndenied\n");
+}

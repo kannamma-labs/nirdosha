@@ -132,7 +132,7 @@ outright by the correction:
 | P1 | Narrowed deadlock claims | Kept unchanged — §8. |
 | P1 | NFR governance | Kept as open work — §9, with the CLI-knob question replaced (compiled binaries have no `NIRDOSHA_{PREFIX}_POOL_*`-equivalent surface today; a new one would need designing, not migrating). |
 | P1 | Spawn-admission blocking hazard | **Reframed, not just kept**: there is no `thread_pool.rs` in the compiled path to protect from re-introduced deadlock — a compiled spawn scheduler doesn't exist yet. The hazard is real but prospective: whatever compiled thread scheduler eventually gets built (as part of B6) must have this property from its first line of code, not retrofitted. See §8. |
-| P2 | Authorization/admission error taxonomy | **Resolved as inapplicable, for now**: `acquire`/`requires(...)` don't compile (`codegen.rs:946-949` rejects `Expr::Acquire`) — there's no `PrivilegedFnNotAcquired`-equivalent in the compiled surface to conflict with `AdmissionDenied`. Reopens if `acquire` ever gains codegen. |
+| P2 | Authorization/admission error taxonomy | **Premise changed, conclusion unchanged, 2026-09**: `acquire`/`requires(...)` now compile for real (`docs/LANGUAGE.md` §6a) — the "doesn't compile" reason this row used to give is gone. Still not a live conflict: a failed `acquire` is an ordinary `Result::Err(str)` the program itself inspects, not a distinguishable runtime signal, and `AdmissionDenied` still isn't its own surfaced error kind either (§9's own "Authorization-oracle risk" entry has the fuller writeup). Reopens for real once `AdmissionDenied` becomes distinguishable. |
 | P2 | Numeric SLOs and rollout plan | Kept, re-baselined — §5, §10. |
 | P2 | Global sequencing as a serialization point | Kept — replay stays opt-in debug mode, §6. |
 
@@ -525,12 +525,26 @@ today has no natural multiple-tenant concept. This section is
 explicitly parked until B8 unblocks it, rather than force-fit onto a
 substrate that doesn't have the concept it needs.
 
-**Authorization-oracle risk — moot today, reopens later.** The
-decision document's concern (don't let `AdmissionDenied` leak
-authorization facts distinguishable from `PrivilegedFnNotAcquired`)
-doesn't apply because `acquire`/`requires(...)` don't compile
-(`codegen.rs:946-949`). Reopens exactly if/when `acquire` gains codegen
-— worth remembering rather than assuming permanently resolved.
+**Authorization-oracle risk — reopened, 2026-09, still not a live
+issue for a different reason.** `acquire`/`requires(role/claim: ...)`
+now compile for real (`docs/LANGUAGE.md` §6a, §10) — the premise this
+entry used to stand on ("doesn't apply because they don't compile") no
+longer holds, exactly as its own closing sentence anticipated. Checked
+against the real compiled behavior rather than reasoned about in the
+abstract: a failed `acquire` surfaces as an ordinary `Result::Err(str)`
+value the `.nir` program itself inspects via `match` — there is no
+`PrivilegedFnNotAcquired`-shaped *runtime* signal to leak in the first
+place (`PrivilegedFnNotAcquired` itself is `typeck.rs`'s own static
+rejection of a direct, unacquired call; a program that compiles never
+produces one at runtime). And `AdmissionDenied` still isn't a
+distinguishable signal on its own terms either — per §10's own phase
+table, a kernel denial still folds into the same generic `-1` every
+other kernel failure returns. So the concern stays moot, but now for
+the right reason (no distinguishable `AdmissionDenied` signal exists to
+correlate against anything), not the wrong one (acquire doesn't
+compile). Reopens for real if/when `AdmissionDenied` becomes its own
+distinct, surfaced error kind — that pairing is the one worth watching,
+not `acquire`'s compiled status by itself.
 
 **NFR governance — partially landed, 2026-09 — validation ranges done,
 precedence/composition/per-principal ceilings/staged rollout still

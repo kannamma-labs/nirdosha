@@ -44,7 +44,7 @@ that's the one file here meant to be read, not run, on its own.
 | 30 | `30_identity_oidc.nir` | `oidc_validate_token`/`check_role`/`extract_claim`/`identity_expired` |
 | 31 | `31_mock_identity_provider.nir` | `mock_issue_token` — the mock-IdP inverse of `oidc_validate_token` |
 | 32 | `32_sessions_and_api_keys.nir` | `create_application_session`/`session_cookie`/`new_refresh_token`/`exchange_refresh_token`/`check_revocation`/`validate_api_key` |
-| 33 | `33_privileged_functions.nir` | `requires(role:...)`/`requires(claim:...,...)` + `acquire` |
+| 33 | `33_privileged_functions.nir` | `requires(role:...)`/`requires(claim:...,...)` + `acquire` — the mechanism itself compiles now (2026-09), but this file's own worked examples route through `oidc_validate_token`/`extract_claim` (still interpreter-only-designed), so it doesn't run end to end; see `50_field_masking_and_check_role.nir` for a `check_role`-driven role-gated flow that does |
 | 34 | `34_requires_public.nir` | `requires(public)` |
 | 35 | `35_validate_contracts.nir` | `validate { pre:/post: }` Hoare contracts |
 | 36 | `36_transact.nir` | `transact { precheck?/network/verify/commit/compensate?/log? }` |
@@ -60,7 +60,7 @@ that's the one file here meant to be read, not run, on its own.
 | 46 | `46_db_schema_and_role_mapping_conventions.nir` | `serve --db` auto schema migrations + `RoleMapping` identity cache (pure convention, no new syntax) |
 | 47 | `47_external_service_boundary.nir` | plugin-backed `db`/`mq` by URL scheme (`db_connect`/`mq_connect_via`) |
 | 49 | `49_nfr.nir` | `nfr(latency_ms:/error_rate_max:/throughput_min_per_sec:/concurrency_max:)` — compiled, automatic APM tracking |
-| 50 | `50_field_masking_and_check_role.nir` | field-level `requires(role/claim:...)` masking + compiled `check_role` — the README's own hero example |
+| 50 | `50_field_masking_and_check_role.nir` | field-level `requires(role/claim:...)` masking + function-level `requires(role:...)`/`acquire` + compiled `check_role` — the README's own hero example |
 
 ## Deliberately not given their own file
 

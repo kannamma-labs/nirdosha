@@ -58,7 +58,7 @@ zero local setup, building in about a minute.
 
 ## What Nirdosha code looks like
 
-**One function. Four independent guarantees the compiler itself checks
+**One function. Five independent guarantees the compiler itself checks
 — not comments, not conventions, not a framework's runtime middleware.**
 (Excerpt — `Text`/`main` omitted here, full runnable source linked below.)
 
@@ -71,6 +71,7 @@ struct Employee {
 
 fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
     effect(pure)                             // lying here is a build error, not a comment
+    requires(role: "hr_staff")               // uncallable at all without a real proof of this role
     nfr(latency_ms: 50, concurrency_max: 1000)   // real APM tracking, zero code at the call site
 {
     return Employee(name.value, department.value, salary)
@@ -80,26 +81,32 @@ fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> 
 ```sh
 git clone https://github.com/kannamma-labs/nirdosha.git && cd nirdosha
 cargo run -p nirdosha --release -- build examples/features/50_field_masking_and_check_role.nir -o employee && ./employee
-# 10          <- a Z3-proven Hoare contract elsewhere in the same file (see below)
+# 10           <- a Z3-proven Hoare contract elsewhere in the same file (see below)
 # 150000.000000
-# 0.000000    <- masked
+# 0.000000     <- masked
 # Ada Lovelace
+# -3.000000    <- never even reached get_employee's body
+# no_access
 ```
 
-`caller: RoleView` is the *only* thing standing between a request and a
-real salary — and a `RoleView` cannot be forged (`RoleView("admin")` is a
-compile-time error) or fabricated by this function's own logic; it can
-only come from `check_role(identity, "admin")` succeeding against a real
-`VerifiedIdentity`, itself compiled, not interpreted. Call
-`get_employee` with a `RoleView` that proves `"admin"` and `salary`
-passes through untouched; call it with any other proof — or none — and
-`salary` comes back `0.0`, unconditionally, while every other field
-still passes through. No `if` in `get_employee`'s own body decides
-that — the masking is a property of the field declaration, checked at
-every `return`, so there's no per-handler `if user.role == "admin"`
-check to forget writing, the way a hand-rolled equivalent scattered
-across every handler that touches `Employee` always eventually gets
-forgotten in one of them.
+**Two independent gates, not one mechanism wearing two hats.**
+`requires(role: "hr_staff")` on the function decides *who can call it
+at all* — `get_employee`'s name has no direct-call path once gated;
+the only way to obtain a callable value is `acquire
+get_employee(proof)`, and it demands a real `RoleView` proving
+`"hr_staff"`. `requires(role: "admin")` on the field separately decides
+*what a successful caller sees back* — `salary` masks itself to zero on
+every `return` unless the value passed as `caller` proves `"admin"`
+specifically. Neither `RoleView` can be forged
+(`RoleView("admin")` is a compile-time error) or fabricated by this
+function's own logic — the only way to get a real one is
+`check_role(identity, role)` succeeding against a real
+`VerifiedIdentity`, itself compiled, not interpreted. The result: an
+HR staffer who isn't also an admin can call the function and get real
+employee records back with salary redacted; someone who's neither
+can't obtain a callable `get_employee` in the first place — two
+different failure points, two different roles, checked independently,
+with no `if` anywhere in `get_employee`'s own body deciding either one.
 
 `effect(pure)` is checked against what the function *actually does* —
 annotate a function that performs I/O as `pure` and `nirdosha build`
@@ -236,9 +243,10 @@ Real, compiled, and running today — the highlights:
 - **Identity and data protection** — `check_role` against a real
   `VerifiedIdentity`, producing an unforgeable `RoleView`; field-level
   `requires(role/claim: ...)` masking that zeroes a struct field on
-  return unless the caller's own `RoleView`/`ClaimView` proves it —
-  both compiled, both enforced in the binary itself, no server process
-  involved.
+  return unless the caller's own `RoleView`/`ClaimView` proves it;
+  function-level `requires(role/claim: ...)` + `acquire`, gating
+  whether a function is even callable at all — all three compiled, all
+  enforced in the binary itself, no server process involved.
 - **`nfr(...)`** — non-functional requirements as a first-class,
   compiled fn annotation: automatic latency/error-rate/throughput/
   concurrency tracking via the APM kernel, with async escalation to an

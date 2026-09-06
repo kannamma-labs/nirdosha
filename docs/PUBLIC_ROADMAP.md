@@ -6,7 +6,29 @@ contribute — the full internal tracker, with verification detail and
 session-by-session notes, is [`docs/ROADMAP.md`](./docs/ROADMAP.md).
 
 Status tags: `[DONE]` (verified — tests pass or run end-to-end),
-`[PARTIAL]` (real progress, gap named), `[OPEN]` (scoped, not started).
+`[PARTIAL]` (real progress, gap named), `[OPEN]` (scoped, not started),
+`[NOT RUNNABLE]` (real, working code as of when it was built and
+verified — against the now-deleted interpreter — but not reachable in
+any form today; added 2026-09, see the callout just below).
+
+> **2026-09 — read every "interpreter-only"/"interpreted path" note
+> below as historical, not current.** The tree-walking interpreter
+> (`run`/`serve`) was removed entirely in a separate pass this session —
+> there is no interpreted fallback left at all. A `[DONE]` item below
+> tagged "interpreter-only" was real and verified *when it was written*,
+> but isn't runnable in *any* form today, compiled or otherwise, until
+> Track B's native codegen actually reaches it — a strictly worse
+> statement than "falls back to the interpreter." Track A's own framing
+> ("gates building critical apps on the interpreted path") is fully
+> moot for the same reason. What changed this session, fully compiled
+> and verified end to end: `check_role` (real identity, an unforgeable
+> `RoleView`), field-level `requires(role/claim: ...)` masking, function-
+> level `requires(role/claim: ...)` + `acquire` (first-class/privileged
+> functions), and `nfr(...)` (non-functional requirements as a compiled
+> fn annotation with real APM-kernel tracking + escalation) — see
+> `docs/LANGUAGE.md` §6a/§6e/§6f/§10 and `docs/PHASE0.md`'s "Twentieth"/
+> "Twenty-first" updates for the full detail this list doesn't yet
+> reflect below.
 
 ---
 
@@ -32,56 +54,96 @@ Status tags: `[DONE]` (verified — tests pass or run end-to-end),
   within 1.4× of `gcc -O2` on scalar benchmarks
 - [DONE] `validate <fn_name> { pre: ... post: ... }` — real Hoare
   contracts on a function: a Z3-backed static proof that hard-fails the
-  build on a genuine counterexample where it can reach one, plus an
-  unconditional runtime check on every actual call as the backstop for
-  everything it can't (most real functions) — see `docs/ROADMAP.md` Track F,
-  F3
+  build on a genuine counterexample where it can reach one, for
+  Tier-1-provable (integer-only) functions. The dynamic runtime-check
+  backstop this bullet used to describe for everything Tier-1 can't
+  prove no longer exists (it lived in the now-deleted interpreter) —
+  see `docs/LANGUAGE.md` §16 for the current, honest split.
+
+**Identity, data protection, and non-functional requirements** (2026-09,
+compiled, no interpreter involved at any point)
+- [DONE] `check_role(identity, role)` against a real `VerifiedIdentity`,
+  producing a genuine, unforgeable `RoleView` — `RoleView`/`ClaimView`
+  can't be directly constructed by a `.nir` program
+- [DONE] Field-level `requires(role/claim: ...)` masking — a struct
+  field zeroes itself on every `return` unless the returning function's
+  own `RoleView`/`ClaimView` parameter proves it, fail-closed
+- [DONE] Function-level `requires(role/claim: ...)` + `acquire` —
+  first-class/privileged functions: a gated `fn`'s value is obtainable
+  only via `acquire name(proof)`, a real `Result(fn(..)->.., str)`
+  checked against a real proof; calling any `fn(..)->..`-typed value
+  (gated or not) is a real indirect call
+- [DONE] `nfr(latency_ms:/error_rate_max:/throughput_min_per_sec:/
+  concurrency_max:)` — non-functional requirements as a first-class fn
+  annotation, tracked automatically via the APM kernel with async
+  escalation to `NIRDOSHA_OBSERVABILITY_URL` on a crossed threshold
 
 **Backend/services**
-- [DONE] `db` (SQLite + Postgres), `json`, `http`/`https`, `mq` (Redis)
-  — interpreter-only today, see Track B below
-- [DONE] Identity — OIDC/JWT validation, roles/claims,
-  `requires(role:...)`, an admin-editable role-mapping cache (IdP role
-  names → app role names)
-- [DONE] `transact` — durable transactions (WAL, crash replay, retry/
-  timeout, idempotency)
-- [DONE] `workflow` — durable state machines with email/SMS/push
+- [NOT RUNNABLE] `db` (SQLite + Postgres), `json`, `http`/`https`, `mq`
+  (Redis) — no codegen yet; see Track B below
+- [NOT RUNNABLE] Identity — OIDC/JWT validation (`oidc_validate_token`),
+  claims (`extract_claim`), an admin-editable role-mapping cache (IdP
+  role names → app role names). `check_role` +
+  `requires(role/claim:...)`/`acquire` are the exception, now fully
+  compiled — see the identity section above.
+- [NOT RUNNABLE] `transact` — durable transactions (WAL, crash replay,
+  retry/timeout, idempotency)
+- [NOT RUNNABLE] `workflow` — durable state machines with email/SMS/push
   notification actions
-- [DONE] Auto-generated, additive-only DB schema migrations
+- [NOT RUNNABLE] Auto-generated, additive-only DB schema migrations
 
-**UI engine**
+**UI engine** — the `nirdosha emit-ui` half (static HTML derived from
+`struct`/`screen`/`dashboard` conventions, no live backend) is real and
+runs today; everything below tagged `[NOT RUNNABLE]` depended on the
+now-deleted `nirdosha serve` for its *live*, server-enforced half —
+`emit-ui` still generates the corresponding markup/hints, but nothing
+runs behind it.
 - [DONE] Zero-syntax CRUD + dashboard inference from `struct`/fn naming
-  conventions — no UI code needed for the common case
+  conventions, via `emit-ui` — static markup, no UI code needed for the
+  common case
 - [DONE] `screen`/`dashboard`/`module` DSL for the cases naming
-  conventions can't express
-- [DONE] Field-level RBAC (`view`/`edit` role/claim gates) and format
-  validation (`pattern`/`format`/`min`/`max`) — enforced server-side,
-  not just hidden in the client
+  conventions can't express — `emit-ui` reads these into the same
+  static markup
+- [NOT RUNNABLE] Field-level RBAC (`view`/`edit` role/claim gates) and
+  format validation (`pattern`/`format`/`min`/`max`) *enforced
+  server-side* — `emit-ui` still emits the client-side hide/disable
+  hints, but there's no server left to enforce anything behind them.
+  Field-level `requires(role/claim:...)` masking (identity section
+  above) is a different, newer, compiled mechanism that *does* enforce
+  for real today, just not through this UI-layer gate.
 - [DONE] Design-token theming (`--theme`) with live reload — color
-  ramps, motion, dark-mode strategy, layout shell, all optional
-- [DONE] `workspace`/`panel` — composite multi-pane screens composing
-  fields/lists from several structs onto one page (`docs/LANGUAGE.md` §15)
-- [DONE] `visual`/`render` — graph, heatmap, and timeline views on a
-  dashboard or inside a panel, on top of the existing bar-chart-only
-  `chart` (`docs/LANGUAGE.md` §11c)
-- [DONE] `field { render: "countdown" }` — a live SLA countdown chip on
-  a table field, ticking client-side with zero added network traffic
-  (`docs/LANGUAGE.md` §11)
-- [DONE] `action { show_result: true }` — a "Simulate"/"Preview" action
-  shows its own JSON return value in a modal instead of just refreshing
-  the row (`docs/LANGUAGE.md` §11)
-- [DONE] A workflow stage stepper — a real `●━●━○━○` progress stepper
-  on a workflow queue row instead of a bare state-name badge, no syntax
-  change (`docs/LANGUAGE.md` §14)
-- [DONE] `examples/ctms/ctms.nir` — all of the above proven together
-  against a real 89-screen enterprise app spec (a Counter-Terrorism
-  Financing & Transaction Monitoring System), not just in isolation —
-  see `docs/ROADMAP.md` Track E6
+  ramps, motion, dark-mode strategy, layout shell, all optional (a
+  static-generation-time concern, unaffected by `serve`'s removal)
+- [NOT RUNNABLE] `workspace`/`panel` — composite multi-pane screens
+  composing fields/lists from several structs onto one page
+  (`docs/LANGUAGE.md` §15) — needs the live multi-source data `serve`
+  provided
+- [NOT RUNNABLE] `visual`/`render` — graph, heatmap, and timeline views
+  on a dashboard or inside a panel, on top of the existing bar-chart-only
+  `chart` (`docs/LANGUAGE.md` §11c) — needs live query data
+- [NOT RUNNABLE] `field { render: "countdown" }` — a live SLA countdown
+  chip on a table field, ticking client-side with zero added network
+  traffic (`docs/LANGUAGE.md` §11) — needs a live table row to attach to
+- [NOT RUNNABLE] `action { show_result: true }` — a "Simulate"/"Preview"
+  action shows its own JSON return value in a modal instead of just
+  refreshing the row (`docs/LANGUAGE.md` §11) — needs a live action call
+- [NOT RUNNABLE] A workflow stage stepper — a real `●━●━○━○` progress
+  stepper on a workflow queue row instead of a bare state-name badge, no
+  syntax change (`docs/LANGUAGE.md` §14) — needs a live workflow queue
+- [NOT RUNNABLE] `examples/ctms/ctms.nir` — all of the above proven
+  together against a real 89-screen enterprise app spec (a
+  Counter-Terrorism Financing & Transaction Monitoring System), not just
+  in isolation — see `docs/ROADMAP.md` Track E6; the static markup still
+  generates via `emit-ui`, the live proof no longer runs
 
 **LLM integration**
 - [DONE] LL(1) grammar exported to GBNF for constrained decoding
   (`crates/compiler/nirdosha.gbnf`)
-- [DONE] Structured `Diagnostic` JSON on every error (`--format=json`)
+- [NOT RUNNABLE] Structured `Diagnostic` JSON on every error
+  (`--format=json`) — that flag was interpreter-mode-only and no longer
+  exists in the compiled-only CLI (`nirdosha build`/`emit-llvm` print
+  plain-text errors); `emit-ast`'s own JSON output, listed separately
+  below, is unaffected
 - [DONE] `emit-ast`/`validate_fragment` for typed AST/fragment tooling
 - [PARTIAL] `crates/bench/` pass@1 + self-repair-rate harness — scaffold,
   corpus, and a real `Model` (`--mode real`, any OpenAI-compatible
@@ -92,11 +154,15 @@ Status tags: `[DONE]` (verified — tests pass or run end-to-end),
 
 ## In progress / next
 
-**Track A — Production readiness** (highest priority: gates building
-critical apps on the interpreted path)
+**Track A — Production readiness** (2026-09: this track's own "gates
+building critical apps on the interpreted path" framing is moot — the
+interpreter is gone, so there's no interpreted path left to gate
+anything on. Kept for now as a record of open production-hardening
+work that would matter again if/when a compiled `serve` (Track B8)
+exists to need it.)
 - [OPEN] `transact` durability under real kill-mid-transaction conditions
-- [OPEN] A deployment story for `nirdosha serve` (containerization,
-  secrets/JWKS handling)
+- [OPEN] A deployment story for a *compiled* `serve` (containerization,
+  secrets/JWKS handling) — `nirdosha serve` itself no longer exists
 - [PARTIAL] Observability — a local OTel-shaped tracer exists; wiring
   to a real collector (OTLP) is open
 - [OPEN] A compatibility/versioning policy before the next breaking
@@ -111,11 +177,15 @@ critical apps on the interpreted path)
   upstream incompatibility); revisit once a fixed `z3`/`z3-src` release
   ships
 
-**Track B — Full compilation** (`json`/`http`/`mq`/identity/`transact`/
-sandboxing remain interpreter-only; native codegen covers the numeric/
-control-flow subset, `tcp`/`tcp_listener`, `file`, scalar-only native
-plugin calls, `dec128` arithmetic, and, as of 2026-09, basic
-concurrency — `thread`/`spawn`/`join`, `chan`/`send`/`recv`, `froze`)
+**Track B — Full compilation** (`json`/`http`/`mq`/`transact`/
+sandboxing/most of identity have no codegen yet and, with the
+interpreter gone, don't run in any form; native codegen covers the
+numeric/control-flow subset, `tcp`/`tcp_listener`, `file`, scalar-only
+native plugin calls, `dec128` arithmetic, basic concurrency —
+`thread`/`spawn`/`join`, `chan`/`send`/`recv`, `froze` — and, as of
+2026-09, `check_role`, field- and function-level `requires(...)`/
+`acquire`, and `nfr(...)` — see the identity section under "Shipped"
+above)
 - [DONE] `file` (`open`/`send`/`recv`/`stop`) — linked `nir_file_*`
   kernels, the same "declare + link a staticlib" pattern `tcp` already
   used; `examples/file_io.nir` compiles and runs as a native binary
@@ -164,8 +234,11 @@ concurrency — `thread`/`spawn`/`join`, `chan`/`send`/`recv`, `froze`)
   ranking for the fuller breakdown.
 
 **Track C — Agent-facing HTTP API** (the spec exists —
-[`docs/nirdosha-agent-api.md`](./docs/nirdosha-agent-api.md) — about half the
-underlying capability already ships; the `/v1/*` server itself is 0% built)
+[`docs/nirdosha-agent-api.md`](./docs/nirdosha-agent-api.md) — the `/v1/*`
+server itself is 0% built, and its "about half the underlying
+capability already ships" premise needs re-checking post-interpreter-
+removal: much of what it counted on shipping was interpreter-backed and
+isn't currently runnable — see the "Shipped" callout above)
 - [OPEN] The HTTP server and its 20 endpoints across code generation,
   execution, introspection, benchmarking, and provenance
 

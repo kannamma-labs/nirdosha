@@ -98,7 +98,9 @@ messages.
   non-affine `struct`/`enum`/`match`, `froze`, `thread`/`spawn`/`join`/
   `chan`/`send`/`recv`, and — 2026-09 — `check_role` (one real,
   compiled identity builtin, out of Row 12's larger still-interpreter-
-  only set) plus two brand-new compiled-only features that never
+  only set), `fn(..)->..`/`acquire`/`requires(role/claim: ...)` on a
+  function (first-class/privileged functions, previously interpreter-
+  only, §6a), plus two brand-new compiled-only features that never
   existed in the interpreter at all, `nfr(...)` and field-level
   `requires(role/claim: ...)` masking, all moved from interpreter-only
   (or nonexistent) to real LLVM codegen over time (docs/LANGUAGE.md §10 has
@@ -1939,10 +1941,14 @@ claim, though that section is currently accurate).
    (`docs/LANGUAGE.md` §7/§10). **B6. Sandboxing codegen** `[OPEN]` —
    `sandbox`/`stop` remains, a separate and larger scope (a real,
    separate OS process, not a thread) not touched by the above.
-7. `[OPEN]` **B7. First-class functions codegen** — `fn(..)->..`/
-   `acquire`/`requires(...)`, and the Phase-4b affine-in-struct/enum
-   case (a `struct`/`enum` whose payload transitively contains
-   `box`/`&`/`thread`/`chan`/`tcp`/`file`/`db`/`mq`).
+7. **B7. First-class functions codegen** — `fn(..)->..`/`acquire`/
+   `requires(...)` `[DONE]` (2026-09, `docs/LANGUAGE.md` §6a/§10): a
+   plain fn value is its own address, `acquire` builds a real
+   `Result(fn(..)->.., str)` gated on a `check_role`-produced
+   `RoleView`/`ClaimView`, calling either emits a real indirect call.
+   The Phase-4b affine-in-struct/enum case (a `struct`/`enum` whose
+   payload transitively contains `box`/`&`/`thread`/`chan`/`tcp`/`file`/
+   `db`/`mq`) is unrelated and still `[OPEN]`.
 8. `[BLOCKED: B1–B7]` **B8. Compiled `serve` mode** — a real
    self-contained production binary with a compiled dispatch table,
    *coexisting* with interpreted `serve` for dev (the OCaml
