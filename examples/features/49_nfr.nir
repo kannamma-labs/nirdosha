@@ -1,0 +1,43 @@
+// Feature: `nfr(...)` -- non-functional requirements as a first-class,
+// compiled fn annotation (LANGUAGE.md §6f, PHASE0.md's "Twentieth
+// update"). Up to four independent, all-optional thresholds
+// (`latency_ms`/`error_rate_max`/`throughput_min_per_sec`/
+// `concurrency_max`) are tracked automatically by the APM kernel
+// (`runtime-kernels::kernel::nfr`) with zero code at any call site --
+// `codegen.rs` wraps every return path in `nir_nfr_call_begin`/
+// `nir_nfr_call_end`. A crossed threshold escalates via an async,
+// fire-and-forget HTTP POST to `NIRDOSHA_OBSERVABILITY_URL` (unset =
+// never escalates, not an error) -- unset here, so this example just
+// demonstrates the annotation being fully transparent to normal
+// execution, the same guarantee `codegen.rs`'s own regression test
+// (`nfr_annotation_is_transparent_to_normal_execution`) checks.
+
+fn add(a: i64, b: i64) -> i64 nfr(latency_ms: 1000, concurrency_max: 10) {
+    return a + b
+}
+
+// `error_rate_max` additionally requires a `Result(_, _)` return type --
+// that's the only way `call_end` can tell a real error from a real
+// success, by inspecting the returned value's own tag, not a heuristic.
+enum DivError { DivideByZero }
+
+fn safe_div(a: i64, b: i64) -> Result(i64, DivError) nfr(error_rate_max: 0.5) {
+    if b == 0 {
+        return Err(DivideByZero())
+    }
+    return Ok(a / b)
+}
+
+fn main() {
+    print(add(2, 3))  // 5
+
+    match safe_div(10, 2) {
+        Ok(v) => print(v),      // 5
+        Err(e) => print(-1),
+    }
+    match safe_div(10, 0) {
+        Ok(v) => print(v),
+        Err(e) => print(-1),    // -1 -- a real error, real enough for
+                                 // `nfr(error_rate_max: ...)` to count it
+    }
+}

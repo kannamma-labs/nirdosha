@@ -94,10 +94,15 @@ messages.
   additive-only (docs/LANGUAGE.md §13).
 - **Compiled-vs-interpreter-only boundary pushed forward repeatedly**
   — `box`/`&`/`*`, `str`, `tcp`/`tcp_listener`, `sha256_hex`/
-  `constant_time_str_eq`, `rand_*`, all of `Vector`/`Matrix`, and
-  non-affine `struct`/`enum`/`match` all moved from interpreter-only to
-  real LLVM codegen over time (docs/LANGUAGE.md §10 has the current, verified
-  line).
+  `constant_time_str_eq`, `rand_*`, all of `Vector`/`Matrix`,
+  non-affine `struct`/`enum`/`match`, `froze`, `thread`/`spawn`/`join`/
+  `chan`/`send`/`recv`, and — 2026-09 — `check_role` (one real,
+  compiled identity builtin, out of Row 12's larger still-interpreter-
+  only set) plus two brand-new compiled-only features that never
+  existed in the interpreter at all, `nfr(...)` and field-level
+  `requires(role/claim: ...)` masking, all moved from interpreter-only
+  (or nonexistent) to real LLVM codegen over time (docs/LANGUAGE.md §10 has
+  the current, verified line).
 - **2026-08-23 — "Enum favoring": `str` banned as a function
   argument/return type.** `Ty::contains_str` + `TypeErrorKind::
   StrInFnSignature`, enforced in `typeck.rs::check_fn`; `struct Text {

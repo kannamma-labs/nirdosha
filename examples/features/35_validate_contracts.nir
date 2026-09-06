@@ -1,10 +1,16 @@
 // Feature: `validate` -- Hoare contracts on a function (LANGUAGE.md
 // §16, `docs/NEXT_GEN.md` §F3). Orthogonal to `requires`: `requires`
 // gates *who* may call a function; `validate` states a fact the
-// function itself must honor, checked two independent ways -- a real
-// static Z3 proof where the function is simple enough (integer params/
-// return, no loop, no division), and always, dynamically, against the
-// real concrete argument/return values on every actual call.
+// function itself must honor. Two enforcement paths were designed, but
+// only one currently has teeth in a compiled binary, 2026-09: a real
+// static Z3 proof, at `nirdosha build` time, where the function is
+// simple enough (integer params/return, no loop, no division) -- every
+// function below is. The dynamic runtime half (checking real concrete
+// argument/return values on every call, for the functions Z3 can't
+// decide) doesn't exist anymore: it lived in `interpreter.rs::call`,
+// which was deleted in a separate interpreter-removal pass this
+// session, and `codegen.rs` never gained a replacement. See
+// `docs/LANGUAGE.md` §16 for the current, honest state.
 
 fn max_of(a: i64, b: i64) -> i64 {
     if a > b { return a }

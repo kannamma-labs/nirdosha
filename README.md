@@ -20,50 +20,76 @@ active development — many safety properties are *proven* today, and
 where one is still *aspirational* the [wiki](https://github.com/arunsoman/nirdosha/wiki/Honest-Scope-and-Roadmap)
 says so plainly. Source files use the `.nir` extension.
 
+**One function. Four independent guarantees the compiler itself checks
+— not comments, not conventions, not a framework's runtime middleware.**
+(Excerpt — `Text`/`main` omitted here, full runnable source linked below.)
+
 ```nirdosha
-fn secret(n: i64) -> i64 requires(role: "admin") {
-    return n + 1
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),   // ← masked on return, not just "hidden in the UI"
 }
 
-fn work(b: box i64) -> i64 {
-    return *b
-}
-
-fn main() {
-    print("hello, Nirdosha")
-    let h: box i64 = box 21
-    let t: thread i64 = spawn work(h)
-    print(join t)
+fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
+    effect(pure)                             // lying here is a build error, not a comment
+    nfr(latency_ms: 50, concurrency_max: 1000)   // real APM tracking, zero code at the call site
+{
+    return Employee(name.value, department.value, salary)
 }
 ```
 
 ```sh
-cd crates/compiler && cargo run -- ../../examples/hello_above_fold.nir
-# hello, Nirdosha
-# 21
+cargo run -p nirdosha --release -- build examples/features/50_field_masking_and_check_role.nir -o employee && ./employee
+# 10          <- a Z3-proven Hoare contract elsewhere in the same file (see below)
+# 150000.000000
+# 0.000000    <- masked
+# Ada Lovelace
 ```
 
-`box` is single-owner — `spawn` moves `h` into the thread, so `main` can
-never touch it again; that's checked at compile time, not by convention.
-`secret` is gated by `requires(role: "admin")` and is literally uncallable
-without an `acquire`d `RoleView` proof — see
-[`examples/privileged_fn.nir`](./examples/privileged_fn.nir) for the full
-role-acquisition flow.
+`caller: RoleView` is the *only* thing standing between a request and a
+real salary — and a `RoleView` cannot be forged (`RoleView("admin")` is a
+compile-time error) or fabricated by this function's own logic; it can
+only come from `check_role(identity, "admin")` succeeding against a real
+`VerifiedIdentity`, itself compiled, not interpreted. Call
+`get_employee` with a `RoleView` that proves `"admin"` and `salary`
+passes through untouched; call it with any other proof — or none — and
+`salary` comes back `0.0`, unconditionally, while every other field
+still passes through. No `if` in `get_employee`'s own body decides
+that — the masking is a property of the field declaration, checked at
+every `return`, so there's no per-handler `if user.role == "admin"`
+check to forget writing, the way a hand-rolled equivalent scattered
+across every handler that touches `Employee` always eventually gets
+forgotten in one of them.
 
-![334 lines of Nirdosha producing a themed dashboard with live SQLite data, a sortable/searchable vendor table, and a role-gated payout-approval action — then the same screens under a lower-privileged identity, with a field dropped and an action disabled by the server](./demo.gif)
+`effect(pure)` is checked against what the function *actually does* —
+annotate a function that performs I/O as `pure` and `nirdosha build`
+rejects it, naming the real effect it found. `nfr(latency_ms: 50,
+concurrency_max: 1000)` wires real per-call tracking into the APM kernel
+with zero code at any call site, and escalates to
+`NIRDOSHA_OBSERVABILITY_URL` automatically if one is configured. The
+full file also carries a `validate` block with a genuine Z3-proven
+post-condition (`tenure_bonus_pct`'s `result` provably stays in `[0,
+20]` for *every* possible input, not just the ones a test tries) —
+flip that bound to something false and `nirdosha build` fails outright,
+naming a real counterexample. Full runnable source, plus what each
+guarantee doesn't (yet) cover:
+[`examples/features/50_field_masking_and_check_role.nir`](./examples/features/50_field_masking_and_check_role.nir).
 
-*334 lines, zero UI code — `examples/vendor_ops.nir`, verified with
-`wc -l`. `nirdosha serve examples/vendor_ops.nir --theme
-examples/vendor_ops_theme.json` derives a live dashboard, a
-sortable/searchable table, and a role-gated `Approve` action from two
-`struct`s and a `screen`/`dashboard` block. Signed in as `analyst`, the
-exact same screen drops the `risk_score` field and column entirely and
-disables `Approve` — both enforced by `serve.rs` on every call, not
-hidden by client JS. Signed in as `admin`, that same `Approve` action
-really flips a row from `requested` to `approved` in SQLite. Nothing here
-is simulated — see the [UI Engine](https://github.com/arunsoman/nirdosha/wiki/UI-Engine)
-and [Honest Scope](https://github.com/arunsoman/nirdosha/wiki/Honest-Scope-and-Roadmap)
-wiki pages.
+![Historical, pre-2026-09 evidence — captured before this repo's interpreter (`run`/`serve`) was removed. 334 lines of Nirdosha producing a themed dashboard with live SQLite data, a sortable/searchable vendor table, and a role-gated payout-approval action — then the same screens under a lower-privileged identity, with a field dropped and an action disabled by the server](./demo.gif)
+
+*Historical evidence, kept for the record, not a claim about what runs
+today: this GIF predates the interpreter removal described in "Current
+focus" below — the `nirdosha serve`/`examples/vendor_ops.nir` it shows
+no longer exist in this tree, and nothing currently replaces the *live*,
+DB-backed half of it. What the hero example above demonstrates instead
+is real and current: field-level masking, driven by a real `RoleView`,
+enforced in the compiled binary itself, no server process involved. The
+UI-generation half that survives today is `nirdosha emit-ui` (static
+HTML derived from `struct`/`screen` conventions, no live backend) — see
+[Try it](#try-it-in-under-a-minute) below, and the
+[UI Engine](https://github.com/arunsoman/nirdosha/wiki/UI-Engine) wiki
+page for the full, current picture.
 
 ---
 
@@ -195,8 +221,8 @@ git clone https://github.com/arunsoman/nirdosha.git && cd nirdosha
 # macOS / Linux — installer script, auto-detects your platform
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/arunsoman/nirdosha/main/scripts/install.sh | sh
 
-nirdosha examples/hello.nir
-nirdosha serve examples/store.nir --port 8080   # CRUD API from a struct
+nirdosha build examples/syntax/hello_nir.nir -o hello && ./hello
+nirdosha emit-ui examples/features/39_screen_ui.nir -o ui.html   # static UI derived from a struct/screen block
 ```
 
 Prefer not to pipe a script into `sh`? Download the binary straight from
@@ -211,7 +237,7 @@ curl -fsSL https://github.com/arunsoman/nirdosha/releases/latest/download/nirdos
 # macOS, Apple Silicon
 curl -fsSL https://github.com/arunsoman/nirdosha/releases/latest/download/nirdosha-aarch64-apple-darwin.tar.gz | tar xz
 
-./nirdosha examples/hello.nir
+./nirdosha build examples/syntax/hello_nir.nir -o hello && ./hello
 ```
 
 These two targets are what's currently published; Windows and Intel

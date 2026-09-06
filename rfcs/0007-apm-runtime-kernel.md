@@ -532,16 +532,36 @@ doesn't apply because `acquire`/`requires(...)` don't compile
 (`codegen.rs:946-949`). Reopens exactly if/when `acquire` gains codegen
 — worth remembering rather than assuming permanently resolved.
 
-**NFR governance — open work, unchanged in kind, changed in detail.**
-Precedence, validation ranges, per-principal ceilings, staged rollout
-are all still open exactly as the decision document states. The one
-concrete change: its question "do the existing CLI/env knobs
-(`--otel-*`, `NIRDOSHA_{PREFIX}_POOL_*`) become defaults/overrides
-beneath declared NFR values, or get deprecated" doesn't apply — those
-are `nirdosha run`/`serve` flags with no compiled-binary equivalent.
-The actual open question for this scope is simpler and newer: what
-configuration surface does a compiled binary get at all, since it
-currently has none.
+**NFR governance — partially landed, 2026-09 — validation ranges done,
+precedence/composition/per-principal ceilings/staged rollout still
+open.** `nfr(latency_ms:, error_rate_max:, throughput_min_per_sec:,
+concurrency_max:)` (`docs/LANGUAGE.md` §6f) is now a real, compiled
+fn-level annotation — the single-function-scoped slice of "NFRs-as-
+language" this section used to describe entirely in the future tense.
+Per-field validation ranges are decided and enforced at parse time
+(each threshold positive, `error_rate_max` in `[0.0, 1.0]`); tracking is
+O(1) state per function via `runtime-kernels::kernel::nfr`, with
+async, fail-open escalation to `NIRDOSHA_OBSERVABILITY_URL` on a
+crossed threshold — the "configuration surface a compiled binary gets
+at all" question below is answered, at least for this one purpose, by
+that one env var. What's still genuinely open, unchanged from the
+decision document: **composition** (nothing checks two `nfr(...)`
+declarations across a call chain for contradiction, e.g. a callee's
+`latency_ms` budget exceeding its caller's), **precedence** (no notion
+of an env/deployment override beneath a declared `nfr(...)` value —
+today the source annotation is the only value, unconditionally),
+**per-principal ceilings** (a `concurrency_max` is global to the
+function, not scoped per caller/tenant — multi-tenancy is still parked,
+above), and **staged rollout** (no shadow/observe-only mode for a new
+`nfr(...)` — day one is already live enforcement + escalation, the same
+"ship live rather than shadow-first" choice §10's Phase 2/3 admission
+mechanism made). The one now-answered half of the decision document's
+own question: its CLI/env-knob framing (`--otel-*`,
+`NIRDOSHA_{PREFIX}_POOL_*`) still doesn't apply (those remain
+`nirdosha run`/`serve` flags with no compiled-binary equivalent), but
+"what configuration surface does a compiled binary get at all" now has
+one concrete instance, `NIRDOSHA_OBSERVABILITY_URL` — not a general
+answer, just proof the question is answerable.
 
 **Operations.** Observe-only-first rollout, `AdmissionDenied` as a new
 failure mode requiring compatibility/migration tests, kernel health as
@@ -561,7 +581,7 @@ than a `nirdosha serve` process an operator already controls.
 | **Manifests** | Compiler manifest pass (frontend, path-agnostic) — not started. | Manifests emitted for classifiable call sites; declared bounds feed the kernel's ceilings instead of the current hardcoded default. | Unchanged from the original table's Phase 2 half. |
 | **`db`/`spawn` enforcement** | `db` once B2 lands; `spawn` budget only once B6's compiled scheduler exists (see §8's spawn note) — both still fully blocked on codegen that doesn't exist. | `AdmissionDenied` compatibility tests pass for each as it lands. | Unchanged — the decision doc's "DB pools first" ordering is still inverted here, since DB doesn't compile yet. |
 | **4 — Global coordination and deadlock recovery** | Likely light/deferred until 2+ real contended domains exist (post-B2) — moot with only `Tcp`/`File` today. | Cross-shard detection SLOs, but only meaningful once there's more than one shard worth coordinating. | Unchanged. |
-| **5 — NFR composition, replay** | NFR composition checks, opt-in replay. The decision document's "interpreter-parity revisit" is now moot outright, not just deferred: the interpreter was removed entirely in a separate pass this session (`run`/`serve`, `interpreter.rs`, and every module that only existed to serve it are gone from the tree) — there is no interpreter left to reach parity with. | Composition checks reject contradictory declarations; replay artifacts meet access-control rules. | The parity question this row used to defer is now closed by events, not by decision. |
+| **5 — NFR composition, replay** | Single-function `nfr(...)` declaration, O(1) tracking, and threshold escalation are now ✅ **done** (`docs/LANGUAGE.md` §6f, §9 above) — ahead of this row's original sequencing, same pattern as Phase 2/3's admission mechanism landing early. Still open, as originally scoped: composition checks across a call chain, precedence/override semantics, per-principal ceilings, and opt-in replay. The decision document's "interpreter-parity revisit" is now moot outright, not just deferred: the interpreter was removed entirely in a separate pass this session (`run`/`serve`, `interpreter.rs`, and every module that only existed to serve it are gone from the tree) — there is no interpreter left to reach parity with. | Composition checks reject contradictory declarations; replay artifacts meet access-control rules. | The parity question this row used to defer is now closed by events, not by decision; single-function declaration/tracking/escalation moved from "not started" to "done" ahead of the rest of this row. |
 
 **Ordering constraint, tightened**: RFC 0006's compiled-path concurrency
 codegen and this RFC's `spawn` admission are not sequential — they are

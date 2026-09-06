@@ -289,7 +289,13 @@ return it, call it many times — the check happens exactly once, at
 acquisition, not smeared across (or missing from) every call site.
 Interpreter-only for now, like every construct past §10's compiled
 subset — `nirdosha build` rejects `fn(..)->..`/`acquire` with a specific
-reason, never silently mis-compiles one.
+reason, never silently mis-compiles one. **`check_role` itself is the
+exception (2026-09, §10)**: it's fully compiled, so a real `RoleView`
+*is* obtainable in a compiled binary today — it's `acquire` (the step
+that would consume that `RoleView` to gate a first-class function) that
+still has zero codegen. A `RoleView` produced this way is not wasted,
+though: §6e's field-level `requires(...)` masking consumes it directly,
+with no `acquire` involved at all.
 
 ### 6b. `str` at function boundaries ("enum favoring")
 
@@ -580,6 +586,104 @@ conversion-factor table keyed by unit pair (and, for temperature,
 non-linear conversion — `Cel`→`[degF]` isn't a scale factor). That's a
 real, separate feature, not shipped here.
 
+### 6e. Field-level `requires(...)` — automatic return masking (2026-09)
+
+```
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),
+}
+
+fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee {
+    return Employee(name.value, department.value, salary)
+}
+```
+
+A `requires(role: "<name>")`/`requires(claim: "<name>", "<value>")`
+annotation on a **struct field** (reusing the same `Requirement` enum
+§6a's function-level `requires(...)` already uses — one shared
+vocabulary, two attachment points) masks that field automatically,
+every time a value of that struct type is returned from a function:
+zeroed to the field's type's zero value (`0`/`0.0`/`false`/`""`/`null`)
+unless the *returning function itself* has a `RoleView`/`ClaimView`
+parameter that proves the matching role/claim. There's no `acquire`
+step here and no gate on the function's callability — every caller can
+call `get_employee`, they just don't all see the same `Employee` back.
+
+**How the caller's identity reaches the masking check.** Nirdosha
+doesn't thread an ambient "current user" through the call stack — a
+`RoleView`/`ClaimView` parameter *is* the proof, checked structurally at
+codegen time: does this function have a parameter of exactly that type?
+If yes, its field is compared (via `nir_str_eq`) against the
+`requires(...)` string at every return; if no, the field is
+unconditionally zeroed — **fail-closed**, the same posture §6a's
+`acquire` takes. A `RoleView`/`ClaimView` is itself unforgeable
+(`TypeErrorKind::UnforgeableProofConstruction` blocks direct
+construction — `RoleView("admin")` doesn't typecheck), so the only way
+to reach the "proof present" branch is a genuine `check_role`/
+`extract_claim` call earlier in the program. §6a's showcase code
+(`check_role(identity, "admin")` → `match` → `Ok(role_view)`) is exactly
+how a real `RoleView` gets produced to pass in here.
+
+**Only scalar fields can be masked**
+(`TypeErrorKind::MaskRequiresNeedsScalarField`) — an aggregate
+(`Vector`/`Matrix`/another `struct`/`enum`) or affine field can't be
+masked this way, since "zero value" isn't well-defined for either (an
+affine field also can't silently disappear without a free/move, which
+masking doesn't perform). Masking only fires on `return` — a field
+read directly off a local struct value inside the same function that
+constructed it is never masked; only the boundary where a struct
+*crosses out* of a function is where the identity of the "returning
+function" (and therefore its `RoleView`/`ClaimView` parameter, or lack
+of one) is well-defined.
+
+Compiled, not interpreter-only, from day one: `codegen.rs::
+emit_field_masking` runs on every aggregate-return path (right before
+the `sret` memcpy), computing each masked field's `authorized` bit via
+`emit_requirement_check` and conditionally zeroing via
+`emit_zero_value`.
+
+### 6f. `nfr(...)` — non-functional requirements as a first-class annotation (2026-09)
+
+```
+fn checkout(cart_id: i64) -> Result(i64, ErrorCode)
+    nfr(latency_ms: 200, error_rate_max: 0.01, throughput_min_per_sec: 50, concurrency_max: 100)
+{
+    ...
+}
+```
+
+A `nfr(...)` annotation on a function declares up to four independent,
+all-optional thresholds — a latency ceiling, a maximum error rate, a
+minimum throughput, a maximum in-flight concurrency — that the APM
+kernel (`runtime-kernels::kernel::nfr`) then tracks **automatically**,
+with zero code at the call site: every call is wrapped (by codegen, at
+every `return` path) in `nir_nfr_call_begin`/`nir_nfr_call_end`, which
+update a small set of atomics registered once per annotated function.
+`error_rate_max` additionally requires the function to return a
+`Result(...)` (`TypeErrorKind::NfrErrorRateNeedsResultReturn`) — that's
+the only way `call_end` can tell a real error from a real success, by
+inspecting the returned value's own tag.
+
+**Escalation.** A crossed threshold fires an async, fire-and-forget
+HTTP POST to `NIRDOSHA_OBSERVABILITY_URL` (an env var — unset means no
+escalation ever happens, not an error) on its own dedicated
+`ThreadPool`, so a slow or unreachable observability endpoint never
+blocks the caller. The body is a small hand-built JSON object (`fn`,
+which threshold, its configured value, the observed value, a
+millisecond timestamp) sent over a plain `std::net::TcpStream`
+(`http://` only, no TLS) with a 2-second write timeout.
+
+**Disclosed simplifications, not a full APM suite** — real, O(1)-per-function
+state, not a tradeoff to hide: latency tracking is a running max, not a
+p99/percentile histogram; error rate and throughput are cumulative
+since the function's first call, not computed over a sliding window;
+concurrency is the exact live in-flight count, no debouncing on a
+transient spike. `docs/adr`'s RFC 0007 has the fuller governance
+picture (rings/aggregator/exporter) this is a deliberately smaller,
+already-real slice of.
+
 ---
 
 ## 7. Concurrency & I/O
@@ -744,14 +848,17 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `Vector`/`Matrix`, fully | Yes | Two codegen strategies — see below. |
 | `struct`/`enum`/`match`, non-affine payloads | Yes | Real LLVM types — see below. Affine payloads: no (Phase 4b). |
 | `struct`/`enum`/`match` with an affine field/payload | No | Phase 4b, deferred (below) — a non-affine one compiles now. |
+| `field: T requires(role/claim: ...)` (§6e field masking) | Yes | 2026-09. Scalar fields only (`is_aggregate()`/affine rejected, `TypeErrorKind::MaskRequiresNeedsScalarField`) — see §6e. |
+| `check_role` | Yes | 2026-09. `claims_json` read as a plain comma-separated role list, exact match per entry — a disclosed simplification, not real JSON parsing (no JSON parser is linked into `runtime-kernels`). `VerifiedIdentity` itself was already freely constructible; this is what makes a real `RoleView` obtainable at all. |
+| `nfr(...)` (§6f) | Yes | 2026-09. O(1) state per function — max-latency not p99, cumulative (not windowed) error-rate/throughput, exact concurrency. See §6f. |
 | `sandbox`/`stop` | No | Real, separate OS process — a larger scope than `thread`/`spawn` above, not touched by that update. |
 | `file`/`open` | No | `docs/PROTOLANG_PORT.md`'s file I/O port. |
 | `dec128` + `dec_*` builtins | No | Not yet in `Ty`/`codegen.rs`'s builtin allowlists. |
-| `json`/`db`/`mq`, Row 12 identity/session/API-key builtins | No | Identity ones also blocked on `VerifiedIdentity`/`RoleView`/`ClaimView` being structs. |
-| `http_get`/`http_post`/`https_get`/`https_post`, `mock_issue_token` | No | Not in `codegen.rs`'s builtin allowlists. |
+| `json`/`db`/`mq`, `extract_claim`/`oidc_validate_token`/`mock_issue_token`, other Row 12 identity/session/API-key builtins | No | `check_role` (above) is the one identity builtin compiled so far; the rest are still blocked on `VerifiedIdentity`/`RoleView`/`ClaimView` being structs plus (for `oidc_validate_token`) real JWT/JWKS crypto. |
+| `http_get`/`http_post`/`https_get`/`https_post` | No | Not in `codegen.rs`'s builtin allowlists. |
 | `transact` | No | |
 | `workflow` | No | Desugars to `send_email`/`send_sms`/`send_push`/`notify`/`__workflow_*`, none compiled. |
-| `fn(..)->..`/`acquire`/`requires(...)` | No | First-class/privileged functions (§6a). |
+| `fn(..)->..`/`acquire`/`requires(role/claim: ...)` on a *function* | No | First-class/privileged functions (§6a) — distinct from field-level `requires(...)` masking (§6e), which **is** compiled. |
 | `screen`/`dashboard` | Inert, not rejected | `codegen.rs` never inspects these — a program containing them compiles cleanly with nothing to lower to. |
 
 **Scalar width mechanics.** Same LLVM widths as the signed types for
@@ -1357,14 +1464,35 @@ which clause failed. `pre`/`post` are ordinary `kv_entry`s, not new
 syntax — their value is `expr`, the same grammar every other value
 position already uses.
 
-**Two independent enforcement paths, not one:**
+**Two independent enforcement paths on paper — one of them currently
+has no compiled-path backstop, 2026-09.** The design is genuinely two
+paths, and `docs/NEXT_GEN.md` §F3 describes both:
 
 | | Static, at build time | Dynamic, at runtime |
 |---|---|---|
-| Runs | `nirdosha build`/`run`/`serve`/`emit-ui` | Every actual call, unconditionally |
-| Basis | A genuine Z3 proof, not a heuristic | The real concrete argument/return values |
-| Scope | Tier 1 only: integer params/return, no loop, no division in the checked function. A `Call` is supported too, but only when *that* callee's own `validate` contract is *already independently proven* — its proof is reused as a fact about the result (`pre` implies `post`, never `post` alone, so a call site that doesn't itself satisfy the callee's precondition gets an uninformative axiom, never a wrong one). A call to an unproven/undeclared callee still falls through to the runtime path — never a guess. | None of the static pass's restrictions — the only enforcement path for a function touching `db`/`json`/`http`, calling another function, or looping, which in practice is most real functions. |
-| On failure | Hard build failure, naming a real counterexample | `pre` stops the body from running at all; `post` reports the real return value that violated it |
+| Runs | `nirdosha build`/`emit-llvm`/`emit-ui` (every command that owns a typechecked program — `main.rs::typecheck_and_own_impl`) | **Nowhere, today.** Previously `interpreter.rs::call`'s own backstop; that module was deleted entirely along with `run`/`serve` in this session's interpreter removal, and `codegen.rs` never gained a replacement — it doesn't inspect `program.validates` at all. |
+| Basis | A genuine Z3 proof, not a heuristic | N/A — no longer exists |
+| Scope | Tier 1 only: integer params/return, no loop, no division in the checked function. A `Call` is supported too, but only when *that* callee's own `validate` contract is *already independently proven* — its proof is reused as a fact about the result (`pre` implies `post`, never `post` alone, so a call site that doesn't itself satisfy the callee's precondition gets an uninformative axiom, never a wrong one). A call to an unproven/undeclared callee falls outside Tier 1 too, and — see the next column — that's no longer a soft landing. | N/A |
+| On failure | Hard build failure, naming a real counterexample | N/A |
+
+**The practical consequence: a `validate` block outside Tier 1 is now
+silently unenforced in every compiled binary.** It still typechecks
+(`typeck::check_validate`), still prints an honest `note:` explaining
+why it couldn't be proven (`print_unsupported_validate_notes`, wired
+into `emit-ui` only — not `build`/`emit-llvm`), and still compiles and
+runs the function itself with zero difference in behavior — the
+contract is simply never checked against anything, not even the
+concrete values a real call actually saw. This is a real, disclosed
+regression from the interpreter era, not a design choice: `validate`'s
+runtime half was never ported when `interpreter.rs` was deleted, since
+nothing in that removal pass was scoped to touch `contract_check.rs` or
+`codegen.rs`'s builtin surface. Closing it needs `codegen.rs` to lower
+a proven-elsewhere `pre`/`post` predicate into a real LLVM assertion
+(trap or a structured failure) at every call/return site — not started.
+Until then, treat an out-of-Tier-1 `validate` block on compiled code as
+documentation of intent, not an enforced contract — only a Tier-1
+`post:` that a real build actually accepts (no `note:` printed for it)
+carries any teeth in the compiled path today.
 | Can't decide | Falls through to the runtime path (`Unsupported`) — `nirdosha emit-ui`/`serve` print a `note:` explaining why | Treated as a violation, never silently passed (a predicate that errors evaluating, or isn't boolean-shaped) |
 
 A function with no `validate` block is byte-for-byte unaffected by
