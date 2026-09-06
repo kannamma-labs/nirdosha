@@ -1,8 +1,3 @@
----
-state: draft
-shepherd: (unassigned)
----
-
 # RFC 0006: Structured concurrency for native threads — Pillars 1-4
 
 ## Motivation

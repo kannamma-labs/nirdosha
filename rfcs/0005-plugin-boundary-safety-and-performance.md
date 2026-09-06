@@ -1,12 +1,3 @@
----
-state: accepted
-shepherd: self-shepherded (Claude, acting with the maintainer's standing
-  authority to decide and ship, not just propose — see git history on
-  `main`); flag for a human maintainer's review after the fact rather
-  than gating the fix behind one first, given both changes below are
-  additive, fully tested, and reversible
----
-
 # RFC 0005: The Nirdosha↔Rust plugin boundary — safety and performance
 
 ## Motivation
