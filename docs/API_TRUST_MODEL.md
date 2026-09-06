@@ -403,6 +403,51 @@ question §7 does not currently address.
 
 ## 5. Return-data masking — `[DONE]` for CRUD-slot fields, `[OPEN]` for five real gaps
 
+> **2026-09 — everything below this point describes a mechanism that no
+> longer runs.** `serve.rs` (`redact_gated_fields`, `check_edit_gates`,
+> `dispatch`) was deleted entirely in this session's separate
+> interpreter-removal pass — there is no `nirdosha serve` left to enforce
+> any of it. Every `[DONE]` claim in this section is now historical, not
+> current: reading it for "what masking exists today" would be wrong.
+> `ui_gen::gates_from_screen_decl`'s UI-hint-generation half survives
+> (`emit-ui` still reads `screen` field gates to hide/disable inputs
+> client-side), but that was always "convenience only," per this
+> section's own original text — the actual boundary it names is gone.
+>
+> **What replaced it is a different, narrower, *compiled* mechanism —
+> not a resurrection of this one.** Field-level `requires(role: ...)`/
+> `requires(claim: ..., ...)` (`docs/LANGUAGE.md` §6e, `docs/PHASE0.md`'s
+> "Twentieth update") masks a struct field automatically at every
+> `return` of that struct type, zeroed unless the returning function
+> itself has a matching `RoleView`/`ClaimView` parameter — a real,
+> compiled `codegen.rs::emit_field_masking`, no `serve`/routes/JSON
+> involved at all. Worth being precise about how its scope differs from
+> what's described below, now that both have existed at different times:
+> it actually **resolves Gap 1** by construction (masking is checked
+> against the struct's own declared field, at the LLVM level, not against
+> a dynamic `JsonVal` shape — there is no separate "walk the response
+> object" step to have a shallow-recursion bug in). It does **not**
+> address Gap 2/Gap 3 the same way, because it isn't the same shape of
+> problem: there's no `serve`/route dispatch at all in the compiled path
+> today (`docs/LANGUAGE.md` §10), so "which of 246 hand-written functions
+> forgot to redact" isn't a question that currently arises — every
+> function that constructs and returns the masked struct type gets the
+> same masking, unconditionally, because it's a property of the *return
+> path*, not of a per-route gate lookup keyed by function name. That's
+> real, structural progress on Gap 1's specific complaint, not a claim
+> that Gaps 2/3 are resolved — they were about a routing layer that no
+> longer exists to have the bug in the first place; the equivalent
+> question (does every code path that lets a masked field's *value*
+> escape through some other channel — an aggregate, a log line, a second
+> struct copying the field out before returning) reopens if/when a
+> compiled `serve` (§10's B8) is ever built, and should get the same
+> scrutiny this section already gave the interpreter-era version.
+>
+> The rest of §5, unedited below, stays as the historical record of what
+> the interpreter-era mechanism did and didn't cover — real, useful
+> context for anyone designing masking for a future compiled `serve`,
+> just not a description of anything currently running.
+
 **Shipped, and a real security boundary, not cosmetic.** A `screen`
 field-level gate —
 

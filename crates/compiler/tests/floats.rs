@@ -4,9 +4,7 @@
 //! have one, no int<->float conversion (no cast operator exists yet).
 
 use nirdosha::ast::Ty;
-use nirdosha::interpreter::Value;
 use nirdosha::parser::Parser;
-use nirdosha::run;
 use nirdosha::token::Lexer;
 use nirdosha::typeck::{typecheck, TypeErrorKind};
 
@@ -20,93 +18,6 @@ fn first_type_error(src: &str) -> TypeErrorKind {
     match typecheck(&program) {
         Ok(()) => panic!("expected a type error, but the program type-checked cleanly"),
         Err(errors) => errors.into_iter().next().unwrap().kind,
-    }
-}
-
-// ---- the example, run end to end ----------------------------------------
-
-#[test]
-fn example_floats_runs_to_completion() {
-    let src = include_str!("fixtures/floats.nir");
-    assert_eq!(run(src), Ok(Value::Unit));
-}
-
-// ---- arithmetic -----------------------------------------------------------
-
-#[test]
-fn float_arithmetic_matches_ieee_754() {
-    let src = r#"
-        fn main() -> f64 {
-            let a: f64 = 7.0
-            let b: f64 = 2.0
-            return a / b
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(f)) => assert_eq!(f, 3.5),
-        other => panic!("expected Ok(Float(3.5)), got {other:?}"),
-    }
-}
-
-#[test]
-fn dividing_a_float_by_zero_saturates_instead_of_trapping() {
-    // Unlike `Value::Int`'s `DivByZero` runtime error, float division by
-    // zero is not an error at all -- it's IEEE 754 `inf`, the semantics
-    // `Ty::F64`'s doc comment commits to.
-    let src = r#"
-        fn main() -> f64 {
-            let a: f64 = 1.0
-            let b: f64 = 0.0
-            return a / b
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(f)) => assert!(f.is_infinite() && f > 0.0),
-        other => panic!("expected Ok(Float(inf)), got {other:?}"),
-    }
-}
-
-#[test]
-fn negating_a_float_works() {
-    let src = r#"
-        fn main() -> f64 {
-            let a: f64 = 2.5
-            return -a
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(f)) => assert_eq!(f, -2.5),
-        other => panic!("expected Ok(Float(-2.5)), got {other:?}"),
-    }
-}
-
-#[test]
-fn float_comparisons_work() {
-    let src = r#"
-        fn main() -> bool {
-            let a: f64 = 1.5
-            let b: f64 = 2.5
-            return a < b
-        }
-    "#;
-    assert_eq!(run(src), Ok(Value::Bool(true)));
-}
-
-// ---- passing floats through functions --------------------------------------
-
-#[test]
-fn floats_pass_through_function_parameters_and_returns_unchanged() {
-    let src = r#"
-        fn pass_through(x: f64) -> f64 {
-            return x
-        }
-        fn main() -> f64 {
-            return pass_through(9.25)
-        }
-    "#;
-    match run(src) {
-        Ok(Value::Float(f)) => assert_eq!(f, 9.25),
-        other => panic!("expected Ok(Float(9.25)), got {other:?}"),
     }
 }
 

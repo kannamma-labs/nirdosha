@@ -17,13 +17,19 @@
 > and Windows binaries ship on every release, verified by CI on all
 > three on every push.
 
-Real, working software today: a full compiler and interpreter
-(`crates/compiler/`), an LL(1) grammar exported to GBNF for
-constrained decoding, SMT-backed overflow/bounds proofs, a durable
-`transact`/`workflow` engine, identity/RBAC, and a declarative UI layer
-that turns a `struct` into a working, role-gated web app with zero UI
-code. 32 shipped capabilities, transparently tracked, on the
-[Public Roadmap](./docs/PUBLIC_ROADMAP.md).
+Real, working software today: a real compiler (`crates/compiler/`) —
+**no interpreter fallback anymore**, removed entirely and deliberately
+so the compiled path can't quietly stay second-class. What that
+compiler proves and runs, natively, right now: an LL(1) grammar
+exported to GBNF for constrained decoding, SMT-backed (Z3) integer/
+buffer-overflow proofs, ownership/affine types with no GC, real
+identity (`check_role` producing an unforgeable `RoleView`) driving
+automatic field-level data masking, and `nirdosha emit-ui`'s static UI
+derivation from `struct`/`screen` conventions. `db`/`json`/`http`/`mq`/
+`transact`/`workflow`/`sandbox` are fully designed and documented but
+don't run in any form right now, compiled or otherwise, until each
+gets real codegen — see [Track B](./docs/PUBLIC_ROADMAP.md) for
+exactly what's landed and what's next.
 
 ## Two ways in
 
@@ -39,88 +45,90 @@ for the full mechanism and evidence.
 
 **Write code? Start with the language itself.**
 [`examples/syntax/`](./examples/syntax/) is a progressive walkthrough —
-`hello_nir.nir` to a 500-line multi-module enterprise app — one level
-at a time. [`examples/features/`](./examples/features/) is the
-complete reference: 47 independently-runnable files, one per language
-feature, from scalar types through `sandbox`/`transact`/`workflow` to
-the declarative UI layer. Or skip both and jump straight into
+`hello_nir.nir` to a multi-module enterprise app — one level at a
+time. [`examples/features/`](./examples/features/) is the complete
+reference: 50 files, one per language feature, from scalar types
+through identity/masking to the declarative UI layer — see
+`docs/LANGUAGE.md` §10 for exactly which of them `nirdosha build`
+compiles today versus which are still waiting on Track B (per the
+paragraph above, a real fraction of the catalogue doesn't run in any
+form yet). Or skip both and jump straight into
 [**GitHub Codespaces**](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1) —
 zero local setup, building in about a minute.
 
 ## What Nirdosha code looks like
 
+**One function. Four independent guarantees the compiler itself checks
+— not comments, not conventions, not a framework's runtime middleware.**
+(Excerpt — `Text`/`main` omitted here, full runnable source linked below.)
+
 ```nirdosha
-fn secret(n: i64) -> i64 requires(role: "admin") {
-    return n + 1
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),   // ← masked on return, not just "hidden in the UI"
 }
 
-fn work(b: box i64) -> i64 {
-    return *b
-}
-
-fn main() {
-    print("hello, Nirdosha")
-    let h: box i64 = box 21
-    let t: thread i64 = spawn work(h)
-    print(join t)
+fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
+    effect(pure)                             // lying here is a build error, not a comment
+    nfr(latency_ms: 50, concurrency_max: 1000)   // real APM tracking, zero code at the call site
+{
+    return Employee(name.value, department.value, salary)
 }
 ```
-
-`box` is single-owner — `spawn` moves `h` into the thread, so `main`
-can never touch it again; that's checked at compile time, not by
-convention. `secret` is gated by `requires(role: "admin")` and is
-literally uncallable without an `acquire`d `RoleView` proof — see
-[`examples/features/33_privileged_functions.nir`](./examples/features/33_privileged_functions.nir)
-for the full role-acquisition flow.
-
-Try something real right now:
 
 ```sh
 git clone https://github.com/kannamma-labs/nirdosha.git && cd nirdosha
-cd crates/compiler && cargo run -- ../../examples/syntax/hello_nir.nir
-# 8
-# hello, nirdosha
+cargo run -p nirdosha --release -- build examples/features/50_field_masking_and_check_role.nir -o employee && ./employee
+# 10          <- a Z3-proven Hoare contract elsewhere in the same file (see below)
+# 150000.000000
+# 0.000000    <- masked
+# Ada Lovelace
 ```
 
-## From two `struct`s to a live, role-gated dashboard
+`caller: RoleView` is the *only* thing standing between a request and a
+real salary — and a `RoleView` cannot be forged (`RoleView("admin")` is a
+compile-time error) or fabricated by this function's own logic; it can
+only come from `check_role(identity, "admin")` succeeding against a real
+`VerifiedIdentity`, itself compiled, not interpreted. Call
+`get_employee` with a `RoleView` that proves `"admin"` and `salary`
+passes through untouched; call it with any other proof — or none — and
+`salary` comes back `0.0`, unconditionally, while every other field
+still passes through. No `if` in `get_employee`'s own body decides
+that — the masking is a property of the field declaration, checked at
+every `return`, so there's no per-handler `if user.role == "admin"`
+check to forget writing, the way a hand-rolled equivalent scattered
+across every handler that touches `Employee` always eventually gets
+forgotten in one of them.
 
-![A themed dashboard with live SQLite data, a sortable/searchable table, and a role-gated approval action — the same screen under a lower-privileged identity, with a field dropped and an action disabled by the server](./demo.gif)
+`effect(pure)` is checked against what the function *actually does* —
+annotate a function that performs I/O as `pure` and `nirdosha build`
+rejects it, naming the real effect it found. `nfr(latency_ms: 50,
+concurrency_max: 1000)` wires real per-call tracking into the APM kernel
+with zero code at any call site, and escalates to
+`NIRDOSHA_OBSERVABILITY_URL` automatically if one is configured. The
+full file also carries a `validate` block with a genuine Z3-proven
+post-condition (`tenure_bonus_pct`'s `result` provably stays in `[0,
+20]` for *every* possible input, not just the ones a test tries) —
+flip that bound to something false and `nirdosha build` fails outright,
+naming a real counterexample. Full runnable source:
+[`examples/features/50_field_masking_and_check_role.nir`](./examples/features/50_field_masking_and_check_role.nir).
 
-`nirdosha serve <file.nir> --port 8080` turns a `struct` plus a
-`screen`/`dashboard` block into a live web app: a sortable/searchable
-table, a themed dashboard, and role-gated actions — derived, not
-hand-written. Field-level RBAC and format validation are enforced
-server-side on every request, not hidden in client JS: sign in with a
-lower-privileged role and a gated field or action disappears from the
-response itself. See it end to end in
-[`examples/syntax/enterprise_app.nir`](./examples/syntax/enterprise_app.nir)
-(517 lines — vendor management, a purchase-order approval workflow, a
-durable payment disbursement, and the dashboard on top):
+## From two `struct`s to a generated UI
 
-```sh
-cd crates/compiler
-cargo run -- serve ../../examples/syntax/enterprise_app.nir --port 8080
-# nirdosha serve: listening on http://127.0.0.1:8080
-```
+![Historical, pre-2026-09 evidence — captured before this repo's interpreter (`run`/`serve`) was removed. A themed dashboard with live SQLite data, a sortable/searchable table, and a role-gated approval action — the same screen under a lower-privileged identity, with a field dropped and an action disabled by the server](./demo.gif)
 
-Nothing here is simulated — see the
-[UI Engine](https://github.com/kannamma-labs/nirdosha/wiki/UI-Engine) wiki page.
-
-## A real plugin ecosystem, not just built-ins
-
-`db_connect`/`mq_connect_via` dispatch by URL scheme to a plugin at
-runtime, so any backend a Rust crate exists for is reachable from plain
-Nirdosha source with **no new syntax**:
-
-```nirdosha
-db_connect("mysql://user:pass@host/db")     // -> a MySQL-backed `db` handle
-mq_connect_via("activemq://host:61613")     // -> an ActiveMQ-backed `mq` handle
-```
-
-Five real reference plugins ship today, each a genuine Rust crate
-wrapping a real client library — MySQL, ActiveMQ, Cassandra, Neo4j,
-HBase — reviewed and listed in [`TRUSTED_PLUGINS.md`](./TRUSTED_PLUGINS.md).
-SQLite, Postgres, and Redis are built in with no plugin needed.
+*Historical, kept for the record, not a claim about what runs today:
+this GIF predates the interpreter removal above — the live,
+DB-backed `nirdosha serve` it shows no longer exists in this tree, and
+nothing currently replaces that *live* half of it.* What's real and
+current instead: `nirdosha emit-ui <file.nir> -o out.html` derives a
+static Material-styled page from the same `struct`/`screen`
+conventions — no live backend, no server process — and the field
+masking demonstrated above runs *underneath* any UI, in the compiled
+binary itself, whether or not one is ever generated. See the
+[UI Engine](https://github.com/kannamma-labs/nirdosha/wiki/UI-Engine)
+wiki page for the full, current picture.
 
 ## Why this exists, in one paragraph
 
@@ -128,11 +136,12 @@ Nirdosha targets one specific problem: **a backend service written and
 maintained by an AI coding agent, with no human reviewing every line
 before it runs.** An LL(1) grammar exported to GBNF lets a sampler
 force every token an agent emits to stay syntactically valid;
-`--format=json` gives a self-repair loop a structured proof obligation
-instead of a paragraph to guess at; `sandbox` is a real OS process and
-a language primitive, not a bolted-on Docker wrapper; there is no
-mutex in the language, so an agent literally cannot generate a
-lock-ordering deadlock. It isn't trying to be a better Rust — see the
+`nirdosha emit-ast` gives a self-repair loop a structured, typed AST to
+work from instead of a paragraph to guess at; there is no mutex in the
+language at all, so an agent literally cannot generate a lock-ordering
+deadlock — a guarantee about what the *language* can express, true
+regardless of which constructs are compiled yet. It isn't trying to be
+a better Rust — see the
 [wiki](https://github.com/kannamma-labs/nirdosha/wiki) for the full case.
 
 ## Nirdosha vs. Rust, Go, Mojo — the one-line version
@@ -156,6 +165,9 @@ Windows, and Apple Silicon macOS** on every
 ```sh
 # macOS / Linux — installer script, auto-detects your platform
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/kannamma-labs/nirdosha/main/scripts/install.sh | sh
+
+nirdosha build examples/syntax/hello_nir.nir -o hello && ./hello
+nirdosha emit-ui examples/features/39_screen_ui.nir -o ui.html   # static UI derived from a struct/screen block
 ```
 
 ```powershell
@@ -173,6 +185,8 @@ curl -fsSL https://github.com/kannamma-labs/nirdosha/releases/latest/download/ni
 
 # macOS, Apple Silicon
 curl -fsSL https://github.com/kannamma-labs/nirdosha/releases/latest/download/nirdosha-aarch64-apple-darwin.tar.gz | tar xz
+
+./nirdosha build examples/syntax/hello_nir.nir -o hello && ./hello
 ```
 
 (Intel Mac: build from source for now — see below.)
@@ -197,9 +211,8 @@ The examples above run as-is, but these four things will trip up your
   `enum` for categorical data, or `struct Text { value: str }` to pass
   free text.
 - **No string concatenation or formatting.** A `str` value only ever
-  comes from a source literal or a builtin (`json_get_str`,
-  `db_query`, ...) — there's no `+` or format string to build one at
-  runtime.
+  comes from a source literal or a builtin — there's no `+` or format
+  string to build one at runtime.
 - **No statement separators.** The parser always extends the current
   expression across a newline — `return x` then `-y` on the next line
   parses as `return (x - y)`, not two statements.
@@ -208,32 +221,44 @@ Full rationale and the complete list: [`AGENTS.md`](./AGENTS.md).
 
 ## What's shipped
 
-32 capabilities are proven and running today — the highlights:
+Real, compiled, and running today — the highlights:
 
 - **Language core** — LL(1) grammar cross-verified against an
   independent LALR(1) generator, a static type checker,
-  ownership/affine types (`box`/`&`, no GC, no manual `free`),
+  ownership/affine types (`box`/`&`/`froze`, no GC, no manual `free`),
   `spawn`/`thread`/`chan` with no mutex in the language, generics,
   `Option`/`Result`, SMT-backed (Z3) integer/buffer-overflow proofs,
-  and `validate { pre:/post: }` Hoare contracts.
+  and `validate { pre:/post: }` Hoare contracts (Z3-proven at build
+  time for Tier-1 integer functions).
 - **Native codegen** — LLVM `-O2` compilation for the numeric/
-  control-flow subset, within 1.4× of `gcc -O2`.
-- **Backend services** — `db` (SQLite/Postgres, plus MySQL/Cassandra/
-  Neo4j/HBase via plugin), `json`, `http`/`https`, `mq` (Redis, plus
-  ActiveMQ via plugin), identity (OIDC/JWT, roles, claims), durable
-  `transact` (WAL, crash replay, retry/timeout, idempotency), and
-  `workflow` state machines with notification actions — running today
-  through the interpreter, with native compilation expanding under
-  [Track B](./docs/PUBLIC_ROADMAP.md).
-- **UI engine** — zero-syntax CRUD/dashboard inference, a `screen`/
-  `dashboard`/`workspace` DSL for the rest, field-level RBAC and
-  format validation enforced server-side, design-token theming with
-  live reload.
+  control-flow/`box`/`froze`/`str`/`tcp`/`file`/concurrency subset,
+  within 1.4× of `gcc -O2` on the operations it covers.
+- **Identity and data protection** — `check_role` against a real
+  `VerifiedIdentity`, producing an unforgeable `RoleView`; field-level
+  `requires(role/claim: ...)` masking that zeroes a struct field on
+  return unless the caller's own `RoleView`/`ClaimView` proves it —
+  both compiled, both enforced in the binary itself, no server process
+  involved.
+- **`nfr(...)`** — non-functional requirements as a first-class,
+  compiled fn annotation: automatic latency/error-rate/throughput/
+  concurrency tracking via the APM kernel, with async escalation to an
+  observability endpoint on a crossed threshold.
+- **UI engine (static)** — `nirdosha emit-ui` derives a Material-styled
+  page from `struct`/`screen`/`dashboard` naming conventions — no
+  hand-written frontend code, no live backend.
 - **Cross-platform CI** — Linux, macOS, and Windows all build and run
   their full test suite on every push, not just at release time.
 
-Full list with status tags, including what's next:
-[`docs/PUBLIC_ROADMAP.md`](./docs/PUBLIC_ROADMAP.md).
+**Not currently running in any form** — designed, documented, and (for
+most of these) previously interpreter-backed, but with the interpreter
+removed and native codegen not yet reaching them: `db`, `json`,
+`http`/`https`, `mq`, `transact`, `workflow`, `sandbox`, and the live
+(server-backed) half of the UI engine. This is the deliberate, disclosed
+trade the interpreter removal made — see
+[Track B](./docs/PUBLIC_ROADMAP.md) for what's landed since and what's
+next; treat `docs/PUBLIC_ROADMAP.md`'s older entries with the same
+caution, since large parts of it still describe the pre-removal,
+interpreter-parity world.
 
 ## How to help
 
@@ -251,7 +276,7 @@ reply, not boilerplate.
 |---|---|
 | Ownership/concurrency, PL theory | A `Track B` codegen gap, or an SMT/typeck edge case |
 | Constrained decoding, agent repair loops | `crates/bench/`'s pass@1 harness — the scaffold's real, it just hasn't been pointed at a live model yet |
-| Real backends, CRUD, sandboxing | A new `examples/*.nir` service, or a sixth plugin |
+| Real backends, CRUD, sandboxing | A `Track B` codegen gap for `db`/`json`/`http`/`mq`/`sandbox` — none of them run today in any form |
 | Docs / DX | Error-message clarity, Getting Started walkthroughs, missing examples |
 
 [`AREAS.md`](./AREAS.md) lists who owns which subsystem; a cross-cutting
@@ -281,9 +306,11 @@ the LLM-integration mechanism with evidence — lives in the
 
 ## FAQ (short version)
 
-**Is it production-ready?** It's pre-1.0 and moving fast, with 32 real
-capabilities shipped and verified — see
-[what's shipped](#whats-shipped) above and the full
+**Is it production-ready?** No — it's pre-1.0 and moving fast. The
+compiled path covers a real, growing subset (see
+[what's shipped](#whats-shipped) above); most backend-service
+capabilities (`db`/`json`/`http`/`mq`/`transact`/`workflow`) don't run
+in any form right now. See the full
 [Public Roadmap](./docs/PUBLIC_ROADMAP.md) for what's next.
 
 **Why not just use Rust?** Rust already solves memory safety for teams
@@ -291,9 +318,9 @@ that can invest in its learning curve. Nirdosha targets a narrower
 problem — AI agents writing backend code unsupervised. See the
 [full answer](https://github.com/kannamma-labs/nirdosha/wiki/Nirdosha-vs-Alternatives).
 
-**Found a bug?** Run `nirdosha <file.nir> --format=json` and paste the
-`Diagnostic` JSON into a GitHub issue. Security issue? See
-[SECURITY.md](./SECURITY.md) instead.
+**Found a bug?** Open a GitHub issue with the `nirdosha build`/
+`emit-llvm` error message and the `.nir` source that produced it.
+Security issue? See [SECURITY.md](./SECURITY.md) instead.
 
 **Want to contribute?** See [CONTRIBUTING.md](./CONTRIBUTING.md). More in
 the [full FAQ](https://github.com/kannamma-labs/nirdosha/wiki/FAQ).

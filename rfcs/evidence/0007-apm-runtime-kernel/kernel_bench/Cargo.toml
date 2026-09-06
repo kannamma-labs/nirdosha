@@ -1,0 +1,27 @@
+# Its own workspace, same isolation reasoning as
+# `crates/runtime-kernels/Cargo.toml` and
+# `rfcs/evidence/0006-structured-concurrency/concurrency_proto/Cargo.toml`:
+# not a member of the repo's root workspace, so building it never
+# contends for that workspace's own `target/` lock.
+[workspace]
+
+[package]
+name = "kernel_bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Section 8's raw baseline for `nir_chan_send`/`nir_chan_recv` — the
+# exact library `kernel::mailbox` wraps (`crates/runtime-kernels/
+# Cargo.toml`'s own provenance comment), so the comparison is against
+# the real substrate, not a stand-in like `std::sync::mpsc`.
+crossbeam-channel = "0.5"
+
+[[bin]]
+name = "kernel_bench"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

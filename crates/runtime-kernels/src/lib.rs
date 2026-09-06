@@ -39,6 +39,70 @@
 //! around it.
 #![allow(clippy::missing_safety_doc)]
 
+mod kernel;
+
+/// Not a real language builtin — no `.nir` program can call this
+/// (`codegen.rs` never emits a `declare`/`call` for it). Proves
+/// `kernel::thread_pool`'s panic containment (`catch_unwind`) survives
+/// being called via `extern "C"` from a host with **no Rust runtime of
+/// its own** — the exact scenario a real compiled `.nir` binary is
+/// (raw LLVM IR + this staticlib, linked by a bare `clang` invocation,
+/// `codegen.rs::build`'s own convention), once `spawn` gets real
+/// codegen. This function is the actual evidence behind the decision to
+/// change this crate's `[profile.release]` from `panic = "abort"` to
+/// `"unwind"` — see `rfcs/evidence/0007-apm-runtime-kernel/panic_containment/`
+/// for the hand-written C program (zero Rust runtime except this
+/// staticlib) that calls this and checks the result, the same rigor
+/// `kernel_bench` already applies to the admission mechanism itself.
+///
+/// Submits a job that panics, waits for it to actually run, then
+/// submits a normal job — returns `1` if the pool survived the panic
+/// and ran the second job, `0` if the pool became unusable. If panic
+/// containment does NOT actually work in the calling binary's
+/// environment, this function never returns at all (the process aborts
+/// first) — a `0` is not the only failure signal; a caller that gets no
+/// output whatsoever from the process this ran in has also learned the
+/// answer.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_kernel_self_test_panic_containment() -> i32 {
+    let pool = kernel::thread_pool::ThreadPool::new();
+    if pool.submit(Box::new(|| panic!("nir_kernel_self_test_panic_containment: expected panic, containment under test"))).is_err() {
+        return 0;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (tx, rx) = std::sync::mpsc::channel();
+    if pool.submit(Box::new(move || {
+        let _ = tx.send(());
+    })).is_err() {
+        return 0;
+    }
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// The flight recorder's one exit point — `codegen.rs`'s generated
+/// `main` wrapper calls this exactly once, automatically, immediately
+/// before every `ret` in `emit_c_main` (every exit path: `unit`, `str`,
+/// and the generic numeric case), regardless of what the `.nir` program
+/// itself did or does. No `.nir` source can call this (it's not
+/// registered in `ast::BUILTIN_NAMES` at all) — this is a compiler-
+/// inserted hook, not a language feature, matching `kernel::dump_report`'s
+/// own "the program never queries the kernel" design (see that
+/// function's doc comment). Prints to stderr so it's always visible
+/// after a run without needing a file to manage.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_kernel_flight_recorder_dump() {
+    // Flush whatever's left in the currently-active event page first
+    // (a run that never filled a page would otherwise have its whole
+    // history silently dropped, since `kernel::recorder::record` only
+    // flushes automatically when a page actually fills) — then print
+    // the plain-counter summary, same as before.
+    kernel::recorder::flush_remaining();
+    eprint!("{}", kernel::dump_report());
+}
+
 const SINGULAR_EPSILON: f64 = 1e-10;
 
 fn matrix_det(elems: &[f64], n: usize) -> f64 {
@@ -630,9 +694,20 @@ pub unsafe extern "C" fn nir_tcp_connect(host_ptr: *const u8, host_len: i64, por
     let host = unsafe { std::slice::from_raw_parts(host_ptr, host_len as usize) };
     let Ok(host) = std::str::from_utf8(host) else { return -1 };
     let Ok(port) = u16::try_from(port) else { return -1 };
+    // Admission first, at the resource-creation call only -- never on
+    // send/recv (kernel.rs's own module doc). A denial is folded into
+    // the same `-1` every other connect failure already returns; a
+    // distinct error code is real future work, not a gap to route
+    // around here.
+    if !kernel::acquire(kernel::Domain::Tcp) {
+        return -1;
+    }
     match TcpStream::connect((host, port)) {
         Ok(stream) => handle_of_stream(stream),
-        Err(_) => -1,
+        Err(_) => {
+            kernel::release(kernel::Domain::Tcp);
+            -1
+        }
     }
 }
 
@@ -642,9 +717,15 @@ pub unsafe extern "C" fn nir_tcp_connect(host_ptr: *const u8, host_len: i64, por
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_tcp_listen(port: i64) -> i64 {
     let Ok(port) = u16::try_from(port) else { return -1 };
+    if !kernel::acquire(kernel::Domain::Tcp) {
+        return -1;
+    }
     match TcpListener::bind(("0.0.0.0", port)) {
         Ok(listener) => handle_of_listener(listener),
-        Err(_) => -1,
+        Err(_) => {
+            kernel::release(kernel::Domain::Tcp);
+            -1
+        }
     }
 }
 
@@ -657,9 +738,15 @@ pub extern "C" fn nir_tcp_listen(port: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_tcp_accept(listener_handle: i64) -> i64 {
     let listener = ManuallyDrop::new(unsafe { listener_from_handle(listener_handle) });
+    if !kernel::acquire(kernel::Domain::Tcp) {
+        return -1;
+    }
     match listener.accept() {
         Ok((stream, _addr)) => handle_of_stream(stream),
-        Err(_) => -1,
+        Err(_) => {
+            kernel::release(kernel::Domain::Tcp);
+            -1
+        }
     }
 }
 
@@ -707,6 +794,11 @@ pub unsafe extern "C" fn nir_tcp_stop(handle: i64) -> i32 {
     drop(unsafe { OwnedFd::from_raw_fd(handle as RawFd) });
     #[cfg(windows)]
     drop(unsafe { OwnedSocket::from_raw_socket(handle as RawSocket) });
+    // One release per handle, regardless of which of connect/listen/
+    // accept originally admitted it -- all three fold into this one
+    // close path (this fn's own doc comment), so the acquire:release
+    // ratio stays 1:1 either way.
+    kernel::release(kernel::Domain::Tcp);
     0
 }
 
@@ -766,15 +858,24 @@ pub unsafe extern "C" fn nir_file_open(path_ptr: *const u8, path_len: i64, mode_
     let Ok(path) = std::str::from_utf8(path) else { return -1 };
     let mode = unsafe { std::slice::from_raw_parts(mode_ptr, mode_len as usize) };
     let Ok(mode) = std::str::from_utf8(mode) else { return -1 };
+    if !kernel::acquire(kernel::Domain::File) {
+        return -1;
+    }
     let opened = match mode {
         "r" => std::fs::File::open(path),
         "w" => std::fs::File::create(path),
         "a" => std::fs::OpenOptions::new().append(true).create(true).open(path),
-        _ => return -1,
+        _ => {
+            kernel::release(kernel::Domain::File);
+            return -1;
+        }
     };
     match opened {
         Ok(file) => handle_of_file(file),
-        Err(_) => -1,
+        Err(_) => {
+            kernel::release(kernel::Domain::File);
+            -1
+        }
     }
 }
 
@@ -818,6 +919,7 @@ pub unsafe extern "C" fn nir_file_stop(handle: i64) -> i32 {
         use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
         drop(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
     }
+    kernel::release(kernel::Domain::File);
     0
 }
 
@@ -873,69 +975,83 @@ pub unsafe extern "C" fn nir_constant_time_str_eq(a_ptr: *const u8, a_len: i64, 
 // fixed seed, not just against a re-reading of the same algorithm
 // description (`crates/compiler/tests/codegen.rs`'s `rand_*` tests).
 //
-// **Process-wide state, not per-"instance."** The interpreter's own
-// `RngState` is deliberately *not* a global (its doc comment: "carried
-// in the interpreter environment, not a global," so independent/
-// concurrent interpreter runs never share a stream) -- but a compiled
-// Nirdosha binary has exactly one logical owner for this state per
-// process: `thread`/`spawn` aren't compiled yet (`docs/LANGUAGE.md` §10), so
-// there's only ever one thread to own it, making a process-wide static
-// the honest equivalent of "this process's one `Interpreter` instance,"
-// not a shortcut around the interpreter's own stated reasoning.
-static RAND_SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static RAND_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// **Per-thread state, not process-wide — fixed (2026-09), not just
+// disclosed.** This used to be a `static AtomicU64`, justified as
+// "`thread`/`spawn` aren't compiled yet, so there's only ever one
+// thread to own this state regardless" — true when written, false once
+// they compiled (this crate's "chan/spawn/join kernels" section), and
+// genuinely broken even for a single caller: the old `splitmix64_next`
+// was an atomic *load* then a separate atomic *store*, not one
+// compare-and-swap, so two threads calling `nir_rand_f64`/
+// `nir_rand_gaussian` at the same instant could both read the same
+// state before either wrote back, silently drawing the same value or
+// corrupting the stream's period. `thread_local!` below closes both
+// problems at once, not just the race: each OS thread gets its own
+// independent `Cell` (no atomics needed at all — nothing outside this
+// thread ever touches it, so there's nothing to race), and a freshly
+// spawned thread's stream starts **unseeded**, restoring the
+// interpreter's own documented "independent, unseeded RNG per spawn"
+// behavior (`Interpreter::rng`'s doc comment) exactly, rather than
+// silently inheriting the spawning thread's seed/position.
+thread_local! {
+    static RAND_SEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RAND_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-fn splitmix64_next(state: &std::sync::atomic::AtomicU64) -> u64 {
-    use std::sync::atomic::Ordering;
-    let mut s = state.load(Ordering::Relaxed).wrapping_add(0x9E3779B97F4A7C15);
-    state.store(s, Ordering::Relaxed);
-    s = (s ^ (s >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    s = (s ^ (s >> 27)).wrapping_mul(0x94D049BB133111EB);
-    s ^ (s >> 31)
+fn splitmix64_next() -> u64 {
+    RAND_STATE.with(|state| {
+        let mut s = state.get().wrapping_add(0x9E3779B97F4A7C15);
+        state.set(s);
+        s = (s ^ (s >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        s = (s ^ (s >> 27)).wrapping_mul(0x94D049BB133111EB);
+        s ^ (s >> 31)
+    })
 }
 
 fn rand_next_f64() -> f64 {
-    (splitmix64_next(&RAND_STATE) >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    (splitmix64_next() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
-/// Seeds the process-wide stream. `codegen.rs` compiles `rand_seed(n)`
-/// for any integer type `n` (`typeck.rs`'s `t.is_integer()` check) --
-/// every one of them arrives here already widened to `i64` (this
-/// backend's own internal convention, `widen_to_i64`'s doc comment), so
-/// this only ever needs to accept one width.
+/// Seeds the *calling thread's* stream only — `codegen.rs` compiles
+/// `rand_seed(n)` for any integer type `n` (`typeck.rs`'s
+/// `t.is_integer()` check) -- every one of them arrives here already
+/// widened to `i64` (this backend's own internal convention,
+/// `widen_to_i64`'s doc comment), so this only ever needs to accept one
+/// width. A thread spawned after this call does **not** inherit the
+/// seed — see this section's own doc comment for why that's the
+/// intended behavior, not a gap.
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_rand_seed(seed: i64) {
-    use std::sync::atomic::Ordering;
-    RAND_STATE.store(seed as u64, Ordering::Relaxed);
-    RAND_SEEDED.store(true, Ordering::Relaxed);
+    RAND_STATE.with(|s| s.set(seed as u64));
+    RAND_SEEDED.with(|s| s.set(true));
 }
 
-/// Aborts if called before `nir_rand_seed` -- the same "the checker
-/// can't catch this statically, so trap at runtime rather than return a
-/// silently-wrong value" treatment every other unrecoverable runtime
-/// condition in this backend gets (div-by-zero, integer overflow,
-/// `nir_alloc` failure), enforced in Rust here rather than threading an
-/// extra codegen-side branch-and-trap sequence through every call site:
-/// `interpreter.rs`'s own `ErrorKind::RngNotSeeded` is a real, catchable
-/// `RuntimeError` there because the interpreter *can* return one; a
-/// compiled binary's equivalent of "stop, this precondition was
-/// violated" is `abort()`, same as `nir_alloc`'s allocation-failure path
-/// already uses.
+/// Aborts if called before `nir_rand_seed` **on this same thread** --
+/// the same "the checker can't catch this statically, so trap at
+/// runtime rather than return a silently-wrong value" treatment every
+/// other unrecoverable runtime condition in this backend gets
+/// (div-by-zero, integer overflow, `nir_alloc` failure), enforced in
+/// Rust here rather than threading an extra codegen-side branch-and-trap
+/// sequence through every call site: `interpreter.rs`'s own
+/// `ErrorKind::RngNotSeeded` is a real, catchable `RuntimeError` there
+/// because the interpreter *can* return one; a compiled binary's
+/// equivalent of "stop, this precondition was violated" is `abort()`,
+/// same as `nir_alloc`'s allocation-failure path already uses.
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_rand_f64() -> f64 {
-    if !RAND_SEEDED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !RAND_SEEDED.with(|s| s.get()) {
         std::process::abort();
     }
     rand_next_f64()
 }
 
-/// Same not-yet-seeded guard as `nir_rand_f64`, then the interpreter's
-/// exact Box-Muller transform (`next_f64()` clamped away from `0.0`
-/// before `.ln()`, same sharp-edge note as `RngState::next_gaussian`'s
-/// own doc comment).
+/// Same not-yet-seeded guard as `nir_rand_f64` (per-thread, same
+/// caveat), then the interpreter's exact Box-Muller transform
+/// (`next_f64()` clamped away from `0.0` before `.ln()`, same
+/// sharp-edge note as `RngState::next_gaussian`'s own doc comment).
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_rand_gaussian(mean: f64, stddev: f64) -> f64 {
-    if !RAND_SEEDED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !RAND_SEEDED.with(|s| s.get()) {
         std::process::abort();
     }
     let u1 = rand_next_f64().max(f64::MIN_POSITIVE);
@@ -1004,6 +1120,350 @@ pub unsafe extern "C" fn nir_free(ptr: *mut u8) {
             .expect("matches the layout nir_alloc used to allocate this same pointer");
         std::alloc::dealloc(base, layout);
     }
+}
+
+// ---- chan/spawn/join kernels (RFC 0006 pillars 2-4, wired for real) -------
+//
+// `codegen.rs` lowers both `Ty::Channel(_)` and `Ty::Thread(_)` to a plain
+// `i64` handle, exactly like `Ty::Tcp`/`Ty::File` above — the same "the
+// kernel already tracks everything a handle needs" story, so there's no
+// separate handle-table type per resource, just [`kernel::HandleTable`]
+// used twice. What crosses this ABI boundary is always one `i64` machine
+// word per value (`codegen.rs`'s `word_to_i64`/`word_from_i64` bitcast/
+// ptrtoint a narrower scalar into that shape at the call site) — a real,
+// disclosed narrower scope than `chan`/`spawn`'s full type-level generality
+// (`str`/`dec128`/struct/enum payloads aren't supported yet, the same
+// "type-oblivious pre-pass, real check at IR-gen time" gap every other
+// partial feature here discloses rather than silently mishandles).
+//
+// A `chan` handle is never closed (`typeck.rs` gives `Ty::Channel` no
+// `stop` case — a channel is meant to be held by more than one concurrent
+// computation, `mailbox`'s own doc comment) — its `HandleTable` entry, and
+// the `crossbeam_channel` pair inside it, simply live for the process's
+// whole lifetime. `nir_chan_recv` clones the `Receiver` out from under the
+// table's lock before blocking on it: `Receiver` is legally cloneable
+// (`kernel::mailbox`'s whole point) and blocking while holding the one
+// lock shared by every channel in the process would serialize every other
+// channel's `new`/`send`/`recv` behind it, defeating "multi-consumer"
+// before it even starts.
+//
+// A `thread` handle's `HandleTable` entry holds the one-job [`Scope`] that
+// call site's `spawn` created (so `join` blocks on exactly that job, not
+// every job any `Scope` anywhere has ever spawned) plus a raw `result_ptr`
+// this file itself owns (a `Box<i64>` converted to a raw pointer with
+// `Box::into_raw`, so its heap address survives being moved into the
+// table). The spawned job writes through `result_ptr` and then drops its
+// `DecrementOnDrop` guard (`thread_pool::Scope::spawn`'s own doc comment)
+// — a plain `Mutex` lock/unlock inside `Scope::join` already gives that
+// write a real happens-before edge to whatever thread later calls
+// `nir_thread_join` and reads it back, so `result_ptr` needs no atomic or
+// lock of its own.
+//
+// **What this deliberately does not attempt**: Pillar 4's full promise —
+// "every spawned thread is tracked by the `Scope` covering its spawning
+// function body" — would need `codegen.rs` to thread a per-function
+// `Scope` through every frame that can spawn. What's real today instead:
+// every `spawn` gets its own dedicated one-job `Scope` (so a `join` really
+// does wait for, and only for, that one spawn — not an accidental wait on
+// some unrelated concurrent spawn sharing the same `Scope`), and
+// `codegen.rs`'s `emit_affine_free` auto-`join`s any `thread` handle a
+// function forgot to consume before its scope ends (the same `FreeMap`-
+// driven auto-close `box`/`tcp` already get) — so an orphan, never-joined
+// thread is structurally impossible in a well-typed program, even though
+// it isn't the exact lexical-scope mechanism the RFC's own prototype uses.
+
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use kernel::HandleTable;
+use kernel::thread_pool::{Scope, ThreadPool};
+use std::sync::{Arc, OnceLock};
+
+fn global_thread_pool() -> &'static Arc<ThreadPool> {
+    static POOL: OnceLock<Arc<ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(ThreadPool::new)
+}
+
+fn channel_table() -> &'static HandleTable<(Sender<i64>, Receiver<i64>)> {
+    static TABLE: OnceLock<HandleTable<(Sender<i64>, Receiver<i64>)>> = OnceLock::new();
+    TABLE.get_or_init(HandleTable::new)
+}
+
+/// `chan T`'s own construction — same handle for every `T` (the payload's
+/// shape only matters at `send`/`recv`, never at creation), so this needs
+/// no type information at all.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_chan_new() -> i64 {
+    let (tx, rx) = kernel::mailbox::mailbox::<i64>();
+    channel_table().insert((tx, rx))
+}
+
+/// Pillar 2: enqueues `value` and returns immediately — `0` always,
+/// unless every receiver for `handle` has already been dropped (never
+/// happens today, since nothing ever removes a channel's table entry —
+/// kept as a real, checked `-1` rather than an `unwrap`, so a future
+/// caller that *does* add a close path fails cleanly instead of
+/// panicking).
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_chan_send(handle: i64, value: i64) -> i64 {
+    match channel_table().with(handle, |(tx, _rx)| kernel::mailbox::send(tx, value)) {
+        Some(Ok(())) => 0,
+        _ => -1,
+    }
+}
+
+/// Pillar 3: blocks until a message is available. `0` on a closed channel
+/// (see `nir_chan_send`'s doc comment — not reachable today, but an inert
+/// `0` rather than a panic if it ever is).
+///
+/// Tries a non-blocking `try_recv` first, deliberately — this is one of
+/// exactly two operations (`nir_thread_join` is the other) the deadlock
+/// detector in `kernel::concurrency_wait_begin`'s own doc comment treats
+/// as "can only ever be unblocked by another concurrent participant,"
+/// and it must never register a wait for a call that was never actually
+/// going to block: a message already sitting in the mailbox (the
+/// overwhelmingly common case — a producer that already ran to
+/// completion before this `recv` even started) must be returned without
+/// ever touching the wait counters, or a fast-finishing sender racing a
+/// slower receiver could look indistinguishable from a real stall.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_chan_recv(handle: i64) -> i64 {
+    let Some(rx) = channel_table().with(handle, |(_tx, rx)| rx.clone()) else {
+        return 0;
+    };
+    match rx.try_recv() {
+        Ok(v) => return v,
+        Err(TryRecvError::Disconnected) => return 0,
+        Err(TryRecvError::Empty) => {}
+    }
+    kernel::concurrency_wait_begin(kernel::WaitTarget::ChanRecv(handle));
+    let result = kernel::mailbox::receive(&rx).unwrap_or(0);
+    kernel::concurrency_wait_end();
+    result
+}
+
+/// One spawned computation's kernel-owned bookkeeping — see this
+/// section's own doc comment for why both fields live here rather than on
+/// the `.nir`-side `thread` handle itself (which stays a bare `i64`).
+struct ThreadHandle {
+    scope: Scope,
+    result_ptr: *mut i64,
+}
+// SAFETY: `result_ptr` is written by exactly one spawned job and read
+// back by exactly one `nir_thread_join` call, synchronized through
+// `Scope::join`'s own `Mutex` (this section's doc comment) — never
+// accessed concurrently from two threads at once, so moving the whole
+// `ThreadHandle` (raw pointer included) into the table's `Mutex`-guarded
+// map from a different thread than the one that eventually joins it is
+// sound.
+unsafe impl Send for ThreadHandle {}
+
+fn thread_table() -> &'static HandleTable<ThreadHandle> {
+    static TABLE: OnceLock<HandleTable<ThreadHandle>> = OnceLock::new();
+    TABLE.get_or_init(HandleTable::new)
+}
+
+/// `spawn name(args)`'s real implementation. `trampoline` is a function
+/// `codegen.rs` generates once per call site — it unpacks `ctx` (a
+/// `nir_alloc`-ed block holding `args`, freed by the trampoline itself
+/// once it's copied them out), calls the actual spawned function, and
+/// writes its result (widened/bitcast to one `i64` word, or left
+/// untouched for a `unit`-returning spawn) through `result_slot`. Passing
+/// a raw function pointer across this boundary needs no cast on either
+/// side: LLVM's opaque `ptr` and Rust's `extern "C" fn(...)` are the same
+/// calling-convention shape.
+///
+/// Returns the new thread's handle immediately — the job runs
+/// concurrently; `nir_thread_join` is what actually waits for it. `-1`
+/// only if the OS itself refused to create a thread
+/// (`thread_pool::SpawnError` — real, not-happened-in-practice resource
+/// exhaustion), the same uniform failure convention every other
+/// resource-creation kernel here already uses.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_thread_spawn(trampoline: extern "C" fn(*mut u8, *mut i64), ctx: *mut u8) -> i64 {
+    // Admission first, at the resource-creation call only (this
+    // module's own "chan/spawn/join kernels" doc comment) -- one
+    // concurrently-outstanding `thread` handle held between `spawn` and
+    // its matching `join`, the same ceiling `nir_tcp_connect`/
+    // `nir_file_open` already enforce for their own domains.
+    if !kernel::acquire(kernel::Domain::Thread) {
+        unsafe {
+            if !ctx.is_null() {
+                nir_free(ctx);
+            }
+        }
+        return -1;
+    }
+    let result_ptr = Box::into_raw(Box::new(0i64));
+    let scope = Scope::new(global_thread_pool());
+    // A tiny `Send` wrapper around the two raw pointers and the function
+    // pointer -- all three are used exactly once, entirely on the
+    // spawned job's own thread, never touched again by the thread that
+    // called `nir_thread_spawn` until (if ever) it later calls
+    // `nir_thread_join`.
+    struct SpawnPayload(*mut u8, *mut i64, extern "C" fn(*mut u8, *mut i64));
+    unsafe impl Send for SpawnPayload {}
+    impl SpawnPayload {
+        // A method call's receiver is the *whole* value, not a field
+        // projection -- unlike `payload.0`/`let SpawnPayload(a, b, c) =
+        // payload` (both of which Rust's disjoint-closure-capture
+        // analysis, RFC 2229, decomposes into per-field captures even
+        // through a full-struct pattern), this is the one access shape
+        // that forces the closure below to capture `payload` as one
+        // `Send`-wrapped value instead of three individually-non-`Send`
+        // raw pointers/fn pointer.
+        fn call(self) {
+            (self.2)(self.0, self.1);
+        }
+    }
+    let payload = SpawnPayload(ctx, result_ptr, trampoline);
+    // Incremented *before* the job is submitted, not after -- a worker
+    // thread can start running the job the instant `scope.spawn` returns
+    // `Ok`, and that job's own code could reach a `join`/`recv` (and so
+    // `concurrency_wait_begin`'s live-count check) before this calling
+    // thread gets to run another instruction. Registering "this
+    // participant now exists" strictly before it could possibly wait on
+    // anything is what makes `concurrency_wait_begin`'s check exact
+    // rather than racy (see `kernel::concurrency_thread_started`'s own
+    // doc comment).
+    kernel::concurrency_thread_started();
+    // Deliberately *not* calling `kernel::concurrency_thread_finished()`
+    // from inside this closure once `payload.call()` returns -- see
+    // `concurrency_thread_finished`'s own doc comment for the race that
+    // would reopen (this counter and `Scope`'s own completion state are
+    // two separate locks with no ordering between them). `nir_thread_
+    // join` calls it instead, only once `Scope::already_done`/`join`
+    // has itself confirmed completion.
+    let submitted = scope.spawn(Box::new(move || payload.call()));
+    if submitted.is_err() {
+        // The OS refused to create a worker thread -- the job never ran
+        // at all, so the optimistic increment above has to be rolled
+        // back here (nothing else ever will: this handle is never
+        // inserted into `thread_table`, so `nir_thread_join` will never
+        // run for it either).
+        kernel::concurrency_thread_finished();
+        kernel::release(kernel::Domain::Thread);
+        unsafe {
+            drop(Box::from_raw(result_ptr));
+            if !ctx.is_null() {
+                nir_free(ctx);
+            }
+        }
+        return -1;
+    }
+    thread_table().insert(ThreadHandle { scope, result_ptr })
+}
+
+/// `join`'s real implementation — blocks until `handle`'s one spawned job
+/// completes (whether it returned normally or panicked; `thread_pool`'s
+/// own panic containment, this section's doc comment), then returns its
+/// result word. A double-join or an already-consumed handle returns `0`
+/// rather than panicking — `ownership.rs`'s affine typing already proves
+/// this doesn't happen in a well-typed program (the same "the checker is
+/// the real gate" trust convention `nir_tcp_stop` documents), including
+/// the implicit auto-join `codegen.rs::emit_affine_free` emits for a
+/// `thread` handle a function forgot to consume itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_thread_join(handle: i64) -> i64 {
+    let Some(entry) = thread_table().remove(handle) else {
+        return 0;
+    };
+    // Checked non-blockingly first, for the identical reason
+    // `nir_chan_recv`'s own `try_recv`-first does: a `join` on a job
+    // that already finished was never actually going to block, and must
+    // never be counted as a real wait (`concurrency_wait_begin`'s doc
+    // comment, and `Scope::already_done`'s own doc comment for exactly
+    // this hazard). Only when genuinely still outstanding does this
+    // become one of the two operations (`nir_chan_recv` is the other)
+    // the deadlock detector treats as "can only ever be unblocked by
+    // another concurrent participant."
+    if !entry.scope.already_done() {
+        kernel::concurrency_wait_begin(kernel::WaitTarget::ThreadJoin(handle));
+        entry.scope.join();
+        kernel::concurrency_wait_end();
+    }
+    // This job can no longer run any more code that could unblock
+    // someone else, whichever branch above got here — see `kernel::
+    // concurrency_thread_finished`'s own doc comment for why this is
+    // the one place that's called, rather than the job itself.
+    kernel::concurrency_thread_finished();
+    let result = unsafe { *entry.result_ptr };
+    unsafe { drop(Box::from_raw(entry.result_ptr)) };
+    // The `thread` handle's own admission slot (`nir_thread_spawn`'s own
+    // doc comment) is released here, at the one-time consuming `join`
+    // that closes it — the same acquire-at-creation/release-at-close
+    // pairing `nir_tcp_stop`/`nir_file_stop` already use for their own
+    // domains.
+    kernel::release(kernel::Domain::Thread);
+    result
+}
+
+// ---- nfr kernels (NFRs as a first-class, compiled-runtime feature) -------
+//
+// See `kernel::nfr`'s own module doc for the real design (four O(1)
+// tracked metrics, escalation only on violation, never on the hot
+// path). This is the `extern "C"` boundary `codegen.rs` compiles
+// `nfr(...)` to: `nir_nfr_register` once per tracked function at
+// program start, `nir_nfr_call_begin`/`nir_nfr_call_end` bracketing
+// every call to it.
+
+/// Registers one `nfr(...)`-declared function — `name_ptr`/`name_len`
+/// is a `{ptr, i64}` `str` value's own two halves (same convention
+/// every other kernel here taking a `str` argument uses). A negative
+/// `i64`/`f64` field means that NFR wasn't declared — `kernel::nfr::
+/// register`'s own doc comment. Returns the id `nir_nfr_call_begin`/
+/// `_end` pass back on every call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_nfr_register(
+    name_ptr: *const u8,
+    name_len: i64,
+    latency_ms: i64,
+    error_rate_max: f64,
+    throughput_min_per_sec: i64,
+    concurrency_max: i64,
+) -> i64 {
+    let name = unsafe { std::slice::from_raw_parts(name_ptr, name_len as usize) };
+    let name = String::from_utf8_lossy(name).into_owned();
+    kernel::nfr::register(name, latency_ms, error_rate_max, throughput_min_per_sec, concurrency_max)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_nfr_call_begin(id: i64) -> i64 {
+    kernel::nfr::call_begin(id)
+}
+
+/// `was_err` is `0`/`1`, not a real `i1`/`bool` at this ABI boundary —
+/// the same "every boolean-shaped flag crossing this file's `extern
+/// "C"` edge is a plain integer" convention this crate already uses
+/// throughout (`nir_str_eq`'s `i32` return, etc.), not an LLVM-`i1`-
+/// specific assumption.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_nfr_call_end(id: i64, start_ns: i64, was_err: i32) {
+    kernel::nfr::call_end(id, start_ns, was_err != 0)
+}
+
+// ---- check_role kernel (identity/RBAC, real authorization pipeline) ------
+//
+// `codegen.rs`'s `IDENTITY_BUILTINS`/`emit_check_role` doc comments have
+// the full scope: this is `check_role`'s real, compiled implementation,
+// deliberately narrower than the interpreter's own JSON-based one —
+// `claims` here is read as a plain comma-separated role list, not
+// parsed as JSON (no JSON parser is linked into this crate). Exact
+// per-entry matching, not a substring search — `"adm"` must never match
+// a claims list containing `"admin"`.
+
+/// `1` if `role` (as UTF-8 bytes) exactly equals one comma-separated
+/// entry of `claims` (each entry's surrounding whitespace trimmed, so
+/// `"admin, editor"` and `"admin,editor"` behave identically), `0`
+/// otherwise — including if either buffer isn't valid UTF-8, the same
+/// "fail closed on malformed input" posture every other identity check
+/// in this codebase already has.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_check_role(claims_ptr: *const u8, claims_len: i64, role_ptr: *const u8, role_len: i64) -> i32 {
+    let claims = unsafe { std::slice::from_raw_parts(claims_ptr, claims_len as usize) };
+    let role = unsafe { std::slice::from_raw_parts(role_ptr, role_len as usize) };
+    let (Ok(claims), Ok(role)) = (std::str::from_utf8(claims), std::str::from_utf8(role)) else {
+        return 0;
+    };
+    claims.split(',').any(|entry| entry.trim() == role) as i32
 }
 
 // ---- dec128 kernels ---------------------------------------------------

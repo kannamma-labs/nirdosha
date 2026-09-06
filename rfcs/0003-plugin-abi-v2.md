@@ -1,8 +1,3 @@
----
-state: draft
-shepherd: (unassigned)
----
-
 # RFC 0003: Plugin ABI v2 — effect declarations, async/sync policy, versioning
 
 ## Motivation

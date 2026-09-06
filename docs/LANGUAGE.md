@@ -43,10 +43,11 @@ nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 | Boolean | `bool` | no | |
 | Unit | `unit` | no | No literal syntax — only reachable as a function's implicit return. |
 | String | `str` | no | UTF-8, `Arc<str>`-backed. Literal + escapes (`\"` `\\` `\n` `\t` `\r`) only — no concatenation, slicing, or indexing. May not be, or be part of, a user `fn`'s parameter or return type — see §6b. |
-| Heap cell | `box T` | **yes** | Single-owner heap allocation. `*expr` dereferences. |
+| Heap cell | `box T` | **yes** | Single-owner heap allocation. `*expr` dereferences. RFC 0006 Pillar 1's `Iso<T>` — already satisfied by this type's own affinity, no separate `iso` keyword. |
+| Frozen cell | `froze T` | no | 2026-09. RFC 0006 Pillar 1's `Froze<T>` — heap-allocated exactly like `box T`, but freely copyable and shareable across any number of concurrent computations at once (safe because nothing can write through one). `*expr` reads; rejected at compile time if `T` is itself affine, the same rule `&T`'s own deref uses (extracting affine content by value out from under a possibly-multiply-held handle would duplicate ownership). Compiled (§10). Leaked, not refcounted — a real, disclosed narrower scope than `Arc`. |
 | Shared reference | `&T` | no | Read-only borrow of a plain identifier only (`&x`, not `&(x+1)`). No `&mut`. |
-| Thread handle | `thread T` | **yes** | A spawned computation's real-OS-thread handle; `join` consumes it once. |
-| Channel | `chan T` | no | Unbounded MPMC queue; the handle is freely copyable, the *payload* moves through `send`. |
+| Thread handle | `thread T` | **yes** | A spawned computation's real-OS-thread handle; `join` consumes it once. Compiled (§10) — word-sized `T` only (see §10's own note); a real OS thread pool underneath (`runtime-kernels`), not simulated. |
+| Channel | `chan T` | no | Unbounded MPMC queue; the handle is freely copyable, the *payload* moves through `send`. Compiled (§10) — word-sized `T` only; a real cross-thread queue underneath, not simulated. A global runtime deadlock detector catches every concurrently-running thread being simultaneously blocked in `recv`/`join` and aborts with a diagnostic, rather than hanging forever (§7). |
 | Sandbox handle | `sandbox` | **yes** | A real, separate OS process; `stop` consumes it once. |
 | TCP connection | `tcp` | **yes** | A real TCP socket (client or accepted server side); `stop` closes it once. |
 | TCP listener | `tcp_listener` | **yes** | A real bound+listening TCP socket; `accept` doesn't consume it, `stop` does. |
@@ -288,7 +289,13 @@ return it, call it many times — the check happens exactly once, at
 acquisition, not smeared across (or missing from) every call site.
 Interpreter-only for now, like every construct past §10's compiled
 subset — `nirdosha build` rejects `fn(..)->..`/`acquire` with a specific
-reason, never silently mis-compiles one.
+reason, never silently mis-compiles one. **`check_role` itself is the
+exception (2026-09, §10)**: it's fully compiled, so a real `RoleView`
+*is* obtainable in a compiled binary today — it's `acquire` (the step
+that would consume that `RoleView` to gate a first-class function) that
+still has zero codegen. A `RoleView` produced this way is not wasted,
+though: §6e's field-level `requires(...)` masking consumes it directly,
+with no `acquire` involved at all.
 
 ### 6b. `str` at function boundaries ("enum favoring")
 
@@ -579,6 +586,104 @@ conversion-factor table keyed by unit pair (and, for temperature,
 non-linear conversion — `Cel`→`[degF]` isn't a scale factor). That's a
 real, separate feature, not shipped here.
 
+### 6e. Field-level `requires(...)` — automatic return masking (2026-09)
+
+```
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),
+}
+
+fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee {
+    return Employee(name.value, department.value, salary)
+}
+```
+
+A `requires(role: "<name>")`/`requires(claim: "<name>", "<value>")`
+annotation on a **struct field** (reusing the same `Requirement` enum
+§6a's function-level `requires(...)` already uses — one shared
+vocabulary, two attachment points) masks that field automatically,
+every time a value of that struct type is returned from a function:
+zeroed to the field's type's zero value (`0`/`0.0`/`false`/`""`/`null`)
+unless the *returning function itself* has a `RoleView`/`ClaimView`
+parameter that proves the matching role/claim. There's no `acquire`
+step here and no gate on the function's callability — every caller can
+call `get_employee`, they just don't all see the same `Employee` back.
+
+**How the caller's identity reaches the masking check.** Nirdosha
+doesn't thread an ambient "current user" through the call stack — a
+`RoleView`/`ClaimView` parameter *is* the proof, checked structurally at
+codegen time: does this function have a parameter of exactly that type?
+If yes, its field is compared (via `nir_str_eq`) against the
+`requires(...)` string at every return; if no, the field is
+unconditionally zeroed — **fail-closed**, the same posture §6a's
+`acquire` takes. A `RoleView`/`ClaimView` is itself unforgeable
+(`TypeErrorKind::UnforgeableProofConstruction` blocks direct
+construction — `RoleView("admin")` doesn't typecheck), so the only way
+to reach the "proof present" branch is a genuine `check_role`/
+`extract_claim` call earlier in the program. §6a's showcase code
+(`check_role(identity, "admin")` → `match` → `Ok(role_view)`) is exactly
+how a real `RoleView` gets produced to pass in here.
+
+**Only scalar fields can be masked**
+(`TypeErrorKind::MaskRequiresNeedsScalarField`) — an aggregate
+(`Vector`/`Matrix`/another `struct`/`enum`) or affine field can't be
+masked this way, since "zero value" isn't well-defined for either (an
+affine field also can't silently disappear without a free/move, which
+masking doesn't perform). Masking only fires on `return` — a field
+read directly off a local struct value inside the same function that
+constructed it is never masked; only the boundary where a struct
+*crosses out* of a function is where the identity of the "returning
+function" (and therefore its `RoleView`/`ClaimView` parameter, or lack
+of one) is well-defined.
+
+Compiled, not interpreter-only, from day one: `codegen.rs::
+emit_field_masking` runs on every aggregate-return path (right before
+the `sret` memcpy), computing each masked field's `authorized` bit via
+`emit_requirement_check` and conditionally zeroing via
+`emit_zero_value`.
+
+### 6f. `nfr(...)` — non-functional requirements as a first-class annotation (2026-09)
+
+```
+fn checkout(cart_id: i64) -> Result(i64, ErrorCode)
+    nfr(latency_ms: 200, error_rate_max: 0.01, throughput_min_per_sec: 50, concurrency_max: 100)
+{
+    ...
+}
+```
+
+A `nfr(...)` annotation on a function declares up to four independent,
+all-optional thresholds — a latency ceiling, a maximum error rate, a
+minimum throughput, a maximum in-flight concurrency — that the APM
+kernel (`runtime-kernels::kernel::nfr`) then tracks **automatically**,
+with zero code at the call site: every call is wrapped (by codegen, at
+every `return` path) in `nir_nfr_call_begin`/`nir_nfr_call_end`, which
+update a small set of atomics registered once per annotated function.
+`error_rate_max` additionally requires the function to return a
+`Result(...)` (`TypeErrorKind::NfrErrorRateNeedsResultReturn`) — that's
+the only way `call_end` can tell a real error from a real success, by
+inspecting the returned value's own tag.
+
+**Escalation.** A crossed threshold fires an async, fire-and-forget
+HTTP POST to `NIRDOSHA_OBSERVABILITY_URL` (an env var — unset means no
+escalation ever happens, not an error) on its own dedicated
+`ThreadPool`, so a slow or unreachable observability endpoint never
+blocks the caller. The body is a small hand-built JSON object (`fn`,
+which threshold, its configured value, the observed value, a
+millisecond timestamp) sent over a plain `std::net::TcpStream`
+(`http://` only, no TLS) with a 2-second write timeout.
+
+**Disclosed simplifications, not a full APM suite** — real, O(1)-per-function
+state, not a tradeoff to hide: latency tracking is a running max, not a
+p99/percentile histogram; error rate and throughput are cumulative
+since the function's first call, not computed over a sliding window;
+concurrency is the exact live in-flight count, no debouncing on a
+transient spike. `docs/adr`'s RFC 0007 has the fuller governance
+picture (rings/aggregator/exporter) this is a deliberately smaller,
+already-real slice of.
+
 ---
 
 ## 7. Concurrency & I/O
@@ -606,31 +711,49 @@ stop(f)                               // closes the file (reuses tcp's keyword)
 
 `chan`/`sandbox` compose: a `chan T` (T a plain scalar) can cross into a
 sandboxed process as a real cross-process transport (a Unix domain
-socket under the hood). Race-freedom for concurrent code comes entirely
-from the ownership checker — an affine value moved into `spawn`/`send`
-can never be touched by the sender again.
+socket under the hood — interpreter-only, since `sandbox` itself is;
+see §10). Race-freedom for concurrent code comes entirely from the
+ownership checker — an affine value moved into `spawn`/`send` can never
+be touched by the sender again.
 
-**`spawn` is backed by a self-tuning, reused-worker OS thread pool
-(`thread_pool.rs`), not one fresh `std::thread::spawn` per call** —
-`.nir`-visible behavior is unchanged (still a real OS thread runs each
-`spawn`'d computation; `join` still blocks and consumes the handle
-exactly once, same affine semantics), but the runtime cost is not "one
-new OS thread, every time": a program that spawns many short-lived tasks
-over its lifetime reuses a small, roughly-peak-concurrency-sized set of
-real threads instead of paying a fresh thread-creation cost for each
-one, and a genuine OS-level failure to create a thread (real resource
-exhaustion under heavy load) is now a clean, catchable runtime error
-(`ErrorKind::ThreadSpawnFailed`) instead of an uncatchable process
-panic. **This is deliberately not Java-style virtual threads** —
-see `thread_pool.rs`'s own module doc comment for the full reasoning
-(Rust has no safe primitive for stackful continuation-switching the way
-the JVM does; the actually-correct Rust answer, an async rewrite of the
-whole interpreter, is a disclosed, scoped, not-yet-started next step,
-not attempted here) — a `spawn`'d task that calls a genuinely long
-blocking operation (a slow `db_query`, a `recv` waiting on a real
-external peer) still ties up one real worker thread for that duration,
-same as before this existed; what changed is reuse between tasks, not
-the cost of blocking itself.
+**`spawn`/`join`/`chan`/`send`/`recv` compile now (§10), backed by a
+real admission-controlled kernel, not just interpreted.** `spawn` runs
+on a self-tuning, reused-worker OS thread pool
+(`runtime-kernels/src/kernel/thread_pool.rs`'s `Scope`) — a program that
+spawns many short-lived tasks reuses a small, roughly-peak-concurrency-
+sized set of real threads rather than paying a fresh thread-creation
+cost every time, and a genuine OS-level failure to create a thread
+(real resource exhaustion) is a clean `-1`/trap, not an uncatchable
+process abort from the OS itself. Every outstanding `thread` handle
+(between `spawn` and its matching `join`) also counts against a real
+admission ceiling (`Domain::Thread`, `NIRDOSHA_KERNEL_MAX_THREAD`,
+default 10,000) — the same per-domain ceiling `tcp`/`file` already
+enforce, hit once a spawned-but-unjoined thread count gets that high.
+Word-sized `T` only for now (integers, `bool`, `f64`, `box`/`froze`/
+another handle) — `str`/`dec128`/struct/enum payloads are still
+interpreter-only, a real, disclosed narrower scope, not a silent gap.
+
+**A dynamic deadlock detector catches the one hazard `spawn`/`chan`
+alone don't rule out.** No mutex exists in the language, so lock-order
+deadlocks are unrepresentable — but two (or more) threads each blocked
+in `recv`/`join`, mutually waiting on something only another blocked
+thread could ever produce, is still constructible. The compiled runtime
+tracks how many concurrent participants exist against how many are
+simultaneously blocked in `join`/`recv` specifically (never `tcp`/`file`
+I/O, which can still resolve from outside the process); if every one of
+them is blocked at once, nothing left in the process could ever unblock
+any of them, and the program aborts immediately with a diagnostic
+naming the actual stuck handles, instead of hanging forever. This is
+detection, not the compile-time proof RFC 0006's own Pillar 5 would be
+— it only catches a *global* stall (the whole program stuck), not a
+local cycle between two threads while a third keeps making unrelated
+progress.
+
+**This is deliberately not Java-style virtual threads** — Rust has no
+safe primitive for stackful continuation-switching the way the JVM
+does; a `spawn`'d task that calls a genuinely long blocking operation
+still ties up one real worker thread for that duration. What changed is
+reuse between tasks, not the cost of blocking itself.
 
 ---
 
@@ -666,15 +789,37 @@ SplitMix64 stream stored **per `Interpreter` instance** (not a process
 global) — same seed, same OS, same run, byte-for-byte identical draws,
 every time. A `spawn`ed function gets its own independent, unseeded RNG
 by default (an honest, documented gap — see `Interpreter::rng`'s doc
-comment). `nirdosha build`'s compiled version of this (§10) necessarily
-uses a process-wide store instead — there's no "interpreter instance" in
-a native binary — but `thread`/`spawn` aren't compiled yet, so a
-compiled program has exactly one thread to own it regardless, matching
-the interpreter's per-instance guarantee in practice today; that
-equivalence stops holding the moment compiled `thread`/`spawn` lands, at
-which point this needs revisiting, not left as a stale assumption. No
-other source of nondeterminism exists in the language (no ambient
-clock/entropy reads anywhere in the builtin set).
+comment). `nirdosha build`'s compiled version of this (§10) matches
+that exactly, for real, as of 2026-09: a `thread_local!` stream, not a
+process-wide `static` (`runtime-kernels/src/lib.rs`'s "rand_seed/
+rand_f64/rand_gaussian kernel" section).
+
+**A real bug found and fixed, not just a design gap.** This was briefly
+a process-wide `static AtomicU64` stream — originally justified by
+"`thread`/`spawn` aren't compiled yet, so there's only ever one thread
+to own it," true when written, false once they compiled (§7, §10). Two
+real problems followed, both closed by the same fix: every
+concurrently-running thread shared one stream (the opposite of the
+interpreter's own "independent, unseeded per spawn" behavior), and the
+stream's own update (`splitmix64_next`: an atomic load, then a separate
+atomic store, not one compare-and-swap) wasn't safe against two threads
+calling `rand_f64`/`rand_gaussian` at the same instant — both could read
+the same state before either wrote back, silently drawing the same
+value or corrupting the stream's period. A `thread_local!` `Cell`
+(no atomics needed at all — nothing outside the owning thread ever
+touches it) closes both: each thread gets its own independent stream,
+started unseeded, restoring the interpreter's own semantics exactly
+rather than merely making the sharing race-free. Verified by two real
+compiled-and-run tests, not just reasoned about:
+`a_spawned_threads_rand_seed_does_not_perturb_the_spawning_threads_stream`
+(a spawned thread seeding/drawing its own stream leaves the spawning
+thread's own sequence byte-for-byte unchanged) and
+`a_freshly_spawned_thread_gets_its_own_unseeded_rng_by_default` (calling
+`rand_f64` inside a spawned thread that never seeded its own stream
+still aborts, even though the spawning thread already seeded its own —
+`crates/compiler/tests/codegen.rs`). No other source of nondeterminism
+exists in the language (no ambient clock/entropy reads anywhere in the
+builtin set).
 
 ---
 
@@ -694,6 +839,8 @@ a live TCP round trip — not by re-reading this section's own prose).
 | Scalar arith/comparison, `if`/`while`, calls incl. recursion, `print` | Yes | `print(bool)` → `1`/`0`, not `"true"`/`"false"` (cosmetic only). `print(unit)` → `"()"`. |
 | Tier-1/2 bounds + div-by-zero guards, `audited` | Yes | Elided where §8 proves safety. |
 | `box`/`&`/`*` | Yes | Real `nir_alloc` + automatic `nir_free` (`ownership.rs`'s `FreeMap`) — not a leak. |
+| `froze`/`*` | Yes | 2026-09. Same `nir_alloc` as `box`, but leaked, not freed — real, disclosed narrower scope than `Arc`; see §2's own `froze T` row. |
+| `thread`/`spawn`/`join`, `chan`/`send`/`recv` | Yes | 2026-09. Word-sized `T` only (integers/`bool`/`f64`/`box`/`froze`/another handle) — `str`/`dec128`/struct/enum payloads still interpreter-only. Real admission ceiling (`Domain::Thread`) and a dynamic deadlock detector — see §7. |
 | `str` | Yes | Literals, `==`/`!=`, `if`-condition, `print`, fn params/returns — `main() -> str` compiles directly. |
 | `tcp`/`tcp_listener` | Yes | `connect`/`listen`/`accept`/`send`/`recv`/`stop` over real sockets. |
 | `sha256_hex`/`constant_time_str_eq` | Yes | Isolated from-scratch SHA-256, bit-verified. Output buffer leaks — see below. |
@@ -701,14 +848,17 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `Vector`/`Matrix`, fully | Yes | Two codegen strategies — see below. |
 | `struct`/`enum`/`match`, non-affine payloads | Yes | Real LLVM types — see below. Affine payloads: no (Phase 4b). |
 | `struct`/`enum`/`match` with an affine field/payload | No | Phase 4b, deferred (below) — a non-affine one compiles now. |
-| `thread`/`spawn`/`join`, `chan`/`send`/`recv`, `sandbox`/`stop` | No | `chan` here means the channel type — distinct from the already-compiled `tcp`. |
+| `field: T requires(role/claim: ...)` (§6e field masking) | Yes | 2026-09. Scalar fields only (`is_aggregate()`/affine rejected, `TypeErrorKind::MaskRequiresNeedsScalarField`) — see §6e. |
+| `check_role` | Yes | 2026-09. `claims_json` read as a plain comma-separated role list, exact match per entry — a disclosed simplification, not real JSON parsing (no JSON parser is linked into `runtime-kernels`). `VerifiedIdentity` itself was already freely constructible; this is what makes a real `RoleView` obtainable at all. |
+| `nfr(...)` (§6f) | Yes | 2026-09. O(1) state per function — max-latency not p99, cumulative (not windowed) error-rate/throughput, exact concurrency. See §6f. |
+| `sandbox`/`stop` | No | Real, separate OS process — a larger scope than `thread`/`spawn` above, not touched by that update. |
 | `file`/`open` | No | `docs/PROTOLANG_PORT.md`'s file I/O port. |
 | `dec128` + `dec_*` builtins | No | Not yet in `Ty`/`codegen.rs`'s builtin allowlists. |
-| `json`/`db`/`mq`, Row 12 identity/session/API-key builtins | No | Identity ones also blocked on `VerifiedIdentity`/`RoleView`/`ClaimView` being structs. |
-| `http_get`/`http_post`/`https_get`/`https_post`, `mock_issue_token` | No | Not in `codegen.rs`'s builtin allowlists. |
+| `json`/`db`/`mq`, `extract_claim`/`oidc_validate_token`/`mock_issue_token`, other Row 12 identity/session/API-key builtins | No | `check_role` (above) is the one identity builtin compiled so far; the rest are still blocked on `VerifiedIdentity`/`RoleView`/`ClaimView` being structs plus (for `oidc_validate_token`) real JWT/JWKS crypto. |
+| `http_get`/`http_post`/`https_get`/`https_post` | No | Not in `codegen.rs`'s builtin allowlists. |
 | `transact` | No | |
 | `workflow` | No | Desugars to `send_email`/`send_sms`/`send_push`/`notify`/`__workflow_*`, none compiled. |
-| `fn(..)->..`/`acquire`/`requires(...)` | No | First-class/privileged functions (§6a). |
+| `fn(..)->..`/`acquire`/`requires(role/claim: ...)` on a *function* | No | First-class/privileged functions (§6a) — distinct from field-level `requires(...)` masking (§6e), which **is** compiled. |
 | `screen`/`dashboard` | Inert, not rejected | `codegen.rs` never inspects these — a program containing them compiles cleanly with nothing to lower to. |
 
 **Scalar width mechanics.** Same LLVM widths as the signed types for
@@ -731,11 +881,10 @@ there's no scope-closing point to hook a `nir_free` onto (a real, small,
 disclosed leak, not a silent one — `runtime_kernels.rs::
 nir_sha256_hex`'s doc comment).
 
-**RNG.** A process-wide stream in `runtime_kernels.rs`, necessarily —
-there's no "interpreter instance" in a native binary the way §9's
-per-instance guarantee assumes (an honest equivalent today only because
-compiled `thread`/`spawn` don't exist yet; revisit when they do).
-Calling `rand_f64`/`rand_gaussian` before `rand_seed` aborts the
+**RNG.** A per-thread (`thread_local!`) stream, not process-wide — fixed
+2026-09, see §9 for the full story (it was briefly process-wide, which
+became a real race once `thread`/`spawn` compiled). Calling `rand_f64`/
+`rand_gaussian` before `rand_seed` **on that same thread** aborts the
 process, matching the interpreter's `RngNotSeeded` in spirit, via
 `abort()` instead of a catchable `Result`.
 
@@ -1315,14 +1464,35 @@ which clause failed. `pre`/`post` are ordinary `kv_entry`s, not new
 syntax — their value is `expr`, the same grammar every other value
 position already uses.
 
-**Two independent enforcement paths, not one:**
+**Two independent enforcement paths on paper — one of them currently
+has no compiled-path backstop, 2026-09.** The design is genuinely two
+paths, and `docs/NEXT_GEN.md` §F3 describes both:
 
 | | Static, at build time | Dynamic, at runtime |
 |---|---|---|
-| Runs | `nirdosha build`/`run`/`serve`/`emit-ui` | Every actual call, unconditionally |
-| Basis | A genuine Z3 proof, not a heuristic | The real concrete argument/return values |
-| Scope | Tier 1 only: integer params/return, no loop, no division in the checked function. A `Call` is supported too, but only when *that* callee's own `validate` contract is *already independently proven* — its proof is reused as a fact about the result (`pre` implies `post`, never `post` alone, so a call site that doesn't itself satisfy the callee's precondition gets an uninformative axiom, never a wrong one). A call to an unproven/undeclared callee still falls through to the runtime path — never a guess. | None of the static pass's restrictions — the only enforcement path for a function touching `db`/`json`/`http`, calling another function, or looping, which in practice is most real functions. |
-| On failure | Hard build failure, naming a real counterexample | `pre` stops the body from running at all; `post` reports the real return value that violated it |
+| Runs | `nirdosha build`/`emit-llvm`/`emit-ui` (every command that owns a typechecked program — `main.rs::typecheck_and_own_impl`) | **Nowhere, today.** Previously `interpreter.rs::call`'s own backstop; that module was deleted entirely along with `run`/`serve` in this session's interpreter removal, and `codegen.rs` never gained a replacement — it doesn't inspect `program.validates` at all. |
+| Basis | A genuine Z3 proof, not a heuristic | N/A — no longer exists |
+| Scope | Tier 1 only: integer params/return, no loop, no division in the checked function. A `Call` is supported too, but only when *that* callee's own `validate` contract is *already independently proven* — its proof is reused as a fact about the result (`pre` implies `post`, never `post` alone, so a call site that doesn't itself satisfy the callee's precondition gets an uninformative axiom, never a wrong one). A call to an unproven/undeclared callee falls outside Tier 1 too, and — see the next column — that's no longer a soft landing. | N/A |
+| On failure | Hard build failure, naming a real counterexample | N/A |
+
+**The practical consequence: a `validate` block outside Tier 1 is now
+silently unenforced in every compiled binary.** It still typechecks
+(`typeck::check_validate`), still prints an honest `note:` explaining
+why it couldn't be proven (`print_unsupported_validate_notes`, wired
+into `emit-ui` only — not `build`/`emit-llvm`), and still compiles and
+runs the function itself with zero difference in behavior — the
+contract is simply never checked against anything, not even the
+concrete values a real call actually saw. This is a real, disclosed
+regression from the interpreter era, not a design choice: `validate`'s
+runtime half was never ported when `interpreter.rs` was deleted, since
+nothing in that removal pass was scoped to touch `contract_check.rs` or
+`codegen.rs`'s builtin surface. Closing it needs `codegen.rs` to lower
+a proven-elsewhere `pre`/`post` predicate into a real LLVM assertion
+(trap or a structured failure) at every call/return site — not started.
+Until then, treat an out-of-Tier-1 `validate` block on compiled code as
+documentation of intent, not an enforced contract — only a Tier-1
+`post:` that a real build actually accepts (no `note:` printed for it)
+carries any teeth in the compiled path today.
 | Can't decide | Falls through to the runtime path (`Unsupported`) — `nirdosha emit-ui`/`serve` print a `note:` explaining why | Treated as a violation, never silently passed (a predicate that errors evaluating, or isn't boolean-shaped) |
 
 A function with no `validate` block is byte-for-byte unaffected by

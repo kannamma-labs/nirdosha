@@ -290,7 +290,7 @@ fn db_connect_effect(args: &[Expr]) -> EffectSet {
 fn walk_expr(e: &Expr, scopes: &mut Scopes, known: &HashMap<String, EffectSet>, plugin_effects: &HashMap<String, EffectSet>, registry: &TypeRegistry, acc: &mut EffectSet) {
     match e {
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::Str(_, _) | Expr::Ident(_, _) | Expr::Chan(_) => {}
-        Expr::Unary(_, inner, _) | Expr::Box(inner, _) | Expr::Deref(inner, _) | Expr::Ref(inner, _) => {
+        Expr::Unary(_, inner, _) | Expr::Box(inner, _) | Expr::Froze(inner, _) | Expr::Deref(inner, _) | Expr::Ref(inner, _) => {
             walk_expr(inner, scopes, known, plugin_effects, registry, acc);
         }
         Expr::Binary(_, l, r, _) => {

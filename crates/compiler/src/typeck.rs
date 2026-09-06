@@ -479,6 +479,21 @@ pub enum TypeErrorKind {
     /// must stay a plain `str` scalar for WAL durability
     /// (`Ty::is_transact_scalar`), so `check_fn` skips this check for it.
     StrInFnSignature { fn_name: String, param_name: Option<String> },
+    /// `nfr(error_rate_max: ...)` on a function that doesn't return
+    /// `Result(_, _)` — `error_rate_max` needs a way to tell a failed
+    /// call from a successful one, and `Result`'s own `Err` variant is
+    /// the only such signal this language has (`ast::NfrSpec`'s own doc
+    /// comment). Caught here rather than silently never firing.
+    NfrErrorRateNeedsResultReturn { fn_name: String, found: Ty },
+    /// `requires(role: ...)` on a struct field whose type isn't a plain,
+    /// freely-copyable scalar — masking replaces the field with `ty`'s
+    /// zero value (`ast::Field::mask_requires`'s own doc comment), which
+    /// has no sound meaning for an affine type (zeroing a `box`/`thread`/
+    /// `tcp` handle would silently leak or double-close whatever it
+    /// pointed to) or an aggregate one (a nested struct/enum/`Vector`/
+    /// `Matrix` needs a much bigger design question about what "masked"
+    /// means recursively, not attempted here).
+    MaskRequiresNeedsScalarField { struct_name: String, field: String, found: Ty },
     /// `__workflow_advance`/`__workflow_link_advance`'s `event` argument
     /// wasn't a value of some declared `enum` type — every
     /// `workflow_lower.rs`-synthesized `<Workflow>Event` is one, but this
@@ -936,6 +951,19 @@ impl std::fmt::Display for TypeError {
                  it: `struct Text {{ value: str }}`, change the signature to `-> Text`, and return \
                  `Text(the_string)` instead of the bare `str`"
             ),
+            TypeErrorKind::NfrErrorRateNeedsResultReturn { fn_name, found } => write!(
+                f,
+                "{line}:{col}: `fn {fn_name}` declares `nfr(error_rate_max: ...)` but returns {found:?}, \
+                 not `Result(_, _)` — `error_rate_max` needs a way to tell a failed call from a \
+                 successful one, and a `Result`'s own `Err` variant is the only such signal this \
+                 language has"
+            ),
+            TypeErrorKind::MaskRequiresNeedsScalarField { struct_name, field, found } => write!(
+                f,
+                "{line}:{col}: `{struct_name}.{field}` declares a masking `requires(...)` but its type \
+                 is {found:?}, not a plain scalar — masking only knows how to replace a field with a \
+                 zero value, which isn't well-defined for an affine handle or a nested aggregate"
+            ),
             TypeErrorKind::WorkflowEventArgMustBeEnum { fn_name, found } => write!(
                 f,
                 "{line}:{col}: `{fn_name}`'s `event` argument must be a workflow event enum value, found {found:?}"
@@ -1074,16 +1102,6 @@ pub fn typecheck(program: &Program) -> Result<(), Vec<TypeError>> {
     typecheck_impl(program, true, &HashMap::new(), &HashMap::new())
 }
 
-/// Same as `typecheck`, plus a plugin crate's declared builtin
-/// signatures (`docs/ROADMAP.md` Track G, G1 / `docs/ECOSYSTEM.md` §G1's
-/// Stage 1) — `plugin::signatures(plugins)`'s shape, so every call to a
-/// plugin builtin is checked exactly like a call to a real one:
-/// resolvable, right arity, right argument/return types, and unusable in
-/// a `spawn`/`transact` slot or as a `fn`/`struct`/variant name.
-pub fn typecheck_with_plugins(program: &Program, plugins: &[crate::plugin::PluginBuiltin]) -> Result<(), Vec<TypeError>> {
-    typecheck_impl(program, true, &crate::plugin::signatures(plugins), &crate::plugin::effect_map(plugins))
-}
-
 /// Same checks as `typecheck`, but does not require a `fn main()`. For
 /// callers that never execute an entrypoint — `nirdosha serve` (every
 /// `fn` is reached individually via `POST /api/<fn>`, not through
@@ -1099,18 +1117,14 @@ pub fn typecheck_optional_main(program: &Program) -> Result<(), Vec<TypeError>> 
     typecheck_impl(program, false, &HashMap::new(), &HashMap::new())
 }
 
-/// Same relationship `typecheck_with_plugins` has to `typecheck` --
-/// `typecheck_optional_main`'s own plugin-aware sibling, for a
-/// plugin-aware `serve`/`emit-ui`/`--sandbox-worker`-shaped caller
-/// (Track B of the plugin-ecosystem plan). The one function this
-/// pattern was missing: `typecheck`/`typecheck_with_plugins`/
-/// `typecheck_optional_main` already existed as a matched trio; this
-/// completes the square.
-pub fn typecheck_optional_main_with_plugins(
-    program: &Program,
-    plugins: &[crate::plugin::PluginBuiltin],
-) -> Result<(), Vec<TypeError>> {
-    typecheck_impl(program, false, &crate::plugin::signatures(plugins), &crate::plugin::effect_map(plugins))
+/// Same as `typecheck`, plus a native (compiled-path) plugin's declared
+/// signatures — `crate::plugin::NativePluginBuiltin` has no effects field
+/// (that's an interpreter-only concept removed along with `PluginBuiltin`),
+/// so this only registers name/params/ret for arity/type checking, the
+/// minimum a `.nir` program calling a linked native plugin symbol needs.
+pub fn typecheck_with_native_plugins(program: &Program, plugins: &[crate::plugin::NativePluginBuiltin]) -> Result<(), Vec<TypeError>> {
+    let sigs = plugins.iter().map(|p| (p.name.clone(), (p.params.clone(), p.ret.clone()))).collect();
+    typecheck_impl(program, true, &sigs, &HashMap::new())
 }
 
 /// A non-fatal diagnostic — unlike `TypeError`, this never blocks
@@ -1375,6 +1389,16 @@ fn typecheck_impl(
             if !field_names.insert(field.name.as_str()) {
                 c.error(
                     TypeErrorKind::DuplicateField { struct_name: s.name.clone(), field: field.name.clone() },
+                    s.span,
+                );
+            }
+            if field.mask_requires.is_some() && (field.ty.is_aggregate() || c.registry.is_affine(&field.ty)) {
+                c.error(
+                    TypeErrorKind::MaskRequiresNeedsScalarField {
+                        struct_name: s.name.clone(),
+                        field: field.name.clone(),
+                        found: field.ty.clone(),
+                    },
                     s.span,
                 );
             }
@@ -2269,6 +2293,13 @@ impl<'a> Checker<'a> {
             self.error(TypeErrorKind::StrInFnSignature { fn_name: f.name.clone(), param_name: None }, f.span);
         }
 
+        if let Some(nfr) = &f.nfr
+            && nfr.error_rate_max.is_some()
+            && !matches!(&f.ret, Ty::Named(name, _) if name == "Result")
+        {
+            self.error(TypeErrorKind::NfrErrorRateNeedsResultReturn { fn_name: f.name.clone(), found: f.ret.clone() }, f.span);
+        }
+
         let mut scopes = Scopes::new();
         for p in &f.params {
             scopes.define(&p.name, p.ty.clone());
@@ -2605,12 +2636,28 @@ impl<'a> Checker<'a> {
                     Ty::Box(Box::new(it))
                 }
             }
+            Expr::Froze(inner, _span) => {
+                let it = self.infer(inner, expected_ret, scopes);
+                if it == Ty::Error {
+                    Ty::Error
+                } else {
+                    Ty::Froze(Box::new(it))
+                }
+            }
             Expr::Deref(inner, span) => {
                 let it = self.infer(inner, expected_ret, scopes);
                 match it {
                     Ty::Error => Ty::Error,
                     Ty::Box(t) => *t,
-                    Ty::Ref(t) => {
+                    // `Ty::Froze` gets exactly `Ty::Ref`'s own rule, not
+                    // `Ty::Box`'s: a `froze` handle may have other live
+                    // copies (it's deliberately not affine — `Ty::Froze`'s
+                    // own doc comment), so extracting affine content out
+                    // of it *by value* would silently duplicate
+                    // ownership the same way extracting it through a
+                    // shared `&` would — the identical hazard, so the
+                    // identical rejection.
+                    Ty::Ref(t) | Ty::Froze(t) => {
                         if self.registry.is_affine(&t) {
                             self.error(TypeErrorKind::CannotMoveOutOfReference { content: *t }, *span);
                             Ty::Error
@@ -4808,6 +4855,7 @@ fn bind_type_params(decl_ty: &Ty, concrete_ty: &Ty, type_params: &[String], subs
             subst.entry(name.clone()).or_insert_with(|| concrete_ty.clone());
         }
         (Ty::Box(a), Ty::Box(b))
+        | (Ty::Froze(a), Ty::Froze(b))
         | (Ty::Ref(a), Ty::Ref(b))
         | (Ty::Thread(a), Ty::Thread(b))
         | (Ty::Channel(a), Ty::Channel(b)) => bind_type_params(a, b, type_params, subst),

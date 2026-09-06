@@ -26,11 +26,14 @@ triager list) and the corresponding GitHub permission, in the same PR.
   merges. No separate process.
 - **Anything cross-cutting, breaking, or that changes the language
   surface, grammar, or a public interface (CLI flags, the manifest
-  format, the plugin ABI):** goes through the [RFC process](./rfcs/README.md)
-  first. This is the direct fix for the gap `docs/ECOSYSTEM.md` §G5
-  named: the `str`-in-signatures ban shipped in one session with no
-  proposal or review window — a real breaking-change precedent this
-  process exists to not repeat. See
+  format, the plugin ABI):** gets a design document in [`rfcs/`](./rfcs/README.md)
+  before it ships, and a real maintainer review before it's treated as
+  decided — a document existing in that directory is not itself a
+  decision, and nothing should be built as if it were until someone
+  with merge authority has actually said so. This is the direct fix for
+  the gap `docs/ECOSYSTEM.md` §G5 named: the `str`-in-signatures ban
+  shipped in one session with no proposal or review window — a real
+  breaking-change precedent this exists to not repeat. See
   [`docs/adr/0002-ban-str-in-fn-signatures.md`](./docs/adr/0002-ban-str-in-fn-signatures.md)
   for that decision recorded after the fact.
 - **A decision made outside the RFC process anyway** (a judgment call
