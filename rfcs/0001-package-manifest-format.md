@@ -1,8 +1,3 @@
----
-state: draft
-shepherd: (unassigned)
----
-
 # RFC 0001: Package manifest format (Cargo-based package manager)
 
 ## Motivation

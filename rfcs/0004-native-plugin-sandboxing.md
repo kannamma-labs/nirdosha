@@ -1,8 +1,3 @@
----
-state: draft
-shepherd: (unassigned)
----
-
 # RFC 0004: Trust model for native (Kind A) plugins
 
 ## Motivation

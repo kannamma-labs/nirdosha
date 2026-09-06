@@ -1,8 +1,3 @@
----
-state: draft
-shepherd: (unassigned)
----
-
 # RFC 0002: Editor/tooling ecosystem — tree-sitter grammar + minimal LSP
 
 ## Motivation
