@@ -1,0 +1,34 @@
+# Local Postgres for the opt-in, real-server test convention
+# (`NIRDOSHA_TEST_POSTGRES_URL`-gated, `#[ignore]`-by-default tests — see
+# `crates/compiler/tests/postgres.rs`) and for manually exercising the
+# Nirdosha Ops Console demo against a real Postgres server.
+#
+# Not used by CI (`.github/workflows/build.yml` has no Postgres service
+# container, deliberately — see docs/ROADMAP.md). Start it yourself:
+#   docker compose -f docker-compose.dev.yml up -d
+#   export NIRDOSHA_TEST_POSTGRES_URL=postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev
+#   cargo test --release -- --ignored
+#
+# Image pinned by digest, not a floating tag — a `latest`/`16-alpine`
+# tag drifts the local dev DB out from under the `--ignored` test suite
+# over time. Re-pin deliberately (`docker manifest inspect`, or
+# `docker pull` + read the digest back) when a real upgrade is wanted.
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    environment:
+      POSTGRES_USER: nirdosha
+      POSTGRES_PASSWORD: nirdosha
+      POSTGRES_DB: nirdosha_dev
+    ports:
+      - "${NIRDOSHA_DEV_PG_PORT:-5432}:5432"
+    volumes:
+      - nirdosha_pg_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nirdosha -d nirdosha_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  nirdosha_pg_dev:
