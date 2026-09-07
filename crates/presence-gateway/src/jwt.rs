@@ -44,8 +44,12 @@ struct RawJwk {
     // oct (`kty: "oct"`, symmetric — HS256 only). Real IdPs never publish
     // one of these in a public JWKS (it would leak the shared secret) —
     // this exists so a locally-mocked JWKS (`mock_issue_token`, this
-    // crate's own integration tests, `tests/serve.rs`'s own `JWKS` const)
-    // verifies exactly the same way a real RSA/EC IdP's would.
+    // crate's own integration tests, and the identical fixture ported into
+    // `crates/runtime-kernels/src/lib.rs`'s `nir_oidc_validate_token` for
+    // the compiled-path side of this same job) verifies exactly the same
+    // way a real RSA/EC IdP's would. (`tests/serve.rs`, this comment's
+    // original citation, no longer exists — deleted along with the
+    // interpreter and `nirdosha serve`.)
     k: Option<String>,
 }
 
@@ -55,9 +59,11 @@ struct VerifiableKey {
 }
 
 /// A parsed, ready-to-verify-against JWKS — loaded once at startup from
-/// `--jwks-file`, the same "static file, no live rotation" posture
-/// `nirdosha serve`'s own `--jwks-file`/`--issuer`/`--audience` trio
-/// already takes (`main.rs`'s `cmd_serve` doc comment); disclosed, not
+/// `--jwks-file`, the same "static file, no live rotation" posture the
+/// old interpreter-era `nirdosha serve --jwks-file` used to take (that
+/// command is gone along with the interpreter; `nir_oidc_validate_token`,
+/// `crates/runtime-kernels/src/lib.rs`, is this same posture's compiled-
+/// path successor); disclosed, not
 /// hidden, the same way that limitation already is there.
 pub struct KeySet {
     keys: HashMap<String, VerifiableKey>,

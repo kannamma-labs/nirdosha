@@ -58,6 +58,60 @@ flate2 = "1"
 # channel is itself sync-only, mature, and widely used well outside
 # this project.
 crossbeam-channel = "0.5"
+# `nir_oidc_validate_token`/`nir_extract_claim`/`nir_check_role`'s real
+# JWT/JWKS crypto and JSON claims parsing (Row 12 identity). Not a new
+# provenance story this time either: `crates/presence-gateway/src/jwt.rs`
+# already depends on this exact set (`jsonwebtoken`/`serde`/`serde_json`/
+# `base64`) for the identical job -- real signature verification against a
+# JWKS, keyed by `kid`, with the JWK's own `kty` locking which `alg` it may
+# verify under (never trusting the token's own `alg` header -- closes the
+# classic algorithm-confusion attack). Same dependency set, same guard,
+# ported here so the compiled path can link it too.
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# `nir_db_connect`/`nir_db_query`/`nir_db_execute`'s real SQLite backend
+# (Row: `db`). Same crate + feature the root workspace's own
+# `crates/compiler/Cargo.toml` already pins (`rusqlite = { version =
+# "0.31", features = ["bundled"] }`, used by `migrate.rs`/`rqlite.rs`) --
+# `bundled` statically links SQLite's own C source into this crate, no
+# system `libsqlite3` dependency, so a compiled `.nir` binary using `db`
+# stays exactly as self-contained a deployment artifact as one that
+# doesn't. `rusqlite::types::Value` (an owned, already-`ToSql` enum) is
+# the marshaling type every bind value below converts into -- no
+# hand-rolled parameter-binding trait needed.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# `nir_mq_connect`/`nir_mq_publish`/`nir_mq_consume`'s real Redis backend
+# (Row: `mq`, `Ty::Mq`'s doc comment). Same crate + version the root
+# workspace's own `crates/compiler/Cargo.toml` already pins
+# (`redis = "0.27"`) -- no new provenance story. `LPUSH`/`BLPOP` back
+# `mq_publish`/`mq_consume`, same as the original interpreter-era design;
+# no static-linking concern (a real network client, not an embedded C
+# library) the way SQLite's `bundled` feature was a decision to make.
+redis = "0.27"
+# `nir_http_get`/`nir_http_post`/`nir_https_get`/`nir_https_post`'s real
+# HTTP(S) client. Same crate the root workspace's own
+# `crates/compiler/Cargo.toml` already pins (`native-tls = "0.2"`) for the
+# identical job -- but a real, deliberate departure from that crate's own
+# choice on the one point `docs/ROADMAP.md` already flagged as needing a
+# conscious decision, not a silent default: **vendored**, not system-
+# linked. Found by actually linking a compiled binary, not decided in
+# advance -- this machine's system OpenSSL doesn't export the symbols
+# (`SSL_ctrl`/`SSL_CTX_ctrl`/`X509_LOOKUP_ctrl`) the `openssl-sys` version
+# this dependency tree resolves to expects (an ABI mismatch real enough to
+# fail the link step outright, not a hypothetical portability concern).
+# Pulling in `openssl` directly with its own `vendored` feature forces
+# Cargo's feature unification to statically compile and link OpenSSL from
+# source into this crate instead of trusting whatever `libssl` happens to
+# be on the host -- the exact same "no system dependency" posture
+# `rusqlite`'s own `bundled` feature already gives SQLite, now given to
+# TLS too, for the same self-contained-deployment reason. Needs a C
+# compiler + `perl`/`make` at *build* time only (already present on any
+# machine that can build this workspace at all — `rusqlite`'s own
+# `bundled` SQLite already requires the same); nothing extra at runtime.
+native-tls = "0.2"
+openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
 # `unwind` (the default -- kept explicit here as a record of a real

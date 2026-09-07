@@ -1,0 +1,156 @@
+// Feature: `state { sla_seconds: N }` plus the synthesized
+// `list_<workflow>_overdue()` (`docs/ROADMAP.md` A15) -- real, compiled
+// SLA/escalation *detection*, driving a real, disclosed "external
+// scheduler" pattern: poll `list_<workflow>_overdue()`, then call
+// `advance_<workflow>(...)` on whatever it reports to move the stale
+// instance into an `Escalated` state. Companion to
+// `52_compiled_workflow_state_machine.nir` (state machine) and
+// `53_compiled_workflow_notifications.nir` (notifications) -- see that
+// file's own header for why this is three files, not one.
+//
+// `docs/WORKFLOW.md`'s own "Deliberate non-goals" section already
+// discloses there is no scheduling/cron primitive in this language at
+// all -- nothing fires "N seconds from now" on its own. `main` below
+// stands in for a real external scheduler: it polls
+// `list_<workflow>_overdue()` and *manually* calls `advance_<workflow>`
+// to escalate -- exactly the round trip `docs/WORKFLOW.md`'s
+// SLA/escalation enterprise-catalog row names as "what it would take."
+// No notification transport in this file -- that's already proven
+// end-to-end in `53_compiled_workflow_notifications.nir` -- `Escalated`'s
+// own `on_entry` just logs, keeping this file's own scope narrow:
+// overdue detection + escalation, not a second copy of file 53's
+// notification proof.
+
+fn log_opened(instance_id: i64) -> unit {
+    print("incident", instance_id, "opened")
+}
+
+fn log_escalated(instance_id: i64) -> unit {
+    print("incident", instance_id, "escalated to manager")
+}
+
+fn log_resolved(instance_id: i64) -> unit {
+    print("incident", instance_id, "resolved")
+}
+
+workflow Incident {
+    state Open {
+        // A real SLA -- `docs/ROADMAP.md` A15's own proposed shape,
+        // `sla_seconds` a plain `state`-level `key: value` entry
+        // (`ast::StateDecl.entries`), the same convention `owner:`/
+        // `label:` already use (`docs/WORKFLOW.md`). 1 second here only
+        // so this example finishes fast and deterministically -- a real
+        // app would use a real SLA like 172800 (48h).
+        sla_seconds: 1
+        on_entry {
+            log_opened(instance_id)
+        }
+        on Escalate -> Escalated
+        on Resolve -> Resolved
+    }
+    // No `sla_seconds` here -- an escalated incident isn't itself
+    // subject to a second SLA in this example, proving
+    // `list_incident_overdue` really does look at *per-state*
+    // `sla_seconds`, not a workflow-wide setting.
+    state Escalated {
+        on_entry {
+            log_escalated(instance_id)
+        }
+        on Resolve -> Resolved
+    }
+    state Resolved terminal {
+        on_entry {
+            log_resolved(instance_id)
+        }
+    }
+}
+
+// Walks `list_<workflow>_overdue`'s returned JSON array for real
+// (`json_array_get`/`json_get_i64`, `Ty::Json`'s doc comment) rather
+// than string-matching the raw JSON text -- broken out into its own fn,
+// one level of `match` nesting at a time, rather than one deeply nested
+// expression, so each `match`'s own expected-return-type context is
+// unambiguous.
+fn instance_is_overdue(j: json, target_id: i64) -> bool {
+    return match json_array_get(j, 0) {
+        Ok(item) => match json_get_i64(item, "instance_id") {
+            Ok(id) => id == target_id,
+            Err(e) => false,
+        },
+        Err(e) => false,
+    }
+}
+
+// Same wrapper shape `52_compiled_workflow_state_machine.nir`'s own
+// `advance_now` already uses -- `advance_incident`'s trailing
+// `payload: json` argument needs a real `json` value, not the
+// `Result(json, str)` `json_parse` itself returns.
+fn advance_now(identity: VerifiedIdentity, instance_id: i64, event: IncidentEvent) -> Result(bool, WorkflowActionError) {
+    return match json_parse("{}") {
+        Ok(payload) => advance_incident(identity, instance_id, event, payload),
+        Err(e) => Err(NoSuchTransition()),
+    }
+}
+
+fn main() {
+    // A real scheduler-shaped caller, not a human -- built directly here
+    // rather than through a real `oidc_validate_token` round trip, the
+    // same shortcut `52_compiled_workflow_state_machine.nir`'s own
+    // `main` already takes when the point is the workflow, not the JWT.
+    let identity: VerifiedIdentity = VerifiedIdentity("scheduler", "https://mock-idp.local", "ops-app", 9999999999, 0, "{}")
+
+    // `Open`'s own `on_entry` already ran before this returns -- "incident
+    // 1 opened" prints before this `print(instance_id)` does, for real.
+    let instance_id: i64 = match start_incident(None(), IncidentData()) {
+        Ok(id) => id,
+        Err(e) => -1,
+    }
+    print(instance_id) // 1
+
+    // Not overdue yet -- `entered_at` is "now".
+    match list_incident_overdue() {
+        Ok(j) => print(j), // []
+        Err(e) => print("overdue query failed"),
+    }
+
+    sleep_ms(1100)
+
+    // Stand-in for an external scheduler's poll: a real stale instance,
+    // real JSON, straight from `__workflow_overdue`'s own SQLite query --
+    // not a mock.
+    let is_overdue: bool = match list_incident_overdue() {
+        Ok(j) => instance_is_overdue(j, instance_id),
+        Err(e) => false,
+    }
+    print(is_overdue) // 1 (true) -- [{"instance_id":1,"state":"Open","age_seconds":...}]
+
+    // The realistic escalation call: the scheduler already knows which
+    // instance it just found overdue (`instance_id`, above) -- it calls
+    // the exact same `advance_<workflow>` any authenticated caller would.
+    // `Err(e) => false` has to come first here, not `Ok(v) => v` --
+    // `codegen.rs::local_ty_of`'s own match-result-type inference reads
+    // `arms[0]`'s body type, and a bound-by-this-very-match identifier
+    // (`v`) isn't in scope yet at that point; a literal-typed first arm
+    // sidesteps it cleanly. Same order `52_compiled_workflow_state_machine.nir`'s
+    // own `advance_now`-consuming `match`es already use.
+    let escalated: bool = match advance_now(identity, instance_id, Escalate()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    print(escalated) // 1 (true) -- Open's on_exit (none declared) then Escalated's on_entry ran
+
+    // `Escalated` declares no `sla_seconds` -- even though real wall-clock
+    // time has kept passing, it's structurally never reported overdue.
+    // Proves `list_<workflow>_overdue` really is per-state, not "any
+    // instance older than N seconds."
+    match list_incident_overdue() {
+        Ok(j) => print(j), // []
+        Err(e) => print("overdue query failed"),
+    }
+
+    let resolved: bool = match advance_now(identity, instance_id, Resolve()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    print(resolved) // 1 (true)
+}

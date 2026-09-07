@@ -2513,6 +2513,16 @@ pub const BUILTIN_NAMES: &[&str] = &[
     // constant-time comparison `interpreter.rs`'s own JWT signature
     // check now uses internally (also a fixed red-team finding).
     "constant_time_str_eq",
+    // Minimal compiled string-parsing primitives (Row: compiled `serve`).
+    // Deliberately not a general string library -- just enough to
+    // hand-parse an HTTP request line: `str_index_of` finds a delimiter
+    // (a space, or `"\r\n"`), `str_slice` extracts the token either side
+    // of it, composed a few times in `.nir` source. `len(s)` (already a
+    // builtin, previously Vector-only) gained a `str` arm alongside these
+    // for the same reason. No `split`/`starts_with`/`trim`/concat --
+    // those are a real, separate follow-up, not smuggled in here.
+    "str_slice",
+    "str_index_of",
     // DB, layer 1: SQLite only (`rusqlite`, "bundled" -- statically
     // linked, no system `libsqlite3`). `Ty::Db`'s doc comment has the
     // full design; the short version: one connection handle, `stop`-able
@@ -2599,6 +2609,17 @@ pub const BUILTIN_NAMES: &[&str] = &[
     // hand" convention.
     "__workflow_submitted_by_me",
     "__workflow_history",
+    // SLA/escalation (`docs/WORKFLOW.md`'s own enterprise-catalog row,
+    // `docs/ROADMAP.md` A15's proposed design: `state { sla_seconds: N }`
+    // + a `list_<workflow>_overdue()` read fn an external scheduler
+    // polls — the queryable half; firing an escalation *automatically*
+    // with no caller involved needs the same "real cross-thread
+    // callback" mechanism this compiler's own `transact` `network`
+    // timeout already named as architecturally out of scope, so this is
+    // deliberately scoped to detection, not automatic firing). Backs
+    // every workflow-with-an-SLA's synthesized `list_<workflow>_overdue`
+    // — same "never written by hand" convention as the others.
+    "__workflow_overdue",
 ];
 
 /// `BUILTIN_NAMES` as a `HashSet`, built once. `is_builtin` runs on the

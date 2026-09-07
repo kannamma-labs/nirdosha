@@ -177,6 +177,16 @@ const PHASE5_BUILTINS: &[&str] = &["det", "inv", "solve", "rank", "kf_update_sta
 /// either, so not `call_builtin_scalar`'s).
 const STR_CRYPTO_BUILTINS: &[&str] = &["sha256_hex", "constant_time_str_eq"];
 
+/// `str_slice`/`str_index_of` — the minimal string-parsing surface a
+/// compiled HTTP `serve` needs to hand-parse a request line (`BUILTIN_NAMES`'
+/// own doc comment has the full scope). `str_slice` is pure pointer
+/// arithmetic on the existing `{ptr, i64}` `str` representation, no kernel
+/// call; `str_index_of` is the one real byte-scan, linked to
+/// `nir_str_index_of`. Own list, not folded into `STR_CRYPTO_BUILTINS`, for
+/// the same "describes something different" reason that one isn't folded
+/// into `RAND_BUILTINS`.
+const STR_BUILTINS: &[&str] = &["str_slice", "str_index_of"];
+
 /// `rand_seed`/`rand_f64`/`rand_gaussian` — a process-wide SplitMix64/
 /// Box-Muller stream in `runtime-kernels/src/lib.rs` (its own module doc on why
 /// this needed real RNG *state* in generated code, the one thing that
@@ -185,6 +195,11 @@ const STR_CRYPTO_BUILTINS: &[&str] = &["sha256_hex", "constant_time_str_eq"];
 /// `STR_CRYPTO_BUILTINS`, for the same "describes something different"
 /// reason that one isn't folded into `PHASE5_BUILTINS`.
 const RAND_BUILTINS: &[&str] = &["rand_seed", "rand_f64", "rand_gaussian"];
+
+/// `sleep_ms(ms)` — `docs/ROADMAP.md`'s own B9 ("small, currently
+/// omitted... found this session, not previously tracked anywhere"). A
+/// real wall-clock sleep, `nir_sleep_ms` (`runtime-kernels/src/lib.rs`).
+const SLEEP_BUILTINS: &[&str] = &["sleep_ms"];
 
 /// `dec_from_i64`/`dec_to_str`/`dec_round`/`dec_scale` — linked calls
 /// into `runtime-kernels/src/lib.rs`'s `rust_decimal`-backed kernels
@@ -218,24 +233,112 @@ const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "d
 /// `check_role` — the first compiled builtin to actually construct a
 /// real `Result(_, _)` value as its return (`DEC128_BUILTINS`'s own
 /// "not yet included: `dec_from_str`" doc comment names exactly this
-/// gap; this is that convention, established for real). Deliberately
-/// scoped narrower than the interpreter's own `check_role`, which reads
-/// `identity.claims_json` as real JSON — this reads it as a plain
-/// comma-separated role list instead (`nir_check_role`,
-/// `runtime-kernels/src/lib.rs`), since a real JSON parser isn't linked
-/// into this crate. `oidc_validate_token` (the only way to produce a
-/// `VerifiedIdentity` *with* a real, cryptographically-verified
-/// `claims_json`) stays interpreter-only — `VerifiedIdentity` itself is
-/// freely constructible either way (`typeck.rs`'s own
-/// `infer_struct_construction`, unlike `RoleView`/`ClaimView`), so this
-/// compiles the real *authorization* pipeline (`check_role` producing an
-/// unforgeable `RoleView`, consumed by field masking) end to end, while
-/// *authentication* (verifying the identity claims themselves came from
-/// a real signed token) remains the disclosed, separate, larger gap
-/// it already was. `extract_claim`/`check_role_path`/
-/// `extract_claim_path` are not included — real, narrower follow-up
-/// work, not attempted here.
-const IDENTITY_BUILTINS: &[&str] = &["check_role"];
+/// gap; this is that convention, established for real). Originally
+/// scoped narrower than the interpreter's own `check_role` (a plain
+/// comma-separated role list, not real JSON, since no JSON parser was
+/// linked into `runtime-kernels`) — 2026-09: with `serde_json` now
+/// linked in for `oidc_validate_token` below, `nir_check_role`'s own
+/// body was upgraded to real JSON-array parsing too (falling back to
+/// the original comma-separated matching for a `VerifiedIdentity` built
+/// directly in `.nir` source, not through `oidc_validate_token` — see
+/// its own doc comment). No `codegen.rs` change was needed for that
+/// upgrade, only `runtime-kernels`.
+///
+/// `oidc_validate_token`/`extract_claim`/`identity_expired` (2026-09):
+/// real JWT/JWKS signature verification (`nir_oidc_validate_token`,
+/// `jsonwebtoken`-backed, same `kty`-locks-`alg` guard
+/// `crates/presence-gateway/src/jwt.rs` already uses) plus real JSON
+/// claim extraction (`nir_extract_claim`). `identity_expired` needs no
+/// kernel at all — `VerifiedIdentity.expires_at` is a plain `i64`
+/// field, so it's `now > identity.expires_at` via GEP+load+`icmp`,
+/// inline in `Codegen::call` (see its own dispatch arm). Authentication
+/// (verifying the identity claims themselves came from a real signed
+/// token) is now real, closing the gap this comment used to name as
+/// separate from `check_role`'s own *authorization* pipeline.
+/// `check_role_path`/`extract_claim_path` and the rest of Row 12
+/// (sessions/refresh/revocation/`validate_api_key`) remain real,
+/// narrower follow-up work, not attempted here.
+const IDENTITY_BUILTINS: &[&str] = &["check_role", "oidc_validate_token", "extract_claim", "identity_expired"];
+
+/// `db_connect`/`db_query`/`db_execute` — real SQLite connectivity
+/// (`Ty::Db`'s own doc comment, `nir_db_*`, `runtime-kernels/src/lib.rs`'s
+/// "db kernels" section). Layer 1 only: SQLite via `rusqlite`'s
+/// `bundled` feature; a Postgres connection string (`postgres://`/
+/// `postgresql://`) is a real, deferred follow-up (dynamic TLS linking),
+/// not silently dropped.
+const DB_BUILTINS: &[&str] = &["db_connect", "db_query", "db_execute"];
+
+/// `json_parse`/`json_get`/`json_get_str`/`json_get_i64`/`json_get_f64`/
+/// `json_get_bool`/`json_array_get`/`json_array_len`/`json_set_str` —
+/// real JSON navigation (`Ty::Json`'s own doc comment). Compiles
+/// `Ty::Json` as the raw text itself (same `{ptr, i64}` representation
+/// `Ty::Str` already has), each accessor re-parsing via `nir_json_*` —
+/// see `Ty::Json`'s `llvm_ty` arm and `nir_db_query`'s doc comment for
+/// the full reasoning on this representation choice.
+const JSON_BUILTINS: &[&str] =
+    &["json_parse", "json_get", "json_get_str", "json_get_i64", "json_get_f64", "json_get_bool", "json_array_get", "json_array_len", "json_set_str"];
+
+/// `mq_connect`/`mq_publish`/`mq_consume` — real Redis connectivity
+/// (`Ty::Mq`'s own doc comment, `nir_mq_*`, `runtime-kernels/src/lib.rs`'s
+/// "mq kernels" section). `mq_connect_via` (the plugin-dispatched
+/// external-service-boundary path, `rfcs/0003-plugin-abi-v2.md`) is
+/// deliberately not included here — a separate mechanism, owned
+/// elsewhere.
+const MQ_BUILTINS: &[&str] = &["mq_connect", "mq_publish", "mq_consume"];
+
+/// `http_get`/`http_post`/`https_get`/`https_post` — real HTTP(S) client
+/// calls (`ast::BUILTIN_NAMES`'s own doc comment has the full, already-
+/// locked design). No new `Ty` — `HttpResponse` is a plain prelude
+/// struct, and every call here is a one-shot request/response, never a
+/// persisted connection handle.
+const HTTP_BUILTINS: &[&str] = &["http_get", "http_post", "https_get", "https_post"];
+
+/// `workflow` Layer 1 (`docs/WORKFLOW.md`) — every builtin
+/// `workflow_lower.rs` desugars a `workflow` block's synthesized
+/// functions into, plus `__workflow_overdue` (`docs/ROADMAP.md` A15,
+/// added alongside this). `__workflow_pending_for_me`/
+/// `__workflow_submitted_by_me`/`__workflow_history` are included here
+/// (real, compiled, runtime-`Err`-producing — `Codegen::
+/// emit_workflow_unsupported_query`'s own doc comment) rather than
+/// rejected at compile time, because `workflow_lower.rs` synthesizes
+/// `list_<w>_pending_for_me`/`list_<w>_submitted_by_me`/
+/// `get_<w>_history` **unconditionally** for *every* `workflow` block —
+/// unlike `__workflow_link_advance` (only synthesized when a `link`-
+/// marked transition actually exists), a `check_expr`-time rejection of
+/// these three would make *every* workflow fail to compile, not just
+/// ones that call them. `__workflow_link_advance` is deliberately
+/// **not** included here — magic-link consumption needs real durable
+/// storage this Layer 1 doesn't have, and since its own `*_via_link` fn
+/// only exists for a workflow that actually declares a `link` transition,
+/// rejecting it at compile time (`check_expr`'s pre-pass) narrows
+/// correctly, to exactly those programs, instead of blocking everything.
+const WORKFLOW_BUILTINS: &[&str] = &[
+    "__workflow_start",
+    "__workflow_advance",
+    "__workflow_overdue",
+    "__workflow_pending_for_me",
+    "__workflow_submitted_by_me",
+    "__workflow_history",
+];
+
+/// `send_email`/`send_sms`/`send_push`/`notify` (`docs/WORKFLOW.md`) —
+/// a real, generic, provider-agnostic authenticated HTTPS POST for the
+/// first three; `notify` always takes the documented *offline* path
+/// (falls back to `send_email`) since nothing in this round populates a
+/// real presence table (`nir_notify`'s own doc comment).
+const NOTIFY_BUILTINS: &[&str] = &["send_email", "send_sms", "send_push", "notify"];
+
+/// `db_execute`/`db_query`'s trailing `?`-placeholder bind values —
+/// `emit_db_binds` builds a `[N x NIR_BIND_VALUE_LLTY]` array of these,
+/// GEP'd into by field index like any other named-struct-shaped value in
+/// this file (`agg_byte_size_operand`'s own "trust the target's natural
+/// layout, don't hand-replicate it" stance applies here too: a plain,
+/// non-packed anonymous struct type follows the same C-layout rules
+/// Rust's `#[repr(C)]` does for `runtime-kernels/src/lib.rs`'s
+/// `NirBindValue` — same field order, same primitive types, both sides
+/// agree without either one computing offsets by hand). Field order:
+/// `tag`(i32) / `i`(i64) / `f`(double) / `s_ptr`(ptr) / `s_len`(i64).
+const NIR_BIND_VALUE_LLTY: &str = "{ i32, i64, double, ptr, i64 }";
 
 /// WGS84 ellipsoid constants — mirrors `interpreter.rs`'s own
 /// `WGS84_A`/`WGS84_F`/`wgs84_e2()` exactly (same values, same derived
@@ -293,6 +396,15 @@ fn affine_codegen_supported_visiting(registry: &TypeRegistry, ty: &Ty, visiting:
     match ty {
         Ty::Box(inner) => affine_codegen_supported_visiting(registry, inner, visiting),
         Ty::Tcp | Ty::TcpListener => true,
+        // `db_connect`'s own `Result(db, str)` is the first affine handle
+        // nested inside a prelude enum's payload (`File`/`Thread`/
+        // `Channel` are all returned bare, never `Result`-wrapped, so
+        // this arm was never needed until now) — a `db` handle is one
+        // opaque `i64` either way, same as `Tcp`/`TcpListener` above.
+        Ty::Db => true,
+        // Same reason as `Ty::Db` just above — `mq_connect`'s own
+        // `Result(mq, str)`.
+        Ty::Mq => true,
         Ty::Named(name, args) => {
             if visiting.iter().any(|v| v == name.as_str()) {
                 return true;
@@ -412,12 +524,39 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
         // already does, never through the pointer-based aggregate path
         // Vector/Matrix use.
         Ty::Dec128 => Ok("{i64, i64}".to_string()),
-        Ty::Json => unsupported("codegen doesn't support `json` yet — JSON is interpreter-only for now"),
-        Ty::Db => unsupported("codegen doesn't support `db` yet — DB connectivity is interpreter-only for now"),
-        Ty::Handle(kind) => unsupported(&format!(
-            "codegen doesn't support plugin handle types (`{kind}`) — plugins are interpreter-only for now"
-        )),
-        Ty::Mq => unsupported("codegen doesn't support `mq` yet — message-queue connectivity is interpreter-only for now"),
+        // A `json` value compiles as the same `{ptr, i64}` two-word
+        // value `Ty::Str` already is — the raw JSON text itself, not a
+        // persisted parsed-tree handle. `json_get`/`json_array_get`/etc.
+        // (`Codegen::call_ptr`'s dispatch) re-parse that text via
+        // `nir_json_*` (`runtime-kernels/src/lib.rs`) on every call — the
+        // simplest thing that reuses an existing representation with
+        // zero new runtime value type, at the cost of re-parsing instead
+        // of a persisted tree. Disclosed, not hidden — see `Ty::Json`'s
+        // own doc comment and `nir_db_query`'s.
+        Ty::Json => Ok("{ptr, i64}".to_string()),
+        // A `db` connection handle — one opaque `i64` into
+        // `runtime-kernels`' own `HandleTable<rusqlite::Connection>`
+        // (`db_table()`, `lib.rs`'s "db kernels" section), same "the
+        // handle itself is just a word, the real resource lives in a
+        // kernel-owned table" shape `Ty::Thread`/`Ty::Channel` above
+        // already use — a `rusqlite::Connection` isn't reconstructible
+        // from a bare integer the way a `tcp`/`file` fd is, so a table
+        // (not a raw fd) backs this one.
+        Ty::Db => Ok("i64".to_string()),
+        // rfcs/0008-native-plugin-abi-widening.md Phase 1: a plugin-held
+        // resource id, exactly like `Ty::Thread`/`Ty::Channel`/`Ty::File`
+        // just above — one opaque `i64` into a table this compiler never
+        // looks inside (here, a table the *plugin's own* Rust code owns,
+        // not a `runtime-kernels` one). All of its safety comes from
+        // `ownership.rs`'s affine tracking at the type level (`Ty::
+        // is_affine()` already lists `Handle(_)`, rfcs/0005 §1); codegen
+        // itself just needs to pass the word through, identically to how
+        // it already treats a spawn/channel/file handle.
+        Ty::Handle(_) => Ok("i64".to_string()),
+        // A `mq` (Redis) connection handle — same "opaque `i64` into a
+        // `HandleTable`" shape as `Ty::Db` just above (`mq_table()`,
+        // `lib.rs`'s "mq kernels" section).
+        Ty::Mq => Ok("i64".to_string()),
         // A fixed-size, two-word value — pointer to the byte data plus an
         // explicit `i64` length, never NUL-terminated-only (a `str`'s
         // bytes are whatever the source literal's escapes resolved to,
@@ -479,10 +618,15 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
             }
             Ok(format!("%{}", mangle_ty(ty)))
         }
-        Ty::Fn(_, _) => unsupported(
-            "codegen doesn't support `fn(..)->..` yet — first-class/privileged functions \
-             (requires/acquire) are interpreter-only for now",
-        ),
+        // A first-class function value (ordinary or `acquire`d) is a
+        // plain function-pointer word, freely copyable like any other
+        // scalar (`Ty::is_affine`'s own doc comment on why `Ty::Fn` is
+        // deliberately excluded there) — no separate handle table, no
+        // refcounting, just `ptr`. Compiled for real, 2026-09: see
+        // `Expr::Ident`'s and `Expr::Acquire`'s own codegen arms for how
+        // a value of this type is actually produced, and `Codegen::call`/
+        // `call_ptr`'s own local-variable check for how it's called.
+        Ty::Fn(_, _) => Ok("ptr".to_string()),
         Ty::Error => unreachable!("a program with a type error is never handed to codegen"),
     }
 }
@@ -521,8 +665,19 @@ fn mangle_ty(ty: &Ty) -> String {
         Ty::Named(name, args) => {
             format!("{name}${}", args.iter().map(mangle_ty).collect::<Vec<_>>().join("$"))
         }
+        // A real generic type argument since `acquire` started compiling
+        // (2026-09): `acquire fn_name(proof)` evaluates to
+        // `Result(Ty::Fn(params, ret), str)`, a genuinely new instantiation
+        // per acquired signature. `Ty::name()`'s own `"fn(i64) -> i64"`
+        // Display form contains `(`/`)`/`,`/` `/`->`, none of them legal
+        // in an unquoted LLVM identifier — a dedicated arm instead of the
+        // fallback below, which would leave the `-`/`>` from `->`
+        // unescaped and produce unparseable IR.
+        Ty::Fn(params, ret) => {
+            format!("fn{}to{}", params.iter().map(|p| format!("_{}", mangle_ty(p))).collect::<String>(), mangle_ty(ret))
+        }
         // Every other `Ty` (`Box`/`Ref`/`Thread`/`Channel`/`Sandbox`/
-        // `Tcp`/`TcpListener`/`File`/`Json`/`Db`/`Mq`/`Fn`/`Error`) is
+        // `Tcp`/`TcpListener`/`File`/`Json`/`Db`/`Mq`/`Error`) is
         // either affine (already rejected before this can run on one) or
         // otherwise never legally a struct/enum generic type argument —
         // this arm is a defensive fallback, not expected to actually run
@@ -909,21 +1064,53 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
                 // existing `arg_ty.is_aggregate()` check there), same as
                 // before. Each argument still gets walked for its own
                 // recursive validity by the shared loop below.
+            } else if name == "__workflow_link_advance" {
+                // `WORKFLOW_BUILTINS`'s own doc comment: magic-link
+                // consumption needs real durable storage (a
+                // `workflow_log.rs`-shaped table keyed by instance id,
+                // surviving process restarts) that this Layer 1 compiled
+                // backend doesn't have — `WorkflowInstance`
+                // (`runtime-kernels/src/lib.rs`) is a plain in-process
+                // `HashMap`, gone the moment the binary exits. Rejected
+                // here (rather than at runtime, like
+                // `__workflow_pending_for_me`/`__workflow_submitted_by_me`/
+                // `__workflow_history`) because a `*_via_link` fn only
+                // exists for a workflow that actually declares a `link`
+                // transition, so this narrows correctly to exactly those
+                // programs — same "specific reason, not a generic
+                // fallthrough" treatment `network_retry`/`network_timeout`
+                // already get in `emit_transact`.
+                return unsupported(format!(
+                    "codegen doesn't support `{name}` yet — magic-link advance needs real \
+                     durable, restart-surviving storage that this compiled backend's Layer 1 \
+                     workflow runtime doesn't have (an in-process table only, see \
+                     `runtime-kernels`'s `WorkflowInstance`); use `advance_<workflow>`/state \
+                     transitions instead"
+                ));
             } else if is_builtin(name)
                 && !PHASE4_BUILTINS.contains(&name.as_str())
                 && !PHASE5_BUILTINS.contains(&name.as_str())
                 && !STR_CRYPTO_BUILTINS.contains(&name.as_str())
+                && !STR_BUILTINS.contains(&name.as_str())
                 && !RAND_BUILTINS.contains(&name.as_str())
                 && !DEC128_BUILTINS.contains(&name.as_str())
                 && !IDENTITY_BUILTINS.contains(&name.as_str())
+                && !DB_BUILTINS.contains(&name.as_str())
+                && !JSON_BUILTINS.contains(&name.as_str())
+                && !SLEEP_BUILTINS.contains(&name.as_str())
+                && !MQ_BUILTINS.contains(&name.as_str())
+                && !HTTP_BUILTINS.contains(&name.as_str())
+                && !WORKFLOW_BUILTINS.contains(&name.as_str())
+                && !NOTIFY_BUILTINS.contains(&name.as_str())
             {
                 // Every builtin not in `PHASE4_BUILTINS` (unrolled IR),
-                // `PHASE5_BUILTINS`/`STR_CRYPTO_BUILTINS` (linked runtime
-                // call), or `RAND_BUILTINS` (linked call into a
-                // process-wide RNG stream) is rejected here with a
-                // specific reason rather than falling through to
-                // `check_expr`'s per-argument walk, which would report a
-                // less specific one.
+                // `PHASE5_BUILTINS`/`STR_CRYPTO_BUILTINS`/`STR_BUILTINS`
+                // (linked runtime call), `RAND_BUILTINS` (linked call
+                // into a process-wide RNG stream), or `DB_BUILTINS`/
+                // `JSON_BUILTINS` (linked SQLite/JSON kernel calls) is
+                // rejected here with a specific reason rather than
+                // falling through to `check_expr`'s per-argument walk,
+                // which would report a less specific one.
                 return unsupported(format!(
                     "codegen doesn't support `{name}` yet — this builtin is interpreter-only \
                      for now (numeric codegen lands in a later phase)"
@@ -999,10 +1186,11 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
             Ok(())
         }
         Expr::Join(inner, _) => check_expr(inner, plugin_names, registry),
-        Expr::Acquire(_, _, _) => unsupported(
-            "codegen doesn't support `acquire` yet — first-class/privileged functions \
-             are interpreter-only for now",
-        ),
+        // Compiled for real, 2026-09 (`Codegen::emit_acquire`) — this
+        // structural pre-pass has no type info (same reasoning
+        // `Expr::Spawn`'s own arm above already gives), so it just
+        // recurses into `proof`.
+        Expr::Acquire(_, proof, _) => check_expr(proof, plugin_names, registry),
         // `chan` construction itself needs no type info at all (every
         // `Ty::Channel` value is the same `i64` handle regardless of its
         // payload type — `llvm_ty`'s own `Ty::Channel` arm) — real per-
@@ -1064,16 +1252,57 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
             }
             Ok(())
         }
-        // `docs/TRANSACT.md`'s own decision: "Compiled backend (codegen.rs) is
-        // out of scope until the interpreter version is proven" — same
-        // "reject, don't mis-compile" treatment every other unimplemented
-        // construct gets (`thread`, `chan`, `sandbox`, `struct`/`enum`/
-        // `match`, `db`/`mq`/`json` — see `docs/LANGUAGE.md` §10 for the
-        // current list; `box`/`tcp` compile now, so they've dropped off
-        // it). `transact` joins the still-unsupported list, not an
-        // exception to it.
-        Expr::Transact { .. } => {
-            unsupported("codegen doesn't support `transact` yet — interpreter-only for now")
+        // `transact { ... }` — compiled 2026-09 (`Codegen::emit_transact`'s
+        // own doc comment has the full scope: Layer 1 control flow only,
+        // no retry/timeout/durability/replay). `network_retry`/
+        // `network_timeout` are the one part of the construct genuinely
+        // rejected here, not just deferred — a compiled trap is an
+        // unrecoverable `abort()`, and `network`'s own declared return
+        // type is restricted to a bare scalar (`Ty::is_transact_scalar`,
+        // never `Result(_, _)`), so there is no non-trapping failure
+        // signal for a retry loop to react to at all. Every slot's own
+        // arguments are still walked structurally (same as `Expr::Call`'s
+        // own args), so a still-unsupported construct nested inside one
+        // is caught with its own specific reason.
+        Expr::Transact { precheck, network, network_retry, network_timeout, verify, commit, compensate, log, .. } => {
+            if network_retry.is_some() || network_timeout.is_some() {
+                return unsupported(
+                    "codegen doesn't support `network`'s `retry`/`timeout` modifiers yet — the \
+                     now-deleted interpreter's retry-on-trap semantics relied on catching an \
+                     internal RuntimeError before it ever unwound; a compiled trap calls abort() \
+                     directly (this language's trap model everywhere else), which is unrecoverable, \
+                     so there is no non-trapping way to detect a failed `network` call to retry \
+                     (`network`'s own declared return type is restricted to a bare scalar by \
+                     Ty::is_transact_scalar, never Result(_, _), so there's no Err to react to \
+                     either) — omit `retry`/`timeout` on `network` for now"
+                        .to_string(),
+                );
+            }
+            if let Some(p) = precheck {
+                for a in &p.args {
+                    check_expr(a, plugin_names, registry)?;
+                }
+            }
+            for a in &network.args {
+                check_expr(a, plugin_names, registry)?;
+            }
+            for a in &verify.args {
+                check_expr(a, plugin_names, registry)?;
+            }
+            for a in &commit.args {
+                check_expr(a, plugin_names, registry)?;
+            }
+            if let Some(c) = compensate {
+                for a in &c.args {
+                    check_expr(a, plugin_names, registry)?;
+                }
+            }
+            if let Some(l) = log {
+                for a in &l.args {
+                    check_expr(a, plugin_names, registry)?;
+                }
+            }
+            Ok(())
         }
     }
 }
@@ -1115,6 +1344,16 @@ impl Scopes {
 struct FnSig {
     params: Vec<Ty>,
     ret: Ty,
+    /// `FnDecl::requires`'s own copy — `None` for a native plugin (never
+    /// gated) and for every ordinary `.nir` fn. `Some(req)` is what
+    /// `Codegen::emit_acquire` checks a `proof` against, and what makes
+    /// `name` callable only as `acquire name(proof)` rather than
+    /// directly (`typeck.rs`'s `PrivilegedFnNotAcquired`, already
+    /// enforced before codegen runs — this field exists purely so
+    /// `emit_acquire` can look the requirement back up by name, since
+    /// `Codegen` doesn't otherwise keep a reference to the whole
+    /// `Program`).
+    requires: Option<Requirement>,
 }
 
 struct Codegen<'a> {
@@ -1245,6 +1484,17 @@ struct Codegen<'a> {
     /// just prepended instead because a named type must textually precede
     /// any `define` that mentions it.
     named_type_decls: String,
+    /// `program.workflows` — `emit_workflow_start`/`emit_workflow_advance`'s
+    /// own doc comments have the full reasoning: `workflow_lower.rs`
+    /// desugars every `workflow` block into ordinary `FnDecl`s whose body
+    /// is a single call to `__workflow_start`/`__workflow_advance`/etc.
+    /// with the workflow's own name baked in as a compile-time `str`
+    /// literal — never a runtime value — so codegen can resolve which
+    /// `WorkflowDecl` a given call site means at compile time and emit
+    /// bespoke, inlined control flow per workflow, the same way
+    /// `emit_check_role`/`emit_transact` hand-build IR for their own
+    /// specific builtins rather than a generic runtime dispatch table.
+    workflows: &'a [WorkflowDecl],
 }
 
 pub fn emit_llvm_ir<'a>(program: &'a Program, smt_report: &'a SmtReport) -> Result<String, CodegenError> {
@@ -1288,7 +1538,9 @@ fn emit_llvm_ir_impl<'a>(
     let mut sigs: HashMap<String, FnSig> = program
         .fns
         .iter()
-        .map(|f| (f.name.clone(), FnSig { params: f.params.iter().map(|p| p.ty.clone()).collect(), ret: f.ret.clone() }))
+        .map(|f| {
+            (f.name.clone(), FnSig { params: f.params.iter().map(|p| p.ty.clone()).collect(), ret: f.ret.clone(), requires: f.requires.clone() })
+        })
         .collect();
     // A native plugin's signature slots into the exact same table a
     // user `fn`'s does — `Codegen::call`'s existing generic fallback
@@ -1297,7 +1549,7 @@ fn emit_llvm_ir_impl<'a>(
     // `declare` line below (in place of a real `define`) and the linked
     // staticlib (`build_with_native_plugins`) are new.
     for np in native_plugins {
-        sigs.insert(np.name.clone(), FnSig { params: np.params.clone(), ret: np.ret.clone() });
+        sigs.insert(np.name.clone(), FnSig { params: np.params.clone(), ret: np.ret.clone(), requires: None });
     }
     // Trusts the program already passed `ownership::check_ownership` (the
     // caller's job, same as `typecheck_and_own`'s existing precedent) —
@@ -1327,6 +1579,7 @@ fn emit_llvm_ir_impl<'a>(
             registry,
             declared_named_types: HashSet::new(),
             named_type_decls: String::new(),
+            workflows: &program.workflows,
         };
 
     writeln!(cg.out, "declare i32 @printf(ptr, ...)").unwrap();
@@ -1377,6 +1630,10 @@ fn emit_llvm_ir_impl<'a>(
     // doc comment.
     writeln!(cg.out, "declare void @nir_sha256_hex(ptr, i64, ptr, i64, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_constant_time_str_eq(ptr, i64, ptr, i64)").unwrap();
+    // `str_index_of` — `STR_BUILTINS`' doc comment. `str_slice`/`len(str)`
+    // need no declare here: both are pure pointer arithmetic in generated
+    // IR, no linked kernel call.
+    writeln!(cg.out, "declare i64 @nir_str_index_of(ptr, i64, ptr, i64)").unwrap();
     // `rand_seed`/`rand_f64`/`rand_gaussian` — `RAND_BUILTINS`' doc comment.
     writeln!(cg.out, "declare void @nir_rand_seed(i64)").unwrap();
     writeln!(cg.out, "declare double @nir_rand_f64()").unwrap();
@@ -1439,9 +1696,62 @@ fn emit_llvm_ir_impl<'a>(
     writeln!(cg.out, "declare i64 @nir_nfr_call_begin(i64)").unwrap();
     writeln!(cg.out, "declare void @nir_nfr_call_end(i64, i64, i32)").unwrap();
     // `check_role`'s real implementation (`IDENTITY_BUILTINS`'s own doc
-    // comment) — `1` if `role` appears in `claims`'s comma-separated
-    // list, `0` otherwise.
+    // comment) — `1` if `role` is present in `claims` (real JSON roles
+    // array, falling back to a comma-separated list), `0` otherwise.
     writeln!(cg.out, "declare i32 @nir_check_role(ptr, i64, ptr, i64)").unwrap();
+    // `oidc_validate_token`/`extract_claim` (`IDENTITY_BUILTINS`'s own
+    // doc comment) — real JWT/JWKS signature verification and JSON claim
+    // extraction. Every `out_*` param is a `ptr` (either `{ptr, i64}`'s
+    // own two words, or a plain `i64`) written into directly, matching
+    // `emit_oidc_validate_token`'s own field-pointer-as-out-param design.
+    writeln!(
+        cg.out,
+        "declare i32 @nir_oidc_validate_token(ptr, i64, ptr, i64, ptr, i64, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr)"
+    )
+    .unwrap();
+    writeln!(cg.out, "declare i32 @nir_extract_claim(ptr, i64, ptr, i64, ptr)").unwrap();
+    // `db`/`json` (`DB_BUILTINS`/`JSON_BUILTINS`'s own doc comments) —
+    // real SQLite connectivity and JSON navigation. Every bind-value
+    // param below is `ptr` to a `[N x NIR_BIND_VALUE_LLTY]` array (or
+    // `null` for the zero-bind case).
+    writeln!(cg.out, "declare i32 @nir_db_connect(ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_db_stop(i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_db_execute(i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_db_query(i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_validate(ptr, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_get(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_array_get(ptr, i64, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_array_len(ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_get_str(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_get_i64(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_get_f64(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_get_bool(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_set_str(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    // `transact { ... }` (`docs/TRANSACT.md`, `Codegen::emit_transact`'s
+    // own doc comment has the compiled-backend scope). `txn_id`'s real
+    // implementation; `sleep_ms`, ordinary compiled `sleep_ms(ms)` (`B9`).
+    writeln!(cg.out, "declare void @nir_transact_gen_txn_id(ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_sleep_ms(i64)").unwrap();
+    // `mq`/`http`/`https` (`MQ_BUILTINS`/`HTTP_BUILTINS`'s own doc
+    // comments) — real Redis connectivity and HTTP(S) client calls.
+    writeln!(cg.out, "declare i32 @nir_mq_connect(ptr, i64, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_mq_stop(i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_mq_publish(i64, ptr, i64, ptr, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_mq_consume(i64, ptr, i64, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_http_get(ptr, i64, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_http_post(ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_https_get(ptr, i64, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_https_post(ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
+    // `workflow` Layer 1 (`docs/WORKFLOW.md`, `Codegen::emit_workflow_start`'s
+    // own doc comment has the full scope) — the in-memory instance
+    // table, SLA/escalation detection, and the four notification
+    // channels.
+    writeln!(cg.out, "declare i32 @nir_workflow_create_instance(ptr, i64, ptr, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_workflow_get_state(ptr, i64, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_workflow_set_state(ptr, i64, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_workflow_list_overdue(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_workflow_send(ptr, i64, i64, ptr, i64, ptr, i64, ptr, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_notify(i64, i64, ptr, i64, ptr, i64, ptr, i64, ptr)").unwrap();
     // The APM kernel's flight recorder (`runtime-kernels/src/kernel/
     // mod.rs`'s own doc comment) — declared unconditionally like every
     // other kernel here, called exactly once by `emit_c_main` on every
@@ -2241,7 +2551,18 @@ impl Codegen<'_> {
             Expr::Float(_, _) => Ty::F64,
             Expr::Bool(_, _) => Ty::Bool,
             Expr::Str(_, _) => Ty::Str,
-            Expr::Ident(name, _) => scopes.get(name).map(|(t, _)| t).unwrap_or(Ty::I64),
+            // A local variable first; if `name` isn't one, it's a bare
+            // reference to an ordinary (ungated) top-level `fn` used as a
+            // first-class value (`apply(double, 21)`, LANGUAGE.md §6a) —
+            // `Ty::Fn`, not `Ty::I64`. A `requires`-gated fn's name has no
+            // such reference at all (`TypeErrorKind::PrivilegedFnNotAcquired`,
+            // already enforced before codegen runs), so `self.sigs.get`
+            // finding one here always means an ungated fn.
+            Expr::Ident(name, _) => scopes
+                .get(name)
+                .map(|(t, _)| t)
+                .or_else(|| self.sigs.get(name).map(|s| Ty::Fn(s.params.clone(), Box::new(s.ret.clone()))))
+                .unwrap_or(Ty::I64),
             Expr::Unary(UnOp::Not, _, _) => Ty::Bool,
             Expr::Unary(UnOp::Neg, inner, _) => self.local_ty_of(inner, scopes),
             Expr::Binary(op, l, r, _) => match op {
@@ -2269,13 +2590,77 @@ impl Codegen<'_> {
             // wrongly report `Ty::I64` for these two builtins.
             Expr::Call(name, _, _) if name == "sha256_hex" => Ty::Str,
             Expr::Call(name, _, _) if name == "constant_time_str_eq" => Ty::Bool,
+            Expr::Call(name, _, _) if name == "str_slice" => Ty::Str,
+            Expr::Call(name, _, _) if name == "str_index_of" => Ty::I64,
             Expr::Call(name, _, _) if name == "rand_f64" || name == "rand_gaussian" => Ty::F64,
             Expr::Call(name, _, _) if name == "rand_seed" => Ty::Unit,
+            Expr::Call(name, _, _) if name == "sleep_ms" => Ty::Unit,
             Expr::Call(name, _, _) if name == "dec_from_i64" || name == "dec_round" => Ty::Dec128,
             Expr::Call(name, _, _) if name == "dec_to_str" => Ty::Str,
             Expr::Call(name, _, _) if name == "dec_scale" => Ty::U32,
             Expr::Call(name, _, _) if name == "check_role" => {
                 Ty::Named("Result".to_string(), vec![Ty::Named("RoleView".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "oidc_validate_token" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "extract_claim" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("ClaimView".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "identity_expired" => Ty::Bool,
+            Expr::Call(name, _, _) if name == "db_connect" => {
+                Ty::Named("Result".to_string(), vec![Ty::Db, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "db_execute" => {
+                Ty::Named("Result".to_string(), vec![Ty::I64, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "db_query" => {
+                Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "json_parse" || name == "json_get" || name == "json_array_get" => {
+                Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "json_get_str" => {
+                Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "json_get_i64" || name == "json_array_len" => {
+                Ty::Named("Result".to_string(), vec![Ty::I64, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "json_get_f64" => {
+                Ty::Named("Result".to_string(), vec![Ty::F64, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "json_get_bool" => {
+                Ty::Named("Result".to_string(), vec![Ty::Bool, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "json_set_str" => {
+                Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "mq_connect" => {
+                Ty::Named("Result".to_string(), vec![Ty::Mq, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "mq_publish" => {
+                Ty::Named("Result".to_string(), vec![Ty::Unit, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "mq_consume" => {
+                Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "http_get" || name == "http_post" || name == "https_get" || name == "https_post" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("HttpResponse".to_string(), vec![]), Ty::Str])
+            }
+            // `workflow` Layer 1 (`WORKFLOW_BUILTINS`/`NOTIFY_BUILTINS`'
+            // own doc comments) — every one of these returns
+            // `Result(_, WorkflowActionError)`, matching `typeck.rs`'s
+            // own `workflow_result_of` calls for the same names exactly.
+            Expr::Call(name, _, _) if name == "__workflow_start" => workflow_result_of(Ty::I64),
+            Expr::Call(name, _, _) if name == "__workflow_advance" => workflow_result_of(Ty::Bool),
+            Expr::Call(name, _, _) if name == "__workflow_overdue" => workflow_result_of(Ty::Json),
+            Expr::Call(name, _, _)
+                if name == "__workflow_pending_for_me" || name == "__workflow_submitted_by_me" || name == "__workflow_history" =>
+            {
+                workflow_result_of(Ty::Json)
+            }
+            Expr::Call(name, _, _) if name == "send_email" || name == "send_sms" || name == "send_push" || name == "notify" => {
+                workflow_result_of(Ty::Bool)
             }
             // Row 11: a struct/variant constructor call produces a
             // `Ty::Named` value (the struct's own type, or the owning
@@ -2291,7 +2676,17 @@ impl Codegen<'_> {
             Expr::Call(name, args, _) if self.registry.is_struct(name) || self.registry.find_variant(name).is_some() => {
                 self.ctor_ty(name, args, scopes).unwrap_or_else(|| Ty::Named(name.to_string(), Vec::new()))
             }
-            Expr::Call(name, _, _) => self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64),
+            // `name` here can be a local variable holding an acquired/
+            // passed-in `Ty::Fn` value, not just a top-level `fn` —
+            // `f(x)` where `f: fn(i64) -> i64` is a parameter parses to
+            // the same `Expr::Call("f", ...)` shape a direct call does
+            // (`parser.rs::parse_call` doesn't distinguish), so `scopes`
+            // is checked first; `self.sigs` (top-level fns only) would
+            // otherwise never find `f` and wrongly fall back to `Ty::I64`.
+            Expr::Call(name, _, _) => match scopes.get(name) {
+                Some((Ty::Fn(_, ret), _)) => *ret,
+                _ => self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64),
+            },
             // Row 11: `base.field`'s type is `base`'s struct type's
             // substituted field type — factored through
             // `field_index_and_ty` so `expr()`/`expr_ptr()`'s own
@@ -2328,6 +2723,17 @@ impl Codegen<'_> {
             // above explains (e.g. `join spawn worker(x)` with nothing
             // ever bound to a name).
             Expr::Spawn(name, _, _) => Ty::Thread(Box::new(self.sigs.get(name).map(|s| s.ret.clone()).unwrap_or(Ty::I64))),
+            // `acquire name(proof)` -> `Result(Ty::Fn(params, ret), str)` —
+            // `name`'s own declared signature, unchanged; `acquire` only
+            // ever gates *whether* the value is obtained, never its shape.
+            Expr::Acquire(name, _, _) => {
+                let sig = self.sigs.get(name);
+                let fn_ty = Ty::Fn(
+                    sig.map(|s| s.params.clone()).unwrap_or_default(),
+                    Box::new(sig.map(|s| s.ret.clone()).unwrap_or(Ty::I64)),
+                );
+                Ty::Named("Result".to_string(), vec![fn_ty, Ty::Str])
+            }
             Expr::Join(inner, _) => match self.local_ty_of(inner, scopes) {
                 Ty::Thread(t) => *t,
                 _ => Ty::I64,
@@ -2961,10 +3367,27 @@ impl Codegen<'_> {
             return Ok("false".to_string());
         };
         let (view_ty, view_ptr) = scopes.get(&param_name).expect("scanned directly from this function's own params");
+        self.emit_str_field_eq_check(&view_ty, &view_ptr, field_name, expected)
+    }
+
+    /// The shared core `emit_requirement_check` (a `RoleView`/`ClaimView`
+    /// *parameter* of the current function) and `emit_acquire` (an
+    /// arbitrary `proof` expression's own pointer) both reduce to: GEP to
+    /// `field_name` on a value of type `view_ty` at `view_ptr`, load its
+    /// `str`, and compare against the compile-time-known `expected`
+    /// string via `nir_str_eq` — the one real runtime check either
+    /// mechanism ever does. Returns a fresh `i1` SSA register.
+    fn emit_str_field_eq_check(
+        &mut self,
+        view_ty: &Ty,
+        view_ptr: &str,
+        field_name: &str,
+        expected: &str,
+    ) -> Result<String, CodegenError> {
         let (idx, _) = self
-            .field_index_and_ty(&view_ty, field_name)
+            .field_index_and_ty(view_ty, field_name)
             .expect("RoleView/ClaimView always declares this field, ast::prelude_structs");
-        let view_llty = self.llvm_ty(&view_ty)?;
+        let view_llty = self.llvm_ty(view_ty)?;
         let field_ptr = self.fresh_reg("req_field_ptr");
         writeln!(self.out, "  {field_ptr} = getelementptr inbounds {view_llty}, ptr {view_ptr}, i32 0, i32 {idx}").unwrap();
         let field_val = self.fresh_reg("req_field_val");
@@ -3125,7 +3548,20 @@ impl Codegen<'_> {
                 Ok(full)
             }
             Expr::Ident(name, _) => {
-                let (ty, ptr) = scopes.get(name).expect("typeck.rs already proved this resolves");
+                let Some((ty, ptr)) = scopes.get(name) else {
+                    // Not a local variable — the one other thing an
+                    // `Ident` can name is a bare reference to an ordinary
+                    // (ungated) top-level `fn` used as a first-class
+                    // value (`apply(double, 21)`, LANGUAGE.md §6a). A
+                    // function's own address is a compile-time-known
+                    // constant operand in LLVM IR (`ptr @name`) — no
+                    // `load` needed, unlike a real variable's storage.
+                    // `typeck.rs`'s `PrivilegedFnNotAcquired` already
+                    // guarantees a `requires`-gated fn's name never
+                    // reaches here directly.
+                    self.sigs.get(name).expect("typeck.rs already proved this resolves (local var or top-level fn)");
+                    return Ok(format!("@{name}"));
+                };
                 if ty.is_aggregate() {
                     // Every well-behaved caller checks `is_aggregate()`
                     // first and calls `expr_ptr()` instead — this is a
@@ -3140,6 +3576,17 @@ impl Codegen<'_> {
                          expression position yet — bind it via `let`, or pass/return it \
                          through a function call"
                     ));
+                }
+                if ty == Ty::Unit {
+                    // No data to load — `Ty::Unit`'s own `llvm_ty` is
+                    // `void`, and `load void` is invalid LLVM IR. Only
+                    // reachable via a match arm that binds a `Ty::Unit`
+                    // payload and then references it directly (e.g.
+                    // `Ok(u) => u`) — the same placeholder value every
+                    // other unit-shaped result in this file already
+                    // uses ("its own value is unit; never [meaningfully]
+                    // read").
+                    return Ok("0".to_string());
                 }
                 let llty = self.llvm_ty(&ty)?;
                 let reg = self.fresh_reg(&format!("{name}.val"));
@@ -3197,8 +3644,18 @@ impl Codegen<'_> {
                 // need to know it came from an assignment specifically.
                 Ok(val)
             }
-            Expr::Acquire(_, _, _) | Expr::SpawnSandbox(_, _, _) | Expr::Transact { .. } => {
+            Expr::Acquire(_, _, _) | Expr::SpawnSandbox(_, _, _) => {
                 unreachable!("check_supported already rejected this program")
+            }
+            // `transact { ... }` — always `Ty::Bool`-valued, never
+            // aggregate, so it belongs here in `expr()`, not `expr_ptr()`
+            // (unlike `Expr::Acquire`/`Expr::If`/`Expr::Match`, which can
+            // be either and so are dispatched from both). `network_retry`/
+            // `network_timeout` are already rejected in `check_expr`'s
+            // pre-pass if present — `emit_transact`'s own doc comment has
+            // the full scope.
+            Expr::Transact { precheck, network, verify, commit, compensate, log, .. } => {
+                self.emit_transact(precheck, network, verify, commit, compensate, log, scopes)
             }
             // `chan`'s own construction — one opaque `i64` handle,
             // identical for every payload type `T` (`llvm_ty`'s own
@@ -3547,7 +4004,17 @@ impl Codegen<'_> {
                     writeln!(self.out, "  call i32 @nir_file_stop(i64 {fd})").unwrap();
                     Ok("0".to_string())
                 }
-                _ => unreachable!("typeck.rs already restricted stop's operand to sandbox/tcp/tcp_listener/file"),
+                Ty::Db => {
+                    let handle = self.expr(inner, scopes)?;
+                    writeln!(self.out, "  call i32 @nir_db_stop(i64 {handle})").unwrap();
+                    Ok("0".to_string())
+                }
+                Ty::Mq => {
+                    let handle = self.expr(inner, scopes)?;
+                    writeln!(self.out, "  call i32 @nir_mq_stop(i64 {handle})").unwrap();
+                    Ok("0".to_string())
+                }
+                _ => unreachable!("typeck.rs already restricted stop's operand to sandbox/tcp/tcp_listener/file/db/mq"),
             },
             // `v[i]` / `m[i, j]` — always yields a scalar element, so this
             // belongs in `expr()`, not `expr_ptr()`, even though the base
@@ -3603,6 +4070,19 @@ impl Codegen<'_> {
     }
 
     fn call(&mut self, name: &str, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        // `name` is a local variable holding a `Ty::Fn` value (an
+        // acquired or passed-in first-class function), not a top-level
+        // `fn` — `f(x)` where `f` is such a variable parses to the same
+        // `Expr::Call("f", ...)` shape a direct call does
+        // (`parser.rs::parse_call`), so this has to be checked before
+        // anything below assumes `name` names a global. Only reached for
+        // a non-aggregate `sig_ret` (`local_ty_of`'s own `Ty::Fn` fork
+        // routes an aggregate-returning one to `call_ptr` instead).
+        if let Some((Ty::Fn(params, ret), fn_slot)) = scopes.get(name) {
+            let fn_ptr = self.fresh_reg(&format!("{name}.fnval"));
+            writeln!(self.out, "  {fn_ptr} = load ptr, ptr {fn_slot}").unwrap();
+            return self.call_indirect(&fn_ptr, &params, &ret, args, scopes);
+        }
         // Row 11: a struct/variant constructor is always aggregate-valued
         // (`is_aggregate()` now covers `Ty::Named`), so a scalar `expr()`
         // result is the wrong shape for it — every well-typed caller
@@ -3658,11 +4138,20 @@ impl Codegen<'_> {
                 let v = self.expr(a, scopes)?;
                 if arg_ty == Ty::F64 {
                     writeln!(self.out, "  call i32 (ptr, ...) @printf(ptr @.float_fmt, double {v})").unwrap();
-                } else if arg_ty == Ty::Str {
+                } else if arg_ty == Ty::Str || arg_ty == Ty::Json {
                     // `%.*s`, not `%s` — the buffer isn't guaranteed
                     // NUL-terminated by this design (`Ty::Str`'s note in
                     // `llvm_ty`), so the explicit length has to drive how
-                    // many bytes `printf` reads, not a NUL scan.
+                    // many bytes `printf` reads, not a NUL scan. `Ty::Json`
+                    // rides the same branch: it's the identical `{ptr,
+                    // i64}` raw-JSON-text representation (`Ty::Json`'s own
+                    // `llvm_ty` doc comment), so `print(a_json_value)` — a
+                    // `db_query`/`list_<workflow>_overdue()` result, say —
+                    // prints its real JSON text, not a wrong `i64`-shaped
+                    // read of a two-word struct (which is what falling
+                    // through to the `else` arm below would have done).
+                    // Found by actually trying to `print` a `json` value,
+                    // not designed in advance.
                     let ptr_reg = self.fresh_reg("str_print_ptr");
                     writeln!(self.out, "  {ptr_reg} = extractvalue {{ptr, i64}} {v}, 0").unwrap();
                     let len_reg = self.fresh_reg("str_print_len");
@@ -3756,6 +4245,55 @@ impl Codegen<'_> {
             .unwrap();
             return self.icmp("ne", "i32", &raw, "0");
         }
+        // `str_slice`/`str_index_of` (`STR_BUILTINS`'s own doc comment) —
+        // `str_slice` is pure pointer arithmetic on the existing `{ptr,
+        // i64}` representation, no kernel call; `str_index_of` is the one
+        // genuine byte-scan, linked to `nir_str_index_of`.
+        if name == "str_slice" {
+            let (s_ptr, s_len) = self.str_parts(&args[0], scopes)?;
+            let start = self.expr(&args[1], scopes)?;
+            let end = self.expr(&args[2], scopes)?;
+            self.guard_str_bounds_ok(&start, &end, &s_len);
+            let new_ptr = self.fresh_reg("slice_ptr");
+            writeln!(self.out, "  {new_ptr} = getelementptr i8, ptr {s_ptr}, i64 {start}").unwrap();
+            let new_len = self.fresh_reg("slice_len");
+            writeln!(self.out, "  {new_len} = sub i64 {end}, {start}").unwrap();
+            let partial = self.fresh_reg("slice_str_partial");
+            writeln!(self.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr {new_ptr}, 0").unwrap();
+            let result = self.fresh_reg("slice_str");
+            writeln!(self.out, "  {result} = insertvalue {{ptr, i64}} {partial}, i64 {new_len}, 1").unwrap();
+            return Ok(result);
+        }
+        if name == "str_index_of" {
+            let (hay_ptr, hay_len) = self.str_parts(&args[0], scopes)?;
+            let (needle_ptr, needle_len) = self.str_parts(&args[1], scopes)?;
+            let idx = self.fresh_reg("str_index_of");
+            writeln!(
+                self.out,
+                "  {idx} = call i64 @nir_str_index_of(ptr {hay_ptr}, i64 {hay_len}, ptr {needle_ptr}, i64 {needle_len})"
+            )
+            .unwrap();
+            return Ok(idx);
+        }
+        // `identity_expired(identity, now) -> bool` — no kernel at all,
+        // unlike its `IDENTITY_BUILTINS` siblings: `VerifiedIdentity.
+        // expires_at` is a plain `i64` field, so this is a GEP+load+
+        // `icmp`, unconditionally inline, the same "no linked call
+        // needed" shape `len(Vector)` already has for a different
+        // reason (there it's compile-time-known; here it's one memory
+        // read).
+        if name == "identity_expired" {
+            let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+            let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+            let (idx, _) = self.field_index_and_ty(&identity_ty, "expires_at").expect("VerifiedIdentity always has expires_at, ast::prelude_structs");
+            let identity_llty = self.llvm_ty(&identity_ty)?;
+            let field_ptr = self.fresh_reg("identity_expires_at_ptr");
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {idx}").unwrap();
+            let expires_at = self.fresh_reg("identity_expires_at");
+            writeln!(self.out, "  {expires_at} = load i64, ptr {field_ptr}").unwrap();
+            let now = self.expr(&args[1], scopes)?;
+            return self.icmp("sgt", "i64", &now, &expires_at);
+        }
         if name == "rand_seed" {
             // Every integer-typed `expr()` result is already `i64`
             // (module doc) regardless of `rand_seed`'s argument's own
@@ -3764,6 +4302,11 @@ impl Codegen<'_> {
             let seed = self.expr(&args[0], scopes)?;
             writeln!(self.out, "  call void @nir_rand_seed(i64 {seed})").unwrap();
             return Ok("0".to_string()); // rand_seed's own "value" is unit; never read
+        }
+        if name == "sleep_ms" {
+            let ms = self.expr(&args[0], scopes)?;
+            writeln!(self.out, "  call void @nir_sleep_ms(i64 {ms})").unwrap();
+            return Ok("0".to_string()); // sleep_ms's own "value" is unit; never read
         }
         if name == "rand_f64" {
             let r = self.fresh_reg("rand_f64");
@@ -3939,6 +4482,52 @@ impl Codegen<'_> {
         Ok(arg_vals)
     }
 
+    /// Calls through an already-loaded function-pointer *value*
+    /// (`fn_ptr` — a register holding the address, not a variable's own
+    /// storage slot) — the shared implementation `call()`'s and
+    /// `call_ptr()`'s own "`name` is a local `Ty::Fn` variable" branches
+    /// both route through. The only real difference from an ordinary
+    /// direct call (`call <ret> @name(...)`) is the callee operand (a
+    /// loaded `ptr` register instead of a named global) and having to
+    /// spell out the full `<ret>(<params>)` function type at the call
+    /// site — LLVM requires this for any indirect call, since the
+    /// callee isn't a named `@fn` whose own `define` already states it
+    /// (the exact same `call <functy> <callee>(<args>)` shape this
+    /// module already uses for `@printf`'s varargs signature).
+    fn call_indirect(
+        &mut self,
+        fn_ptr: &str,
+        params: &[Ty],
+        ret: &Ty,
+        args: &[Expr],
+        scopes: &mut Scopes,
+    ) -> Result<String, CodegenError> {
+        let arg_vals = self.call_args(args, params, scopes)?;
+        let param_lltys: Vec<String> =
+            params.iter().map(|p| if p.is_aggregate() { Ok("ptr".to_string()) } else { self.llvm_ty(p) }).collect::<Result<_, _>>()?;
+        if ret.is_aggregate() {
+            let agg_llty = self.llvm_ty(ret)?;
+            let dest = self.fresh_reg("indirect_call_result.addr");
+            self.emit_alloca(&dest, &agg_llty);
+            let mut all_param_lltys = vec!["ptr".to_string()];
+            all_param_lltys.extend(param_lltys);
+            let mut all_args = vec![format!("ptr {dest}")];
+            all_args.extend(arg_vals);
+            writeln!(self.out, "  call void ({}) {fn_ptr}({})", all_param_lltys.join(", "), all_args.join(", ")).unwrap();
+            Ok(dest)
+        } else {
+            let ret_llty = self.llvm_ty(ret)?;
+            if ret_llty == "void" {
+                writeln!(self.out, "  call void ({}) {fn_ptr}({})", param_lltys.join(", "), arg_vals.join(", ")).unwrap();
+                Ok("0".to_string())
+            } else {
+                let r = self.fresh_reg("indirect_call_result");
+                writeln!(self.out, "  {r} = call {ret_llty} ({}) {fn_ptr}({})", param_lltys.join(", "), arg_vals.join(", ")).unwrap();
+                Ok(self.widen_to_i64(&r, ret))
+            }
+        }
+    }
+
     /// Every Phase-4 builtin that yields a plain scalar (`f64`/`i64`/
     /// `bool`) result — reached from `call()`'s `expr()` path (aggregate-
     /// returning builtins are `call_builtin_agg`'s job instead). Each
@@ -3984,15 +4573,20 @@ impl Codegen<'_> {
                 }
                 Ok(acc)
             }
-            "len" => {
-                let Ty::Vector(_, n) = self.local_ty_of(&args[0], scopes) else {
-                    unreachable!("typeck.rs already proved this is a Vector")
-                };
-                // `len` is genuinely O(1): a `Vector`'s length is baked
-                // into its `Ty`, known at codegen time -- no load at all,
-                // unlike every other builtin here.
-                Ok(n.to_string())
-            }
+            "len" => match self.local_ty_of(&args[0], scopes) {
+                // A `Vector`'s length is baked into its `Ty`, known at
+                // codegen time -- no load at all, genuinely O(1).
+                Ty::Vector(_, n) => Ok(n.to_string()),
+                // A `str`'s length is a runtime value (the second field
+                // of its `{ptr, i64}` representation), not a compile-time
+                // constant like Vector's -- one `extractvalue`, same as
+                // `str_parts`'s own len half.
+                Ty::Str => {
+                    let (_, len) = self.str_parts(&args[0], scopes)?;
+                    Ok(len)
+                }
+                _ => unreachable!("typeck.rs already proved this is a Vector or str"),
+            },
             "norm" | "frobenius_norm" => {
                 let (_, len) = agg_elem_and_len(&self.local_ty_of(&args[0], scopes));
                 let a_ptr = self.expr_ptr(&args[0], scopes)?;
@@ -4717,6 +5311,10 @@ impl Codegen<'_> {
                 self.if_expr(cond, then_block, else_block.as_deref(), *span, scopes)
             }
             Expr::Match { scrutinee, arms, span } => self.match_expr(scrutinee, arms, *span, scopes),
+            // `acquire name(proof)` — always aggregate-valued
+            // (`Result(Ty::Fn(..), str)`), so it belongs here, not in
+            // `expr()`.
+            Expr::Acquire(name, proof, _) => self.emit_acquire(name, proof, scopes),
             _ => unsupported(
                 "codegen doesn't support this aggregate expression form yet — only \
                  identifiers, literals, assignment, binary operators, dereferencing a boxed/\
@@ -4771,6 +5369,13 @@ impl Codegen<'_> {
     /// hand that same pointer back as this call expression's own
     /// "value" — exactly `expr_ptr`'s contract.
     fn call_ptr(&mut self, name: &str, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        // Same "`name` may be a local `Ty::Fn` variable, not a global"
+        // check `call()` opens with — see its own comment for why.
+        if let Some((Ty::Fn(params, ret), fn_slot)) = scopes.get(name) {
+            let fn_ptr = self.fresh_reg(&format!("{name}.fnval"));
+            writeln!(self.out, "  {fn_ptr} = load ptr, ptr {fn_slot}").unwrap();
+            return self.call_indirect(&fn_ptr, &params, &ret, args, scopes);
+        }
         if PHASE4_BUILTINS.contains(&name)
             || matches!(name, "inv" | "solve" | "kf_update_state" | "kf_update_cov")
         {
@@ -4778,6 +5383,93 @@ impl Codegen<'_> {
         }
         if name == "check_role" {
             return self.emit_check_role(args, scopes);
+        }
+        if name == "oidc_validate_token" {
+            return self.emit_oidc_validate_token(args, scopes);
+        }
+        if name == "extract_claim" {
+            return self.emit_extract_claim(args, scopes);
+        }
+        if name == "db_connect" {
+            return self.emit_db_connect(args, scopes);
+        }
+        if name == "db_execute" {
+            return self.emit_db_execute(args, scopes);
+        }
+        if name == "db_query" {
+            return self.emit_db_query(args, scopes);
+        }
+        if name == "json_parse" {
+            return self.emit_json_parse(args, scopes);
+        }
+        if name == "json_get" {
+            return self.emit_json_get(args, scopes);
+        }
+        if name == "json_array_get" {
+            return self.emit_json_array_get(args, scopes);
+        }
+        if name == "json_array_len" {
+            return self.emit_json_array_len(args, scopes);
+        }
+        if name == "json_get_str" {
+            return self.emit_json_get_str(args, scopes);
+        }
+        if name == "json_get_i64" {
+            return self.emit_json_get_i64(args, scopes);
+        }
+        if name == "json_get_f64" {
+            return self.emit_json_get_f64(args, scopes);
+        }
+        if name == "json_get_bool" {
+            return self.emit_json_get_bool(args, scopes);
+        }
+        if name == "json_set_str" {
+            return self.emit_json_set_str(args, scopes);
+        }
+        if name == "mq_connect" {
+            return self.emit_mq_connect(args, scopes);
+        }
+        if name == "mq_publish" {
+            return self.emit_mq_publish(args, scopes);
+        }
+        if name == "mq_consume" {
+            return self.emit_mq_consume(args, scopes);
+        }
+        if name == "http_get" {
+            return self.emit_http_call("nir_http_get", args, false, scopes);
+        }
+        if name == "http_post" {
+            return self.emit_http_call("nir_http_post", args, true, scopes);
+        }
+        if name == "https_get" {
+            return self.emit_http_call("nir_https_get", args, false, scopes);
+        }
+        if name == "https_post" {
+            return self.emit_http_call("nir_https_post", args, true, scopes);
+        }
+        if name == "__workflow_start" {
+            return self.emit_workflow_start(args, scopes);
+        }
+        if name == "__workflow_advance" {
+            return self.emit_workflow_advance(args, scopes);
+        }
+        if name == "__workflow_overdue" {
+            return self.emit_workflow_overdue(args, scopes);
+        }
+        if name == "__workflow_pending_for_me" || name == "__workflow_submitted_by_me" || name == "__workflow_history" {
+            return self.emit_workflow_unsupported_query(name);
+        }
+        if name == "send_email" {
+            return self.emit_send_notification("email", args, scopes);
+        }
+        if name == "send_sms" {
+            return self.emit_send_notification("sms", args, scopes);
+        }
+        if name == "send_push" {
+            return self.emit_send_notification("push", args, scopes);
+        }
+        if name == "notify" {
+            return self.emit_notify(args, scopes);
         }
         let sig_params = self.sigs.get(name).expect("typeck.rs already resolved this call").params.clone();
         let sig_ret = self.sigs.get(name).expect("typeck.rs already resolved this call").ret.clone();
@@ -4869,6 +5561,1609 @@ impl Codegen<'_> {
         writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
         let msg_full = self.fresh_reg("check_role_err_msg_full");
         writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", MSG.len()).unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `oidc_validate_token(token, expected_issuer, expected_audience,
+    /// jwks_json) -> Result(VerifiedIdentity, str)` — real JWT/JWKS
+    /// signature verification (`nir_oidc_validate_token`,
+    /// `IDENTITY_BUILTINS`'s own doc comment has the full scope). Unlike
+    /// `emit_check_role`'s single-`str`-field `RoleView` payload,
+    /// `VerifiedIdentity` has six fields, so this writes the kernel's
+    /// out-params **directly into a scratch `VerifiedIdentity`'s own
+    /// field pointers** (via `field_index_and_ty`, same helper
+    /// `emit_check_role` uses to *read* `claims_json`) rather than
+    /// double-buffering through intermediate locals, then `memcpy`s that
+    /// whole struct into the `Result`'s payload on success — the same
+    /// "GEP to the field, no intermediate copy" discipline
+    /// `construct_variant`'s generic path already uses for aggregate
+    /// payloads. Same tag-then-payload/br/merge shape as
+    /// `emit_check_role` otherwise; the one real difference is the `Err`
+    /// message is a genuine runtime `str` value from the kernel's own
+    /// `out_err`, not a compile-time literal (a malformed token/JWKS
+    /// produces a different message than a bad issuer/audience/
+    /// signature, and callers of a real relying-party check deserve to
+    /// know which).
+    fn emit_oidc_validate_token(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![identity_ty.clone(), Ty::Str]);
+
+        let (token_ptr, token_len) = self.str_parts(&args[0], scopes)?;
+        let (issuer_ptr, issuer_len) = self.str_parts(&args[1], scopes)?;
+        let (audience_ptr, audience_len) = self.str_parts(&args[2], scopes)?;
+        let (jwks_ptr, jwks_len) = self.str_parts(&args[3], scopes)?;
+
+        // A scratch `VerifiedIdentity`, written to directly by the
+        // kernel call below on success — its own field pointers *are*
+        // the kernel's `out_subject`/`out_issuer`/etc. arguments, no
+        // separate out-param locals to copy from afterward.
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let identity_scratch = self.fresh_reg("oidc_identity_scratch");
+        self.emit_alloca(&identity_scratch, &identity_llty);
+        let field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("oidc_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_scratch}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let subject_ptr = field_ptr(self, "subject");
+        let issuer_ptr_out = field_ptr(self, "issuer");
+        let audience_ptr_out = field_ptr(self, "audience");
+        let expires_at_ptr = field_ptr(self, "expires_at");
+        let issued_at_ptr = field_ptr(self, "issued_at");
+        let claims_json_ptr = field_ptr(self, "claims_json");
+
+        let err_scratch = self.fresh_reg("oidc_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let found = self.fresh_reg("oidc_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_oidc_validate_token(ptr {token_ptr}, i64 {token_len}, ptr {issuer_ptr}, i64 {issuer_len}, \
+             ptr {audience_ptr}, i64 {audience_len}, ptr {jwks_ptr}, i64 {jwks_len}, ptr {subject_ptr}, ptr {issuer_ptr_out}, \
+             ptr {audience_ptr_out}, ptr {expires_at_ptr}, ptr {issued_at_ptr}, ptr {claims_json_ptr}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.fresh_reg("oidc_is_ok");
+        writeln!(self.out, "  {is_ok} = icmp ne i32 {found}, 0").unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("oidc_result.addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("oidc_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("oidc_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("oidc_ok");
+        let err_label = self.fresh_label("oidc_err");
+        let merge_label = self.fresh_label("oidc_merge");
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        let identity_bytes = agg_byte_size_operand(&identity_ty, &self.registry);
+        writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {payload_ptr}, ptr {identity_scratch}, i64 {identity_bytes}, i1 false)").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let err_val = self.fresh_reg("oidc_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {err_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `extract_claim(identity, name) -> Result(ClaimView, str)` — real
+    /// JSON claim extraction (`nir_extract_claim`). `ClaimView`'s sole
+    /// field (`value: str`) makes this structurally identical to
+    /// `emit_check_role`: one kernel call producing a bool-shaped status
+    /// plus (on success) a single `str` out-param that *is* the whole
+    /// `Ok` payload, same tag-then-payload/br/merge shape, same
+    /// compile-time `Err` literal (unlike `oidc_validate_token`, a
+    /// missing/non-string claim has exactly one reason, so no dynamic
+    /// message is needed from the kernel).
+    fn emit_extract_claim(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let claim_view_ty = Ty::Named("ClaimView".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![claim_view_ty.clone(), Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("extract_claim_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("extract_claim_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("extract_claim_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("extract_claim_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+        let (name_ptr, name_len) = self.str_parts(&args[1], scopes)?;
+
+        let out_scratch = self.fresh_reg("extract_claim_out_scratch");
+        self.emit_alloca(&out_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("extract_claim_found");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_extract_claim(ptr {claims_ptr}, i64 {claims_len}, ptr {name_ptr}, i64 {name_len}, ptr {out_scratch})"
+        )
+        .unwrap();
+        let is_found = self.fresh_reg("extract_claim_is_found");
+        writeln!(self.out, "  {is_found} = icmp ne i32 {found}, 0").unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("extract_claim_result.addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("extract_claim_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("extract_claim_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("extract_claim_ok");
+        let err_label = self.fresh_label("extract_claim_err");
+        let merge_label = self.fresh_label("extract_claim_merge");
+        writeln!(self.out, "  br i1 {is_found}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        let value_val = self.fresh_reg("extract_claim_value");
+        writeln!(self.out, "  {value_val} = load {{ptr, i64}}, ptr {out_scratch}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {value_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let msg_global = self.fresh_global("extract_claim_err_msg");
+        const MSG: &str = "claim not present in identity's claims";
+        writeln!(self.string_globals, "{msg_global} = private unnamed_addr constant [{} x i8] c\"{}\"", MSG.len(), llvm_escape_bytes(MSG.as_bytes()))
+            .unwrap();
+        let msg_partial = self.fresh_reg("extract_claim_err_msg_partial");
+        writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
+        let msg_full = self.fresh_reg("extract_claim_err_msg_full");
+        writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", MSG.len()).unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// Shared tag-then-payload/branch/merge shape for a `Result(_, str)`
+    /// builtin whose success/failure was decided by one already-called
+    /// linked kernel — every `db`/`json` builtin below uses this
+    /// (`emit_check_role`/`emit_oidc_validate_token` predate this helper
+    /// and aren't refactored onto it, but follow the identical shape).
+    /// `is_ok`/`ok_val`/`err_val` are all already-computed SSA values by
+    /// the time this is called — `ok_val` loaded from wherever the
+    /// kernel wrote it (harmless to load unconditionally even on the
+    /// failure path: an uninitialized-but-never-dereferenced `{ptr,i64}`
+    /// bit pattern is not a memory access), `err_val` the same. Every
+    /// caller here has exactly one payload value per variant (never more
+    /// than one field), so — like `emit_check_role`'s own doc comment
+    /// already established for its single-`str`-field case — storing
+    /// directly at `payload_ptr` (word offset 0) is exactly equivalent
+    /// to `construct_variant`'s general per-field GEP addressing.
+    fn emit_result_merge(
+        &mut self,
+        result_ty: &Ty,
+        is_ok: &str,
+        ok_llty: &str,
+        ok_val: &str,
+        err_val: &str,
+        label_prefix: &str,
+    ) -> Result<String, CodegenError> {
+        let result_llty = self.llvm_ty(result_ty)?;
+        let dest = self.fresh_reg(&format!("{label_prefix}_result_addr"));
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg(&format!("{label_prefix}_tag_ptr"));
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg(&format!("{label_prefix}_payload_ptr"));
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label(&format!("{label_prefix}_ok"));
+        let err_label = self.fresh_label(&format!("{label_prefix}_err"));
+        let merge_label = self.fresh_label(&format!("{label_prefix}_merge"));
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store {ok_llty} {ok_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {err_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// Builds the `[N x NIR_BIND_VALUE_LLTY]` array `db_execute`/
+    /// `db_query`'s trailing `?`-placeholder arguments become
+    /// (`runtime-kernels/src/lib.rs`'s `NirBindValue`'s own doc comment
+    /// has the exact field layout this mirrors). Returns `("null", "0")`
+    /// for the zero-bind case (the bare 2-arg form) — the same "no real
+    /// buffer needed when the length says not to dereference it"
+    /// convention `sha256_hex`'s 1-arg form already established for
+    /// `b_ptr`/`b_len`.
+    fn emit_db_binds(&mut self, binds: &[Expr], scopes: &mut Scopes) -> Result<(String, String), CodegenError> {
+        if binds.is_empty() {
+            return Ok(("null".to_string(), "0".to_string()));
+        }
+        let n = binds.len();
+        let arr_llty = format!("[{n} x {NIR_BIND_VALUE_LLTY}]");
+        let arr_ptr = self.fresh_reg("db_binds_arr");
+        self.emit_alloca(&arr_ptr, &arr_llty);
+        for (i, arg) in binds.iter().enumerate() {
+            let elem_ptr = self.fresh_reg("db_bind_elem_ptr");
+            writeln!(self.out, "  {elem_ptr} = getelementptr inbounds {arr_llty}, ptr {arr_ptr}, i32 0, i32 {i}").unwrap();
+            let tag_ptr = self.fresh_reg("db_bind_tag_ptr");
+            writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 0").unwrap();
+            let i_ptr = self.fresh_reg("db_bind_i_ptr");
+            writeln!(self.out, "  {i_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 1").unwrap();
+            let f_ptr = self.fresh_reg("db_bind_f_ptr");
+            writeln!(self.out, "  {f_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 2").unwrap();
+            let sptr_ptr = self.fresh_reg("db_bind_sptr_ptr");
+            writeln!(self.out, "  {sptr_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 3").unwrap();
+            let slen_ptr = self.fresh_reg("db_bind_slen_ptr");
+            writeln!(self.out, "  {slen_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 4").unwrap();
+
+            // Zero every field first, so the kernel never reads a stale/
+            // uninitialized value out of the field(s) this arg's own
+            // tag doesn't select.
+            writeln!(self.out, "  store i64 0, ptr {i_ptr}").unwrap();
+            writeln!(self.out, "  store double 0.0, ptr {f_ptr}").unwrap();
+            writeln!(self.out, "  store ptr null, ptr {sptr_ptr}").unwrap();
+            writeln!(self.out, "  store i64 0, ptr {slen_ptr}").unwrap();
+
+            let arg_ty = self.local_ty_of(arg, scopes);
+            if arg_ty == Ty::Str {
+                writeln!(self.out, "  store i32 2, ptr {tag_ptr}").unwrap();
+                let (ptr, len) = self.str_parts(arg, scopes)?;
+                writeln!(self.out, "  store ptr {ptr}, ptr {sptr_ptr}").unwrap();
+                writeln!(self.out, "  store i64 {len}, ptr {slen_ptr}").unwrap();
+            } else if arg_ty == Ty::F64 {
+                writeln!(self.out, "  store i32 1, ptr {tag_ptr}").unwrap();
+                let v = self.expr(arg, scopes)?;
+                writeln!(self.out, "  store double {v}, ptr {f_ptr}").unwrap();
+            } else if arg_ty == Ty::Bool {
+                writeln!(self.out, "  store i32 3, ptr {tag_ptr}").unwrap();
+                let v = self.expr(arg, scopes)?;
+                let widened = self.fresh_reg("db_bind_bool_widened");
+                writeln!(self.out, "  {widened} = zext i1 {v} to i64").unwrap();
+                writeln!(self.out, "  store i64 {widened}, ptr {i_ptr}").unwrap();
+            } else {
+                // Every other bind-value type `typeck.rs`'s `infer` (not
+                // `check`) allowed through is some integer width — widen
+                // to i64 the same way every other integer-typed value
+                // already does on its way into a linked kernel call.
+                writeln!(self.out, "  store i32 0, ptr {tag_ptr}").unwrap();
+                let v = self.expr(arg, scopes)?;
+                let widened = self.widen_to_i64(&v, &arg_ty);
+                writeln!(self.out, "  store i64 {widened}, ptr {i_ptr}").unwrap();
+            }
+        }
+        Ok((arr_ptr, n.to_string()))
+    }
+
+    /// `db_connect(path) -> Result(db, str)`.
+    fn emit_db_connect(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Db, Ty::Str]);
+        let (path_ptr, path_len) = self.str_parts(&args[0], scopes)?;
+        let handle_scratch = self.fresh_reg("db_connect_handle_scratch");
+        self.emit_alloca(&handle_scratch, "i64");
+        let err_scratch = self.fresh_reg("db_connect_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("db_connect_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_db_connect(ptr {path_ptr}, i64 {path_len}, ptr {handle_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let handle_val = self.fresh_reg("db_connect_handle");
+        writeln!(self.out, "  {handle_val} = load i64, ptr {handle_scratch}").unwrap();
+        let err_val = self.fresh_reg("db_connect_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "i64", &handle_val, &err_val, "db_connect")
+    }
+
+    /// `db_execute(conn, sql, ...binds) -> Result(i64, str)` — everything
+    /// except `SELECT`; the affected-row count.
+    fn emit_db_execute(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::I64, Ty::Str]);
+        let conn = self.expr(&args[0], scopes)?; // Ty::Db is scalar (i64), not aggregate
+        let (sql_ptr, sql_len) = self.str_parts(&args[1], scopes)?;
+        let (binds_ptr, binds_len) = self.emit_db_binds(&args[2..], scopes)?;
+        let affected_scratch = self.fresh_reg("db_execute_affected_scratch");
+        self.emit_alloca(&affected_scratch, "i64");
+        let err_scratch = self.fresh_reg("db_execute_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("db_execute_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_db_execute(i64 {conn}, ptr {sql_ptr}, i64 {sql_len}, ptr {binds_ptr}, i64 {binds_len}, ptr {affected_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let affected_val = self.fresh_reg("db_execute_affected");
+        writeln!(self.out, "  {affected_val} = load i64, ptr {affected_scratch}").unwrap();
+        let err_val = self.fresh_reg("db_execute_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "i64", &affected_val, &err_val, "db_execute")
+    }
+
+    /// `db_query(conn, sql, ...binds) -> Result(json, str)` — `SELECT`
+    /// statements; every row comes back as one JSON object, the whole
+    /// result set a JSON array (`nir_db_query`'s own doc comment).
+    fn emit_db_query(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str]);
+        let conn = self.expr(&args[0], scopes)?;
+        let (sql_ptr, sql_len) = self.str_parts(&args[1], scopes)?;
+        let (binds_ptr, binds_len) = self.emit_db_binds(&args[2..], scopes)?;
+        let json_scratch = self.fresh_reg("db_query_json_scratch");
+        self.emit_alloca(&json_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("db_query_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("db_query_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_db_query(i64 {conn}, ptr {sql_ptr}, i64 {sql_len}, ptr {binds_ptr}, i64 {binds_len}, ptr {json_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let json_val = self.fresh_reg("db_query_json");
+        writeln!(self.out, "  {json_val} = load {{ptr, i64}}, ptr {json_scratch}").unwrap();
+        let err_val = self.fresh_reg("db_query_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &json_val, &err_val, "db_query")
+    }
+
+    /// `json_parse(s) -> Result(json, str)` — an identity function on
+    /// success under this representation (`Ty::Json` compiles as `s`'s
+    /// own raw text, `Ty::Json`'s `llvm_ty` arm), so only validity needs
+    /// checking; the `Ok` payload reuses `s`'s own already-computed
+    /// `{ptr, i64}` value directly rather than re-evaluating `s`.
+    fn emit_json_parse(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str]);
+        let json_val = self.expr(&args[0], scopes)?;
+        let json_ptr = self.fresh_reg("json_parse_ptr");
+        writeln!(self.out, "  {json_ptr} = extractvalue {{ptr, i64}} {json_val}, 0").unwrap();
+        let json_len = self.fresh_reg("json_parse_len");
+        writeln!(self.out, "  {json_len} = extractvalue {{ptr, i64}} {json_val}, 1").unwrap();
+        let err_scratch = self.fresh_reg("json_parse_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_parse_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_validate(ptr {json_ptr}, i64 {json_len}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let err_val = self.fresh_reg("json_parse_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &json_val, &err_val, "json_parse")
+    }
+
+    /// `json_get(doc, key) -> Result(json, str)`.
+    fn emit_json_get(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let (key_ptr, key_len) = self.str_parts(&args[1], scopes)?;
+        let json_scratch = self.fresh_reg("json_get_json_scratch");
+        self.emit_alloca(&json_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("json_get_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_get_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_get(ptr {doc_ptr}, i64 {doc_len}, ptr {key_ptr}, i64 {key_len}, ptr {json_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let json_val = self.fresh_reg("json_get_json_val");
+        writeln!(self.out, "  {json_val} = load {{ptr, i64}}, ptr {json_scratch}").unwrap();
+        let err_val = self.fresh_reg("json_get_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &json_val, &err_val, "json_get")
+    }
+
+    /// `json_array_get(doc, idx) -> Result(json, str)` — same shape as
+    /// `json_get`, indexed by position instead of key.
+    fn emit_json_array_get(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let idx = self.expr(&args[1], scopes)?;
+        let json_scratch = self.fresh_reg("json_array_get_json_scratch");
+        self.emit_alloca(&json_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("json_array_get_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_array_get_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_array_get(ptr {doc_ptr}, i64 {doc_len}, i64 {idx}, ptr {json_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let json_val = self.fresh_reg("json_array_get_json_val");
+        writeln!(self.out, "  {json_val} = load {{ptr, i64}}, ptr {json_scratch}").unwrap();
+        let err_val = self.fresh_reg("json_array_get_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &json_val, &err_val, "json_array_get")
+    }
+
+    /// `json_array_len(doc) -> Result(i64, str)`.
+    fn emit_json_array_len(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::I64, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let value_scratch = self.fresh_reg("json_array_len_value_scratch");
+        self.emit_alloca(&value_scratch, "i64");
+        let err_scratch = self.fresh_reg("json_array_len_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_array_len_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_array_len(ptr {doc_ptr}, i64 {doc_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let value_val = self.fresh_reg("json_array_len_value");
+        writeln!(self.out, "  {value_val} = load i64, ptr {value_scratch}").unwrap();
+        let err_val = self.fresh_reg("json_array_len_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "i64", &value_val, &err_val, "json_array_len")
+    }
+
+    /// `json_get_str(doc, key) -> Result(str, str)`.
+    fn emit_json_get_str(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let (key_ptr, key_len) = self.str_parts(&args[1], scopes)?;
+        let value_scratch = self.fresh_reg("json_get_str_value_scratch");
+        self.emit_alloca(&value_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("json_get_str_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_get_str_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_get_str(ptr {doc_ptr}, i64 {doc_len}, ptr {key_ptr}, i64 {key_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let value_val = self.fresh_reg("json_get_str_value");
+        writeln!(self.out, "  {value_val} = load {{ptr, i64}}, ptr {value_scratch}").unwrap();
+        let err_val = self.fresh_reg("json_get_str_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &value_val, &err_val, "json_get_str")
+    }
+
+    /// `json_get_i64(doc, key) -> Result(i64, str)`.
+    fn emit_json_get_i64(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::I64, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let (key_ptr, key_len) = self.str_parts(&args[1], scopes)?;
+        let value_scratch = self.fresh_reg("json_get_i64_value_scratch");
+        self.emit_alloca(&value_scratch, "i64");
+        let err_scratch = self.fresh_reg("json_get_i64_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_get_i64_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_get_i64(ptr {doc_ptr}, i64 {doc_len}, ptr {key_ptr}, i64 {key_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let value_val = self.fresh_reg("json_get_i64_value");
+        writeln!(self.out, "  {value_val} = load i64, ptr {value_scratch}").unwrap();
+        let err_val = self.fresh_reg("json_get_i64_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "i64", &value_val, &err_val, "json_get_i64")
+    }
+
+    /// `json_get_f64(doc, key) -> Result(f64, str)`.
+    fn emit_json_get_f64(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::F64, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let (key_ptr, key_len) = self.str_parts(&args[1], scopes)?;
+        let value_scratch = self.fresh_reg("json_get_f64_value_scratch");
+        self.emit_alloca(&value_scratch, "double");
+        let err_scratch = self.fresh_reg("json_get_f64_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_get_f64_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_get_f64(ptr {doc_ptr}, i64 {doc_len}, ptr {key_ptr}, i64 {key_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let value_val = self.fresh_reg("json_get_f64_value");
+        writeln!(self.out, "  {value_val} = load double, ptr {value_scratch}").unwrap();
+        let err_val = self.fresh_reg("json_get_f64_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "double", &value_val, &err_val, "json_get_f64")
+    }
+
+    /// `json_get_bool(doc, key) -> Result(bool, str)`.
+    fn emit_json_get_bool(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Bool, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let (key_ptr, key_len) = self.str_parts(&args[1], scopes)?;
+        let value_scratch = self.fresh_reg("json_get_bool_value_scratch");
+        self.emit_alloca(&value_scratch, "i32");
+        let err_scratch = self.fresh_reg("json_get_bool_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_get_bool_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_json_get_bool(ptr {doc_ptr}, i64 {doc_len}, ptr {key_ptr}, i64 {key_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let raw = self.fresh_reg("json_get_bool_raw");
+        writeln!(self.out, "  {raw} = load i32, ptr {value_scratch}").unwrap();
+        let value_val = self.icmp("ne", "i32", &raw, "0")?;
+        let err_val = self.fresh_reg("json_get_bool_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "i1", &value_val, &err_val, "json_get_bool")
+    }
+
+    /// `json_set_str(doc, key, value) -> Result(json, str)`.
+    fn emit_json_set_str(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str]);
+        let (doc_ptr, doc_len) = self.str_parts(&args[0], scopes)?;
+        let (key_ptr, key_len) = self.str_parts(&args[1], scopes)?;
+        let (value_ptr, value_len) = self.str_parts(&args[2], scopes)?;
+        let json_scratch = self.fresh_reg("json_set_str_json_scratch");
+        self.emit_alloca(&json_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("json_set_str_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("json_set_str_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_json_set_str(ptr {doc_ptr}, i64 {doc_len}, ptr {key_ptr}, i64 {key_len}, ptr {value_ptr}, i64 {value_len}, ptr {json_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let json_val = self.fresh_reg("json_set_str_json_val");
+        writeln!(self.out, "  {json_val} = load {{ptr, i64}}, ptr {json_scratch}").unwrap();
+        let err_val = self.fresh_reg("json_set_str_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &json_val, &err_val, "json_set_str")
+    }
+
+    /// `mq_connect(host, port) -> Result(mq, str)`.
+    fn emit_mq_connect(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Mq, Ty::Str]);
+        let (host_ptr, host_len) = self.str_parts(&args[0], scopes)?;
+        let port = self.expr(&args[1], scopes)?;
+        let handle_scratch = self.fresh_reg("mq_connect_handle_scratch");
+        self.emit_alloca(&handle_scratch, "i64");
+        let err_scratch = self.fresh_reg("mq_connect_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("mq_connect_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_mq_connect(ptr {host_ptr}, i64 {host_len}, i64 {port}, ptr {handle_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let handle_val = self.fresh_reg("mq_connect_handle");
+        writeln!(self.out, "  {handle_val} = load i64, ptr {handle_scratch}").unwrap();
+        let err_val = self.fresh_reg("mq_connect_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "i64", &handle_val, &err_val, "mq_connect")
+    }
+
+    /// `mq_publish(conn, queue, message) -> Result(unit, str)`.
+    fn emit_mq_publish(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Unit, Ty::Str]);
+        let conn = self.expr(&args[0], scopes)?;
+        let (queue_ptr, queue_len) = self.str_parts(&args[1], scopes)?;
+        let (msg_ptr, msg_len) = self.str_parts(&args[2], scopes)?;
+        let err_scratch = self.fresh_reg("mq_publish_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("mq_publish_ok");
+        writeln!(self.out, "  {found} = call i32 @nir_mq_publish(i64 {conn}, ptr {queue_ptr}, i64 {queue_len}, ptr {msg_ptr}, i64 {msg_len}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let err_val = self.fresh_reg("mq_publish_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        // `unit`'s own value is always the same placeholder `i64 0`
+        // every other unit-returning site in this file already uses.
+        self.emit_result_merge(&result_ty, &is_ok, "i64", "0", &err_val, "mq_publish")
+    }
+
+    /// `mq_consume(conn, queue, timeout_secs) -> Result(str, str)`.
+    fn emit_mq_consume(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]);
+        let conn = self.expr(&args[0], scopes)?;
+        let (queue_ptr, queue_len) = self.str_parts(&args[1], scopes)?;
+        let timeout_secs = self.expr(&args[2], scopes)?;
+        let msg_scratch = self.fresh_reg("mq_consume_msg_scratch");
+        self.emit_alloca(&msg_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("mq_consume_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("mq_consume_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_mq_consume(i64 {conn}, ptr {queue_ptr}, i64 {queue_len}, i64 {timeout_secs}, ptr {msg_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let msg_val = self.fresh_reg("mq_consume_msg");
+        writeln!(self.out, "  {msg_val} = load {{ptr, i64}}, ptr {msg_scratch}").unwrap();
+        let err_val = self.fresh_reg("mq_consume_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &msg_val, &err_val, "mq_consume")
+    }
+
+    /// `http_get`/`http_post`/`https_get`/`https_post` — shared shape,
+    /// differing only in which kernel is linked and whether a request
+    /// `body` argument exists. `HttpResponse { status: i64, body: str }`
+    /// is a real two-field struct payload (unlike every other builtin in
+    /// this file's own `emit_result_merge` uses, which all have exactly
+    /// one payload value) — built in a scratch alloca via `field_index_
+    /// and_ty`/GEP (the same shape `emit_oidc_validate_token` already
+    /// uses for its own multi-field `VerifiedIdentity` payload), then
+    /// `memcpy`'d into the `Result`'s payload directly rather than going
+    /// through `emit_result_merge` at all.
+    fn emit_http_call(&mut self, kernel_name: &str, args: &[Expr], has_body: bool, scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let http_response_ty = Ty::Named("HttpResponse".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![http_response_ty.clone(), Ty::Str]);
+
+        let (host_ptr, host_len) = self.str_parts(&args[0], scopes)?;
+        let port = self.expr(&args[1], scopes)?;
+        let (path_ptr, path_len) = self.str_parts(&args[2], scopes)?;
+
+        let status_scratch = self.fresh_reg("http_status_scratch");
+        self.emit_alloca(&status_scratch, "i64");
+        let body_scratch = self.fresh_reg("http_body_scratch");
+        self.emit_alloca(&body_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("http_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let found = self.fresh_reg("http_ok");
+        if has_body {
+            let (req_body_ptr, req_body_len) = self.str_parts(&args[3], scopes)?;
+            writeln!(
+                self.out,
+                "  {found} = call i32 @{kernel_name}(ptr {host_ptr}, i64 {host_len}, i64 {port}, ptr {path_ptr}, i64 {path_len}, \
+                 ptr {req_body_ptr}, i64 {req_body_len}, ptr {status_scratch}, ptr {body_scratch}, ptr {err_scratch})"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                self.out,
+                "  {found} = call i32 @{kernel_name}(ptr {host_ptr}, i64 {host_len}, i64 {port}, ptr {path_ptr}, i64 {path_len}, \
+                 ptr {status_scratch}, ptr {body_scratch}, ptr {err_scratch})"
+            )
+            .unwrap();
+        }
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+
+        let http_llty = self.llvm_ty(&http_response_ty)?;
+        let http_scratch = self.fresh_reg("http_response_scratch");
+        self.emit_alloca(&http_scratch, &http_llty);
+        let (status_idx, _) =
+            self.field_index_and_ty(&http_response_ty, "status").expect("HttpResponse always has status, ast::prelude_structs");
+        let (body_idx, _) = self.field_index_and_ty(&http_response_ty, "body").expect("HttpResponse always has body, ast::prelude_structs");
+        let status_field_ptr = self.fresh_reg("http_status_field_ptr");
+        writeln!(self.out, "  {status_field_ptr} = getelementptr inbounds {http_llty}, ptr {http_scratch}, i32 0, i32 {status_idx}").unwrap();
+        let status_val = self.fresh_reg("http_status_val");
+        writeln!(self.out, "  {status_val} = load i64, ptr {status_scratch}").unwrap();
+        writeln!(self.out, "  store i64 {status_val}, ptr {status_field_ptr}").unwrap();
+        let body_field_ptr = self.fresh_reg("http_body_field_ptr");
+        writeln!(self.out, "  {body_field_ptr} = getelementptr inbounds {http_llty}, ptr {http_scratch}, i32 0, i32 {body_idx}").unwrap();
+        let body_val = self.fresh_reg("http_body_val");
+        writeln!(self.out, "  {body_val} = load {{ptr, i64}}, ptr {body_scratch}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {body_val}, ptr {body_field_ptr}").unwrap();
+
+        let err_val = self.fresh_reg("http_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("http_result_addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("http_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("http_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("http_ok");
+        let err_label = self.fresh_label("http_err");
+        let merge_label = self.fresh_label("http_merge");
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        let http_bytes = agg_byte_size_operand(&http_response_ty, &self.registry);
+        writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {payload_ptr}, ptr {http_scratch}, i64 {http_bytes}, i1 false)").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {err_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// Calls a `transact` slot's callee — always a plain top-level `fn`,
+    /// never a builtin (`typeck::infer_transact_slot`'s own doc comment)
+    /// — and hands back its value plus its declared return type,
+    /// regardless of whether that type is aggregate or scalar. Every
+    /// other call site in this file already picks `call()` vs.
+    /// `call_ptr()` based on the *caller's* own known context (an
+    /// expected type, an aggregate check done ahead of time); a
+    /// `transact` slot has neither — `precheck`/`verify`'s return type is
+    /// fixed at `bool` but `commit`/`compensate`/`log`'s is genuinely
+    /// unconstrained (`docs/TRANSACT.md`'s own decision) — so this is the
+    /// one call site in `emit_transact` that has to branch on
+    /// `sig_ret.is_aggregate()` itself, mirroring `call()`'s and
+    /// `call_ptr()`'s own near-identical tails rather than forcing every
+    /// slot through one or the other ahead of time.
+    fn emit_transact_call(&mut self, slot: &TransactSlot, scopes: &mut Scopes) -> Result<(String, Ty), CodegenError> {
+        let sig_params = self.sigs.get(&slot.name).expect("typeck.rs already resolved this call").params.clone();
+        let sig_ret = self.sigs.get(&slot.name).expect("typeck.rs already resolved this call").ret.clone();
+        let arg_vals = self.call_args(&slot.args, &sig_params, scopes)?;
+        if sig_ret.is_aggregate() {
+            let agg_llty = self.llvm_ty(&sig_ret)?;
+            let dest = self.fresh_reg("transact_call_result_addr");
+            self.emit_alloca(&dest, &agg_llty);
+            let mut all_args = vec![format!("ptr {dest}")];
+            all_args.extend(arg_vals);
+            writeln!(self.out, "  call void @{}({})", slot.name, all_args.join(", ")).unwrap();
+            Ok((dest, sig_ret))
+        } else {
+            let ret_llty = self.llvm_ty(&sig_ret)?;
+            if ret_llty == "void" {
+                writeln!(self.out, "  call void @{}({})", slot.name, arg_vals.join(", ")).unwrap();
+                Ok(("0".to_string(), sig_ret))
+            } else {
+                let r = self.fresh_reg("transact_call_result");
+                writeln!(self.out, "  {r} = call {ret_llty} @{}({})", slot.name, arg_vals.join(", ")).unwrap();
+                Ok((self.widen_to_i64(&r, &sig_ret), sig_ret))
+            }
+        }
+    }
+
+    /// `transact { precheck?/network/verify/commit/compensate?/log? }` —
+    /// `docs/TRANSACT.md`, compiled for real 2026-09, Layer 1 only (the
+    /// same scope the now-deleted interpreter itself shipped *first*,
+    /// before retry/timeout/durability/replay — "layers, not a syntax
+    /// spec," the doc's own section title). Real, compiled control flow:
+    /// `txn_id` generated (`nir_transact_gen_txn_id`), `precheck` (if
+    /// present) aborting the whole block to `false` immediately on a
+    /// `false` return, `network`/`verify` becoming real implicit local
+    /// bindings later slots' arguments resolve through the ordinary
+    /// `Expr::Ident`/`scopes` mechanism (no special-casing needed there —
+    /// `call_args`'s existing argument evaluation already handles it),
+    /// `verify`'s result choosing `commit` or `compensate`, `log` (if
+    /// present) always running last. The whole expression is a real
+    /// `i1` value, `true`/`false` exactly as documented.
+    ///
+    /// **Deliberately not attempted here, and not simply deferred by
+    /// oversight — architecturally blocked by the compiled trap model,
+    /// found while designing this, not assumed in advance:** `network`'s
+    /// `retry`/`timeout` modifiers (rejected explicitly in
+    /// `check_expr`'s pre-pass, with a specific reason, before this
+    /// function is ever reached). The interpreter's own retry-on-trap
+    /// semantics relied on catching an internal `RuntimeError` before it
+    /// ever unwound; a compiled trap calls `abort()` directly (every
+    /// `guard_*` in this file), an unrecoverable process exit — and
+    /// `network`'s own declared return type is restricted to a bare
+    /// scalar by `Ty::is_transact_scalar` (never `Result(_, _)`), so
+    /// there is no non-trapping failure signal for `network` to react to
+    /// either, unlike `commit`/`compensate` (whose return types are
+    /// genuinely unconstrained). This is a real, narrower gap, not a
+    /// missing feature: no bounded amount of engineering time closes it
+    /// without either giving compiled traps a catchable/unwinding
+    /// semantics (a much larger, unrelated language change) or changing
+    /// `is_transact_scalar`'s already-locked durability-boundary rule.
+    ///
+    /// **Also deferred, named, not attempted**: `commit`/`compensate`'s
+    /// own retry-with-backoff-then-trap-on-exhaustion (theoretically
+    /// possible when their return type happens to be `Result(_, _)`,
+    /// since that one *is* unconstrained — but genuinely new, untested
+    /// control flow this pass didn't have budget to build and verify
+    /// carefully in the same round as the rest of Layer 1); the
+    /// durability log (`transact_log.rs`, deleted along with the
+    /// interpreter) and crash replay — a real, separate, much larger
+    /// follow-up, not a small addition to this function.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_transact(
+        &mut self,
+        precheck: &Option<TransactSlot>,
+        network: &TransactSlot,
+        verify: &TransactSlot,
+        commit: &TransactSlot,
+        compensate: &Option<TransactSlot>,
+        log: &Option<TransactSlot>,
+        scopes: &mut Scopes,
+    ) -> Result<String, CodegenError> {
+        scopes.push();
+
+        let result_slot = self.fresh_reg("transact_result_addr");
+        self.emit_alloca(&result_slot, "i1");
+
+        // `txn_id` — generated before `precheck` even runs, in scope for
+        // every slot (`typeck::infer_transact`'s own ordering), even
+        // though only `network` is required to actually reference it.
+        let txn_id_slot = self.fresh_reg("transact_txn_id_addr");
+        self.emit_alloca(&txn_id_slot, "{ptr, i64}");
+        writeln!(self.out, "  call void @nir_transact_gen_txn_id(ptr {txn_id_slot})").unwrap();
+        scopes.define("txn_id", Ty::Str, txn_id_slot.clone());
+
+        let after_precheck_label = self.fresh_label("transact_after_precheck");
+        if let Some(p) = precheck {
+            let (precheck_val, _) = self.emit_transact_call(p, scopes)?;
+            let precheck_true = self.fresh_label("transact_precheck_true");
+            let precheck_false = self.fresh_label("transact_precheck_false");
+            writeln!(self.out, "  br i1 {precheck_val}, label %{precheck_true}, label %{precheck_false}").unwrap();
+            writeln!(self.out, "{precheck_false}:").unwrap();
+            writeln!(self.out, "  store i1 false, ptr {result_slot}").unwrap();
+            writeln!(self.out, "  br label %{after_precheck_label}").unwrap();
+            writeln!(self.out, "{precheck_true}:").unwrap();
+        }
+
+        // `network` — always a bare scalar return (`Ty::is_transact_scalar`,
+        // never aggregate), so this is always the plain `store <llty>`
+        // path, never a `memcpy`.
+        let (network_val, network_ty) = self.emit_transact_call(network, scopes)?;
+        let network_llty = self.llvm_ty(&network_ty)?;
+        let network_slot = self.fresh_reg("transact_network_addr");
+        self.emit_alloca(&network_slot, &network_llty);
+        writeln!(self.out, "  store {network_llty} {network_val}, ptr {network_slot}").unwrap();
+        scopes.define("network", network_ty, network_slot);
+
+        // `verify` — its own return type is already forced to `bool` by
+        // `typeck.rs`, so `verify_val` is directly usable as a branch
+        // condition with no extra `icmp`/widening needed.
+        let (verify_val, verify_ty) = self.emit_transact_call(verify, scopes)?;
+        let verify_slot = self.fresh_reg("transact_verify_addr");
+        self.emit_alloca(&verify_slot, "i1");
+        writeln!(self.out, "  store i1 {verify_val}, ptr {verify_slot}").unwrap();
+        scopes.define("verify", verify_ty, verify_slot);
+
+        let commit_label = self.fresh_label("transact_commit");
+        let compensate_label = self.fresh_label("transact_compensate");
+        let after_verify_label = self.fresh_label("transact_after_verify");
+        writeln!(self.out, "  br i1 {verify_val}, label %{commit_label}, label %{compensate_label}").unwrap();
+
+        writeln!(self.out, "{commit_label}:").unwrap();
+        self.emit_transact_call(commit, scopes)?; // return value unconstrained, discarded
+        writeln!(self.out, "  store i1 true, ptr {result_slot}").unwrap();
+        writeln!(self.out, "  br label %{after_verify_label}").unwrap();
+
+        writeln!(self.out, "{compensate_label}:").unwrap();
+        if let Some(c) = compensate {
+            self.emit_transact_call(c, scopes)?; // return value unconstrained, discarded
+        }
+        writeln!(self.out, "  store i1 false, ptr {result_slot}").unwrap();
+        writeln!(self.out, "  br label %{after_verify_label}").unwrap();
+
+        writeln!(self.out, "{after_verify_label}:").unwrap();
+        if let Some(l) = log {
+            // Best-effort per `docs/TRANSACT.md` — but unlike the deleted
+            // interpreter, a trap inside `log` is *not* swallowed here:
+            // every compiled trap is an unconditional `abort()`, the same
+            // as anywhere else in this language. A real, disclosed
+            // difference, not a silent one.
+            self.emit_transact_call(l, scopes)?;
+        }
+        writeln!(self.out, "  br label %{after_precheck_label}").unwrap();
+
+        writeln!(self.out, "{after_precheck_label}:").unwrap();
+        let result = self.fresh_reg("transact_result");
+        writeln!(self.out, "  {result} = load i1, ptr {result_slot}").unwrap();
+
+        scopes.pop();
+        Ok(result)
+    }
+
+    /// Resolves a `workflow_lower.rs`-synthesized call's compile-time-
+    /// literal `workflow_name` argument back to the original
+    /// `WorkflowDecl` it names (`Codegen.workflows`, populated from
+    /// `program.workflows` at construction — the lowering pass keeps the
+    /// source `WorkflowDecl` around for exactly this) — and rejects,
+    /// with a specific reason, the one Layer 1 restriction not already
+    /// caught by `check_expr`'s pre-pass: a workflow whose `data { ... }`
+    /// block is non-empty. `nir_workflow_create_instance` (`runtime-
+    /// kernels`) takes no `data` parameter at all — an instance's
+    /// `WorkflowInstance` row has no `data_json` field to persist one
+    /// into — so a `data.<field>` reference inside any state's
+    /// `on_entry`/`on_exit` *other* than the very first state's (whose
+    /// actions run inline, inside `start_<workflow>`'s own generated
+    /// function body, sharing its still-live `data` parameter — see
+    /// `emit_workflow_start`) could never resolve once an `advance_*`
+    /// call has moved the instance on. Rather than track which
+    /// individual action bodies happen to reference `data` (fragile,
+    /// easy to silently miscompile a workflow edited later to add one),
+    /// this rejects the whole workflow up front — the same "reject
+    /// early and specifically, not partially and silently" posture this
+    /// file takes throughout.
+    fn resolve_workflow_layer1(&self, name_expr: &Expr) -> Result<&WorkflowDecl, CodegenError> {
+        let Expr::Str(name, _) = name_expr else {
+            return unsupported(
+                "workflow codegen expects a compile-time string literal workflow name (always \
+                 true for workflow_lower.rs-synthesized calls)"
+                    .to_string(),
+            );
+        };
+        let wf = self
+            .workflows
+            .iter()
+            .find(|w| &w.name == name)
+            .ok_or_else(|| CodegenError { message: format!("no `workflow {name}` declaration found for this compiled program") })?;
+        if !wf.data.is_empty() {
+            return unsupported(format!(
+                "codegen doesn't support `workflow {name}` yet — its `data {{ ... }}` block is \
+                 non-empty, and this compiled backend's Layer 1 workflow runtime has nowhere \
+                 durable to persist a `data` value past the initial `start_*` call \
+                 (`nir_workflow_create_instance` takes no `data` parameter at all — an \
+                 instance's `WorkflowInstance` row has no `data_json` field); a workflow with an \
+                 empty `data {{ }}` block compiles now"
+            ));
+        }
+        Ok(wf)
+    }
+
+    /// Runs one `on_entry`/`on_exit` action slot (`TransactSlot`, same
+    /// shape `transact`'s own `precheck`/`verify`/... slots use) for its
+    /// side effect only, discarding its return value —
+    /// `docs/WORKFLOW.md`'s grammar restricts an action call to a bare
+    /// `name(args)`, so nothing here would use the value even if kept.
+    /// Deliberately **not** `emit_transact_call` (whose
+    /// `self.sigs.get(&slot.name).expect(...)` only resolves user-
+    /// defined functions): a workflow action's callee may just as often
+    /// be a builtin (`send_email` etc. are exactly the point) —
+    /// reusing `Stmt::Expr`'s own `is_aggregate()`-routed dispatch
+    /// instead naturally supports both, through the same `call()`/
+    /// `call_ptr()` machinery every other call in this file already
+    /// goes through.
+    fn emit_workflow_action(&mut self, slot: &TransactSlot, scopes: &mut Scopes) -> Result<(), CodegenError> {
+        let call_expr = Expr::Call(slot.name.clone(), slot.args.clone(), slot.span);
+        if self.local_ty_of(&call_expr, scopes).is_aggregate() {
+            self.expr_ptr(&call_expr, scopes)?;
+        } else {
+            self.expr(&call_expr, scopes)?;
+        }
+        Ok(())
+    }
+
+    /// Builds a scratch `WorkflowActionError` value with the given
+    /// variant's tag (`ast::prelude_enums`' own declaration order —
+    /// `NoRecipientsForRole`=0 through `NotStateOwner`=8) and, for the
+    /// one payload-carrying case a caller needs, its `str` payload —
+    /// returns a pointer to it, ready for the caller's own
+    /// `llvm.memcpy` into a `Result(_, WorkflowActionError)`'s payload
+    /// field (this file's "build the aggregate fully, then one memcpy"
+    /// convention — `emit_http_call`'s doc comment). A zero-payload
+    /// variant's payload buffer is left exactly as `emit_alloca` leaves
+    /// it (uninitialized, never read — `construct_variant`'s own
+    /// zero-payload path already leaves the very same buffer untouched
+    /// for a hand-written `Err(SomeZeroPayloadVariant)` anywhere else in
+    /// this language, so this isn't a new risk).
+    fn emit_workflow_error(&mut self, variant_tag: i64, str_payload: Option<&str>) -> Result<String, CodegenError> {
+        let err_ty = Ty::Named("WorkflowActionError".to_string(), vec![]);
+        let err_llty = self.llvm_ty(&err_ty)?;
+        let scratch = self.fresh_reg("workflow_err_scratch");
+        self.emit_alloca(&scratch, &err_llty);
+        let tag_ptr = self.fresh_reg("workflow_err_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {err_llty}, ptr {scratch}, i32 0, i32 0").unwrap();
+        writeln!(self.out, "  store i64 {variant_tag}, ptr {tag_ptr}").unwrap();
+        if let Some(v) = str_payload {
+            let payload_ptr = self.fresh_reg("workflow_err_payload_ptr");
+            writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {err_llty}, ptr {scratch}, i32 0, i32 1").unwrap();
+            writeln!(self.out, "  store {{ptr, i64}} {v}, ptr {payload_ptr}").unwrap();
+        }
+        Ok(scratch)
+    }
+
+    /// Stores tag `1` (`Err`, `ast::prelude_enums`' `Result` declaration
+    /// order) into an already-GEP'd `Result(_, WorkflowActionError)`'s
+    /// `tag_ptr`, then `memcpy`s a `WorkflowActionError` scratch value
+    /// (built by `emit_workflow_error`) into its `payload_ptr` — shared
+    /// tail every `emit_workflow_*`/`emit_send_notification`/
+    /// `emit_notify` error path uses.
+    fn emit_workflow_err_into_result(&mut self, tag_ptr: &str, payload_ptr: &str, err_scratch: &str) {
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let err_ty = Ty::Named("WorkflowActionError".to_string(), vec![]);
+        let bytes = agg_byte_size_operand(&err_ty, &self.registry);
+        writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {payload_ptr}, ptr {err_scratch}, i64 {bytes}, i1 false)").unwrap();
+    }
+
+    /// `__workflow_start(workflow_name, identity, data) ->
+    /// Result(i64, WorkflowActionError)` — Layer 1 (`WORKFLOW_BUILTINS`'
+    /// own doc comment). Creates a fresh, in-process instance
+    /// (`nir_workflow_create_instance`) in the workflow's first-declared
+    /// state, then runs that state's `on_entry` actions — `instance_id`/
+    /// `data.<field>` (`docs/WORKFLOW.md`'s implicit-binding rules) both
+    /// resolve for free here: this codegen runs *inside*
+    /// `start_<workflow>`'s own generated function body, which already
+    /// has `data` as a real parameter (`workflow_lower.rs`), and a fresh
+    /// `instance_id` local is bound into `scopes` just for the duration
+    /// of these actions. `identity` (`args[1]`) is accepted and
+    /// typechecked but not yet durably recorded as `started_by_subject`
+    /// — no `WorkflowInstance` field for it exists yet (Layer 1's
+    /// disclosed narrower cut, same posture as everything else this
+    /// file names explicitly rather than silently drops).
+    fn emit_workflow_start(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let wf = self.resolve_workflow_layer1(&args[0])?.clone();
+        let result_ty = workflow_result_of(Ty::I64);
+
+        let (name_ptr, name_len) = self.str_parts(&args[0], scopes)?;
+        let first_state = wf.states.first().expect("parser rejects a workflow with zero states");
+        let initial_global = self.fresh_global("workflow_start_initial_state");
+        writeln!(
+            self.string_globals,
+            "{initial_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            first_state.name.len(),
+            llvm_escape_bytes(first_state.name.as_bytes())
+        )
+        .unwrap();
+
+        let instance_scratch = self.fresh_reg("workflow_start_instance_scratch");
+        self.emit_alloca(&instance_scratch, "i64");
+        let found = self.fresh_reg("workflow_start_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_workflow_create_instance(ptr {name_ptr}, i64 {name_len}, ptr {initial_global}, i64 {}, ptr {instance_scratch})",
+            first_state.name.len()
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("workflow_start_result_addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("workflow_start_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("workflow_start_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("workflow_start_ok");
+        let err_label = self.fresh_label("workflow_start_err");
+        let merge_label = self.fresh_label("workflow_start_merge");
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        let instance_val = self.fresh_reg("workflow_start_instance_id");
+        writeln!(self.out, "  {instance_val} = load i64, ptr {instance_scratch}").unwrap();
+        scopes.push();
+        let instance_slot = self.fresh_reg("workflow_start_instance_slot");
+        self.emit_alloca(&instance_slot, "i64");
+        writeln!(self.out, "  store i64 {instance_val}, ptr {instance_slot}").unwrap();
+        scopes.define("instance_id", Ty::I64, instance_slot);
+        for action in &first_state.on_entry {
+            self.emit_workflow_action(action, scopes)?;
+        }
+        scopes.pop();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store i64 {instance_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        // Can't-really-happen in practice: `nir_workflow_create_instance`
+        // only returns `0` for an invalid-UTF8 workflow/initial-state
+        // name, and both are always compile-time source identifiers here
+        // — but a well-typed `Err` arm is still required. `InstanceNotFound`
+        // is the closest available "the operation didn't succeed" signal;
+        // `WorkflowActionError` has no dedicated catch-all variant.
+        let err_scratch = self.emit_workflow_error(4, None)?; // InstanceNotFound
+        self.emit_workflow_err_into_result(&tag_ptr, &payload_ptr, &err_scratch);
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `__workflow_advance(workflow_name, identity, instance_id, event,
+    /// payload) -> Result(bool, WorkflowActionError)` — Layer 1. Looks up
+    /// the instance's current state (`Err(InstanceNotFound)` if it
+    /// doesn't exist for this workflow), then a sequential per-state
+    /// `nir_str_eq` comparison chain — the same shape `match_literal`'s
+    /// own `Ty::Str` arm uses — finds the matching state, and within it,
+    /// a sequential comparison of the runtime `event` argument's enum
+    /// tag against each of that state's own transitions' compile-time-
+    /// known variant index in the desugared `<Workflow>Event` enum
+    /// (`self.registry.enum_variants`, so this never has to re-derive
+    /// `workflow_lower.rs`'s own first-appearance event-numbering by
+    /// hand). On a match: runs the *old* state's `on_exit` actions, then
+    /// `nir_workflow_set_state`, then the *new* state's `on_entry`
+    /// actions — `instance_id` (`docs/WORKFLOW.md`'s implicit binding)
+    /// resolves for free in every one of these actions, since this
+    /// codegen runs *inside* `advance_<workflow>`'s own generated
+    /// function body, which already has `instance_id: i64` as a real
+    /// parameter; no separate binding needed the way `emit_workflow_start`
+    /// needs one for its own fresh instance id. No matching state name
+    /// or no matching transition both fall through to a shared
+    /// `Err(NoSuchTransition)` — `payload` (`args[4]`) is accepted and
+    /// typechecked but not yet threaded into any binding
+    /// (`docs/WORKFLOW.md`'s own disclosed gap, unchanged here). State
+    /// ownership (`owner: role(...)`/`owner: claim(...)`) is accepted
+    /// syntactically (`typeck.rs::check_workflow_decl`) but not enforced
+    /// by this Layer 1 runtime — no `NotStateOwner` is ever produced.
+    fn emit_workflow_advance(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let wf = self.resolve_workflow_layer1(&args[0])?.clone();
+        let result_ty = workflow_result_of(Ty::Bool);
+        let event_ty = Ty::Named(format!("{}Event", wf.name), vec![]);
+        let event_variants: Vec<Variant> = self
+            .registry
+            .enum_variants(&format!("{}Event", wf.name))
+            .expect("workflow_lower.rs always synthesizes <Workflow>Event")
+            .to_vec();
+
+        let (name_ptr, name_len) = self.str_parts(&args[0], scopes)?;
+        let instance_id_val = self.expr(&args[2], scopes)?;
+
+        let state_scratch = self.fresh_reg("workflow_advance_state_scratch");
+        self.emit_alloca(&state_scratch, "{ptr, i64}");
+        let found_instance = self.fresh_reg("workflow_advance_found_instance");
+        writeln!(
+            self.out,
+            "  {found_instance} = call i32 @nir_workflow_get_state(ptr {name_ptr}, i64 {name_len}, i64 {instance_id_val}, ptr {state_scratch})"
+        )
+        .unwrap();
+        let instance_found = self.icmp("ne", "i32", &found_instance, "0")?;
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("workflow_advance_result_addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("workflow_advance_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("workflow_advance_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let found_label = self.fresh_label("workflow_advance_instance_found");
+        let not_found_label = self.fresh_label("workflow_advance_instance_not_found");
+        let no_such_transition_label = self.fresh_label("workflow_advance_no_such_transition");
+        let merge_label = self.fresh_label("workflow_advance_merge");
+        writeln!(self.out, "  br i1 {instance_found}, label %{found_label}, label %{not_found_label}").unwrap();
+
+        writeln!(self.out, "{not_found_label}:").unwrap();
+        let err_scratch_nf = self.emit_workflow_error(4, None)?; // InstanceNotFound
+        self.emit_workflow_err_into_result(&tag_ptr, &payload_ptr, &err_scratch_nf);
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{found_label}:").unwrap();
+        let current_state = self.fresh_reg("workflow_advance_current_state");
+        writeln!(self.out, "  {current_state} = load {{ptr, i64}}, ptr {state_scratch}").unwrap();
+        let cur_ptr = self.fresh_reg("workflow_advance_cur_ptr");
+        writeln!(self.out, "  {cur_ptr} = extractvalue {{ptr, i64}} {current_state}, 0").unwrap();
+        let cur_len = self.fresh_reg("workflow_advance_cur_len");
+        writeln!(self.out, "  {cur_len} = extractvalue {{ptr, i64}} {current_state}, 1").unwrap();
+
+        let event_ptr = self.expr_ptr_expected(&args[3], &event_ty, scopes)?;
+        let event_llty = self.llvm_ty(&event_ty)?;
+        let event_tag_ptr = self.fresh_reg("workflow_advance_event_tag_ptr");
+        writeln!(self.out, "  {event_tag_ptr} = getelementptr inbounds {event_llty}, ptr {event_ptr}, i32 0, i32 0").unwrap();
+        let event_tag = self.fresh_reg("workflow_advance_event_tag");
+        writeln!(self.out, "  {event_tag} = load i64, ptr {event_tag_ptr}").unwrap();
+
+        let state_cmp_labels: Vec<String> = wf.states.iter().map(|_| self.fresh_label("workflow_advance_state_cmp")).collect();
+        writeln!(self.out, "  br label %{}", state_cmp_labels[0]).unwrap();
+
+        for (i, s) in wf.states.iter().enumerate() {
+            let cmp_label = &state_cmp_labels[i];
+            let next_state_label = state_cmp_labels.get(i + 1).unwrap_or(&no_such_transition_label);
+            writeln!(self.out, "{cmp_label}:").unwrap();
+            let state_global = self.fresh_global("workflow_advance_state_lit");
+            writeln!(
+                self.string_globals,
+                "{state_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+                s.name.len(),
+                llvm_escape_bytes(s.name.as_bytes())
+            )
+            .unwrap();
+            let state_eq_raw = self.fresh_reg("workflow_advance_state_eq");
+            writeln!(
+                self.out,
+                "  {state_eq_raw} = call i32 @nir_str_eq(ptr {cur_ptr}, i64 {cur_len}, ptr {state_global}, i64 {})",
+                s.name.len()
+            )
+            .unwrap();
+            let state_eq = self.icmp("ne", "i32", &state_eq_raw, "0")?;
+            let state_body_label = self.fresh_label("workflow_advance_state_body");
+            writeln!(self.out, "  br i1 {state_eq}, label %{state_body_label}, label %{next_state_label}").unwrap();
+
+            writeln!(self.out, "{state_body_label}:").unwrap();
+            let transition_cmp_labels: Vec<String> =
+                s.transitions.iter().map(|_| self.fresh_label("workflow_advance_event_cmp")).collect();
+            if transition_cmp_labels.is_empty() {
+                writeln!(self.out, "  br label %{no_such_transition_label}").unwrap();
+            } else {
+                writeln!(self.out, "  br label %{}", transition_cmp_labels[0]).unwrap();
+            }
+            for (j, t) in s.transitions.iter().enumerate() {
+                let event_idx = event_variants
+                    .iter()
+                    .position(|v| v.name == t.event)
+                    .expect("typeck.rs already validated every transition event exists in <Workflow>Event");
+                let cmp_label = &transition_cmp_labels[j];
+                let next_event_label = transition_cmp_labels.get(j + 1).unwrap_or(&no_such_transition_label);
+                writeln!(self.out, "{cmp_label}:").unwrap();
+                let event_eq = self.icmp("eq", "i64", &event_tag, &event_idx.to_string())?;
+                let action_label = self.fresh_label("workflow_advance_action");
+                writeln!(self.out, "  br i1 {event_eq}, label %{action_label}, label %{next_event_label}").unwrap();
+
+                writeln!(self.out, "{action_label}:").unwrap();
+                for action in &s.on_exit {
+                    self.emit_workflow_action(action, scopes)?;
+                }
+                let target_state = wf.states.iter().find(|st| st.name == t.target).expect("workflow_lower.rs already validated target state exists");
+                let target_global = self.fresh_global("workflow_advance_target_state");
+                writeln!(
+                    self.string_globals,
+                    "{target_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+                    target_state.name.len(),
+                    llvm_escape_bytes(target_state.name.as_bytes())
+                )
+                .unwrap();
+                let set_ok = self.fresh_reg("workflow_advance_set_ok");
+                writeln!(
+                    self.out,
+                    "  {set_ok} = call i32 @nir_workflow_set_state(ptr {name_ptr}, i64 {name_len}, i64 {instance_id_val}, ptr {target_global}, i64 {})",
+                    target_state.name.len()
+                )
+                .unwrap();
+                // `set_ok`'s own failure is the same can't-really-happen
+                // case `emit_workflow_start`'s own `err_label` doc comment
+                // already names (this instance and workflow name were
+                // just proven to match above) — not checked separately.
+                for action in &target_state.on_entry {
+                    self.emit_workflow_action(action, scopes)?;
+                }
+                writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+                writeln!(self.out, "  store i1 true, ptr {payload_ptr}").unwrap();
+                writeln!(self.out, "  br label %{merge_label}").unwrap();
+            }
+        }
+
+        writeln!(self.out, "{no_such_transition_label}:").unwrap();
+        let err_scratch_nt = self.emit_workflow_error(3, None)?; // NoSuchTransition
+        self.emit_workflow_err_into_result(&tag_ptr, &payload_ptr, &err_scratch_nt);
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `__workflow_overdue(workflow_name) -> Result(json,
+    /// WorkflowActionError)` — `docs/ROADMAP.md` A15's SLA/escalation
+    /// design, only reachable for a workflow that declares at least one
+    /// `sla_seconds` entry (`workflow_lower.rs` only synthesizes
+    /// `list_<workflow>_overdue` in that case). Builds a compile-time
+    /// JSON literal `{"State":seconds,...}` from every
+    /// `state { sla_seconds: N }` entry (`typeck.rs::check_workflow_decl`
+    /// already proved every such value a non-negative literal `i64`) and
+    /// hands it to `nir_workflow_list_overdue`, which does the actual
+    /// now-vs-`entered_at` comparison against every live
+    /// `WorkflowInstance` row for this workflow.
+    fn emit_workflow_overdue(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let wf = self.resolve_workflow_layer1(&args[0])?.clone();
+        let result_ty = workflow_result_of(Ty::Json);
+        let (name_ptr, name_len) = self.str_parts(&args[0], scopes)?;
+
+        let mut sla_json = String::from("{");
+        let mut first = true;
+        for s in &wf.states {
+            if let Some((_, value)) = s.entries.iter().find(|(k, _)| k == "sla_seconds") {
+                let Expr::Int(n, _) = value else {
+                    unreachable!("typeck.rs::check_workflow_decl only accepts a literal i64 for sla_seconds")
+                };
+                if !first {
+                    sla_json.push(',');
+                }
+                first = false;
+                sla_json.push_str(&format!("{:?}:{}", s.name, n));
+            }
+        }
+        sla_json.push('}');
+
+        let sla_global = self.fresh_global("workflow_overdue_sla_json");
+        writeln!(
+            self.string_globals,
+            "{sla_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            sla_json.len(),
+            llvm_escape_bytes(sla_json.as_bytes())
+        )
+        .unwrap();
+
+        let json_scratch = self.fresh_reg("workflow_overdue_json_scratch");
+        self.emit_alloca(&json_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("workflow_overdue_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("workflow_overdue_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_workflow_list_overdue(ptr {name_ptr}, i64 {name_len}, ptr {sla_global}, i64 {}, ptr {json_scratch}, ptr {err_scratch})",
+            sla_json.len()
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let json_val = self.fresh_reg("workflow_overdue_json_val");
+        writeln!(self.out, "  {json_val} = load {{ptr, i64}}, ptr {json_scratch}").unwrap();
+        let err_val = self.fresh_reg("workflow_overdue_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("workflow_overdue_result_addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("workflow_overdue_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("workflow_overdue_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("workflow_overdue_ok");
+        let err_label = self.fresh_label("workflow_overdue_err");
+        let merge_label = self.fresh_label("workflow_overdue_merge");
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {json_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        // `nir_workflow_list_overdue`'s own failure mode is a plain `str`
+        // message (bad UTF-8 — the SLA JSON itself can't be malformed,
+        // it's a compile-time-built literal), not a `WorkflowActionError`
+        // — wrapped here as `ProviderRequestFailed(msg)`, reusing the one
+        // variant with a `str` payload as the generic "something went
+        // wrong, here's why" carrier (closest fit, not a perfect name
+        // match: this is an ops/admin query, not a notification send —
+        // `WorkflowActionError` has no dedicated catch-all variant).
+        let err_scratch2 = self.emit_workflow_error(2, Some(&err_val))?; // ProviderRequestFailed(msg)
+        self.emit_workflow_err_into_result(&tag_ptr, &payload_ptr, &err_scratch2);
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `__workflow_pending_for_me`/`__workflow_submitted_by_me`/
+    /// `__workflow_history` — real, compiled, always-`Err` (never a
+    /// trap) implementations. `workflow_lower.rs` synthesizes
+    /// `list_<w>_pending_for_me`/`list_<w>_submitted_by_me`/
+    /// `get_<w>_history` **unconditionally** for every `workflow` block,
+    /// so unlike `__workflow_link_advance` these three can't be rejected
+    /// at compile time without breaking every workflow, including ones
+    /// that never call them (`WORKFLOW_BUILTINS`'s own doc comment).
+    /// State ownership (`owner: role(...)`), "who submitted this," and
+    /// the audit trail all need data this Layer 1 runtime genuinely
+    /// doesn't keep — `WorkflowInstance` (`runtime-kernels/src/lib.rs`)
+    /// has no `owner`/`started_by_subject`/history fields at all — so
+    /// each of these three real, compiled functions always returns a
+    /// real `Err(ProviderRequestFailed(msg))`, naming exactly which
+    /// tracking is missing, rather than a misleading `Ok("[]")` that a
+    /// caller could read as "you truly have zero pending items" instead
+    /// of "this isn't tracked." `ProviderRequestFailed` is reused as the
+    /// generic "something went wrong, here's why" carrier (the same
+    /// "closest fit, not a perfect name match" reuse `emit_workflow_overdue`
+    /// already makes) since `WorkflowActionError` has no dedicated
+    /// catch-all variant of its own.
+    fn emit_workflow_unsupported_query(&mut self, name: &str) -> Result<String, CodegenError> {
+        let result_ty = workflow_result_of(Ty::Json);
+        let reason = format!(
+            "`{name}` needs real durable, restart-surviving storage (state ownership/started-by/\
+             audit-trail tracking) that this compiled backend's Layer 1 workflow runtime doesn't \
+             have — `WorkflowInstance` (runtime-kernels) tracks only the current state"
+        );
+        let msg_global = self.fresh_global("workflow_unsupported_query_msg");
+        writeln!(
+            self.string_globals,
+            "{msg_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            reason.len(),
+            llvm_escape_bytes(reason.as_bytes())
+        )
+        .unwrap();
+        let msg_partial = self.fresh_reg("workflow_unsupported_query_msg_partial");
+        writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
+        let msg_full = self.fresh_reg("workflow_unsupported_query_msg_full");
+        writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", reason.len()).unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("workflow_unsupported_query_result_addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("workflow_unsupported_query_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("workflow_unsupported_query_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+        let err_scratch = self.emit_workflow_error(2, Some(&msg_full))?; // ProviderRequestFailed(msg)
+        self.emit_workflow_err_into_result(&tag_ptr, &payload_ptr, &err_scratch);
+        Ok(dest)
+    }
+
+    /// Shared 3-way branch every `send_email`/`send_sms`/`send_push`/
+    /// `notify` builtin ends with, once its own kernel call has already
+    /// produced `status` (`nir_workflow_send`/`nir_notify`'s shared
+    /// status convention: `0` ok, `1` provider not configured, anything
+    /// else a request failure whose message is in `err_scratch`) — an
+    /// LLVM `switch` rather than a linear `icmp` chain, so "any value
+    /// that isn't 0 or 1" (not just literally `2`) safely falls to the
+    /// request-failed case as the `default`.
+    fn emit_notify_result(&mut self, result_ty: &Ty, status: &str, err_scratch: &str) -> Result<String, CodegenError> {
+        let result_llty = self.llvm_ty(result_ty)?;
+        let dest = self.fresh_reg("notify_result_addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("notify_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("notify_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("notify_ok");
+        let not_configured_label = self.fresh_label("notify_not_configured");
+        let request_failed_label = self.fresh_label("notify_request_failed");
+        let merge_label = self.fresh_label("notify_merge");
+        writeln!(
+            self.out,
+            "  switch i32 {status}, label %{request_failed_label} [ i32 0, label %{ok_label}  i32 1, label %{not_configured_label} ]"
+        )
+        .unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store i1 true, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{not_configured_label}:").unwrap();
+        let not_configured_scratch = self.emit_workflow_error(1, None)?; // ProviderNotConfigured
+        self.emit_workflow_err_into_result(&tag_ptr, &payload_ptr, &not_configured_scratch);
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{request_failed_label}:").unwrap();
+        let err_val = self.fresh_reg("notify_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        let request_failed_scratch = self.emit_workflow_error(2, Some(&err_val))?; // ProviderRequestFailed(msg)
+        self.emit_workflow_err_into_result(&tag_ptr, &payload_ptr, &request_failed_scratch);
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `send_email`/`send_sms`/`send_push(conn, to, template, vars) ->
+    /// Result(bool, WorkflowActionError)` — shared shape, differing only
+    /// in which literal `channel` string (`"email"`/`"sms"`/`"push"`) is
+    /// passed to `nir_workflow_send` (`runtime-kernels`'s "send/notify
+    /// section" — a real, generic authenticated HTTPS POST against an
+    /// admin-configured provider row, `docs/WORKFLOW.md`'s own design).
+    /// `to: Recipient`'s `str` payload sits at the same word offset (1)
+    /// for both `BySubject`/`ByRole` (`ast::prelude_enums`) — extracted
+    /// without branching on the tag, same "both variants agree, so skip
+    /// the dispatch" shape `RoleView`/`ClaimView`'s own single-field
+    /// payloads already get.
+    fn emit_send_notification(&mut self, channel: &str, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = workflow_result_of(Ty::Bool);
+        let recipient_ty = Ty::Named("Recipient".to_string(), vec![]);
+
+        let conn = self.expr(&args[0], scopes)?; // Ty::Db is scalar (i64)
+        let recipient_ptr = self.expr_ptr_expected(&args[1], &recipient_ty, scopes)?;
+        let recipient_llty = self.llvm_ty(&recipient_ty)?;
+        let recipient_payload_ptr = self.fresh_reg("send_notification_recipient_payload_ptr");
+        writeln!(self.out, "  {recipient_payload_ptr} = getelementptr inbounds {recipient_llty}, ptr {recipient_ptr}, i32 0, i32 1").unwrap();
+        let to_val = self.fresh_reg("send_notification_to_val");
+        writeln!(self.out, "  {to_val} = load {{ptr, i64}}, ptr {recipient_payload_ptr}").unwrap();
+        let to_ptr = self.fresh_reg("send_notification_to_ptr");
+        writeln!(self.out, "  {to_ptr} = extractvalue {{ptr, i64}} {to_val}, 0").unwrap();
+        let to_len = self.fresh_reg("send_notification_to_len");
+        writeln!(self.out, "  {to_len} = extractvalue {{ptr, i64}} {to_val}, 1").unwrap();
+
+        let (template_ptr, template_len) = self.str_parts(&args[2], scopes)?;
+        let (vars_ptr, vars_len) = self.str_parts(&args[3], scopes)?;
+
+        let channel_global = self.fresh_global("send_notification_channel");
+        writeln!(
+            self.string_globals,
+            "{channel_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            channel.len(),
+            llvm_escape_bytes(channel.as_bytes())
+        )
+        .unwrap();
+
+        let err_scratch = self.fresh_reg("send_notification_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let status = self.fresh_reg("send_notification_status");
+        writeln!(
+            self.out,
+            "  {status} = call i32 @nir_workflow_send(ptr {channel_global}, i64 {}, i64 {conn}, ptr {to_ptr}, i64 {to_len}, \
+             ptr {template_ptr}, i64 {template_len}, ptr {vars_ptr}, i64 {vars_len}, ptr {err_scratch})",
+            channel.len()
+        )
+        .unwrap();
+
+        self.emit_notify_result(&result_ty, &status, &err_scratch)
+    }
+
+    /// `notify(conn, mq, to, template, vars) -> Result(bool,
+    /// WorkflowActionError)` — same shape as `emit_send_notification`,
+    /// but the callee kernel is `nir_notify` (no channel string — it
+    /// always takes the documented *offline* path, delegating to the
+    /// email channel; see that kernel's own doc comment for why the
+    /// presence-bridge online path isn't reachable this round) and `mq`
+    /// (`args[1]`) is accepted/typechecked but otherwise unused here.
+    fn emit_notify(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = workflow_result_of(Ty::Bool);
+        let recipient_ty = Ty::Named("Recipient".to_string(), vec![]);
+
+        let conn = self.expr(&args[0], scopes)?;
+        let mq = self.expr(&args[1], scopes)?; // Ty::Mq is scalar (i64); unused by nir_notify itself
+        let recipient_ptr = self.expr_ptr_expected(&args[2], &recipient_ty, scopes)?;
+        let recipient_llty = self.llvm_ty(&recipient_ty)?;
+        let recipient_payload_ptr = self.fresh_reg("notify_recipient_payload_ptr");
+        writeln!(self.out, "  {recipient_payload_ptr} = getelementptr inbounds {recipient_llty}, ptr {recipient_ptr}, i32 0, i32 1").unwrap();
+        let to_val = self.fresh_reg("notify_to_val");
+        writeln!(self.out, "  {to_val} = load {{ptr, i64}}, ptr {recipient_payload_ptr}").unwrap();
+        let to_ptr = self.fresh_reg("notify_to_ptr");
+        writeln!(self.out, "  {to_ptr} = extractvalue {{ptr, i64}} {to_val}, 0").unwrap();
+        let to_len = self.fresh_reg("notify_to_len");
+        writeln!(self.out, "  {to_len} = extractvalue {{ptr, i64}} {to_val}, 1").unwrap();
+
+        let (template_ptr, template_len) = self.str_parts(&args[3], scopes)?;
+        let (vars_ptr, vars_len) = self.str_parts(&args[4], scopes)?;
+
+        let err_scratch = self.fresh_reg("notify_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let status = self.fresh_reg("notify_status");
+        writeln!(
+            self.out,
+            "  {status} = call i32 @nir_notify(i64 {conn}, i64 {mq}, ptr {to_ptr}, i64 {to_len}, ptr {template_ptr}, i64 {template_len}, \
+             ptr {vars_ptr}, i64 {vars_len}, ptr {err_scratch})"
+        )
+        .unwrap();
+
+        self.emit_notify_result(&result_ty, &status, &err_scratch)
+    }
+
+    /// `acquire name(proof)` — `docs/LANGUAGE.md` §6a, compiled for real
+    /// 2026-09. `name` must be a `requires`-gated top-level fn
+    /// (`typeck.rs` already proved this; `FnSig::requires` is this
+    /// codegen's own copy of `FnDecl::requires`, looked up here since
+    /// `Codegen` doesn't otherwise keep a reference to the whole
+    /// `Program`). Builds a real `Result(Ty::Fn(params, ret), str)` by
+    /// hand, the same tag-then-payload shape `emit_check_role` already
+    /// uses: `Ok(f)` stores the target function's own address (`ptr
+    /// @name` — a compile-time-known constant operand, no instruction
+    /// needed) as the payload; `Err(reason)` stores a fresh string
+    /// literal naming exactly which requirement `proof` failed to
+    /// prove. The actual check is `emit_str_field_eq_check` against
+    /// `proof`'s own `role`/`value` field — the same runtime comparison
+    /// `emit_requirement_check` does for a *parameter*-shaped proof,
+    /// just against an arbitrary expression's pointer instead.
+    fn emit_acquire(&mut self, name: &str, proof: &Expr, scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let params = self.sigs.get(name).expect("typeck.rs already resolved this acquire target").params.clone();
+        let ret = self.sigs.get(name).expect("typeck.rs already resolved this acquire target").ret.clone();
+        let req = self
+            .sigs
+            .get(name)
+            .expect("typeck.rs already resolved this acquire target")
+            .requires
+            .clone()
+            .expect("typeck.rs only allows acquire on a requires-gated fn");
+        let fn_ty = Ty::Fn(params, Box::new(ret));
+        let result_ty = Ty::Named("Result".to_string(), vec![fn_ty, Ty::Str]);
+
+        let (proof_ty, field_name, expected): (Ty, &str, String) = match &req {
+            Requirement::Role(r) => (Ty::Named("RoleView".to_string(), vec![]), "role", r.clone()),
+            Requirement::Claim(_, v) => (Ty::Named("ClaimView".to_string(), vec![]), "value", v.clone()),
+        };
+        let proof_ptr = self.expr_ptr_expected(proof, &proof_ty, scopes)?;
+        let authorized = self.emit_str_field_eq_check(&proof_ty, &proof_ptr, field_name, &expected)?;
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("acquire_result.addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("acquire_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("acquire_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("acquire_ok");
+        let err_label = self.fresh_label("acquire_err");
+        let merge_label = self.fresh_label("acquire_merge");
+        writeln!(self.out, "  br i1 {authorized}, label %{ok_label}, label %{err_label}").unwrap();
+
+        // `Ok(f)` — variant 0. The target function's own address is a
+        // compile-time constant operand (`ptr @name`), not a value that
+        // needs computing — functions are already global values of
+        // pointer type in LLVM IR.
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store ptr @{name}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        // `Err("...")` — variant 1. Same "the payload's first two words
+        // are directly a `str` value" shape `emit_check_role`'s own
+        // `Err` arm uses.
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let msg = match &req {
+            Requirement::Role(r) => format!("{name} requires role \"{r}\", which the given proof doesn't have"),
+            Requirement::Claim(c, v) => format!("{name} requires claim \"{c}\"=\"{v}\", which the given proof doesn't have"),
+        };
+        let msg_global = self.fresh_global("acquire_err_msg");
+        writeln!(
+            self.string_globals,
+            "{msg_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            msg.len(),
+            llvm_escape_bytes(msg.as_bytes())
+        )
+        .unwrap();
+        let msg_partial = self.fresh_reg("acquire_err_msg_partial");
+        writeln!(self.out, "  {msg_partial} = insertvalue {{ptr, i64}} undef, ptr {msg_global}, 0").unwrap();
+        let msg_full = self.fresh_reg("acquire_err_msg_full");
+        writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", msg.len()).unwrap();
         writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
         writeln!(self.out, "  br label %{merge_label}").unwrap();
 
@@ -5133,6 +7428,36 @@ impl Codegen<'_> {
         // recorder that goes silent on exactly the failures worth
         // recording (a trap, an admission denial) would defeat the
         // point of having one.
+        writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
+        writeln!(self.out, "  call void @abort()").unwrap();
+        writeln!(self.out, "  unreachable").unwrap();
+        writeln!(self.out, "{ok}:").unwrap();
+    }
+
+    /// `str_slice(s, start, end)`'s bounds check — traps unless `0 <=
+    /// start <= end <= len`, same `abort()`-after-flight-recorder-dump
+    /// trap idiom as `guard_io_ok`/`guard_recv_ok`. A wrong bounds check
+    /// here would either read out-of-bounds memory or spuriously abort on
+    /// every valid slice, so this is deliberately three separate `icmp`s
+    /// ANDed together rather than one clever combined comparison.
+    fn guard_str_bounds_ok(&mut self, start: &str, end: &str, len: &str) {
+        if self.audited {
+            return;
+        }
+        let start_neg = self.fresh_reg("slice_start_neg");
+        writeln!(self.out, "  {start_neg} = icmp slt i64 {start}, 0").unwrap();
+        let start_gt_end = self.fresh_reg("slice_start_gt_end");
+        writeln!(self.out, "  {start_gt_end} = icmp sgt i64 {start}, {end}").unwrap();
+        let end_gt_len = self.fresh_reg("slice_end_gt_len");
+        writeln!(self.out, "  {end_gt_len} = icmp sgt i64 {end}, {len}").unwrap();
+        let bad1 = self.fresh_reg("slice_bad1");
+        writeln!(self.out, "  {bad1} = or i1 {start_neg}, {start_gt_end}").unwrap();
+        let is_fail = self.fresh_reg("slice_out_of_bounds");
+        writeln!(self.out, "  {is_fail} = or i1 {bad1}, {end_gt_len}").unwrap();
+        let trap = self.fresh_label("slice_trap");
+        let ok = self.fresh_label("slice_ok");
+        writeln!(self.out, "  br i1 {is_fail}, label %{trap}, label %{ok}").unwrap();
+        writeln!(self.out, "{trap}:").unwrap();
         writeln!(self.out, "  call void @nir_kernel_flight_recorder_dump()").unwrap();
         writeln!(self.out, "  call void @abort()").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
@@ -6018,6 +8343,24 @@ impl Codegen<'_> {
             let mut word_off: u64 = 0;
             for (name, decl_ty) in arm.bindings.iter().zip(variant.payload.iter()) {
                 let field_ty = substitute_ty(decl_ty, &subst);
+                // A `Ty::Unit` payload (e.g. `mq_publish`'s own
+                // `Result(unit, str)`) carries no data at all —
+                // `llvm_ty(Unit)` is `void`, and `alloca void`/`load
+                // void` are both invalid LLVM IR, so this skips the
+                // whole alloca/load/store dance every other field type
+                // gets below. The placeholder `"0"` is never actually
+                // dereferenced as a pointer — `Expr::Ident`'s own
+                // `Ty::Unit` short-circuit returns it directly instead
+                // of loading through it, the same "its own value is
+                // unit; never [meaningfully] read" convention every
+                // other unit-shaped result in this file already uses.
+                // Found by actually compiling `Ok(u) => true` against a
+                // real `Result(unit, str)`, not designed in advance.
+                if field_ty == Ty::Unit {
+                    scopes.define(name, Ty::Unit, "0".to_string());
+                    word_off += conservative_word_count(&field_ty, &self.registry);
+                    continue;
+                }
                 let field_ptr = self.fresh_reg("armfield.addr");
                 writeln!(self.out, "  {field_ptr} = getelementptr inbounds i64, ptr {payload}, i64 {word_off}").unwrap();
                 // Every binding gets its own stack slot — the same
@@ -6041,7 +8384,20 @@ impl Codegen<'_> {
                 word_off += conservative_word_count(&field_ty, &self.registry);
             }
             let fell_through = if result_ty.is_aggregate() {
-                let src = self.expr_ptr(&arm.body, scopes)?;
+                // `expr_ptr_expected`, not plain `expr_ptr` — this arm's
+                // body already has a real, concrete expected type in
+                // hand (`result_ty`, already resolved from `arms[0]`
+                // above), so a bare `Err(SomeVariant(...))`-shaped body
+                // (which `ctor_ty`'s own no-context inference can't
+                // disambiguate — which `Result(T, E)` instantiation does
+                // this `Err` belong to?) resolves correctly instead of
+                // hitting that ambiguity error. Found by actually
+                // compiling a `workflow`-generated `Err(NoSuchTransition())`
+                // arm, not designed in advance — the same "found by
+                // testing" precedent this file's own `Ty::Unit`-payload
+                // fix (just above, in this same per-arm loop) already
+                // set.
+                let src = self.expr_ptr_expected(&arm.body, result_ty, scopes)?;
                 if let Some((ptr, _)) = slot {
                     let bytes = agg_byte_size_operand(result_ty, &self.registry);
                     writeln!(
@@ -6113,7 +8469,10 @@ impl Codegen<'_> {
                              scopes: &mut Scopes|
          -> Result<bool, CodegenError> {
             if result_ty.is_aggregate() {
-                let src = cg.expr_ptr(body, scopes)?;
+                // `expr_ptr_expected`, not plain `expr_ptr` — same fix,
+                // same reason, as `match_enum`'s own per-arm body
+                // evaluation just above.
+                let src = cg.expr_ptr_expected(body, result_ty, scopes)?;
                 if !cg.terminated {
                     if let Some((ptr, _)) = slot {
                         let bytes = agg_byte_size_operand(result_ty, &cg.registry);
@@ -6582,6 +8941,26 @@ fn build_impl(
     // Unix-only.
     #[cfg(unix)]
     clang_cmd.arg("-lm");
+    // Found by a real macOS CI failure, not anticipated in advance:
+    // `native-tls`'s macOS backend (`security-framework`, pulled in
+    // for `nir_https_get`/`nir_https_post` — `Ty::Db`'s `native-tls`
+    // dependency comment) links against `Security.framework`/
+    // `CoreFoundation.framework` (`AuthorizationCreate`/`CFArrayCreate`/
+    // etc.) — real macOS system frameworks clang does **not** auto-link
+    // when the input is a bare `.ll`/staticlib pair rather than actual
+    // Objective-C/C source (unlike compiling a `.m` file, where the
+    // default SDK sysroot linking pulls these in implicitly). Every
+    // other affine-handle kernel in `RUNTIME_KERNELS_LIB` links fine
+    // without them, so this stayed invisible until a real compiled
+    // binary using the TLS path was actually linked on a real macOS
+    // runner — the same "found by testing, not review" discipline this
+    // file's own `-lm`/`NATIVE_STATIC_LIBS` comments already document
+    // for their own platforms. Harmless to pass unconditionally even
+    // for a program that never calls `https_get`/`https_post` (same
+    // reasoning as `-lm` above) — the linker only pulls in what's
+    // actually referenced.
+    #[cfg(target_os = "macos")]
+    clang_cmd.arg("-framework").arg("Security").arg("-framework").arg("CoreFoundation");
     // Windows has no equivalent hand-picked single flag — `std::net`
     // (the `nir_tcp_*` kernels) needs `ws2_32.lib`, and other stdlib
     // pieces need their own system libs beside it, so the captured,

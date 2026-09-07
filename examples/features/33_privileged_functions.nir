@@ -7,6 +7,14 @@
 // proof: a `RoleView` (from `check_role`) or `ClaimView` (from
 // `extract_claim`), themselves only producible from a real, externally-
 // issued, validated token.
+//
+// The `requires`/`acquire` mechanism itself compiles for real (2026-09,
+// LANGUAGE.md §10) -- but this file's own worked examples authenticate
+// via `oidc_validate_token` (JWT/JWKS validation), which remains
+// interpreter-only-designed, so `nirdosha build` still rejects this
+// file as a whole. See `50_field_masking_and_check_role.nir` for a
+// role-gated `acquire` flow built on `check_role` instead, which
+// compiles and runs end to end today.
 
 fn transfer_funds(amount: i64) -> i64 requires(role: "admin") {
     return amount

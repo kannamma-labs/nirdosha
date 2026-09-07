@@ -148,6 +148,19 @@ pub enum Domain {
     /// pair; a total-ever-created cap would be a different, not-yet-
     /// asked-for kind of limit.
     Thread,
+    /// One outstanding `db` connection (between `db_connect` and its
+    /// matching `stop`) — same ceiling-on-concurrently-held-affine-
+    /// handles shape as `Tcp`/`File` above, now that a real SQLite
+    /// backend exists (`nir_db_connect`, `lib.rs`'s "db kernels"
+    /// section). Appended after `Thread`, not inserted earlier, so
+    /// every existing `Domain as u8` discriminant this module's own
+    /// flight-recorder encoding (`kernel::recorder::domain_name`)
+    /// depends on stays stable.
+    Db,
+    /// One outstanding `mq` (Redis) connection — same shape as `Db`
+    /// just above, appended after it for the same "existing `Domain as
+    /// u8` discriminants stay stable" reason.
+    Mq,
 }
 
 impl Domain {
@@ -161,6 +174,8 @@ impl Domain {
             Domain::Tcp => "NIRDOSHA_KERNEL_MAX_TCP",
             Domain::File => "NIRDOSHA_KERNEL_MAX_FILE",
             Domain::Thread => "NIRDOSHA_KERNEL_MAX_THREAD",
+            Domain::Db => "NIRDOSHA_KERNEL_MAX_DB",
+            Domain::Mq => "NIRDOSHA_KERNEL_MAX_MQ",
         }
     }
 
@@ -190,12 +205,16 @@ impl DomainCounters {
 static TCP: DomainCounters = DomainCounters::new();
 static FILE: DomainCounters = DomainCounters::new();
 static THREAD: DomainCounters = DomainCounters::new();
+static DB: DomainCounters = DomainCounters::new();
+static MQ: DomainCounters = DomainCounters::new();
 
 fn counters_for(domain: Domain) -> &'static DomainCounters {
     match domain {
         Domain::Tcp => &TCP,
         Domain::File => &FILE,
         Domain::Thread => &THREAD,
+        Domain::Db => &DB,
+        Domain::Mq => &MQ,
     }
 }
 
@@ -274,7 +293,7 @@ pub fn stats(domain: Domain) -> (i64, u64, u64) {
 /// it's ever seen, not just a diagnostic curiosity.
 pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
-    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread)] {
+    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq)] {
         let (held, grants, denials) = stats(domain);
         out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials}\n"));
     }

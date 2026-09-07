@@ -1210,6 +1210,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-plugin-native-kv"
+version = "0.1.0"
+
+[[package]]
+name = "nirdosha-plugin-native-shout"
+version = "0.1.0"
+
+[[package]]
 name = "nirdosha-presence-gateway"
 version = "0.1.0"
 dependencies = [

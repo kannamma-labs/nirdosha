@@ -1183,6 +1183,539 @@ passes through untouched, and a role the identity's `claims_json`
 doesn't carry at all fails at `check_role` itself, before a `RoleView`
 is ever produced.
 
+**Twenty-first update:** `fn(..)->..`/`acquire`/`requires(role/claim:
+...)` on a *function* — first-class and privileged functions,
+§6a — compiled for real, closing the one gap the Twentieth update's own
+closing line named ("`acquire`... still has zero codegen"). Two pieces,
+both new:
+
+*Ordinary first-class functions.* A bare top-level `fn` name used as a
+value (`apply(double, 21)`, no `requires(...)` involved) now evaluates
+to its own address — `codegen.rs::Expr::Ident`'s one new fallback, hit
+only when `name` isn't a local variable — and calling a `fn(..)->..`-
+typed value (a parameter, a match-bound name, anything) emits a real
+indirect call (`codegen.rs::call_indirect`), spelling out the full
+`<ret>(<params>)` function type LLVM requires at an indirect call site.
+`Ty::Fn` itself needed a real `llvm_ty` mapping for the first time
+(plain `ptr` — it's freely copyable and non-affine already, `Ty::
+is_affine`'s own doc comment says so, so nothing else about the
+ownership story had to change) and a dedicated `mangle_ty` case (its
+`Display` form contains `(`/`)`/`,`/`->`, none legal in an unquoted
+LLVM identifier — the generic fallback would have produced unparseable
+IR for `Result(fn(..)->.., str)`'s own synthesized name, caught by
+actually trying to link the output, not by inspection).
+
+*`acquire name(proof)`.* Builds a genuine `Result(fn(params) -> ret,
+str)` by hand — the same tag-then-payload shape `check_role`'s own
+compiled implementation already uses (`Ok(f)` stores the target
+function's real address as the payload; `Err(reason)` names exactly
+which requirement wasn't met), with the actual check itself
+(`emit_str_field_eq_check`, factored out of the Twentieth update's own
+`emit_requirement_check` so both a function-level proof and a
+field-masking proof share one implementation) identical to what
+field-masking already does: GEP to the proof's `role`/`value` field,
+`nir_str_eq` against the requirement's compile-time-known string.
+
+**A real, disclosed ordering constraint, found by actually compiling a
+`match` shaped this way, not by reading the codegen plan in advance:**
+`match_expr`'s own result type is inferred from its *first* arm's body
+— evaluated *before* that arm's own bindings exist in scope, a
+pre-existing property of `match_expr`'s design that simply never had a
+way to surface before now, since every previous arm binding was always
+a plain value used directly, never called *as a function*. `Ok(f) =>
+f(...)` written as a match's first arm hits this: `f` isn't bound yet
+at the point its type needs inferring, so the callee resolves to
+nothing and the match's whole result type comes out wrong. Not a
+compiler bug to fix here — reordering (`Err(...)` first) is a complete,
+correct workaround, and the real examples/tests below all use it.
+
+**Real, compiled-and-run verification**, matching every other update's
+own standard: `check_role_produces_real_role_view_that_drives_field_masking`'s
+function-level sibling, `acquire_produces_real_callable_fn_value_gated_by_check_role`
+(`crates/compiler/tests/codegen.rs`) — an identity that proves
+`get_employee`'s required role (`"hr_staff"`) gets a real, callable
+function back and a real return value from calling it; one that
+doesn't gets a real `Err`, never reaching `get_employee`'s body at all.
+`ordinary_first_class_function_value_compiles_and_calls_indirectly`
+covers the ungated half the same way. `examples/features/
+50_field_masking_and_check_role.nir` — the README's own hero example —
+now composes *both* mechanisms on one function: `get_employee
+requires(role: "hr_staff")` gates who can call it at all, `salary
+requires(role: "admin")` separately gates what a successful caller sees
+back, and the two roles are genuinely independent (an hr_staff member
+who isn't also an admin gets real records with `salary` redacted; an
+outsider who's neither can't obtain a callable `get_employee` in the
+first place).
+
+**Still real, still open, unaffected by this update:** `extract_claim`/
+`oidc_validate_token` (the claim/OIDC half of §6a's own worked example,
+`examples/features/33_privileged_functions.nir`) remain interpreter-
+only-designed with the interpreter now gone, so a claim-gated flow
+built on real JWT/JWKS validation still doesn't run end to end — only
+the role-gated, `check_role`-driven path does. The Phase-4b affine-in-
+struct/enum gap (a `struct`/`enum` whose payload transitively contains
+`box`/`&`/`thread`/`chan`/`tcp`/`file`/`db`/`mq`) is unrelated and still
+open, same as before.
+
+**Twenty-second update:** a minimal compiled `serve` mode (ROADMAP.md
+Track B8) — the direct answer to "research prototype": a compiled
+Nirdosha binary now serves real HTTP traffic and dispatches to compiled
+business logic, self-contained, no interpreter. This was never actually
+gated on `db`/`json`/identity landing first (Track B's own sequencing
+was a policy choice, not a technical one) — `tcp`/`tcp_listener` were
+already fully compiled with a real OS accept loop, the only missing
+piece was a way to parse an HTTP request line at all.
+
+*Three new string primitives*, deliberately minimal (`docs/LANGUAGE.md`
+§5/§10) — not a general string library: `len(s: str) -> i64` (extends
+the existing Vector-only `len`, an `extractvalue` on `str`'s own
+`{ptr, i64}` representation, no kernel call); `str_slice(s, start, end)
+-> str` (pure pointer arithmetic — `getelementptr` + a new bounds-check
+trap, `codegen::guard_str_bounds_ok`, modeled on `guard_io_ok`/
+`guard_recv_ok`'s own abort-after-flight-recorder-dump idiom); and
+`str_index_of(haystack, needle) -> i64`, the one genuine byte-scan, the
+only one of the three backed by a real linked kernel
+(`nir_str_index_of`, `runtime-kernels/src/lib.rs`, parallel to
+`nir_str_eq`). No `split`/`starts_with`/`trim`/string-concatenation —
+tokenizing a request line is `str_index_of` + `str_slice` composed a
+few times in `.nir` source, and path routing is a plain `.nir`
+`if`/`else if` chain against the already-existing `==` — genuinely no
+new language construct anywhere in this update.
+
+**`examples/features/51_compiled_serve.nir`** — hand-parses `METHOD SP
+PATH SP VERSION\r\n...` and routes `/api/<fn>` to two distinct compiled
+`fn`s (`handle_hello`/`handle_echo`) inside a real `while true { accept
+... }` loop, GET-only, one request per connection, `Connection: close`
++ a real socket close as the end-of-body signal (no `Content-Length` —
+the same simplifying cut the existing client-side `http_get` builtin
+already made, mirrored from the other side). Unlike every other file in
+the catalogue, its own accept loop never returns, so it's meant to be
+run standalone and driven with a real `curl`, not read to completion by
+itself — and it was: `curl` against a running compiled binary produced
+distinct, correct bodies from `/api/hello` and `/api/echo`, and a real
+404 from an unrouted path.
+
+**Real, compiled-and-run verification**, same standard as every update
+above: `crates/compiler/tests/codegen.rs`'s
+`compiled_serve_routes_by_path_to_two_compiled_functions` spawns the
+compiled binary (its `accept` blocks, so it runs in its own process,
+`compiled_listen_accept_serves_a_real_client`'s own template), drives
+two real `std::net::TcpStream` requests against the one running
+process, and asserts the two routes produce two different real bodies
+plus a real 404 for an unknown path — not a mock, not a typecheck-only
+test. `str_slice_and_str_index_of_parse_a_request_line` and
+`str_slice_traps_on_out_of_bounds_end` cover the three primitives (and
+their trap) directly.
+
+**Still real, still open, unaffected by this update:** POST/request-
+body handling (`Content-Length`-driven parsing), keep-alive/pipelining,
+concurrent connection handling (`spawn`-per-connection), string
+concatenation, and everything else in Track B (`db`/`transact`/`mq`/
+`json`/`http`-client-server/`workflow`/`sandbox`).
+
+**Twenty-third update:** real identity crypto — `oidc_validate_token`/
+`extract_claim`/`identity_expired` compiled for real (ROADMAP.md B4),
+closing the exact gap the Twenty-first update's own closing line named
+("`extract_claim`/`oidc_validate_token`... remain interpreter-only-
+designed with the interpreter now gone, so a claim-gated flow... still
+doesn't run end to end"). It does now.
+
+*`nir_oidc_validate_token`* (`runtime-kernels/src/lib.rs`) ports
+`crates/presence-gateway/src/jwt.rs`'s exact JWKS-verification shape —
+same new dependency set (`jsonwebtoken`/`serde`/`serde_json`/`base64`)
+and, critically, its one load-bearing security detail: a JWK's own
+`kty` locks which algorithm it may verify under (RSA→RS256, EC-P256→
+ES256, oct→HS256), never derived from the token's own `alg` header —
+closes the classic algorithm-confusion attack, ported rather than
+re-derived. Deliberately **not** validating `exp` against the real
+wall clock inside this builtin, unlike `jwt.rs::verify` (a live network
+boundary, where that split is correct) — a compiled `.nir` builtin
+stays a pure function of its inputs (§9), so expiry is
+`identity_expired(identity, now)`'s job given an explicit `now`.
+`VerifiedIdentity` has six fields (unlike `RoleView`'s one), so
+`codegen::emit_oidc_validate_token` writes the kernel's out-params
+**directly into a scratch `VerifiedIdentity`'s own field pointers**
+(`field_index_and_ty`, the same helper `emit_check_role` already uses
+to *read* `claims_json`) rather than double-buffering, then `memcpy`s
+the whole struct into the `Result`'s payload on success — the same
+"GEP to the field, no intermediate copy" discipline
+`construct_variant`'s generic aggregate-payload path already uses.
+
+*`nir_check_role` upgraded alongside this*, same signature, no
+`codegen.rs` change needed: tries `claims_json` as real JSON first (a
+top-level `"roles"` array), falling back to the original plain
+comma-separated matching on parse failure — so
+`check_role_produces_real_role_view_that_drives_field_masking`'s own
+existing test fixture (`VerifiedIdentity` built directly with
+`claims_json = "admin,editor"`, not JSON) keeps working unchanged,
+while `oidc_validate_token`'s own real JSON claims now check out
+correctly too. `nir_extract_claim` is new, structurally identical to
+`nir_check_role`/`emit_check_role`'s shape (one kernel call, a
+bool-shaped status, a single `str` payload on success).
+
+**A real, pre-existing, documented codegen limitation surfaced again,
+not introduced here:** the Twenty-first update's own `match_expr`
+ordering caveat (a match's result type is inferred from its *first*
+arm's body, evaluated before that arm's own bindings exist in scope) —
+`examples/features/30_identity_oidc.nir`'s own fixture writes
+`Ok(id) => id` as its first arm, which hits exactly this; the complete,
+correct workaround (`Err(...)` first) is the same one already
+documented, applied again here rather than re-investigated.
+
+**Real, compiled-and-run verification**: a genuine HMAC-SHA256 JWT
+(the same fixture `examples/features/30_identity_oidc.nir`/
+`31_mock_identity_provider.nir` already use — `kid:"key1"`,
+`kty:"oct"`, secret `"my-secret-key"`), verified end to end in a
+compiled binary —
+`oidc_validate_token_verifies_a_real_jwt_and_drives_check_role_and_extract_claim`
+(`crates/compiler/tests/codegen.rs`): real subject/issuer/audience
+extracted, `check_role`/`extract_claim` reading the real JWT claims
+correctly, `identity_expired` correct for both a far-future and a
+just-past `now`, a wrong-issuer token and a tampered-signature token
+both real `Err`s, never a trap. `runtime-kernels`' own
+`identity_kernel_tests` module covers the pure verification logic
+directly (valid/tampered/wrong-issuer/wrong-audience/unknown-`kid`/
+malformed-JWKS, plus `check_role`'s JSON-vs-comma-separated paths and
+`extract_claim`'s found/not-found cases).
+
+**Still real, still open, unaffected by this update:** `check_role_path`/
+`extract_claim_path` (dotted-path claim lookup), live JWKS refresh/
+rotation (static JWKS only), sessions/refresh tokens/revocation/
+`validate_api_key`, and everything else in Track B.
+
+**Twenty-fourth update:** `db` (SQLite) + `json` compiled for real
+(ROADMAP.md B2) — real ecosystem crate this time, not a from-scratch
+port: `rusqlite`'s `bundled` feature (already the root workspace's own
+choice, `crates/compiler/Cargo.toml`), statically linked into
+`runtime-kernels` the same way `jsonwebtoken` was for Phase 1.
+
+*A real design decision, made rather than deferred*: `Ty::Json` compiles
+as the raw JSON text itself — the same `{ptr, i64}` representation
+`Ty::Str` already has — not a persisted parsed-tree handle the way the
+(now-deleted) interpreter's `Value::Json(Arc<serde_json::Value>)` was.
+Every `json_get_*`/`json_array_*` accessor re-parses that text on every
+call via a linked `nir_json_*` kernel (`serde_json`, already linked in
+for Phase 1's JWT claims). The cost is real (re-parsing instead of a
+cached tree) and disclosed, not hidden — the win is zero new runtime
+value type: `db_query`'s own result just *is* a `str`-shaped value with
+a different type tag, exactly the design this item's own doc comment
+anticipated ("rows ride as `str`, JSON-encoded... avoids building a
+from-scratch runtime JSON representation twice").
+
+*A real handle-table reuse, not a new mechanism*: a `db` connection
+rides through `kernel::HandleTable<rusqlite::Connection>` (`db_table()`)
+— the same generic table `kernel/mod.rs` had already built, unused,
+"for the next resource domain... whose handle isn't already a raw OS
+fd," specifically anticipating this. `Domain::Db` is a new admission-
+control domain, appended after `Thread` (not inserted earlier) so every
+existing `Domain as u8` flight-recorder discriminant stays stable.
+
+*Bind values* (`db_execute`/`db_query`'s trailing `?`-placeholder args):
+`codegen::emit_db_binds` builds a `[N x NirBindValue]` array, one
+element per bind arg, tagged by that arg's own static type
+(`i64`/`f64`/`str`/`bool`) — a small `#[repr(C)]` tagged-union struct,
+non-packed so ordinary C/LLVM natural-alignment layout applies on both
+the Rust and generated-IR sides identically, the same "trust the
+target's own layout rules" stance `agg_byte_size_operand`'s sizeof trick
+already takes. A zero-payload `enum` variant as a bind value (part of
+the original design) isn't compiled yet — named, not silently dropped.
+
+**A real, found-by-testing gap, not designed in advance**: SQLite has no
+native boolean storage class, so a bound `bool` round-trips through
+`db_query` as a plain JSON *number* (`0`/`1`), never a JSON boolean —
+`json_get_bool`'s original strict "must be a real JSON `true`/`false`"
+check would have made it and `db` unusable together for any boolean
+column. `nir_json_get_bool` now accepts both shapes; any other integer
+is still a real `Err`, not silently coerced.
+
+**Real, compiled-and-run verification**: `examples/features/
+27_database.nir` — an *existing, unmodified* file, previously
+typechecked but with zero execution path of any kind (no interpreter
+left, no codegen) — now compiles and runs against a real in-memory
+SQLite database: schema creation, two parameterized inserts, a filtered
+`SELECT` navigated through `json_array_get`/`json_get_str`, an update,
+and a connection failure that's a real `Err`, never a trap
+(`db_connect_execute_query_round_trips_real_sqlite_rows`,
+`crates/compiler/tests/codegen.rs`). A second test exercises every
+other `json_*` accessor (`json_get_i64`/`_f64`/`_bool`,
+`json_array_len`, `json_set_str`, `json_get`, `json_parse`) against a
+real `db_query` result and plain literals.
+
+**A real, pre-existing, documented codegen limitation surfaced a second
+time, not introduced here**: the same `match_expr` first-arm-inference-
+order gap the Twenty-third update's own verification hit — this time
+for plain scalar payloads (`str`/`bool`/`f64`), not just an aggregate
+struct. `local_ty_of`'s `Expr::Ident` fallback is unconditionally
+`Ty::I64` when a name isn't bound yet, which happens to be *correct* by
+coincidence whenever the real first-arm type also is `i64` (as
+`db_execute`'s own `Ok(n) => n` already was, `27_database.nir`'s own
+existing arm order) — but wrong, and IR-invalid, for any other scalar
+type (`Ok(f) => f`, `Ok(b) => b`, `Ok(s) => s` as a match's *first*
+arm). The complete, correct workaround is unchanged: put whichever arm
+is a bare bound identifier *second*, not first — a literal or
+constructor first arm resolves correctly regardless of scope. Applied
+throughout the new tests above; not a compiler bug fixed in this
+update.
+
+**Still real, still open, unaffected by this update:** Postgres (layer
+2 — `dbconn.rs` no longer exists at all, removed with the interpreter),
+a zero-payload `enum` bind value, `BLOB` columns (no `bytes` type —
+represented as JSON `null`), `mq`/`http`/`https`/`transact`/`workflow`/
+`sandbox`, and the rest of Track B.
+
+**Twenty-fifth update:** `transact` Layer 1 compiled for real
+(ROADMAP.md B1) — the same layer the now-deleted interpreter itself
+shipped *first*, before retry/timeout/durability/replay
+(`docs/TRANSACT.md`'s own "layers, not a syntax spec" section). Real
+control flow: `precheck?/network/verify/commit/compensate?/log?`, the
+implicit `network`/`verify`/`txn_id` bindings (resolved through the
+ordinary `Expr::Ident`/`Scopes` mechanism — no special-casing needed
+there, `call_args`'s existing per-argument evaluation already handles
+it once each binding's own stack slot is registered), a real `i1`
+result exactly as documented (`true` if `commit` ran, `false` if
+`compensate` ran or would have). `txn_id` is a real, always-unique
+value now too (`nir_transact_gen_txn_id` — process id + a coarse
+timestamp + an atomic sequence number, hex-formatted; not
+cryptographically unpredictable, and doesn't need to be — its only job
+is deduping a resend, and no crash-replay mechanism exists yet to give
+it a reason to survive a restart).
+
+**A genuine architectural finding, not a scope choice made in
+advance**: `network`'s `retry`/`timeout` modifiers turned out to be
+impossible to give real compiled semantics to, not merely deferred.
+The deleted interpreter's retry-on-trap logic depended on catching its
+own internal `RuntimeError` before it ever unwound out of the
+interpreter — a compiled trap has no such thing, it's an unconditional
+`abort()` (every `guard_*` in `codegen.rs`), full stop. The natural
+fallback — react to a `Result::Err` return instead of a trap, the same
+rule `docs/TRANSACT.md`'s own §1b already uses for `commit`/`compensate`
+— doesn't apply to `network` specifically: its declared return type is
+restricted to a bare scalar by `Ty::is_transact_scalar` (already
+locked, not something this update touched), which by definition
+excludes `Result(_, _)`. So there is no non-trapping signal of any kind
+for `network` to retry on in the compiled model — not "not yet built,"
+genuinely not expressible without either giving compiled traps a
+catchable/unwinding semantics (a much larger, unrelated language
+change) or loosening `is_transact_scalar`'s own durability-boundary
+rule. `check_expr`'s pre-pass rejects `retry`/`timeout` on `network`
+explicitly, with this exact reasoning in the error message, rather than
+silently ignoring the modifiers or miscompiling something that looks
+like it retries but doesn't.
+
+`commit`/`compensate`'s own return types stay genuinely unconstrained
+(`docs/TRANSACT.md`'s own deliberate design), so retry-with-backoff
+*is* structurally possible there — a new `sleep_ms` kernel
+(`nir_sleep_ms`, closing `docs/ROADMAP.md`'s own B9 in passing) exists
+for exactly that future use, but building and carefully verifying the
+backoff-then-trap-on-exhaustion loop itself was real, separate scope
+this update didn't attempt — a named follow-up, not a partial or buggy
+attempt left in the tree.
+
+**Real, compiled-and-run verification**: `examples/features/
+36_transact.nir` — an *existing, unmodified* file, previously
+typechecked but with zero execution path (no interpreter, no codegen)
+— now compiles and runs: `checkout(10)` commits (`verify` true),
+`checkout(-5)` compensates (`verify` false), `minimal(1)` (no
+`precheck`/`compensate`/`log` slot at all) commits
+(`transact_commits_and_compensates_for_real_matching_the_checked_in_example`,
+`crates/compiler/tests/codegen.rs`). Three more tests cover
+`precheck == false` skipping every other slot entirely, `verify ==
+false` with no `compensate` slot yielding `false` with nothing else to
+run, and `network retry 3` producing the specific, real rejection
+message above rather than a generic error or silent no-op.
+
+**Still real, still open, unaffected by this update:** `network`'s
+`retry`/`timeout` (architecturally blocked, above), `commit`/
+`compensate`'s own retry-with-backoff, the durability log
+(`transact_log.rs`, deleted with the interpreter), crash replay, and
+everything else in Track B (`mq`/`http`/`https`/`workflow`/`sandbox`).
+
+**Twenty-sixth update:** `mq` (Redis, B3) and `http`/`https` (B5)
+compiled for real — real ecosystem crates again, not from-scratch ports:
+`redis` and `native-tls`, the same two the root workspace's own
+`crates/compiler/Cargo.toml` already pinned for the (now-deleted)
+interpreter's identical job.
+
+*`mq_connect`/`mq_publish`/`mq_consume`* ride through
+`kernel::HandleTable<redis::Connection>` (`mq_table()`), the same shape
+`db_table()` already established — a new `Domain::Mq` admission
+ceiling, appended after `Domain::Db` so existing discriminants stay
+stable. `LPUSH`/`BLPOP` back publish/consume exactly as the original
+design specified. Verified against a real local Redis instance (not a
+mock): `mq_publish_and_consume_round_trip_a_real_message`
+(`crates/compiler/tests/codegen.rs`) and `runtime-kernels`' own
+`mq_kernel_tests`. `examples/features/28_message_queue.nir` itself
+still doesn't compile as-is — `Ok(m) => m` as `mq_consume`'s first arm
+hits the same pre-existing `match_expr` ordering gap the identity work
+already found and worked around; the file is unmodified, matching this
+track's own "don't touch existing examples to route around a
+documented, separate limitation" practice.
+
+*`http_get`/`http_post`/`https_get`/`https_post`* needed no new `Ty` at
+all — `HttpResponse` was already a plain prelude struct, and every call
+is a one-shot request/response, never a persisted handle. Request/
+response handling (`Connection: close` + read-to-EOF) is exactly the
+already-locked design from before this backend existed; `https_get`/
+`https_post` wrap the identical logic in a `native_tls::TlsStream`.
+
+**Two real things found by actually testing this, not designed in
+advance:**
+
+1. **System OpenSSL didn't link.** The first compiled binary using
+   `https_get` failed at the link step — this environment's system
+   `libssl` doesn't export symbols (`SSL_ctrl`/`SSL_CTX_ctrl`/
+   `X509_LOOKUP_ctrl`) the resolved `openssl-sys` version expects, a
+   real ABI mismatch, not a hypothetical portability concern. Fixed by
+   adding a direct `openssl = { features = ["vendored"] }` dependency to
+   force Cargo's feature unification to statically compile and link
+   OpenSSL from source instead — the exact "no system dependency"
+   posture `rusqlite`'s own `bundled` feature already gives SQLite,
+   given to TLS too, for the same self-contained-deployment reason.
+   `docs/ROADMAP.md`'s own B5 entry had flagged "vendored vs. system" as
+   a decision to make deliberately, not silently; this is that decision,
+   forced by a real failure rather than made in the abstract.
+2. **Chunked transfer-encoding needed real decoding, not a documented
+   gap.** A real HTTPS `GET` against `example.com` (a genuine production
+   server, not a local mock) came back with raw `<hex-size>\r\n...`
+   chunk framing still in the body — `example.com` chunks by default,
+   and a large fraction of real HTTP servers do too. Unlike skipping
+   `Content-Length` parsing (redundant once every request already reads
+   to EOF), an undecoded chunked body is a visibly, materially wrong
+   result for ordinary real-world use, not an acceptable "first cut"
+   simplification — so `decode_chunked_body` was added:
+   `Transfer-Encoding: chunked` is detected from the response headers,
+   and the hex-size/data/CRLF chunk sequence is decoded for real. Any
+   other transfer encoding is left as-is (the original, narrower scope,
+   still honestly disclosed).
+
+A third design decision, made rather than deferred: a `Ty::Unit`-payload
+`Result` variant binding (`mq_publish`'s own `Result(unit, str)`,
+`Ok(u) => true`) turned out to `alloca void`/`load void` — both invalid
+LLVM IR, a genuine pre-existing `match_enum`/`Expr::Ident` gap, not
+specific to `mq` at all (simply never exercised before, since no
+earlier compiled builtin's `Ok` variant bound a bare `unit` payload).
+Fixed at both sites: `match_enum`'s per-arm binding loop skips the
+alloca/load/store dance entirely for a `Ty::Unit` field, and
+`Expr::Ident`'s own read path short-circuits to the same placeholder
+`"0"` value every other unit-shaped result in this file already uses,
+rather than trying to load one back.
+
+**Real, compiled-and-run verification**: `mq_publish_and_consume_
+round_trip_a_real_message` and `http_get_and_post_round_trip_against_
+a_real_local_server` (`crates/compiler/tests/codegen.rs`) — a real
+Redis publish-then-consume round trip and a real local-TCP-server
+HTTP GET/POST round trip (verifying the request the server actually
+received carried a real `Content-Length` header and body), plus a
+manual, network-dependent HTTPS `GET` against `example.com` proving the
+vendored-TLS + chunked-decoding path end to end. `runtime-kernels`' own
+`mq_kernel_tests`/`http_kernel_tests` cover the kernels directly,
+including chunked-body edge cases (empty body, truncated input,
+non-chunked bodies left untouched).
+
+**Still real, still open, unaffected by this update:** `mq_connect_via`
+(the separate, plugin-dispatched external-service-boundary mechanism),
+`workflow`, `sandbox`, and `transact`'s own still-open remainder
+(durability log, crash replay, `commit`/`compensate` retry-with-backoff).
+
+**Twenty-seventh update:** `workflow` (B10, Phase 5) compiled for real —
+Layer 1 only, same "layers, not a syntax spec" framing Twenty-fifth
+update's `transact` already established for itself.
+
+*`start_<workflow>`/`advance_<workflow>`, `on_entry`/`on_exit`, ordinary
+transitions, `terminal` states* (`codegen.rs`'s `resolve_workflow_layer1`/
+`emit_workflow_action`/`emit_workflow_start`/`emit_workflow_advance`)
+needed no new `Ty` at all — `workflow_lower.rs` already desugars a
+`workflow` block into ordinary `fn`/`enum`/`struct` declarations before
+codegen ever sees it, so this backend's job was making those
+already-synthesized functions compile, not inventing new codegen for
+`workflow` syntax itself. `__workflow_pending_for_me`/
+`__workflow_submitted_by_me`/`__workflow_history` (synthesized
+unconditionally for *every* workflow, whether or not it's ever called)
+get real, compiled, always-`Err` bodies instead — rejecting them at
+compile time would break every workflow, not just ones that call them.
+`__workflow_link_advance` stays compile-time-rejected (it only exists
+for a workflow with a `link`-marked transition, so this narrows
+correctly, unlike the three query fns above).
+
+*`send_email`/`send_sms`/`send_push`/`notify`* (`emit_send_notification`/
+`emit_notify`/`emit_notify_result`) needed one real ownership-checker fix
+beyond straightforward codegen: `notify(conn: db, mq: Mq, ...)` has *two*
+connection-shaped arguments, but `ownership.rs`'s existing "a builtin's
+leading connection argument is read, not consumed" exemption
+(`db_query`/`db_execute`/`send_email`/... already had it) only ever
+checked argument index 0 — `notify`'s own `mq` argument at index 1 was
+silently treated as a consuming move on every call, so `stop mq_conn`
+right after a `notify(...)` call in the same function was a real (if
+surprising) `use after it was moved` error. Fixed by adding the matching
+`i == 1 && name == "notify"` exemption, general and not workflow-file-
+specific, the same way the two match-arm-routing fixes below Twenty-
+fifth update already were.
+
+*`state { sla_seconds: N }` + `list_<workflow>_overdue()`* (A15,
+`emit_workflow_overdue`) is new surface, not just newly-compiled old
+surface — `workflow_lower.rs` only synthesizes `list_<workflow>_overdue`
+for a workflow that declares at least one `sla_seconds` entry (the same
+"unused feature costs nothing" convention `LinkToken` already follows),
+and the compiled query reports every instance whose *current* state
+declares `sla_seconds` and whose time-in-state has passed it — real SQL
+over the same durable `workflow_instance` store, not a new one. Detection
+only: nothing in the language fires an escalation automatically, so a
+caller (an external scheduler, or — in
+`examples/features/54_compiled_workflow_escalation.nir` — `main` itself,
+standing in for one) still has to poll this and call `advance_<workflow>`
+to actually escalate.
+
+**A second real, general compiler bug found by writing the third example
+file, not designed against in advance:** `codegen.rs::match_expr`'s
+`result_ty = self.local_ty_of(&arms[0].body, scopes)` runs *before*
+`match_enum` binds any arm's own payload into scope. When `arms[0]`'s
+body is a bare identifier the match itself just bound — `Ok(v) => v`
+written as the *first* arm, rather than second — `local_ty_of` can't
+find `v` in scope yet and silently falls back to its `Ty::I64` default,
+miscompiling a `bool`-producing match into an `i64`-typed result slot.
+Caught by clang rejecting the resulting IR (`'%v.val' defined with type
+'i1' but expected 'i64'`) while building
+`54_compiled_workflow_escalation.nir`, not a silent wrong answer — but a
+real miscompile all the same, and not workflow-specific (any `match`
+whose first arm is a bound identifier can hit it). Not fixed in
+`codegen.rs` itself this round — worked around the same way
+`52_compiled_workflow_state_machine.nir`'s own `advance_now` call sites
+already do, by ordering the arm whose body doesn't depend on the match's
+own bindings first (`Err(e) => false` before `Ok(v) => v`). A real fix
+(`local_ty_of` should try every arm, not just `arms[0]`, and prefer
+whichever one it can actually resolve) is named here, not attempted, the
+same "narrow, disclosed" posture the pre-existing aggregate-arm
+`expr_ptr`/`expr_ptr_expected` gap already has.
+
+**Real, compiled-and-run verification**: three new example files, each
+built and run for real, output inspected, not just typechecked —
+`52_compiled_workflow_state_machine.nir` (state machine, `on_entry`/
+`on_exit`, `terminal`, `Err(NoSuchTransition)`/`Err(InstanceNotFound)`),
+`53_compiled_workflow_notifications.nir` (all four notification builtins
+against a real self-hosted `tcp_listener` standing in for the provider,
+real `Authorization: Bearer` header and JSON body over the wire, plus the
+real not-configured `send_push` path), `54_compiled_workflow_escalation.nir`
+(SLA detection + a real external-scheduler-style escalation round trip).
+Five new `crates/compiler/tests/codegen.rs` tests cover the same ground
+at the test-suite level: `workflow_start_advance_runs_on_entry_on_exit_and_reaches_a_terminal_state`,
+`workflow_on_entry_send_email_posts_to_a_real_configured_provider`,
+`workflow_list_overdue_reports_a_real_stale_instance_and_ignores_states_with_no_sla`,
+`workflow_with_a_data_block_is_explicitly_rejected_not_silently_dropped`,
+`workflow_link_marked_transitions_are_explicitly_rejected_not_silently_dropped`.
+Full regression: `cargo test -p nirdosha` (every test file green, 108/108
+in `tests/codegen.rs`) and `cargo test` from inside
+`crates/runtime-kernels`'s own separate `[workspace]` root (84/84,
+`--skip kernel::recorder`).
+
+**Still real, still open, unaffected by this update:** a non-empty
+`data { ... }` block and `link`-marked (magic-link) transitions stay
+explicitly rejected — this Layer 1 runtime has nowhere durable to
+persist either past the initial call; `owner:` state ownership is parsed
+but not enforced at runtime; `notify` always takes the offline
+(`send_email`-fallback) path (no presence table populated by this
+compiled backend); `sandbox`, and `transact`'s own still-open remainder,
+unaffected by this update either.
+
 ---
 
 
