@@ -19,6 +19,7 @@ this list.
 | [0005](./0005-plugin-boundary-safety-and-performance.md) | The Nirdosha↔Rust plugin boundary — safety and performance |
 | [0006](./0006-structured-concurrency.md) | Structured concurrency for native threads — Pillars 1-4 |
 | [0007](./0007-apm-runtime-kernel.md) | A compiled-path resource-control kernel — boundary-leased admission, fail-open telemetry, and NFRs-as-language |
+| [0008](./0008-native-plugin-abi-widening.md) | Native plugin ABI widening and Cargo-driven discovery — a compile-time-only path to a real plugin ecosystem |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a

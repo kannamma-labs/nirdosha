@@ -1,0 +1,78 @@
+// Feature: compiled `serve` (LANGUAGE.md's compiled-status matrix;
+// ROADMAP.md Track B8). Hand-parses an HTTP request line over a raw
+// `tcp_listener`/`accept` loop using the new `str_index_of`/`str_slice`/
+// `len(str)` primitives (`STR_BUILTINS`, `crates/compiler/src/codegen.rs`),
+// and routes `/api/<fn>` to distinct compiled `.nir` functions by plain
+// `if`/`else if` + `==` -- no new language construct, no interpreter (there
+// is none left to fall back to).
+//
+// Deliberately scoped: GET-only, the whole request assumed to arrive in one
+// `recv` (true for an ordinary small `curl` GET, not adversarially
+// guaranteed), `Connection: close` + a real socket close as the end-of-body
+// signal (no `Content-Length` -- same simplifying cut the existing
+// client-side `http_get` builtin already made, just from the other side),
+// one request per connection, sequential (no per-connection `spawn`).
+//
+// Unlike every other file in this catalogue, `main`'s own accept loop runs
+// forever, so this one is meant to be run standalone and driven with a
+// real `curl`, not read to completion by itself:
+//
+//   nirdosha build examples/features/51_compiled_serve.nir -o /tmp/serve_demo
+//   /tmp/serve_demo &
+//   curl -s http://127.0.0.1:8080/api/hello   # -> hello from /api/hello
+//   curl -s http://127.0.0.1:8080/api/echo    # -> hello from /api/echo
+//   curl -s http://127.0.0.1:8080/api/unknown # -> 404 Not Found
+//
+// `crates/compiler/tests/codegen.rs`'s
+// `compiled_serve_routes_by_path_to_two_compiled_functions` test drives
+// this same shape end-to-end with real client sockets from within the
+// test suite, not just this manual `curl` walkthrough.
+
+struct Text {
+    value: str,
+}
+
+fn handle_hello() -> Text {
+    return Text("hello from /api/hello")
+}
+
+fn handle_echo() -> Text {
+    return Text("hello from /api/echo")
+}
+
+fn main() {
+    let l: tcp_listener = listen(8080)
+    while true {
+        let conn: tcp = accept(l)
+        let req: str = recv(conn)
+
+        // "METHOD SP PATH SP VERSION\r\n..." -- three fields, split on
+        // spaces, stopping at the request line's own "\r\n". No `split`
+        // builtin exists; this is `str_index_of` + `str_slice` composed
+        // a few times, exactly the scope `STR_BUILTINS` was sized for.
+        let line_end: i64 = str_index_of(req, "\r\n")
+        let line: str = str_slice(req, 0, line_end)
+        let sp1: i64 = str_index_of(line, " ")
+        let after_method: str = str_slice(line, sp1 + 1, len(line))
+        let sp2: i64 = str_index_of(after_method, " ")
+        let path: str = str_slice(after_method, 0, sp2)
+
+        // No string concatenation exists yet, so each route sends its
+        // headers and body as two separate `send` calls rather than
+        // interpolating the dispatched function's return value into one
+        // literal -- this is what actually proves two different compiled
+        // `fn`s handle two different routes, not just two string literals.
+        if path == "/api/hello" {
+            let body: Text = handle_hello()
+            send(conn, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            send(conn, body.value)
+        } else if path == "/api/echo" {
+            let body: Text = handle_echo()
+            send(conn, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            send(conn, body.value)
+        } else {
+            send(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+        }
+        stop conn
+    }
+}

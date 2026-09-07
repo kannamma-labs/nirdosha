@@ -613,6 +613,79 @@ pub unsafe extern "C" fn nir_str_eq(a: *const u8, a_len: i64, b: *const u8, b_le
     (a == b) as i32
 }
 
+/// Backs the `str_index_of(haystack, needle)` builtin — the one string
+/// primitive that's a genuine byte-scan (`str_slice`/`len(str)` are pure
+/// pointer-arithmetic in `codegen.rs`, no kernel call at all). Returns the
+/// byte offset of the first occurrence of `needle` in `haystack`, or `-1`
+/// if it's not found. An empty `needle` always matches at offset `0`
+/// (mirrors `str::find`'s own convention for an empty pattern).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_str_index_of(
+    hay_ptr: *const u8,
+    hay_len: i64,
+    needle_ptr: *const u8,
+    needle_len: i64,
+) -> i64 {
+    if needle_len == 0 {
+        return 0;
+    }
+    if needle_len > hay_len {
+        return -1;
+    }
+    let hay = unsafe { std::slice::from_raw_parts(hay_ptr, hay_len as usize) };
+    let needle = unsafe { std::slice::from_raw_parts(needle_ptr, needle_len as usize) };
+    match hay.windows(needle.len()).position(|w| w == needle) {
+        Some(i) => i as i64,
+        None => -1,
+    }
+}
+
+#[cfg(test)]
+mod str_index_of_tests {
+    use super::nir_str_index_of;
+
+    fn index_of(hay: &str, needle: &str) -> i64 {
+        unsafe {
+            nir_str_index_of(
+                hay.as_ptr(),
+                hay.len() as i64,
+                needle.as_ptr(),
+                needle.len() as i64,
+            )
+        }
+    }
+
+    #[test]
+    fn finds_a_substring_in_the_middle() {
+        assert_eq!(index_of("GET /api/hello HTTP/1.1", " "), 3);
+    }
+
+    #[test]
+    fn returns_negative_one_when_not_found() {
+        assert_eq!(index_of("hello", "xyz"), -1);
+    }
+
+    #[test]
+    fn empty_needle_matches_at_offset_zero() {
+        assert_eq!(index_of("hello", ""), 0);
+    }
+
+    #[test]
+    fn needle_at_offset_zero() {
+        assert_eq!(index_of("hello world", "hello"), 0);
+    }
+
+    #[test]
+    fn needle_at_the_end() {
+        assert_eq!(index_of("hello world", "world"), 6);
+    }
+
+    #[test]
+    fn needle_longer_than_haystack_is_not_found() {
+        assert_eq!(index_of("hi", "hello"), -1);
+    }
+}
+
 // ---- tcp/tcp_listener kernels --------------------------------------------
 //
 // A `tcp`/`tcp_listener` handle is a raw OS socket handle, not a Rust
@@ -1440,22 +1513,210 @@ pub extern "C" fn nir_nfr_call_end(id: i64, start_ns: i64, was_err: i32) {
     kernel::nfr::call_end(id, start_ns, was_err != 0)
 }
 
-// ---- check_role kernel (identity/RBAC, real authorization pipeline) ------
+// ---- check_role / oidc_validate_token / extract_claim kernels -----------
+// (identity/RBAC, real authorization pipeline)
 //
 // `codegen.rs`'s `IDENTITY_BUILTINS`/`emit_check_role` doc comments have
-// the full scope: this is `check_role`'s real, compiled implementation,
-// deliberately narrower than the interpreter's own JSON-based one —
-// `claims` here is read as a plain comma-separated role list, not
-// parsed as JSON (no JSON parser is linked into this crate). Exact
-// per-entry matching, not a substring search — `"adm"` must never match
-// a claims list containing `"admin"`.
+// the full scope. `check_role` was previously a plain comma-separated
+// role list, deliberately narrower than the interpreter's own JSON-based
+// one, disclosed as such — "no JSON parser is linked into this crate".
+// 2026-09: that's no longer true (`Cargo.toml`'s new `serde_json`
+// dependency, added for `oidc_validate_token`'s own claims below), so
+// `check_role` is upgraded here to real JSON-array parsing too, **with a
+// fallback to the original comma-separated matching** so a
+// `VerifiedIdentity` built directly in `.nir` source with a plain
+// `claims_json = "admin,editor"` string (not real JSON — the existing
+// `check_role_produces_real_role_view_that_drives_field_masking` test
+// fixture does exactly this) still works unchanged.
+//
+// `oidc_validate_token`/`extract_claim` port
+// `crates/presence-gateway/src/jwt.rs`'s exact JWKS-verification shape
+// (same dependency set, same doc comment's own reasoning) — including its
+// one load-bearing security detail: a JWK's `kty` *locks* which `alg` it
+// may verify under (RSA→RS256, EC/P-256→ES256, oct→HS256), never derived
+// from the token's own `alg` header, closing the classic algorithm-
+// confusion attack (an RSA public key replayed as an HMAC secret).
+// Deliberately **not** validating `exp` against the real wall clock here,
+// unlike `jwt.rs::verify` — that module is a live network boundary and
+// checking real-time expiry there is the right split for its job; this
+// compiled builtin stays a pure function of its inputs
+// (`docs/LANGUAGE.md` §9's determinism story), leaving expiry to
+// `identity_expired(identity, now)`'s own explicit `now` instead of an
+// ambient clock read.
 
-/// `1` if `role` (as UTF-8 bytes) exactly equals one comma-separated
-/// entry of `claims` (each entry's surrounding whitespace trimmed, so
-/// `"admin, editor"` and `"admin,editor"` behave identically), `0`
+#[derive(serde::Deserialize)]
+struct RawJwks {
+    keys: Vec<RawJwk>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawJwk {
+    kid: String,
+    kty: String,
+    // RSA (`kty: "RSA"`)
+    n: Option<String>,
+    e: Option<String>,
+    // EC (`kty: "EC"`, `crv: "P-256"` only — ES256)
+    crv: Option<String>,
+    x: Option<String>,
+    y: Option<String>,
+    // oct (`kty: "oct"`, symmetric — HS256 only).
+    k: Option<String>,
+}
+
+fn decoding_key_for(jwk: &RawJwk) -> Result<(jsonwebtoken::DecodingKey, jsonwebtoken::Algorithm), String> {
+    use base64::Engine as _;
+    match jwk.kty.as_str() {
+        "RSA" => {
+            let n = jwk.n.as_deref().ok_or("JWK is missing required field `n`")?;
+            let e = jwk.e.as_deref().ok_or("JWK is missing required field `e`")?;
+            let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(n, e).map_err(|err| format!("invalid RSA key material: {err}"))?;
+            Ok((decoding_key, jsonwebtoken::Algorithm::RS256))
+        }
+        "EC" => {
+            let crv = jwk.crv.clone().unwrap_or_default();
+            if crv != "P-256" {
+                return Err(format!("unsupported EC curve `{crv}` (only P-256/ES256 is supported)"));
+            }
+            let x = jwk.x.as_deref().ok_or("JWK is missing required field `x`")?;
+            let y = jwk.y.as_deref().ok_or("JWK is missing required field `y`")?;
+            let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(x, y).map_err(|err| format!("invalid EC key material: {err}"))?;
+            Ok((decoding_key, jsonwebtoken::Algorithm::ES256))
+        }
+        "oct" => {
+            let k = jwk.k.as_deref().ok_or("JWK is missing required field `k`")?;
+            let raw_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(k).map_err(|_| "JWK field `k` is not valid base64url".to_string())?;
+            Ok((jsonwebtoken::DecodingKey::from_secret(&raw_secret), jsonwebtoken::Algorithm::HS256))
+        }
+        other => Err(format!("unsupported JWK `kty`: `{other}` (only RSA, EC/P-256, and oct are supported)")),
+    }
+}
+
+struct VerifiedClaims {
+    subject: String,
+    issuer: String,
+    audience: String,
+    expires_at: i64,
+    issued_at: i64,
+    claims_json: String,
+}
+
+fn validate_oidc_token_inner(token: &str, expected_issuer: &str, expected_audience: &str, jwks_json: &str) -> Result<VerifiedClaims, String> {
+    let jwks: RawJwks = serde_json::from_str(jwks_json).map_err(|e| format!("malformed JWKS: {e}"))?;
+    let header = jsonwebtoken::decode_header(token).map_err(|e| format!("malformed token: {e}"))?;
+    let kid = header.kid.ok_or_else(|| "token header has no `kid`".to_string())?;
+    let jwk = jwks.keys.iter().find(|k| k.kid == kid).ok_or_else(|| format!("token references unknown key id `{kid}`"))?;
+    let (decoding_key, algorithm) = decoding_key_for(jwk)?;
+
+    // Locked to exactly the one algorithm this `kid`'s key material is
+    // valid for (never the token's own `alg` header) — the actual
+    // algorithm-confusion guard, decided entirely by `decoding_key_for`'s
+    // `kty` match above, same as `jwt.rs::verify`.
+    let mut validation = jsonwebtoken::Validation::new(algorithm);
+    validation.set_issuer(&[expected_issuer]);
+    validation.set_audience(&[expected_audience]);
+    validation.validate_exp = false; // see this section's own doc comment
+
+    let data = jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation).map_err(|e| format!("token verification failed: {e}"))?;
+    let claims = data.claims;
+
+    let subject = claims.get("sub").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let issuer = claims.get("iss").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let audience = claims.get("aud").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let expires_at = claims.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
+    let issued_at = claims.get("iat").and_then(|v| v.as_i64()).unwrap_or(0);
+    // The full decoded claims, re-serialized — this is what `check_role`/
+    // `extract_claim` read back out of `VerifiedIdentity.claims_json`.
+    let claims_json = serde_json::to_string(&claims).unwrap_or_else(|_| "{}".to_string());
+
+    Ok(VerifiedClaims { subject, issuer, audience, expires_at, issued_at, claims_json })
+}
+
+/// `{ptr, i64}` — matches `Ty::Str`'s own codegen layout exactly (same
+/// idea as the RFC 0008 native-plugin ABI's `NirStr`), so `codegen.rs`
+/// can load one of these straight into a `str` value with a plain
+/// `insertvalue` pair, no marshaling. Every `NirStrOut` this file
+/// produces is heap-allocated via `nir_alloc` and never freed — the same
+/// disclosed, permanent-leak convention `nir_sha256_hex` already uses
+/// (`Ty::Str` isn't affine, so there's no scope-closing point to hook a
+/// matching `nir_free` onto).
+#[repr(C)]
+pub struct NirStrOut {
+    pub ptr: *const u8,
+    pub len: i64,
+}
+
+unsafe fn write_str_out(out: *mut NirStrOut, s: String) {
+    let leaked: &'static [u8] = Box::leak(s.into_boxed_str().into_boxed_bytes());
+    unsafe {
+        *out = NirStrOut { ptr: leaked.as_ptr(), len: leaked.len() as i64 };
+    }
+}
+
+unsafe fn str_from_raw<'a>(ptr: *const u8, len: i64) -> Option<&'a str> {
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    std::str::from_utf8(bytes).ok()
+}
+
+/// `oidc_validate_token`'s real, compiled implementation. `1` (with every
+/// `out_*` param populated) if `token`'s signature verifies against
+/// `jwks_json` and its `iss`/`aud` match, `0` (with `out_err` populated,
+/// everything else untouched) otherwise — a malformed token/JWKS is a
+/// real `Err`, never a trap, same as every other identity check in this
+/// codebase.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_oidc_validate_token(
+    token_ptr: *const u8,
+    token_len: i64,
+    issuer_ptr: *const u8,
+    issuer_len: i64,
+    audience_ptr: *const u8,
+    audience_len: i64,
+    jwks_ptr: *const u8,
+    jwks_len: i64,
+    out_subject: *mut NirStrOut,
+    out_issuer: *mut NirStrOut,
+    out_audience: *mut NirStrOut,
+    out_expires_at: *mut i64,
+    out_issued_at: *mut i64,
+    out_claims_json: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(token), Some(expected_issuer), Some(expected_audience), Some(jwks_json)) = (
+        unsafe { str_from_raw(token_ptr, token_len) },
+        unsafe { str_from_raw(issuer_ptr, issuer_len) },
+        unsafe { str_from_raw(audience_ptr, audience_len) },
+        unsafe { str_from_raw(jwks_ptr, jwks_len) },
+    ) else {
+        unsafe { write_str_out(out_err, "token/issuer/audience/jwks is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match validate_oidc_token_inner(token, expected_issuer, expected_audience, jwks_json) {
+        Ok(claims) => unsafe {
+            write_str_out(out_subject, claims.subject);
+            write_str_out(out_issuer, claims.issuer);
+            write_str_out(out_audience, claims.audience);
+            *out_expires_at = claims.expires_at;
+            *out_issued_at = claims.issued_at;
+            write_str_out(out_claims_json, claims.claims_json);
+            1
+        },
+        Err(msg) => unsafe {
+            write_str_out(out_err, msg);
+            0
+        },
+    }
+}
+
+/// `1` if `role` (as UTF-8 bytes) is present in `claims`'s roles, `0`
 /// otherwise — including if either buffer isn't valid UTF-8, the same
 /// "fail closed on malformed input" posture every other identity check
-/// in this codebase already has.
+/// in this codebase already has. Tries `claims` as real JSON first (a
+/// top-level `"roles"` array of strings — `nir_oidc_validate_token`'s own
+/// `claims_json` output shape); on JSON-parse failure, falls back to the
+/// original plain comma-separated-list matching (each entry's
+/// surrounding whitespace trimmed) — exact per-entry matching either way,
+/// never a substring search (`"adm"` must never match `"admin"`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_check_role(claims_ptr: *const u8, claims_len: i64, role_ptr: *const u8, role_len: i64) -> i32 {
     let claims = unsafe { std::slice::from_raw_parts(claims_ptr, claims_len as usize) };
@@ -1463,7 +1724,1849 @@ pub unsafe extern "C" fn nir_check_role(claims_ptr: *const u8, claims_len: i64, 
     let (Ok(claims), Ok(role)) = (std::str::from_utf8(claims), std::str::from_utf8(role)) else {
         return 0;
     };
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(claims) {
+        if let Some(roles) = parsed.get("roles").and_then(|v| v.as_array()) {
+            return roles.iter().any(|r| r.as_str() == Some(role)) as i32;
+        }
+    }
     claims.split(',').any(|entry| entry.trim() == role) as i32
+}
+
+/// `extract_claim`'s real, compiled implementation. `1` (with `out_value`
+/// populated) if `claims_json` parses as JSON and has a top-level
+/// string-valued claim named `name`, `0` otherwise. Array/object-valued
+/// claims (e.g. `"roles"`) are out of scope here — that's `check_role`'s
+/// job, not `extract_claim`'s, per this exact split in
+/// `examples/features/30_identity_oidc.nir`'s own fixture.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_extract_claim(claims_json_ptr: *const u8, claims_json_len: i64, name_ptr: *const u8, name_len: i64, out_value: *mut NirStrOut) -> i32 {
+    let (Some(claims_json), Some(name)) = (unsafe { str_from_raw(claims_json_ptr, claims_json_len) }, unsafe { str_from_raw(name_ptr, name_len) }) else {
+        return 0;
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(claims_json) else {
+        return 0;
+    };
+    match parsed.get(name).and_then(|v| v.as_str()) {
+        Some(s) => unsafe {
+            write_str_out(out_value, s.to_string());
+            1
+        },
+        None => 0,
+    }
+}
+
+#[cfg(test)]
+mod identity_kernel_tests {
+    use super::*;
+
+    // Same fixture as `examples/features/30_identity_oidc.nir`/
+    // `31_mock_identity_provider.nir`: header `{"alg":"HS256","kid":"key1"}`,
+    // payload `{"sub":"alice","iss":"https://example.com","aud":"my-app",
+    // "exp":2000000000,"iat":1700000000,"roles":["physician"],
+    // "department":"cardiology"}`, secret `"my-secret-key"` (JWKS `k` is
+    // that string's base64url encoding).
+    const FIXTURE_TOKEN: &str = "eyJhbGciOiAiSFMyNTYiLCAia2lkIjogImtleTEifQ.eyJzdWIiOiAiYWxpY2UiLCAiaXNzIjogImh0dHBzOi8vZXhhbXBsZS5jb20iLCAiYXVkIjogIm15LWFwcCIsICJleHAiOiAyMDAwMDAwMDAwLCAiaWF0IjogMTcwMDAwMDAwMCwgInJvbGVzIjogWyJwaHlzaWNpYW4iXSwgImRlcGFydG1lbnQiOiAiY2FyZGlvbG9neSJ9.nrFdeqNDwXWLeGzud6X9Q4ITzCXULzZBBK8y51LGYXs";
+    const FIXTURE_JWKS: &str = r#"{"keys":[{"kid":"key1","kty":"oct","k":"bXktc2VjcmV0LWtleQ"}]}"#;
+
+    #[test]
+    fn valid_token_verifies_and_extracts_real_claims() {
+        let claims = validate_oidc_token_inner(FIXTURE_TOKEN, "https://example.com", "my-app", FIXTURE_JWKS).expect("fixture token should verify");
+        assert_eq!(claims.subject, "alice");
+        assert_eq!(claims.issuer, "https://example.com");
+        assert_eq!(claims.audience, "my-app");
+        assert_eq!(claims.expires_at, 2000000000);
+        assert_eq!(claims.issued_at, 1700000000);
+        let parsed: serde_json::Value = serde_json::from_str(&claims.claims_json).unwrap();
+        assert_eq!(parsed["department"], "cardiology");
+        assert_eq!(parsed["roles"][0], "physician");
+    }
+
+    #[test]
+    fn wrong_issuer_is_rejected() {
+        assert!(validate_oidc_token_inner(FIXTURE_TOKEN, "https://wrong-issuer.example", "my-app", FIXTURE_JWKS).is_err());
+    }
+
+    #[test]
+    fn wrong_audience_is_rejected() {
+        assert!(validate_oidc_token_inner(FIXTURE_TOKEN, "https://example.com", "wrong-app", FIXTURE_JWKS).is_err());
+    }
+
+    #[test]
+    fn tampered_signature_is_rejected() {
+        // Flip the last character of the signature segment.
+        let mut tampered = FIXTURE_TOKEN.to_string();
+        tampered.pop();
+        tampered.push('x');
+        assert!(validate_oidc_token_inner(&tampered, "https://example.com", "my-app", FIXTURE_JWKS).is_err());
+    }
+
+    #[test]
+    fn unknown_kid_is_rejected() {
+        let jwks = r#"{"keys":[{"kid":"some-other-key","kty":"oct","k":"bXktc2VjcmV0LWtleQ"}]}"#;
+        assert!(validate_oidc_token_inner(FIXTURE_TOKEN, "https://example.com", "my-app", jwks).is_err());
+    }
+
+    #[test]
+    fn malformed_jwks_is_rejected_not_a_panic() {
+        assert!(validate_oidc_token_inner(FIXTURE_TOKEN, "https://example.com", "my-app", "not json").is_err());
+    }
+
+    fn check_role(claims_json: &str, role: &str) -> i32 {
+        unsafe { nir_check_role(claims_json.as_ptr(), claims_json.len() as i64, role.as_ptr(), role.len() as i64) }
+    }
+
+    #[test]
+    fn check_role_finds_a_role_in_a_real_json_roles_array() {
+        let claims = r#"{"roles":["physician","nurse"]}"#;
+        assert_eq!(check_role(claims, "physician"), 1);
+        assert_eq!(check_role(claims, "admin"), 0);
+    }
+
+    #[test]
+    fn check_role_falls_back_to_comma_separated_for_non_json_claims() {
+        // The existing `check_role_produces_real_role_view_that_drives_
+        // field_masking` test's own fixture shape -- must keep working.
+        assert_eq!(check_role("admin,editor", "admin"), 1);
+        assert_eq!(check_role("admin,editor", "adm"), 0); // exact match, not substring
+    }
+
+    #[test]
+    fn extract_claim_reads_a_string_claim_from_real_json() {
+        let claims_json = r#"{"department":"cardiology","roles":["physician"]}"#;
+        let name = "department";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let found = unsafe { nir_extract_claim(claims_json.as_ptr(), claims_json.len() as i64, name.as_ptr(), name.len() as i64, &mut out) };
+        assert_eq!(found, 1);
+        let value = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap() };
+        assert_eq!(value, "cardiology");
+    }
+
+    #[test]
+    fn extract_claim_not_found_returns_zero() {
+        let claims_json = r#"{"department":"cardiology"}"#;
+        let name = "missing";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let found = unsafe { nir_extract_claim(claims_json.as_ptr(), claims_json.len() as i64, name.as_ptr(), name.len() as i64, &mut out) };
+        assert_eq!(found, 0);
+    }
+}
+
+// ---- db kernels (`db_connect`/`db_query`/`db_execute`/`stop`) -----------
+//
+// `Ty::Db`'s own doc comment (`ast.rs`) has the full design: layer 1
+// targets SQLite specifically, via `rusqlite`'s `bundled` feature
+// (statically linked, no system `libsqlite3`, same reason this crate's
+// own `Cargo.toml` gives). Postgres (`postgres://`/`postgresql://`) is a
+// real, separate, deferred follow-up (dynamic TLS linking) — not
+// silently dropped, `docs/ROADMAP.md`'s own B2 note already says so.
+//
+// A `db` handle rides through `kernel::HandleTable<rusqlite::Connection>`
+// (`kernel/mod.rs`'s own "not wired to any `nir_*` kernel yet" table,
+// built exactly for this), not a raw OS fd like `tcp`/`file` — a
+// `rusqlite::Connection` isn't `Copy`/reconstructable from a bare
+// integer the way a fd is, so the table (not `Box::into_raw`/`from_raw`
+// pointer arithmetic) is the right fit here, same as `channel_table`/
+// `thread_table` above already use it for their own non-fd resources.
+
+fn db_table() -> &'static HandleTable<rusqlite::Connection> {
+    static TABLE: OnceLock<HandleTable<rusqlite::Connection>> = OnceLock::new();
+    TABLE.get_or_init(HandleTable::new)
+}
+
+/// One bind value for `db_execute`/`db_query`'s trailing `?`-placeholder
+/// arguments — `codegen.rs`'s `emit_db_binds` builds an array of these
+/// (one per trailing arg, tag chosen by that arg's own static type),
+/// passed as a plain `(ptr, i64 len)` pair like any other buffer here.
+/// `#[repr(C)]`, field order/types matched exactly by the anonymous LLVM
+/// struct type `codegen.rs` GEPs into (`{ i32, i64, double, ptr, i64 }`)
+/// — non-packed, so ordinary C/LLVM natural-alignment layout applies on
+/// both sides, the same "trust the target's own layout rules, don't
+/// hand-replicate them" stance `agg_byte_size_operand`'s sizeof trick
+/// already takes.
+#[repr(C)]
+pub struct NirBindValue {
+    pub tag: i32, // 0 = i64, 1 = f64, 2 = str, 3 = bool
+    pub i: i64,
+    pub f: f64,
+    pub s_ptr: *const u8,
+    pub s_len: i64,
+}
+
+unsafe fn bind_values_from_raw(ptr: *const NirBindValue, len: i64) -> Vec<rusqlite::types::Value> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let raw = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    raw.iter()
+        .map(|b| match b.tag {
+            0 => rusqlite::types::Value::Integer(b.i),
+            1 => rusqlite::types::Value::Real(b.f),
+            2 => {
+                let s = unsafe { str_from_raw(b.s_ptr, b.s_len) }.unwrap_or("").to_string();
+                rusqlite::types::Value::Text(s)
+            }
+            // SQLite has no native boolean column type — bound as 0/1,
+            // same convention every `i32`-as-bool return in this file
+            // already uses on the way back out.
+            3 => rusqlite::types::Value::Integer(b.i),
+            _ => rusqlite::types::Value::Null,
+        })
+        .collect()
+}
+
+fn sqlite_row_to_json(row: &rusqlite::Row, column_names: &[String]) -> serde_json::Value {
+    let mut obj = serde_json::Map::with_capacity(column_names.len());
+    for (i, name) in column_names.iter().enumerate() {
+        let value: rusqlite::types::Value = row.get(i).unwrap_or(rusqlite::types::Value::Null);
+        let json_val = match value {
+            rusqlite::types::Value::Null => serde_json::Value::Null,
+            rusqlite::types::Value::Integer(n) => serde_json::Value::from(n),
+            rusqlite::types::Value::Real(f) => serde_json::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+            rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+            // `BLOB` has no first-class Nirdosha type to carry it (no
+            // `bytes` type — the same gap `Ty::File`'s own doc comment
+            // already names for file I/O) — a disclosed, narrower cut,
+            // not a silent drop: every other SQLite type round-trips
+            // exactly.
+            rusqlite::types::Value::Blob(_) => serde_json::Value::Null,
+        };
+        obj.insert(name.clone(), json_val);
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// `db_connect(path) -> Result(db, str)`. `path` is really "connection
+/// string" per `Ty::Db`'s own doc comment, but this kernel only ever
+/// opens SQLite — a bare path or `":memory:"`, both handled by
+/// `rusqlite::Connection::open` itself, no special-casing needed here.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_handle: *mut i64, out_err: *mut NirStrOut) -> i32 {
+    let Some(path) = (unsafe { str_from_raw(path_ptr, path_len) }) else {
+        unsafe { write_str_out(out_err, "connection string is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    if !kernel::acquire(kernel::Domain::Db) {
+        unsafe { write_str_out(out_err, "too many open db connections".to_string()) };
+        return 0;
+    }
+    match rusqlite::Connection::open(path) {
+        Ok(conn) => {
+            let id = db_table().insert(conn);
+            unsafe { *out_handle = id };
+            1
+        }
+        Err(e) => {
+            kernel::release(kernel::Domain::Db);
+            unsafe { write_str_out(out_err, e.to_string()) };
+            0
+        }
+    }
+}
+
+/// Closes `handle` — `ownership.rs`'s affine typing already proves this
+/// runs at most once per handle in a well-typed program, same "the
+/// checker is the real gate" convention `nir_tcp_stop`/`nir_file_stop`
+/// already document.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_db_stop(handle: i64) -> i32 {
+    if db_table().remove(handle).is_some() {
+        kernel::release(kernel::Domain::Db);
+    }
+    0
+}
+
+/// `db_execute(conn, sql, ...binds) -> Result(i64, str)` — everything
+/// except `SELECT` (`INSERT`/`UPDATE`/`DELETE`/DDL); returns the
+/// affected-row count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_db_execute(
+    handle: i64,
+    sql_ptr: *const u8,
+    sql_len: i64,
+    binds_ptr: *const NirBindValue,
+    binds_len: i64,
+    out_affected: *mut i64,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let Some(sql) = (unsafe { str_from_raw(sql_ptr, sql_len) }) else {
+        unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
+    let result = db_table().with(handle, |conn| conn.execute(sql, rusqlite::params_from_iter(binds.iter())));
+    match result {
+        Some(Ok(n)) => {
+            unsafe { *out_affected = n as i64 };
+            1
+        }
+        Some(Err(e)) => {
+            unsafe { write_str_out(out_err, e.to_string()) };
+            0
+        }
+        None => {
+            unsafe { write_str_out(out_err, "db handle is not open".to_string()) };
+            0
+        }
+    }
+}
+
+/// `db_query(conn, sql, ...binds) -> Result(json, str)` — `SELECT`
+/// statements. Every row comes back as one JSON object (column name ->
+/// value); the whole result set is a JSON array (`Ty::Json`'s own doc
+/// comment). This compiled path represents `Ty::Json` as the raw text
+/// itself (see `codegen.rs`'s `Ty::Json` `llvm_ty` arm), re-parsed by
+/// each `json_get_*` accessor below rather than a persisted parsed-tree
+/// handle — the simplest thing that reuses `str`'s existing
+/// `{ptr, i64}` representation with zero new runtime value type,
+/// matching this crate's own established "ship the real, narrower
+/// slice, disclose the gap" pattern (`nir_check_role`'s own doc comment
+/// is the precedent for this exact discipline).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_db_query(
+    handle: i64,
+    sql_ptr: *const u8,
+    sql_len: i64,
+    binds_ptr: *const NirBindValue,
+    binds_len: i64,
+    out_json: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let Some(sql) = (unsafe { str_from_raw(sql_ptr, sql_len) }) else {
+        unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
+    let result: Option<Result<String, rusqlite::Error>> = db_table().with(handle, |conn| {
+        let mut stmt = conn.prepare(sql)?;
+        let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows = stmt.query(rusqlite::params_from_iter(binds.iter()))?;
+        let mut out_rows = Vec::new();
+        while let Some(row) = rows.next()? {
+            out_rows.push(sqlite_row_to_json(row, &column_names));
+        }
+        Ok(serde_json::to_string(&serde_json::Value::Array(out_rows)).unwrap_or_else(|_| "[]".to_string()))
+    });
+    match result {
+        Some(Ok(json)) => {
+            unsafe { write_str_out(out_json, json) };
+            1
+        }
+        Some(Err(e)) => {
+            unsafe { write_str_out(out_err, e.to_string()) };
+            0
+        }
+        None => {
+            unsafe { write_str_out(out_err, "db handle is not open".to_string()) };
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod db_kernel_tests {
+    use super::*;
+
+    unsafe fn connect(path: &str) -> Result<i64, String> {
+        let mut handle = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_db_connect(path.as_ptr(), path.len() as i64, &mut handle, &mut err) };
+        if ok != 0 {
+            Ok(handle)
+        } else {
+            Err(unsafe { std::str::from_utf8(std::slice::from_raw_parts(err.ptr, err.len as usize)).unwrap().to_string() })
+        }
+    }
+
+    unsafe fn execute(handle: i64, sql: &str, binds: &[NirBindValue]) -> Result<i64, String> {
+        let mut affected = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_db_execute(handle, sql.as_ptr(), sql.len() as i64, binds.as_ptr(), binds.len() as i64, &mut affected, &mut err) };
+        if ok != 0 {
+            Ok(affected)
+        } else {
+            Err(unsafe { std::str::from_utf8(std::slice::from_raw_parts(err.ptr, err.len as usize)).unwrap().to_string() })
+        }
+    }
+
+    unsafe fn query(handle: i64, sql: &str, binds: &[NirBindValue]) -> Result<String, String> {
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_db_query(handle, sql.as_ptr(), sql.len() as i64, binds.as_ptr(), binds.len() as i64, &mut out, &mut err) };
+        if ok != 0 {
+            Ok(unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap().to_string() })
+        } else {
+            Err(unsafe { std::str::from_utf8(std::slice::from_raw_parts(err.ptr, err.len as usize)).unwrap().to_string() })
+        }
+    }
+
+    fn str_bind(s: &'static str) -> NirBindValue {
+        NirBindValue { tag: 2, i: 0, f: 0.0, s_ptr: s.as_ptr(), s_len: s.len() as i64 }
+    }
+    fn i64_bind(n: i64) -> NirBindValue {
+        NirBindValue { tag: 0, i: n, f: 0.0, s_ptr: std::ptr::null(), s_len: 0 }
+    }
+
+    #[test]
+    fn connect_execute_query_round_trips_real_rows_in_memory() {
+        unsafe {
+            let conn = connect(":memory:").expect("in-memory sqlite should always open");
+            execute(conn, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, rating INTEGER)", &[]).expect("DDL should succeed");
+            let inserted = execute(conn, "INSERT INTO users (name, rating) VALUES (?, ?)", &[str_bind("ada"), i64_bind(5)]).expect("insert should succeed");
+            assert_eq!(inserted, 1);
+            execute(conn, "INSERT INTO users (name, rating) VALUES (?, ?)", &[str_bind("grace"), i64_bind(4)]).expect("insert should succeed");
+
+            let rows_json = query(conn, "SELECT name, rating FROM users WHERE rating >= ? ORDER BY id", &[i64_bind(5)]).expect("query should succeed");
+            let rows: serde_json::Value = serde_json::from_str(&rows_json).unwrap();
+            assert_eq!(rows[0]["name"], "ada");
+            assert_eq!(rows[0]["rating"], 5);
+            assert_eq!(rows.as_array().unwrap().len(), 1);
+
+            let updated = execute(conn, "UPDATE users SET rating = ? WHERE name = ?", &[i64_bind(5), str_bind("grace")]).expect("update should succeed");
+            assert_eq!(updated, 1);
+
+            assert_eq!(nir_db_stop(conn), 0);
+        }
+    }
+
+    #[test]
+    fn connect_to_an_invalid_path_is_a_real_err_not_a_panic() {
+        unsafe {
+            assert!(connect("/no/such/directory/at/all/db.sqlite").is_err());
+        }
+    }
+
+    #[test]
+    fn bad_sql_is_a_real_err_not_a_panic() {
+        unsafe {
+            let conn = connect(":memory:").unwrap();
+            assert!(execute(conn, "NOT VALID SQL AT ALL", &[]).is_err());
+            nir_db_stop(conn);
+        }
+    }
+}
+
+// ---- json kernels (`Ty::Json` as raw text, re-parsed per accessor) ------
+//
+// See `nir_db_query`'s own doc comment for the representation choice.
+// Every accessor is fallible (`Result(_, str)`, `Ty::Json`'s own doc
+// comment) — a malformed document, a missing key, or a type mismatch is
+// a real `Err`, never a trap.
+
+unsafe fn parse_json(ptr: *const u8, len: i64) -> Result<serde_json::Value, String> {
+    let s = unsafe { str_from_raw(ptr, len) }.ok_or_else(|| "json text is not valid UTF-8".to_string())?;
+    serde_json::from_str(s).map_err(|e| format!("malformed JSON: {e}"))
+}
+
+/// `json_parse(s) -> Result(json, str)` — validates `s` parses as JSON;
+/// `codegen.rs`'s `emit_json_parse` reuses `s`'s own already-computed
+/// `{ptr, i64}` value as the `Ok` payload directly (this representation
+/// makes `json_parse` an identity function on success), so this kernel
+/// only needs to report validity, not produce a value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_validate(json_ptr: *const u8, json_len: i64, out_err: *mut NirStrOut) -> i32 {
+    match unsafe { parse_json(json_ptr, json_len) } {
+        Ok(_) => 1,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            0
+        }
+    }
+}
+
+/// `json_get(doc, key) -> Result(json, str)` — the sub-value at `key`,
+/// re-serialized (this representation's `Ty::Json` is text, not a
+/// persisted tree, so navigating one level means re-emitting the
+/// sub-tree as its own JSON text).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_get(doc_ptr: *const u8, doc_len: i64, key_ptr: *const u8, key_len: i64, out_json: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
+    let parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let Some(key) = (unsafe { str_from_raw(key_ptr, key_len) }) else {
+        unsafe { write_str_out(out_err, "key is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match parsed.get(key) {
+        Some(v) => {
+            unsafe { write_str_out(out_json, serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())) };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, format!("key `{key}` not found")) };
+            0
+        }
+    }
+}
+
+/// `json_array_get(doc, idx) -> Result(json, str)` — same shape as
+/// `json_get`, indexed by position instead of key.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_array_get(doc_ptr: *const u8, doc_len: i64, idx: i64, out_json: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
+    let parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let found = if idx < 0 { None } else { parsed.as_array().and_then(|a| a.get(idx as usize)) };
+    match found {
+        Some(v) => {
+            unsafe { write_str_out(out_json, serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())) };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, format!("index {idx} out of range, or not an array")) };
+            0
+        }
+    }
+}
+
+/// `json_array_len(doc) -> Result(i64, str)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_array_len(doc_ptr: *const u8, doc_len: i64, out_len: *mut i64, out_err: *mut NirStrOut) -> i32 {
+    let parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    match parsed.as_array() {
+        Some(a) => {
+            unsafe { *out_len = a.len() as i64 };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, "not a JSON array".to_string()) };
+            0
+        }
+    }
+}
+
+/// `json_get_str(doc, key) -> Result(str, str)` — a leaf accessor: the
+/// value at `key` must itself be a JSON string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_get_str(doc_ptr: *const u8, doc_len: i64, key_ptr: *const u8, key_len: i64, out_value: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
+    let parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let Some(key) = (unsafe { str_from_raw(key_ptr, key_len) }) else {
+        unsafe { write_str_out(out_err, "key is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match parsed.get(key).and_then(|v| v.as_str()) {
+        Some(s) => {
+            unsafe { write_str_out(out_value, s.to_string()) };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, format!("key `{key}` not found, or not a string")) };
+            0
+        }
+    }
+}
+
+/// `json_get_i64(doc, key) -> Result(i64, str)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_get_i64(doc_ptr: *const u8, doc_len: i64, key_ptr: *const u8, key_len: i64, out_value: *mut i64, out_err: *mut NirStrOut) -> i32 {
+    let parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let Some(key) = (unsafe { str_from_raw(key_ptr, key_len) }) else {
+        unsafe { write_str_out(out_err, "key is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match parsed.get(key).and_then(|v| v.as_i64()) {
+        Some(n) => {
+            unsafe { *out_value = n };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, format!("key `{key}` not found, or not an integer")) };
+            0
+        }
+    }
+}
+
+/// `json_get_f64(doc, key) -> Result(f64, str)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_get_f64(doc_ptr: *const u8, doc_len: i64, key_ptr: *const u8, key_len: i64, out_value: *mut f64, out_err: *mut NirStrOut) -> i32 {
+    let parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let Some(key) = (unsafe { str_from_raw(key_ptr, key_len) }) else {
+        unsafe { write_str_out(out_err, "key is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match parsed.get(key).and_then(|v| v.as_f64()) {
+        Some(f) => {
+            unsafe { *out_value = f };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, format!("key `{key}` not found, or not a number")) };
+            0
+        }
+    }
+}
+
+/// `json_get_bool(doc, key) -> Result(bool, str)`. `out_value` is `i32`
+/// (`0`/`1`), the same boolean-as-int convention every other kernel here
+/// already uses.
+///
+/// Accepts a real JSON boolean (`true`/`false`) *or* the JSON integers
+/// `0`/`1` — not just the former. SQLite has no native boolean storage
+/// class (`NirBindValue`'s own doc comment: a bound `bool` is stored as
+/// SQLite `INTEGER` `0`/`1`), so `nir_db_query`'s `sqlite_row_to_json`
+/// re-serializes that column back as a plain JSON *number*, never a JSON
+/// boolean — there is no schema-level "this integer column is really a
+/// bool" signal available to make it re-serialize any other way. Without
+/// this fallback, `json_get_bool` would never succeed on any `db`-sourced
+/// boolean column, which would make the two builtins genuinely unusable
+/// together — found by testing a real `db_execute`/`db_query` round trip
+/// of a bound `bool`, not by reasoning about the representations in
+/// advance. Any other JSON number (not `0`/`1`) is still a real `Err`,
+/// not silently coerced.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_get_bool(doc_ptr: *const u8, doc_len: i64, key_ptr: *const u8, key_len: i64, out_value: *mut i32, out_err: *mut NirStrOut) -> i32 {
+    let parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let Some(key) = (unsafe { str_from_raw(key_ptr, key_len) }) else {
+        unsafe { write_str_out(out_err, "key is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let found = parsed.get(key).and_then(|v| match v {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::Number(n) if n.as_i64() == Some(0) => Some(false),
+        serde_json::Value::Number(n) if n.as_i64() == Some(1) => Some(true),
+        _ => None,
+    });
+    match found {
+        Some(b) => {
+            unsafe { *out_value = b as i32 };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, format!("key `{key}` not found, or not a boolean (or 0/1 integer)")) };
+            0
+        }
+    }
+}
+
+/// `json_set_str(doc, key, value) -> Result(json, str)` — `json_get_str`'s
+/// inverse: sets `key` to a string value on a JSON object, or starts a
+/// fresh object if `doc` is JSON `null` (the shape `json_parse("{}")`/
+/// `json_parse("null")` both already produce). Any other JSON shape (an
+/// array, a scalar) is a real `Err`, not a type error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_set_str(
+    doc_ptr: *const u8,
+    doc_len: i64,
+    key_ptr: *const u8,
+    key_len: i64,
+    value_ptr: *const u8,
+    value_len: i64,
+    out_json: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let mut parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let (Some(key), Some(value)) = (unsafe { str_from_raw(key_ptr, key_len) }, unsafe { str_from_raw(value_ptr, value_len) }) else {
+        unsafe { write_str_out(out_err, "key/value is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    if parsed.is_null() {
+        parsed = serde_json::Value::Object(serde_json::Map::new());
+    }
+    match parsed.as_object_mut() {
+        Some(map) => {
+            map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+            unsafe { write_str_out(out_json, serde_json::to_string(&parsed).unwrap_or_else(|_| "null".to_string())) };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, "not a JSON object (and not null)".to_string()) };
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_kernel_tests {
+    use super::*;
+
+    fn to_str(out: &NirStrOut) -> String {
+        unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap().to_string() }
+    }
+
+    #[test]
+    fn get_str_reads_a_string_field() {
+        let doc = r#"{"name":"ada","rating":5}"#;
+        let key = "name";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_json_get_str(doc.as_ptr(), doc.len() as i64, key.as_ptr(), key.len() as i64, &mut out, &mut err) };
+        assert_eq!(ok, 1);
+        assert_eq!(to_str(&out), "ada");
+    }
+
+    #[test]
+    fn array_get_then_get_str_navigates_a_row() {
+        let doc = r#"[{"name":"ada","rating":5}]"#;
+        let mut row = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_json_array_get(doc.as_ptr(), doc.len() as i64, 0, &mut row, &mut err) };
+        assert_eq!(ok, 1);
+        let row_text = to_str(&row);
+        let key = "name";
+        let mut name = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok2 = unsafe { nir_json_get_str(row_text.as_ptr(), row_text.len() as i64, key.as_ptr(), key.len() as i64, &mut name, &mut err) };
+        assert_eq!(ok2, 1);
+        assert_eq!(to_str(&name), "ada");
+    }
+
+    #[test]
+    fn missing_key_is_a_real_err_not_a_panic() {
+        let doc = "{}";
+        let key = "missing";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_json_get_str(doc.as_ptr(), doc.len() as i64, key.as_ptr(), key.len() as i64, &mut out, &mut err) };
+        assert_eq!(ok, 0);
+    }
+
+    #[test]
+    fn malformed_json_is_a_real_err_not_a_panic() {
+        let doc = "not json";
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        assert_eq!(unsafe { nir_json_validate(doc.as_ptr(), doc.len() as i64, &mut err) }, 0);
+    }
+
+    #[test]
+    fn set_str_on_null_starts_a_fresh_object() {
+        let doc = "null";
+        let key = "department";
+        let value = "cardiology";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_json_set_str(doc.as_ptr(), doc.len() as i64, key.as_ptr(), key.len() as i64, value.as_ptr(), value.len() as i64, &mut out, &mut err) };
+        assert_eq!(ok, 1);
+        let parsed: serde_json::Value = serde_json::from_str(&to_str(&out)).unwrap();
+        assert_eq!(parsed["department"], "cardiology");
+    }
+
+    fn get_bool(doc: &str, key: &str) -> Option<i32> {
+        let mut out = 0i32;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_json_get_bool(doc.as_ptr(), doc.len() as i64, key.as_ptr(), key.len() as i64, &mut out, &mut err) };
+        if ok != 0 { Some(out) } else { None }
+    }
+
+    #[test]
+    fn get_bool_accepts_a_real_json_boolean() {
+        assert_eq!(get_bool(r#"{"active":true}"#, "active"), Some(1));
+        assert_eq!(get_bool(r#"{"active":false}"#, "active"), Some(0));
+    }
+
+    #[test]
+    fn get_bool_also_accepts_sqlite_shaped_0_and_1_integers() {
+        // `db_query`'s own re-serialization of a bound `bool` column --
+        // SQLite has no native boolean storage class, so it comes back
+        // as a plain JSON number, not a JSON boolean.
+        assert_eq!(get_bool(r#"{"active":1}"#, "active"), Some(1));
+        assert_eq!(get_bool(r#"{"active":0}"#, "active"), Some(0));
+    }
+
+    #[test]
+    fn get_bool_rejects_any_other_integer() {
+        assert_eq!(get_bool(r#"{"active":2}"#, "active"), None);
+    }
+}
+
+// ---- transact kernels (`docs/TRANSACT.md`) --------------------------------
+//
+// Layer 1 (in-process control flow) plus retry/backoff, reinterpreted for
+// the compiled backend's own trap model: the now-deleted interpreter could
+// catch its own internal `RuntimeError` inside `transact`'s retry loop
+// before it ever unwound out of the interpreter; a compiled trap calls
+// `abort()` directly (`codegen.rs`'s `guard_io_ok` and every other guard),
+// an unrecoverable process exit, not a catchable error. So retry here
+// reacts only to a slot's own declared `Result(_, _)` return coming back
+// `Err` — the same rule `docs/TRANSACT.md`'s own §1b already uses for
+// `commit`/`compensate` (a trap *there* was always going to retry the same
+// way a trap anywhere else in this language traps: it doesn't, it aborts).
+// Durability logging and crash replay (`transact_log.rs`, deleted with the
+// interpreter) are a real, separate, disclosed follow-up, not attempted
+// here — `codegen::emit_transact`'s own doc comment names the gap.
+
+/// `txn_id`'s real, compiled implementation — an always-unique (not
+/// cryptographically unpredictable, but not guessable in any way that
+/// matters for its actual job: deduping a replayed resend) idempotency
+/// key: process id + a coarse monotonic timestamp + a process-wide atomic
+/// sequence number, hex-formatted. No crash-replay mechanism exists yet to
+/// actually need this to survive a restart (this update's own disclosed
+/// gap) — it only has to be unique *within* one process's lifetime today,
+/// same as the now-deleted interpreter's own scope note for a local
+/// SQLite-file-backed log.
+static TXN_ID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_transact_gen_txn_id(out: *mut NirStrOut) {
+    use std::sync::atomic::Ordering;
+    let seq = TXN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let pid = std::process::id();
+    let id = format!("txn-{pid:x}-{nanos:x}-{seq:x}");
+    unsafe { write_str_out(out, id) };
+}
+
+/// `sleep_ms(ms)` — a real wall-clock sleep (`docs/ROADMAP.md`'s own B9,
+/// "small, currently omitted... found this session"). `transact`'s own
+/// `commit`/`compensate` bounded-backoff retry loop
+/// (`codegen::emit_transact`) is what actually needed this to exist;
+/// `ms <= 0` is a no-op, not a panic (mirrors `std::thread::sleep`'s own
+/// "a zero duration returns immediately" behavior for negative input too,
+/// which `Duration::from_millis` can't represent directly).
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_sleep_ms(ms: i64) {
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+}
+
+#[cfg(test)]
+mod transact_kernel_tests {
+    use super::*;
+
+    #[test]
+    fn gen_txn_id_produces_distinct_ids() {
+        let mut a = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut b = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe {
+            nir_transact_gen_txn_id(&mut a);
+            nir_transact_gen_txn_id(&mut b);
+        }
+        let a_str = unsafe { std::str::from_utf8(std::slice::from_raw_parts(a.ptr, a.len as usize)).unwrap() };
+        let b_str = unsafe { std::str::from_utf8(std::slice::from_raw_parts(b.ptr, b.len as usize)).unwrap() };
+        assert_ne!(a_str, b_str);
+        assert!(a_str.starts_with("txn-"));
+    }
+
+    #[test]
+    fn sleep_ms_zero_or_negative_returns_immediately() {
+        let start = std::time::Instant::now();
+        nir_sleep_ms(0);
+        nir_sleep_ms(-5);
+        assert!(start.elapsed() < std::time::Duration::from_millis(50));
+    }
+}
+
+// ---- mq kernels (`mq_connect`/`mq_publish`/`mq_consume`, Redis) ---------
+//
+// `Ty::Mq`'s own doc comment has the full design: layer 1 targets Redis
+// specifically, `LPUSH`/`BLPOP` backing `mq_publish`/`mq_consume` (same
+// choice the now-deleted interpreter made). Same `HandleTable` shape
+// `db_table()` already uses — a `redis::Connection` isn't reconstructible
+// from a bare integer either.
+
+fn mq_table() -> &'static HandleTable<redis::Connection> {
+    static TABLE: OnceLock<HandleTable<redis::Connection>> = OnceLock::new();
+    TABLE.get_or_init(HandleTable::new)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_mq_connect(host_ptr: *const u8, host_len: i64, port: i64, out_handle: *mut i64, out_err: *mut NirStrOut) -> i32 {
+    let Some(host) = (unsafe { str_from_raw(host_ptr, host_len) }) else {
+        unsafe { write_str_out(out_err, "host is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    if !kernel::acquire(kernel::Domain::Mq) {
+        unsafe { write_str_out(out_err, "too many open mq connections".to_string()) };
+        return 0;
+    }
+    let url = format!("redis://{host}:{port}");
+    let opened = redis::Client::open(url).and_then(|client| client.get_connection());
+    match opened {
+        Ok(conn) => {
+            let id = mq_table().insert(conn);
+            unsafe { *out_handle = id };
+            1
+        }
+        Err(e) => {
+            kernel::release(kernel::Domain::Mq);
+            unsafe { write_str_out(out_err, e.to_string()) };
+            0
+        }
+    }
+}
+
+/// Closes `handle` — same "the checker is the real gate" convention
+/// `nir_db_stop`/`nir_tcp_stop` already document.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_mq_stop(handle: i64) -> i32 {
+    if mq_table().remove(handle).is_some() {
+        kernel::release(kernel::Domain::Mq);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_mq_publish(handle: i64, queue_ptr: *const u8, queue_len: i64, msg_ptr: *const u8, msg_len: i64, out_err: *mut NirStrOut) -> i32 {
+    let (Some(queue), Some(msg)) = (unsafe { str_from_raw(queue_ptr, queue_len) }, unsafe { str_from_raw(msg_ptr, msg_len) }) else {
+        unsafe { write_str_out(out_err, "queue/message is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let result = mq_table().with(handle, |conn| redis::cmd("LPUSH").arg(queue).arg(msg).query::<i64>(conn));
+    match result {
+        Some(Ok(_)) => 1,
+        Some(Err(e)) => {
+            unsafe { write_str_out(out_err, e.to_string()) };
+            0
+        }
+        None => {
+            unsafe { write_str_out(out_err, "mq handle is not open".to_string()) };
+            0
+        }
+    }
+}
+
+/// `mq_consume(conn, queue, timeout_secs) -> Result(str, str)` — `BLPOP`,
+/// blocking up to `timeout_secs` (`0` blocks forever, Redis's own
+/// convention, unchanged here). A timeout with nothing published is a
+/// real `Err`, not a trap — indistinguishable at this layer from any
+/// other Redis error, both just a message string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_mq_consume(handle: i64, queue_ptr: *const u8, queue_len: i64, timeout_secs: i64, out_msg: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
+    let Some(queue) = (unsafe { str_from_raw(queue_ptr, queue_len) }) else {
+        unsafe { write_str_out(out_err, "queue is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let result = mq_table().with(handle, |conn| redis::cmd("BLPOP").arg(queue).arg(timeout_secs).query::<Option<(String, String)>>(conn));
+    match result {
+        Some(Ok(Some((_key, value)))) => {
+            unsafe { write_str_out(out_msg, value) };
+            1
+        }
+        Some(Ok(None)) => {
+            unsafe { write_str_out(out_err, "timed out waiting for a message".to_string()) };
+            0
+        }
+        Some(Err(e)) => {
+            unsafe { write_str_out(out_err, e.to_string()) };
+            0
+        }
+        None => {
+            unsafe { write_str_out(out_err, "mq handle is not open".to_string()) };
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod mq_kernel_tests {
+    use super::*;
+
+    // Real Redis, not a mock -- `examples/features/28_message_queue.nir`'s
+    // own header comment already documents this file's tests degrade
+    // gracefully when Redis isn't reachable; these do the same, skipping
+    // (not failing) rather than asserting against an environment this
+    // crate doesn't control the availability of.
+    fn connect() -> Option<i64> {
+        let host = "127.0.0.1";
+        let mut handle = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_mq_connect(host.as_ptr(), host.len() as i64, 6379, &mut handle, &mut err) };
+        if ok != 0 { Some(handle) } else { None }
+    }
+
+    #[test]
+    fn publish_then_consume_round_trips_a_real_message() {
+        let Some(conn) = connect() else {
+            eprintln!("skipping: no Redis reachable at 127.0.0.1:6379");
+            return;
+        };
+        let queue = "nirdosha_test_queue_publish_then_consume";
+        let msg = "hello from mq_kernel_tests";
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let published = unsafe { nir_mq_publish(conn, queue.as_ptr(), queue.len() as i64, msg.as_ptr(), msg.len() as i64, &mut err) };
+        assert_eq!(published, 1);
+
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let consumed = unsafe { nir_mq_consume(conn, queue.as_ptr(), queue.len() as i64, 2, &mut out, &mut err) };
+        assert_eq!(consumed, 1);
+        let value = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap() };
+        assert_eq!(value, msg);
+
+        assert_eq!(unsafe { nir_mq_stop(conn) }, 0);
+    }
+
+    #[test]
+    fn consume_with_nothing_published_times_out_as_a_real_err() {
+        let Some(conn) = connect() else {
+            eprintln!("skipping: no Redis reachable at 127.0.0.1:6379");
+            return;
+        };
+        let queue = "nirdosha_test_queue_never_published_to";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let consumed = unsafe { nir_mq_consume(conn, queue.as_ptr(), queue.len() as i64, 1, &mut out, &mut err) };
+        assert_eq!(consumed, 0);
+        unsafe { nir_mq_stop(conn) };
+    }
+
+    #[test]
+    fn connect_to_an_unreachable_host_is_a_real_err_not_a_panic() {
+        let host = "127.0.0.1";
+        let mut handle = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        // Port 1 is never a real Redis server.
+        let ok = unsafe { nir_mq_connect(host.as_ptr(), host.len() as i64, 1, &mut handle, &mut err) };
+        assert_eq!(ok, 0);
+    }
+}
+
+// ---- http/https kernels (`http_get`/`http_post`/`https_get`/`https_post`) --
+//
+// `ast::BUILTIN_NAMES`'s own doc comment has the full, already-locked
+// design (written before this backend existed, ported here unchanged):
+// plain HTTP over `std::net::TcpStream`, HTTPS over the identical
+// request/response handling wrapped in a `native_tls::TlsStream`.
+// **`Connection: close` + read-to-EOF, no `Content-Length`/chunked-
+// transfer-encoding parsing** — "no ... parsing needed for a first cut,
+// since the server closing the socket *is* the end-of-body signal" is
+// this design's own words, not a new cut made here. A network failure, a
+// malformed status line, or a non-UTF-8 body are all a real `Err`, never
+// a trap.
+
+struct HttpParsed {
+    status: i64,
+    body: String,
+}
+
+/// Decodes an HTTP/1.1 `Transfer-Encoding: chunked` body — each chunk is
+/// a hex size line, that many raw bytes, a trailing `\r\n`, repeated
+/// until a zero-size chunk terminates the sequence (any trailer headers
+/// after the terminating chunk are ignored, same "don't need them for a
+/// first cut" scope as the rest of this module). Found necessary by
+/// actually testing `https_get` against a real server (`example.com`
+/// chunks by default) — not designed in ahead of time, but not
+/// optional either once found: without this, a chunked response's body
+/// comes back with raw `<hex-size>\r\n...\r\n` framing still in it,
+/// which is a real, visibly wrong bug for a large fraction of real HTTP
+/// servers, not an acceptable "first cut" gap the way skipping
+/// `Content-Length`-driven partial reads is (this module's read-to-EOF
+/// strategy already makes `Content-Length` itself redundant).
+fn decode_chunked_body(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut pos = 0usize;
+    loop {
+        let line_end = body[pos..].windows(2).position(|w| w == b"\r\n").ok_or_else(|| "malformed chunked body: no chunk-size line".to_string())?;
+        let size_line = std::str::from_utf8(&body[pos..pos + line_end]).map_err(|_| "malformed chunked body: chunk-size line is not valid UTF-8".to_string())?;
+        // A chunk-size line may carry `;`-separated extensions -- ignored,
+        // only the leading hex digits matter.
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16).map_err(|_| format!("malformed chunked body: bad chunk size `{size_hex}`"))?;
+        pos += line_end + 2;
+        if size == 0 {
+            break; // terminating chunk -- any trailer headers after it are ignored
+        }
+        if pos + size > body.len() {
+            return Err("malformed chunked body: chunk size exceeds remaining data".to_string());
+        }
+        out.extend_from_slice(&body[pos..pos + size]);
+        pos += size;
+        if body.get(pos..pos + 2) != Some(b"\r\n") {
+            return Err("malformed chunked body: missing CRLF after chunk data".to_string());
+        }
+        pos += 2;
+    }
+    Ok(out)
+}
+
+fn parse_http_response(raw: &[u8]) -> Result<HttpParsed, String> {
+    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| "malformed HTTP response: no header/body separator".to_string())?;
+    let head = &raw[..sep];
+    let body = &raw[sep + 4..];
+    let head_str = std::str::from_utf8(head).map_err(|_| "malformed HTTP response: headers are not valid UTF-8".to_string())?;
+    let status_line = head_str.lines().next().ok_or_else(|| "malformed HTTP response: empty status line".to_string())?;
+    let mut parts = status_line.splitn(3, ' ');
+    let _version = parts.next();
+    let status_str = parts.next().ok_or_else(|| "malformed HTTP response: no status code in status line".to_string())?;
+    let status: i64 = status_str.parse().map_err(|_| format!("malformed HTTP response: bad status code `{status_str}`"))?;
+    let is_chunked = head_str.lines().skip(1).any(|line| {
+        line.split_once(':').map(|(k, v)| k.trim().eq_ignore_ascii_case("transfer-encoding") && v.trim().eq_ignore_ascii_case("chunked")).unwrap_or(false)
+    });
+    let body_bytes = if is_chunked { decode_chunked_body(body)? } else { body.to_vec() };
+    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| "HTTP response body is not valid UTF-8".to_string())?.to_string();
+    Ok(HttpParsed { status, body: body_str })
+}
+
+fn http_request_bytes(method: &str, host: &str, path: &str, body: Option<&str>, bearer_token: Option<&str>) -> Vec<u8> {
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    if let Some(token) = bearer_token {
+        req.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    match body {
+        Some(b) => req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}", b.len())),
+        None => req.push_str("\r\n"),
+    }
+    req.into_bytes()
+}
+
+fn do_http(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) -> Result<HttpParsed, String> {
+    do_http_with_auth(host, port, path, method, body, None)
+}
+
+/// `do_http`'s own generalization — `bearer_token`, when present, adds
+/// an `Authorization: Bearer <token>` header. `send_email`/`send_sms`/
+/// `send_push`'s own generic-provider POST (`send_via_provider`) is the
+/// one caller that needs this; `http_post`/`https_post` (client-facing
+/// builtins) never pass one, matching their own already-locked design
+/// (no auth header in that surface).
+fn do_http_with_auth(host: &str, port: i64, path: &str, method: &str, body: Option<&str>, bearer_token: Option<&str>) -> Result<HttpParsed, String> {
+    let mut stream = std::net::TcpStream::connect((host, port as u16)).map_err(|e| e.to_string())?;
+    stream.write_all(&http_request_bytes(method, host, path, body, bearer_token)).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    parse_http_response(&raw)
+}
+
+fn do_https(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) -> Result<HttpParsed, String> {
+    let stream = std::net::TcpStream::connect((host, port as u16)).map_err(|e| e.to_string())?;
+    let connector = native_tls::TlsConnector::new().map_err(|e| e.to_string())?;
+    let mut stream = connector.connect(host, stream).map_err(|e| e.to_string())?;
+    stream.write_all(&http_request_bytes(method, host, path, body, None)).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    parse_http_response(&raw)
+}
+
+unsafe fn write_http_result(result: Result<HttpParsed, String>, out_status: *mut i64, out_body: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
+    match result {
+        Ok(r) => {
+            unsafe {
+                *out_status = r.status;
+                write_str_out(out_body, r.body);
+            }
+            1
+        }
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_http_get(
+    host_ptr: *const u8,
+    host_len: i64,
+    port: i64,
+    path_ptr: *const u8,
+    path_len: i64,
+    out_status: *mut i64,
+    out_body: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(host), Some(path)) = (unsafe { str_from_raw(host_ptr, host_len) }, unsafe { str_from_raw(path_ptr, path_len) }) else {
+        unsafe { write_str_out(out_err, "host/path is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let result = do_http(host, port, path, "GET", None);
+    unsafe { write_http_result(result, out_status, out_body, out_err) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_http_post(
+    host_ptr: *const u8,
+    host_len: i64,
+    port: i64,
+    path_ptr: *const u8,
+    path_len: i64,
+    body_ptr: *const u8,
+    body_len: i64,
+    out_status: *mut i64,
+    out_body: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(host), Some(path), Some(body)) =
+        (unsafe { str_from_raw(host_ptr, host_len) }, unsafe { str_from_raw(path_ptr, path_len) }, unsafe { str_from_raw(body_ptr, body_len) })
+    else {
+        unsafe { write_str_out(out_err, "host/path/body is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let result = do_http(host, port, path, "POST", Some(body));
+    unsafe { write_http_result(result, out_status, out_body, out_err) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_https_get(
+    host_ptr: *const u8,
+    host_len: i64,
+    port: i64,
+    path_ptr: *const u8,
+    path_len: i64,
+    out_status: *mut i64,
+    out_body: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(host), Some(path)) = (unsafe { str_from_raw(host_ptr, host_len) }, unsafe { str_from_raw(path_ptr, path_len) }) else {
+        unsafe { write_str_out(out_err, "host/path is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let result = do_https(host, port, path, "GET", None);
+    unsafe { write_http_result(result, out_status, out_body, out_err) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_https_post(
+    host_ptr: *const u8,
+    host_len: i64,
+    port: i64,
+    path_ptr: *const u8,
+    path_len: i64,
+    body_ptr: *const u8,
+    body_len: i64,
+    out_status: *mut i64,
+    out_body: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(host), Some(path), Some(body)) =
+        (unsafe { str_from_raw(host_ptr, host_len) }, unsafe { str_from_raw(path_ptr, path_len) }, unsafe { str_from_raw(body_ptr, body_len) })
+    else {
+        unsafe { write_str_out(out_err, "host/path/body is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let result = do_https(host, port, path, "POST", Some(body));
+    unsafe { write_http_result(result, out_status, out_body, out_err) }
+}
+
+#[cfg(test)]
+mod http_kernel_tests {
+    use super::*;
+
+    #[test]
+    fn parse_http_response_extracts_status_and_body() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world";
+        let parsed = parse_http_response(raw).unwrap();
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body, "hello world");
+    }
+
+    #[test]
+    fn parse_http_response_handles_empty_body() {
+        let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let parsed = parse_http_response(raw).unwrap();
+        assert_eq!(parsed.status, 204);
+        assert_eq!(parsed.body, "");
+    }
+
+    #[test]
+    fn parse_http_response_rejects_malformed_input() {
+        assert!(parse_http_response(b"not an http response at all").is_err());
+    }
+
+    #[test]
+    fn parse_http_response_decodes_a_real_chunked_body() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nMozilla\r\n9\r\nDeveloper\r\n0\r\n\r\n";
+        let parsed = parse_http_response(raw).unwrap();
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body, "MozillaDeveloper");
+    }
+
+    #[test]
+    fn parse_http_response_leaves_a_non_chunked_body_untouched() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        assert_eq!(parse_http_response(raw).unwrap().body, "hello");
+    }
+
+    #[test]
+    fn decode_chunked_body_rejects_truncated_input() {
+        assert!(decode_chunked_body(b"5\r\nabc").is_err());
+    }
+
+    #[test]
+    fn http_get_round_trips_against_a_real_local_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello from server").unwrap();
+        });
+        let result = do_http("127.0.0.1", port as i64, "/", "GET", None);
+        server.join().unwrap();
+        let parsed = result.unwrap();
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body, "hello from server");
+    }
+
+    #[test]
+    fn http_post_sends_a_real_body_with_content_length() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let received = String::from_utf8_lossy(&buf[..n]).into_owned();
+            assert!(received.contains("Content-Length: 11"));
+            assert!(received.ends_with("hello world"));
+            stream.write_all(b"HTTP/1.1 201 Created\r\nConnection: close\r\n\r\ncreated").unwrap();
+        });
+        let result = do_http("127.0.0.1", port as i64, "/submit", "POST", Some("hello world"));
+        server.join().unwrap();
+        let parsed = result.unwrap();
+        assert_eq!(parsed.status, 201);
+        assert_eq!(parsed.body, "created");
+    }
+
+    #[test]
+    fn http_get_connection_refused_is_a_real_err_not_a_panic() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // bound then immediately dropped -- nothing listens on it
+        assert!(do_http("127.0.0.1", port as i64, "/", "GET", None).is_err());
+    }
+}
+
+// ---- workflow kernels (`docs/WORKFLOW.md`, Layer 1 only) -----------------
+//
+// The now-deleted interpreter's own `workflow_log.rs` (1294 lines) was a
+// real, file-backed-SQLite-by-default durability store, modeled on
+// `transact_log.rs` — instance state, an append-only history log, magic-
+// link tokens, an identity/presence directory for `notify()`. None of
+// that is rebuilt here. This is deliberately the *smallest* real slice,
+// the same "Layer 1: in-process, no durability" cut `transact` itself
+// shipped first (`docs/TRANSACT.md`'s own layering) — a process-wide,
+// in-memory instance table (`instance_id -> (workflow_name,
+// current_state)`), real state transitions, real `on_entry`/`on_exit`
+// action calls. Lost on process exit, same as `transact`'s own Layer 1
+// durability posture — a real, disclosed, much narrower gap than the
+// full design's cross-restart/multi-instance guarantee.
+
+struct WorkflowInstance {
+    workflow_name: String,
+    state: String,
+    /// Unix seconds this instance entered `state` — reset on every
+    /// transition (`nir_workflow_set_state`), stamped fresh on create.
+    /// The one piece of data `nir_workflow_list_overdue` needs to answer
+    /// "how long has this instance sat here" — an SLA/escalation clock,
+    /// not a general audit timestamp (no history of *previous* states'
+    /// own dwell times is kept, matching this whole track's Layer-1
+    /// "narrower, disclosed" scope).
+    entered_at: i64,
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+fn workflow_instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, WorkflowInstance>> {
+    static TABLE: OnceLock<std::sync::Mutex<std::collections::HashMap<i64, WorkflowInstance>>> = OnceLock::new();
+    TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+static WORKFLOW_INSTANCE_SEQ: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+
+/// Creates a new instance in `initial_state`, returns its fresh
+/// `instance_id`. Only fails on malformed UTF-8 input — in practice
+/// never, since `codegen::emit_workflow_start` only ever passes
+/// compile-time-known `str` literals (the workflow's own name, its
+/// first-declared state's name) here, never a runtime value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_workflow_create_instance(workflow_name_ptr: *const u8, workflow_name_len: i64, initial_state_ptr: *const u8, initial_state_len: i64, out_instance_id: *mut i64) -> i32 {
+    let (Some(workflow_name), Some(initial_state)) =
+        (unsafe { str_from_raw(workflow_name_ptr, workflow_name_len) }, unsafe { str_from_raw(initial_state_ptr, initial_state_len) })
+    else {
+        return 0;
+    };
+    let id = WORKFLOW_INSTANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    workflow_instances()
+        .lock()
+        .unwrap()
+        .insert(id, WorkflowInstance { workflow_name: workflow_name.to_string(), state: initial_state.to_string(), entered_at: now_unix_secs() });
+    unsafe { *out_instance_id = id };
+    1
+}
+
+/// `1` (with `out_state` populated) if `instance_id` exists and belongs
+/// to `workflow_name`, `0` otherwise (unknown instance, or an
+/// `instance_id` that belongs to a *different* workflow — the same
+/// "each workflow's own instance space" isolation a real per-workflow
+/// table would give for free).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_workflow_get_state(workflow_name_ptr: *const u8, workflow_name_len: i64, instance_id: i64, out_state: *mut NirStrOut) -> i32 {
+    let Some(workflow_name) = (unsafe { str_from_raw(workflow_name_ptr, workflow_name_len) }) else {
+        return 0;
+    };
+    let table = workflow_instances().lock().unwrap();
+    match table.get(&instance_id) {
+        Some(inst) if inst.workflow_name == workflow_name => {
+            unsafe { write_str_out(out_state, inst.state.clone()) };
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// Moves `instance_id` to `new_state`, resetting its SLA clock
+/// (`entered_at`) to now.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_workflow_set_state(workflow_name_ptr: *const u8, workflow_name_len: i64, instance_id: i64, new_state_ptr: *const u8, new_state_len: i64) -> i32 {
+    let (Some(workflow_name), Some(new_state)) =
+        (unsafe { str_from_raw(workflow_name_ptr, workflow_name_len) }, unsafe { str_from_raw(new_state_ptr, new_state_len) })
+    else {
+        return 0;
+    };
+    let mut table = workflow_instances().lock().unwrap();
+    match table.get_mut(&instance_id) {
+        Some(inst) if inst.workflow_name == workflow_name => {
+            inst.state = new_state.to_string();
+            inst.entered_at = now_unix_secs();
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// `list_<workflow>_overdue()`'s real implementation
+/// (`codegen::emit_workflow_overdue`) — SLA/escalation, the queryable
+/// half (`docs/ROADMAP.md` A15's own proposed, more tractable design:
+/// a `list_<workflow>_overdue()` read fn an external scheduler polls,
+/// not an in-process timer — the same "real cross-thread callback"
+/// complexity already deferred for `transact`'s `network` timeout would
+/// be needed to fire escalations *automatically* with no caller
+/// involved at all, not attempted here). `sla_config_json` is a
+/// compile-time-built `{"StateName": seconds, ...}` object, one entry
+/// per state that declared `sla_seconds` — states with no entry are
+/// never SLA-tracked, matching `docs/WORKFLOW.md`'s own "sla is a real,
+/// scoped proposed design, not sketched in the original doc" framing.
+/// Returns a JSON array of `{"instance_id":N,"state":"...","age_seconds":N}`,
+/// oldest-dwelling first.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_workflow_list_overdue(
+    workflow_name_ptr: *const u8,
+    workflow_name_len: i64,
+    sla_config_json_ptr: *const u8,
+    sla_config_json_len: i64,
+    out_json: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(workflow_name), Some(sla_config_json)) =
+        (unsafe { str_from_raw(workflow_name_ptr, workflow_name_len) }, unsafe { str_from_raw(sla_config_json_ptr, sla_config_json_len) })
+    else {
+        unsafe { write_str_out(out_err, "workflow_name/sla_config is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let sla_config: serde_json::Value = match serde_json::from_str(sla_config_json) {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, format!("malformed sla config: {e}")) };
+            return 0;
+        }
+    };
+    let now = now_unix_secs();
+    let table = workflow_instances().lock().unwrap();
+    let mut overdue: Vec<(i64, &String, i64)> = Vec::new();
+    for (id, inst) in table.iter() {
+        if inst.workflow_name != workflow_name {
+            continue;
+        }
+        if let Some(sla) = sla_config.get(&inst.state).and_then(|v| v.as_i64()) {
+            let age = now - inst.entered_at;
+            if age >= sla {
+                overdue.push((*id, &inst.state, age));
+            }
+        }
+    }
+    overdue.sort_by(|a, b| b.2.cmp(&a.2));
+    let rows: Vec<serde_json::Value> =
+        overdue.into_iter().map(|(id, state, age)| serde_json::json!({"instance_id": id, "state": state, "age_seconds": age})).collect();
+    unsafe { write_str_out(out_json, serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())) };
+    1
+}
+
+#[cfg(test)]
+mod workflow_overdue_tests {
+    use super::*;
+
+    #[test]
+    fn an_instance_past_its_sla_is_reported_overdue() {
+        let name = "OverdueTestWorkflow";
+        let state = "Waiting";
+        let mut id = 0i64;
+        unsafe { nir_workflow_create_instance(name.as_ptr(), name.len() as i64, state.as_ptr(), state.len() as i64, &mut id) };
+        // Backdate `entered_at` directly (real time would need a real
+        // sleep) -- same "poke the table, don't wait on a real clock"
+        // convention this crate's own other timing-adjacent tests avoid
+        // needing at all elsewhere.
+        workflow_instances().lock().unwrap().get_mut(&id).unwrap().entered_at -= 1000;
+
+        let sla_config = r#"{"Waiting":60}"#;
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe {
+            nir_workflow_list_overdue(name.as_ptr(), name.len() as i64, sla_config.as_ptr(), sla_config.len() as i64, &mut out, &mut err)
+        };
+        assert_eq!(ok, 1);
+        let json_text = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap() };
+        let parsed: serde_json::Value = serde_json::from_str(json_text).unwrap();
+        assert_eq!(parsed[0]["instance_id"], id);
+        assert_eq!(parsed[0]["state"], "Waiting");
+    }
+
+    #[test]
+    fn an_instance_within_its_sla_is_not_overdue() {
+        let name = "NotOverdueTestWorkflow";
+        let state = "Waiting";
+        let mut id = 0i64;
+        unsafe { nir_workflow_create_instance(name.as_ptr(), name.len() as i64, state.as_ptr(), state.len() as i64, &mut id) };
+
+        let sla_config = r#"{"Waiting":600}"#;
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe { nir_workflow_list_overdue(name.as_ptr(), name.len() as i64, sla_config.as_ptr(), sla_config.len() as i64, &mut out, &mut err) };
+        let json_text = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap() };
+        assert_eq!(json_text, "[]");
+    }
+
+    #[test]
+    fn a_state_with_no_sla_entry_is_never_overdue() {
+        let name = "NoSlaTestWorkflow";
+        let state = "Untracked";
+        let mut id = 0i64;
+        unsafe { nir_workflow_create_instance(name.as_ptr(), name.len() as i64, state.as_ptr(), state.len() as i64, &mut id) };
+        workflow_instances().lock().unwrap().get_mut(&id).unwrap().entered_at -= 100_000;
+
+        let sla_config = r#"{"SomeOtherState":1}"#;
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe { nir_workflow_list_overdue(name.as_ptr(), name.len() as i64, sla_config.as_ptr(), sla_config.len() as i64, &mut out, &mut err) };
+        let json_text = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap() };
+        assert_eq!(json_text, "[]");
+    }
+}
+
+// ---- send_email/send_sms/send_push/notify (`docs/WORKFLOW.md`) ----------
+//
+// A real, generic, provider-agnostic authenticated HTTPS POST — not any
+// specific vendor's own exact API schema (SendGrid/Twilio/FCM), exactly
+// the already-locked design. Reads the first `active = 1` row of a
+// fixed-name table (`email_provider_config`/`sms_provider_config`/
+// `push_provider_config`) via the caller's own `db` handle — no implicit/
+// global connection, matching every `db_query`/`db_execute` convention
+// already established.
+//
+// **`notify`'s presence bridge is not wired up in this round** — a real
+// `identity_presence` table only ever gets populated by two `serve.rs`
+// routes (`_presence_connect`/`_disconnect`), and `serve.rs` itself is
+// gone. Rather than build an unreachable presence table nothing can ever
+// populate, `notify` here always takes the documented *offline* path
+// (falls back to `send_email`) — a real, disclosed narrowing of an
+// already-narrow design, not a fake "sometimes online" simulation.
+// `crates/presence-gateway/`'s own real Redis-`PUBLISH`-relay protocol
+// (`docs/WORKFLOW.md`'s own §"notify's presence bridge") is exactly what
+// a future session should wire this up to.
+
+/// `active = 1` row's five fixed columns, in `docs/WORKFLOW.md`'s own
+/// declared order (`EmailProviderConfig`'s doc comment).
+struct ProviderConfig {
+    host: String,
+    port: i64,
+    path: String,
+    api_key: String,
+    from_address: String,
+}
+
+fn provider_table_name(channel: &str) -> &'static str {
+    match channel {
+        "email" => "email_provider_config",
+        "sms" => "sms_provider_config",
+        "push" => "push_provider_config",
+        _ => unreachable!("codegen only ever passes email/sms/push"),
+    }
+}
+
+fn load_active_provider_config(conn_handle: i64, channel: &str) -> Result<ProviderConfig, String> {
+    let table = provider_table_name(channel);
+    let sql = format!("SELECT host, port, path, api_key, from_address FROM {table} WHERE active = 1 LIMIT 1");
+    let row = db_table().with(conn_handle, |conn| {
+        conn.query_row(&sql, [], |r| {
+            Ok(ProviderConfig {
+                host: r.get(0)?,
+                port: r.get(1)?,
+                path: r.get(2)?,
+                api_key: r.get(3)?,
+                from_address: r.get(4)?,
+            })
+        })
+    });
+    match row {
+        Some(Ok(cfg)) => Ok(cfg),
+        Some(Err(_)) => Err("provider_not_configured".to_string()),
+        None => Err("db handle is not open".to_string()),
+    }
+}
+
+/// The actual authenticated POST — `{"to","from","template","vars"}` as
+/// JSON, `Authorization: Bearer <api_key>`. A non-2xx status or a
+/// connection failure is `Err(message)`; success is `Ok(())`.
+fn send_via_provider(cfg: &ProviderConfig, to: &str, template: &str, vars_json: &str) -> Result<(), String> {
+    let body = serde_json::json!({"to": to, "from": cfg.from_address, "template": template, "vars": serde_json::from_str::<serde_json::Value>(vars_json).unwrap_or(serde_json::Value::Null)})
+        .to_string();
+    let result = do_http_with_auth(&cfg.host, cfg.port, &cfg.path, "POST", Some(&body), Some(&cfg.api_key));
+    match result {
+        Ok(parsed) if (200..300).contains(&parsed.status) => Ok(()),
+        Ok(parsed) => Err(format!("provider returned status {}", parsed.status)),
+        Err(e) => Err(e),
+    }
+}
+
+/// `0`=ok, `1`=`ProviderNotConfigured`, `2`=`ProviderRequestFailed(msg)` —
+/// `codegen::emit_send_notification`'s own doc comment maps these back
+/// onto the real `WorkflowActionError` variant tags (3 and index-matched
+/// respectively) at the call site, the same "kernel reports a small
+/// status code, codegen builds the real enum value" split every other
+/// `Result`-returning builtin in this file already uses.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_workflow_send(
+    channel_ptr: *const u8,
+    channel_len: i64,
+    conn_handle: i64,
+    to_ptr: *const u8,
+    to_len: i64,
+    template_ptr: *const u8,
+    template_len: i64,
+    vars_json_ptr: *const u8,
+    vars_json_len: i64,
+    out_err_msg: *mut NirStrOut,
+) -> i32 {
+    let (Some(channel), Some(to), Some(template), Some(vars_json)) = (
+        unsafe { str_from_raw(channel_ptr, channel_len) },
+        unsafe { str_from_raw(to_ptr, to_len) },
+        unsafe { str_from_raw(template_ptr, template_len) },
+        unsafe { str_from_raw(vars_json_ptr, vars_json_len) },
+    ) else {
+        unsafe { write_str_out(out_err_msg, "argument is not valid UTF-8".to_string()) };
+        return 2;
+    };
+    let cfg = match load_active_provider_config(conn_handle, channel) {
+        Ok(cfg) => cfg,
+        Err(e) if e == "provider_not_configured" => return 1,
+        Err(e) => {
+            unsafe { write_str_out(out_err_msg, e) };
+            return 2;
+        }
+    };
+    match send_via_provider(&cfg, to, template, vars_json) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { write_str_out(out_err_msg, e) };
+            2
+        }
+    }
+}
+
+/// `notify`'s real implementation — always takes the offline
+/// (`send_email`) path; see this section's own doc comment for why the
+/// presence-bridge online path isn't reachable this round. Same status-
+/// code convention as `nir_workflow_send`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_notify(
+    conn_handle: i64,
+    _mq_handle: i64,
+    to_ptr: *const u8,
+    to_len: i64,
+    template_ptr: *const u8,
+    template_len: i64,
+    vars_json_ptr: *const u8,
+    vars_json_len: i64,
+    out_err_msg: *mut NirStrOut,
+) -> i32 {
+    unsafe { nir_workflow_send(b"email".as_ptr(), 5, conn_handle, to_ptr, to_len, template_ptr, template_len, vars_json_ptr, vars_json_len, out_err_msg) }
+}
+
+#[cfg(test)]
+mod workflow_send_tests {
+    use super::*;
+
+    fn open_memory_db() -> i64 {
+        let path = ":memory:";
+        let mut handle = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        assert_eq!(unsafe { nir_db_connect(path.as_ptr(), path.len() as i64, &mut handle, &mut err) }, 1);
+        handle
+    }
+
+    #[test]
+    fn send_email_with_no_active_provider_row_is_not_configured() {
+        let conn = open_memory_db();
+        let sql = "CREATE TABLE email_provider_config (id INTEGER PRIMARY KEY, active INTEGER, host TEXT, port INTEGER, path TEXT, api_key TEXT, from_address TEXT)";
+        let mut affected = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe { nir_db_execute(conn, sql.as_ptr(), sql.len() as i64, std::ptr::null(), 0, &mut affected, &mut err) };
+
+        let channel = "email";
+        let to = "alice@example.com";
+        let template = "welcome";
+        let vars = "{}";
+        let mut err_msg = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let status = unsafe {
+            nir_workflow_send(
+                channel.as_ptr(),
+                channel.len() as i64,
+                conn,
+                to.as_ptr(),
+                to.len() as i64,
+                template.as_ptr(),
+                template.len() as i64,
+                vars.as_ptr(),
+                vars.len() as i64,
+                &mut err_msg,
+            )
+        };
+        assert_eq!(status, 1);
+        unsafe { nir_db_stop(conn) };
+    }
+
+    #[test]
+    fn send_email_posts_to_a_real_configured_provider() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let received = String::from_utf8_lossy(&buf[..n]).into_owned();
+            assert!(received.contains("Authorization: Bearer secret-key-123"));
+            assert!(received.contains("alice@example.com"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nsent").unwrap();
+        });
+
+        let conn = open_memory_db();
+        let create_sql = "CREATE TABLE email_provider_config (id INTEGER PRIMARY KEY, active INTEGER, host TEXT, port INTEGER, path TEXT, api_key TEXT, from_address TEXT)";
+        let mut affected = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe { nir_db_execute(conn, create_sql.as_ptr(), create_sql.len() as i64, std::ptr::null(), 0, &mut affected, &mut err) };
+        let insert_sql = "INSERT INTO email_provider_config (active, host, port, path, api_key, from_address) VALUES (1, ?, ?, ?, ?, ?)";
+        let host = "127.0.0.1";
+        let path = "/send";
+        let api_key = "secret-key-123";
+        let from_address = "noreply@example.com";
+        let binds = [
+            NirBindValue { tag: 2, i: 0, f: 0.0, s_ptr: host.as_ptr(), s_len: host.len() as i64 },
+            NirBindValue { tag: 0, i: port as i64, f: 0.0, s_ptr: std::ptr::null(), s_len: 0 },
+            NirBindValue { tag: 2, i: 0, f: 0.0, s_ptr: path.as_ptr(), s_len: path.len() as i64 },
+            NirBindValue { tag: 2, i: 0, f: 0.0, s_ptr: api_key.as_ptr(), s_len: api_key.len() as i64 },
+            NirBindValue { tag: 2, i: 0, f: 0.0, s_ptr: from_address.as_ptr(), s_len: from_address.len() as i64 },
+        ];
+        unsafe { nir_db_execute(conn, insert_sql.as_ptr(), insert_sql.len() as i64, binds.as_ptr(), binds.len() as i64, &mut affected, &mut err) };
+
+        let channel = "email";
+        let to = "alice@example.com";
+        let template = "welcome";
+        let vars = "{}";
+        let mut err_msg = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let status = unsafe {
+            nir_workflow_send(
+                channel.as_ptr(),
+                channel.len() as i64,
+                conn,
+                to.as_ptr(),
+                to.len() as i64,
+                template.as_ptr(),
+                template.len() as i64,
+                vars.as_ptr(),
+                vars.len() as i64,
+                &mut err_msg,
+            )
+        };
+        server.join().unwrap();
+        assert_eq!(status, 0);
+        unsafe { nir_db_stop(conn) };
+    }
+}
+
+#[cfg(test)]
+mod workflow_kernel_tests {
+    use super::*;
+
+    #[test]
+    fn create_then_get_state_round_trips() {
+        let name = "TestWorkflow1";
+        let state = "Pending";
+        let mut id = 0i64;
+        assert_eq!(unsafe { nir_workflow_create_instance(name.as_ptr(), name.len() as i64, state.as_ptr(), state.len() as i64, &mut id) }, 1);
+
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        assert_eq!(unsafe { nir_workflow_get_state(name.as_ptr(), name.len() as i64, id, &mut out) }, 1);
+        let seen = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap() };
+        assert_eq!(seen, "Pending");
+    }
+
+    #[test]
+    fn set_state_then_get_state_sees_the_update() {
+        let name = "TestWorkflow2";
+        let state = "Start";
+        let mut id = 0i64;
+        unsafe { nir_workflow_create_instance(name.as_ptr(), name.len() as i64, state.as_ptr(), state.len() as i64, &mut id) };
+
+        let next = "Done";
+        assert_eq!(unsafe { nir_workflow_set_state(name.as_ptr(), name.len() as i64, id, next.as_ptr(), next.len() as i64) }, 1);
+
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe { nir_workflow_get_state(name.as_ptr(), name.len() as i64, id, &mut out) };
+        let seen = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out.ptr, out.len as usize)).unwrap() };
+        assert_eq!(seen, "Done");
+    }
+
+    #[test]
+    fn unknown_instance_id_is_not_found() {
+        let name = "TestWorkflow3";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        assert_eq!(unsafe { nir_workflow_get_state(name.as_ptr(), name.len() as i64, 999_999_999, &mut out) }, 0);
+    }
+
+    #[test]
+    fn an_instance_id_belonging_to_a_different_workflow_is_not_found() {
+        let name_a = "TestWorkflowA";
+        let name_b = "TestWorkflowB";
+        let state = "S";
+        let mut id = 0i64;
+        unsafe { nir_workflow_create_instance(name_a.as_ptr(), name_a.len() as i64, state.as_ptr(), state.len() as i64, &mut id) };
+
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        assert_eq!(unsafe { nir_workflow_get_state(name_b.as_ptr(), name_b.len() as i64, id, &mut out) }, 0);
+    }
 }
 
 // ---- dec128 kernels ---------------------------------------------------

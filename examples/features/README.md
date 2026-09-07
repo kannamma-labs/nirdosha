@@ -1,13 +1,19 @@
 # Nirdosha — feature catalogue
 
-One `.nir` file per language feature, each independently runnable
-(`nirdosha <file>`) and verified against `target/debug/nirdosha`. Every
-file is self-contained — no external services required, though a few
+One `.nir` file per language feature, each independently runnable and
+verified against `target/debug/nirdosha`. **2026-09: there is no
+interpreter and no bare `nirdosha <file>` run mode any more** — compile
+first, then run the binary: `nirdosha build <file>.nir -o <out> && <out>`.
+Every file is self-contained — no external services required, though a few
 (25/28/47) degrade gracefully (a real `Err`, not a crash) when Redis or
 network access isn't available.
 
 `45_module_namespacing.nir` `use`s `45_module_namespacing_helper.nir` —
 that's the one file here meant to be read, not run, on its own.
+`51_compiled_serve.nir` is the other exception: its own `main` loops
+forever accepting connections, so it's meant to be run in the background
+and driven with a real `curl` (see its own header comment), not read to
+completion by itself.
 
 | # | File | Feature |
 |---|---|---|
@@ -37,19 +43,19 @@ that's the one file here meant to be read, not run, on its own.
 | 23 | `23_tcp_listener.nir` | `tcp_listener`, `listen`, `accept` |
 | 24 | `24_file_io.nir` | `file`, `open` (`"r"`/`"w"`/`"a"`) |
 | 25 | `25_json.nir` | `json_parse`/`json_get_*`/`json_array_*`/`json_set_str` |
-| 26 | `26_http_and_https.nir` | `http_get`/`http_post`/`https_get`/`https_post` |
+| 26 | `26_http_and_https.nir` | `http_get`/`http_post`/`https_get`/`https_post` — compiled (2026-09); vendored TLS, chunked-transfer-encoding decoding |
 | 27 | `27_database.nir` | `db_connect`/`db_query`/`db_execute` (SQLite/Postgres) |
-| 28 | `28_message_queue.nir` | `mq_connect`/`mq_publish`/`mq_consume` (Redis) |
+| 28 | `28_message_queue.nir` | `mq_connect`/`mq_publish`/`mq_consume` (Redis) — the mechanism compiles (2026-09), but this file's own `Ok(m) => m` arm order hits the pre-existing `match_expr` limitation (`docs/PHASE0.md`'s "Twenty-first update"); see `crates/compiler/tests/codegen.rs`'s `mq_publish_and_consume_round_trip_a_real_message` for a working equivalent |
 | 29 | `29_crypto_hashing.nir` | `sha256_hex`, `constant_time_str_eq` |
 | 30 | `30_identity_oidc.nir` | `oidc_validate_token`/`check_role`/`extract_claim`/`identity_expired` |
 | 31 | `31_mock_identity_provider.nir` | `mock_issue_token` — the mock-IdP inverse of `oidc_validate_token` |
 | 32 | `32_sessions_and_api_keys.nir` | `create_application_session`/`session_cookie`/`new_refresh_token`/`exchange_refresh_token`/`check_revocation`/`validate_api_key` |
-| 33 | `33_privileged_functions.nir` | `requires(role:...)`/`requires(claim:...,...)` + `acquire` |
+| 33 | `33_privileged_functions.nir` | `requires(role:...)`/`requires(claim:...,...)` + `acquire` — the mechanism itself compiles now (2026-09), but this file's own worked examples route through `oidc_validate_token`/`extract_claim` (still interpreter-only-designed), so it doesn't run end to end; see `50_field_masking_and_check_role.nir` for a `check_role`-driven role-gated flow that does |
 | 34 | `34_requires_public.nir` | `requires(public)` |
 | 35 | `35_validate_contracts.nir` | `validate { pre:/post: }` Hoare contracts |
-| 36 | `36_transact.nir` | `transact { precheck?/network/verify/commit/compensate?/log? }` |
-| 37 | `37_transact_cross_process.nir` | `transact`'s cross-process layer + `retry`/`timeout` |
-| 38 | `38_workflow.nir` | `workflow { data/state/on_entry/on <Event> -> <State>/terminal/owner }` |
+| 36 | `36_transact.nir` | `transact { precheck?/network/verify/commit/compensate?/log? }` — compiled (2026-09, Layer 1 only) |
+| 37 | `37_transact_cross_process.nir` | `transact`'s cross-process layer + `retry`/`timeout` — `retry`/`timeout` rejected by the compiled path (architectural, `docs/TRANSACT.md`); no interpreter left to run this file any other way |
+| 38 | `38_workflow.nir` | `workflow { data/state/on_entry/on <Event> -> <State>/terminal/owner }` — the *full* design vision, still not runnable end to end (its own non-empty `data` block, and its dependency on `mock_issue_token`, which never got codegen); see `52`/`53`/`54` for the real, compiled subset |
 | 39 | `39_screen_ui.nir` | `screen <Struct> { title/field/action }` |
 | 40 | `40_dashboard.nir` | `dashboard { tile/chart }` |
 | 41 | `41_dashboard_visual.nir` | `dashboard { visual ... { render: "graph"\|"heatmap"\|"timeline" } }` |
@@ -60,7 +66,11 @@ that's the one file here meant to be read, not run, on its own.
 | 46 | `46_db_schema_and_role_mapping_conventions.nir` | `serve --db` auto schema migrations + `RoleMapping` identity cache (pure convention, no new syntax) |
 | 47 | `47_external_service_boundary.nir` | plugin-backed `db`/`mq` by URL scheme (`db_connect`/`mq_connect_via`) |
 | 49 | `49_nfr.nir` | `nfr(latency_ms:/error_rate_max:/throughput_min_per_sec:/concurrency_max:)` — compiled, automatic APM tracking |
-| 50 | `50_field_masking_and_check_role.nir` | field-level `requires(role/claim:...)` masking + compiled `check_role` — the README's own hero example |
+| 50 | `50_field_masking_and_check_role.nir` | field-level `requires(role/claim:...)` masking + function-level `requires(role:...)`/`acquire` + compiled `check_role` — the README's own hero example |
+| 51 | `51_compiled_serve.nir` | compiled `serve` — `str_index_of`/`str_slice`/`len(str)` hand-parse an HTTP request line over `listen`/`accept`, routing `/api/<fn>` to distinct compiled `fn`s by plain `if`/`else if` + `==`; real `curl`-drivable, no interpreter |
+| 52 | `52_compiled_workflow_state_machine.nir` | compiled `workflow` Layer 1 (2026-09) — `start_*`/`advance_*`, `on_entry`/`on_exit`, ordinary transitions, `terminal` states, `Err(NoSuchTransition)`/`Err(InstanceNotFound)` as real, non-trapping errors |
+| 53 | `53_compiled_workflow_notifications.nir` | compiled `send_email`/`send_sms`/`send_push`/`notify` fired from a workflow's `on_entry` — real authenticated HTTPS POSTs against a real, admin-editable provider row in a real SQLite table, and the real not-configured (`send_push`, no provider row) path |
+| 54 | `54_compiled_workflow_escalation.nir` | compiled `state { sla_seconds: N }` + `list_<workflow>_overdue()` (`docs/ROADMAP.md` A15) — real SLA/escalation *detection*, driving a real "external scheduler polls, then calls `advance_<workflow>`" escalation round trip; per-state, not workflow-wide (a state with no `sla_seconds` is never reported overdue) |
 
 ## Deliberately not given their own file
 

@@ -1,0 +1,38 @@
+[package]
+name = "nirdosha-plugin-native-shout"
+version = "0.1.0"
+edition = "2024"
+description = "Reference native (compiled-path) Nirdosha plugin (rfcs/0008-native-plugin-abi-widening.md): a pure str-in/str-out builtin, shout(s: str) -> str, called directly from generated LLVM IR -- no interpreter."
+
+# The same statically-greppable convention `docs/ECOSYSTEM.md` #G1
+# proposed for the (deleted, interpreter-only) Kind-A plugins, updated
+# for the compiled path: `kind = "native-compiled"` distinguishes this
+# from a `kind = "native"` (interpreter `PluginBuiltin`) crate, which no
+# longer exists in this repo but could in principle exist again -- a
+# future `nirdosha build` auto-discovery pass (rfcs/0008 Phase 3, not
+# built yet) would need this distinction to know it can call straight
+# into a linked symbol here, not into `Interpreter::plugins`.
+[package.metadata.nirdosha]
+kind = "native-compiled"
+builtins = [
+    { name = "plugin_shout", params = ["str"], ret = "str" },
+]
+
+# Deliberately zero dependency on the `nirdosha` crate itself, unlike
+# the old interpreter-era plugin crates (which had to implement
+# `NirdoshaPlugin`, a Rust trait living in `nirdosha`). A native plugin
+# is a plain `#[no_mangle] extern "C"` symbol -- the compiler links
+# against the *symbol*, never the Rust type system on this side of the
+# boundary, so this crate needs nothing beyond `std`.
+[dependencies]
+
+[lib]
+crate-type = ["staticlib"]
+
+# No `[profile.release]` here (unlike `crates/runtime-kernels/Cargo.toml`,
+# which is its own separate workspace and can): this crate is a member
+# of the repo's root workspace, and Cargo only honors `[profile.*]` from
+# a workspace *root* manifest, silently ignoring it in a member crate's
+# own `Cargo.toml` (the same trap the root `Cargo.toml`'s own
+# `overflow-checks` comment documents). `panic = "unwind"` is already
+# the default release-profile behavior, so there's nothing to override.

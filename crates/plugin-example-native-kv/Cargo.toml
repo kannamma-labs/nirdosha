@@ -1,0 +1,31 @@
+[package]
+name = "nirdosha-plugin-native-kv"
+version = "0.1.0"
+edition = "2024"
+description = "Reference native (compiled-path) Nirdosha plugin (rfcs/0008-native-plugin-abi-widening.md): a stateful, handle(Kind)-based builtin gallery -- kv_open/kv_set/kv_get/kv_close -- the shape every real I/O plugin (a DB/MQ connection) needs, without requiring a live external service to try."
+
+[package.metadata.nirdosha]
+kind = "native-compiled"
+builtins = [
+    { name = "kv_open", params = [], ret = "handle(KvStore)" },
+    # `&handle(KvStore)`, not a bare `handle(KvStore)` -- these two
+    # *borrow* the store (read/write through the reference) rather than
+    # consuming it, so the same handle can back any number of
+    # `kv_set`/`kv_get` calls before the one, final, consuming
+    # `kv_close(h)` -- see `src/lib.rs`'s own doc comments on both.
+    { name = "kv_set", params = ["&handle(KvStore)", "str", "str"], ret = "i64" },
+    { name = "kv_get", params = ["&handle(KvStore)", "str"], ret = "str" },
+    { name = "kv_close", params = ["handle(KvStore)"], ret = "i64" },
+]
+
+# Same "zero dependency on the `nirdosha` crate" story as
+# `plugin-example-native-shout` -- see that crate's own Cargo.toml
+# comment.
+[dependencies]
+
+[lib]
+crate-type = ["staticlib"]
+
+# See `plugin-example-native-shout/Cargo.toml`'s identical comment: no
+# `[profile.release]` here, a member crate's own copy would be silently
+# ignored by Cargo (only the workspace-root manifest's is honored).

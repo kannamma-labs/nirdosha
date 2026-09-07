@@ -10,10 +10,11 @@ Verified Publisher badge.
 ## What this is, and isn't
 
 A Kind-A plugin is arbitrary native Rust code, statically linked
-directly into whatever binary calls `run_with_plugins`/`serve::run` —
-full process trust, no sandbox (rfcs/0004-native-plugin-sandboxing.md's
-own open-question section explains why that's a deliberate, disclosed
-gap, not solved by this file). Appearing on this list means:
+directly into the compiled binary via `codegen::build_with_native_plugins`
+(`crates/compiler/src/codegen.rs`, `NativePluginBuiltin`) — full process
+trust, no sandbox (rfcs/0004-native-plugin-sandboxing.md's own
+open-question section explains why that's a deliberate, disclosed gap,
+not solved by this file). Appearing on this list means:
 
 - A maintainer has read the plugin's source at the version listed.
 - Its declared `[package.metadata.nirdosha]` builtins and their
@@ -35,21 +36,23 @@ Appearing on this list does **not** mean:
 
 ## Listed plugins
 
-| Crate | Version reviewed | Declared effects | Notes |
-|---|---|---|---|
-| `nirdosha-plugin-rot13` | 0.1.0 | (none — pure) | The reference plugin; trivial, no I/O. |
-| `nirdosha-plugin-mysql` | 0.1.0 | network | Sync `mysql` crate. See `crates/plugin-example-mysql/README.md`. |
-| `nirdosha-plugin-activemq` | 0.1.0 | network | Hand-rolled STOMP client, not a third-party crate — see its README for why. |
-| `nirdosha-plugin-cassandra` | 0.1.0 | network | Async `scylla` driver, bridged via `nirdosha-plugin-support`. |
-| `nirdosha-plugin-neo4j` | 0.1.0 | network | Async `neo4rs` driver, same bridge. |
-| `nirdosha-plugin-hbase` | 0.1.0 | network | `hbase-thrift` — see its README's "why this is the hardest one" for real, disclosed rough edges. |
-
-All six are reference plugins in this repository (`crates/plugin-example-*/`),
-reviewed as part of building them, not third-party submissions — this
-table's real purpose is to be the template a genuine third-party
-plugin's listing follows, and the day-one gate a future auto-discovery
-step (RFC 0001) requires before linking an unfamiliar plugin
-automatically.
+**None, as of 2026-09.** The six reference plugins this table used to
+list (`nirdosha-plugin-rot13`/`-mysql`/`-activemq`/`-cassandra`/
+`-neo4j`/`-hbase`, `crates/plugin-example-*/`) were removed entirely in
+`refactor: remove native plugin ecosystem` — every one of them
+depended on the tree-walking interpreter's own `PluginBuiltin`/
+`PluginFn` dispatch, which no longer exists (the interpreter was
+deleted in a separate pass the same session). `NativePluginBuiltin`
+(the compiled-path plugin ABI these examples never targeted, a
+different and narrower scalar-only shape) survives and is real —
+`crates/compiler/tests/native_plugin_codegen.rs` exercises it directly
+— but nothing currently plugs into it: no reference plugin crate
+implements it, and `nirdosha build`'s own CLI has no flag to load a
+native plugin at all yet (`build_with_native_plugins` is a library
+entry point with no wired-up caller). This table's real purpose is
+unchanged — the template a genuine plugin's listing follows, and the
+day-one gate a future auto-discovery step (RFC 0001) requires — it
+just currently has zero rows to show for it.
 
 ## Requesting a listing
 

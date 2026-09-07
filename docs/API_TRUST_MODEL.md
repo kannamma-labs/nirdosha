@@ -369,6 +369,32 @@ proposed sketch, which starts from zero.
 
 ## 4a. Which backend enforces any of this — `[DONE]`, fail-closed
 
+> **2026-09 — both premises below are now false; read this section as
+> history.** The interpreter (`run`/`serve`, `interpreter.rs`,
+> `serve.rs`) was deleted entirely in a separate pass this session — the
+> "every mechanism in §3-§5 exists only on the interpreted path" claim
+> below described a real trade at the time, but there is no interpreted
+> path left to make it on. Separately, and independently: `Ty::Fn`/
+> `Expr::Acquire` are **no longer rejected** by `codegen.rs::
+> check_supported` — `acquire`/`requires(role/claim: ...)` on a function
+> compile for real now (`docs/LANGUAGE.md` §6a, §10's compiled-vs-
+> interpreter-only table). The security posture this section's own
+> closing paragraph draws attention to — "worth stating so nobody
+> assumes an `emit-llvm`'d build of a gated app is the same app, faster"
+> — has flipped from "the compiled path refuses" to "the compiled path
+> is now the *only* path, and it actually enforces `requires`/`acquire`
+> for real": `crates/compiler/tests/codegen.rs`'s
+> `acquire_produces_real_callable_fn_value_gated_by_check_role` is the
+> compiled-and-run proof. What's still real from this section: `db`/
+> `json`/`mq`/`transact`/`sandbox`/most Row 12 identity builtins
+> (`extract_claim`/`oidc_validate_token` included) remain uncompiled and
+> now don't run in *any* form — worse than "falls back to the
+> interpreter," since there's no fallback left. A gated app that relies
+> on any of those alongside `requires`/`acquire` still doesn't run
+> end to end; one that only needs `check_role` + `requires`/`acquire` +
+> field masking now does, compiled, with no interpreter anywhere in the
+> picture.
+
 Not previously covered in this document, and load-bearing for anyone
 reading `docs/LANGUAGE.md` §10's compiled-vs-interpreted split: **every
 mechanism in §3-§5 exists only on the interpreted path.**

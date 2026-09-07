@@ -1,0 +1,165 @@
+// Feature: `send_email`/`send_sms`/`send_push`/`notify` fired from a
+// `workflow`'s `on_entry` -- real, compiled, provider-agnostic
+// authenticated HTTPS POSTs (`docs/WORKFLOW.md`), driven by real,
+// admin-editable provider rows in a real SQLite table, not mocked
+// out. Companion to `52_compiled_workflow_state_machine.nir`
+// (state machine) and `54_compiled_workflow_escalation.nir`
+// (SLA/escalation) -- see that file's own header for why this is three
+// files, not one.
+//
+// Self-contained: rather than depending on a real email/SMS/push
+// provider being reachable, this spins up its own local `tcp_listener`
+// (same "self-hosted, not skipped" precedent `22_tcp_client.nir` and
+// `crates/compiler/tests/codegen.rs`'s own
+// `workflow_on_entry_send_email_posts_to_a_real_configured_provider`
+// test already use) and points every provider row at it -- proving the
+// real request shape (`Authorization: Bearer <api_key>`, a
+// `{"to","from","template","vars"}` JSON body) actually leaves the
+// process, not just that the syntax parses.
+//
+// `notify(conn, mq, to, template, vars)` is `docs/WORKFLOW.md`'s
+// presence-aware channel -- online routes over a real Redis pub/sub
+// bridge (`crates/presence-gateway`), offline falls back to email. This
+// compiled backend doesn't populate a real presence table this round
+// (`nir_notify`'s own doc comment), so `notify` always takes the offline
+// path here -- a real, disclosed narrower cut, not a fake success.
+//
+// `conn: db` and `mq_conn: mq` stay inside *one* function throughout,
+// never handed to a second user-defined helper -- `db`/`mq` are affine
+// (`Ty::is_affine`), and passing an affine value into another
+// user-defined `fn` really does move it (`ownership.rs`); only a short,
+// explicit allowlist of *builtins* (`db_execute`/`db_query`/
+// `send_email`/`send_sms`/`send_push`/`notify`/...) treat their leading
+// connection argument as read, not consumed, so a connection can drive
+// several calls before its one `stop` -- same discipline
+// `27_database.nir`'s own single `run_all(conn: db)` already follows.
+
+fn notify_with_conn(conn: db, mq_conn: mq, instance_id: i64) -> unit {
+    // Real per-app config, not compile-time syntax -- `docs/WORKFLOW.md`'s
+    // own point #4. Each of the three provider tables shares this exact
+    // shape (`load_active_provider_config`, `runtime-kernels/src/lib.rs`).
+    let created_email: i64 = match db_execute(conn, "CREATE TABLE email_provider_config (id INTEGER PRIMARY KEY, active INTEGER, host TEXT, port INTEGER, path TEXT, api_key TEXT, from_address TEXT)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let created_sms: i64 = match db_execute(conn, "CREATE TABLE sms_provider_config (id INTEGER PRIMARY KEY, active INTEGER, host TEXT, port INTEGER, path TEXT, api_key TEXT, from_address TEXT)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    // `push_provider_config` deliberately stays empty (no `INSERT`) --
+    // `send_push` below demonstrates the real not-configured path.
+    let created_push: i64 = match db_execute(conn, "CREATE TABLE push_provider_config (id INTEGER PRIMARY KEY, active INTEGER, host TEXT, port INTEGER, path TEXT, api_key TEXT, from_address TEXT)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let inserted_email: i64 = match db_execute(conn, "INSERT INTO email_provider_config (active, host, port, path, api_key, from_address) VALUES (1, ?, ?, ?, ?, ?)", "127.0.0.1", 9730, "/send/email", "email-secret-key", "alerts@example.com") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let inserted_sms: i64 = match db_execute(conn, "INSERT INTO sms_provider_config (active, host, port, path, api_key, from_address) VALUES (1, ?, ?, ?, ?, ?)", "127.0.0.1", 9730, "/send/sms", "sms-secret-key", "+15550100") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    print(created_email + created_sms + created_push + inserted_email + inserted_sms) // 2 -- all five DDL/DML statements succeeded; the three `CREATE TABLE`s report 0 rows affected, the two `INSERT`s report 1 each
+
+    // `json_parse` on a fixed, valid literal can't actually fail, but
+    // the type system doesn't know that -- `send_and_report` (the `Ok`
+    // arm) is the real final owner of `conn`/`mq_conn` from here, doing
+    // its own `stop` at the very end, the same "whichever fn is left
+    // holding it stops it" discipline this file's own header describes.
+    match json_parse("{\"ticket\":1}") {
+        Ok(vars) => send_and_report(conn, mq_conn, vars),
+        Err(e) => print(e),
+    }
+}
+
+fn send_and_report(conn: db, mq_conn: mq, vars: json) -> unit {
+    // Real, configured -- a real POST leaves the process for each of
+    // these three calls (`send_email`/`send_sms`/`notify` all resolve
+    // to the same test server below).
+    match send_email(conn, ByRole("on_call_engineer"), "incident_opened", vars) {
+        Err(e) => print(false),
+        Ok(sent) => print(sent), // 1
+    }
+    match send_sms(conn, ByRole("on_call_engineer"), "incident_opened", vars) {
+        Err(e) => print(false),
+        Ok(sent) => print(sent), // 1
+    }
+    // No `push_provider_config` row at all -- a real `Err`, never a trap.
+    match send_push(conn, ByRole("on_call_engineer"), "incident_opened", vars) {
+        Ok(sent) => print(true),
+        Err(e) => print("push not configured"), // push not configured
+    }
+    match notify(conn, mq_conn, ByRole("on_call_engineer"), "incident_opened", vars) {
+        Err(e) => print(false),
+        Ok(sent) => print(sent), // 1 -- delegated to the same configured email provider
+    }
+    stop conn
+    stop mq_conn
+}
+
+workflow Incident {
+    state Open {
+        on_entry {
+            notify_all_channels(instance_id)
+        }
+        on Resolve -> Resolved
+    }
+    state Resolved terminal {
+    }
+}
+
+// `on_entry`'s own implicit binding here is `instance_id: i64` (always)
+// -- a fresh `db`/`mq` connection is opened right here, the same way
+// any ordinary function would, rather than being threaded in.
+fn notify_all_channels(instance_id: i64) -> unit {
+    match db_connect(":memory:") {
+        Ok(conn) => connect_mq_and_notify(conn, instance_id),
+        Err(e) => print(e),
+    }
+}
+
+fn connect_mq_and_notify(conn: db, instance_id: i64) -> unit {
+    match mq_connect("127.0.0.1", 6379) {
+        Ok(mq_conn) => notify_with_conn(conn, mq_conn, instance_id),
+        Err(e) => print(e),
+    }
+}
+
+// Stands in for a real email/SMS provider: three real, configured sends
+// happen above (`send_email`, `send_sms`, and `notify`'s own delegated
+// email send) -- `send_push` never even opens a connection (no provider
+// row), so exactly three real accepts are expected here.
+fn fake_provider(l: tcp_listener) -> unit {
+    let c1: tcp = accept(l)
+    let r1: str = recv(c1)
+    print(r1)
+    send(c1, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok")
+    stop c1
+
+    let c2: tcp = accept(l)
+    let r2: str = recv(c2)
+    print(r2)
+    send(c2, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok")
+    stop c2
+
+    let c3: tcp = accept(l)
+    let r3: str = recv(c3)
+    print(r3)
+    send(c3, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok")
+    stop c3
+    stop l
+}
+
+fn main() {
+    let l: tcp_listener = listen(9730)
+    let h: thread unit = spawn fake_provider(l)
+
+    let instance_id: i64 = match start_incident(None(), IncidentData()) {
+        Ok(id) => id,
+        Err(e) => -1,
+    }
+    print(instance_id) // 1
+
+    join h
+}

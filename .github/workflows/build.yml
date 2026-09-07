@@ -9,6 +9,24 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # `mq_publish_and_consume_round_trip_a_real_message` (`tests/codegen.rs`)
+    # is deliberately real, not mocked -- it needs an actual Redis at
+    # 127.0.0.1:6379 (`Ty::Mq`'s doc comment: "not a mock" is the whole
+    # point of that test). Found missing by a real CI failure ("Connection
+    # refused (os error 111)"), not anticipated in advance -- a plain
+    # `ubuntu-latest` runner has no Redis running by default. Service
+    # containers only work on Linux-hosted runners (this job), not
+    # macOS/Windows (see those jobs' own Redis setup below/omission).
+    services:
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies (clang, z3)
@@ -53,6 +71,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system Z3 (see workflow header)
         run: brew install z3
+      # macOS runners have no service-container support (that's a
+      # Linux-runner-only GitHub Actions feature — see the `build` job's
+      # own `services:` block above) -- `mq_publish_and_consume_round_trip_
+      # a_real_message` needs a real local Redis just as much here, so
+      # it's installed and started directly instead.
+      - name: Install and start Redis (Homebrew — no service-container support on macOS runners)
+        run: |
+          brew install redis
+          brew services start redis
+          for i in $(seq 1 10); do redis-cli ping && break; sleep 1; done
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
         with:
