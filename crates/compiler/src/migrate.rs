@@ -248,6 +248,8 @@ mod tests {
             enums: vec![],
             screens: vec![],
             dashboard: None,
+            landing: None,
+            serve_config: None,
             workflows: vec![],
             workspaces: vec![],
             validates: vec![],

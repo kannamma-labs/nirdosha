@@ -505,6 +505,15 @@ const DEMO_MODE = __NIRDOSHA_DEMO_MODE__;
 // -- the login screen becomes a real redirect to the identity
 // provider's own hosted login (`/auth/login`), not a form of any kind.
 const PRODUCTION_MODE = __NIRDOSHA_PRODUCTION_MODE__;
+// `landing { role(...)/claim(...)/default -> <Screen> }`
+// (`rfcs/0010-landing-and-serve-exposure.md`) as an ordered array of
+// `{role|claim|default, target}` -- first-match-wins, exactly one
+// `default` entry guaranteed by `typeck::check_landing`. `null` for a
+// program with no `landing` block at all (every build before this RFC,
+// and any program that simply doesn't declare one) -- `applyLanding`
+// below is then a no-op, so route()'s own existing default-screen
+// behavior is completely unaffected.
+const LANDING = __NIRDOSHA_LANDING__;
 
 // ---- identity ----
 // With no IDENTITY_BASE (the default), this is a pure client-side STUB:
@@ -528,6 +537,25 @@ function getIdentity() {
 }
 function setIdentity(id) { localStorage.setItem(IDENTITY_KEY, JSON.stringify(id)); }
 function clearIdentity() { localStorage.removeItem(IDENTITY_KEY); }
+
+// First matching `LANDING` rule's `target`, or `null` if `LANDING` is
+// `null` (no `landing` block declared) -- never reached with no match
+// otherwise, since `typeck::check_landing` already guarantees exactly
+// one `default` rule exists whenever `LANDING` itself is non-null.
+// `id.claims` is this client's own base64url-decoded (never re-verified
+// here) JWT payload -- display/routing-hint only, same trust boundary
+// `getIdentity`'s own doc comment already states for `roles`/`claims`.
+function landingTargetFor(id) {
+  if (!LANDING || !id) return null;
+  const roles = id.roles || [];
+  const claims = id.claims || {};
+  for (const rule of LANDING) {
+    if (rule.default) return rule.target;
+    if (rule.role !== undefined && roles.includes(rule.role)) return rule.target;
+    if (rule.claim !== undefined && claims[rule.claim[0]] === rule.claim[1]) return rule.target;
+  }
+  return null;
+}
 
 function decodeJwtPayload(token) {
   try {
@@ -2203,11 +2231,24 @@ async function renderPanel(panel, container, id) {
 // itself applies) whenever sign-in happened *from* the login screen;
 // leave the hash alone if sign-in happened via the nav-rail "Sign in"
 // while already looking at a screen (rare, but don't yank them away).
+// `landing { ... }` (`rfcs/0010-landing-and-serve-exposure.md`) takes
+// priority over the pre-existing "dashboard, else first readable
+// screen" fallback below, but only ever at this one call site (right
+// after a fresh sign-in) -- never on an ordinary page load/reload
+// (`validateStoredIdentityThenStart` never calls this), so a bookmarked
+// or deep-linked hash is never fought with on refresh. `LANDING` being
+// `null` (no `landing` block declared) makes `landingTargetFor` return
+// `null` too, falling straight through to the original, byte-identical
+// behavior -- this is purely additive for every program that predates
+// this RFC.
 function postLoginRedirect() {
   renderNav();
   const hash = (location.hash || "").replace(/^#\//, "");
   if (hash !== "login" && hash !== "") { route(); return; }
-  if (HAS_DASHBOARD) {
+  const landingTarget = landingTargetFor(getIdentity());
+  if (landingTarget) {
+    location.hash = "#/" + landingTarget;
+  } else if (HAS_DASHBOARD) {
     location.hash = "#/dashboard";
   } else {
     const first = MANIFEST.find((s) => { const gate = screenReadGate(s); return !gate || canRun(gate); });
@@ -2506,9 +2547,19 @@ function route() {
     const token = params.get("token");
     if (token) {
       const claims = decodeJwtPayload(token);
-      setIdentity({ subject: claims.sub, roles: claims.roles || [], claims, token });
+      const id = { subject: claims.sub, roles: claims.roles || [], claims, token };
+      setIdentity(id);
+      // Same `landing`-first, `dashboard`-else-fallback ordering
+      // `postLoginRedirect` uses for every other sign-in path
+      // (`rfcs/0010-landing-and-serve-exposure.md`) -- not a call to
+      // `postLoginRedirect` itself, since this hash is always
+      // `auth/callback...`, never `login`/empty, so its own "did the
+      // user already navigate elsewhere" guard doesn't apply here.
+      const landingTarget = landingTargetFor(id);
+      location.hash = landingTarget ? "#/" + landingTarget : "#/dashboard";
+    } else {
+      location.hash = "#/dashboard";
     }
-    location.hash = "#/dashboard";
     return;
   }
   document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.route === hash));

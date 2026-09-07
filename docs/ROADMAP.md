@@ -2146,6 +2146,17 @@ Only `sandbox` (B6) remains fully `[OPEN]`.
    bodies are fixed literals). Schema-embedded-at-compile-time (B2) and
    a real deployment story (containerization, secrets/JWKS handling —
    `docs/PUBLIC_ROADMAP.md`'s Track A) remain open, separate work.
+   **2026-09 prerequisite work, landed ahead of the dispatch-table
+   framework itself**: `landing { role(...)/claim(...)/default -> <screen> }`
+   (per-role default-screen redirect) and the `serve { expose ... }`
+   route-exposure model, with a real, unconditional deny-by-default
+   typeck rule on any exposed mutating (`create_`/`update_`/`delete_`)
+   function with no `requires(...)` — `rfcs/0010-landing-and-serve-exposure.md`,
+   `crates/compiler/tests/landing_dsl.rs` (11 tests) +
+   `crates/compiler/tests/serve_exposure.rs` (13 tests). This is grammar/
+   typeck only so far — nothing yet dispatches an exposed route over
+   real HTTP; that's the dispatch-table framework itself, still open,
+   described in the paragraph above.
 9. `[DONE]` **B9. `sleep_ms` codegen** — 2026-09. `nir_sleep_ms`
    (`runtime-kernels/src/lib.rs`), a plain `std::thread::sleep` wrapper;
    needed anyway once `transact` (B1)'s own future retry/backoff work
