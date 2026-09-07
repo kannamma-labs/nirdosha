@@ -1868,8 +1868,8 @@ mod identity_kernel_tests {
 // pointer arithmetic) is the right fit here, same as `channel_table`/
 // `thread_table` above already use it for their own non-fd resources.
 
-fn db_table() -> &'static HandleTable<rusqlite::Connection> {
-    static TABLE: OnceLock<HandleTable<rusqlite::Connection>> = OnceLock::new();
+fn db_table() -> &'static HandleTable<kernel::db::DbConn> {
+    static TABLE: OnceLock<HandleTable<kernel::db::DbConn>> = OnceLock::new();
     TABLE.get_or_init(HandleTable::new)
 }
 
@@ -1936,9 +1936,11 @@ fn sqlite_row_to_json(row: &rusqlite::Row, column_names: &[String]) -> serde_jso
 }
 
 /// `db_connect(path) -> Result(db, str)`. `path` is really "connection
-/// string" per `Ty::Db`'s own doc comment, but this kernel only ever
-/// opens SQLite — a bare path or `":memory:"`, both handled by
-/// `rusqlite::Connection::open` itself, no special-casing needed here.
+/// string" per `Ty::Db`'s own doc comment — a bare path or `":memory:"`
+/// opens (pooled, except `:memory:`) SQLite; a `postgres://`/
+/// `postgresql://` URL opens a real, pooled Postgres connection
+/// (`kernel::db::connect`'s own doc comment has the full scheme-dispatch
+/// and pooling design).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_handle: *mut i64, out_err: *mut NirStrOut) -> i32 {
     let Some(path) = (unsafe { str_from_raw(path_ptr, path_len) }) else {
@@ -1949,7 +1951,7 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
         unsafe { write_str_out(out_err, "too many open db connections".to_string()) };
         return 0;
     }
-    match rusqlite::Connection::open(path) {
+    match kernel::db::connect(path) {
         Ok(conn) => {
             let id = db_table().insert(conn);
             unsafe { *out_handle = id };
@@ -1957,7 +1959,7 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
         }
         Err(e) => {
             kernel::release(kernel::Domain::Db);
-            unsafe { write_str_out(out_err, e.to_string()) };
+            unsafe { write_str_out(out_err, e) };
             0
         }
     }
@@ -1992,15 +1994,24 @@ pub unsafe extern "C" fn nir_db_execute(
         unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
         return 0;
     };
-    let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
-    let result = db_table().with(handle, |conn| conn.execute(sql, rusqlite::params_from_iter(binds.iter())));
+    let result: Option<Result<i64, String>> = db_table().with(handle, |conn| {
+        if let Some(sqlite) = conn.as_sqlite_mut() {
+            let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
+            return sqlite.execute(sql, rusqlite::params_from_iter(binds.iter())).map(|n| n as i64).map_err(|e| e.to_string());
+        }
+        let pg = conn.as_postgres_mut().expect("DbConn is either SQLite or Postgres");
+        let binds = unsafe { kernel::db::pg_bind_values_from_raw(binds_ptr, binds_len) };
+        let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = binds.iter().map(|b| b as &(dyn postgres::types::ToSql + Sync)).collect();
+        let rewritten = kernel::db::rewrite_placeholders(sql);
+        pg.execute(&rewritten, &refs).map(|n| n as i64).map_err(|e| e.to_string())
+    });
     match result {
         Some(Ok(n)) => {
-            unsafe { *out_affected = n as i64 };
+            unsafe { *out_affected = n };
             1
         }
         Some(Err(e)) => {
-            unsafe { write_str_out(out_err, e.to_string()) };
+            unsafe { write_str_out(out_err, e) };
             0
         }
         None => {
@@ -2035,15 +2046,26 @@ pub unsafe extern "C" fn nir_db_query(
         unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
         return 0;
     };
-    let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
-    let result: Option<Result<String, rusqlite::Error>> = db_table().with(handle, |conn| {
-        let mut stmt = conn.prepare(sql)?;
-        let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-        let mut rows = stmt.query(rusqlite::params_from_iter(binds.iter()))?;
-        let mut out_rows = Vec::new();
-        while let Some(row) = rows.next()? {
-            out_rows.push(sqlite_row_to_json(row, &column_names));
+    let result: Option<Result<String, String>> = db_table().with(handle, |conn| {
+        if let Some(sqlite) = conn.as_sqlite_mut() {
+            let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
+            let mut stmt = sqlite.prepare(sql).map_err(|e| e.to_string())?;
+            let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let mut rows = stmt.query(rusqlite::params_from_iter(binds.iter())).map_err(|e| e.to_string())?;
+            let mut out_rows = Vec::new();
+            loop {
+                let next = rows.next().map_err(|e| e.to_string())?;
+                let Some(row) = next else { break };
+                out_rows.push(sqlite_row_to_json(row, &column_names));
+            }
+            return Ok(serde_json::to_string(&serde_json::Value::Array(out_rows)).unwrap_or_else(|_| "[]".to_string()));
         }
+        let pg = conn.as_postgres_mut().expect("DbConn is either SQLite or Postgres");
+        let binds = unsafe { kernel::db::pg_bind_values_from_raw(binds_ptr, binds_len) };
+        let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = binds.iter().map(|b| b as &(dyn postgres::types::ToSql + Sync)).collect();
+        let rewritten = kernel::db::rewrite_placeholders(sql);
+        let rows = pg.query(&rewritten, &refs).map_err(|e| e.to_string())?;
+        let out_rows: Vec<serde_json::Value> = rows.iter().map(kernel::db::pg_row_to_json).collect();
         Ok(serde_json::to_string(&serde_json::Value::Array(out_rows)).unwrap_or_else(|_| "[]".to_string()))
     });
     match result {
@@ -2052,7 +2074,7 @@ pub unsafe extern "C" fn nir_db_query(
             1
         }
         Some(Err(e)) => {
-            unsafe { write_str_out(out_err, e.to_string()) };
+            unsafe { write_str_out(out_err, e) };
             0
         }
         None => {
@@ -2142,6 +2164,88 @@ mod db_kernel_tests {
             assert!(execute(conn, "NOT VALID SQL AT ALL", &[]).is_err());
             nir_db_stop(conn);
         }
+    }
+
+    /// Two `db_connect` calls to the same non-`:memory:` path see the
+    /// same underlying database — true regardless of pooling (it's the
+    /// same file either way), but a real regression guard that the
+    /// pooled path didn't break ordinary persistence semantics.
+    /// `kernel::db::tests` (module-private, sees `PoolRegistry::pool_count`
+    /// under `#[cfg(test)]`) is where pooling *itself* — same key reuses
+    /// one pool, `:memory:` never gets one at all — is actually proven.
+    #[test]
+    fn two_connects_to_the_same_file_path_see_the_same_data() {
+        let dir = std::env::temp_dir().join(format!("nirdosha_db_pool_test_{}.sqlite", std::process::id()));
+        let path = dir.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            let conn1 = connect(&path).expect("file-backed sqlite should open");
+            execute(conn1, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", &[]).expect("DDL should succeed");
+            execute(conn1, "INSERT INTO t (name) VALUES (?)", &[str_bind("first")]).expect("insert should succeed");
+            nir_db_stop(conn1);
+
+            let conn2 = connect(&path).expect("reconnecting to the same path should open");
+            let rows_json = query(conn2, "SELECT name FROM t", &[]).expect("query should succeed");
+            let rows: serde_json::Value = serde_json::from_str(&rows_json).unwrap();
+            assert_eq!(rows[0]["name"], "first");
+            nir_db_stop(conn2);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Real, opt-in, `#[ignore]`d Postgres coverage — same convention
+    /// `NIRDOSHA_TEST_POSTGRES_URL`-gated tests use throughout this
+    /// repo (`docker-compose.dev.yml` at the repo root stands up a real
+    /// local server for this). Run with:
+    ///   NIRDOSHA_TEST_POSTGRES_URL=postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev \
+    ///     cargo test --release -- --ignored
+    fn test_postgres_url() -> String {
+        std::env::var("NIRDOSHA_TEST_POSTGRES_URL").unwrap_or_else(|_| "postgres://postgres@127.0.0.1:5432/postgres".to_string())
+    }
+
+    #[test]
+    #[ignore]
+    fn postgres_connect_execute_query_round_trips_real_rows() {
+        let url = test_postgres_url();
+        unsafe {
+            let conn = connect(&url).expect("real postgres server must be reachable (see NIRDOSHA_TEST_POSTGRES_URL)");
+            let _ = execute(conn, "DROP TABLE IF EXISTS nirdosha_pg_kernel_test", &[]);
+            execute(conn, "CREATE TABLE nirdosha_pg_kernel_test (id BIGINT PRIMARY KEY, name TEXT, rating INTEGER)", &[]).expect("DDL should succeed");
+            let inserted = execute(conn, "INSERT INTO nirdosha_pg_kernel_test (id, name, rating) VALUES (1, ?, ?)", &[str_bind("ada"), i64_bind(5)]).expect("insert should succeed");
+            assert_eq!(inserted, 1);
+
+            let rows_json = query(conn, "SELECT name, rating FROM nirdosha_pg_kernel_test WHERE rating >= ?", &[i64_bind(5)]).expect("query should succeed");
+            let rows: serde_json::Value = serde_json::from_str(&rows_json).unwrap();
+            assert_eq!(rows[0]["name"], "ada");
+            assert_eq!(rows[0]["rating"], 5);
+
+            execute(conn, "DROP TABLE nirdosha_pg_kernel_test", &[]).expect("cleanup DDL should succeed");
+            nir_db_stop(conn);
+        }
+    }
+
+    /// Proves pooling for real against a live server, not just SQLite's
+    /// same-file coincidence above: sequential `db_connect`/`db_stop`
+    /// pairs against the same Postgres connection string must reuse a
+    /// pooled connection rather than opening a fresh TCP/TLS handshake
+    /// every time — indirectly observable here as "many sequential
+    /// connects complete quickly," the direct pool-identity assertion
+    /// lives in `kernel::db::tests` where `PoolRegistry` internals are
+    /// actually visible.
+    #[test]
+    #[ignore]
+    fn postgres_sequential_connects_are_fast_meaning_pooled() {
+        let url = test_postgres_url();
+        let start = std::time::Instant::now();
+        unsafe {
+            for _ in 0..20 {
+                let conn = connect(&url).expect("real postgres server must be reachable");
+                query(conn, "SELECT 1", &[]).expect("query should succeed");
+                nir_db_stop(conn);
+            }
+        }
+        let elapsed = start.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(5), "20 sequential connects took {elapsed:?} -- pooling should make this fast, not one fresh handshake each time");
     }
 }
 
@@ -3319,8 +3423,14 @@ fn provider_table_name(channel: &str) -> &'static str {
 fn load_active_provider_config(conn_handle: i64, channel: &str) -> Result<ProviderConfig, String> {
     let table = provider_table_name(channel);
     let sql = format!("SELECT host, port, path, api_key, from_address FROM {table} WHERE active = 1 LIMIT 1");
+    // SQLite-only for now — this predates Phase 1's Postgres support and
+    // isn't in that phase's own scope to extend; a Postgres `conn_handle`
+    // here is a disclosed, narrow `Err`, not a silent wrong answer.
     let row = db_table().with(conn_handle, |conn| {
-        conn.query_row(&sql, [], |r| {
+        let Some(sqlite) = conn.as_sqlite_mut() else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        sqlite.query_row(&sql, [], |r| {
             Ok(ProviderConfig {
                 host: r.get(0)?,
                 port: r.get(1)?,

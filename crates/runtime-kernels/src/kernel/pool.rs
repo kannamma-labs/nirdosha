@@ -178,6 +178,18 @@ impl<M: ManageConnection> PoolRegistry<M> {
     pub fn pool_count(&self) -> usize {
         self.pools.lock().unwrap().len()
     }
+
+    /// Whether `key` specifically has a live pool right now — unlike
+    /// [`PoolRegistry::pool_count`], this is safe to assert on even
+    /// when the registry is a process-wide static shared by other
+    /// concurrently-running tests in the same binary (`kernel::db`'s
+    /// own test module needs exactly this: "did *my* uniquely-named key
+    /// get a pool," not "how many keys exist in total," since a count
+    /// races against every other test touching the same registry).
+    #[cfg(test)]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.pools.lock().unwrap().contains_key(key)
+    }
 }
 
 #[cfg(test)]

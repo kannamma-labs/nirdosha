@@ -114,6 +114,7 @@
 // to the compiler until a real caller exists.
 #![allow(dead_code)]
 
+pub mod db;
 pub mod mailbox;
 pub mod nfr;
 pub mod pool;
@@ -193,13 +194,32 @@ struct DomainCounters {
     held: AtomicI64,
     grants: AtomicU64,
     denials: AtomicU64,
+    /// A pooled checkout (`kernel::db`, and later `kernel::http`) that
+    /// failed its `ManageConnection::is_valid` round-trip and was
+    /// evicted + transparently replaced before the caller ever saw the
+    /// staleness — this phase's own "APM rehydrates stale pooled
+    /// connections" design. Always `0` for a domain with no pooling
+    /// behind it (`Tcp`/`File`/`Thread`/`Mq` today) — same "the number
+    /// just stays honestly zero" posture `held`/`grants`/`denials`
+    /// already have for a domain that never denies anything.
+    stale_rehydrated: AtomicU64,
     max: OnceLock<i64>,
 }
 
 impl DomainCounters {
     const fn new() -> Self {
-        DomainCounters { held: AtomicI64::new(0), grants: AtomicU64::new(0), denials: AtomicU64::new(0), max: OnceLock::new() }
+        DomainCounters { held: AtomicI64::new(0), grants: AtomicU64::new(0), denials: AtomicU64::new(0), stale_rehydrated: AtomicU64::new(0), max: OnceLock::new() }
     }
+}
+
+/// Records one pooled checkout that had to evict a stale connection and
+/// open a fresh one before returning — called from `kernel::db`'s (and
+/// later `kernel::http`'s) `connect` path, never from `.nir`-visible
+/// code. Deliberately separate from [`acquire`]/[`release`]: rehydration
+/// is a pool-level event, not an admission decision — a rehydrated
+/// checkout still went through a real `acquire` either way.
+pub fn record_stale_rehydrated(domain: Domain) {
+    counters_for(domain).stale_rehydrated.fetch_add(1, Ordering::Relaxed);
 }
 
 static TCP: DomainCounters = DomainCounters::new();
@@ -266,10 +286,11 @@ pub fn release(domain: Domain) {
 
 /// Raw self-metrics — RFC 0007 §7's "kernel self-metrics are first-class"
 /// principle, in its smallest form: no exporter, no aggregation, just
-/// the numbers. `(currently_held, total_grants, total_denials)`.
-pub fn stats(domain: Domain) -> (i64, u64, u64) {
+/// the numbers. `(currently_held, total_grants, total_denials,
+/// total_stale_rehydrated)`.
+pub fn stats(domain: Domain) -> (i64, u64, u64, u64) {
     let c = counters_for(domain);
-    (c.held.load(Ordering::Relaxed), c.grants.load(Ordering::Relaxed), c.denials.load(Ordering::Relaxed))
+    (c.held.load(Ordering::Relaxed), c.grants.load(Ordering::Relaxed), c.denials.load(Ordering::Relaxed), c.stale_rehydrated.load(Ordering::Relaxed))
 }
 
 /// The flight recorder's one output: every domain's final counters,
@@ -294,22 +315,24 @@ pub fn stats(domain: Domain) -> (i64, u64, u64) {
 pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
     for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq)] {
-        let (held, grants, denials) = stats(domain);
-        out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials}\n"));
+        let (held, grants, denials, stale_rehydrated) = stats(domain);
+        out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated}\n"));
     }
     out
 }
 
 /// A generic, process-wide table mapping an opaque, mint-once `i64`
-/// handle to a live Rust value `T` — for the next resource domain this
-/// project adds whose handle isn't already a raw OS fd (`json`'s parsed
-/// document, a `db` connection, an `mq` subscription). Same shape the
-/// now-removed `nirdosha-plugin-support::HandleRegistry` used, minus
-/// its interpreter-specific error-construction helpers (`Value`/
+/// handle to a live Rust value `T` — for a resource domain whose handle
+/// isn't already a raw OS fd (`json`'s parsed document, a `db`
+/// connection, an `mq` subscription). Same shape the now-removed
+/// `nirdosha-plugin-support::HandleRegistry` used, minus its
+/// interpreter-specific error-construction helpers (`Value`/
 /// `RuntimeError` don't exist on this side of the ABI boundary — this
 /// crate can't depend on the compiler crate at all, this file's own
-/// module doc). Not wired to any `nir_*` kernel yet; exists now so the
-/// next one that needs it doesn't invent its own table from scratch.
+/// module doc). **Doc-drift fix**: this comment used to say "not wired
+/// to any `nir_*` kernel yet" — `lib.rs`'s `db_table()` is a real,
+/// working `HandleTable<...>` today (`db`'s own `Domain::Db` doc
+/// comment above already reflects this; this one hadn't been updated).
 pub struct HandleTable<T> {
     next_id: AtomicI64,
     handles: Mutex<HashMap<i64, T>>,
@@ -547,12 +570,12 @@ mod tests {
 
     #[test]
     fn acquire_then_release_returns_to_zero_held() {
-        let (held_before, _, _) = stats(Domain::File);
+        let (held_before, _, _, _) = stats(Domain::File);
         assert!(acquire(Domain::File));
-        let (held_after_acquire, _, _) = stats(Domain::File);
+        let (held_after_acquire, _, _, _) = stats(Domain::File);
         assert_eq!(held_after_acquire, held_before + 1);
         release(Domain::File);
-        let (held_after_release, _, _) = stats(Domain::File);
+        let (held_after_release, _, _, _) = stats(Domain::File);
         assert_eq!(held_after_release, held_before);
     }
 
@@ -567,9 +590,9 @@ mod tests {
         unsafe { std::env::set_var("NIRDOSHA_KERNEL_MAX_TCP", "2") };
         assert!(acquire(Domain::Tcp));
         assert!(acquire(Domain::Tcp));
-        let (_, _, denials_before) = stats(Domain::Tcp);
+        let (_, _, denials_before, _) = stats(Domain::Tcp);
         assert!(!acquire(Domain::Tcp), "third acquire must be denied at a ceiling of 2");
-        let (held, _, denials_after) = stats(Domain::Tcp);
+        let (held, _, denials_after, _) = stats(Domain::Tcp);
         assert_eq!(held, 2, "a denied acquire must not increment held");
         assert_eq!(denials_after, denials_before + 1);
         release(Domain::Tcp);

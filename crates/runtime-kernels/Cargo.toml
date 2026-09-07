@@ -112,6 +112,9 @@ redis = "0.27"
 # `bundled` SQLite already requires the same); nothing extra at runtime.
 native-tls = "0.2"
 openssl = { version = "0.10", features = ["vendored"] }
+r2d2_postgres = "0.18.2"
+postgres = "0.19.14"
+postgres-native-tls = "0.5.3"
 
 [profile.release]
 # `unwind` (the default -- kept explicit here as a record of a real
