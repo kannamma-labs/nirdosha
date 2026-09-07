@@ -17,12 +17,16 @@ performance.
 > `serve`, `--sandbox-worker`) was deleted entirely
 > (`crates/compiler/src/interpreter.rs`/`serve.rs`, both removed —
 > `docs/API_TRUST_MODEL.md` §4a). Every "interpreter-only" label
-> elsewhere in this document (§2's type table, `db`/`json`/`mq`/
-> `transact`/`sandbox`/`file`, most Row 12 identity builtins, §11
+> elsewhere in this document (§2's type table, `transact`/`sandbox`, §11
 > onward's `nirdosha serve`-dependent DSL sections) now means **does
 > not run in any form today**, not "works, just not compiled" — there
 > is no fallback left to run it on. Only what §10's compiled-vs-
-> interpreter-only table marks "Yes" actually executes.
+> interpreter-only table marks "Yes" actually executes. **`db`/`json`/`mq`/
+> `http`/`https` and all of Row 12's identity builtins are no longer
+> in that "interpreter-only" set** — real compiled-path codegen landed
+> for all of them (`docs/ROADMAP.md` Track B, `docs/adr/0005`-`0007`);
+> only `transact`/`sandbox` remain genuinely interpreter-only-and-thus-
+> not-running.
 
 ```sh
 nirdosha build <file.nir> -o <out> [--opt0]   # compile to a native binary (LLVM, -O2 by default)
@@ -209,13 +213,19 @@ general string library (no `split`/`starts_with`/`trim`/concat).
 - `db_query`/`db_execute` bind values gain `dec128` as a sixth bindable type, sent as `dec_to_str`'s canonical form. Use a `NUMERIC`/`DECIMAL` Postgres column, not `DOUBLE PRECISION` — reintroducing float storage on the far side defeats the point. SQLite has no real decimal column type; `TEXT` is the honest choice there.
 - JSON encode/decode (`nirdosha serve`, `json_get_*`) represents `dec128` as a JSON **string**, not a JSON number, for the same reason as the DB binding — a JSON number is IEEE-754 double under nearly every consumer's parser, exactly the silent-drift failure this type exists to prevent. `emit-ui` renders a `dec128` field as a text input, not `<input type=number>`.
 
-**Identity / relying party** (Row 12)
+**Identity / relying party** (Row 12, compiled 2026-09 throughout — `docs/adr/0007-identity-row12-remaining-builtins.md` has the rest of this section's own design decisions)
 - `oidc_validate_token(token: str, expected_issuer: str, expected_audience: str, jwks_json: str) -> Result(VerifiedIdentity, str)` — validates a real OIDC/JWT ID token against the supplied **static** JWKS JSON (RSA/RS256, EC-P256/ES256, or oct/HS256, one key per `kid`; live JWKS refresh/rotation is a separate, deferred gap). Checks issuer, audience, and signature — a JWK's own `kty` locks which algorithm it may verify under, never the token's own `alg` header (closes the classic algorithm-confusion attack). Does **not** check `exp` against the real clock (`identity_expired`'s job, given an explicit `now` — keeps this builtin a pure function of its inputs, §9). Returns a `VerifiedIdentity` on success. The runtime never mints tokens; it only consumes externally-issued ones.
 - `check_role(identity: VerifiedIdentity, role: str) -> Result(RoleView, str)` — succeeds if `identity.claims_json` contains a `roles` array with the requested role.
 - `extract_claim(identity: VerifiedIdentity, name: str) -> Result(ClaimView, str)` — extracts a string claim from `identity.claims_json`.
 - `check_role_path(identity: VerifiedIdentity, path: str, role: str) -> Result(RoleView, str)` — `check_role`'s dotted-path sibling, for IdPs that nest the roles array under a path instead of a flat top-level `"roles"` field (e.g. Keycloak's `"realm_access.roles"`). `check_role`/`extract_claim` are unchanged and still the right call for a flat claim — including one whose own name contains a literal dot (Auth0-style namespaced claims like `"https://myapp.example.com/roles"`), which is a flat key, not a nested path.
 - `extract_claim_path(identity: VerifiedIdentity, path: str) -> Result(ClaimView, str)` — `extract_claim`'s dotted-path sibling, same nested-vs-flat distinction as `check_role_path` above.
 - `identity_expired(identity: VerifiedIdentity, now: i64) -> bool` — true if `now > identity.expires_at`.
+- `check_revocation(identity: VerifiedIdentity) -> bool` — true only if `claims_json` has a top-level `"revoked": true`. **Fail-open on absence**, deliberately — a token issued before this claim existed, or from an IdP that never sets it, must not read as revoked; the alternative (fail-closed) would silently revoke every such token.
+- `create_application_session(identity: VerifiedIdentity) -> ApplicationSession` — mints a session with a real, unpredictable `session_id` (per-process entropy folded with a monotonic counter through `sha256`, not derivable from `subject`/`issuer` — a real bug class in the design this ports, named directly rather than left implicit) and an 8-hour lifetime. `ApplicationSession` fields: `session_id`, `identity_subject`, `identity_issuer`, `created_at`, `expires_at`, `last_accessed_at`.
+- `session_cookie(session: ApplicationSession) -> str` — a `Set-Cookie`-shaped string (`HttpOnly; Secure; SameSite=Strict; Max-Age=<n>`) whose `Max-Age` is the session's own real remaining lifetime (`expires_at - created_at`), not a constant repeated independently of `create_application_session`'s own lifetime.
+- `new_refresh_token(expires_at: i64) -> RefreshTokenHandle` — mints an affine (`handle: box i64`), single-use handle. `RefreshTokenHandle` also carries `expires_at: i64`.
+- `exchange_refresh_token(identity: VerifiedIdentity, handle: RefreshTokenHandle, new_issued_at: i64) -> Result(VerifiedIdentity, str)` — redeems `handle` exactly once: a real server-side table marks it used on first exchange, so a second attempt is a real `Err`, not just relying on the affine type's own compile-time single-use guarantee (defense in depth across the FFI boundary — see the ADR for why the type-level guarantee alone wasn't judged sufficient). Reissues `identity` with `new_issued_at` as its own `issued_at`; `expires_at` comes from the handle's own mint-time value (extending the session past the *original* token's expiry is the whole point of a refresh), never carried over from the input `identity`.
+- `validate_api_key(key: str, expected_hash: str) -> Result(VerifiedIdentity, str)` — a real constant-time `sha256` compare of `key` against `expected_hash`. This builtin's own fixed 2-`str` signature has no room for a lookup step — looking `expected_hash` up from wherever it's actually stored (a config table, a database row via `db_query`) is the caller's job. On match: `subject` is the key's own hash (a stable, non-reversible identifier, not a lookup result), `issuer` is `"api-key"`, empty `audience`, `claims_json` is `"{}"` (an API key carries no claims), `expires_at` is `i64::MAX` (a static key has no session-style expiry; `0` would make `identity_expired` see every API-key identity as already expired).
 
 **Message queue** (`Ty::Mq`, compiled 2026-09 — Redis only)
 - `mq_connect(host: str, port: i64) -> Result(mq, str)` — opens a real Redis connection (`redis` crate). `mq` is affine like `db`/`tcp`/`file` — connect, use, and `stop` inside one function.
@@ -933,7 +943,7 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `dec128` + `dec_*` builtins | No | Not yet in `Ty`/`codegen.rs`'s builtin allowlists. |
 | `db`, SQLite + Postgres (`db_connect`/`db_query`/`db_execute`) | Yes | 2026-09 (SQLite), 2026-09 (Postgres + pooling for both, `docs/adr/0005-postgres-pooling-and-tls.md`). `rusqlite` `bundled`, statically linked for SQLite; `postgres`/`postgres-native-tls` (vendored TLS, verify-by-default off-`localhost`) for Postgres. Pooled via `kernel::pool::PoolRegistry`, `:memory:` deliberately unpooled. Bind values: `i64`/`f64`/`str`/`bool`; a zero-payload `enum` variant as a bind value is not yet compiled. |
 | `json` (`json_parse`/`json_get`/`json_get_*`/`json_array_*`/`json_set_str`) | Yes | 2026-09. Compiles as raw text (`Ty::Json`'s own `llvm_ty` arm), re-parsed by each accessor — no persisted parsed-tree handle. |
-| `check_role_path`/`extract_claim_path`, sessions/refresh/revocation/`validate_api_key` | No | `check_role`/`oidc_validate_token`/`extract_claim`/`identity_expired`/`db`/`json`/`mq`/`http`/`https` (above/below) are the builtins compiled so far; the dotted-path claim siblings and the rest of Row 12 (session/refresh-token/API-key lifecycle) remain real, narrower follow-up work. |
+| `check_role_path`/`extract_claim_path`, sessions/refresh/revocation/`validate_api_key` | Yes | 2026-09 (`docs/adr/0007-identity-row12-remaining-builtins.md`). Real dotted-path claim lookup, real unpredictable session ids, real server-side single-use refresh-token redemption (not just the affine type's compile-time guarantee), fail-open revocation, constant-time API-key validation. |
 | `mq` (Redis: `mq_connect`/`mq_publish`/`mq_consume`) | Yes | 2026-09. `redis` crate, real `LPUSH`/`BLPOP`. `mq_connect_via` (plugin-dispatched) is a separate mechanism. |
 | `http_get`/`http_post`/`https_get`/`https_post` | Yes | 2026-09 (client), 2026-09 (real keep-alive + pooling + `Domain::Http` admission, `docs/adr/0006-http-keepalive-pooling.md`). Real `Content-Length`/chunked-aware incremental response reader, pooled connections reused across calls, at-most-once retry on a provably-unsent write failure. HTTPS via vendored (not system) OpenSSL — see the HTTP/HTTPS section above. |
 | `transact` | Yes, Layer 1 only | 2026-09. `precheck?/network/verify/commit/compensate?/log?`, real control flow, a real `bool` result. `network`'s `retry`/`timeout` rejected explicitly (architectural: a compiled trap is `abort()`, unrecoverable, and `network`'s return type can never be `Result(_, _)` — no failure signal to retry on). Durability logging, crash replay, and `commit`/`compensate`'s own retry-with-backoff are real, disclosed follow-up work — see `docs/TRANSACT.md`. |
