@@ -561,6 +561,29 @@ impl Parser {
         Ok((key, value))
     }
 
+    /// `encode <channel> { field: "...", type: "...", aggregate: "..." }`
+    /// inside a `visual { ... }` body (rfcs/0009 Phase A — grammar-of-
+    /// graphics `render: "chart"`). Folds straight into the caller's flat
+    /// `Vec<KvEntry>` as `"encode.<channel>.<key>"`-prefixed entries — no
+    /// new AST node, the exact same "prefix convention instead of a
+    /// nested type" idiom `screen_decl`'s own `paginate { ... }` body
+    /// already established (see `parse_screen_decl`'s doc comment).
+    /// `channel` isn't restricted to `x`/`y`/`color`/`size`/`theta` at
+    /// the grammar level — `typeck.rs::check_dashboard` narrows it, the
+    /// same division of labor `LayoutNode::Widget`'s `kind` already has.
+    /// Caller has already peeked `Tok::Ident("encode")` to get here.
+    fn parse_encode_channel_entries(&mut self) -> PResult<Vec<KvEntry>> {
+        self.expect_ident()?; // "encode" itself
+        let channel = self.expect_ident()?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut inner = Vec::new();
+        while self.peek().tok != Tok::RBrace {
+            inner.push(self.parse_kv_entry()?);
+        }
+        self.expect(&Tok::RBrace, "`}`")?;
+        Ok(inner.into_iter().map(|(k, v)| (format!("encode.{channel}.{k}"), v)).collect())
+    }
+
     /// `screen_decl ::= "screen" IDENT "{" screen_item* "}"`
     /// `screen_item ::= paginate_block | field_override | action_decl | layout_decl | kv_entry`
     ///
@@ -820,11 +843,15 @@ impl Parser {
 
     /// `dashboard_decl ::= "dashboard" "{" dashboard_item* "}"`
     /// `dashboard_item ::= ("tile" | "chart") STRING "->" IDENT
-    ///                   | "visual" STRING "->" IDENT ("{" kv_entry* "}")?`
-    /// (`docs/ROADMAP.md` Track E2) Same first-token-text dispatch as
-    /// `screen`'s body; `tile`/`chart`/`visual` are reserved only as a
-    /// dashboard body's leading item keyword. `visual`'s trailing
-    /// `{ kv_entry* }` is optional, the same "label+target alone is a
+    ///                   | "visual" STRING "->" IDENT ("{" visual_item* "}")?`
+    /// `visual_item ::= kv_entry | "encode" IDENT "{" kv_entry* "}"`
+    /// (`docs/ROADMAP.md` Track E2; `encode` added by rfcs/0009 Phase A for
+    /// `render: "chart"`'s grammar-of-graphics `mark`/encoding config —
+    /// see `parse_encode_channel_entries`.) Same first-token-text dispatch
+    /// as `screen`'s body; `tile`/`chart`/`visual`/`encode` are reserved
+    /// only as a dashboard body's leading item keyword (`encode` only
+    /// inside a `visual` body specifically). `visual`'s trailing
+    /// `{ visual_item* }` is optional, the same "label+target alone is a
     /// valid, body-less item" shape `action_decl` already has —
     /// unlike `tile`/`chart`, whose `entries` field always stays empty
     /// since neither has a body at all.
@@ -858,7 +885,11 @@ impl Parser {
                     if self.peek().tok == Tok::LBrace {
                         self.bump();
                         while self.peek().tok != Tok::RBrace {
-                            entries.push(self.parse_kv_entry()?);
+                            if matches!(&self.peek().tok, Tok::Ident(s) if s == "encode") {
+                                entries.extend(self.parse_encode_channel_entries()?);
+                            } else {
+                                entries.push(self.parse_kv_entry()?);
+                            }
                         }
                         self.expect(&Tok::RBrace, "`}`")?;
                     }
@@ -904,13 +935,17 @@ impl Parser {
     }
 
     /// `panel_decl ::= "panel" STRING "{" panel_item* "}"`
-    /// `panel_item ::= action_decl | kv_entry`
+    /// `panel_item ::= action_decl | "encode" IDENT "{" kv_entry* "}" | kv_entry`
     /// Called with the leading `"panel"` token already consumed by
     /// `parse_workspace_decl` (the same "caller consumes the dispatch
     /// keyword" shape `parse_dashboard_decl`'s `tile`/`chart` arm uses).
     /// `action_decl` inside a panel is `parse_action_decl` reused
     /// completely unchanged — zero new syntax for panel actions beyond
-    /// what a screen's own actions already have.
+    /// what a screen's own actions already have. `encode` (rfcs/0009
+    /// Phase A, extended to panels) is `parse_encode_channel_entries`
+    /// reused unchanged too — same `render: "chart"` grammar-of-graphics
+    /// config a dashboard `visual` already has, folded into this panel's
+    /// own flat `entries`.
     fn parse_panel_decl(&mut self) -> PResult<PanelDecl> {
         let span = self.span();
         let title = self.expect_str_lit("a panel title")?;
@@ -919,9 +954,12 @@ impl Parser {
         let mut actions = Vec::new();
         while self.peek().tok != Tok::RBrace {
             let is_action = matches!(&self.peek().tok, Tok::Ident(s) if s == "action");
+            let is_encode = matches!(&self.peek().tok, Tok::Ident(s) if s == "encode");
             if is_action {
                 self.expect_ident()?; // consume "action"
                 actions.push(self.parse_action_decl()?);
+            } else if is_encode {
+                entries.extend(self.parse_encode_channel_entries()?);
             } else {
                 entries.push(self.parse_kv_entry()?);
             }

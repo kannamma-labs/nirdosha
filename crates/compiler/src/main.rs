@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
+        "emit-catalog" => cmd_emit_catalog(args),
         other => {
             eprintln!("unknown subcommand `{other}` -- nirdosha has no interpreter/`run`/`serve` mode anymore; use `build` or `emit-llvm`.");
             print_usage();
@@ -44,8 +45,14 @@ fn print_usage() {
     eprintln!("                                      compile to a native binary (LLVM, -O2 by default)");
     eprintln!("  nirdosha emit-llvm <file.nir>       print the generated LLVM IR");
     eprintln!("  nirdosha emit-ast <file.nir>        print the parsed AST as JSON (docs/goal.md row 9)");
-    eprintln!("  nirdosha emit-ui <file.nir> [-o out.html]");
-    eprintln!("                                      derive a Material-styled web UI from struct/fn conventions");
+    eprintln!("  nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]");
+    eprintln!("                                      derive a Material-styled web UI from struct/fn conventions;");
+    eprintln!("                                      --manifest-path (or an auto-detected Cargo.toml next to");
+    eprintln!("                                      <file.nir>) links any nir-ui-component crates it depends on");
+    eprintln!("                                      (rfcs/0009 Phase B)");
+    eprintln!("  nirdosha emit-catalog [-o out.json]");
+    eprintln!("                                      print the std UI catalog (rfcs/0009 Phase 0) -- the closed");
+    eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
 }
 
 /// Load (resolving any `use "..."` — `docs/ROADMAP.md` Track F, F2 piece 3)
@@ -61,15 +68,27 @@ fn print_usage() {
 /// (`Interpreter::new`'s own `source` argument); every other caller
 /// just uses the `Program`.
 fn typecheck_and_own(path: &str) -> Result<(nirdosha::ast::Program, String), String> {
-    typecheck_and_own_impl(path, true)
+    typecheck_and_own_impl(path, true, &[])
 }
 
 /// Same as `typecheck_and_own`, but does not require a `fn main()` — for
-/// commands that never execute an entrypoint (`serve`, `emit-ui`,
-/// `--sandbox-worker`; see `typeck::typecheck_optional_main`'s doc
-/// comment for why each of those doesn't need one).
-fn typecheck_and_own_optional_main(path: &str) -> Result<(nirdosha::ast::Program, String), String> {
-    typecheck_and_own_impl(path, false)
+/// commands that never execute an entrypoint (`emit-ui` is the only one
+/// left; `serve`/`--sandbox-worker` were removed along with the
+/// interpreter — see `typeck::typecheck_optional_main`'s doc comment
+/// for the full "why" this still applies to `emit-ui`), plus every
+/// linked `ui_plugin::NativeUiComponent`'s `name` as a legal `layout`
+/// widget kind (rfcs/0009 Phase B) — `cmd_emit_ui`'s own entry point
+/// once `--manifest-path`/an auto-detected `Cargo.toml` resolves any.
+/// No plain (components-free) sibling function exists: `cmd_emit_ui` is
+/// the only caller and always comes through here, passing `&[]` when no
+/// UI-plugin crate was linked — byte-for-byte the same checks
+/// `typecheck_optional_main` alone would run (`typecheck_and_own_impl`'s
+/// own `ui_components.is_empty()` branch).
+fn typecheck_and_own_optional_main_with_ui_components(
+    path: &str,
+    components: &[nirdosha::ui_plugin::NativeUiComponent],
+) -> Result<(nirdosha::ast::Program, String), String> {
+    typecheck_and_own_impl(path, false, components)
 }
 
 /// Prints `typeck::ungated_fn_warnings` to stderr — non-fatal, unlike a
@@ -90,10 +109,19 @@ fn print_ungated_fn_warnings(program: &nirdosha::ast::Program) {
     }
 }
 
-fn typecheck_and_own_impl(path: &str, require_main: bool) -> Result<(nirdosha::ast::Program, String), String> {
+fn typecheck_and_own_impl(
+    path: &str,
+    require_main: bool,
+    ui_components: &[nirdosha::ui_plugin::NativeUiComponent],
+) -> Result<(nirdosha::ast::Program, String), String> {
     let (program, src) = nirdosha::loader::load_program(path)?;
-    let type_result =
-        if require_main { nirdosha::typeck::typecheck(&program) } else { nirdosha::typeck::typecheck_optional_main(&program) };
+    let type_result = if require_main {
+        nirdosha::typeck::typecheck(&program)
+    } else if ui_components.is_empty() {
+        nirdosha::typeck::typecheck_optional_main(&program)
+    } else {
+        nirdosha::typeck::typecheck_optional_main_with_ui_components(&program, ui_components)
+    };
     if let Err(errors) = type_result {
         let joined = errors.iter().map(|e| format!("type error: {e}")).collect::<Vec<_>>().join("\n");
         return Err(joined);
@@ -440,22 +468,55 @@ fn cmd_gen_crud(mut args: impl Iterator<Item = String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `--manifest-path <Cargo.toml>` resolves explicitly; absent that, a
+/// `Cargo.toml` sitting right next to the input `.nir` file is used
+/// automatically (the common case for a project that has one at all —
+/// no need to type the flag every time). Returns `Ok(None)` for "no
+/// manifest, don't attempt discovery at all" (the byte-for-byte-
+/// unchanged default for every `.nir` file with no Cargo project next
+/// to it, and every existing test/example in this repo), never an
+/// error just for that.
+fn resolve_ui_component_manifest(explicit: Option<&str>, input_nir_path: &str) -> Option<std::path::PathBuf> {
+    if let Some(p) = explicit {
+        return Some(std::path::PathBuf::from(p));
+    }
+    let candidate = std::path::Path::new(input_nir_path).parent()?.join("Cargo.toml");
+    candidate.is_file().then_some(candidate)
+}
+
 fn cmd_emit_ui(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
     let mut theme_path: Option<String> = None;
+    let mut manifest_path: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => output = args.next(),
             "--theme" => theme_path = args.next(),
+            "--manifest-path" => manifest_path = args.next(),
             other => input = Some(other.to_string()),
         }
     }
     let Some(path) = input else {
-        eprintln!("usage: nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json]");
+        eprintln!("usage: nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]");
         return ExitCode::FAILURE;
     };
-    let (program, _src) = match typecheck_and_own_optional_main(&path) {
+    // rfcs/0009 Phase B -- `ui_plugin::discover_components` (a real
+    // `cargo metadata` call) only ever runs when a manifest was
+    // actually found (explicit flag, or an auto-detected `Cargo.toml`
+    // next to `path`); absent either, this is `vec![]` and every line
+    // below behaves exactly as it did before this RFC existed.
+    let components = match resolve_ui_component_manifest(manifest_path.as_deref(), &path) {
+        Some(manifest) => match nirdosha::ui_plugin::discover_components(&manifest) {
+            Ok(c) => c,
+            Err(msg) => {
+                eprintln!("error discovering UI-plugin components from {}: {msg}", manifest.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        None => Vec::new(),
+    };
+    let (program, _src) = match typecheck_and_own_optional_main_with_ui_components(&path, &components) {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("{msg}");
@@ -476,7 +537,11 @@ fn cmd_emit_ui(mut args: impl Iterator<Item = String>) -> ExitCode {
     // `emit-ui` produces a static file, no server behind either
     // `/api/_demo_login` or `/auth/login` -- both false, same as
     // `identity_base: None`/`server_table_api: false` right above.
-    let html = nirdosha::ui_gen::generate(&program, &effects, None, false, false, false, theme.as_ref());
+    let html = if components.is_empty() {
+        nirdosha::ui_gen::generate(&program, &effects, None, false, false, false, theme.as_ref())
+    } else {
+        nirdosha::ui_gen::generate_with_ui_components(&program, &effects, None, false, false, false, theme.as_ref(), &components)
+    };
     match output {
         Some(out) => match std::fs::write(&out, html) {
             Ok(()) => {
@@ -490,6 +555,56 @@ fn cmd_emit_ui(mut args: impl Iterator<Item = String>) -> ExitCode {
         },
         None => {
             println!("{html}");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// `nirdosha emit-catalog [-o out.json]` (rfcs/0009 Phase 0) -- prints
+/// `catalog/std/0.1.json`, a hand-written documentation of the closed
+/// layout/control/chart/theme vocabulary `ui_gen.rs`/`ui_gen_template.html`
+/// already render. Baked in at compile time (`include_str!`), not read
+/// from disk at runtime, the same "ships inside the binary" posture
+/// `nirdosha.gbnf` has for the core grammar. Parsed and re-serialized
+/// (rather than echoed byte-for-byte) purely so a hand-edit that breaks
+/// JSON syntax fails loudly here instead of shipping silently malformed
+/// output -- this command does not yet merge in anything from typeck or
+/// a linked plugin (rfcs/0009 Phase B); it is std only, disclosed, not
+/// hidden.
+const STD_CATALOG_JSON: &str = include_str!("../catalog/std/0.1.json");
+
+fn cmd_emit_catalog(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut output: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-o" => output = args.next(),
+            other => {
+                eprintln!("unknown argument `{other}` -- usage: nirdosha emit-catalog [-o out.json]");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let value: serde_json::Value = match serde_json::from_str(STD_CATALOG_JSON) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("internal error: catalog/std/0.1.json failed to parse: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let json = serde_json::to_string_pretty(&value).expect("a parsed serde_json::Value always re-serializes");
+    match output {
+        Some(out) => match std::fs::write(&out, &json) {
+            Ok(()) => {
+                println!("wrote {out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error writing {out}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        None => {
+            println!("{json}");
             ExitCode::SUCCESS
         }
     }
