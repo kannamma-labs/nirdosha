@@ -353,6 +353,18 @@ const NOTIFY_BUILTINS: &[&str] = &["send_email", "send_sms", "send_push", "notif
 /// `tag`(i32) / `i`(i64) / `f`(double) / `s_ptr`(ptr) / `s_len`(i64).
 const NIR_BIND_VALUE_LLTY: &str = "{ i32, i64, double, ptr, i64 }";
 
+/// `transact { commit/compensate }`'s bounded retry-with-backoff
+/// (`Codegen::emit_call_with_retry`) — a fixed compile-time attempt
+/// count and a doubling backoff (`nir_sleep_ms`) between attempts, e.g.
+/// 100ms/200ms/400ms for the two retries after the first attempt.
+/// Deliberately small and fixed rather than configurable: this phase's
+/// durability guarantee doesn't depend on how many live retries happen
+/// before a `commit`/`compensate` is left `*_pending` for replay to
+/// finish later — retrying live is purely a latency optimization for
+/// the common transient-failure case, not the actual safety mechanism.
+const TRANSACT_RETRY_MAX_ATTEMPTS: i64 = 3;
+const TRANSACT_RETRY_BASE_BACKOFF_MS: i64 = 100;
+
 /// WGS84 ellipsoid constants — mirrors `interpreter.rs`'s own
 /// `WGS84_A`/`WGS84_F`/`wgs84_e2()` exactly (same values, same derived
 /// `e2` formula), needed independently here since codegen computes these
@@ -1405,6 +1417,16 @@ struct Codegen<'a> {
     /// works unmodified), then swapping back; appended to `self.out` once
     /// at the very end, alongside `string_globals`.
     trampolines: String,
+    /// One entry per `transact` call site actually compiled — `(site_id,
+    /// trampoline_function_name)`, consumed once by `emit_c_main` to
+    /// emit `nir_transact_register_replay_site` calls in generated
+    /// `main`'s own prologue. Empty for a program that never uses
+    /// `transact` at all, so `nir_transact_log_init`/`nir_transact_replay_all`
+    /// are only emitted (and only ever open/touch a durability log file)
+    /// when the program actually needs them — the same zero-cost-when-
+    /// unused posture every other optional kernel subsystem here already
+    /// has.
+    transact_sites: Vec<(i64, String)>,
     tmp: usize,
     label: usize,
     smt_report: &'a SmtReport,
@@ -1575,6 +1597,7 @@ fn emit_llvm_ir_impl<'a>(
             entry_allocas: String::new(),
             string_globals: String::new(),
             trampolines: String::new(),
+            transact_sites: Vec::new(),
             tmp: 0,
             label: 0,
             smt_report,
@@ -1760,6 +1783,20 @@ fn emit_llvm_ir_impl<'a>(
     // implementation; `sleep_ms`, ordinary compiled `sleep_ms(ms)` (`B9`).
     writeln!(cg.out, "declare void @nir_transact_gen_txn_id(ptr)").unwrap();
     writeln!(cg.out, "declare void @nir_sleep_ms(i64)").unwrap();
+    // Durability log + crash replay (`kernel::transact`'s own module doc
+    // has the full design) — every `nir_transact_*` here is a no-op on
+    // a program that never calls it (the log file is never even opened
+    // unless `nir_transact_log_init` itself is emitted, gated on
+    // `Codegen::transact_sites` being non-empty).
+    writeln!(cg.out, "declare i32 @nir_transact_log_init()").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_begin(ptr, i64, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_commit_pending(ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_compensate_pending(ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_committed(ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_compensated(ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_transact_decode_args(ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare void @nir_transact_register_replay_site(i64, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_transact_replay_all()").unwrap();
     // `mq`/`http`/`https` (`MQ_BUILTINS`/`HTTP_BUILTINS`'s own doc
     // comments) — real Redis connectivity and HTTP(S) client calls.
     writeln!(cg.out, "declare i32 @nir_mq_connect(ptr, i64, i64, ptr, ptr)").unwrap();
@@ -6770,6 +6807,283 @@ impl Codegen<'_> {
         }
     }
 
+    /// Calls `callee_name` once with `arg_operands` (already-formatted
+    /// `"<llty> <val>"` operands — from `call_args`, or from
+    /// `emit_replay_decode_operands` for a replay trampoline's decoded
+    /// values) and returns a real `i1`: `true` unconditionally for a
+    /// non-`Result` return type (there's nothing to retry against — the
+    /// call either ran or trapped, same as any ordinary call in this
+    /// file), or, when `sig_ret` is `Result(_, _)`, `true` only once an
+    /// attempt's tag word reads `0` (`Ok`) — retrying with doubling
+    /// backoff (`nir_sleep_ms`, `TRANSACT_RETRY_BASE_BACKOFF_MS` ×
+    /// 2^attempt) up to `TRANSACT_RETRY_MAX_ATTEMPTS` times, `false` if
+    /// every attempt came back `Err`. The caller decides what
+    /// "exhausted" means — for the live `transact` path, that's leaving
+    /// the row `commit_pending`/`compensate_pending` for a later replay
+    /// to finish, never a hard abort (`emit_transact`'s own doc comment
+    /// on why compiled traps can't be the retry-on-failure mechanism
+    /// here).
+    ///
+    /// Emits its own internal `header`/`body`/`ok`/`err`/`done` blocks
+    /// (a private control-flow region, same shape `guard_in_range`'s
+    /// trap check already uses) — callers must not assume the current
+    /// block is still whatever it was before this call returns; merge
+    /// results via a stored-to `alloca` slot afterward, never a `phi`
+    /// keyed on a label this function didn't hand back (`emit_transact`/
+    /// `emit_transact_replay_trampoline` both follow this already).
+    fn emit_call_with_retry(&mut self, callee_name: &str, sig_ret: &Ty, arg_operands: &[String], label_prefix: &str) -> Result<String, CodegenError> {
+        let is_result = matches!(sig_ret, Ty::Named(n, targs) if n == "Result" && targs.len() == 2);
+        if !is_result {
+            let ret_llty = self.llvm_ty(sig_ret)?;
+            if sig_ret.is_aggregate() {
+                let dest = self.fresh_reg(&format!("{label_prefix}_call_dest"));
+                self.emit_alloca(&dest, &ret_llty);
+                let mut all = vec![format!("ptr {dest}")];
+                all.extend(arg_operands.iter().cloned());
+                writeln!(self.out, "  call void @{callee_name}({})", all.join(", ")).unwrap();
+            } else if ret_llty == "void" {
+                writeln!(self.out, "  call void @{callee_name}({})", arg_operands.join(", ")).unwrap();
+            } else {
+                writeln!(self.out, "  call {ret_llty} @{callee_name}({})", arg_operands.join(", ")).unwrap();
+            }
+            return Ok("1".to_string());
+        }
+
+        let result_llty = self.llvm_ty(sig_ret)?;
+        let success_slot = self.fresh_reg(&format!("{label_prefix}_retry_success_addr"));
+        self.emit_alloca(&success_slot, "i1");
+        writeln!(self.out, "  store i1 false, ptr {success_slot}").unwrap();
+        let counter_slot = self.fresh_reg(&format!("{label_prefix}_retry_counter_addr"));
+        self.emit_alloca(&counter_slot, "i64");
+        writeln!(self.out, "  store i64 0, ptr {counter_slot}").unwrap();
+
+        let header = self.fresh_label(&format!("{label_prefix}_retry_header"));
+        let body = self.fresh_label(&format!("{label_prefix}_retry_body"));
+        let ok_label = self.fresh_label(&format!("{label_prefix}_retry_ok"));
+        let err_label = self.fresh_label(&format!("{label_prefix}_retry_err"));
+        let done = self.fresh_label(&format!("{label_prefix}_retry_done"));
+
+        writeln!(self.out, "  br label %{header}").unwrap();
+        writeln!(self.out, "{header}:").unwrap();
+        let counter = self.fresh_reg(&format!("{label_prefix}_retry_counter"));
+        writeln!(self.out, "  {counter} = load i64, ptr {counter_slot}").unwrap();
+        let under_max = self.fresh_reg(&format!("{label_prefix}_retry_under_max"));
+        writeln!(self.out, "  {under_max} = icmp slt i64 {counter}, {TRANSACT_RETRY_MAX_ATTEMPTS}").unwrap();
+        writeln!(self.out, "  br i1 {under_max}, label %{body}, label %{done}").unwrap();
+
+        writeln!(self.out, "{body}:").unwrap();
+        let call_dest = self.fresh_reg(&format!("{label_prefix}_call_dest"));
+        self.emit_alloca(&call_dest, &result_llty);
+        let mut all = vec![format!("ptr {call_dest}")];
+        all.extend(arg_operands.iter().cloned());
+        writeln!(self.out, "  call void @{callee_name}({})", all.join(", ")).unwrap();
+        let tag_ptr = self.fresh_reg(&format!("{label_prefix}_tag_ptr"));
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {call_dest}, i32 0, i32 0").unwrap();
+        let tag = self.fresh_reg(&format!("{label_prefix}_tag"));
+        writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+        let is_ok = self.fresh_reg(&format!("{label_prefix}_is_ok"));
+        writeln!(self.out, "  {is_ok} = icmp eq i64 {tag}, 0").unwrap();
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i1 true, ptr {success_slot}").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        let next_counter = self.fresh_reg(&format!("{label_prefix}_retry_next"));
+        writeln!(self.out, "  {next_counter} = add i64 {counter}, 1").unwrap();
+        writeln!(self.out, "  store i64 {next_counter}, ptr {counter_slot}").unwrap();
+        let backoff = self.fresh_reg(&format!("{label_prefix}_retry_backoff"));
+        writeln!(self.out, "  {backoff} = shl i64 {TRANSACT_RETRY_BASE_BACKOFF_MS}, {counter}").unwrap();
+        writeln!(self.out, "  call void @nir_sleep_ms(i64 {backoff})").unwrap();
+        writeln!(self.out, "  br label %{header}").unwrap();
+
+        writeln!(self.out, "{done}:").unwrap();
+        let result = self.fresh_reg(&format!("{label_prefix}_retry_result"));
+        writeln!(self.out, "  {result} = load i1, ptr {success_slot}").unwrap();
+        Ok(result)
+    }
+
+    /// The mirror image of `emit_db_binds`, for a replay trampoline: GEPs
+    /// `params.len()` `NirBindValue`s out of `arr_ptr` (already decoded
+    /// by `nir_transact_decode_args`) and builds the `"<llty> <val>"`
+    /// call-argument operands `emit_call_with_retry` needs, per real
+    /// LLVM parameter type (`is_transact_scalar`'s four shapes — the
+    /// only ones a `transact` `commit`/`compensate` callee can declare,
+    /// so this never sees anything else).
+    fn emit_replay_decode_operands(&mut self, arr_ptr: &str, params: &[Ty], label_prefix: &str) -> Result<Vec<String>, CodegenError> {
+        let arr_llty = format!("[{} x {NIR_BIND_VALUE_LLTY}]", params.len().max(1));
+        let mut operands = Vec::with_capacity(params.len());
+        for (i, ty) in params.iter().enumerate() {
+            let elem_ptr = self.fresh_reg(&format!("{label_prefix}_elem_ptr"));
+            writeln!(self.out, "  {elem_ptr} = getelementptr inbounds {arr_llty}, ptr {arr_ptr}, i32 0, i32 {i}").unwrap();
+            match ty {
+                Ty::Bool => {
+                    let field_ptr = self.fresh_reg(&format!("{label_prefix}_i_ptr"));
+                    writeln!(self.out, "  {field_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 1").unwrap();
+                    let val = self.fresh_reg(&format!("{label_prefix}_i_val"));
+                    writeln!(self.out, "  {val} = load i64, ptr {field_ptr}").unwrap();
+                    let b = self.fresh_reg(&format!("{label_prefix}_bool_val"));
+                    writeln!(self.out, "  {b} = icmp ne i64 {val}, 0").unwrap();
+                    operands.push(format!("i1 {b}"));
+                }
+                Ty::Str => {
+                    let sptr_field = self.fresh_reg(&format!("{label_prefix}_sptr_ptr"));
+                    writeln!(self.out, "  {sptr_field} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 3").unwrap();
+                    let sptr = self.fresh_reg(&format!("{label_prefix}_sptr"));
+                    writeln!(self.out, "  {sptr} = load ptr, ptr {sptr_field}").unwrap();
+                    let slen_field = self.fresh_reg(&format!("{label_prefix}_slen_ptr"));
+                    writeln!(self.out, "  {slen_field} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 4").unwrap();
+                    let slen = self.fresh_reg(&format!("{label_prefix}_slen"));
+                    writeln!(self.out, "  {slen} = load i64, ptr {slen_field}").unwrap();
+                    let partial = self.fresh_reg(&format!("{label_prefix}_str_partial"));
+                    writeln!(self.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr {sptr}, 0").unwrap();
+                    let full = self.fresh_reg(&format!("{label_prefix}_str_full"));
+                    writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 {slen}, 1").unwrap();
+                    operands.push(format!("{{ptr, i64}} {full}"));
+                }
+                Ty::F64 => {
+                    let field_ptr = self.fresh_reg(&format!("{label_prefix}_f_ptr"));
+                    writeln!(self.out, "  {field_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 2").unwrap();
+                    let val = self.fresh_reg(&format!("{label_prefix}_f_val"));
+                    writeln!(self.out, "  {val} = load double, ptr {field_ptr}").unwrap();
+                    operands.push(format!("double {val}"));
+                }
+                other if other.is_integer() => {
+                    let field_ptr = self.fresh_reg(&format!("{label_prefix}_i_ptr"));
+                    writeln!(self.out, "  {field_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 1").unwrap();
+                    let val = self.fresh_reg(&format!("{label_prefix}_i_val"));
+                    writeln!(self.out, "  {val} = load i64, ptr {field_ptr}").unwrap();
+                    operands.push(format!("i64 {val}"));
+                }
+                other => {
+                    return unsupported(format!(
+                        "transact replay trampoline: unsupported commit/compensate parameter type {other:?} \
+                         (typeck.rs::infer_transact already restricts these to is_transact_scalar's four shapes)"
+                    ));
+                }
+            }
+        }
+        Ok(operands)
+    }
+
+    /// Generates one top-level replay trampoline for a single `transact`
+    /// site (same `self.trampolines`/temporarily-swapped-`self.out`
+    /// mechanism `emit_spawn_trampoline` already established), matching
+    /// `kernel::transact::ReplayFn`'s real ABI exactly: `extern "C"
+    /// fn(*const u8, i64, i32) -> i32`. Decodes the row's JSON-encoded
+    /// args (`nir_transact_decode_args`) into one shared, worst-case-
+    /// sized `NirBindValue` buffer (`max(commit's arity, compensate's
+    /// arity)` — the two paths never run in the same call, so sharing
+    /// one buffer is safe and simpler than allocating two), then
+    /// dispatches to whichever of `commit.name`/`compensate.name` the
+    /// caller's `is_commit` flag selects, through the exact same
+    /// `emit_call_with_retry` bounded-retry logic the live path uses —
+    /// replaying a `commit` that itself needs a few attempts to succeed
+    /// gets the same treatment as it would have gotten live.
+    /// `kernel::transact::nir_transact_replay_all` (not this function)
+    /// is what marks the row `committed`/`compensated` on a real `1`
+    /// return, or leaves it pending (logged, not silently dropped) on
+    /// `0` — this trampoline only ever reports which one happened.
+    fn emit_transact_replay_trampoline(&mut self, site_id: i64, commit: &TransactSlot, compensate: &Option<TransactSlot>) -> Result<String, CodegenError> {
+        let tramp_name = self.fresh_global(&format!("transact_replay_{site_id}"));
+        // `.params.clone()`/`.ret.clone()`, not `.clone()` on the whole
+        // `&FnSig` — cloning the reference itself (always available,
+        // regardless of whether `FnSig` implements `Clone`, since every
+        // reference is trivially `Clone`/`Copy`) would silently keep the
+        // borrow of `self.sigs` alive for this whole function, colliding
+        // with every `&mut self` call below it. Same pattern
+        // `emit_transact_call` already uses.
+        let commit_params = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").params.clone();
+        let commit_ret = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").ret.clone();
+        let compensate_params_ret = compensate.as_ref().map(|c| {
+            let s = self.sigs.get(&c.name).expect("typeck.rs already resolved this call");
+            (s.params.clone(), s.ret.clone())
+        });
+        let max_arity = commit_params.len().max(compensate_params_ret.as_ref().map(|(p, _)| p.len()).unwrap_or(0)).max(1);
+
+        let saved_out = std::mem::take(&mut self.out);
+        // `emit_alloca`/`emit_call_with_retry` (called below, and shared
+        // with the *live* `emit_transact` path) both write through
+        // `self.entry_allocas`, a per-function scratch buffer normally
+        // owned and spliced back in by `Codegen::function`'s own
+        // "capture position, clear, ..., splice back" dance
+        // (`entry_allocas`'s own doc comment). This trampoline is a
+        // second, hand-built `define` outside that machinery (the same
+        // `self.out`-swap trick `emit_spawn_trampoline` already uses) —
+        // without saving/restoring `self.entry_allocas` too, this
+        // function's own allocas would either land in the *enclosing*
+        // live function's entry block (if some are already queued there
+        // mid-codegen) or silently vanish into a buffer nothing ever
+        // splices for this `define` at all — a real bug, caught by
+        // actually compiling a `transact` program and reading clang's
+        // own "use of undefined value" error, not reasoned about.
+        let saved_entry_allocas = std::mem::take(&mut self.entry_allocas);
+        writeln!(self.out, "define i32 {tramp_name}(ptr %args_json_ptr, i64 %args_json_len, i32 %is_commit) {{").unwrap();
+        writeln!(self.out, "entry:").unwrap();
+        let alloca_splice_pos = self.out.len();
+
+        let arr_llty = format!("[{max_arity} x {NIR_BIND_VALUE_LLTY}]");
+        let arr_ptr = self.fresh_reg("replay_arr");
+        self.emit_alloca(&arr_ptr, &arr_llty);
+        let decoded_n = self.fresh_reg("replay_decoded_n");
+        writeln!(self.out, "  {decoded_n} = call i64 @nir_transact_decode_args(ptr %args_json_ptr, i64 %args_json_len, ptr {arr_ptr}, i64 {max_arity})").unwrap();
+        let _ = decoded_n; // real decode-failure handling would need a third result branch -- not reachable for a row this same binary logged, only for a hand-corrupted log file.
+
+        let result_slot = self.fresh_reg("replay_result_addr");
+        self.emit_alloca(&result_slot, "i32");
+
+        let is_commit_b = self.fresh_reg("replay_is_commit_b");
+        writeln!(self.out, "  {is_commit_b} = icmp ne i32 %is_commit, 0").unwrap();
+        let do_commit = self.fresh_label("replay_do_commit");
+        let do_compensate = self.fresh_label("replay_do_compensate");
+        let done = self.fresh_label("replay_done");
+        writeln!(self.out, "  br i1 {is_commit_b}, label %{do_commit}, label %{do_compensate}").unwrap();
+
+        writeln!(self.out, "{do_commit}:").unwrap();
+        let commit_operands = self.emit_replay_decode_operands(&arr_ptr, &commit_params, "replay_commit")?;
+        let commit_success = self.emit_call_with_retry(&commit.name, &commit_ret, &commit_operands, "replay_commit")?;
+        let commit_result = self.fresh_reg("replay_commit_result_i32");
+        writeln!(self.out, "  {commit_result} = zext i1 {commit_success} to i32").unwrap();
+        writeln!(self.out, "  store i32 {commit_result}, ptr {result_slot}").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+
+        writeln!(self.out, "{do_compensate}:").unwrap();
+        if let Some(c) = compensate {
+            let (comp_params, comp_ret) = compensate_params_ret.expect("compensate is Some, so compensate_params_ret was computed above");
+            let comp_operands = self.emit_replay_decode_operands(&arr_ptr, &comp_params, "replay_compensate")?;
+            let comp_success = self.emit_call_with_retry(&c.name, &comp_ret, &comp_operands, "replay_compensate")?;
+            let comp_result = self.fresh_reg("replay_compensate_result_i32");
+            writeln!(self.out, "  {comp_result} = zext i1 {comp_success} to i32").unwrap();
+            writeln!(self.out, "  store i32 {comp_result}, ptr {result_slot}").unwrap();
+        } else {
+            // A row can only be `compensate_pending` if the live path
+            // itself marked it so, which only happens inside the `if let
+            // Some(c) = compensate` branch of `emit_transact` -- so this
+            // arm is unreachable for any row this binary's own live path
+            // produced. Still real, compiled code (not `unreachable`):
+            // a hand-edited/corrupted log row is the only way here, and
+            // reporting failure (leaving it `compensate_pending`) is the
+            // same safe response replay already gives any row it can't
+            // finish, not a crash.
+            writeln!(self.out, "  store i32 0, ptr {result_slot}").unwrap();
+        }
+        writeln!(self.out, "  br label %{done}").unwrap();
+
+        writeln!(self.out, "{done}:").unwrap();
+        let result = self.fresh_reg("replay_result");
+        writeln!(self.out, "  {result} = load i32, ptr {result_slot}").unwrap();
+        writeln!(self.out, "  ret i32 {result}").unwrap();
+        writeln!(self.out, "}}").unwrap();
+        writeln!(self.out).unwrap();
+
+        self.out.insert_str(alloca_splice_pos, &self.entry_allocas);
+        self.trampolines.push_str(&self.out);
+        self.out = saved_out;
+        self.entry_allocas = saved_entry_allocas;
+        Ok(tramp_name)
+    }
+
     /// `transact { precheck?/network/verify/commit/compensate?/log? }` —
     /// `docs/TRANSACT.md`, compiled for real 2026-09, Layer 1 only (the
     /// same scope the now-deleted interpreter itself shipped *first*,
@@ -6868,19 +7182,87 @@ impl Codegen<'_> {
         writeln!(self.out, "  store i1 {verify_val}, ptr {verify_slot}").unwrap();
         scopes.define("verify", verify_ty, verify_slot);
 
+        // A compile-time-unique id for this call site — used both as the
+        // durability log's own `site_id` column and as the key
+        // `nir_transact_register_replay_site` registers this site's
+        // generated trampoline under. Assigned by position in
+        // `self.transact_sites` (one push per `emit_transact` call,
+        // program-wide codegen order — stable within one build, not
+        // across a rebuild that adds/removes/reorders `transact` sites;
+        // see `docs/adr/0009-transact-durability-and-replay.md`'s
+        // disclosed fingerprint-guard gap).
+        let site_id = self.transact_sites.len() as i64;
+
+        // `txn_id`'s raw `ptr`/`i64` parts — every `nir_transact_*` durability
+        // call below takes these, not the `{ptr, i64}` struct value itself.
+        let txn_id_ptr_gep = self.fresh_reg("transact_txn_id_ptr_gep");
+        writeln!(self.out, "  {txn_id_ptr_gep} = getelementptr inbounds {{ptr, i64}}, ptr {txn_id_slot}, i32 0, i32 0").unwrap();
+        let txn_id_ptr_val = self.fresh_reg("transact_txn_id_ptr");
+        writeln!(self.out, "  {txn_id_ptr_val} = load ptr, ptr {txn_id_ptr_gep}").unwrap();
+        let txn_id_len_gep = self.fresh_reg("transact_txn_id_len_gep");
+        writeln!(self.out, "  {txn_id_len_gep} = getelementptr inbounds {{ptr, i64}}, ptr {txn_id_slot}, i32 0, i32 1").unwrap();
+        let txn_id_len_val = self.fresh_reg("transact_txn_id_len");
+        writeln!(self.out, "  {txn_id_len_val} = load i64, ptr {txn_id_len_gep}").unwrap();
+
+        // Durable row created right here, not at the top of the function
+        // — a `precheck`-rejected transact never reaches this point, so
+        // it never gets a row at all (nothing for replay to ever act on
+        // anyway). Best-effort, like `log` below: `nir_transact_log_init`
+        // already aborted the whole program at startup (`emit_c_main`) if
+        // the log couldn't be opened, so a failure return here would mean
+        // a `txn_id` collision or a mid-run I/O error — rare, and not
+        // something a live `abort()` should escalate to, matching this
+        // function's existing "durability is a best-effort side channel
+        // to the live control flow, not a gate on it" posture throughout.
+        writeln!(self.out, "  call i32 @nir_transact_begin(ptr {txn_id_ptr_val}, i64 {txn_id_len_val}, i64 {site_id})").unwrap();
+
         let commit_label = self.fresh_label("transact_commit");
         let compensate_label = self.fresh_label("transact_compensate");
         let after_verify_label = self.fresh_label("transact_after_verify");
         writeln!(self.out, "  br i1 {verify_val}, label %{commit_label}, label %{compensate_label}").unwrap();
 
         writeln!(self.out, "{commit_label}:").unwrap();
-        self.emit_transact_call(commit, scopes)?; // return value unconstrained, discarded
+        {
+            let (binds_ptr, binds_len) = self.emit_db_binds(&commit.args, scopes)?;
+            writeln!(self.out, "  call i32 @nir_transact_mark_commit_pending(ptr {txn_id_ptr_val}, i64 {txn_id_len_val}, ptr {binds_ptr}, i64 {binds_len})").unwrap();
+            let sig_params = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").params.clone();
+            let sig_ret = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").ret.clone();
+            let arg_operands = self.call_args(&commit.args, &sig_params, scopes)?;
+            let success = self.emit_call_with_retry(&commit.name, &sig_ret, &arg_operands, "transact_commit")?;
+            let mark_committed_label = self.fresh_label("transact_mark_committed");
+            let after_commit_label = self.fresh_label("transact_after_commit");
+            writeln!(self.out, "  br i1 {success}, label %{mark_committed_label}, label %{after_commit_label}").unwrap();
+            writeln!(self.out, "{mark_committed_label}:").unwrap();
+            writeln!(self.out, "  call i32 @nir_transact_mark_committed(ptr {txn_id_ptr_val}, i64 {txn_id_len_val})").unwrap();
+            writeln!(self.out, "  br label %{after_commit_label}").unwrap();
+            writeln!(self.out, "{after_commit_label}:").unwrap();
+            // `success == false` here means every live retry attempt came
+            // back `Err` — the row is left `commit_pending` (never
+            // marked), recoverable by the next `nir_transact_replay_all`
+            // rather than lost. The live `transact` expression's own `i1`
+            // result still reports `true` unconditionally below, matching
+            // this function's pre-existing, unchanged semantics: it
+            // reflects *which branch `verify` chose*, not whether
+            // `commit`'s own side effect is confirmed durable yet.
+        }
         writeln!(self.out, "  store i1 true, ptr {result_slot}").unwrap();
         writeln!(self.out, "  br label %{after_verify_label}").unwrap();
 
         writeln!(self.out, "{compensate_label}:").unwrap();
         if let Some(c) = compensate {
-            self.emit_transact_call(c, scopes)?; // return value unconstrained, discarded
+            let (binds_ptr, binds_len) = self.emit_db_binds(&c.args, scopes)?;
+            writeln!(self.out, "  call i32 @nir_transact_mark_compensate_pending(ptr {txn_id_ptr_val}, i64 {txn_id_len_val}, ptr {binds_ptr}, i64 {binds_len})").unwrap();
+            let sig_params = self.sigs.get(&c.name).expect("typeck.rs already resolved this call").params.clone();
+            let sig_ret = self.sigs.get(&c.name).expect("typeck.rs already resolved this call").ret.clone();
+            let arg_operands = self.call_args(&c.args, &sig_params, scopes)?;
+            let success = self.emit_call_with_retry(&c.name, &sig_ret, &arg_operands, "transact_compensate")?;
+            let mark_compensated_label = self.fresh_label("transact_mark_compensated");
+            let after_compensate_label = self.fresh_label("transact_after_compensate");
+            writeln!(self.out, "  br i1 {success}, label %{mark_compensated_label}, label %{after_compensate_label}").unwrap();
+            writeln!(self.out, "{mark_compensated_label}:").unwrap();
+            writeln!(self.out, "  call i32 @nir_transact_mark_compensated(ptr {txn_id_ptr_val}, i64 {txn_id_len_val})").unwrap();
+            writeln!(self.out, "  br label %{after_compensate_label}").unwrap();
+            writeln!(self.out, "{after_compensate_label}:").unwrap();
         }
         writeln!(self.out, "  store i1 false, ptr {result_slot}").unwrap();
         writeln!(self.out, "  br label %{after_verify_label}").unwrap();
@@ -6899,6 +7281,16 @@ impl Codegen<'_> {
         writeln!(self.out, "{after_precheck_label}:").unwrap();
         let result = self.fresh_reg("transact_result");
         writeln!(self.out, "  {result} = load i1, ptr {result_slot}").unwrap();
+
+        // The replay trampoline is generated unconditionally (even for a
+        // program whose durability log never actually records a pending
+        // row for this site at runtime) and registered under `site_id` —
+        // `emit_c_main`'s prologue calls `nir_transact_register_replay_site`
+        // for every entry in `self.transact_sites` before ever calling
+        // `nir_main`, so replay always has a trampoline for every site
+        // this build knows about, no runtime conditionality needed here.
+        let tramp_name = self.emit_transact_replay_trampoline(site_id, commit, compensate)?;
+        self.transact_sites.push((site_id, tramp_name));
 
         scopes.pop();
         Ok(result)
@@ -9173,6 +9565,41 @@ impl Codegen<'_> {
         }
         writeln!(self.out, "define i32 @main() {{").unwrap();
         writeln!(self.out, "entry:").unwrap();
+        // Durability log init + crash replay — strictly before any user
+        // code (including `nfr` registration, harmless either order, but
+        // definitely before `nir_main`) runs, and strictly after every
+        // `transact` site's replay trampoline is registered
+        // (`nir_transact_register_replay_site`), so `nir_transact_replay_all`
+        // never dispatches to a site that isn't registered yet. Entirely
+        // absent from the emitted IR for a program with no `transact` at
+        // all (`self.transact_sites` empty) — zero cost when unused, same
+        // convention every other optional kernel subsystem in this file
+        // already follows.
+        if !self.transact_sites.is_empty() {
+            let log_ok = self.fresh_reg("transact_log_init_ok");
+            writeln!(self.out, "  {log_ok} = call i32 @nir_transact_log_init()").unwrap();
+            let log_ok_b = self.fresh_reg("transact_log_init_ok_b");
+            writeln!(self.out, "  {log_ok_b} = icmp ne i32 {log_ok}, 0").unwrap();
+            let log_init_ok_label = self.fresh_label("transact_log_init_ok");
+            let log_init_fail_label = self.fresh_label("transact_log_init_fail");
+            writeln!(self.out, "  br i1 {log_ok_b}, label %{log_init_ok_label}, label %{log_init_fail_label}").unwrap();
+            writeln!(self.out, "{log_init_fail_label}:").unwrap();
+            // Fail fast and loud, matching `instance_lock`'s own stated
+            // philosophy (its doc comment) and `guard_in_range`'s existing
+            // trap convention elsewhere in this file — a program that
+            // declares `transact` but can't durably log it must not run
+            // silently without the guarantee it was written to rely on.
+            // `nir_transact_log_init` itself already printed the real
+            // reason (another instance holding the log, or a plain I/O
+            // error) to stderr before returning `0`.
+            writeln!(self.out, "  call void @abort()").unwrap();
+            writeln!(self.out, "  unreachable").unwrap();
+            writeln!(self.out, "{log_init_ok_label}:").unwrap();
+            for (site_id, tramp_name) in self.transact_sites.clone() {
+                writeln!(self.out, "  call void @nir_transact_register_replay_site(i64 {site_id}, ptr {tramp_name})").unwrap();
+            }
+            writeln!(self.out, "  call void @nir_transact_replay_all()").unwrap();
+        }
         // `nfr(...)` registration — once per tracked function, before
         // `nir_main` (the `.nir` program's own `main`) ever runs, so
         // every `nir_nfr_call_begin`/`_end` inside it already has a real
