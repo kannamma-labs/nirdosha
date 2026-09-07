@@ -9,10 +9,29 @@ here. Nirdosha's "external effect" already *is* a named function call
 support is a rollback-and-replay discipline layered over calls that already
 exist, not a new subsystem. One keyword, six slots.
 
-**Status: all five layers are implemented** (in-process control flow, a
-real durability log, crash replay, `network`'s own `retry`/`timeout`, and a
-real cross-process `network`/`commit` test) — see "How we're going to get
-there" below for exactly what each one delivered.
+**Status, 2026-09 — the interpreter these five layers were built against is
+deleted; only Layer 1 has a compiled-backend equivalent today.** All five
+layers below describe real, historical work (in-process control flow, a
+real durability log, crash replay, `network`'s own `retry`/`timeout`, a real
+cross-process `network`/`commit` test) — but that work lived entirely in
+`interpreter.rs`/`transact_log.rs`, both removed with the interpreter, so
+none of layers 2–5 run in any form today. `codegen.rs`'s `emit_transact`
+compiles Layer 1 for real (precheck/network/verify/commit/compensate/log,
+the implicit `network`/`verify`/`txn_id` bindings, a real `bool` result —
+`examples/features/36_transact.nir` compiled and run, unmodified,
+`crates/compiler/tests/codegen.rs`'s
+`transact_commits_and_compensates_for_real_matching_the_checked_in_example`).
+`network`'s `retry`/`timeout` are not a deferred nicety but an
+**architectural** gap in the compiled model: a compiled trap is an
+unconditional `abort()` (unlike the interpreter's own catchable
+`RuntimeError`), and `network`'s declared return type is restricted to a
+bare scalar (`Ty::is_transact_scalar`, never `Result(_, _)`) — so there is
+no non-trapping failure signal for a retry loop to react to at all;
+rejected explicitly (`check_expr`'s pre-pass), not silently ignored.
+`commit`/`compensate`'s own retry-with-backoff (theoretically possible,
+since their return type is unconstrained), the durability log, and crash
+replay remain real, separate, disclosed follow-up work — see
+`docs/PHASE0.md`'s "Twenty-fifth update" for the full detail.
 
 ## What it brings to the table
 
@@ -405,11 +424,10 @@ practice:
   arbitrary business data to actually finish the operation, so the same
   restriction there would defeat their purpose. The honest cost of that
   asymmetry is "Crash replay"'s named `Stuck` gap above.
-- **Compiled backend (`codegen.rs`) is out of scope until the interpreter
-  version is proven** — same "reject, don't mis-compile" treatment every
-  other unimplemented construct gets today (`sandbox`, `struct`/`enum`/
-  `match`, `db`/`mq`/`json` are still interpreter-only per
-  `docs/LANGUAGE.md` §10 — `box`/`froze`/`tcp`/`thread`/`spawn`/`join`/
-  `chan`/`send`/`recv` all compile now, so they've dropped off that
-  list; `transact` joins the still-unsupported one, not an exception to
-  it).
+- **Compiled backend (`codegen.rs`) was out of scope until the
+  interpreter version was proven** — true when written, moot since
+  2026-09: the interpreter that "proved" it is deleted, and `transact`'s
+  Layer 1 now has a real compiled equivalent (this doc's own status
+  header above). `db`/`json` also compile now, so they've dropped off
+  the "still interpreter-only" list too; `sandbox`/`mq`/`http`/`https`
+  remain on it.

@@ -1890,6 +1890,140 @@ fn compiled_listen_accept_serves_a_real_client() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim_end(), "client hello");
 }
 
+/// Phase 0 (compiled `serve`): a real curl-shaped request over a real
+/// socket, twice, against the *same* running compiled process, routed by
+/// path to two different compiled `fn`s -- `str_index_of`/`str_slice`/
+/// `len(str)` doing the request-line parsing, plain `if`/`else if` + `==`
+/// doing the routing. Same "spawn the compiled binary since `accept`
+/// blocks, connect a real client from the test" shape as
+/// `compiled_listen_accept_serves_a_real_client`, except this server's
+/// own `while true` loop never exits on its own, so the test kills the
+/// child at the end instead of waiting on it.
+#[test]
+fn compiled_serve_routes_by_path_to_two_compiled_functions() {
+    let port = free_port();
+    let src = format!(
+        r#"
+        struct Text {{
+            value: str,
+        }}
+
+        fn handle_hello() -> Text {{
+            return Text("hello from /api/hello")
+        }}
+
+        fn handle_echo() -> Text {{
+            return Text("hello from /api/echo")
+        }}
+
+        fn main() {{
+            let l: tcp_listener = listen({port})
+            while true {{
+                let conn: tcp = accept(l)
+                let req: str = recv(conn)
+
+                let line_end: i64 = str_index_of(req, "\r\n")
+                let line: str = str_slice(req, 0, line_end)
+                let sp1: i64 = str_index_of(line, " ")
+                let after_method: str = str_slice(line, sp1 + 1, len(line))
+                let sp2: i64 = str_index_of(after_method, " ")
+                let path: str = str_slice(after_method, 0, sp2)
+
+                if path == "/api/hello" {{
+                    let body: Text = handle_hello()
+                    send(conn, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    send(conn, body.value)
+                }} else if path == "/api/echo" {{
+                    let body: Text = handle_echo()
+                    send(conn, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    send(conn, body.value)
+                }} else {{
+                    send(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                }}
+                stop conn
+            }}
+        }}
+    "#
+    );
+
+    let program = parse_checked(&src);
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
+    codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect("codegen::build should succeed");
+    let mut child = Command::new(&out_path).spawn().expect("compiled binary should start");
+
+    use std::io::{Read, Write};
+    let request = |path: &str| -> Vec<u8> {
+        let mut attempt = 0;
+        let mut conn = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => break s,
+                Err(_) if attempt < 50 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("could not connect to the compiled listener: {e}"),
+            }
+        };
+        conn.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        conn.read_to_end(&mut buf).unwrap();
+        buf
+    };
+
+    let hello_response = String::from_utf8_lossy(&request("/api/hello")).into_owned();
+    let echo_response = String::from_utf8_lossy(&request("/api/echo")).into_owned();
+    let missing_response = String::from_utf8_lossy(&request("/api/unknown")).into_owned();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&out_path);
+
+    assert!(hello_response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {hello_response:?}");
+    assert!(hello_response.ends_with("hello from /api/hello"), "unexpected response: {hello_response:?}");
+    assert!(echo_response.starts_with("HTTP/1.1 200 OK"), "unexpected response: {echo_response:?}");
+    assert!(echo_response.ends_with("hello from /api/echo"), "unexpected response: {echo_response:?}");
+    assert!(missing_response.starts_with("HTTP/1.1 404 Not Found"), "unexpected response: {missing_response:?}");
+    assert_ne!(hello_response, echo_response, "two different routes must produce two different bodies");
+}
+
+#[test]
+fn str_slice_and_str_index_of_parse_a_request_line() {
+    let src = r#"
+        fn main() {
+            let s: str = "GET /api/hello HTTP/1.1"
+            print(len(s))
+            let sp1: i64 = str_index_of(s, " ")
+            print(sp1)
+            let method: str = str_slice(s, 0, sp1)
+            print(method)
+            let rest: str = str_slice(s, sp1 + 1, len(s))
+            let sp2: i64 = str_index_of(rest, " ")
+            let path: str = str_slice(rest, 0, sp2)
+            print(path)
+            print(str_index_of(s, "xyz"))
+            print(path == "/api/hello")
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "23\n3\nGET\n/api/hello\n-1\n1\n");
+}
+
+#[test]
+fn str_slice_traps_on_out_of_bounds_end() {
+    let src = r#"
+        fn main() {
+            let s: str = "hello"
+            let bad: str = str_slice(s, 2, 10)
+            print(bad)
+        }
+    "#;
+    let (_, code) = compile_and_run(src);
+    assert_ne!(code, 0, "an out-of-bounds str_slice should trap, not succeed");
+}
+
 #[test]
 fn connecting_to_a_closed_port_traps_at_runtime() {
     let port = free_port(); // bound then immediately dropped -- nothing listens on it
@@ -2259,4 +2393,843 @@ fn acquire_produces_real_callable_fn_value_gated_by_check_role() {
     let (stdout, code) = compile_and_run(src);
     assert_eq!(code, 0);
     assert_eq!(stdout, "150000.000000\n-2.000000\ndenied\n");
+}
+
+/// Phase 1 (identity crypto): a genuine HMAC-SHA256 JWT, verified end to
+/// end in a compiled binary via real `jsonwebtoken` signature verification
+/// against a static JWKS -- same fixture as `examples/features/
+/// 30_identity_oidc.nir`/`31_mock_identity_provider.nir` (`kid:"key1"`,
+/// `kty:"oct"`, `k:"bXktc2VjcmV0LWtleQ"` = `"my-secret-key"`). Arms are
+/// `Err(...)`-first throughout -- the documented, pre-existing
+/// `match_expr` workaround (`docs/PHASE0.md`'s "Twenty-first update":
+/// `local_ty_of` infers a match's result type from its *first* arm's
+/// body, evaluated before that arm's own bindings exist in scope, so an
+/// `Ok(id) => id`-shaped first arm doesn't resolve; reordering is the
+/// complete, correct fix, not something this phase needed to touch).
+#[test]
+fn oidc_validate_token_verifies_a_real_jwt_and_drives_check_role_and_extract_claim() {
+    let src = r#"
+        struct Text {
+            value: str,
+        }
+
+        fn main() {
+            let token: str = "eyJhbGciOiAiSFMyNTYiLCAia2lkIjogImtleTEifQ.eyJzdWIiOiAiYWxpY2UiLCAiaXNzIjogImh0dHBzOi8vZXhhbXBsZS5jb20iLCAiYXVkIjogIm15LWFwcCIsICJleHAiOiAyMDAwMDAwMDAwLCAiaWF0IjogMTcwMDAwMDAwMCwgInJvbGVzIjogWyJwaHlzaWNpYW4iXSwgImRlcGFydG1lbnQiOiAiY2FyZGlvbG9neSJ9.nrFdeqNDwXWLeGzud6X9Q4ITzCXULzZBBK8y51LGYXs"
+            let jwks: str = "{\"keys\":[{\"kid\":\"key1\",\"kty\":\"oct\",\"k\":\"bXktc2VjcmV0LWtleQ\"}]}"
+
+            let identity: VerifiedIdentity = match oidc_validate_token(token, "https://example.com", "my-app", jwks) {
+                Err(e) => VerifiedIdentity("", "", "", 0, 0, "{}"),
+                Ok(id) => id,
+            }
+            print(identity.subject)
+            print(identity.issuer)
+            print(identity.audience)
+
+            let has_physician: bool = match check_role(identity, "physician") {
+                Err(e) => false,
+                Ok(proof) => true,
+            }
+            print(has_physician)
+
+            let has_admin: bool = match check_role(identity, "admin") {
+                Err(e) => false,
+                Ok(proof) => true,
+            }
+            print(has_admin)
+
+            let department: Text = match extract_claim(identity, "department") {
+                Err(e) => Text(e),
+                Ok(claim) => Text(claim.value),
+            }
+            print(department.value)
+
+            print(identity_expired(identity, 999999999999))
+            print(identity_expired(identity, 1700000001))
+
+            let wrong_issuer_rejected: bool = match oidc_validate_token(token, "https://wrong-issuer.example", "my-app", jwks) {
+                Err(e) => true,
+                Ok(id) => false,
+            }
+            print(wrong_issuer_rejected)
+
+            // A tampered signature (last character of the token flipped)
+            // is a real `Err`, never a trap.
+            let tampered: str = "eyJhbGciOiAiSFMyNTYiLCAia2lkIjogImtleTEifQ.eyJzdWIiOiAiYWxpY2UiLCAiaXNzIjogImh0dHBzOi8vZXhhbXBsZS5jb20iLCAiYXVkIjogIm15LWFwcCIsICJleHAiOiAyMDAwMDAwMDAwLCAiaWF0IjogMTcwMDAwMDAwMCwgInJvbGVzIjogWyJwaHlzaWNpYW4iXSwgImRlcGFydG1lbnQiOiAiY2FyZGlvbG9neSJ9.nrFdeqNDwXWLeGzud6X9Q4ITzCXULzZBBK8y51LGYXt"
+            let tampered_rejected: bool = match oidc_validate_token(tampered, "https://example.com", "my-app", jwks) {
+                Err(e) => true,
+                Ok(id) => false,
+            }
+            print(tampered_rejected)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        "alice\nhttps://example.com\nmy-app\n1\n0\ncardiology\n1\n0\n1\n1\n"
+    );
+}
+
+/// Phase 2 (`db`, SQLite via `rusqlite`): a real, unmodified copy of
+/// `examples/features/27_database.nir` — `db_connect`/`db_execute`/
+/// `db_query`/`json_array_get`/`json_get_str`/`stop`, compiled and run
+/// against a real in-memory SQLite database. A schema is created, two
+/// rows inserted, a filtered `SELECT` round-tripped through the new
+/// `Ty::Json`-as-text representation, a row updated, and a connection
+/// failure (a real `Err`, never a trap) all exercised end to end.
+#[test]
+fn db_connect_execute_query_round_trips_real_sqlite_rows() {
+    let src = include_str!("../../../examples/features/27_database.nir");
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "ada\n1\n");
+}
+
+/// The rest of the `json_*` accessor surface `27_database.nir` doesn't
+/// happen to exercise — `json_get_i64`/`json_get_f64`/`json_get_bool`/
+/// `json_array_len` read out of a real `db_query` row (SQLite has no
+/// native boolean column, so `active` round-trips as `0`/`1`, matching
+/// `NirBindValue`'s own documented bool-as-integer convention), plus
+/// `json_parse`/`json_get`/`json_set_str` against plain literals. `Json`
+/// and `Str` are distinct types even though they share one compiled
+/// representation (`Ty::Json`'s `llvm_ty` arm) — `typeck.rs` enforces
+/// the distinction like any other nominal type, so every `json_get_*`
+/// call here reads directly from the live `Ty::Json` value in scope
+/// (`row`, `parsed`), never through a `Text`-wrapped detour; only the
+/// final *scalar* extractions (`str`/`i64`/`f64`/`bool`) cross
+/// `build_row`'s own function boundary, carried in one `Row` struct
+/// (struct *fields* aren't inspected by the `str`-at-boundary ban —
+/// `contains_str` only walks a generic type's own type arguments, not a
+/// plain struct's field list — the same reason the ban's own suggested
+/// `struct Text { value: str }` fix works at all). Arms are
+/// `Err(...)`-first throughout — the same documented, pre-existing
+/// `match_expr` ordering workaround the identity test above already
+/// uses (a bare bound identifier as an arm's body, e.g. `Ok(f) => f`,
+/// needs its real type already known when `match_expr` infers the whole
+/// match's result type from its *first* arm; putting `Err` first
+/// sidesteps that inference order entirely).
+#[test]
+fn json_accessors_read_every_scalar_type_out_of_a_real_db_query_result() {
+    let src = r#"
+        struct Row {
+            name: str,
+            id: i64,
+            score: f64,
+            active: bool,
+            len_is_err: bool,
+        }
+
+        // `json` is a plain parameter type here (like `db` already is for
+        // `conn` below) -- not banned, since `contains_str` only walks a
+        // generic type's own type arguments, and bare `Ty::Json` isn't
+        // one. Kept as its own function so `build_row` below never needs
+        // a multi-statement match-arm body (this grammar's `=>` takes one
+        // expression, not a `{ }` block) to combine several `json_get_*`
+        // reads into one `Row`.
+        fn row_from_json(row: json) -> Row {
+            let name: str = match json_get_str(row, "name") {
+                Err(e) => "",
+                Ok(s) => s,
+            }
+            let id: i64 = match json_get_i64(row, "id") {
+                Err(e) => -1,
+                Ok(n) => n,
+            }
+            let score: f64 = match json_get_f64(row, "score") {
+                Err(e) => -1.0,
+                Ok(f) => f,
+            }
+            let active: bool = match json_get_bool(row, "active") {
+                Err(e) => false,
+                Ok(b) => b,
+            }
+            let len_is_err: bool = match json_array_len(row) {
+                Err(e) => true, // `row` is one object, not an array
+                Ok(n) => false,
+            }
+            return Row(name, id, score, active, len_is_err)
+        }
+
+        fn build_row(conn: db) -> Row {
+            let created: i64 = match db_execute(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL, active INTEGER)") {
+                Err(e) => -1,
+                Ok(n) => n,
+            }
+            let inserted: i64 = match db_execute(conn, "INSERT INTO t (name, score, active) VALUES (?, ?, ?)", "ada", 4.5, true) {
+                Err(e) => -1,
+                Ok(n) => n,
+            }
+            let result: Row = match db_query(conn, "SELECT * FROM t") {
+                Err(e) => Row("", -1, -1.0, false, false),
+                Ok(rows) => match json_array_get(rows, 0) {
+                    Err(e) => Row("", -1, -1.0, false, false),
+                    Ok(row) => row_from_json(row),
+                },
+            }
+            stop conn
+            return result
+        }
+
+        fn main() {
+            let row: Row = match db_connect(":memory:") {
+                Err(e) => Row("", -1, -1.0, false, false),
+                Ok(conn) => build_row(conn),
+            }
+            print(row.name)        // ada
+            print(row.id)          // 1
+            print(row.score)       // 4.5
+            print(row.active)      // true -- bound as SQLite integer 1; `nir_json_get_bool` accepts a real JSON boolean or a 0/1 integer
+            print(row.len_is_err)  // true
+
+            let parsed: bool = match json_parse("{\"a\": 1}") {
+                Err(e) => false,
+                Ok(j) => match json_get_i64(j, "a") {
+                    Err(e) => false,
+                    Ok(n) => n == 1,
+                },
+            }
+            print(parsed) // 1 (bool prints as 1/0, not "true"/"false")
+
+            // Every match's first-listed arm here is a literal, not a
+            // bare bound identifier -- `Ok(s) => s`-shaped passthroughs
+            // (like the innermost arm below) are fine in *second*
+            // position (`match_expr` only infers the whole match's
+            // result type from `arms[0]`'s body, `docs/PHASE0.md`'s
+            // "Twenty-first update"), but a bare identifier *first*
+            // (`Err(e) => e` would have been, here) hits that same
+            // inference-order gap regardless of whether the payload is
+            // an aggregate or, as here, a plain `str`/`json` value.
+            let nested: str = match json_parse("{\"outer\": {\"inner\": \"value\"}}") {
+                Err(e) => "parse-error",
+                Ok(doc) => match json_get(doc, "outer") {
+                    Err(e) => "get-error",
+                    Ok(inner) => match json_get_str(inner, "inner") {
+                        Err(e) => "get-str-error",
+                        Ok(s) => s,
+                    },
+                },
+            }
+            print(nested) // value
+
+            let set_ok: bool = match json_parse("null") {
+                Err(e) => false,
+                Ok(null_doc) => match json_set_str(null_doc, "extra", "value") {
+                    Err(e) => false,
+                    Ok(j) => match json_get_str(j, "extra") {
+                        Err(e) => false,
+                        Ok(s) => s == "value",
+                    },
+                },
+            }
+            print(set_ok) // 1
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "ada\n1\n4.500000\n1\n1\n1\nvalue\n1\n");
+}
+
+/// Phase 3 (`transact`, Layer 1 only — `docs/TRANSACT.md`,
+/// `codegen::emit_transact`'s own doc comment has the full scope): a
+/// real, unmodified copy of `examples/features/36_transact.nir` —
+/// `precheck`/`network`/`verify`/`commit`/`compensate`/`log`, the
+/// implicit `network`/`verify`/`txn_id` bindings, and a `transact { ... }`
+/// expression's own real `bool` value, all compiled and run for real.
+/// `checkout(10)` commits, `checkout(-5)` compensates, `minimal(1)`
+/// (no `precheck`/`compensate`/`log`) commits.
+#[test]
+fn transact_commits_and_compensates_for_real_matching_the_checked_in_example() {
+    let src = include_str!("../../../examples/features/36_transact.nir");
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "committing\n10\nlogged\n10\n1\n1\ncompensating\n-5\nlogged\n-5\n0\n0\ncommitting\n1\n1\n");
+}
+
+/// `precheck == false` aborts the whole block immediately — nothing
+/// durable would ever be written (moot today, no durability log exists
+/// yet), but concretely: `network`/`verify`/`commit`/`compensate`/`log`
+/// must never run at all, and the block's own value is `false`. Not
+/// exercised by `36_transact.nir` itself (both its `checkout` calls have
+/// `db_reachable()` return `true`), so a dedicated test.
+#[test]
+fn transact_precheck_false_skips_every_other_slot() {
+    let src = r#"
+        fn never_reachable() -> bool {
+            print("db down")
+            return false
+        }
+        fn call_api(txn_id: str, amount: i64) -> i64 {
+            print("network ran") // must never print
+            return amount
+        }
+        fn check(resp: i64) -> bool {
+            print("verify ran") // must never print
+            return resp > 0
+        }
+        fn update_db(amount: i64) -> i64 {
+            print("commit ran") // must never print
+            return amount
+        }
+
+        fn main() {
+            let result: bool = transact {
+                precheck: never_reachable()
+                network:  call_api(txn_id, 5)
+                verify:   check(network)
+                commit:   update_db(5)
+            }
+            print(result)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "db down\n0\n");
+}
+
+/// `verify == false` with no `compensate` slot at all is still
+/// immediately terminal (`docs/TRANSACT.md`'s own explicit note) — the
+/// block yields `false`, nothing else runs.
+#[test]
+fn transact_verify_false_with_no_compensate_slot_yields_false() {
+    let src = r#"
+        fn call_api(txn_id: str, amount: i64) -> i64 {
+            return amount
+        }
+        fn check(resp: i64) -> bool {
+            return resp > 0
+        }
+        fn update_db(amount: i64) -> i64 {
+            print("commit ran") // must never print
+            return amount
+        }
+
+        fn main() {
+            let result: bool = transact {
+                network: call_api(txn_id, -5)
+                verify:  check(network)
+                commit:  update_db(-5)
+            }
+            print(result)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\n");
+}
+
+/// `network`'s `retry`/`timeout` modifiers are a real, architectural
+/// rejection (`check_expr`'s pre-pass), not a generic "unsupported"
+/// fallthrough — confirms the specific error path, not just that *some*
+/// error occurs.
+#[test]
+fn transact_network_retry_is_explicitly_rejected_not_silently_ignored() {
+    let src = r#"
+        fn call_api(txn_id: str, amount: i64) -> i64 { return amount }
+        fn check(resp: i64) -> bool { return resp > 0 }
+        fn update_db(amount: i64) -> i64 { return amount }
+
+        fn main() {
+            let result: bool = transact {
+                network: call_api(txn_id, 5) retry 3
+                verify:  check(network)
+                commit:  update_db(5)
+            }
+            print(result)
+        }
+    "#;
+    let program = parse_checked(src);
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
+    let err = codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect_err("retry should be rejected");
+    assert!(err.contains("retry"), "unexpected error message: {err}");
+}
+
+/// Phase 4 (`mq`, Redis): a real, compiled `mq_connect`/`mq_publish`/
+/// `mq_consume` round trip against the real local Redis instance this
+/// environment already has running at `127.0.0.1:6379` (same host/port
+/// `examples/features/28_message_queue.nir` itself uses) — not a mock.
+/// `Ok(m) => m` (a bare bound identifier as `mq_consume`'s Ok arm) is
+/// deliberately *not* written first here — the same documented
+/// `match_expr` ordering workaround the `transact`/`db` tests above
+/// already use.
+#[test]
+fn mq_publish_and_consume_round_trip_a_real_message() {
+    let src = r#"
+        struct Text { value: str }
+
+        fn round_trip(conn: mq) -> Text {
+            let published: bool = match mq_publish(conn, "nirdosha_codegen_test_queue", "hello from a compiled binary") {
+                Err(e) => false,
+                Ok(u) => true,
+            }
+            print(published)
+
+            let consumed: Text = match mq_consume(conn, "nirdosha_codegen_test_queue", 2) {
+                Err(e) => Text(e),
+                Ok(m) => Text(m),
+            }
+            stop conn
+            return consumed
+        }
+
+        fn main() {
+            let result: Text = match mq_connect("127.0.0.1", 6379) {
+                Err(e) => Text(e),
+                Ok(conn) => round_trip(conn),
+            }
+            print(result.value)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\nhello from a compiled binary\n");
+}
+
+/// Phase 4 (`http`/`https`): a real, compiled `http_get`/`http_post`
+/// round trip against a real local TCP server the same test spawns
+/// (self-contained, no external network dependency, same shape
+/// `compiled_listen_accept_serves_a_real_client` already uses) — proves
+/// the full compiled pipeline (`codegen::emit_http_call` -> `nir_http_get`/
+/// `nir_http_post` -> a real socket), not just the kernel in isolation
+/// (already covered by `runtime-kernels`' own `http_kernel_tests`).
+/// `https_get`/`https_post` (vendored-OpenSSL-linked, chunked-transfer-
+/// encoding-decoding) are exercised directly against a real production
+/// server (`example.com`) as a manual verification step instead of an
+/// automated test here, to keep this suite free of an external-network
+/// dependency — the shared `parse_http_response`/`decode_chunked_body`
+/// logic underneath both is already covered by `runtime-kernels`' own
+/// unit tests either way.
+#[test]
+fn http_get_and_post_round_trip_against_a_real_local_server() {
+    let get_port = free_port();
+    let src = format!(
+        r#"
+        struct HttpResult {{
+            status: i64,
+            body: str,
+        }}
+
+        fn server(l: tcp_listener) -> unit {{
+            let conn: tcp = accept(l)
+            let req: str = recv(conn)
+            send(conn, "HTTP/1.1 201 Created\r\nConnection: close\r\n\r\ncreated ok")
+            stop conn
+            stop l
+            return
+        }}
+
+        fn main() {{
+            let l: tcp_listener = listen({get_port})
+            let h: thread unit = spawn server(l)
+
+            let result: HttpResult = match http_get("127.0.0.1", {get_port}, "/api/thing") {{
+                Err(e) => HttpResult(-1, e),
+                Ok(resp) => HttpResult(resp.status, resp.body),
+            }}
+            print(result.status)
+            print(result.body)
+            join h
+        }}
+    "#
+    );
+    let (stdout, code) = compile_and_run(&src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "201\ncreated ok\n");
+
+    let post_port = free_port();
+    let src2 = format!(
+        r#"
+        struct HttpResult {{
+            status: i64,
+            body: str,
+        }}
+
+        // `thread`/`spawn`/`join` compile word-sized payloads only
+        // (`docs/LANGUAGE.md` §10) -- `str`/struct results don't cross
+        // that boundary yet, so the server prints the request it
+        // received itself, from inside the spawned thread, rather than
+        // returning it through `join`.
+        fn server(l: tcp_listener) -> unit {{
+            let conn: tcp = accept(l)
+            let req: str = recv(conn)
+            print(req) // the real request the server received, proving Content-Length + body were sent
+            send(conn, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nack")
+            stop conn
+            stop l
+            return
+        }}
+
+        fn main() {{
+            let l: tcp_listener = listen({post_port})
+            let h: thread unit = spawn server(l)
+
+            let result: HttpResult = match http_post("127.0.0.1", {post_port}, "/submit", "payload=42") {{
+                Err(e) => HttpResult(-1, e),
+                Ok(resp) => HttpResult(resp.status, resp.body),
+            }}
+            print(result.status)
+            print(result.body)
+            join h
+        }}
+    "#
+    );
+    let (stdout2, code2) = compile_and_run(&src2);
+    assert_eq!(code2, 0);
+    // The server's own `print(req)` runs (in real wall-clock order)
+    // before `main`'s `http_post` can possibly finish reading a
+    // response — the server must `recv`, print, and `send` before
+    // `main`'s blocking read returns at all — so `req`'s print always
+    // lands first in `stdout`, found by running this, not assumed.
+    let request_line = stdout2.lines().next().unwrap();
+    assert!(request_line.starts_with("POST /submit HTTP/1.1"), "unexpected request: {request_line}");
+    assert!(stdout2.contains("Content-Length: 10"), "unexpected request: {stdout2}");
+    assert!(stdout2.trim_end().ends_with("200\nack"), "unexpected tail: {stdout2}");
+}
+
+/// Phase 5 (`workflow` Layer 1, `docs/WORKFLOW.md`): a real, compiled
+/// `start_<workflow>`/`advance_<workflow>` round trip — an empty-`data`
+/// workflow (`Codegen::resolve_workflow_layer1`'s own disclosed
+/// restriction; `38_workflow.nir`'s own non-empty `data` block is why
+/// that example still isn't compiled-runnable this round, see
+/// `examples/features/README.md`), `on_entry`/`on_exit` actions that
+/// both read the implicit `instance_id` binding, an ordinary transition,
+/// and a `terminal` state reached for real. Also proves
+/// `Err(NoSuchTransition)`/`Err(InstanceNotFound)` are real `Err`s, never
+/// traps, for a bad event and a nonexistent instance id respectively.
+#[test]
+fn workflow_start_advance_runs_on_entry_on_exit_and_reaches_a_terminal_state() {
+    let src = r#"
+        fn log_open(instance_id: i64) -> unit {
+            print("opened", instance_id)
+        }
+        fn log_close(instance_id: i64) -> unit {
+            print("closed", instance_id)
+        }
+        fn log_exit_open(instance_id: i64) -> unit {
+            print("exiting open", instance_id)
+        }
+
+        workflow Ticket {
+            state Open {
+                on_entry {
+                    log_open(instance_id)
+                }
+                on_exit {
+                    log_exit_open(instance_id)
+                }
+                on Close -> Closed
+            }
+            state Closed terminal {
+                on_entry {
+                    log_close(instance_id)
+                }
+            }
+        }
+
+        // `advance_ticket`'s trailing `payload: json` argument needs a
+        // real `json` value, not a `Result(json, str)` — this mirrors
+        // `38_workflow.nir`'s own `decide_approval` wrapper exactly,
+        // *including* its arm order: `Ok(payload) => advance_ticket(...)`
+        // (a plain call with a fully known return type) must come first.
+        // Swapping the order — `Err(...) => Err(NoSuchTransition())`
+        // first — hits a different, also pre-existing `local_ty_of`/
+        // `ctor_ty` gap: with no expected-type context, a generic
+        // `Err(...)`-wrapping arm can't resolve which `Result`
+        // instantiation it belongs to when it's `arms[0]`.
+        fn advance_now(identity: VerifiedIdentity, instance_id: i64, event: TicketEvent) -> Result(bool, WorkflowActionError) {
+            return match json_parse("{}") {
+                Ok(payload) => advance_ticket(identity, instance_id, event, payload),
+                Err(e) => Err(NoSuchTransition()),
+            }
+        }
+
+        fn main() {
+            let identity: VerifiedIdentity = VerifiedIdentity("u1", "iss", "aud", 9999999999, 0, "{}")
+
+            let instance_id: i64 = match start_ticket(None(), TicketData()) {
+                Err(e) => -1,
+                Ok(id) => id,
+            }
+            print(instance_id)
+
+            let closed: bool = match advance_now(identity, instance_id, Close()) {
+                Err(e) => false,
+                Ok(v) => v,
+            }
+            print(closed)
+
+            // `Closed` has no outgoing transitions -- firing `Close()`
+            // again is a real `Err` (`NoSuchTransition`), never a trap.
+            let bad_event: bool = match advance_now(identity, instance_id, Close()) {
+                Err(e) => true,
+                Ok(v) => false,
+            }
+            print(bad_event)
+
+            // A nonexistent instance id is a real `Err` (`InstanceNotFound`),
+            // never a trap either.
+            let missing: bool = match advance_now(identity, 999999, Close()) {
+                Err(e) => true,
+                Ok(v) => false,
+            }
+            print(missing)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0, "stdout: {stdout}");
+    // `print(a, b)` prints each argument on its own line (`Codegen::call`'s
+    // `"print"` arm), and `Open`'s `on_entry` runs *inside* `start_ticket`
+    // itself, before it returns the new instance id — so "opened"/"1"
+    // land before `main`'s own `print(instance_id)` line. `true`/`false`
+    // print as `1`/`0` (`Codegen::call`'s own disclosed cosmetic
+    // difference from the deleted interpreter's `"true"`/`"false"`).
+    assert_eq!(
+        stdout,
+        "opened\n1\n1\nexiting open\n1\nclosed\n1\n1\n1\n1\n",
+        "unexpected stdout: {stdout}"
+    );
+}
+
+/// Phase 5 (`send_email`, `docs/WORKFLOW.md`): a workflow's `on_entry`
+/// action really does post an authenticated HTTPS-shaped request to a
+/// real local server, driven by a real, admin-editable provider row in a
+/// real SQLite table — not a mock. Also proves the not-configured path
+/// (no provider row at all) is a real `Err`, never a trap.
+#[test]
+fn workflow_on_entry_send_email_posts_to_a_real_configured_provider() {
+    let port = free_port();
+    let src = format!(
+        r#"
+        fn server(l: tcp_listener) -> unit {{
+            let conn: tcp = accept(l)
+            let req: str = recv(conn)
+            print(req)
+            send(conn, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nsent")
+            stop conn
+            stop l
+        }}
+
+        // Neither `db` nor `json` has a literal an `Err` arm could fall
+        // back to (there's no syntax for an opaque handle, and
+        // `27_database.nir`'s own idiom never binds a bare `json` out of
+        // a match either) -- so, like that file, every `Result`-typed
+        // value here is consumed inside a nested match, never unwrapped
+        // into a bare `let x: db/json = match {{ ... }}` with a made-up
+        // fallback.
+        fn notify_with_conn(conn: db, instance_id: i64) -> unit {{
+            let created: i64 = match db_execute(conn, "CREATE TABLE email_provider_config (id INTEGER PRIMARY KEY, active INTEGER, host TEXT, port INTEGER, path TEXT, api_key TEXT, from_address TEXT)") {{
+                Err(e) => -1,
+                Ok(n) => n,
+            }}
+            let inserted: i64 = match db_execute(conn, "INSERT INTO email_provider_config (active, host, port, path, api_key, from_address) VALUES (1, ?, ?, ?, ?, ?)", "127.0.0.1", {port}, "/send", "secret-key-123", "noreply@example.com") {{
+                Err(e) => -1,
+                Ok(n) => n,
+            }}
+            match json_parse("{{}}") {{
+                Ok(vars) => match send_email(conn, ByRole("reviewer"), "ticket_opened", vars) {{
+                    Ok(v) => print(v),
+                    Err(e) => print(false),
+                }},
+                Err(e) => print(e),
+            }}
+            stop conn
+        }}
+
+        fn notify_open(instance_id: i64) -> unit {{
+            match db_connect(":memory:") {{
+                Ok(conn) => notify_with_conn(conn, instance_id),
+                Err(e) => print(e),
+            }}
+        }}
+
+        workflow Ticket {{
+            state Open {{
+                on_entry {{
+                    notify_open(instance_id)
+                }}
+                on Close -> Closed
+            }}
+            state Closed terminal {{
+            }}
+        }}
+
+        // No provider row at all this time -- a real `Err`, never a trap.
+        fn check_not_configured(conn: db) -> bool {{
+            let not_configured: bool = match json_parse("{{}}") {{
+                Ok(vars) => match send_email(conn, ByRole("reviewer"), "ticket_opened", vars) {{
+                    Ok(v) => false,
+                    Err(e) => true,
+                }},
+                Err(e) => false,
+            }}
+            stop conn
+            return not_configured
+        }}
+
+        fn main() {{
+            let l: tcp_listener = listen({port})
+            let h: thread unit = spawn server(l)
+
+            let instance_id: i64 = match start_ticket(None(), TicketData()) {{
+                Err(e) => -1,
+                Ok(id) => id,
+            }}
+            print(instance_id)
+            join h
+
+            match db_connect(":memory:") {{
+                Ok(conn) => print(check_not_configured(conn)),
+                Err(e) => print(false),
+            }}
+        }}
+    "#
+    );
+    let (stdout, code) = compile_and_run(&src);
+    assert_eq!(code, 0, "stdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    // The server's own `print(req)` (real happens-before: `send_email`'s
+    // blocking POST must complete before `start_ticket`/`main` can move
+    // on) lands before `main`'s own prints -- same real, verified-by-
+    // running ordering `http_get_and_post_round_trip_against_a_real_local_server`
+    // already established. Real, authenticated, JSON-bodied POST: the
+    // provider's own `api_key` shows up as a real `Authorization: Bearer`
+    // header, and the body is `{"to","from","template","vars"}` built
+    // straight from the real, admin-editable provider row and the
+    // `send_email` call's own arguments (`send_via_provider`'s own doc
+    // comment) -- not a hand-typed test fixture.
+    assert!(lines[0].starts_with("POST /send HTTP/1.1"), "unexpected request line: {}", lines[0]);
+    assert!(stdout.contains("Authorization: Bearer secret-key-123"), "missing auth header: {stdout}");
+    assert!(
+        stdout.contains(r#""from":"noreply@example.com""#) && stdout.contains(r#""template":"ticket_opened""#) && stdout.contains(r#""to":"reviewer""#),
+        "unexpected body: {stdout}"
+    );
+    // Tail, in real observed order: the on_entry action's own
+    // `print(v)` (the successful `send_email` -> `true`), `main`'s
+    // `print(instance_id)`, then `print(check_not_configured(conn))`
+    // (no provider row the second time -- a real `Err`, never a trap,
+    // reported as `true`).
+    assert_eq!(&lines[lines.len() - 3..], ["1", "1", "1"], "unexpected tail: {stdout}");
+}
+
+/// Phase 5 (`__workflow_overdue`, `docs/ROADMAP.md` A15): `state {
+/// sla_seconds: N }` plus the synthesized `list_<workflow>_overdue()`
+/// really do detect a stale instance — no scheduling/cron primitive
+/// exists in this language (`docs/WORKFLOW.md`'s own "Deliberate non-
+/// goals" section), so this is the disclosed, queryable fallback an
+/// external scheduler would poll. Also proves a state with *no*
+/// `sla_seconds` entry is never reported overdue, and that a
+/// non-terminal `state` with no matching `sla_seconds` key still moves
+/// on normally.
+#[test]
+fn workflow_list_overdue_reports_a_real_stale_instance_and_ignores_states_with_no_sla() {
+    let src = r#"
+        workflow Ticket {
+            state Open {
+                sla_seconds: 1
+                on Close -> Closed
+            }
+            state Closed terminal {
+            }
+        }
+
+        fn main() {
+            let instance_id: i64 = match start_ticket(None(), TicketData()) {
+                Err(e) => -1,
+                Ok(id) => id,
+            }
+            print(instance_id)
+
+            // Not overdue yet -- `entered_at` is "now". `print` doesn't
+            // support an aggregate (`WorkflowActionError`) argument yet,
+            // so the (real, but here-unreachable) `Err` arm prints a
+            // fixed literal instead of the error value itself.
+            match list_ticket_overdue() {
+                Ok(j) => print(j), // []
+                Err(e) => print("overdue query failed"),
+            }
+
+            sleep_ms(1100)
+
+            match list_ticket_overdue() {
+                Ok(j) => print(j), // [{"instance_id":1,"state":"Open","age_seconds":...}]
+                Err(e) => print("overdue query failed"),
+            }
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0, "stdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "[]", "a brand-new instance shouldn't be overdue yet: {stdout}");
+    assert!(
+        lines[2].contains(r#""instance_id":1"#) && lines[2].contains(r#""state":"Open""#),
+        "expected the stale instance to be reported overdue: {stdout}"
+    );
+}
+
+/// A `workflow` with a non-empty `data {{ ... }}` block is explicitly
+/// rejected, not silently miscompiled — `Codegen::resolve_workflow_layer1`'s
+/// own doc comment: this Layer 1 runtime has nowhere durable to persist
+/// a `data` value past the initial `start_*` call.
+#[test]
+fn workflow_with_a_data_block_is_explicitly_rejected_not_silently_dropped() {
+    let src = r#"
+        workflow Approval {
+            data {
+                amount: i64,
+            }
+            state Pending {
+                on Approve -> Approved
+            }
+            state Approved terminal {
+            }
+        }
+
+        fn main() {
+            let instance_id: i64 = match start_approval(None(), ApprovalData(100)) {
+                Err(e) => -1,
+                Ok(id) => id,
+            }
+            print(instance_id)
+        }
+    "#;
+    let program = parse_checked(src);
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
+    let err = codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect_err("a non-empty `data` block should be rejected");
+    assert!(err.contains("data"), "unexpected error message: {err}");
+}
+
+/// `__workflow_link_advance` (a magic-link `*_via_link` fn, only
+/// synthesized for a workflow that declares a `link`-marked transition)
+/// is explicitly rejected too — same real durable-storage gap, but
+/// scoped only to programs that actually declare one, unlike the
+/// `data`-block restriction above which applies to the whole workflow.
+#[test]
+fn workflow_link_marked_transitions_are_explicitly_rejected_not_silently_dropped() {
+    let src = r#"
+        workflow Approval {
+            state Pending {
+                on link Approve -> Approved
+            }
+            state Approved terminal {
+            }
+        }
+
+        fn main() {
+            let instance_id: i64 = match start_approval(None(), ApprovalData()) {
+                Err(e) => -1,
+                Ok(id) => id,
+            }
+            print(instance_id)
+        }
+    "#;
+    let program = parse_checked(src);
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
+    let err = codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect_err("a `link`-marked transition's `*_via_link` fn should be rejected");
+    assert!(err.contains("magic-link") || err.contains("__workflow_link_advance"), "unexpected error message: {err}");
 }

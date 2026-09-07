@@ -1587,50 +1587,49 @@ of Track B has landed.*
     (frozen design/historical-journal docs, not status trackers — this
     file is where current status belongs, per this file's own stated
     convention).
-- `[OPEN]` **A15. SLA/escalation timers for `workflow` states — no
-  scheduler primitive exists; `owner`/`on_entry` alone can't express
-  "escalate after N hours of silence."** Surfaced by the enterprise-
-  catalog review `docs/WORKFLOW.md` §9 did against real systems (ServiceNow,
-  SAP Business Workflow, Concur, banking maker-checker all have this).
-  Verified directly: `on_entry`/`on_exit` only ever fire in response to
-  a transition that already happened — nothing in the language calls
-  back into a running instance after a time delay with no human action,
-  and `docs/WORKFLOW.md`'s own "Deliberate non-goals" section already
-  discloses "no scheduling/cron primitive in Nirdosha at all." A state
-  sitting in `PendingManagerApproval` for a week with nobody acting is
-  invisible today: no re-notification, no auto-escalation to a
-  substitute approver, no visibility that an SLA was even breached.
+- `[PARTIAL]` **A15. SLA/escalation timers for `workflow` states — the
+  detection half is real and compiled now; automatic firing is still
+  structurally impossible.** Surfaced by the enterprise-catalog review
+  `docs/WORKFLOW.md` §9 did against real systems (ServiceNow, SAP Business
+  Workflow, Concur, banking maker-checker all have this).
 
-  **Proposed design, not started** — two independent pieces, drawing
-  the same "in-language vs. external infrastructure" line `notify()`'s
-  own realtime path (an external WS gateway relays its Redis `PUBLISH`)
-  already draws:
-  1. **In-language**: a new `state { sla: "<duration>" }` kv-entry — no
-     new grammar needed, just a new key on the same open-ended
-     `StateDecl.entries` slot `owner`/`label` already use (`docs/ROADMAP.md`
-     A13). `workflow_instance` gains an `sla_deadline_at` column,
-     computed at entry time (`now + duration`) the same way
-     `record_transition`/`create_instance` already stamp `updated_at`. A
-     new synthesized read fn, `list_<workflow>_overdue() ->
-     Result(json, WorkflowActionError)`, queries every instance whose
-     current state declares an `sla` and whose deadline has passed —
-     pure SQL, no scheduler needed for the query itself.
-  2. **External** (the part Nirdosha genuinely cannot do alone, disclosed
-     not hidden): something has to actually *call* that query
-     periodically and act on what it finds (re-notify, auto-reassign, or
-     fire a new `Escalated` event via `advance_<workflow>`) — a cron job
-     or orchestrator polling `list_<workflow>_overdue()`, the same "the
-     schedule itself is always external" posture `docs/WORKFLOW.md`'s own
-     "nightly workflow" note already establishes for a purely time-
-     triggered `workflow`. `nirdosha serve` itself needs no new
-     subsystem — this is a client of the existing RPC surface, not a new
-     runtime concept.
+  **Built, 2026-09** — the in-language piece this entry originally
+  proposed, shipped close to as sketched: `state { sla_seconds: N }` (an
+  `i64` seconds count, not the originally-proposed `sla: "<duration>"`
+  string — no duration-string parser existed and a plain `i64` needed
+  none) is a plain key on the same open-ended `StateDecl.entries` slot
+  `owner`/`label` already use (A13). `workflow_lower.rs` synthesizes
+  `list_<workflow>_overdue() -> Result(json, WorkflowActionError)` for
+  any workflow declaring at least one `sla_seconds`; `codegen.rs`'s
+  `emit_workflow_overdue` compiles it for real, querying every instance
+  whose *current* state declares `sla_seconds` and whose time-in-state
+  has passed it — pure SQL over the same durable `workflow_instance`
+  store every other Layer 1 piece uses, no scheduler needed for the
+  query itself. Verified end to end, not just typechecked:
+  `crates/compiler/tests/codegen.rs`'s
+  `workflow_list_overdue_reports_a_real_stale_instance_and_ignores_states_with_no_sla`
+  and `examples/features/54_compiled_workflow_escalation.nir` (a real
+  "external scheduler polls, then calls `advance_<workflow>` to
+  escalate" round trip, built and run for real) — both also confirm a
+  state with no `sla_seconds` is never reported overdue, i.e. the check
+  is genuinely per-state, not workflow-wide.
 
-  **Not solved by this**: what "escalate" actually *does* (e.g.
-  auto-reassign `owner` to someone's manager) needs the delegation
-  feature (also `[OPEN]`, same `docs/WORKFLOW.md` §9 review) or a hand-
-  written `Escalated` transition in the workflow's own states — left to
-  the app author, not something `sla` alone would automate.
+  **Still not solved, per this entry's own original "External" half**:
+  the part Nirdosha genuinely cannot do alone, disclosed not hidden —
+  something still has to actually *call* `list_<workflow>_overdue()`
+  periodically and act on what it finds (re-notify, auto-reassign, or
+  fire a new `Escalated` event via `advance_<workflow>`, as file 54
+  does manually) — a cron job or orchestrator, the same "the schedule
+  itself is always external" posture `docs/WORKFLOW.md`'s own "nightly
+  workflow" note already establishes for a purely time-triggered
+  `workflow`. `nirdosha serve` itself still needs no new subsystem for
+  this — a poller is a client of the existing RPC surface, not a new
+  runtime concept. What "escalate" actually *does* beyond that (e.g.
+  auto-reassign `owner` to someone's manager) still needs the
+  delegation feature (also `[OPEN]`, same `docs/WORKFLOW.md` §9 review)
+  or a hand-written `Escalated` transition in the workflow's own states,
+  the way file 54 demonstrates — left to the app author, not something
+  `sla_seconds` alone automates.
 - `[DONE]` **A16. `spawn` created a brand-new real OS thread on every
   single call, unconditionally — no reuse, and a real OS-level failure
   to create one (`RLIMIT_NPROC`/`kernel.threads-max` exhaustion under
@@ -1905,42 +1904,118 @@ the builtins already call into native Rust either way). Sequenced by
 what a critical app actually benefits from, not by "easiest first."*
 
 Current state: `codegen.rs`'s `check_supported` rejects, with a named
-reason, everything below — verified directly against its
+reason, most of what's below — verified directly against its
 `unsupported(...)` call sites this session (not just docs/LANGUAGE.md §10's
-claim, though that section is currently accurate).
+claim, though that section is currently accurate). B8 (compiled `serve`),
+part of B4 (identity crypto), B2 (`db`/`json`), part of B1 (`transact`
+Layer 1), B9 (`sleep_ms`), B3 (`mq`), B5 (`http`/`https`), and B10
+(`workflow` Layer 1) are now real exceptions, `[PARTIAL]`/`[DONE]` below,
+not `[OPEN]`/`[BLOCKED]` — see each entry. Only `sandbox` (B6) remains
+fully `[OPEN]`.
 
-1. `[OPEN]` **B1. `transact` codegen.** Durable-transaction correctness
-   under compilation matters more for a critical/financial app than
-   db/http do — do this first, not last.
-2. `[OPEN]` **B2. `db` + `json` codegen.** `Ty::Db`, `db_connect`/
-   `db_query`/`db_execute`; all 8 `json_*` builtins. Unlocks compiling
-   `trade_finance.nir`/`store.nir` at all. Note: `rusqlite` already
-   uses the `bundled` feature (fully static SQLite) — no new
-   dependency-linking design needed there. The Postgres backend added
-   2026-08-24 (`dbconn.rs`) is a real, separate wrinkle for this item:
-   `postgres`/`postgres-native-tls` are *not* statically bundled the way
-   `rusqlite` is, so a compiled binary using a Postgres `db_connect`
-   would need real dynamic-linking/deployment design (a system TLS
-   library at minimum) — not just "port the interpreter's dispatch to
-   LLVM IR" the way the SQLite path is.
-3. `[OPEN]` **B3. `mq` codegen** (`mq_connect`/`mq_publish`/
-   `mq_consume` — Redis). Network client either way; no static-linking
-   concern, same as today.
-4. `[OPEN]` **B4. Identity/Row 12 codegen** — `oidc_validate_token`,
-   `check_role(_path)`, `extract_claim(_path)`, sessions, refresh,
-   revocation, `validate_api_key`. On the critical path of every
+1. `[PARTIAL]` **B1. `transact` codegen.** 2026-09: Layer 1 real and
+   compiled — `precheck?/network/verify/commit/compensate?/log?`,
+   the implicit `network`/`verify`/`txn_id` bindings, a real `bool`
+   result (`codegen::emit_transact`; `examples/features/36_transact.nir`,
+   unmodified, compiles and runs;
+   `crates/compiler/tests/codegen.rs`'s
+   `transact_commits_and_compensates_for_real_matching_the_checked_in_example`
+   and three more). `network`'s `retry`/`timeout` are an **architectural**
+   gap, not a deferred nicety: a compiled trap is an unconditional
+   `abort()` (the now-deleted interpreter's own catchable `RuntimeError`
+   has no compiled equivalent), and `network`'s declared return type can
+   never be `Result(_, _)` (`Ty::is_transact_scalar`), so there is no
+   non-trapping failure signal to retry on — rejected explicitly, not
+   silently ignored. Still open: `commit`/`compensate`'s own
+   retry-with-backoff (possible in principle, since their return type is
+   unconstrained — just not attempted this round), the durability log
+   (`transact_log.rs`, deleted with the interpreter), and crash replay.
+2. `[PARTIAL]` **B2. `db` + `json` codegen.** 2026-09: `db_connect`/
+   `db_query`/`db_execute` (SQLite via `rusqlite`'s `bundled` feature,
+   `nir_db_*`, `runtime-kernels/src/lib.rs`) and all 9 `json_*` builtins
+   (`json_parse`/`json_get`/`json_get_str`/`json_get_i64`/`json_get_f64`/
+   `json_get_bool`/`json_array_get`/`json_array_len`/`json_set_str`) are
+   real, compiled, and verified — `examples/features/27_database.nir`
+   (unmodified) compiles and runs against a real in-memory SQLite
+   database (`crates/compiler/tests/codegen.rs`'s
+   `db_connect_execute_query_round_trips_real_sqlite_rows`). `Ty::Json`
+   compiles as raw text (the design this item's own doc comment
+   anticipated: `str` + accessor shims, not a from-scratch runtime value
+   type), re-parsed by each accessor — a real, disclosed cost (no
+   persisted parsed-tree handle) traded for zero new representation.
+   Named gaps, not silently dropped: a zero-payload `enum` variant as a
+   bind value isn't compiled yet (only `i64`/`f64`/`str`/`bool`);
+   `BLOB` columns have no first-class Nirdosha type (represented as
+   JSON `null`). Postgres (the interpreter-era `dbconn.rs`, which no
+   longer exists at all — removed with the interpreter) remains a real,
+   separate, deferred follow-up: `postgres`/`postgres-native-tls` are
+   *not* statically bundled the way `rusqlite` is, so a compiled binary
+   using a Postgres `db_connect` would need real dynamic-linking/
+   deployment design (a system TLS library at minimum).
+3. `[DONE]` **B3. `mq` codegen** — 2026-09. `mq_connect`/`mq_publish`/
+   `mq_consume` (Redis via the `redis` crate, `LPUSH`/`BLPOP`), real,
+   verified against a real local Redis instance
+   (`crates/compiler/tests/codegen.rs`'s
+   `mq_publish_and_consume_round_trip_a_real_message`,
+   `runtime-kernels`' own `mq_kernel_tests`). `mq_connect_via` (the
+   plugin-dispatched external-service-boundary path) is a separate
+   mechanism, not touched here. `examples/features/28_message_queue.nir`
+   itself still doesn't compile — a pre-existing, unrelated `match_expr`
+   arm-ordering limitation (`docs/PHASE0.md`'s "Twenty-first update"),
+   the same one `oidc_validate_token`'s own worked example hit.
+4. `[PARTIAL]` **B4. Identity/Row 12 codegen** — `check_role` (2026-09,
+   originally a plain comma-separated role list, upgraded again 2026-09
+   to real JSON-array parsing with a comma-separated fallback),
+   `oidc_validate_token`/`extract_claim`/`identity_expired` (2026-09,
+   real `jsonwebtoken`-backed JWT/JWKS signature verification against a
+   **static** JWKS — same `kty`-locks-`alg` guard as
+   `crates/presence-gateway/src/jwt.rs`; live JWKS
+   refresh/rotation deferred). Still open: `check_role_path`/
+   `extract_claim_path` (dotted-path claim lookup), sessions, refresh
+   tokens, revocation, `validate_api_key`. On the critical path of every
    authenticated request — do before general concurrency/sandboxing.
-5. `[OPEN]` **B5. `http`/`https` codegen** — `http_get`/`http_post`/
-   `https_get`/`https_post`. Note: `native-tls` is **not** currently
-   vendored — dynamically links system OpenSSL on Linux unless the
-   `vendored` feature is turned on; decide that as part of this item,
-   not silently at deploy time.
+5. `[DONE]` **B5. `http`/`https` codegen** — 2026-09. `http_get`/
+   `http_post`/`https_get`/`https_post`, real (`std::net::TcpStream` for
+   plain HTTP, `native_tls::TlsStream` for HTTPS), `Connection: close` +
+   read-to-EOF + real chunked-transfer-encoding decoding (found
+   necessary by testing against a real production server, not designed
+   in advance). **Decided, not left to deploy time**: TLS is vendored
+   (`openssl = { features = ["vendored"] }`), not system-linked — found
+   necessary by an actual link failure against this environment's system
+   OpenSSL (a real ABI mismatch, `SSL_ctrl`/`SSL_CTX_ctrl` missing), same
+   "no system dependency" posture `rusqlite`'s `bundled` SQLite already
+   has. Verified end to end: a real local-TCP-server round trip
+   (`crates/compiler/tests/codegen.rs`'s
+   `http_get_and_post_round_trip_against_a_real_local_server`) and a
+   real HTTPS `GET` against `example.com` (manual, network-dependent,
+   not part of the automated suite).
 6. `thread`/`spawn`/`join`, `chan`/`send`/`recv` `[DONE]` (2026-09) —
    compiled, backed by a real admission-controlled kernel
    (`runtime-kernels`) and a dynamic deadlock detector
-   (`docs/LANGUAGE.md` §7/§10). **B6. Sandboxing codegen** `[OPEN]` —
-   `sandbox`/`stop` remains, a separate and larger scope (a real,
-   separate OS process, not a thread) not touched by the above.
+   (`docs/LANGUAGE.md` §7/§10). **B6. Sandboxing codegen** `[OPEN,
+   DESCOPED FROM v1]` — `sandbox`/`stop` remains, a separate and larger
+   scope (a real, separate OS process, not a thread) not touched by the
+   above. **2026-09 decision: explicitly descoped from the first
+   production release, not merely unstarted.** Zero existing compiled-
+   backend scaffolding (unlike every other item in this track, which was
+   "port an already-interpreter-proven design" — `sandbox`/cross-process
+   `chan` worked in the deleted interpreter, but that whole
+   implementation went with it, so this is closer to new kernel work
+   than a port); nothing else in the compiled backend depends on it
+   (`workflow`/`transact`/`db`/`mq`/`http`/`serve`/identity are all
+   independent); and the original phase plan
+   (`structured-strolling-cray.md`) already called this "standalone,
+   lowest priority, treat as a spike" and excluded it from its own
+   "smallest version that actually retires the research-prototype
+   framing" bar. Real cost of shipping without it: the two catalog
+   examples that need it (`20_sandbox.nir`/`21_sandbox_channels.nir`)
+   stay in the already-existing, already-disclosed "not runnable"
+   bucket (`docs/LANGUAGE.md` §10 already lists `sandbox`/`stop` as
+   `No`) — no regression, no other feature affected. Tracked as future
+   work, to be picked up post-v1 as its own dedicated effort (real
+   process-spawn/kill/reap kernels, a `--sandbox-worker` re-exec
+   protocol, then cross-process `chan` transport), not folded back into
+   this track's remaining sequencing.
 7. **B7. First-class functions codegen** — `fn(..)->..`/`acquire`/
    `requires(...)` `[DONE]` (2026-09, `docs/LANGUAGE.md` §6a/§10): a
    plain fn value is its own address, `acquire` builds a real
@@ -1949,17 +2024,50 @@ claim, though that section is currently accurate).
    The Phase-4b affine-in-struct/enum case (a `struct`/`enum` whose
    payload transitively contains `box`/`&`/`thread`/`chan`/`tcp`/`file`/
    `db`/`mq`) is unrelated and still `[OPEN]`.
-8. `[BLOCKED: B1–B7]` **B8. Compiled `serve` mode** — a real
-   self-contained production binary with a compiled dispatch table,
-   *coexisting* with interpreted `serve` for dev (the OCaml
-   `ocaml`/`ocamlopt`-style split), not replacing it. This is the
-   direct answer to the original "ship the migration/schema with the
-   binary" question — schema gets embedded at compile time once B2
-   exists, migration runtime links into the binary here.
-9. `[OPEN]` **B9. `sleep_ms` codegen** — small, currently omitted from
-   even the interpreter-only list in docs/LANGUAGE.md §10; found this
-   session, not previously tracked anywhere. Fold into whichever of
-   B1–B7 it naturally lands under once scoped.
+8. `[PARTIAL]` **B8. Compiled `serve` mode** — 2026-09: this was never
+   actually gated on B1–B7 (that was a policy choice, "do the
+   correctness-critical pieces first," not a technical one), and the
+   "coexisting with interpreted `serve` for dev, the OCaml
+   `ocaml`/`ocamlopt`-style split" framing this entry used to have is
+   now categorically false — the interpreter and `nirdosha serve` were
+   both deleted entirely; there is only the one compiled path. What's
+   real today: a hand-parsed HTTP request line over a real
+   `tcp_listener`/`accept` loop (three new string primitives —
+   `str_index_of`/`str_slice`, `len(str)` — `docs/LANGUAGE.md` §5/§10),
+   routing `/api/<fn>` to distinct compiled `.nir` functions by a plain
+   `if`/`else if` chain, no new language construct
+   (`examples/features/51_compiled_serve.nir`, real-`curl`-verified;
+   `crates/compiler/tests/codegen.rs`'s
+   `compiled_serve_routes_by_path_to_two_compiled_functions`). Named gaps,
+   not silently dropped: GET-only, no `Content-Length`/POST body
+   parsing, whole request assumed to arrive in one `recv`, sequential
+   (no per-connection `spawn`), no string concatenation (response
+   bodies are fixed literals). Schema-embedded-at-compile-time (B2) and
+   a real deployment story (containerization, secrets/JWKS handling —
+   `docs/PUBLIC_ROADMAP.md`'s Track A) remain open, separate work.
+9. `[DONE]` **B9. `sleep_ms` codegen** — 2026-09. `nir_sleep_ms`
+   (`runtime-kernels/src/lib.rs`), a plain `std::thread::sleep` wrapper;
+   needed anyway once `transact` (B1)'s own future retry/backoff work
+   picks up `commit`/`compensate`'s retry loop.
+10. `[PARTIAL]` **B10. `workflow` codegen** — 2026-09. Layer 1 real and
+    compiled: `start_<workflow>`/`advance_<workflow>`, `on_entry`/
+    `on_exit`, ordinary transitions, `terminal` states
+    (`codegen.rs`'s `emit_workflow_*`; `examples/features/52_compiled_workflow_state_machine.nir`,
+    built and run); `send_email`/`send_sms`/`send_push`/`notify`, real
+    authenticated HTTPS POSTs against a live provider row
+    (`examples/features/53_compiled_workflow_notifications.nir`);
+    `state { sla_seconds: N }` + `list_<workflow>_overdue()` SLA/
+    escalation detection (A15 above;
+    `examples/features/54_compiled_workflow_escalation.nir`). Named
+    gaps, not silently dropped: a non-empty `data { ... }` block and any
+    `link`-marked transition (`*_via_link` magic links) are explicitly
+    rejected — no durable storage for either past the initial call in
+    this Layer 1 runtime; `list_<workflow>_pending_for_me`/
+    `list_<workflow>_submitted_by_me`/`get_<workflow>_history` compile
+    but are always a real `Err` (same gap); `owner:` state ownership
+    isn't enforced at runtime; `notify` always takes the offline
+    (`send_email`-fallback) path. See `docs/WORKFLOW.md`'s own
+    "Status, 2026-09" section for the full detail.
 
 ---
 
@@ -1967,10 +2075,13 @@ claim, though that section is currently accurate).
 
 *20 endpoints across 5 groups (A: codegen/validation, B: execution,
 C: introspection, D: benchmarking, E: provenance). The HTTP API layer
-itself is 0% built — no `/v1/*` server exists (`serve.rs` only serves
-`/api/<fn>` for a program's own functions, unrelated). Roughly half
-the underlying capabilities it would wrap already exist, verified this
-session:*
+itself is 0% built — no `/v1/*` server exists. (The interpreter-era
+`serve.rs` used to serve a program's own `/api/<fn>` dispatch; that file
+is gone along with the interpreter. B8 above's minimal *compiled*
+`/api/<fn>` dispatcher, 2026-09, is unrelated to this Track C spec —
+same URL shape, a different, narrower mechanism, no `/v1/*` surface at
+all.) Roughly half the underlying capabilities it would wrap already
+exist, verified this session:*
 
 **Underlying capability already shipped** (the API layer to expose it
 is what's missing): `--format=json` structured diagnostics, `emit-ast`/
