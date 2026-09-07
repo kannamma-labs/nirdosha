@@ -49,10 +49,11 @@
     "widget": {
       "jsonType": "widget",
       "kinds": ["divider", "card", "timeline"],
-      "closedVocabulary": "typeck.rs line ~1906 rejects any kind not in this list -- adding a widget kind is a typeck + ui_gen.rs + template change, not app-level",
+      "closedVocabulary": "typeck.rs::check_screen_layout rejects any kind not in this list AND not a linked ui_plugin::NativeUiComponent's name (rfcs/0009 Phase B, Checker.extra_widget_kinds) -- still closed either way, just extensible by whoever calls generate_with_ui_components in Rust source, never by a `.nir` program itself",
       "entries": {
         "source": "identifier, used by `timeline` to name the backing fn",
-        "title": "string, used by `card`"
+        "title": "string, used by `card`",
+        "*": "every other key, generically, for a plugin-contributed kind's own render_js to read via node.entries.<key> (ui_gen.rs::widget_entry_json) -- literals/idents only (Str/Int/Float/Bool/Ident), anything else serializes as null"
       }
     }
   },
@@ -112,11 +113,24 @@
   },
 
   "charts": {
-    "_comment": "MetricRender (dashboard tiles/charts) and PanelRender (workspace panels) share this same 4-name vocabulary, enforced by typeck::check_visual_render_expr. Rendered as inline SVG, zero external charting library -- ui_gen_template.html's own \"self-contained, no external deps\" stance.",
+    "_comment": "MetricRender (dashboard tiles/charts) and PanelRender (workspace panels) share this vocabulary. Rendered as inline SVG, zero external charting library -- ui_gen_template.html's own \"self-contained, no external deps\" stance.",
     "bar_chart": { "appliesTo": ["metric"], "default": true, "dataShape": "[{label, value}] -- e.g. a chart_<name>() fn, or db_query aliasing columns label/value" },
     "graph": { "appliesTo": ["metric", "panel"], "renderer": "renderForceGraph" },
     "heatmap": { "appliesTo": ["metric", "panel"], "renderer": "renderHeatGrid" },
-    "timeline": { "appliesTo": ["metric", "panel", "widget"], "renderer": "renderTimelineList" }
+    "timeline": { "appliesTo": ["metric", "panel", "widget"], "renderer": "renderTimelineList" },
+    "chart": {
+      "_comment": "rfcs/0009 Phase A -- a fifth, parameterized `visual { render: \"chart\" ... }` kind, additive alongside the four fixed shapes above (which are unaffected -- \"chart\" is not a replacement or a desugaring target for them). A bounded grammar-of-graphics subset: mark x encoding instead of a fixed shape per chart type.",
+      "appliesTo": ["metric (dashboard `visual` only -- not yet wired into workspace `panel`)"],
+      "renderer": "renderGraphicsChart",
+      "mark": ["bar", "line", "area", "point", "arc", "rule"],
+      "encoding": {
+        "_comment": "one or more `encode <channel> { field, type, aggregate? }` blocks, DSL-side folded into visual's flat entries as \"encode.<channel>.<key>\" (parser.rs::parse_encode_channel_entries); manifest-side reassembled into this array (ui_gen.rs::parse_chart_config/metrics_json).",
+        "channels": ["x", "y", "color", "size", "theta"],
+        "type": ["quantitative", "nominal", "ordinal", "temporal"],
+        "aggregate": ["sum", "avg", "count", "min", "max"],
+        "field": "any string literal -- NOT cross-checked against a real column; the backing fn returns opaque json, there's no struct to resolve it against (a real, disclosed limit, not an oversight)"
+      }
+    }
   },
   "panelRenders": {
     "_comment": "PanelRender's own default (a plain table) has no MetricRender equivalent -- a dashboard tile is never a table.",
@@ -148,8 +162,8 @@
   },
 
   "extensionPoints": {
-    "_comment": "Not yet built -- named here so rfcs/0009 Phase A/B have one place to land without redesigning this file's shape.",
-    "charts": "rfcs/0009 Phase A proposes replacing the 4 fixed `charts` entries above with one `chart` element parameterized by {mark, encoding} (a bounded grammar-of-graphics subset) -- the 4 names above would become sugar that desugars to a fixed {mark, encoding} pair, not removed.",
-    "components": "rfcs/0009 Phase B proposes Cargo-metadata-tagged plugin crates (kind = \"nir-ui-component\", mirroring rfcs/0008's native-builtin discovery) contributing additional entries here, each carrying its own crate name + version for provenance."
+    "_comment": "rfcs/0009 Phase A and Phase B's *mechanism* are both built and verified (see charts.chart above and widget.kinds' closedVocabulary note) -- what remains open is named here, not silently dropped.",
+    "charts": "[DONE, mechanism] `render: \"chart\"` (see charts.chart above). [OPEN] the same mark/encoding config isn't wired into workspace `panel { ... }` yet, only dashboard `visual { ... }` -- PanelRender's own closed set is untouched.",
+    "components": "[DONE, mechanism] a Rust crate hand-assembles a `ui_plugin::NativeUiComponent` slice and passes it to `typecheck_optional_main_with_ui_components`/`generate_with_ui_components` (crates/compiler/tests/ui_plugin.rs is the real, screenshot-verified proof). [OPEN] Cargo-metadata-tagged automatic discovery (`kind = \"nir-ui-component\"` in a dependency's own Cargo.toml, `nirdosha build`/`emit-ui` finding+linking it with no hand-assembled Rust slice) is explicitly not built -- shares one open discovery problem with rfcs/0008 Phase 3 (native builtin auto-discovery) rather than inventing a second, parallel mechanism. [OPEN] a component only ever contributes a `layout` widget kind today, not a full catalog-schema entry (typed `props`, a chart/control/action type, a GBNF fragment, crate-name+version provenance in this file) -- rfcs/0009's original, larger sketch for `NativeUiComponent`."
   }
 }
