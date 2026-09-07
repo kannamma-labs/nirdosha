@@ -454,7 +454,11 @@ pub enum TypeErrorKind {
     /// literal `render` value is caught by the existing, more general
     /// `InvalidFieldValidationExpr { key: "render" }` instead — this
     /// variant only ever fires once that shape check already passed.
-    UnknownRenderValue { context: String, render: String, allowed: String },
+    /// `key` (rfcs/0009 Phase A) names which key the bad value was found
+    /// on -- originally always `"render"` (hence the field name below),
+    /// now also `"mark"`, `"type"`, `"aggregate"`, or a bare channel/
+    /// subkey name for `encode`'s own shape errors (`check_encode_entry`).
+    UnknownRenderValue { context: String, key: String, render: String, allowed: String },
 
     // ---- Track E4's `action { show_result: true }` --------------------
     /// `action "..." -> fn { show_result: true }` (on a `screen` or,
@@ -925,9 +929,9 @@ impl std::fmt::Display for TypeError {
                 "{line}:{col}: `panel \"{panel}\"` in `workspace {workspace}` — `source: {fn_name}` must take exactly one \
                  `i64` parameter and return `Result(json, _)`"
             ),
-            TypeErrorKind::UnknownRenderValue { context, render, allowed } => write!(
+            TypeErrorKind::UnknownRenderValue { context, key, render, allowed } => write!(
                 f,
-                "{line}:{col}: {context} {{ render: \"{render}\" }} — not a recognized render kind; use one of {allowed}"
+                "{line}:{col}: {context} {{ {key}: \"{render}\" }} — not a recognized value; use one of {allowed}"
             ),
             TypeErrorKind::ShowResultRequiresJsonResult { context, fn_name } => write!(
                 f,
@@ -1712,6 +1716,7 @@ impl<'a> Checker<'a> {
     fn check_field_render_expr(&mut self, struct_name: &str, field_name: &str, field_ty: Option<&Ty>, value: &Expr) {
         self.check_render_expr(
             format!("`field {field_name}` on `{struct_name}`"),
+            "render",
             value,
             |s| matches!(s, "countdown" | "badge" | "searchable_select"),
             "\"countdown\", \"badge\", \"searchable_select\"",
@@ -1907,6 +1912,7 @@ impl<'a> Checker<'a> {
                     self.error(
                         TypeErrorKind::UnknownRenderValue {
                             context: format!("`layout` in `screen {}`", screen.struct_name),
+                            key: "kind".to_string(),
                             render: kind.clone(),
                             allowed: "\"divider\", \"card\", \"timeline\"".to_string(),
                         },
@@ -2037,12 +2043,87 @@ impl<'a> Checker<'a> {
                 if key == "render" {
                     self.check_render_expr(
                         format!("`visual \"{}\"`", v.label),
+                        "render",
                         value,
-                        |s| matches!(s, "graph" | "heatmap" | "timeline"),
-                        "\"graph\", \"heatmap\", \"timeline\"",
+                        |s| matches!(s, "graph" | "heatmap" | "timeline" | "chart"),
+                        "\"graph\", \"heatmap\", \"timeline\", \"chart\"",
                     );
+                } else if key == "mark" {
+                    self.check_render_expr(
+                        format!("`visual \"{}\"`'s `mark`", v.label),
+                        "mark",
+                        value,
+                        |s| matches!(s, "bar" | "line" | "area" | "point" | "arc" | "rule"),
+                        "\"bar\", \"line\", \"area\", \"point\", \"arc\", \"rule\"",
+                    );
+                } else if let Some(rest) = key.strip_prefix("encode.") {
+                    self.check_encode_entry(&v.label, rest, value);
                 }
             }
+        }
+    }
+
+    /// One `encode <channel> { <subkey>: value }` entry, already
+    /// flattened by the parser into `"encode.<channel>.<subkey>"`
+    /// (rfcs/0009 Phase A) — `rest` is `"<channel>.<subkey>"`. There is
+    /// deliberately no cross-check against a struct's real fields here
+    /// the way `screen`/`workspace` field references get: a `visual`'s
+    /// `target_fn` returns opaque `json` (`Metric`'s own doc comment —
+    /// "resolve to a JSON array of `{label, value}` objects" is a
+    /// runtime convention, not a typechecked shape), so `field`'s value
+    /// is only checked to *be* a string, not to *name a real column* —
+    /// a real, disclosed narrowing, not an oversight.
+    fn check_encode_entry(&mut self, visual_label: &str, rest: &str, value: &Expr) {
+        let Some((channel, subkey)) = rest.split_once('.') else {
+            // Unreachable from `parse_encode_channel_entries` (it always
+            // emits exactly one dot), kept as a defensive no-op rather
+            // than a panic, same posture `MetricRender::from_kv` already
+            // takes toward an already-parser-guaranteed shape.
+            return;
+        };
+        if !matches!(channel, "x" | "y" | "color" | "size" | "theta") {
+            self.error(
+                TypeErrorKind::UnknownRenderValue {
+                    context: format!("`visual \"{visual_label}\"`'s `encode` channel"),
+                    key: "encode".to_string(),
+                    render: channel.to_string(),
+                    allowed: "\"x\", \"y\", \"color\", \"size\", \"theta\"".to_string(),
+                },
+                value.span(),
+            );
+            return;
+        }
+        match subkey {
+            "field" => self.check_render_expr(
+                format!("`visual \"{visual_label}\"`'s `encode {channel}`'s `field`"),
+                "field",
+                value,
+                |_| true,
+                "any string literal (not cross-checked against a real column -- the backing fn returns opaque json)",
+            ),
+            "type" => self.check_render_expr(
+                format!("`visual \"{visual_label}\"`'s `encode {channel}`'s `type`"),
+                "type",
+                value,
+                |s| matches!(s, "quantitative" | "nominal" | "ordinal" | "temporal"),
+                "\"quantitative\", \"nominal\", \"ordinal\", \"temporal\"",
+            ),
+            "aggregate" => self.check_render_expr(
+                format!("`visual \"{visual_label}\"`'s `encode {channel}`'s `aggregate`"),
+                "aggregate",
+                value,
+                |s| matches!(s, "sum" | "avg" | "count" | "min" | "max"),
+                "\"sum\", \"avg\", \"count\", \"min\", \"max\"",
+            ),
+            other => self.error(
+                TypeErrorKind::UnknownRenderValue {
+                    context: format!("`visual \"{visual_label}\"`'s `encode {channel}` key"),
+                    key: "encode".to_string(),
+                    render: other.to_string(),
+                    allowed: "\"field\", \"type\", \"aggregate\"".to_string(),
+                },
+                value.span(),
+            ),
         }
     }
 
@@ -2058,14 +2139,19 @@ impl<'a> Checker<'a> {
     /// of this one. `context` is a pre-formatted, already-backtick-
     /// quoted description for the error message, since this one check
     /// serves three different callers with different surrounding syntax.
-    fn check_render_expr(&mut self, context: String, value: &Expr, valid: fn(&str) -> bool, allowed: &str) {
+    fn check_render_expr(&mut self, context: String, key: &str, value: &Expr, valid: fn(&str) -> bool, allowed: &str) {
         let Expr::Str(render, _) = value else {
-            self.error(TypeErrorKind::InvalidFieldValidationExpr { key: "render".to_string() }, value.span());
+            self.error(TypeErrorKind::InvalidFieldValidationExpr { key: key.to_string() }, value.span());
             return;
         };
         if !valid(render) {
             self.error(
-                TypeErrorKind::UnknownRenderValue { context, render: render.clone(), allowed: allowed.to_string() },
+                TypeErrorKind::UnknownRenderValue {
+                    context,
+                    key: key.to_string(),
+                    render: render.clone(),
+                    allowed: allowed.to_string(),
+                },
                 value.span(),
             );
         }
@@ -2152,6 +2238,7 @@ impl<'a> Checker<'a> {
                 if key == "render" {
                     self.check_render_expr(
                         format!("`panel \"{}\"` in `workspace {}`", panel.title, ws.name),
+                        "render",
                         value,
                         |s| matches!(s, "graph" | "heatmap" | "timeline"),
                         "\"graph\", \"heatmap\", \"timeline\"",
