@@ -1,0 +1,138 @@
+// Feature: `workflow { data/state/on_entry/on_exit/on <Event> ->
+// <State>/terminal }` -- the compiled Layer 1 state-machine core
+// (`docs/WORKFLOW.md`, `docs/TRANSACT.md`'s own "Layers, not a syntax
+// spec" precedent applied here too). `38_workflow.nir` is this
+// construct's *full* design (RBAC-style `owner:` gates, a `data { ... }`
+// block, magic links) -- narrower and still interpreter-only-designed,
+// since it also depends on `mock_issue_token` (never got codegen either).
+// This file, and its two companions (`53_compiled_workflow_notifications.nir`,
+// `54_compiled_workflow_escalation.nir`), are the real, compiled,
+// end-to-end-verified subset instead: three separate files because no
+// single small workflow naturally exercises the state machine, every
+// notification channel, *and* SLA/escalation at once without becoming
+// unreadable.
+//
+// `workflow_lower.rs` desugars this into ordinary `fn`/`enum`/`struct`
+// declarations right after parsing: `start_ticket`, `advance_ticket`, a
+// synthesized `TicketEvent` enum, and a `TicketData` struct (empty here --
+// Layer 1's own disclosed restriction, see `Codegen::resolve_workflow_layer1`'s
+// doc comment: a non-empty `data { ... }` block has nowhere durable to
+// live past the initial `start_*` call in this compiled backend). Every
+// later stage, including `nirdosha serve`'s automatic `POST /api/<fn>`
+// exposure, sees only the desugared `fn`s.
+//
+// Self-contained: nothing external is required. `instance_id` (always)
+// is the one implicit binding an `on_entry`/`on_exit` action can use
+// here -- `data.<field>` bindings need the non-empty-`data` support this
+// Layer 1 doesn't have, hence the empty `data {}`-shaped workflow below.
+
+fn log_opened(instance_id: i64) -> unit {
+    print("ticket", instance_id, "opened")
+}
+
+fn log_left_open(instance_id: i64) -> unit {
+    print("ticket", instance_id, "leaving Open")
+}
+
+fn log_in_progress(instance_id: i64) -> unit {
+    print("ticket", instance_id, "now InProgress")
+}
+
+fn log_closed(instance_id: i64) -> unit {
+    print("ticket", instance_id, "closed")
+}
+
+workflow Ticket {
+    state Open {
+        on_entry {
+            log_opened(instance_id)
+        }
+        on_exit {
+            log_left_open(instance_id)
+        }
+        on Start -> InProgress
+        on Close -> Closed
+    }
+
+    state InProgress {
+        on_entry {
+            log_in_progress(instance_id)
+        }
+        on Close -> Closed
+    }
+
+    // `terminal` means "no outgoing `on`s, and that's declared on
+    // purpose" -- a non-`terminal` state with zero transitions is a
+    // compile error (`WorkflowStateHasNoTransitions`), so a real dead
+    // end always says so explicitly. `Closed` still has its own
+    // `on_entry`/`on_exit`, same as any other state.
+    state Closed terminal {
+        on_entry {
+            log_closed(instance_id)
+        }
+    }
+}
+
+// `advance_ticket`'s trailing `payload: json` argument needs a real
+// `json` value, not the `Result(json, str)` `json_parse` itself
+// returns -- wrapping it here (a `Call`, not a bare identifier, so the
+// pre-existing `match_expr`/`local_ty_of` arm-order limitation
+// `docs/PHASE0.md`'s "Twenty-first update" documents doesn't apply) is
+// the same shape `38_workflow.nir`'s own `decide_approval` wrapper uses.
+fn advance_now(identity: VerifiedIdentity, instance_id: i64, event: TicketEvent) -> Result(bool, WorkflowActionError) {
+    return match json_parse("{}") {
+        Ok(payload) => advance_ticket(identity, instance_id, event, payload),
+        Err(e) => Err(NoSuchTransition()),
+    }
+}
+
+fn main() {
+    // `advance_ticket` requires a real `identity: VerifiedIdentity`
+    // (`docs/WORKFLOW.md`'s "state ownership" section) -- built directly
+    // here rather than through a real `oidc_validate_token` round trip,
+    // the same shortcut `check_role_produces_real_role_view_...`'s own
+    // test template already takes when the point is the workflow, not
+    // the JWT.
+    let identity: VerifiedIdentity = VerifiedIdentity("agent-7", "https://mock-idp.local", "support-app", 9999999999, 0, "{}")
+
+    // `start_ticket`'s own `on_entry` (Open's) already runs before this
+    // returns -- the "ticket 1 opened" line below prints *before* this
+    // `print(instance_id)` does, for real (see `main`'s own comment
+    // just below).
+    let instance_id: i64 = match start_ticket(None(), TicketData()) {
+        Ok(id) => id,
+        Err(e) => -1,
+    }
+    print(instance_id) // 1 -- printed *after* "ticket 1 opened" (on_entry ran first, inside start_ticket)
+
+    // Open -> InProgress: runs Open's on_exit, then InProgress's on_entry.
+    let moved: bool = match advance_now(identity, instance_id, Start()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    print(moved) // 1 (true)
+
+    // InProgress -> Closed (terminal): runs InProgress's on_exit (none
+    // declared -- a no-op), then Closed's on_entry.
+    let closed: bool = match advance_now(identity, instance_id, Close()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    print(closed) // 1 (true)
+
+    // `Closed` is terminal -- no outgoing `on`s at all, so *any* event
+    // here is a real `Err(NoSuchTransition)`, never a trap.
+    let stuck: bool = match advance_now(identity, instance_id, Close()) {
+        Ok(v) => false,
+        Err(e) => true,
+    }
+    print(stuck) // 1 (true)
+
+    // A nonexistent instance id is a real `Err(InstanceNotFound)`, same
+    // "never a trap" guarantee.
+    let missing: bool = match advance_now(identity, 999999, Close()) {
+        Ok(v) => false,
+        Err(e) => true,
+    }
+    print(missing) // 1 (true)
+}

@@ -42,6 +42,37 @@ multi-instance fix), and four new interpreter builtins
 (`send_email`/`send_sms`/`send_push`/`notify`) for the notification
 actions the design conversation specifically asked for.
 
+**Status, 2026-09 — the interpreter this feature was originally built
+against is deleted; a real, narrower compiled-backend equivalent exists
+now (`docs/TRANSACT.md`'s own "layers, not a syntax spec" precedent
+applied here too).** `codegen.rs`'s `emit_workflow_*` compiles Layer 1 for
+real: `start_<workflow>`/`advance_<workflow>`, `on_entry`/`on_exit`
+actions, ordinary transitions, and `terminal` states, with
+`Err(NoSuchTransition)`/`Err(InstanceNotFound)` as real, non-trapping
+results (`examples/features/52_compiled_workflow_state_machine.nir`).
+`send_email`/`send_sms`/`send_push`/`notify` (below) compile too — real,
+authenticated HTTPS POSTs against a live, admin-editable provider row
+(`examples/features/53_compiled_workflow_notifications.nir`). SLA/
+escalation *detection* (`state { sla_seconds: N }` +
+`list_<workflow>_overdue()`, `docs/ROADMAP.md` A15) compiles as well —
+the query side only; nothing fires automatically, so an external
+scheduler still has to poll and call `advance_<workflow>` itself
+(`examples/features/54_compiled_workflow_escalation.nir`). Narrower than
+the interpreter-only design below, each gap real and disclosed rather
+than silently dropped: a non-empty `data { ... }` block and any
+`link`-marked transition (`*_via_link` magic links) are explicitly
+rejected at compile time — this Layer 1 runtime has nowhere durable to
+persist a `data` value or a link token past the initial call — instead
+of being silently miscompiled; the synthesized
+`list_<workflow>_pending_for_me`/`list_<workflow>_submitted_by_me`/
+`get_<workflow>_history` query fns compile but are always a real `Err`
+(same durable-storage gap, "state ownership + a generated queue UI"
+below); `owner:` state ownership is parsed but not enforced by this
+compiled backend at runtime; `notify` always takes the offline
+(`send_email`-fallback) path, since nothing in this compiled path
+populates a real presence table. See `docs/LANGUAGE.md` §10 for the
+one-line compiled-status-matrix entry this expands on.
+
 ## What it brings to the table
 
 **1. Named states and transitions instead of a `status TEXT` column
@@ -332,13 +363,15 @@ builtin).
   but not yet threaded into `on_entry`/`on_exit` bindings.** Reserved for
   a future increment; every current binding comes from `data`/`instance_id`/
   `link_<Event>` only.
-- **No native codegen.** `workflow`-desugared functions call
-  `send_email`/`notify`/`__workflow_*`, none of which are in
-  `codegen.rs`'s `PHASE4_BUILTINS`/`PHASE5_BUILTINS`/... allowlists, so
-  `nirdosha build`/`emit-llvm` rejects a program using `workflow` the
-  same clean, disclosed way it already rejects one using `transact` —
-  `check_supported` names the specific unsupported builtin, never a
-  silent mis-compile.
+- **Native codegen exists now, but only for a Layer 1 subset — see this
+  doc's own "Status, 2026-09" section up top.** `workflow`-desugared
+  functions calling `send_email`/`send_sms`/`send_push`/`notify`/
+  `__workflow_start`/`__workflow_advance`/`__workflow_overdue` compile
+  and run for real; a program using a non-empty `data { ... }` block or
+  a `link`-marked transition (`__workflow_link_advance`) is still
+  explicitly rejected by `nirdosha build`/`emit-llvm`, the same clean,
+  disclosed way `check_supported` already names any other unsupported
+  construct rather than silently mis-compiling.
 
 ## State ownership + a generated queue UI
 
@@ -592,7 +625,7 @@ Each row below is a real, common pattern; "Have?" says whether today's
 | Who submitted this / "my requests" | Every system listed above | **Yes** | §6 above. |
 | Audit trail (who/when/why) | SOX compliance, banking regulation | **Yes**, with the disclosed per-viewer-ACL gap in §7 | §7 above; a real per-viewer ACL (participants + requester only) is the remaining gap. |
 | Delegation / out-of-office reassignment | "I'm on leave, my approvals route to my manager for two weeks" (every system above has this) | **No** | Needs a new admin-editable `WorkflowDelegation`-shaped struct (`from_subject, to_subject, workflow_name, starts_at, ends_at`) and a second check in `identity_satisfies_owner` — real, buildable, same "ordinary struct, free CRUD screen" convention `RoleMapping`/`EmailProviderConfig` already use, just not built. |
-| SLA / escalation timers | "If not acted on in 48h, escalate to the owner's manager or notify again" (universal in enterprise workflow engines) | **No, structurally — tracked as `docs/ROADMAP.md` Track A item A15** | `docs/WORKFLOW.md`'s own "Deliberate non-goals" section already discloses this: **there is no scheduling/cron primitive in Nirdosha at all**. The `state`/`on_entry` shape is durable and retry-safe, but nothing inside the language can fire "48 hours from now" on its own — this needs an *external* scheduler calling `advance_<workflow>`/a new escalation fn, same as every other "nightly" workflow already has to work this way. A real, scoped proposed design (`state { sla: "<duration>" }` + a `list_<workflow>_overdue()` read fn for whatever external scheduler polls it) is in `docs/ROADMAP.md` A15, not sketched here. |
+| SLA / escalation timers | "If not acted on in 48h, escalate to the owner's manager or notify again" (universal in enterprise workflow engines) | **Partial — detection only, compiled; tracked as `docs/ROADMAP.md` Track A item A15** | This doc's own "Deliberate non-goals" section still applies to the *automatic-firing* half: **there is no scheduling/cron primitive in Nirdosha at all**, so nothing inside the language fires "48 hours from now" on its own. What's real and compiled now (2026-09, this doc's own "Status" section up top): `state { sla_seconds: N }` + a synthesized `list_<workflow>_overdue()` read fn genuinely detects a stale instance, per-state, over a real durable store — an *external* scheduler still has to poll it and call `advance_<workflow>` itself to escalate, the same round trip every other "nightly" workflow already has to work this way (`examples/features/54_compiled_workflow_escalation.nir`). |
 | Bulk actions ("approve all 12 selected") | Any queue-shaped enterprise UI | **No** | Pure UI-layer batching over the existing `advance_<workflow>` calls, one request per selected row — no new compiler construct needed, just not built in `ui_gen_template.html` yet. |
 | In-app notification inbox (persisted, browsable later) | Almost every enterprise app's bell icon | **Already possible today, not a compiler gap** | `on_entry`/`on_exit` can call *any* function, not just `send_email`/`send_sms`/`notify` — an ordinary user-defined `fn` that `db_execute`s an insert into your own `struct Notification { ... }` (a real, free CRUD screen) gives a persisted, browsable inbox with zero new grammar. What's still missing is only a UI *bell icon* convention (`ui_gen.rs` has no special-cased "notification" struct today — it would just render as an ordinary screen, not a badge in the nav bar). |
 | Unified cross-workflow "Approvals" inbox (one queue merging every workflow, not one nav tab per workflow) | Any org with more than one approval process | **No** | Pure UI aggregation over each workflow's own `list_<workflow>_pending_for_me` — no new compiler construct, just not built (today's "Workflows" nav is one entry per `workflow`, not a merged view). |

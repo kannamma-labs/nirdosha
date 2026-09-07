@@ -589,9 +589,25 @@ impl<'a> Checker<'a> {
                     // than once — a real connection is meant to run many
                     // queries, the same way a `tcp`/`file` handle is
                     // meant to `send`/`recv` many times before its one
-                    // `stop` (`Ty::Db`'s doc comment).
-                    let consume =
-                        !(i == 0 && matches!(name.as_str(), "db_query" | "db_execute" | "mq_publish" | "mq_consume"));
+                    // `stop` (`Ty::Db`'s doc comment). `send_email`/
+                    // `send_sms`/`send_push`/`notify` (`docs/WORKFLOW.md`)
+                    // take the exact same `conn: Db` leading argument
+                    // shape (a workflow's `on_entry` typically fires
+                    // several notifications off one connection) — same
+                    // exemption, same reason. `notify` alone also takes a
+                    // second connection-shaped argument, `mq: Mq`
+                    // (`docs/WORKFLOW.md`'s presence bridge) -- it's just
+                    // as reusable as `conn` (a workflow's `on_entry` may
+                    // call `notify` more than once off the same `mq`
+                    // connection before its own one `stop`), so it gets
+                    // the same read-not-consumed treatment at its own
+                    // fixed position instead of the generic `i == 0`.
+                    let consume = !((i == 0
+                        && matches!(
+                            name.as_str(),
+                            "db_query" | "db_execute" | "mq_publish" | "mq_consume" | "send_email" | "send_sms" | "send_push" | "notify"
+                        ))
+                        || (i == 1 && name.as_str() == "notify"));
                     self.touch_expr(a, consume);
                 }
             }

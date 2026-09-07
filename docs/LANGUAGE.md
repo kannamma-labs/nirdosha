@@ -137,6 +137,19 @@ to write them with). All require `f64` elements unless noted.
   `unit` — literal, variable, or computed result, all identically); the
   one remaining gap is a whole `Vector`/`Matrix` argument (§10).
 
+**Compiled string parsing** (2026-09) — the minimal surface a compiled
+HTTP `serve` needs to hand-parse a request line; deliberately not a
+general string library (no `split`/`starts_with`/`trim`/concat).
+- `len(s: str) -> i64` — same name as Vector's `len` (below), `str`'s
+  own arm added alongside it.
+- `str_slice(s: str, start: i64, end: i64) -> str` — the substring
+  `[start, end)`. Traps (not `Result`) if `start`/`end` are out of
+  bounds — a real, out-of-band program error, same convention as
+  `dec_from_i64`'s scale-overflow trap above.
+- `str_index_of(haystack: str, needle: str) -> i64` — byte offset of
+  the first occurrence of `needle`, or `-1` if not found. An empty
+  `needle` matches at offset `0`.
+
 **Dense linear algebra** (Phase 2)
 - `transpose(m: Matrix) -> Matrix` — any element type.
 - `dot(a: Vector, b: Vector) -> T` — same length, numeric element.
@@ -145,7 +158,7 @@ to write them with). All require `f64` elements unless noted.
 - `ones(n)` / `ones(r, c)` — same shape rule, filled with `1.0`.
 - `identity(n)` → `Matrix(f64, n, n)`.
 - `sum(v_or_m) -> T` — any numeric element type.
-- `len(v: Vector) -> i64`.
+- `len(v: Vector) -> i64` — overloaded with `len(s: str) -> i64` (below), same name.
 - `norm(v: Vector(f64,_)) -> f64` — 2-norm. `norm1` — sum of `|x|`. `norm_inf` — max `|x|`. `frobenius_norm(m: Matrix(f64,_,_))`.
 - `trace(m: Matrix(T,n,n)) -> T` — square only (`NotSquare` otherwise), numeric element.
 - `det(m: Matrix(f64,n,n)) -> f64` — Gaussian elimination, partial pivoting.
@@ -158,6 +171,7 @@ to write them with). All require `f64` elements unless noted.
 - `rand_seed(seed: <int>)` — resets the RNG stream (SplitMix64; see §9 — interpreted and compiled each keep their own, per §9/§10). Required before any draw.
 - `rand_f64() -> f64` — uniform `[0, 1)`.
 - `rand_gaussian(mean: f64, stddev: f64) -> f64` — Box-Muller.
+- `sleep_ms(ms: <int>)` — a real wall-clock sleep (compiled 2026-09, `docs/ROADMAP.md`'s B9; `nir_sleep_ms`). `ms <= 0` returns immediately.
 - `distance(a: Vector(f64,3), b: Vector(f64,3)) -> f64` — Euclidean.
 - `bearing(from: Vector(f64,3), to: Vector(f64,3)) -> f64` — initial great-circle bearing, degrees `[0,360)`; takes lat/lon/alt vectors, altitude ignored.
 - `lla_to_ecef(v: Vector(f64,3)) -> Vector(f64,3)` / `ecef_to_lla` — WGS84.
@@ -165,14 +179,23 @@ to write them with). All require `f64` elements unless noted.
 - `kf_predict_state(x, P, F, Q) -> Vector` / `kf_predict_cov(x, P, F, Q) -> Matrix` — linear Kalman filter predict step (split in two — no tuple/struct return type exists).
 - `kf_update_state(x, P, z, H, R) -> Vector` / `kf_update_cov(...) -> Matrix` — update step.
 
-**Database** (`Ty::Db`, interpreter-only — `docs/PROTOLANG_PORT.md`'s "Locked design 5: DB")
-- `db_connect(conn_str: str) -> Result(db, str)` — a bare path or `:memory:` opens a local SQLite database (`rusqlite`, bundled); a `postgres://`/`postgresql://` connection string instead connects to a real Postgres server (`postgres`/`postgres-native-tls` — `crates/compiler/src/dbconn.rs`). Same four-function surface either way; only `db_connect`'s own argument decides the backend, chosen once and fixed for that handle's lifetime.
-- `db_query(conn: db, sql: str, ...up to 8 bind values) -> Result(json, str)` — row-returning statements (`SELECT`). Bind values are `i64`/`f64`/`str`/`bool` (or a zero-payload `enum` variant, bound as its name), the only way to parameterize a query since `str` has no concatenation (§2). `?` placeholders (SQLite's own positional style) are rewritten to Postgres's `$1, $2, ...` automatically when the handle is a Postgres connection, so the same `sql` string and call site work against either backend. Every row comes back as one JSON object (column name → value); the whole result set is a JSON array, navigated with `json_array_len`/`json_array_get`/`json_get_*` like any other JSON document.
+**Database** (`Ty::Db`, compiled 2026-09 — SQLite only; `docs/PROTOLANG_PORT.md`'s "Locked design 5: DB")
+- `db_connect(conn_str: str) -> Result(db, str)` — a bare path or `:memory:` opens a local SQLite database (`rusqlite`, `bundled` feature — statically linked, no system `libsqlite3`; `nir_db_connect`, `runtime-kernels/src/lib.rs`). Postgres (`postgres://`/`postgresql://` connection strings, `crates/compiler/src/dbconn.rs`) was the interpreter-era design's layer 2; the compiled path doesn't have it yet (`dbconn.rs` itself no longer exists, removed with the interpreter) — a real, deferred follow-up (dynamic TLS linking), not silently dropped.
+- `db_query(conn: db, sql: str, ...up to 8 bind values) -> Result(json, str)` — row-returning statements (`SELECT`). Bind values are `i64`/`f64`/`str`/`bool`, the only way to parameterize a query since `str` has no concatenation (§2) — a zero-payload `enum` variant as a bind value is the one part of the original design not yet compiled (`NirBindValue`'s own doc comment, `runtime-kernels/src/lib.rs`). Every row comes back as one JSON object (column name → value); the whole result set is a JSON array, navigated with `json_array_len`/`json_array_get`/`json_get_*` like any other JSON document. `Ty::Json` compiles as the raw JSON text itself, re-parsed by each accessor — see `json`'s own entry below.
 - `db_execute(conn: db, sql: str, ...up to 8 bind values) -> Result(i64, str)` — everything else (`INSERT`/`UPDATE`/`DELETE`/DDL); returns the affected-row count.
 - `stop(conn)` — closes the connection (reuses `tcp`/`file`'s keyword).
-- A connection failure, SQL syntax error, or constraint violation is `Err(message)`, never a trap — the database engine's own error message passed straight through.
-- Postgres is strongly typed at the wire level (unlike SQLite): a schema column meant to hold a Nirdosha `i64`/`f64`/`bool`/`str` value should be declared `BIGINT`/`DOUBLE PRECISION`/`BOOLEAN`/`TEXT` — a narrower column type (e.g. `integer`) is a clear `Err` from the driver, not a silent misbind.
-- TLS to Postgres is opt-in, read from the connection string's own `sslmode=require`/`verify-ca`/`verify-full`; no `sslmode` (or `disable`/`prefer`/`allow`) connects in plaintext.
+- A connection failure, SQL syntax error, or constraint violation is `Err(message)`, never a trap — SQLite's own error message (`rusqlite::Error`) passed straight through.
+- SQLite has no native boolean column type: a `bool` bind value is stored as SQLite `INTEGER` `0`/`1`, and comes back out of `db_query` the same way — a plain JSON *number*, not a JSON boolean. `json_get_bool` (below) accepts both shapes for exactly this reason, found by testing a real round trip, not designed in advance.
+- SQLite `BLOB` columns have no first-class Nirdosha type to carry them (no `bytes` type) — `db_query` represents one as JSON `null`, a disclosed, narrower cut, not a silent drop; every other SQLite storage class round-trips exactly.
+- Real, compiled-and-run verification: `examples/features/27_database.nir` (schema creation, parameterized insert/update, a filtered `SELECT`, a connection failure) — `crates/compiler/tests/codegen.rs`'s `db_connect_execute_query_round_trips_real_sqlite_rows` compiles and runs that exact file, unmodified, against a real in-memory SQLite database.
+
+**JSON** (`Ty::Json`, compiled 2026-09 — see `Ty::Json`'s own doc comment for the representation choice)
+- `json_parse(s: str) -> Result(json, str)` — validates `s` parses as JSON; an identity function on success (`s`'s own value, unchanged) under this representation.
+- `json_get(doc: json, key: str) -> Result(json, str)` / `json_array_get(doc: json, idx: i64) -> Result(json, str)` — navigate to a sub-value, re-serialized as its own JSON text (this representation is text, not a persisted tree, so navigating one level means re-emitting the sub-tree).
+- `json_get_str`/`json_get_i64`/`json_get_f64`/`json_get_bool(doc: json, key: str) -> Result(_, str)` — leaf accessors; the value at `key` must itself be that JSON type (`json_get_bool` also accepts a JSON `0`/`1` integer — see `db`'s own note above on why).
+- `json_array_len(doc: json) -> Result(i64, str)`.
+- `json_set_str(doc: json, key: str, value: str) -> Result(json, str)` — sets `key` to a string value on a JSON object, or starts a fresh object if `doc` is JSON `null`. Any other JSON shape (an array, a scalar) is a real `Err`, not a type error.
+- Every accessor re-parses `doc`'s raw text on every call (no persisted parsed-tree handle) — the simplest thing that reuses `str`'s existing `{ptr, i64}` representation with zero new runtime value type, at the cost of re-parsing instead of a cached tree; disclosed, not hidden.
 - `nirdosha serve --db <path>`'s auto-generated table routes and automatic schema migrations (§13) are a separate mechanism, still SQLite-only.
 
 **Decimal arithmetic** (`dec128`, interpreter-only — §2, §10) — 2026-08-26.
@@ -186,12 +209,26 @@ to write them with). All require `f64` elements unless noted.
 - JSON encode/decode (`nirdosha serve`, `json_get_*`) represents `dec128` as a JSON **string**, not a JSON number, for the same reason as the DB binding — a JSON number is IEEE-754 double under nearly every consumer's parser, exactly the silent-drift failure this type exists to prevent. `emit-ui` renders a `dec128` field as a text input, not `<input type=number>`.
 
 **Identity / relying party** (Row 12)
-- `oidc_validate_token(token: str, expected_issuer: str, expected_audience: str, jwks_json: str) -> Result(VerifiedIdentity, str)` — validates a mock OIDC/JWT ID token against the supplied JWKS JSON (HMAC-SHA256). Checks issuer, audience, and signature. Returns a `VerifiedIdentity` on success. The runtime never mints tokens; it only consumes externally-issued ones.
+- `oidc_validate_token(token: str, expected_issuer: str, expected_audience: str, jwks_json: str) -> Result(VerifiedIdentity, str)` — validates a real OIDC/JWT ID token against the supplied **static** JWKS JSON (RSA/RS256, EC-P256/ES256, or oct/HS256, one key per `kid`; live JWKS refresh/rotation is a separate, deferred gap). Checks issuer, audience, and signature — a JWK's own `kty` locks which algorithm it may verify under, never the token's own `alg` header (closes the classic algorithm-confusion attack). Does **not** check `exp` against the real clock (`identity_expired`'s job, given an explicit `now` — keeps this builtin a pure function of its inputs, §9). Returns a `VerifiedIdentity` on success. The runtime never mints tokens; it only consumes externally-issued ones.
 - `check_role(identity: VerifiedIdentity, role: str) -> Result(RoleView, str)` — succeeds if `identity.claims_json` contains a `roles` array with the requested role.
 - `extract_claim(identity: VerifiedIdentity, name: str) -> Result(ClaimView, str)` — extracts a string claim from `identity.claims_json`.
 - `check_role_path(identity: VerifiedIdentity, path: str, role: str) -> Result(RoleView, str)` — `check_role`'s dotted-path sibling, for IdPs that nest the roles array under a path instead of a flat top-level `"roles"` field (e.g. Keycloak's `"realm_access.roles"`). `check_role`/`extract_claim` are unchanged and still the right call for a flat claim — including one whose own name contains a literal dot (Auth0-style namespaced claims like `"https://myapp.example.com/roles"`), which is a flat key, not a nested path.
 - `extract_claim_path(identity: VerifiedIdentity, path: str) -> Result(ClaimView, str)` — `extract_claim`'s dotted-path sibling, same nested-vs-flat distinction as `check_role_path` above.
 - `identity_expired(identity: VerifiedIdentity, now: i64) -> bool` — true if `now > identity.expires_at`.
+
+**Message queue** (`Ty::Mq`, compiled 2026-09 — Redis only)
+- `mq_connect(host: str, port: i64) -> Result(mq, str)` — opens a real Redis connection (`redis` crate). `mq` is affine like `db`/`tcp`/`file` — connect, use, and `stop` inside one function.
+- `mq_publish(conn: mq, queue: str, message: str) -> Result(unit, str)` — `LPUSH`.
+- `mq_consume(conn: mq, queue: str, timeout_secs: i64) -> Result(str, str)` — `BLPOP`, blocking up to `timeout_secs` (`0` blocks forever). A timeout with nothing published is a real `Err`, not a trap.
+- `stop(conn)` — closes the connection.
+- `mq_connect_via(url: str) -> Result(mq, str)` — a separate, plugin-dispatched mechanism (`rfcs/0003-plugin-abi-v2.md`, `examples/features/47_external_service_boundary.nir`), not part of this Redis-specific path.
+
+**HTTP/HTTPS client** (no new `Ty` — a one-shot request/response, never a persisted connection handle; `HttpResponse { status: i64, body: str }` is a plain prelude struct; compiled 2026-09)
+- `http_get(host: str, port: i64, path: str) -> Result(HttpResponse, str)` / `http_post(host, port, path, body: str) -> Result(HttpResponse, str)` — plain HTTP over `std::net::TcpStream`.
+- `https_get`/`https_post` — same request/response handling, wrapped in a `native_tls::TlsStream` (vendored OpenSSL — see below). `TlsConnector::new()`'s defaults do the actual security-critical work (certificate-chain and hostname verification against the platform's trust store).
+- Every request sends `Connection: close` and reads to EOF as the end-of-body signal — no `Content-Length` parsing needed. A `Transfer-Encoding: chunked` response body **is** decoded (found necessary by testing against a real server, not designed in advance — a large fraction of real HTTP servers chunk by default; a raw, undecoded chunked body would be a visibly wrong result, not an acceptable "first cut" gap the way `Content-Length` itself being unnecessary is).
+- A network failure, a malformed status line, or a non-UTF-8 body are all a real `Err`, never a trap.
+- **TLS is vendored, not system-linked** — a real, deliberate choice (`runtime-kernels/Cargo.toml`'s own doc comment), found necessary by an actual link failure against this environment's system OpenSSL (an ABI mismatch), not decided in the abstract: `openssl = { features = ["vendored"] }` forces the whole dependency tree to statically compile and link OpenSSL from source, the same "no system dependency" posture `rusqlite`'s own `bundled` feature already gives SQLite.
 
 ---
 
@@ -877,22 +914,28 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `thread`/`spawn`/`join`, `chan`/`send`/`recv` | Yes | 2026-09. Word-sized `T` only (integers/`bool`/`f64`/`box`/`froze`/another handle) — `str`/`dec128`/struct/enum payloads still interpreter-only. Real admission ceiling (`Domain::Thread`) and a dynamic deadlock detector — see §7. |
 | `str` | Yes | Literals, `==`/`!=`, `if`-condition, `print`, fn params/returns — `main() -> str` compiles directly. |
 | `tcp`/`tcp_listener` | Yes | `connect`/`listen`/`accept`/`send`/`recv`/`stop` over real sockets. |
+| `str_index_of`/`str_slice`, `len(str)` | Yes | 2026-09. The minimal string-parsing surface a compiled HTTP `serve` needs — `str_slice`/`len(str)` are pure pointer arithmetic on `str`'s `{ptr, i64}` representation (no kernel call); `str_index_of` is the one real byte-scan, linked to `nir_str_index_of`. No `split`/`starts_with`/`trim`/concat — a real, separate follow-up. |
+| Compiled `serve` (`/api/<fn>` routing over `tcp_listener`/`accept`) | Yes, minimal | 2026-09 (ROADMAP.md Track B8). `str_index_of`/`str_slice` hand-parse the request line; routing is a plain `.nir` `if`/`else if` chain, no new language construct. GET-only, whole request assumed to arrive in one `recv`, no `Content-Length`/POST body support — see `examples/features/51_compiled_serve.nir`. |
 | `sha256_hex`/`constant_time_str_eq` | Yes | Isolated from-scratch SHA-256, bit-verified. Output buffer leaks — see below. |
 | `rand_seed`/`rand_f64`/`rand_gaussian` | Yes | Same algorithm as the interpreter, process-wide state — see below. |
 | `Vector`/`Matrix`, fully | Yes | Two codegen strategies — see below. |
 | `struct`/`enum`/`match`, non-affine payloads | Yes | Real LLVM types — see below. Affine payloads: no (Phase 4b). |
 | `struct`/`enum`/`match` with an affine field/payload | No | Phase 4b, deferred (below) — a non-affine one compiles now. |
 | `field: T requires(role/claim: ...)` (§6e field masking) | Yes | 2026-09. Scalar fields only (`is_aggregate()`/affine rejected, `TypeErrorKind::MaskRequiresNeedsScalarField`) — see §6e. |
-| `check_role` | Yes | 2026-09. `claims_json` read as a plain comma-separated role list, exact match per entry — a disclosed simplification, not real JSON parsing (no JSON parser is linked into `runtime-kernels`). `VerifiedIdentity` itself was already freely constructible; this is what makes a real `RoleView` obtainable at all. |
+| `check_role` | Yes | 2026-09, upgraded again 2026-09: `claims_json` is now tried as real JSON first (a top-level `"roles"` array), falling back to the original plain comma-separated-list matching only if that parse fails — so a `VerifiedIdentity` built directly in `.nir` source (a plain string, not JSON) still works unchanged. The JSON path is what `oidc_validate_token`'s own real claims now populate. |
+| `oidc_validate_token`/`extract_claim`/`identity_expired` | Yes | 2026-09. Real JWT/JWKS signature verification (`nir_oidc_validate_token`, `jsonwebtoken`-backed, same `kty`-locks-`alg` guard as `crates/presence-gateway/src/jwt.rs`) against a **static** JWKS (live rotation/refresh is a separate, deferred gap); real JSON claim extraction (`nir_extract_claim`). `identity_expired` needs no kernel — `now > identity.expires_at`, inline GEP+load+`icmp`. Deliberately **not** validating `exp` against the real wall clock inside `oidc_validate_token` itself — that stays `identity_expired`'s job with an explicit `now`, keeping the builtin a pure function of its inputs (§9). |
 | `nfr(...)` (§6f) | Yes | 2026-09. O(1) state per function — max-latency not p99, cumulative (not windowed) error-rate/throughput, exact concurrency. See §6f. |
 | `sandbox`/`stop` | No | Real, separate OS process — a larger scope than `thread`/`spawn` above, not touched by that update. |
 | `file`/`open` | No | `docs/PROTOLANG_PORT.md`'s file I/O port. |
 | `dec128` + `dec_*` builtins | No | Not yet in `Ty`/`codegen.rs`'s builtin allowlists. |
-| `json`/`db`/`mq`, `extract_claim`/`oidc_validate_token`/`mock_issue_token`, other Row 12 identity/session/API-key builtins | No | `check_role` (above) is the one identity builtin compiled so far; the rest are still blocked on `VerifiedIdentity`/`RoleView`/`ClaimView` being structs plus (for `oidc_validate_token`) real JWT/JWKS crypto. |
-| `http_get`/`http_post`/`https_get`/`https_post` | No | Not in `codegen.rs`'s builtin allowlists. |
-| `transact` | No | |
-| `workflow` | No | Desugars to `send_email`/`send_sms`/`send_push`/`notify`/`__workflow_*`, none compiled. |
-| `fn(..)->..`/`acquire`/`requires(role/claim: ...)` on a *function* | Yes | 2026-09. First-class/privileged functions (§6a) — a plain fn value is its own address, an acquired one is a real, hand-built `Result(fn(..)->.., str)`; calling either emits a real indirect call. `sandbox` scoping this exact mechanism is unrelated; `extract_claim`/`oidc_validate_token` (the claim/OIDC half of §6a's own example) remain interpreter-only-designed, so a claim-gated flow still doesn't run end to end. |
+| `db`, SQLite (`db_connect`/`db_query`/`db_execute`) | Yes | 2026-09. `rusqlite` `bundled`, statically linked. Postgres (layer 2, `dbconn.rs`) not yet in the compiled path. Bind values: `i64`/`f64`/`str`/`bool`; a zero-payload `enum` variant as a bind value is not yet compiled. |
+| `json` (`json_parse`/`json_get`/`json_get_*`/`json_array_*`/`json_set_str`) | Yes | 2026-09. Compiles as raw text (`Ty::Json`'s own `llvm_ty` arm), re-parsed by each accessor — no persisted parsed-tree handle. |
+| `check_role_path`/`extract_claim_path`, sessions/refresh/revocation/`validate_api_key` | No | `check_role`/`oidc_validate_token`/`extract_claim`/`identity_expired`/`db`/`json`/`mq`/`http`/`https` (above/below) are the builtins compiled so far; the dotted-path claim siblings and the rest of Row 12 (session/refresh-token/API-key lifecycle) remain real, narrower follow-up work. |
+| `mq` (Redis: `mq_connect`/`mq_publish`/`mq_consume`) | Yes | 2026-09. `redis` crate, real `LPUSH`/`BLPOP`. `mq_connect_via` (plugin-dispatched) is a separate mechanism. |
+| `http_get`/`http_post`/`https_get`/`https_post` | Yes | 2026-09. Real client, `Connection: close` + read-to-EOF + chunked-transfer-encoding decoding. HTTPS via vendored (not system) OpenSSL — see the HTTP/HTTPS section above. |
+| `transact` | Yes, Layer 1 only | 2026-09. `precheck?/network/verify/commit/compensate?/log?`, real control flow, a real `bool` result. `network`'s `retry`/`timeout` rejected explicitly (architectural: a compiled trap is `abort()`, unrecoverable, and `network`'s return type can never be `Result(_, _)` — no failure signal to retry on). Durability logging, crash replay, and `commit`/`compensate`'s own retry-with-backoff are real, disclosed follow-up work — see `docs/TRANSACT.md`. |
+| `workflow` | Yes, Layer 1 only | 2026-09. `start_*`/`advance_*`, `on_entry`/`on_exit`, ordinary transitions, and `terminal` states are real and compiled, with `Err(NoSuchTransition)`/`Err(InstanceNotFound)` as real, non-trapping results (`examples/features/52_compiled_workflow_state_machine.nir`). `send_email`/`send_sms`/`send_push`/`notify` compile too — real, authenticated HTTPS POSTs against an admin-editable provider row in a real SQLite table (`examples/features/53_compiled_workflow_notifications.nir`). `state { sla_seconds: N }` + `list_<workflow>_overdue()` (`docs/ROADMAP.md` A15) compile as well — real SLA/escalation *detection*, not automatic firing: an external scheduler still has to poll and call `advance_*` itself (`examples/features/54_compiled_workflow_escalation.nir`). Real, disclosed narrower cut than the interpreter-only design: a non-empty `data { ... }` block and any `link`-marked transition (`*_via_link` magic links) are explicitly rejected at compile time — this Layer 1 runtime has nowhere durable to persist a `data` value or a link token past the initial call — rather than silently miscompiled; the synthesized `pending_for_me`/`submitted_by_me`/`history` query fns compile but are always a real `Err` (same durable-storage gap); `owner:` state ownership isn't enforced at runtime yet; `notify` always takes the offline (`send_email`-fallback) path, since this compiled backend doesn't populate a real presence table. See `docs/WORKFLOW.md`'s own status section. |
+| `fn(..)->..`/`acquire`/`requires(role/claim: ...)` on a *function* | Yes | 2026-09. First-class/privileged functions (§6a) — a plain fn value is its own address, an acquired one is a real, hand-built `Result(fn(..)->.., str)`; calling either emits a real indirect call. `sandbox` scoping this exact mechanism is unrelated. `extract_claim`/`oidc_validate_token` (the claim/OIDC half of §6a's own example) are now real too (above), so a claim-gated flow driven by a genuine verified JWT runs end to end, not just the role-gated path. |
 | `screen`/`dashboard` | Inert, not rejected | `codegen.rs` never inspects these — a program containing them compiles cleanly with nothing to lower to. |
 
 **Scalar width mechanics.** Same LLVM widths as the signed types for
@@ -1399,7 +1442,8 @@ restart" shape `transact`'s own `network` slot already has
 replay_pending_workflow_actions` — called at `nirdosha serve` startup
 right alongside `replay_pending_transactions`).
 
-Interpreter-only, the same way `transact`/`db`/`mq` already are (§10):
+Not compiled yet, the same way `mq` isn't (§10; `transact`/`db` have since
+dropped off this list — Layer 1 and SQLite respectively, both 2026-09):
 `workflow`-desugared functions call builtins outside `codegen.rs`'s
 `PHASE4_BUILTINS`/`PHASE5_BUILTINS`/... allowlists, so `nirdosha build`/
 `emit-llvm` cleanly rejects a program using `workflow`, naming the
