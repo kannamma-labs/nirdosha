@@ -452,6 +452,15 @@ __NIRDOSHA_THEME_SCRIPT__
 
 <script>
 "use strict";
+// rfcs/0009 Phase B -- name -> render function, one entry per linked
+// `ui_plugin::NativeUiComponent` (empty for every build with none
+// linked, i.e. every build before this RFC and every plain `emit-ui`
+// call today). Populated by the plain top-level statements
+// `__NIRDOSHA_UI_COMPONENTS__` splices in below, never by anything
+// request- or model-supplied -- see `renderLayoutNode`'s `"widget"`
+// case for the one place this is read.
+const WIDGET_RENDERERS = {};
+__NIRDOSHA_UI_COMPONENTS__
 const MANIFEST = __NIRDOSHA_MANIFEST__;
 const STATS = __NIRDOSHA_STATS__;
 const CHARTS = __NIRDOSHA_CHARTS__;
@@ -1503,6 +1512,15 @@ function renderLayoutNode(node, ctx) {
         }
         return holder;
       }
+      // rfcs/0009 Phase B -- a plugin-contributed widget kind, checked
+      // by `typeck.rs::check_screen_layout`'s `extra_widget_kinds` (same
+      // allowlist discipline as the three std kinds above, just sourced
+      // from whatever `NativeUiComponent`s this build linked instead of
+      // a hardcoded list). Falls through to the plain empty div only if
+      // `node.kind` really isn't registered -- unreachable for a
+      // typeck-accepted program, kept as a defensive default rather than
+      // a thrown error, same posture the three std branches above have.
+      if (WIDGET_RENDERERS[node.kind]) return WIDGET_RENDERERS[node.kind](node);
       return el("div", {}, []);
     }
     default:

@@ -1555,7 +1555,36 @@ fn layout_json(node: &LayoutNode, fields: &[FieldSpec], actions: &[Action]) -> s
             "kind": kind,
             "source": kv_ident(entries, "source"),
             "title": kv_str(entries, "title"),
+            // rfcs/0009 Phase B -- every entry, generically, so a
+            // plugin-contributed widget's own `render_js` can read
+            // whatever config keys it declared (`node.entries.<key>`)
+            // without `layout_json` needing to know its shape in
+            // advance the way `source`/`title` above are special-cased
+            // for the three std kinds. Harmless duplication for a std
+            // widget (`divider`/`card`/`timeline`'s own client code
+            // keeps reading `node.source`/`node.title` directly,
+            // unchanged) -- not a second parallel shape, just a strict
+            // superset.
+            "entries": entries.iter().map(|(k, v)| (k.clone(), widget_entry_json(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
         }),
+    }
+}
+
+/// A `layout { <kind> { key: value } }` leaf's own value -- always a
+/// simple literal or bare identifier in practice (nothing here composes
+/// with `screen`/struct typing the way a `field`/`action` reference
+/// does), so this is deliberately narrower than a general `Expr`
+/// evaluator: anything outside this set becomes JSON `null` rather than
+/// a panic, the same "typeck already proved the shapes that matter,
+/// this only needs to not crash on the rest" posture the rest of this
+/// file's `kv_*` helpers already have.
+fn widget_entry_json(e: &Expr) -> serde_json::Value {
+    match e {
+        Expr::Str(s, _) | Expr::Ident(s, _) => serde_json::Value::String(s.clone()),
+        Expr::Int(n, _) => serde_json::json!(n),
+        Expr::Float(f, _) => serde_json::json!(f),
+        Expr::Bool(b, _) => serde_json::json!(b),
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -1716,6 +1745,42 @@ pub fn generate(
     production_mode: bool,
     theme: Option<&Theme>,
 ) -> String {
+    generate_impl(program, effects, identity_base, server_table_api, demo_mode, production_mode, theme, &[])
+}
+
+/// Same as [`generate`], plus every linked `crate::ui_plugin::
+/// NativeUiComponent`'s JS spliced into the emitted `<script>` block and
+/// registered so a `layout { <component.name> { ... } }` leaf renders
+/// via it instead of falling through to the empty-div default
+/// (rfcs/0009 Phase B). Pair with `typeck::
+/// typecheck_optional_main_with_ui_components` — that's what makes a
+/// component's `name` a legal widget `kind` in the first place; this
+/// function does no defensive re-check of its own, the same "typeck
+/// already proved it" trust every other `ui_gen.rs` pass extends to its
+/// input `Program`.
+pub fn generate_with_ui_components(
+    program: &Program,
+    effects: &HashMap<String, FnEffects>,
+    identity_base: Option<&str>,
+    server_table_api: bool,
+    demo_mode: bool,
+    production_mode: bool,
+    theme: Option<&Theme>,
+    components: &[crate::ui_plugin::NativeUiComponent],
+) -> String {
+    generate_impl(program, effects, identity_base, server_table_api, demo_mode, production_mode, theme, components)
+}
+
+fn generate_impl(
+    program: &Program,
+    effects: &HashMap<String, FnEffects>,
+    identity_base: Option<&str>,
+    server_table_api: bool,
+    demo_mode: bool,
+    production_mode: bool,
+    theme: Option<&Theme>,
+    components: &[crate::ui_plugin::NativeUiComponent],
+) -> String {
     let screens = build_screens(program, effects);
     let manifest = manifest_json(&screens);
     let stats = metrics_json(&build_stats(program));
@@ -1745,6 +1810,26 @@ pub fn generate(
         .replace("__NIRDOSHA_THEME_SCRIPT__", &theme_bootstrap_script(theme))
         .replace("__NIRDOSHA_FAVICON__", &favicon_data_uri())
         .replace("__NIRDOSHA_LOGO__", &logo_data_uri())
+        .replace("__NIRDOSHA_UI_COMPONENTS__", &ui_components_script(components))
+}
+
+/// Splices each linked component's `render_js` verbatim, then registers
+/// it into the template's `WIDGET_RENDERERS` map by name (rfcs/0009
+/// Phase B) — empty for `generate`'s own `components: &[]`, byte-for-
+/// byte the same `const WIDGET_RENDERERS = {};` output every build
+/// before this RFC already had.
+fn ui_components_script(components: &[crate::ui_plugin::NativeUiComponent]) -> String {
+    let mut out = String::new();
+    for c in components {
+        out.push_str(c.render_js);
+        out.push('\n');
+        out.push_str(&format!(
+            "WIDGET_RENDERERS[{}] = {};\n",
+            serde_json::to_string(&c.name).expect("a component name is a plain string, always serializes"),
+            c.render_fn
+        ));
+    }
+    out
 }
 
 /// The same brand mark as `favicon_data_uri`, at a larger 96x96 size for
