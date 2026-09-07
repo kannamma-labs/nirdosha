@@ -249,19 +249,41 @@ struct Metric {
     required_role: Option<String>,
     required_claim: Option<(String, String)>,
     render: MetricRender,
+    /// rfcs/0009 Phase A — only populated when `render ==
+    /// MetricRender::Chart`; `None` for every other kind, unchanged from
+    /// before this field existed.
+    chart_mark: Option<String>,
+    /// Empty unless `render == MetricRender::Chart`. Order is first-seen
+    /// order in the source `encode <channel> { ... }` blocks, not a
+    /// fixed x/y/color/size/theta ordering — the client doesn't need one
+    /// (each channel is self-describing via its own `channel` key).
+    chart_encoding: Vec<(String, EncodingChannelSpec)>,
+}
+
+/// One `encode <channel> { field: "...", type: "...", aggregate: "..."
+/// }` (rfcs/0009 Phase A), already proved well-formed by `typeck.rs::
+/// check_encode_entry` — `ui_gen.rs` trusts that closed-vocabulary proof
+/// exactly like `MetricRender::from_kv` already trusts `render`'s own.
+struct EncodingChannelSpec {
+    field: String,
+    kind: String,
+    aggregate: Option<String>,
 }
 
 /// `visual "..." -> fn { render: "..." }`'s closed vocabulary
 /// (`typeck.rs::check_visual_render_expr` already proved the string
-/// literal is one of these three, or this is `BarChart` — every
+/// literal is one of these four, or this is `BarChart` — every
 /// `stat_`/`chart_`-convention metric and every declared `tile`/`chart`
 /// item defaults here, unchanged behavior from before Track E2 existed).
+/// `Chart` (rfcs/0009 Phase A) is the one variant whose full config
+/// doesn't fit in this enum — see `Metric.chart_mark`/`chart_encoding`.
 #[derive(Clone, Copy, PartialEq)]
 enum MetricRender {
     BarChart,
     Graph,
     Heatmap,
     Timeline,
+    Chart,
 }
 
 impl MetricRender {
@@ -271,6 +293,7 @@ impl MetricRender {
             MetricRender::Graph => "graph",
             MetricRender::Heatmap => "heatmap",
             MetricRender::Timeline => "timeline",
+            MetricRender::Chart => "chart",
         }
     }
     fn from_kv(entries: &[(String, Expr)]) -> MetricRender {
@@ -278,13 +301,46 @@ impl MetricRender {
             Some("graph") => MetricRender::Graph,
             Some("heatmap") => MetricRender::Heatmap,
             Some("timeline") => MetricRender::Timeline,
-            // Already proven by typeck to be one of the three above, or
+            Some("chart") => MetricRender::Chart,
+            // Already proven by typeck to be one of the four above, or
             // absent — an unrecognized string never reaches this trust
             // boundary (same "typeck already proved well-formedness"
             // posture every other `kv_str` consumer in this file has).
             _ => MetricRender::BarChart,
         }
     }
+}
+
+/// `mark`/`encode <channel> { ... }` from a `visual { render: "chart"
+/// ... }` block (rfcs/0009 Phase A) — only ever called once `MetricRender
+/// ::from_kv` has already returned `Chart` for the same `entries`, so
+/// every value here is already typeck-proven well-formed. Channels are
+/// grouped by first appearance since `field`/`type`/`aggregate` arrive
+/// as separate, already-flattened `"encode.<channel>.<subkey>"` entries
+/// (`parse_encode_channel_entries`'s own doc comment) rather than as one
+/// nested value.
+fn parse_chart_config(entries: &[(String, Expr)]) -> (Option<String>, Vec<(String, EncodingChannelSpec)>) {
+    let mark = kv_str(entries, "mark").map(str::to_string);
+    let mut encoding: Vec<(String, EncodingChannelSpec)> = Vec::new();
+    for (key, value) in entries {
+        let Some(rest) = key.strip_prefix("encode.") else { continue };
+        let Some((channel, subkey)) = rest.split_once('.') else { continue };
+        let Expr::Str(s, _) = value else { continue };
+        let idx = match encoding.iter().position(|(c, _)| c == channel) {
+            Some(i) => i,
+            None => {
+                encoding.push((channel.to_string(), EncodingChannelSpec { field: String::new(), kind: String::new(), aggregate: None }));
+                encoding.len() - 1
+            }
+        };
+        match subkey {
+            "field" => encoding[idx].1.field = s.clone(),
+            "type" => encoding[idx].1.kind = s.clone(),
+            "aggregate" => encoding[idx].1.aggregate = Some(s.clone()),
+            _ => {}
+        }
+    }
+    (mark, encoding)
 }
 
 /// One derived screen: a user `struct` plus whichever CRUD-convention
@@ -893,6 +949,8 @@ fn build_metric_from_fn(f: &FnDecl, label: String, render: MetricRender) -> Metr
         required_role,
         required_claim,
         render,
+        chart_mark: None,
+        chart_encoding: Vec::new(),
     }
 }
 
@@ -945,7 +1003,14 @@ fn build_charts(program: &Program) -> Vec<Metric> {
     // found above.
     for v in &dash.visuals {
         if let Some(f) = find_fn(program, &v.target_fn) {
-            metrics.push(build_metric_from_fn(f, v.label.clone(), MetricRender::from_kv(&v.entries)));
+            let render = MetricRender::from_kv(&v.entries);
+            let mut m = build_metric_from_fn(f, v.label.clone(), render);
+            if render == MetricRender::Chart {
+                let (mark, encoding) = parse_chart_config(&v.entries);
+                m.chart_mark = mark;
+                m.chart_encoding = encoding;
+            }
+            metrics.push(m);
         }
     }
     metrics
@@ -1561,6 +1626,14 @@ fn metrics_json(metrics: &[Metric]) -> String {
             // it entirely for a tile, and a plain chart's own default
             // renders byte-for-byte the same as before this key existed.
             "render": m.render.as_str(),
+            // rfcs/0009 Phase A — always present (`null`/`[]` for every
+            // non-`"chart"` metric, the same "client ignores it" posture
+            // `render` itself already has above) rather than a second
+            // JSON shape just for chart items.
+            "mark": m.chart_mark,
+            "encoding": m.chart_encoding.iter().map(|(channel, e)| serde_json::json!({
+                "channel": channel, "field": e.field, "type": e.kind, "aggregate": e.aggregate,
+            })).collect::<Vec<_>>(),
         }))
         .collect::<Vec<_>>());
     serde_json::to_string(&value).expect("stats/charts manifest is built from plain strings/bools, always serializes")
