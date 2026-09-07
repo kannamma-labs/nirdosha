@@ -249,19 +249,41 @@ struct Metric {
     required_role: Option<String>,
     required_claim: Option<(String, String)>,
     render: MetricRender,
+    /// rfcs/0009 Phase A — only populated when `render ==
+    /// MetricRender::Chart`; `None` for every other kind, unchanged from
+    /// before this field existed.
+    chart_mark: Option<String>,
+    /// Empty unless `render == MetricRender::Chart`. Order is first-seen
+    /// order in the source `encode <channel> { ... }` blocks, not a
+    /// fixed x/y/color/size/theta ordering — the client doesn't need one
+    /// (each channel is self-describing via its own `channel` key).
+    chart_encoding: Vec<(String, EncodingChannelSpec)>,
+}
+
+/// One `encode <channel> { field: "...", type: "...", aggregate: "..."
+/// }` (rfcs/0009 Phase A), already proved well-formed by `typeck.rs::
+/// check_encode_entry` — `ui_gen.rs` trusts that closed-vocabulary proof
+/// exactly like `MetricRender::from_kv` already trusts `render`'s own.
+struct EncodingChannelSpec {
+    field: String,
+    kind: String,
+    aggregate: Option<String>,
 }
 
 /// `visual "..." -> fn { render: "..." }`'s closed vocabulary
 /// (`typeck.rs::check_visual_render_expr` already proved the string
-/// literal is one of these three, or this is `BarChart` — every
+/// literal is one of these four, or this is `BarChart` — every
 /// `stat_`/`chart_`-convention metric and every declared `tile`/`chart`
 /// item defaults here, unchanged behavior from before Track E2 existed).
+/// `Chart` (rfcs/0009 Phase A) is the one variant whose full config
+/// doesn't fit in this enum — see `Metric.chart_mark`/`chart_encoding`.
 #[derive(Clone, Copy, PartialEq)]
 enum MetricRender {
     BarChart,
     Graph,
     Heatmap,
     Timeline,
+    Chart,
 }
 
 impl MetricRender {
@@ -271,6 +293,7 @@ impl MetricRender {
             MetricRender::Graph => "graph",
             MetricRender::Heatmap => "heatmap",
             MetricRender::Timeline => "timeline",
+            MetricRender::Chart => "chart",
         }
     }
     fn from_kv(entries: &[(String, Expr)]) -> MetricRender {
@@ -278,13 +301,46 @@ impl MetricRender {
             Some("graph") => MetricRender::Graph,
             Some("heatmap") => MetricRender::Heatmap,
             Some("timeline") => MetricRender::Timeline,
-            // Already proven by typeck to be one of the three above, or
+            Some("chart") => MetricRender::Chart,
+            // Already proven by typeck to be one of the four above, or
             // absent — an unrecognized string never reaches this trust
             // boundary (same "typeck already proved well-formedness"
             // posture every other `kv_str` consumer in this file has).
             _ => MetricRender::BarChart,
         }
     }
+}
+
+/// `mark`/`encode <channel> { ... }` from a `visual { render: "chart"
+/// ... }` block (rfcs/0009 Phase A) — only ever called once `MetricRender
+/// ::from_kv` has already returned `Chart` for the same `entries`, so
+/// every value here is already typeck-proven well-formed. Channels are
+/// grouped by first appearance since `field`/`type`/`aggregate` arrive
+/// as separate, already-flattened `"encode.<channel>.<subkey>"` entries
+/// (`parse_encode_channel_entries`'s own doc comment) rather than as one
+/// nested value.
+fn parse_chart_config(entries: &[(String, Expr)]) -> (Option<String>, Vec<(String, EncodingChannelSpec)>) {
+    let mark = kv_str(entries, "mark").map(str::to_string);
+    let mut encoding: Vec<(String, EncodingChannelSpec)> = Vec::new();
+    for (key, value) in entries {
+        let Some(rest) = key.strip_prefix("encode.") else { continue };
+        let Some((channel, subkey)) = rest.split_once('.') else { continue };
+        let Expr::Str(s, _) = value else { continue };
+        let idx = match encoding.iter().position(|(c, _)| c == channel) {
+            Some(i) => i,
+            None => {
+                encoding.push((channel.to_string(), EncodingChannelSpec { field: String::new(), kind: String::new(), aggregate: None }));
+                encoding.len() - 1
+            }
+        };
+        match subkey {
+            "field" => encoding[idx].1.field = s.clone(),
+            "type" => encoding[idx].1.kind = s.clone(),
+            "aggregate" => encoding[idx].1.aggregate = Some(s.clone()),
+            _ => {}
+        }
+    }
+    (mark, encoding)
 }
 
 /// One derived screen: a user `struct` plus whichever CRUD-convention
@@ -329,21 +385,30 @@ struct Panel {
     source: Action,
     actions: Vec<Action>,
     render: PanelRender,
+    /// rfcs/0009 Phase A, extended to panels — only populated when
+    /// `render == PanelRender::Chart`; `None`/empty for every other
+    /// kind, unchanged from before these fields existed. Same shape
+    /// `Metric.chart_mark`/`chart_encoding` already have.
+    chart_mark: Option<String>,
+    chart_encoding: Vec<(String, EncodingChannelSpec)>,
 }
 
 /// `panel "..." { render: "..." }`'s closed vocabulary (`docs/ROADMAP.md`
 /// Track E2) — `Table` (the default: `renderPanel`'s original plain-
 /// table rendering, unchanged for a panel that never sets `render`)
-/// plus the same three kinds `MetricRender` gives `visual`, reused
-/// unchanged client-side (`renderForceGraph`/`renderHeatGrid`/
-/// `renderTimelineList` don't care whether they were called from
-/// `renderDashboard` or `renderPanel`).
+/// plus the same kinds `MetricRender` gives `visual`, reused unchanged
+/// client-side (`renderForceGraph`/`renderHeatGrid`/`renderTimelineList`/
+/// `renderGraphicsChart` don't care whether they were called from
+/// `renderDashboard` or `renderPanel`). `Chart` (rfcs/0009 Phase A) is
+/// the one variant whose full config doesn't fit in this enum — see
+/// `Panel.chart_mark`/`chart_encoding`.
 #[derive(Clone, Copy, PartialEq)]
 enum PanelRender {
     Table,
     Graph,
     Heatmap,
     Timeline,
+    Chart,
 }
 
 impl PanelRender {
@@ -353,16 +418,18 @@ impl PanelRender {
             PanelRender::Graph => "graph",
             PanelRender::Heatmap => "heatmap",
             PanelRender::Timeline => "timeline",
+            PanelRender::Chart => "chart",
         }
     }
     /// Same trust posture as `MetricRender::from_kv` — typeck already
-    /// proved `render`, if present, is one of the three explicit kinds;
+    /// proved `render`, if present, is one of the explicit kinds;
     /// absent (or, defensively, anything else) means the default.
     fn from_kv(entries: &[(String, Expr)]) -> PanelRender {
         match kv_str(entries, "render") {
             Some("graph") => PanelRender::Graph,
             Some("heatmap") => PanelRender::Heatmap,
             Some("timeline") => PanelRender::Timeline,
+            Some("chart") => PanelRender::Chart,
             _ => PanelRender::Table,
         }
     }
@@ -893,6 +960,8 @@ fn build_metric_from_fn(f: &FnDecl, label: String, render: MetricRender) -> Metr
         required_role,
         required_claim,
         render,
+        chart_mark: None,
+        chart_encoding: Vec::new(),
     }
 }
 
@@ -945,7 +1014,14 @@ fn build_charts(program: &Program) -> Vec<Metric> {
     // found above.
     for v in &dash.visuals {
         if let Some(f) = find_fn(program, &v.target_fn) {
-            metrics.push(build_metric_from_fn(f, v.label.clone(), MetricRender::from_kv(&v.entries)));
+            let render = MetricRender::from_kv(&v.entries);
+            let mut m = build_metric_from_fn(f, v.label.clone(), render);
+            if render == MetricRender::Chart {
+                let (mark, encoding) = parse_chart_config(&v.entries);
+                m.chart_mark = mark;
+                m.chart_encoding = encoding;
+            }
+            metrics.push(m);
         }
     }
     metrics
@@ -1372,7 +1448,9 @@ fn build_workspaces(program: &Program, effects: &HashMap<String, FnEffects>) -> 
             let Some(source) = build_action(program, effects, "source", source_fn) else { continue };
             let actions: Vec<Action> = pd.actions.iter().filter_map(|a| build_custom_action(program, effects, a)).collect();
             let render = PanelRender::from_kv(&pd.entries);
-            panels.push(Panel { title: pd.title.clone(), source, actions, render });
+            let (chart_mark, chart_encoding) =
+                if render == PanelRender::Chart { parse_chart_config(&pd.entries) } else { (None, Vec::new()) };
+            panels.push(Panel { title: pd.title.clone(), source, actions, render, chart_mark, chart_encoding });
         }
 
         let title = kv_str(&wd.entries, "title").map(str::to_string).unwrap_or_else(|| to_display_label(&wd.name));
@@ -1404,6 +1482,14 @@ fn workspaces_json(workspaces: &[Workspace]) -> String {
             "panels": w.panels.iter().map(|p| serde_json::json!({
                 "title": p.title,
                 "render": p.render.as_str(),
+                // rfcs/0009 Phase A, extended to panels -- always
+                // present (null/[] for every non-"chart" panel), same
+                // "client ignores it" posture metrics_json's own
+                // mark/encoding keys already have.
+                "mark": p.chart_mark,
+                "encoding": p.chart_encoding.iter().map(|(channel, e)| serde_json::json!({
+                    "channel": channel, "field": e.field, "type": e.kind, "aggregate": e.aggregate,
+                })).collect::<Vec<_>>(),
                 "sourceFn": p.source.fn_name,
                 // Guaranteed exactly one param by `typeck.rs::
                 // check_workspace`'s shape check before `ui_gen` ever
@@ -1490,7 +1576,36 @@ fn layout_json(node: &LayoutNode, fields: &[FieldSpec], actions: &[Action]) -> s
             "kind": kind,
             "source": kv_ident(entries, "source"),
             "title": kv_str(entries, "title"),
+            // rfcs/0009 Phase B -- every entry, generically, so a
+            // plugin-contributed widget's own `render_js` can read
+            // whatever config keys it declared (`node.entries.<key>`)
+            // without `layout_json` needing to know its shape in
+            // advance the way `source`/`title` above are special-cased
+            // for the three std kinds. Harmless duplication for a std
+            // widget (`divider`/`card`/`timeline`'s own client code
+            // keeps reading `node.source`/`node.title` directly,
+            // unchanged) -- not a second parallel shape, just a strict
+            // superset.
+            "entries": entries.iter().map(|(k, v)| (k.clone(), widget_entry_json(v))).collect::<serde_json::Map<String, serde_json::Value>>(),
         }),
+    }
+}
+
+/// A `layout { <kind> { key: value } }` leaf's own value -- always a
+/// simple literal or bare identifier in practice (nothing here composes
+/// with `screen`/struct typing the way a `field`/`action` reference
+/// does), so this is deliberately narrower than a general `Expr`
+/// evaluator: anything outside this set becomes JSON `null` rather than
+/// a panic, the same "typeck already proved the shapes that matter,
+/// this only needs to not crash on the rest" posture the rest of this
+/// file's `kv_*` helpers already have.
+fn widget_entry_json(e: &Expr) -> serde_json::Value {
+    match e {
+        Expr::Str(s, _) | Expr::Ident(s, _) => serde_json::Value::String(s.clone()),
+        Expr::Int(n, _) => serde_json::json!(n),
+        Expr::Float(f, _) => serde_json::json!(f),
+        Expr::Bool(b, _) => serde_json::json!(b),
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -1561,6 +1676,14 @@ fn metrics_json(metrics: &[Metric]) -> String {
             // it entirely for a tile, and a plain chart's own default
             // renders byte-for-byte the same as before this key existed.
             "render": m.render.as_str(),
+            // rfcs/0009 Phase A — always present (`null`/`[]` for every
+            // non-`"chart"` metric, the same "client ignores it" posture
+            // `render` itself already has above) rather than a second
+            // JSON shape just for chart items.
+            "mark": m.chart_mark,
+            "encoding": m.chart_encoding.iter().map(|(channel, e)| serde_json::json!({
+                "channel": channel, "field": e.field, "type": e.kind, "aggregate": e.aggregate,
+            })).collect::<Vec<_>>(),
         }))
         .collect::<Vec<_>>());
     serde_json::to_string(&value).expect("stats/charts manifest is built from plain strings/bools, always serializes")
@@ -1643,6 +1766,42 @@ pub fn generate(
     production_mode: bool,
     theme: Option<&Theme>,
 ) -> String {
+    generate_impl(program, effects, identity_base, server_table_api, demo_mode, production_mode, theme, &[])
+}
+
+/// Same as [`generate`], plus every linked `crate::ui_plugin::
+/// NativeUiComponent`'s JS spliced into the emitted `<script>` block and
+/// registered so a `layout { <component.name> { ... } }` leaf renders
+/// via it instead of falling through to the empty-div default
+/// (rfcs/0009 Phase B). Pair with `typeck::
+/// typecheck_optional_main_with_ui_components` — that's what makes a
+/// component's `name` a legal widget `kind` in the first place; this
+/// function does no defensive re-check of its own, the same "typeck
+/// already proved it" trust every other `ui_gen.rs` pass extends to its
+/// input `Program`.
+pub fn generate_with_ui_components(
+    program: &Program,
+    effects: &HashMap<String, FnEffects>,
+    identity_base: Option<&str>,
+    server_table_api: bool,
+    demo_mode: bool,
+    production_mode: bool,
+    theme: Option<&Theme>,
+    components: &[crate::ui_plugin::NativeUiComponent],
+) -> String {
+    generate_impl(program, effects, identity_base, server_table_api, demo_mode, production_mode, theme, components)
+}
+
+fn generate_impl(
+    program: &Program,
+    effects: &HashMap<String, FnEffects>,
+    identity_base: Option<&str>,
+    server_table_api: bool,
+    demo_mode: bool,
+    production_mode: bool,
+    theme: Option<&Theme>,
+    components: &[crate::ui_plugin::NativeUiComponent],
+) -> String {
     let screens = build_screens(program, effects);
     let manifest = manifest_json(&screens);
     let stats = metrics_json(&build_stats(program));
@@ -1672,6 +1831,26 @@ pub fn generate(
         .replace("__NIRDOSHA_THEME_SCRIPT__", &theme_bootstrap_script(theme))
         .replace("__NIRDOSHA_FAVICON__", &favicon_data_uri())
         .replace("__NIRDOSHA_LOGO__", &logo_data_uri())
+        .replace("__NIRDOSHA_UI_COMPONENTS__", &ui_components_script(components))
+}
+
+/// Splices each linked component's `render_js` verbatim, then registers
+/// it into the template's `WIDGET_RENDERERS` map by name (rfcs/0009
+/// Phase B) — empty for `generate`'s own `components: &[]`, byte-for-
+/// byte the same `const WIDGET_RENDERERS = {};` output every build
+/// before this RFC already had.
+fn ui_components_script(components: &[crate::ui_plugin::NativeUiComponent]) -> String {
+    let mut out = String::new();
+    for c in components {
+        out.push_str(&c.render_js);
+        out.push('\n');
+        out.push_str(&format!(
+            "WIDGET_RENDERERS[{}] = {};\n",
+            serde_json::to_string(&c.name).expect("a component name is a plain string, always serializes"),
+            c.render_fn
+        ));
+    }
+    out
 }
 
 /// The same brand mark as `favicon_data_uri`, at a larger 96x96 size for

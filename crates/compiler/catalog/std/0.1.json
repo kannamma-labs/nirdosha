@@ -1,0 +1,169 @@
+{
+  "$id": "nirdosha://catalog/std/0.1",
+  "version": "0.1.0",
+  "description": "The closed vocabulary `emit-ui` already renders (crates/compiler/src/ui_gen.rs + ui_gen_template.html; see crates/compiler/UI_DSL_TODO.md's own build tracker). This file documents the existing manifest wire shape as data -- it does not change what ui_gen.rs emits or what typeck/grammar_export consume today (rfcs/0009 Phase 0). Field names below are the actual camelCase JSON keys `ui_gen.rs`'s `*_json` functions emit, not the internal Rust struct field names.",
+
+  "layout": {
+    "_comment": "ast.rs::LayoutNode, screen <Struct> { layout { ... } } -- ui_gen.rs::layout_json",
+    "row": {
+      "jsonType": "row",
+      "entries": { "gap": "number, optional -- CSS gap" },
+      "children": "LayoutNode[]"
+    },
+    "column": {
+      "jsonType": "column",
+      "entries": { "gap": "number, optional" },
+      "children": "LayoutNode[]"
+    },
+    "grid": {
+      "jsonType": "grid",
+      "entries": {
+        "columns": "number, required (typeck-enforced), default 1 if absent from JSON",
+        "gap": "number, optional"
+      },
+      "children": "LayoutNode[]",
+      "limitation": "no per-child column-span control -- each child occupies the next cell, disclosed narrowing not an oversight (ast.rs LayoutNode::Grid doc comment)"
+    },
+    "group": {
+      "jsonType": "group",
+      "entries": {
+        "title": "string, optional",
+        "collapsible": "bool, optional"
+      },
+      "children": "LayoutNode[]"
+    },
+    "tabs": {
+      "jsonType": "tabs",
+      "tabs": [{ "label": "string", "children": "LayoutNode[]" }]
+    },
+    "field": {
+      "jsonType": "field",
+      "field": "the resolved FieldSpec JSON (see `fieldSpec` below), embedded directly -- not a name the client looks up a second time",
+      "resolution": "by name against the screen's own fields, typechecked (typeck::check_screen_layout)"
+    },
+    "action": {
+      "jsonType": "action",
+      "action": "the resolved Action JSON (see `action` below), embedded directly",
+      "resolution": "by display label against the screen's declared or inferred actions, typechecked"
+    },
+    "widget": {
+      "jsonType": "widget",
+      "kinds": ["divider", "card", "timeline"],
+      "closedVocabulary": "typeck.rs::check_screen_layout rejects any kind not in this list AND not a linked ui_plugin::NativeUiComponent's name (rfcs/0009 Phase B, Checker.extra_widget_kinds) -- still closed either way, just extensible by whoever calls generate_with_ui_components in Rust source, never by a `.nir` program itself",
+      "entries": {
+        "source": "identifier, used by `timeline` to name the backing fn",
+        "title": "string, used by `card`",
+        "*": "every other key, generically, for a plugin-contributed kind's own render_js to read via node.entries.<key> (ui_gen.rs::widget_entry_json) -- literals/idents only (Str/Int/Float/Bool/Ident), anything else serializes as null"
+      }
+    }
+  },
+
+  "fieldSpec": {
+    "_comment": "ui_gen.rs::field_json -- one form field or table column",
+    "keys": {
+      "name": "string",
+      "control": "one of `controls`' keys below",
+      "required": "bool",
+      "label": "string -- a readonly field's *type* label (e.g. \"box i64\"); ignored for editable controls",
+      "displayLabel": "string|null -- screen { field <name> { label: \"...\" } } override; null keeps the raw field name",
+      "nested": "FieldSpec[] -- populated only when control == \"struct\", one level deep",
+      "options": "string[] -- populated only when control == \"select\"/\"searchable_select\": zero-payload enum variant names, in declaration order (this order is the field's ordinal meaning, e.g. RiskRating{Low,Medium,High})",
+      "requiredViewRoles": "string[]|null -- any-of role gate; empty/null = ungated",
+      "requiredViewClaim": "[string,string]|null",
+      "requiredEditRoles": "string[]|null",
+      "requiredEditClaim": "[string,string]|null",
+      "pattern": "string|null -- validation regex",
+      "min": "number|null",
+      "max": "number|null",
+      "render": "string|null -- passthrough render hint",
+      "selectTable": "string|null -- generic table-route backing a searchable_select",
+      "selectFn": "string|null -- fn backing a searchable_select instead",
+      "searchParam": "string, default \"q\"",
+      "selectPageSize": "number, default 25"
+    }
+  },
+
+  "controls": {
+    "_comment": "ui_gen.rs::build_field -- Ty -> control inference, or an explicit screen{field{control:...}} override. 7 base controls + searchable_select, per crates/compiler/UI_DSL_TODO.md's own count.",
+    "text": { "inferredFrom": "Ty::Str (default)", "editable": true },
+    "date": { "inferredFrom": "Ty::Str, when the field name looks date-like (is_date_like_field_name)", "editable": true },
+    "number": { "inferredFrom": "Ty::I64 | Ty::F64 | Ty::Dec128", "editable": true },
+    "checkbox": { "inferredFrom": "Ty::Bool", "editable": true },
+    "select": { "inferredFrom": "a zero-payload-only enum reference (the categorical/ordinal case)", "editable": true, "seeAlso": "fieldSpec.options" },
+    "searchable_select": { "inferredFrom": "never inferred -- only via explicit screen{field{control:\"searchable_select\"}}, backed by selectTable or selectFn", "editable": true },
+    "struct": { "inferredFrom": "a struct-typed field/param, one nesting level deep (build_field's depth cap)", "editable": true, "seeAlso": "fieldSpec.nested" },
+    "readonly": { "inferredFrom": "anything else: a payload-carrying enum, anything past the nesting cap, or any type with no editable mapping", "editable": false }
+  },
+
+  "action": {
+    "_comment": "ui_gen.rs::action_json -- one button/call, CRUD-inferred or screen{action{...}}-declared",
+    "keys": {
+      "kind": "\"list\" | \"create\" | \"update\" | \"delete\" | \"get\" | \"custom\" | \"source\" -- \"custom\" is a declared screen{action{...}}; \"source\" is a workspace panel's backing fn, reusing this shape purely for its gating fields",
+      "fn": "string -- backing fn name",
+      "requiresLogin": "bool",
+      "requiredRole": "string|null",
+      "requiredClaim": "[string,string]|null",
+      "badges": "string[] -- effect badges (e.g. \"network\") from effects::infer_effects, display-only, never gates anything",
+      "params": "FieldSpec[] -- the action's own call parameters, not assumed to match the subject struct's fields",
+      "label": "string|null -- set only when kind == \"custom\"; a CRUD action's label is derived client-side from kind",
+      "style": "\"filled\" | \"outlined\" | null -- null falls back to the client's per-kind default",
+      "confirm": "string|null -- when set, client must confirm before calling fn (delete always does this unconditionally already)",
+      "showResult": "bool -- only true on a fn returning Result(json, _), typeck-enforced (check_action_show_result)"
+    }
+  },
+
+  "charts": {
+    "_comment": "MetricRender (dashboard tiles/charts) and PanelRender (workspace panels) share this vocabulary. Rendered as inline SVG, zero external charting library -- ui_gen_template.html's own \"self-contained, no external deps\" stance.",
+    "bar_chart": { "appliesTo": ["metric"], "default": true, "dataShape": "[{label, value}] -- e.g. a chart_<name>() fn, or db_query aliasing columns label/value" },
+    "graph": { "appliesTo": ["metric", "panel"], "renderer": "renderForceGraph" },
+    "heatmap": { "appliesTo": ["metric", "panel"], "renderer": "renderHeatGrid" },
+    "timeline": { "appliesTo": ["metric", "panel", "widget"], "renderer": "renderTimelineList" },
+    "chart": {
+      "_comment": "rfcs/0009 Phase A -- a fifth, parameterized `visual { render: \"chart\" ... }` kind, additive alongside the four fixed shapes above (which are unaffected -- \"chart\" is not a replacement or a desugaring target for them). A bounded grammar-of-graphics subset: mark x encoding instead of a fixed shape per chart type.",
+      "appliesTo": ["metric (dashboard `visual`)", "panel (workspace `panel`)"],
+      "renderer": "renderGraphicsChart",
+      "mark": ["bar", "line", "area", "point", "arc", "rule"],
+      "encoding": {
+        "_comment": "one or more `encode <channel> { field, type, aggregate? }` blocks, DSL-side folded into visual's flat entries as \"encode.<channel>.<key>\" (parser.rs::parse_encode_channel_entries); manifest-side reassembled into this array (ui_gen.rs::parse_chart_config/metrics_json).",
+        "channels": ["x", "y", "color", "size", "theta"],
+        "type": ["quantitative", "nominal", "ordinal", "temporal"],
+        "aggregate": ["sum", "avg", "count", "min", "max"],
+        "field": "any string literal -- NOT cross-checked against a real column; the backing fn returns opaque json, there's no struct to resolve it against (a real, disclosed limit, not an oversight)"
+      }
+    }
+  },
+  "panelRenders": {
+    "_comment": "PanelRender's own default (a plain table) has no MetricRender equivalent -- a dashboard tile is never a table.",
+    "table": { "default": true, "renderer": "renderPanel (plain table)" }
+  },
+
+  "themeTokens": {
+    "_comment": "ui_gen.rs::Theme and friends -- MD3 tokens threaded from protobox's DesignSpec via --theme. Every field is optional; an absent field keeps the app's built-in default, byte-for-byte, for every app that predates a given token.",
+    "brand": "object<string,string>|null -- 11-step ramp, keys \"50\"..\"950\" (RAMP_STEPS), values #rrggbb",
+    "neutral": "object<string,string>|null -- same 11-step shape, page background/borders/text hierarchy",
+    "fonts": { "sans": "string", "display": "string", "mono": "string|null" },
+    "radius": { "control": "CSS length string, e.g. \"0.375rem\"", "card": "CSS length string" },
+    "shadowCard": "string|null -- a CSS box-shadow value",
+    "density": { "cardPadding": "number (px)", "gap": "number (px)", "controlHeight": "number (px)", "fontSize": "number (px)" },
+    "motion": {
+      "level": "string",
+      "interactionMs": "number", "entranceMs": "number",
+      "easing": "string",
+      "animations": "string[] -- subset of the fixed 4-name vocabulary [\"fade-in\",\"slide-up\",\"scale-in\",\"pop\"] the client's @keyframes block hardcodes",
+      "hoverLiftPx": "number", "hoverScale": "number", "pressScale": "number", "staggerMs": "number"
+    },
+    "darkMode": "\"none\" | \"media\" | \"class\" | \"always\" | null",
+    "layout": {
+      "appShell": "\"auto\" | \"sidebar\" | \"topbar\" | \"sidebar-topbar\" | \"minimal\" -- \"auto\"/absent keeps the fixed nav-rail + top-app-bar shell every pre-existing app already has",
+      "contentWidth": "\"auto\" | \"boxed\" | \"fluid\""
+    },
+    "typeScale": { "level": "string", "titlePx": "number", "heroPx": "number" },
+    "valueSafety": "every CSS value here is rejected outright if it contains any of < > { } -- theme_value_is_safe's own rule, the only thing standing between a theme file and breaking out of a <style> element"
+  },
+
+  "extensionPoints": {
+    "_comment": "rfcs/0009 Phase A and Phase B's *mechanism* are both built and verified (see charts.chart above and widget.kinds' closedVocabulary note) -- what remains open is named here, not silently dropped.",
+    "charts": "[DONE] `render: \"chart\"` (see charts.chart above), wired into both dashboard `visual { ... }` and workspace `panel { ... }` -- one shared typeck check (`check_encode_entry`), one shared client renderer (`renderGraphicsChart`).",
+    "components": "[DONE] a Rust crate hand-assembles a `ui_plugin::NativeUiComponent` slice and passes it to `typecheck_optional_main_with_ui_components`/`generate_with_ui_components` -- proven inline (crates/compiler/tests/ui_plugin.rs), against a real separate crate (crates/ui-plugin-example-sparkline + crates/compiler/tests/ui_plugin_examples.rs), and via real Cargo-metadata auto-discovery (`ui_plugin::discover_components`, `nirdosha emit-ui --manifest-path`/an auto-detected Cargo.toml next to the .nir file -- crates/compiler/tests/ui_plugin_discovery.rs spawns the real binary against a scratch project depending on the reference crate, no hand-assembled Rust slice at all), all screenshot- or CLI-output-verified for real. [OPEN, and NOT the same problem as the above] Cargo-driven discovery for *native builtins* (rfcs/0008 Phase 3) remains unbuilt -- a UI component crosses no ABI boundary (three plain strings, one a JS source path) so `cargo metadata` + `std::fs::read_to_string` was the whole mechanism; a native builtin's compiled `.a` bytes still need real building and linking, a harder, separate problem rfcs/0009's own original text incorrectly assumed would share one discovery pass with this one. [OPEN] a component only ever contributes a `layout` widget kind today, not a full catalog-schema entry (typed `props`, a chart/control/action type, a GBNF fragment, crate-name+version provenance in this file) -- rfcs/0009's original, larger sketch for `NativeUiComponent`."
+  }
+}

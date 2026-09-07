@@ -41,6 +41,19 @@ signal-hook = { version = "0.4", default-features = false }
 [features]
 dist = ["z3/vendored"]
 
+# rfcs/0009-ui-catalog-extensibility.md Phase B's real, separately-
+# compiled reference UI component -- `tests/ui_plugin_examples.rs`'s
+# own dependency, mirroring how `tests/native_plugin_examples.rs`
+# proves `plugin-example-native-shout`/`plugin-example-native-kv` work
+# as their own READMEs claim (that pair is proven via a real `cargo
+# build --release -p <crate>` + linked `.a`, since a native builtin
+# crosses a real ABI boundary; this one is proven via an ordinary
+# `[dev-dependencies]` edge instead, since it only hands over plain
+# constants a consumer reads at its own build time — no ABI, no
+# staticlib, nothing to link).
+[dev-dependencies]
+nirdosha-ui-plugin-example-sparkline = { path = "../ui-plugin-example-sparkline" }
+
 # `overflow-checks = true` for release builds used to live here, back
 # when this file was itself the workspace root. It's now at the real
 # workspace root (../../Cargo.toml) -- Cargo only honors `[profile.*]`
