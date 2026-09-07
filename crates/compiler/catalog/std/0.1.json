@@ -120,7 +120,7 @@
     "timeline": { "appliesTo": ["metric", "panel", "widget"], "renderer": "renderTimelineList" },
     "chart": {
       "_comment": "rfcs/0009 Phase A -- a fifth, parameterized `visual { render: \"chart\" ... }` kind, additive alongside the four fixed shapes above (which are unaffected -- \"chart\" is not a replacement or a desugaring target for them). A bounded grammar-of-graphics subset: mark x encoding instead of a fixed shape per chart type.",
-      "appliesTo": ["metric (dashboard `visual` only -- not yet wired into workspace `panel`)"],
+      "appliesTo": ["metric (dashboard `visual`)", "panel (workspace `panel`)"],
       "renderer": "renderGraphicsChart",
       "mark": ["bar", "line", "area", "point", "arc", "rule"],
       "encoding": {
@@ -163,7 +163,7 @@
 
   "extensionPoints": {
     "_comment": "rfcs/0009 Phase A and Phase B's *mechanism* are both built and verified (see charts.chart above and widget.kinds' closedVocabulary note) -- what remains open is named here, not silently dropped.",
-    "charts": "[DONE, mechanism] `render: \"chart\"` (see charts.chart above). [OPEN] the same mark/encoding config isn't wired into workspace `panel { ... }` yet, only dashboard `visual { ... }` -- PanelRender's own closed set is untouched.",
-    "components": "[DONE, mechanism] a Rust crate hand-assembles a `ui_plugin::NativeUiComponent` slice and passes it to `typecheck_optional_main_with_ui_components`/`generate_with_ui_components` (crates/compiler/tests/ui_plugin.rs is the real, screenshot-verified proof). [OPEN] Cargo-metadata-tagged automatic discovery (`kind = \"nir-ui-component\"` in a dependency's own Cargo.toml, `nirdosha build`/`emit-ui` finding+linking it with no hand-assembled Rust slice) is explicitly not built -- shares one open discovery problem with rfcs/0008 Phase 3 (native builtin auto-discovery) rather than inventing a second, parallel mechanism. [OPEN] a component only ever contributes a `layout` widget kind today, not a full catalog-schema entry (typed `props`, a chart/control/action type, a GBNF fragment, crate-name+version provenance in this file) -- rfcs/0009's original, larger sketch for `NativeUiComponent`."
+    "charts": "[DONE] `render: \"chart\"` (see charts.chart above), wired into both dashboard `visual { ... }` and workspace `panel { ... }` -- one shared typeck check (`check_encode_entry`), one shared client renderer (`renderGraphicsChart`).",
+    "components": "[DONE, mechanism] a Rust crate hand-assembles a `ui_plugin::NativeUiComponent` slice and passes it to `typecheck_optional_main_with_ui_components`/`generate_with_ui_components` -- proven both inline (crates/compiler/tests/ui_plugin.rs) and against a real, separate crate (crates/ui-plugin-example-sparkline + crates/compiler/tests/ui_plugin_examples.rs), both screenshot-verified in a browser. [OPEN] Cargo-metadata-tagged automatic discovery (`kind = \"nir-ui-component\"` in a dependency's own Cargo.toml, `nirdosha build`/`emit-ui` finding+linking it with no hand-assembled Rust slice/dev-dependency) is explicitly not built -- shares one open discovery problem with rfcs/0008 Phase 3 (native builtin auto-discovery) rather than inventing a second, parallel mechanism. [OPEN] a component only ever contributes a `layout` widget kind today, not a full catalog-schema entry (typed `props`, a chart/control/action type, a GBNF fragment, crate-name+version provenance in this file) -- rfcs/0009's original, larger sketch for `NativeUiComponent`."
   }
 }
