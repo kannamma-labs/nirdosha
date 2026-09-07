@@ -8941,6 +8941,26 @@ fn build_impl(
     // Unix-only.
     #[cfg(unix)]
     clang_cmd.arg("-lm");
+    // Found by a real macOS CI failure, not anticipated in advance:
+    // `native-tls`'s macOS backend (`security-framework`, pulled in
+    // for `nir_https_get`/`nir_https_post` — `Ty::Db`'s `native-tls`
+    // dependency comment) links against `Security.framework`/
+    // `CoreFoundation.framework` (`AuthorizationCreate`/`CFArrayCreate`/
+    // etc.) — real macOS system frameworks clang does **not** auto-link
+    // when the input is a bare `.ll`/staticlib pair rather than actual
+    // Objective-C/C source (unlike compiling a `.m` file, where the
+    // default SDK sysroot linking pulls these in implicitly). Every
+    // other affine-handle kernel in `RUNTIME_KERNELS_LIB` links fine
+    // without them, so this stayed invisible until a real compiled
+    // binary using the TLS path was actually linked on a real macOS
+    // runner — the same "found by testing, not review" discipline this
+    // file's own `-lm`/`NATIVE_STATIC_LIBS` comments already document
+    // for their own platforms. Harmless to pass unconditionally even
+    // for a program that never calls `https_get`/`https_post` (same
+    // reasoning as `-lm` above) — the linker only pulls in what's
+    // actually referenced.
+    #[cfg(target_os = "macos")]
+    clang_cmd.arg("-framework").arg("Security").arg("-framework").arg("CoreFoundation");
     // Windows has no equivalent hand-picked single flag — `std::net`
     // (the `nir_tcp_*` kernels) needs `ws2_32.lib`, and other stdlib
     // pieces need their own system libs beside it, so the captured,
