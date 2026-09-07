@@ -16,6 +16,24 @@ rediscovered per integration. Everything below is either shipped and
 verified today, or explicitly marked as an open gap — no aspirational
 claims.
 
+> **Drift note (2026-09-07, code as truth).** This entire pipeline
+> (§1-§9) is built around `nirdosha serve` — the compiled binary has no
+> `serve` subcommand any more. `interpreter.rs` and `serve.rs`
+> (and `dbconn.rs`/`durability.rs`/`observability.rs`/`pool.rs`, the
+> rest of what `serve` needed) were deleted entirely on 2026-09-06
+> (`refactor: remove tree-walking interpreter and its only consumers`
+> — three days after this doc was last written). Current subcommands
+> are `init`/`build`/`emit-llvm`/`emit-ast`/`emit-ui`/`emit-catalog`/
+> `gen-crud` only. Concretely: `nirdosha init`'s scaffolded `run.sh`
+> (§2) will not run, there is no live `/api/<fn>` or
+> `/_nirdosha/table/<snake>` route (§4-§6) for protobox's QA harness or
+> a generated app's own UI to call, and role/provider-config live-edit
+> (§4) has nothing to point at. Treat §1-§9 as the target contract for
+> when a compiled or revived serving story exists, not as what
+> `nirdosha init && ./run.sh` produces today — a real, unresolved gap
+> worth surfacing to whoever owns the protobox integration, not
+> something this pass can silently paper over.
+
 ## 1. The pipeline, end to end
 
 ```

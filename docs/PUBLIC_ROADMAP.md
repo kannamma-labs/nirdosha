@@ -200,11 +200,17 @@ above)
   (`docs/LANGUAGE.md` §7/§10, `rfcs/0007-apm-runtime-kernel.md` §8).
   Word-sized payloads/arguments/results only; `sandbox` is unaffected,
   still open below.
-- [DONE] Scalar-only native plugin calls (Kind A plugins) —
+- [DONE] Native plugin calls (Kind A plugins) —
   `plugin::NativePluginBuiltin`/`codegen::build_with_native_plugins`
   (`rfcs/0005-plugin-boundary-safety-and-performance.md` §3), ~250x
-  faster than interpreted plugin dispatch for this subset; `str`/
-  aggregate-typed plugin builtins still interpreter-only
+  faster than interpreted plugin dispatch ever was for the scalar
+  subset; widened past scalars to `str`, `handle(Kind)`, and
+  `&handle(Kind)` (`rfcs/0008-native-plugin-abi-widening.md` Phase 1,
+  two real reference crates: `crates/plugin-example-native-{shout,kv}`)
+  — there is no interpreter left for anything to fall back to.
+  Aggregate (`Vector`/`Matrix`)-typed plugin builtins remain
+  unsupported; Cargo-driven auto-discovery of a plugin crate is still
+  open (`rfcs/0008` Phase 3).
 - [DONE] The compiled-path runtime kernels (`det`/`inv`/`tcp`/`file`/...)
   moved from a bare, dependency-free `rustc` invocation to a real Cargo
   package (`crates/runtime-kernels/`, `docs/adr/0003-runtime-kernels-

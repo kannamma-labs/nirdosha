@@ -13,6 +13,21 @@ notification actions and external triggers, generalizing the
 `status TEXT` + hand-rolled `CREATE TABLE`/append-only-log pattern every
 one of those processes was independently re-deriving.
 
+> **Drift note (2026-09-07, code as truth).** `interpreter.rs` and
+> `serve.rs` — the two things "the interpreter" and "`nirdosha serve`'s
+> automatic RPC exposure" below refer to — were deleted entirely on
+> 2026-09-06 (`refactor: remove tree-walking interpreter and its only
+> consumers`). `workflow_lower.rs` itself is untouched and still
+> desugars `workflow` blocks into ordinary `fn`/`enum`/`struct`
+> declarations, so that part of the finding below still holds — but
+> those declarations now only flow through the *compiled* path
+> (`codegen.rs`), which doesn't yet lower `transact`/`db`/`json`/`http`/
+> notification-sending calls a real workflow body needs (see
+> `docs/TRANSACT.md`'s own drift note). There is currently no live
+> `POST /api/<fn>` RPC surface at all. Treat the "shipped" claims below
+> as true of the removed interpreter build, not the current
+> compiled-only binary.
+
 The finding that matters, same shape as `docs/TRANSACT.md`'s own: **this
 doesn't need a new runtime.** `workflow` is a compiler-stage desugaring —
 every `workflow` block becomes ordinary `fn`/`enum`/`struct` declarations

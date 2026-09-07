@@ -12,6 +12,19 @@ oversold. Where a property is narrower than the ideal, that's said
 plainly, the same way `docs/PHASE0.md`'s own "Twelfth update" discloses the
 `recv`-hang gap in the deadlock-freedom claim rather than hiding it.
 
+> **Drift note (2026-09-07, code as truth).** This document was checked
+> against `interpreter.rs`/`serve.rs` on 2026-08-27 — both were deleted
+> entirely on 2026-09-06 (`refactor: remove tree-walking interpreter
+> and its only consumers`; see `docs/VALUES.md`'s own account of why).
+> Every row in the table immediately below, and the RBAC/dispatch claim
+> in "Top 5 reason" #4, describe that now-removed runtime — there is
+> currently no `nirdosha serve`, so none of "ready to use as-is, today"
+> is actually available today. `transact` (#1) and `workflow` (#2) are
+> similarly stranded — see `docs/TRANSACT.md`/`docs/WORKFLOW.md`'s own drift
+> notes. Reasons #3 and #5 (single-binary footprint, compile-time
+> memory/overflow safety) still hold: both describe `codegen.rs`'s
+> compiled path, which the interpreter removal didn't touch.
+
 ## Ready to use as-is, today
 
 Before the comparative case: these are standing capabilities, already

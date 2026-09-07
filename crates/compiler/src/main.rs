@@ -56,17 +56,18 @@ fn print_usage() {
 }
 
 /// Load (resolving any `use "..."` — `docs/ROADMAP.md` Track F, F2 piece 3)
-/// -> typecheck -> ownership-check, shared by `build` and `emit-llvm` —
-/// same static gates `nirdosha::run` applies before ever interpreting,
+/// -> typecheck -> ownership-check, shared by `build` and `emit-llvm`,
 /// applied here before ever generating code. Codegen's own
 /// `check_supported` (a third, narrower gate — signed-integer/bool/unit
 /// only, no `box`/`&`/`*`) runs separately, inside `codegen::build`/
 /// `emit_llvm_ir` themselves, since it's specific to this backend, not a
 /// property of the language generally. Returns the entry file's own
-/// source alongside the (possibly multi-file-merged) `Program` — the
-/// one caller that still needs it directly is `cmd_sandbox_worker`
-/// (`Interpreter::new`'s own `source` argument); every other caller
-/// just uses the `Program`.
+/// source alongside the (possibly multi-file-merged) `Program` — a
+/// holdover from when `cmd_sandbox_worker` (`Interpreter::new`'s own
+/// `source` argument) was a real caller; that command was removed along
+/// with the interpreter (see `typecheck_and_own_optional_main_with_ui_components`'s
+/// doc comment below), and both current callers (`cmd_build`/
+/// `cmd_emit_llvm`) discard it (`let (program, _src) = ...`).
 fn typecheck_and_own(path: &str) -> Result<(nirdosha::ast::Program, String), String> {
     typecheck_and_own_impl(path, true, &[])
 }

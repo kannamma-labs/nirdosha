@@ -8,6 +8,19 @@ the codebase or is explicitly planned in docs/Nirdosha_Unified_Plan.md.
 Nothing is aspirational hand-waving -- if it's not built yet, it
 says so and references the phase that delivers it.
 
+> **2026-09 correction.** The tree-walking interpreter
+> (`interpreter.rs`) and `serve.rs` were deleted entirely in a later
+> session (see `docs/API_TRUST_MODEL.md`'s own provenance note) --
+> `nirdosha` is compiled-path-only now (`init`/`build`/`emit-llvm`/
+> `emit-ast`/`emit-ui`/`emit-catalog`/`gen-crud`, no bare `run`, no
+> `serve`, no `--sandbox-worker`). That breaks this document's
+> grounding for **B1** (wraps the now-gone `nirdosha::run`/
+> `run_diagnostic`) and the `--format=json` flag referenced below (also
+> removed with the interpreter) -- both marked inline where they occur.
+> Everything else here (validate_fragment, codegen's `check_supported`,
+> the sandbox/stop *AST support*, refine.rs/smt.rs) is unaffected or
+> noted separately.
+
 ------------------------------------------------------------------------
 WHAT PROBLEM THESE APIs SOLVE
 ------------------------------------------------------------------------
@@ -37,9 +50,15 @@ The hardest things in the LLM-code-generation world today:
 Nirdosha's existing architecture addresses each of these:
 
   1. LL(1) grammar + planned GBNF export → constrained decoding
-  2. --format=json → structured diagnostics (already shipped)
+  2. --format=json → structured diagnostics (removed with the
+     interpreter -- see the 2026-09 correction above; a compiled-path
+     replacement would need new work, not a wrap of existing code)
   3. refine.rs + smt.rs → SMT-discharged bounds proofs (shipped)
-  4. sandbox/stop → real OS process isolation (shipped)
+  4. sandbox/stop → parses and typechecks, but has no working runtime
+     path today -- codegen explicitly rejects it
+     (`codegen.rs`: "codegen doesn't support `sandbox` yet") and the
+     interpreter that used to run it is gone; not "shipped" as an
+     isolation mechanism right now
   5. rand_seed → deterministic RNG (shipped)
   6. validate_fragment → type-check expression fragments in
      context (shipped)
@@ -91,8 +110,12 @@ Auth:        none (local tool -- not a multi-tenant platform)
 
 The server is a thin HTTP wrapper around the compiler crate
 (`crates/compiler/src/lib.rs`). It links the compiler as a library and
-exposes its existing functions (run, run_diagnostic,
-validate_fragment, typecheck, check_ownership) as HTTP endpoints.
+would expose its existing functions as HTTP endpoints --
+`typeck::validate_fragment`, `typeck::typecheck`,
+`ownership::check_ownership` still exist (module-qualified, not
+crate-root re-exports). `run`/`run_diagnostic` do **not** exist any
+more: the interpreter they belonged to was deleted (see the 2026-09
+correction above), so B1 below has no live function left to wrap.
 
 ------------------------------------------------------------------------
 A. CODE GENERATION & VALIDATION
@@ -427,6 +450,18 @@ B. EXECUTION & SIMULATION
 
 ================ B1. POST /v1/run ========================
 
+**2026-09: no longer buildable as specified.** This wrapped the
+tree-walking interpreter's `nirdosha::run(src)`/`run_diagnostic(src)`,
+and that interpreter was deleted entirely (see the 2026-09 correction
+at the top of this document). There is no compiled-path equivalent of
+"run this arbitrary program and print its output" today -- `build`
+produces a native binary you then execute yourself, which is a
+different shape (a build step in between, no in-process diagnostics
+capture). Reviving this endpoint means designing a compiled-execution
+equivalent, not restoring a wrapper.
+
+Original design (kept for reference, no longer grounded in shipped code):
+
 Run a Nirdosha program via the tree-walking interpreter.
 Wraps: `nirdosha::run(src)` or `nirdosha::run_diagnostic(src)`.
 
@@ -466,9 +501,12 @@ Response (200 OK, runtime error with format=json):
 ================ B2. POST /v1/run-sandboxed ===============
 
 Run a Nirdosha program inside an isolated OS process.
-Uses the existing `sandbox`/`stop` primitives (shipped in commit
-579c1bc, docs/SANDBOXING.md layer 1) to fork a child process that
-re-execs the nirdosha binary.
+**2026-09: also no longer buildable as specified** -- `sandbox`/`stop`
+parse and typecheck, but the interpreter machinery that actually forked
+and re-exec'd a child process (`SandboxChild`, `spawn_sandbox`) lived in
+`interpreter.rs` and was deleted with it; `codegen.rs` explicitly
+rejects `sandbox` as unsupported today. Same status as B1: needs new
+compiled-path work, not a wrap.
 
 THIS IS THE HARD THING IT MAKES EASY:
   Running LLM-generated code safely is the #1 blocker for autonomous
@@ -1154,17 +1192,25 @@ the code the LLM writes -- which is the gap nobody has shipped yet.
 IMPLEMENTATION NOTES
 ------------------------------------------------------------------------
 
-The server is a thin HTTP wrapper. It links the compiler crate
-as a library (crates/compiler/src/lib.rs already exposes run, run_diagnostic,
-validate_fragment, Diagnostic, RunFailure). The additional work:
+The server is a thin HTTP wrapper. It links the compiler crate as a
+library -- but as of the 2026-09 interpreter removal,
+`crates/compiler/src/lib.rs` only re-exports `Diagnostic` at the crate
+root; `validate_fragment` is `typeck::validate_fragment`, and `run`/
+`run_diagnostic`/`RunFailure` no longer exist at all (B1/B2 above are
+no longer just "wire it up"). The additional work:
 
   1. HTTP server (axum or actix-web, ~200 lines of route handlers)
   2. Grammar-constrained decoding integration (calls an external
      OpenAI-compatible endpoint with the GBNF grammar -- Phase 2 dep)
   3. Benchmark harness scoring loop (Phase 5 scaffold exists in crates/bench/)
   4. Provenance hashing (sha256 of source + AST, straightforward)
+  5. A compiled-path execution story for B1/B2 (see those sections) --
+     the interpreter they wrapped is gone, so this is new design work,
+     not a wrap of existing code
 
-No compiler internals change. The compiler already has every
-function these APIs need. The server just calls them.
+Most compiler internals this spec needs (validate_fragment, typecheck,
+check_ownership, codegen's check_supported) are unchanged. B1/B2 are
+the exception: the server can no longer "just call" an existing
+function for them.
 
 ========================================================================

@@ -43,14 +43,19 @@ list (`nirdosha-plugin-rot13`/`-mysql`/`-activemq`/`-cassandra`/
 depended on the tree-walking interpreter's own `PluginBuiltin`/
 `PluginFn` dispatch, which no longer exists (the interpreter was
 deleted in a separate pass the same session). `NativePluginBuiltin`
-(the compiled-path plugin ABI these examples never targeted, a
-different and narrower scalar-only shape) survives and is real —
-`crates/compiler/tests/native_plugin_codegen.rs` exercises it directly
-— but nothing currently plugs into it: no reference plugin crate
-implements it, and `nirdosha build`'s own CLI has no flag to load a
-native plugin at all yet (`build_with_native_plugins` is a library
-entry point with no wired-up caller). This table's real purpose is
-unchanged — the template a genuine plugin's listing follows, and the
+(the compiled-path plugin ABI these examples never targeted, since
+widened past scalars to `str`/`handle(Kind)` by
+rfcs/0008-native-plugin-abi-widening.md Phase 1) survives and is real —
+`crates/compiler/tests/native_plugin_codegen.rs` exercises it directly,
+and two in-repo reference crates now implement it end to end
+(`crates/plugin-example-native-shout`, `crates/plugin-example-native-kv`,
+proven via `crates/compiler/tests/native_plugin_examples.rs`) — but
+`nirdosha build`'s own CLI still has no flag to load a native plugin at
+all (`build_with_native_plugins` is a library entry point with no
+wired-up CLI caller; Cargo-driven auto-discovery is rfcs/0008's own
+still-open Phase 3), so neither reference crate is a candidate for this
+table yet — there's no app-facing way to depend on one. This table's
+real purpose is unchanged — the template a genuine plugin's listing follows, and the
 day-one gate a future auto-discovery step (RFC 0001) requires — it
 just currently has zero rows to show for it.
 

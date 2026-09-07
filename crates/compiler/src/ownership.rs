@@ -1,17 +1,17 @@
 //! Static move-checker — docs/goal.md row 1's actual content ("no GC, no manual
 //! `free()`"). Runs after `typeck.rs`, over the same AST.
 //!
-//! **Why this doesn't matter for *this* interpreter's safety, and why it's
-//! built anyway.** `interpreter.rs` clones a `Value` on every variable
-//! read (`Env::get`), so right now, aliasing a `box` can't actually corrupt
-//! anything — two "owners" just end up with two independent Rust-owned
-//! trees. A real (future, LLVM-compiled, arena/region-based) backend
-//! wouldn't clone; it would hand out the same address twice, and a
-//! use-after-move would be a real dangling pointer or double-free. This
-//! pass proves, statically, that no well-typed Nirdosha program ever does
-//! that — the proof a real backend needs already exists before there's a
-//! real backend to need it, which is the honest way to read "row 1 is
-//! partially done": the discipline is proved, not yet load-bearing.
+//! **Why this mattered even before it was load-bearing, and why it's
+//! load-bearing now.** This pass predates `codegen.rs` (the LLVM
+//! backend): back when the now-deleted `interpreter.rs` cloned a `Value`
+//! on every variable read (`Env::get`), aliasing a `box` couldn't
+//! actually corrupt anything — two "owners" just ended up with two
+//! independent Rust-owned trees, so this pass's proof was real but not
+//! yet load-bearing. `codegen.rs` is the "future backend" that paragraph
+//! used to gesture at: it doesn't clone, it hands out the same address
+//! twice (`emit_affine_free`'s real `nir_free` call is driven directly by
+//! this pass's `FreeMap`), so a use-after-move here would now be a real
+//! dangling pointer or double-free if this pass ever let one through.
 //!
 //! **The rule.** Every type is either *affine* (`Ty::is_affine` — currently
 //! only `Ty::Box`) or freely copyable (everything else). Using an

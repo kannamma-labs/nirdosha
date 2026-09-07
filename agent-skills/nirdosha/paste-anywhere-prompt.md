@@ -737,9 +737,10 @@ fn main() requires(public) {
 ```
 
 Naming `list_<struct>`/`create_<struct>`/`update_<struct>`/
-`delete_<struct>` functions like this is also what `nirdosha emit-ui`/
-`nirdosha serve` use to auto-generate a full CRUD web UI with zero
-extra syntax — see the `screen`/`dashboard` DSL in `docs/LANGUAGE.md` §11 if
+`delete_<struct>` functions like this is also what `nirdosha emit-ui`
+uses to auto-generate a full CRUD web UI with zero extra syntax (a
+static HTML file — there is no `nirdosha serve`/compiled serving mode
+anymore, the interpreter it depended on was deleted) — see the `screen`/`dashboard` DSL in `docs/LANGUAGE.md` §11 if
 you need to customize that generated UI (custom labels, field
 validation, role-gated visibility, dashboard tiles/charts).
 
@@ -760,7 +761,7 @@ no warning** — nothing points at the missing screen; it's simply absent
 from the nav rail. This is the exact same "compiles clean, wrong at
 runtime" hazard class as `db_query`'s array-result footgun above, just
 one layer up (UI generation, not the interpreter) — if a struct you
-expect to see a screen for doesn't show up in `nirdosha serve`'s nav,
+expect to see a screen for doesn't show up in `nirdosha emit-ui`'s nav,
 check every one of its CRUD function names against this convention
 before assuming something else is wrong.
 
@@ -784,8 +785,8 @@ Target } ... }` — durable, named states with `on <Event> -> <Target>`
 transitions, desugared into ordinary `fn`s (`start_<name>`,
 `advance_<name>`, etc.), so it needs no new runtime. `state { owner:
 role("...") }` names who may fire that state's outgoing events —
-checked live, per instance, not statically — and `nirdosha serve`/
-`emit-ui` generate a "Workflows" queue screen from it automatically
+checked live, per instance, not statically — and `nirdosha emit-ui`
+generates a "Workflows" queue screen from it automatically
 (each role sees only what's waiting on them, plus a "my requests" tab
 for whoever started an instance and an audit-trail "history" view), no
 extra syntax needed. See `docs/WORKFLOW.md` for the full construct.
@@ -807,30 +808,37 @@ verify before presenting code as final:
 
 ```sh
 nirdosha emit-ui file.nir -o /tmp/out.html   # full typecheck + ownership check, no side effects (doesn't run main())
-nirdosha file.nir --format=json              # actually runs it; structured Diagnostic JSON on any failure
+nirdosha build file.nir -o /tmp/out && /tmp/out   # actually compiles and runs it -- native binary, no interpreter
 ```
+
+**There is no interpreter anymore, and no `--format=json` flag.** An
+older workflow ran `nirdosha file.nir --format=json` to execute a
+program directly; that mode was deleted along with the tree-walking
+interpreter, and there is no fallback for it (the panic-on-
+`DuplicateConstructor` gap this section used to warn about was specific
+to that deleted flag, and no longer applies to anything reachable).
+`nirdosha build` only compiles what `codegen.rs::check_supported`
+accepts — `db`/`json`/`mq`/`transact`/`sandbox` and most Row 12 identity
+builtins (`oidc_validate_token`, `extract_claim`, ...) aren't in that
+set yet, so a program using any of them will fail `build`/`emit-llvm`
+with a named "unsupported" reason (`docs/LANGUAGE.md` §10's
+compiled-vs-not table) — that's not a bug to work around, it's today's
+real, disclosed boundary of what actually runs. `requires(role/claim:
+...)`/`acquire`/`check_role` **do** compile and run for real.
 
 **`nirdosha emit-ast file.nir` does *not* typecheck** — it only
 lexes/parses, by deliberate design (so a program that doesn't yet
 typecheck can still be inspected). A file that passes `emit-ast` can
 still be full of type errors — don't treat a clean `emit-ast` as "this
-compiles." Use `emit-ui` for a real typecheck-only pass, or just run it
-with `--format=json` if side effects (a real DB write, a real HTTP
-call) are acceptable for this check.
+compiles." Use `emit-ui` for a real typecheck-only pass that also
+accepts programs `build` can't yet run end to end.
 
-A `Diagnostic` (from `--format=json`) or a `type error: ...` line (from
-`emit-ui`) names the exact rule violated — read it and fix the named
-issue rather than guessing. **Known gap:** on at least one type error
-kind (`DuplicateConstructor` — two enums, or an enum and the prelude's
-`CurrencyCode`/`UnitCode`, declaring the same variant name — rule 1's
-last paragraph), `--format=json` itself panics instead of emitting the
-`Diagnostic`, instead of the failure it's supposed to report cleanly.
-If `--format=json` produces no JSON at all and dies with a Rust panic,
-re-run plain `nirdosha emit-ui file.nir` (no `--format=json`) — the
-same error still reports fine there. If you don't have shell access (a
-plain chat interface), self-check your output line-by-line against the
-15 rules above before presenting it, and say plainly that it hasn't
-been run through the real compiler.
+A `type error: ...`/`ownership error: ...` line (from `emit-ui`) or an
+`unsupported: ...` line (from `build`/`emit-llvm`) names the exact rule
+violated — read it and fix the named issue rather than guessing. If you
+don't have shell access (a plain chat interface), self-check your
+output line-by-line against the 15 rules above before presenting it,
+and say plainly that it hasn't been run through the real compiler.
 
 ## Where to go deeper
 

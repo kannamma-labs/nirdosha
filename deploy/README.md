@@ -1,5 +1,21 @@
 # Deploying nirdosha to Kubernetes
 
+> **2026-09 — this deployment path currently has no live server to
+> deploy.** Every mechanism below (the runtime image's `ENTRYPOINT
+> ["nirdosha"]` running as a long-lived Pod, `--transact-log`/
+> `--workflow-log`, the `/_nirdosha/table/<name>` route, `/healthz`/
+> `/readyz`) assumes a working `nirdosha serve`. The interpreter and
+> `serve.rs` were deleted entirely (`docs/API_TRUST_MODEL.md` §4a) —
+> there is no `serve` subcommand anymore (it errors "unknown
+> subcommand"), and `nirdosha build`/`emit-ui` (the CLI's replacements)
+> produce a native binary or a static HTML file, neither of which is a
+> long-running server a Kubernetes Deployment/StatefulSet + Service +
+> Ingress has anything to route to. This file, `docs/KUBERNETES.md`, and
+> `docs/KUBERNETES_ADVANTAGE.md` describe a real design that shipped
+> before the interpreter removal and hasn't been revisited since — treat
+> the rest of this document as a design record to reconcile with the
+> current CLI, not a working deployment guide today.
+
 Three ways in, all rendering the same shape (see `../docs/KUBERNETES.md` for
 the compliance matrix these implement and `../docs/KUBERNETES_ADVANTAGE.md`
 for the case for nirdosha over a classic two-tier stack on k8s):

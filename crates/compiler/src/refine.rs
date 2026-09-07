@@ -27,14 +27,18 @@
 //! kind of place a soundness bug hides, and a wrong proof is worse than
 //! no proof, so it's left as "unknown" (full range) rather than risked.
 //!
-//! **Not wired to elide the runtime check.** `interpreter.rs` keeps every
-//! Tier-2 check exactly as before, proven or not. Eliding a check only
-//! pays off once there's a real ahead-of-time backend generating a binary
-//! that runs faster without it — there's no codegen yet (docs/goal.md §3's
-//! Backend layer), so removing the interpreter's redundant check now
-//! would only remove a safety net for zero benefit. This pass's output —
-//! `RefineReport` — is the real, standalone deliverable: a genuine static
-//! proof, ready for a future backend to act on.
+//! **Still not wired to elide anything, but for a different reason than
+//! originally written here.** The "there's no codegen yet" framing this
+//! paragraph used to give is stale — `codegen.rs` (LLVM, the interpreter's
+//! deleted replacement) is now the only backend, and it *does* elide
+//! `guard_in_range`/`guard_index_in_bounds` traps proven safe — just from
+//! `smt.rs`'s `SmtReport`, not from this module's `RefineReport`. Nothing
+//! in `main.rs`/`codegen.rs` calls `refine::analyze` at all today; this
+//! pass runs only under its own tests (`tests/refine.rs`). It remains in
+//! the tree as the documented, Z3-independent proof technique (see
+//! `smt.rs`'s own module doc), but "wire it in as the fallback when Z3
+//! isn't available" — the reason given below for keeping it — was never
+//! actually built; there is no such fallback switch in the real pipeline.
 //!
 //! **Loops: widen, don't iterate to a fixed point.** A `while` body might
 //! run any number of times, so any binding it reassigns is widened to its

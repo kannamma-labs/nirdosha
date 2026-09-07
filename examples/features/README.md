@@ -1,10 +1,22 @@
 # Nirdosha — feature catalogue
 
-One `.nir` file per language feature, each independently runnable
-(`nirdosha <file>`) and verified against `target/debug/nirdosha`. Every
-file is self-contained — no external services required, though a few
-(25/28/47) degrade gracefully (a real `Err`, not a crash) when Redis or
-network access isn't available.
+One `.nir` file per language feature. Every file is self-contained — no
+external services required, though a few (25/28/47) degrade gracefully
+(a real `Err`, not a crash) when Redis or network access isn't
+available.
+
+**2026-09 — there is no interpreter anymore, so "runnable" no longer
+means what it used to here.** The tree-walking interpreter and
+`nirdosha <file>`/`nirdosha serve` were deleted entirely (`docs/
+API_TRUST_MODEL.md` §4a). Only a file whose constructs are all in
+`codegen.rs::check_supported`'s accepted set (`docs/LANGUAGE.md` §10's
+compiled-vs-not table) can still be compiled and actually run today
+(`nirdosha build <file> -o out && ./out`); every file above can still be
+parsed/typechecked (`nirdosha emit-ast`/`emit-ui`), but a file built
+around an interpreter-only construct (`db`/`json`/`mq`/`sandbox`/`tcp`/
+`file`/`transact`/most Row 12 identity builtins — most of the numbered
+list below) no longer executes through any current `nirdosha` command
+at all, and isn't re-verified by this repo's own CI as of this note.
 
 `45_module_namespacing.nir` `use`s `45_module_namespacing_helper.nir` —
 that's the one file here meant to be read, not run, on its own.
@@ -57,8 +69,8 @@ that's the one file here meant to be read, not run, on its own.
 | 43 | `43_layout.nir` | `layout { row/column/grid/group/tabs/divider/timeline }` |
 | 44 | `44_module_nav_grouping.nir` | `module "Display Name" { ... }` — legacy nav grouping, not scoping |
 | 45 | `45_module_namespacing.nir` (+ `..._helper.nir`) | `module Ident { pub ... }` real namespacing + `use` |
-| 46 | `46_db_schema_and_role_mapping_conventions.nir` | `serve --db` auto schema migrations + `RoleMapping` identity cache (pure convention, no new syntax) |
-| 47 | `47_external_service_boundary.nir` | plugin-backed `db`/`mq` by URL scheme (`db_connect`/`mq_connect_via`) |
+| 46 | `46_db_schema_and_role_mapping_conventions.nir` | the (now-deleted, `serve --db`-only) auto schema migrations + `RoleMapping` identity cache convention (pure convention, no new syntax) |
+| 47 | `47_external_service_boundary.nir` | plugin-backed `db`/`mq` by URL scheme (`db_connect`/`mq_connect_via`) — the two reference plugin crates this demonstrated (`plugin-example-mysql`/`-activemq`) were deleted along with the interpreter (`docs/adr/0004`'s 2026-09-07 note); `mq_connect_via` itself still typechecks but has no execution path left, same as the rest of `db`/`mq` |
 | 49 | `49_nfr.nir` | `nfr(latency_ms:/error_rate_max:/throughput_min_per_sec:/concurrency_max:)` — compiled, automatic APM tracking |
 | 50 | `50_field_masking_and_check_role.nir` | field-level `requires(role/claim:...)` masking + function-level `requires(role:...)`/`acquire` + compiled `check_role` — the README's own hero example |
 
@@ -66,11 +78,10 @@ that's the one file here meant to be read, not run, on its own.
 
 Properties of the toolchain/compiler rather than `.nir` syntax you write:
 
-- **Execution modes** (`nirdosha <file>` / `build` / `emit-llvm` /
-  `emit-ast` / `emit-ui` / `serve`, `--format=json`) — every feature
-  file above is itself run through the interpret path; several
-  (workflow/screen/dashboard-bearing ones) are also checked with
-  `emit-ui`.
+- **Execution modes** (`init` / `gen-crud` / `build` / `emit-llvm` /
+  `emit-ast` / `emit-ui` / `emit-catalog` — see the 2026-09 note above:
+  there is no interpreter, no bare `nirdosha <file>`, and no `serve`/
+  `--format=json` anymore).
 - **Static guarantees** (type checking, ownership/move-checking,
   interval analysis, Z3 bounds proving) — properties every file above
   is already subject to, not a separate construct to demonstrate.

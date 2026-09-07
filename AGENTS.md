@@ -2,7 +2,8 @@
 
 Nirdosha is a security/systems-focused DSL (structs/enums, affine
 `box`/`db`/`tcp`/`file`/`mq`/`sandbox` handles, Row 12 identity) with a
-Rust compiler (interpreter + LLVM codegen) at `crates/compiler/`. This
+Rust compiler (LLVM codegen only — the tree-walking interpreter was
+deleted) at `crates/compiler/`. This
 file is the minimum needed to orient — everything else loads on demand
 from the table below. Don't read `docs/GRAMMAR.md`/`docs/LANGUAGE.md`/etc.
 up front; load the one row you actually need.
@@ -14,12 +15,17 @@ cd crates/compiler
 cargo build                              # build the nirdosha CLI
 cargo test                                # full suite (unit + crates/compiler/tests/*.rs)
 cargo test --test <name>                  # one integration test file
-cargo run -- <file.nir>                   # interpret
 cargo run -- build <file.nir> -o <out>    # compile to a native binary (LLVM, -O2)
 cargo run -- emit-ast <file.nir>          # parsed AST as JSON -- lex+parse ONLY, does NOT typecheck (by design: an ill-typed program is still inspectable)
-cargo run -- emit-ui <file.nir> -o out.html   # derive a web UI from struct/fn conventions -- full typecheck+ownership pass, no side effects; the actual fastest typecheck-only smoke test
-cargo run -- serve <file.nir> --port 8080     # run as a real HTTP service
+cargo run -- emit-ui <file.nir> -o out.html   # derive a static-HTML web UI from struct/fn conventions -- full typecheck+ownership pass, no side effects; the actual fastest typecheck-only smoke test
+cargo run -- emit-catalog [-o out.json]   # dump the resolved UI catalog (std + linked UI-plugin components) as JSON
+cargo run -- gen-crud <file.nir>          # scaffold CRUD fns for a struct
 ```
+
+There is no `run`/`serve` subcommand — the tree-walking interpreter and
+its HTTP server (`interpreter.rs`/`serve.rs`) were deleted; `codegen.rs`
+is the only backend, and `emit-ui`'s output is a static, self-contained
+HTML file with no server behind it.
 
 ## Facts that will cost you real time to rediscover — read these once
 
@@ -67,7 +73,7 @@ All of the following live under `docs/`.
 |---|---|
 | Current status of everything, what's shipped, what's pending, sequencing | `docs/ROADMAP.md` |
 | EBNF grammar, LL(1)/parser disambiguation rules | `docs/GRAMMAR.md` |
-| Type system, operators, builtins list, what's compiled vs. interpreter-only (verify against `codegen.rs::check_supported` directly, not just this doc) | `docs/LANGUAGE.md` |
+| Type system, operators, builtins list, what's still not compiled (verify against `codegen.rs::check_supported` directly, not just this doc) | `docs/LANGUAGE.md` |
 | Design philosophy / the "rows" (no-GC, no-races, determinism, LLM-friendliness, ...) | `docs/goal.md` |
 | Phase-by-phase build plan (0.5 → 5) | `docs/Nirdosha_Unified_Plan.md` |
 | `transact` durability protocol (WAL, crash replay, `txn_id`, retry/timeout) | `docs/TRANSACT.md` |
@@ -92,11 +98,14 @@ packages or tooling.
 
 ## Load on demand — large source files
 
-`crates/compiler/src/INDEX.md` maps every file over ~500 lines
-(`codegen.rs`/`interpreter.rs`/`typeck.rs`/`ast.rs`/`parser.rs`/
-`ui_gen.rs`/`serve.rs`/`ownership.rs`/`runtime_kernels.rs`/`smt.rs`/
-`refine.rs`/`main.rs`) to its structural pieces by name, with an
-approximate line number as a fast-path hint — check that before reading
-one of these files in full. The names are the durable part; a line
-number will drift as the file is edited, `grep -n` the name if it looks
-off rather than trusting a stale offset.
+`crates/compiler/src/INDEX.md` maps every `crates/compiler/src/` file
+over ~500 lines (`codegen.rs`/`typeck.rs`/`ast.rs`/`ui_gen.rs`/
+`parser.rs`/`contract_check.rs`/`ownership.rs`/`smt.rs`/`refine.rs`/
+`main.rs`/`token.rs`/`effects.rs`) to its structural pieces by name,
+with an approximate line number as a fast-path hint — check that before
+reading one of these files in full. The names are the durable part; a
+line number will drift as the file is edited, `grep -n` the name if it
+looks off rather than trusting a stale offset. The compiled-path
+runtime kernels (`det`/`inv`/`kf_update`/`tcp`/`file`, ...) live in
+their own crate now, `crates/runtime-kernels/`, not
+`crates/compiler/src/` — see `docs/adr/0003-runtime-kernels-cargo-dependency.md`.
