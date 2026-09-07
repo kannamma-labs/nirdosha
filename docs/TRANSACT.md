@@ -14,6 +14,21 @@ real durability log, crash replay, `network`'s own `retry`/`timeout`, and a
 real cross-process `network`/`commit` test) — see "How we're going to get
 there" below for exactly what each one delivered.
 
+> **Drift note (2026-09-07, code as truth).** That "implemented" claim
+> was true against the tree-walking interpreter, which — along with
+> `durability.rs`/`transact_log.rs`/`pool.rs`/`dbconn.rs`, everything
+> `transact`'s durability log and crash replay were built on — was
+> deleted entirely on 2026-09-06 (`refactor: remove tree-walking
+> interpreter and its only consumers`; see `docs/VALUES.md`'s "we
+> removed the interpreter entirely, on purpose" for why). `transact` is
+> still parsed and typechecked, but `codegen.rs` has no lowering for it
+> yet (compiled programs can't run one at all today), and there is
+> currently no interpreted execution path either. Every "verified live"
+> claim below describes the now-removed interpreter build, not the
+> current compiled-only binary — treat this document as the target
+> design for `transact` on the compiled path, not a description of
+> what `nirdosha build` produces today.
+
 ## What it brings to the table
 
 **1. Names the actual failure mode, instead of assuming "no exception ==

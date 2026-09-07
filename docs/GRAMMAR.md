@@ -353,12 +353,15 @@ pub_item    ::= "pub"? (fn_decl | struct_decl | enum_decl)
 // enforcement paths consume the same `entries`, neither part of this
 // grammar layer: `contract_check::check_program_contracts` (a real
 // Z3-backed Tier-1 proof, hard-failing the build only on a genuine
-// counterexample -- integer params/return, no loop/call/division) and
-// `interpreter.rs::call`'s runtime backstop (re-checks every `pre`/
-// `post` against the real concrete values on every actual call,
+// counterexample -- integer params/return, no loop/call/division) and,
+// previously, `interpreter.rs::call`'s runtime backstop (re-checked every
+// `pre`/`post` against the real concrete values on every actual call,
 // unconditionally -- the only enforcement for a contract on a `fn`
 // outside that static subset, true of nearly every real `fn` in a real
-// app).
+// app). That module was deleted along with the rest of the interpreter
+// (2026-09-06) and `codegen.rs` never gained a replacement -- a `validate`
+// block outside the Tier-1 static subset is unenforced at runtime today
+// (`docs/LANGUAGE.md`'s `validate`/Hoare-contracts section).
 validate_decl ::= "validate" ident "{" kv_entry* "}"
 
 // `docs/WORKFLOW.md`'s durable state machine — desugared by `workflow_lower.rs`

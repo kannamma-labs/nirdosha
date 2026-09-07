@@ -12,9 +12,12 @@ A clear description of what went wrong.
 
 **Diagnostic output**
 
-Run the failing case with `nirdosha <file.nir> --format=json` and paste
-the `Diagnostic` JSON here — it's the fastest way to pin down exactly
-where things went wrong.
+Run the failing case with `nirdosha emit-ui <file.nir> -o /tmp/out.html`
+(typecheck/ownership errors) or `nirdosha build <file.nir> -o /tmp/out`
+(codegen "unsupported" errors) and paste the error output here — it's
+the fastest way to pin down exactly where things went wrong. (There is
+no interpreter and no `--format=json` flag anymore — see
+[`SECURITY.md`](../../SECURITY.md) / `docs/API_TRUST_MODEL.md` §4a.)
 
 ```json
 paste here

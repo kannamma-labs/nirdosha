@@ -18,10 +18,10 @@ nobody may touch.
 | Area | Path(s) | Owner | Notes |
 |---|---|---|---|
 | Compiler core (parser, typeck, ownership, SMT/refine) | `crates/compiler/src/{parser,typeck,ast,ownership,smt,refine}.rs` | `arunsoman` | Static-checking pipeline. See `crates/compiler/src/INDEX.md` for the per-function map. |
-| Interpreter | `crates/compiler/src/interpreter.rs` | `arunsoman` | The reference execution semantics — anything the native backend doesn't yet cover falls back here. |
-| Native codegen (LLVM) | `crates/compiler/src/codegen.rs`, `runtime_kernels.rs` | `arunsoman` | Narrower than the interpreter by design (`check_supported`'s explicit reject list); help wanted closing Track B gaps, `docs/ROADMAP.md`. |
-| UI/screen DSL | `crates/compiler/src/{ui_gen,serve}.rs` | `arunsoman` | Manifest derivation + the server that enforces its gates; see `docs/LANGUAGE.md` §11–13. |
-| Plugin/extension system | `crates/compiler/src/plugin.rs`, `crates/plugin-example-rot13/` | `arunsoman` | New, Track G1 Kind A (native builtin extension via Cargo) — actively in progress; see `rfcs/0001-package-manifest-format.md`. |
+| Native codegen (LLVM) | `crates/compiler/src/codegen.rs`, `runtime_kernels.rs` | `arunsoman` | The only backend now — the tree-walking interpreter (`interpreter.rs`) was deleted; `check_supported`'s explicit reject list is the ground truth for what still isn't compiled. Help wanted closing those gaps, `docs/ROADMAP.md`. |
+| UI/screen DSL | `crates/compiler/src/ui_gen.rs` | `arunsoman` | Manifest + static HTML derivation (`emit-ui`). `serve.rs` (the HTTP server that enforced gates server-side) was deleted along with the interpreter — gating today is client-side only in the emitted HTML; see `docs/LANGUAGE.md` §11–13 and `docs/API_TRUST_MODEL.md`. |
+| UI-plugin components | `crates/compiler/src/ui_plugin.rs`, `crates/ui-plugin-example-sparkline/` | `arunsoman` | Compile-time `layout` widget extension + Cargo-metadata auto-discovery; see `rfcs/0009-ui-catalog-extensibility.md`. |
+| Plugin/extension system | `crates/compiler/src/plugin.rs`, `crates/plugin-example-native-shout/`, `crates/plugin-example-native-kv/` | `arunsoman` | Native builtin extension via Cargo, Phase 1 built and verified; see `rfcs/0008-native-plugin-abi-widening.md`. |
 | Grammar / GBNF / constrained decoding | `crates/grammar_check/`, `crates/grammar_export/`, `crates/compiler/nirdosha.gbnf` | `arunsoman` | LALR(1) cross-check against the hand-written LL(1) parser; corpus entries are a **help wanted** / good-first-issue source (see open issue #3). |
 | LLM eval harness | `crates/bench/` | `arunsoman` | Real pass@1/self-repair scaffold, mock models only today — **help wanted** wiring a real provider (open issue #2, `docs/ECOSYSTEM.md` §G3). |
 | Presence gateway | `crates/presence-gateway/` | `arunsoman` | `docs/ROADMAP.md` Track A5. |

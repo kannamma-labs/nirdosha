@@ -23,6 +23,24 @@ comment. `[N/A]` means "correctly delegated to the platform/operator,
 not a gap this codebase should close" — e.g. TLS termination belongs at
 an Ingress/mesh, not in `tiny_http`.
 
+> **Drift note (2026-09-07, code as truth).** Every `[DONE]` row below
+> (health/readiness probes, graceful SIGTERM, `/metrics`, structured
+> logs, the presence-gateway sidecar, all of it) was real against
+> `serve.rs` as of 2026-08-27/28. `serve.rs` — along with
+> `interpreter.rs`/`dbconn.rs`/`durability.rs`/`observability.rs`/
+> `pool.rs`/`thread_pool.rs` — was deleted entirely on 2026-09-06
+> (`refactor: remove tree-walking interpreter and its only consumers`).
+> There is currently no `nirdosha serve` binary to containerize at
+> all — every `[DONE]` claim below now describes a Kubernetes story for
+> a runtime that no longer exists in this tree, not the current
+> compiled-only `nirdosha`. The Dockerfile/Helm chart/Kustomize
+> manifests likely still reference a `serve` invocation that would fail
+> to start; re-verify before relying on any of this for a real
+> deployment. This is a real, unresolved regression this pass
+> surfaces rather than silently patches, since restoring it is a
+> product decision (revive `serve.rs` on the compiled path vs. a new
+> design), not a doc fix.
+
 ## The one question that actually matters: what happens at >1 replica?
 
 `nirdosha serve` fuses UI and API into **one process** — it answers
