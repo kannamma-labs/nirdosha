@@ -19,17 +19,20 @@
 >   blocks (`x`/`y`/`color`/`size`/`theta`) — folded into the existing
 >   flat `Vec<KvEntry>` via the same prefix convention `paginate { }`
 >   already uses (`"encode.<channel>.<key>"`), **not** the
->   `BTreeMap<String, EncodingChannel>` Rust struct sketched below, and
->   **not** wired into workspace `panel { ... }` yet, only dashboard
->   `visual { ... }`. `field` is checked to be a string only — never
->   cross-checked against a real column, since the backing fn returns
->   opaque `json` with no struct to resolve against (this document's own
->   §Design anticipated resolving against "the bound struct's real
->   fields," which turned out not to apply to the `visual`/`dashboard`
->   path at all). One generalized `renderGraphicsChart` in
->   `ui_gen_template.html` replaces four hand-built functions' worth of
->   *new* surface area (the four old ones are untouched). 16 new typeck
->   tests (`tests/visual_dsl.rs`) + 2 manifest tests (`tests/emit_ui.rs`)
+>   `BTreeMap<String, EncodingChannel>` Rust struct sketched below.
+>   `field` is checked to be a string only — never cross-checked against
+>   a real column, since the backing fn returns opaque `json` with no
+>   struct to resolve against (this document's own §Design anticipated
+>   resolving against "the bound struct's real fields," which turned out
+>   not to apply to the `visual`/`dashboard`/`panel` path at all). One
+>   generalized `renderGraphicsChart` in `ui_gen_template.html` replaces
+>   four hand-built functions' worth of *new* surface area (the four old
+>   ones are untouched). **Also wired into workspace `panel { ... }`**,
+>   a follow-up landed after this box's first version — same grammar,
+>   same typeck (`check_encode_entry` generalized from a `visual`-only
+>   helper to a shared one), same client renderer, just threaded through
+>   `Panel`/`PanelRender` instead of `Metric`/`MetricRender`. 19 typeck
+>   tests (`tests/visual_dsl.rs`) + 3 manifest tests (`tests/emit_ui.rs`)
 >   + the real shipped renderer extracted and run headlessly in Chrome
 >   against sample data for all six marks (screenshotted).
 > - **Phase B**: shipped narrower than sketched below — a
@@ -40,20 +43,30 @@
 >   `props`/`slots`/a `gbnf_fragment` the way the original sketch's
 >   `NativeUiComponent` struct below has them. No Cargo-metadata
 >   discovery, no `nirdosha build` auto-linking — a component slice is
->   hand-assembled in Rust source today (`crates/compiler/tests/
->   ui_plugin.rs`), the same posture `rfcs/0008`'s own
->   `native_plugin_codegen.rs` has toward `NativePluginBuiltin` ahead of
->   its still-open Phase 3. `typeck::Checker.extra_widget_kinds` widens
->   `check_screen_layout`'s closed set; `ui_gen::generate_with_ui_
->   components` splices `render_js` into the emitted `<script>` and
->   registers it into a new `WIDGET_RENDERERS` map, read by
->   `renderLayoutNode`'s widget-dispatch fallback. `layout_json`'s
->   `Widget` arm also gained a generic `entries` object (every kv-entry,
->   not just the `source`/`title` the three std kinds special-case) so a
->   component's own config keys reach its `render_js`. 4 new tests
->   (`tests/ui_plugin.rs`) + the real shipped `renderLayoutNode`
->   extracted and run headlessly in Chrome, dispatching into a
->   hand-written component and rendering it (screenshotted).
+>   still hand-assembled in Rust source (either inline,
+>   `crates/compiler/tests/ui_plugin.rs`, or via an ordinary
+>   `[dev-dependencies]` edge to a real separate crate,
+>   `crates/ui-plugin-example-sparkline` + `tests/
+>   ui_plugin_examples.rs` — a follow-up closing this RFC's own "proof
+>   obligation" line literally, the way `plugin-example-native-shout`/
+>   `-native-kv` already do for `rfcs/0008`), the same posture
+>   `rfcs/0008`'s own `native_plugin_codegen.rs` has toward
+>   `NativePluginBuiltin` ahead of its still-open Phase 3.
+>   `typeck::Checker.extra_widget_kinds` widens `check_screen_layout`'s
+>   closed set; `ui_gen::generate_with_ui_components` splices `render_js`
+>   into the emitted `<script>` and registers it into a new
+>   `WIDGET_RENDERERS` map, read by `renderLayoutNode`'s widget-dispatch
+>   fallback. `layout_json`'s `Widget` arm also gained a generic
+>   `entries` object (every kv-entry, not just the `source`/`title` the
+>   three std kinds special-case) so a component's own config keys reach
+>   its `render_js`. The reference crate's own widget
+>   (`sparkline { source: <fn> field: "..." }`) is a genuinely useful
+>   one, not a stub — it fetches its own data via `node.source` (the
+>   `timeline` widget's own convention) and draws a small inline-SVG
+>   trend line. 4 + 3 new tests (`tests/ui_plugin.rs`,
+>   `tests/ui_plugin_examples.rs`) + both the hand-written and the real
+>   crate's own `render.js` extracted and run headlessly in Chrome
+>   (screenshotted).
 > - **Still open, named not hidden**: Cargo-driven discovery for both
 >   the chart grammar's own future extensions and UI components (shared
 >   with `rfcs/0008` Phase 3, per this document's own §Open questions);
@@ -62,8 +75,13 @@
 >   phase (`crates/grammar_export`'s `nirdosha.gbnf` covers the core
 >   `.nir` language only — no UI-specific grammar exists yet to extend);
 >   `render_js` review-policy documentation. `cargo test -p nirdosha`
->   stayed green (34 test binaries) throughout every step above — no
->   existing behavior changed.
+>   stayed green (35 test binaries) throughout every step above — no
+>   existing behavior changed. (Unrelated, pre-existing, not investigated
+>   here: `cargo build --workspace` fails on `crates/grammar_check` with
+>   a shift-reduce conflict in its hand-maintained LALR(1) grammar —
+>   confirmed unrelated to anything in this RFC, since nothing here
+>   touches the core `.nir` grammar/tokenizer at all; every build/test
+>   claim above is `-p nirdosha`-scoped specifically to avoid it.)
 >
 > The rest of this document is the original design capture, kept as
 > written below; this box is the only part updated after the fact.
