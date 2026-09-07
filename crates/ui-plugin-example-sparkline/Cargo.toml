@@ -6,17 +6,21 @@ description = "Reference compile-time UI-plugin component (rfcs/0009-ui-catalog-
 
 # Same statically-greppable convention `plugin-example-native-shout`'s
 # own Cargo.toml already established for `kind = "native-compiled"`,
-# extended to a second kind: `kind = "nir-ui-component"` is what a
-# future `nirdosha build`/`emit-ui` auto-discovery pass (rfcs/0009's own
-# "Open questions" -- shared, still-open work with rfcs/0008 Phase 3)
-# would grep for to tell a UI-component crate from an ordinary
-# dependency. Not consumed by anything yet -- `crates/compiler/tests/
-# ui_plugin_examples.rs` reads this crate's `NAME`/`RENDER_FN`/
-# `RENDER_JS` constants directly, standing in for that discovery pass.
+# extended to a second kind: `kind = "nir-ui-component"` is what
+# `ui_plugin::discover_components` (`nirdosha emit-ui --manifest-path`)
+# greps for, via a real `cargo metadata` call against the *app author's*
+# own Cargo.toml, to tell a UI-component crate from an ordinary
+# dependency -- see that function's own doc comment for the full
+# resolution algorithm. `render_js_path` is relative to this file's own
+# directory; `crates/compiler/tests/ui_plugin_discovery.rs` is the real,
+# no-hand-assembly, no-dev-dependency end-to-end proof (a scratch
+# project's own Cargo.toml depends on this crate by path, `nirdosha
+# emit-ui` discovers it with zero Rust code written for the occasion).
 [package.metadata.nirdosha]
 kind = "nir-ui-component"
 name = "sparkline"
 render_fn = "render_sparkline"
+render_js_path = "src/render.js"
 
 # Deliberately zero dependency on the `nirdosha` crate itself -- same
 # posture `plugin-example-native-shout`/`plugin-example-native-kv`

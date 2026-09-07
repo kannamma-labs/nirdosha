@@ -18,8 +18,8 @@ use nirdosha_ui_plugin_example_sparkline as sparkline_crate;
 fn component() -> NativeUiComponent {
     NativeUiComponent {
         name: sparkline_crate::NAME.to_string(),
-        render_js: sparkline_crate::RENDER_JS,
-        render_fn: sparkline_crate::RENDER_FN,
+        render_js: sparkline_crate::RENDER_JS.to_string(),
+        render_fn: sparkline_crate::RENDER_FN.to_string(),
     }
 }
 
