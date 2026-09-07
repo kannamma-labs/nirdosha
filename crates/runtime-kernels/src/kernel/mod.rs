@@ -117,11 +117,13 @@
 pub mod db;
 pub mod http;
 pub mod identity;
+pub mod instance_lock;
 pub mod mailbox;
 pub mod nfr;
 pub mod pool;
 pub mod recorder;
 pub mod thread_pool;
+pub mod transact;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};

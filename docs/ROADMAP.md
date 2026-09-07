@@ -1907,13 +1907,13 @@ Current state: `codegen.rs`'s `check_supported` rejects, with a named
 reason, most of what's below — verified directly against its
 `unsupported(...)` call sites this session (not just docs/LANGUAGE.md §10's
 claim, though that section is currently accurate). B8 (compiled `serve`),
-part of B4 (identity crypto), B2 (`db`/`json`), part of B1 (`transact`
-Layer 1), B9 (`sleep_ms`), B3 (`mq`), B5 (`http`/`https`), and B10
-(`workflow` Layer 1) are now real exceptions, `[PARTIAL]`/`[DONE]` below,
-not `[OPEN]`/`[BLOCKED]` — see each entry. Only `sandbox` (B6) remains
-fully `[OPEN]`.
+B1 (`transact`, durability+replay included), part of B4 (identity
+crypto), B2 (`db`/`json`), B9 (`sleep_ms`), B3 (`mq`), B5 (`http`/
+`https`), and B10 (`workflow` Layer 1) are now real exceptions,
+`[PARTIAL]`/`[DONE]` below, not `[OPEN]`/`[BLOCKED]` — see each entry.
+Only `sandbox` (B6) remains fully `[OPEN]`.
 
-1. `[PARTIAL]` **B1. `transact` codegen.** 2026-09: Layer 1 real and
+1. `[DONE]` **B1. `transact` codegen.** 2026-09: Layer 1 real and
    compiled — `precheck?/network/verify/commit/compensate?/log?`,
    the implicit `network`/`verify`/`txn_id` bindings, a real `bool`
    result (`codegen::emit_transact`; `examples/features/36_transact.nir`,
@@ -1926,10 +1926,32 @@ fully `[OPEN]`.
    has no compiled equivalent), and `network`'s declared return type can
    never be `Result(_, _)` (`Ty::is_transact_scalar`), so there is no
    non-trapping failure signal to retry on — rejected explicitly, not
-   silently ignored. Still open: `commit`/`compensate`'s own
-   retry-with-backoff (possible in principle, since their return type is
-   unconstrained — just not attempted this round), the durability log
-   (`transact_log.rs`, deleted with the interpreter), and crash replay.
+   silently ignored.
+   **2026-09 follow-up, same item: durability log, bounded retry, and
+   crash replay** (`docs/adr/0009-transact-durability-and-replay.md`,
+   `crates/runtime-kernels/src/kernel/transact.rs` +
+   `kernel/instance_lock.rs`). `commit`/`compensate` now get real
+   bounded retry-with-backoff (`Codegen::emit_call_with_retry`, fixed
+   3-attempt budget, doubling backoff via `nir_sleep_ms`) whenever their
+   return type is `Result(_, _)`; a fsync'd (`synchronous=FULL`) SQLite
+   durability log records each attempt's already-computed args before
+   the first live try, so retry exhaustion leaves a row `commit_pending`/
+   `compensate_pending` rather than losing it; a compiler-synthesized
+   per-call-site replay trampoline (mirroring `spawn`'s own trampoline
+   mechanism) re-dispatches every pending row from generated `main`'s
+   own prologue, before `nir_main()` ever runs. Verified against real
+   compiled binaries run as two separate OS processes sharing one log
+   file (`crates/compiler/tests/codegen.rs`'s
+   `transact_replay_finishes_a_commit_pending_row_left_by_a_prior_process`).
+   **Two disclosed, deliberate narrowings, not silent gaps**: replay
+   dispatch is by a bare per-site `site_id` with no build-version
+   fingerprint guard (a rolling deploy that changes the *set* of
+   `transact` sites between the writing and replaying process could
+   dispatch to the wrong site — real, separate follow-up work); and the
+   durability log is local-SQLite only, unsafe under this repo's own
+   `deploy/kustomize/overlays/postgres-multi-replica/` (a
+   Postgres-backed log for fleet-wide use is real, separate follow-up
+   work, not part of this item).
 2. `[DONE]` **B2. `db` + `json` codegen.** 2026-09: `db_connect`/
    `db_query`/`db_execute` (SQLite via `rusqlite`'s `bundled` feature)
    and all 9 `json_*` builtins

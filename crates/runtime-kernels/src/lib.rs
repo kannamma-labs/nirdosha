@@ -1883,6 +1883,7 @@ fn db_table() -> &'static HandleTable<kernel::db::DbConn> {
 /// both sides, the same "trust the target's own layout rules, don't
 /// hand-replicate them" stance `agg_byte_size_operand`'s sizeof trick
 /// already takes.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct NirBindValue {
     pub tag: i32, // 0 = i64, 1 = f64, 2 = str, 3 = bool
