@@ -1,7 +1,7 @@
 //! Tokens and the lexer. Every token carries a `Span` so downstream errors
-//! (parser, interpreter) can report structured, machine-checkable positions
-//! instead of prose — the diagnostic shape docs/goal.md row 9 asks for, started
-//! here rather than bolted on later.
+//! (parser, typeck, codegen) can report structured, machine-checkable
+//! positions instead of prose — the diagnostic shape docs/goal.md row 9
+//! asks for, started here rather than bolted on later.
 
 // `Hash` is for `refine.rs`, which keys a `HashSet<Span>` of proven-safe
 // sites — every other consumer only needed equality/ordering before this.

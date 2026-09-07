@@ -486,7 +486,19 @@ DSL, not a bug report against this one.
   "graph" | "heatmap" | "timeline" }` (`docs/LANGUAGE.md` §11c) — three more
   inline-SVG shapes, still zero external dependency, still no line/
   scatter/treemap/3D and no real physics/basemap (disclosed there, not
-  restated here).
+  restated here). **Superseded 2026-09-07 (`rfcs/0009` Phase A)**: that
+  same `visual`/`panel` slot also accepts a fifth, additive `render:
+  "chart"` kind — a bounded mark (`bar`/`line`/`area`/`point`/`arc`/
+  `rule`) × `encode <channel> { ... }` composition, one generalized
+  `renderGraphicsChart` renderer, still no external charting library —
+  covering the line/scatter/treemap gap this bullet names, though still
+  not 3D or a real basemap. `chart_<name>`/`dashboard { chart "..." }`
+  itself is untouched and still permanently the one bar-chart shape.
+  `rfcs/0009` Phase B further adds compile-time UI-plugin `layout { ... }`
+  widget kinds (`crates/compiler/src/ui_plugin.rs`), including
+  Cargo-metadata auto-discovery of a `nir-ui-component` crate — a
+  different extension point (a `layout` widget, not a chart/form
+  control), not a narrowing of this bullet's own closed sets.
 - **Four built-in animations, fixed, nothing else.** `fade-in`/
   `slide-up`/`scale-in`/`pop` (docs/LANGUAGE.md §11b) are the entire
   `@keyframes` vocabulary `ui_gen_template.html` ships — a screen's

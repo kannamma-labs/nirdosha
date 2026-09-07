@@ -8,8 +8,10 @@ triage, or design feedback — helps.
 
 - **Try it and report what breaks.** Build from source (below) or grab
   a [prebuilt binary](https://github.com/kannamma-labs/nirdosha/releases/latest),
-  run a few `examples/*.nir`
-  files, open an issue for anything confusing or wrong.
+  try a few `examples/features/*.nir`/`examples/syntax/*.nir` files
+  through `nirdosha emit-ui`/`build` (there is no interpreter anymore —
+  see `examples/features/README.md`'s 2026-09 note on what still
+  actually runs), open an issue for anything confusing or wrong.
 - **Improve docs.** Typos, unclear explanations, and missing examples
   are all welcome fixes.
 - **Add `.nir` examples**, especially ones exercising a feature that
@@ -60,9 +62,9 @@ sudo pacman -S clang z3
 ```
 
 `clang` is only invoked at runtime by `nirdosha build`/`emit-llvm`
-(native codegen) — you don't need it just to interpret a program or run
-the test suite. `z3` is linked at compile time and is required to build
-the compiler at all.
+(native codegen) — you don't need it just to run the test suite or use
+`emit-ui`/`emit-ast`/`emit-catalog`. `z3` is linked at compile time and
+is required to build the compiler at all.
 
 Read [`AGENTS.md`](./AGENTS.md) first if you're going to touch the
 compiler itself — it has the hard gotchas (no `::` token, `str` banned

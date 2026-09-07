@@ -2,9 +2,11 @@
 
 `kernel_bench/` measures the actual, current, zero-admission cost of
 `crates/runtime-kernels`'s `nir_tcp_*`/`nir_file_*` kernels — the only
-two effects that compile at all today (`db`/`spawn`/`chan`/`sandbox`
-are still hard `codegen.rs` rejections). RFC 0007 §5 needs this before
-any of its numeric SLOs can be treated as more than a guess.
+two effects that compiled at the time this harness was written
+(`db`/`spawn`/`chan`/`sandbox` were still hard `codegen.rs` rejections;
+**update, 2026-09**: `spawn`/`chan` compile now too, see RFC 0007 §8 —
+`db`/`sandbox` remain rejections). RFC 0007 §5 needs this before any of
+its numeric SLOs can be treated as more than a guess.
 
 ## What it does
 
@@ -99,11 +101,14 @@ of the call it's guarding, for effects that exist specifically because
 they're supposed to be cheap.
 
 **Caveat on `db`/`spawn`.** This harness cannot say anything about
-those domains — they don't compile yet (`codegen.rs` hard-rejects
-them). Whatever `nir_db_*`/`nir_spawn_*` kernels eventually get built
-per Track B items B2/B6 will need this same measurement repeated
-against their own baseline before RFC 0007's SLOs can be considered
-validated for those domains too.
+those domains — at the time this was written, neither compiled yet
+(`codegen.rs` hard-rejected them). **Update (2026-09)**: `spawn`/`chan`
+compile now (RFC 0007 §8), but haven't been run through this harness;
+`db` remains a hard rejection. Whatever `nir_db_*` kernel eventually
+gets built per Track B item B2, and a `spawn`/`chan` pass of this
+harness, will need this same measurement repeated against their own
+baseline before RFC 0007's SLOs can be considered validated for those
+domains too.
 
 ## Update: the admission mechanism now exists, and this harness measured it live
 

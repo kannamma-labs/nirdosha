@@ -42,13 +42,17 @@ None of it is reachable from the compiled path — `runtime-kernels` is
 its own Cargo workspace, statically linked as a `.a` staticlib into a
 compiled binary, and its own module doc states it "cannot `use`
 anything from `interpreter.rs` directly across that compilation-unit
-boundary." A binary from `nirdosha build` today has, for the only two
-effects that compile at all (`tcp`, `file`), a handful of raw `extern
-"C"` syscall wrappers — one `connect()`/`open()` per call, no pooling,
-no scheduling, no admission control, no telemetry, no audit hook.
+boundary." A binary from `nirdosha build` today has, for the effects
+that compiled at the time this was written (`tcp`, `file`), a handful
+of raw `extern "C"` syscall wrappers — one `connect()`/`open()` per
+call, no pooling, no scheduling, no admission control, no telemetry, no
+audit hook. **Update (2026-09)**: `spawn`/`join`/`chan`/`send`/`recv`
+compile now too, with a real admission `Domain::Thread` ceiling and a
+dynamic stall detector — see §8's own "Update" for the full picture;
+only `db`/`sandbox` remain hard rejections.
 
-As `db` (Track B item B2) and `spawn`/`chan`/`sandbox` (item B6) gain
-codegen over time, should `runtime-kernels` grow the same way the
+As `db` (Track B item B2) and `sandbox` (item B6) gain codegen over
+time, should `runtime-kernels` grow the same way the
 interpreter did — independent per-effect resource managers, never
 unified, discovering their coupling only after each ships separately —
 or should a single, deliberately designed resource-control kernel exist
@@ -206,9 +210,10 @@ open work the decision document didn't need to solve.
 **Global coordination plane.** Named for completeness, but **its exit
 criteria are close to vacuous today**: cross-shard wait-for sweeps
 matter once there are multiple real, contended resource domains. With
-only `tcp` and `file` compiling, and no DB/spawn contention possible
-yet, there's very little for a coordinator to coordinate. This plane's
-real design work should wait for B2/B6, not be speculatively built now.
+only `tcp`/`file`/`thread` (as of 2026-09, §8's Update) having admission
+domains, and no DB contention possible yet, there's still very little
+for a coordinator to coordinate. This plane's real design work should
+wait for B2, not be speculatively built now.
 
 **Failure behavior table** — kept unchanged from the decision document;
 it's a general design principle (fail-open telemetry, fail-closed hard
@@ -264,7 +269,9 @@ What the compiled path actually has as a boundary, today:
    **For the compiled path, that fallback is the primary and, for now,
    only case** — not a corner case of a request-classification system
    that mostly doesn't apply here.
-2. Once `spawn` compiles (B6), a spawned task's entry point becomes a
+2. Now that `spawn` compiles (2026-09, §8's Update) — though still
+   without the compiled thread *scheduler* §8 says this boundary-unit
+   idea actually needs — a spawned task's entry point becomes a
    second, more natural boundary unit — closer in spirit to "a request"
    — since a task has a definable start and a manifest of what it will
    do, the way a request handler does in the original design.
@@ -333,10 +340,13 @@ Two findings this resolves:
    exactly the calls that exist because they're supposed to be cheap —
    not negligible the way it is for the boundary calls.
 
-**Still unmeasured, and unmeasurable until Track B lands**: `db`
-(B2) and `spawn`/`chan`/`sandbox` (B6) don't compile, so this harness
-says nothing about those domains. Whatever kernels eventually back
-them need this same measurement repeated against their own baseline.
+**Still unmeasured, and unmeasurable until Track B lands**: `db` (B2)
+and `sandbox` (B6) don't compile, so this harness says nothing about
+those domains — `spawn`/`chan` compile now too (§8's Update) but
+haven't been run through this specific benchmark harness yet. Whatever
+kernels eventually back `db`/`sandbox`, and a `spawn`/`chan` pass of
+this harness, need this same measurement repeated against their own
+baseline.
 
 ## 6. Telemetry/data transmission design
 
@@ -353,6 +363,18 @@ architectural problem" the way the decision document frames it for the
 interpreter — a compiled-path telemetry exporter can be designed
 without that particular piece of debt from day one, if this is built
 after that finding is internalized.
+
+**Update (2026-09), corrected**: "ring buffers... batching" above read
+as pure future design when this section was written; one of those
+pieces is real now. `kernel::recorder` is a genuine double-buffered
+ring (grant/release/denial events only, boundary-scoped, never on the
+`send`/`recv` hot path) with real batching (gzip-compress-and-flush
+one full page at a time, off the hot path, on `thread_pool`) — see
+§10's Phase 1 row for the exact mechanism. What's still exactly as
+undesigned as this section originally said: an aggregator thread,
+OTLP/any network export, spill, sampling, and the redaction-vs-
+replay-fidelity separation — `kernel::recorder` writes to a local file
+only, nothing crosses the process boundary.
 
 ## 7. Metrics design
 
@@ -591,9 +613,9 @@ than a `nirdosha serve` process an operator already controls.
 |---|---|---|---|
 | **0 — Foundations** | ✅ **Done.** Phase 0 harness measures the zero-admission baseline — see §5. | ✅ Done. | The decision doc's Phase 0 assumed an interpreter/RFC-0006 baseline; this measured the actual compiled-path substrate instead, and found the two SLOs are not equally at risk (§5). |
 | **2/3 — Admission mechanism, live** | ✅ **Built and measured**, ahead of the sequencing this table originally proposed. `crates/runtime-kernels/src/kernel/`: one atomic compare-and-swap per domain (`Tcp`, `File`), gating `nir_tcp_connect`/`nir_tcp_listen`/`nir_tcp_accept`/`nir_file_open` only — never `send`/`recv`/`read`/`write`, resolving §5's "which SLO is at risk" finding by not putting admission on that path at all, rather than by hitting an aggressive nanosecond budget on it. `kernel_bench` re-run against it: every boundary call within run-to-run noise of the original baseline (`rfcs/evidence/0007-apm-runtime-kernel/README.md`'s "Update" section) — no measurable regression. A generic `HandleTable<T>` also now exists, unwired, for the next resource domain (`json`/`db`/`mq`) to use instead of inventing its own table. **Also now built, both unwired, both ported near-verbatim from the interpreter-side modules of the same name (real design, zero interpreter dependency, confirmed by actually checking before porting)**: `kernel::pool` (generic `r2d2`-backed connection *pooling* — reuse, distinct from admission) and `kernel::thread_pool` (eager-growth reused-worker OS thread pool, the exact deadlock-avoidance design `rfcs/0006`'s spawn/join concerns need) — 17 total unit tests across all three modules, all passing, including `thread_pool`'s own adversarial suite (panic containment, flaky-spawner injection, deep spawn/join chains that would deadlock a bounded pool). **One real, disclosed gap found while porting, not before**: `thread_pool`'s panic containment (`catch_unwind`) only works under a profile with unwinding enabled; this crate's `[profile.release]` sets `panic = "abort"` (the profile a real compiled `.nir` binary actually ships as), where a panicking spawned job would abort the whole process — flagged prominently in `thread_pool`'s own module doc as unresolved, not silently carried over. **Still open**: the compiler-side manifest pass (frontend, path-agnostic) hasn't been built; `AdmissionDenied` as a distinct, surfaced error kind (today a denial folds into the same `-1` every other failure returns); neither `pool` nor `thread_pool` is wired to any `nir_*` kernel yet, since `db`/`mq`/`spawn` don't compile. | Real code now exists in the tree, not just a measured baseline — the two originally-separate phases (build a lease-check stub; measure its cost) happened together, and the mechanism landed as live enforcement (generous ceiling) rather than pure shadow/observe-only mode first. The pooling/worker-reuse primitives are new relative to the original table entirely — added after explicitly re-checking whether anything from the deleted interpreter-side modules should be resurrected into the kernel's foundation now, rather than reinvented per-domain later. |
-| **1 — Telemetry data plane** | `kernel.rs`'s own self-metrics (`stats()` — grants/denials/currently-held per domain) exist now, in the smallest possible form (§7's "kernel self-metrics are first-class" principle) — no exporter, no rings, no aggregation, not yet called from anywhere. Still open: rings/aggregator/batching/exporter, and a new compiled-binary config/export mechanism (env-var or build-time, undesigned). | Telemetry overhead within re-derived targets; 100% drop accounting; a decided answer for how a compiled binary is told where to export telemetry. | Added the config-mechanism exit criterion — the decision doc didn't need one, since `nirdosha serve` already has `--otel-*` flags (and `serve` no longer exists at all as of this session's separate interpreter-removal work). |
+| **1 — Telemetry data plane** | `kernel.rs`'s own self-metrics (`stats()` — grants/denials/currently-held per domain) exist, in the smallest possible form (§7's "kernel self-metrics are first-class" principle), plus (**correction, 2026-09-07**: this row previously said "no rings" — that stopped being true the same commit this table's Phase 2/3 row already credits) a real local ring: `kernel::recorder` double-buffers every `acquire`/`release`/denial event into one of two pages (`NIRDOSHA_KERNEL_RECORDER_PAGE_CAPACITY`, default 1024), gzip-compresses each full page independently (valid concatenated gzip members, RFC 1952) on a background `thread_pool` worker the instant it fills, and appends it to a local file (`NIRDOSHA_KERNEL_RECORDER_PATH`); the final partial page is flushed synchronously from `nir_kernel_flight_recorder_dump`, which every `codegen.rs` trap-guard (`guard_nonzero_divisor`/`guard_call_ok`/`guard_io_ok`/`guard_recv_ok`) already calls before aborting. This is real, tested (`kernel/recorder.rs`'s own unit tests), and running in every compiled binary today — but it answers "what led up to a crash," a local diagnostic log, not "aggregate metrics across a fleet." Still open, and still fully undesigned: any network export (OTLP or otherwise) of either this ring or `stats()`'s counters, cross-process aggregation, and a decided mechanism for a compiled binary to be told where to send data off-box at all. | Telemetry overhead within re-derived targets; 100% drop accounting; a decided answer for how a compiled binary is told where to export telemetry. | Added the config-mechanism exit criterion — the decision doc didn't need one, since `nirdosha serve` already has `--otel-*` flags (and `serve` no longer exists at all as of this session's separate interpreter-removal work). This row's own "no rings" claim was corrected 2026-09-07 after `kernel::recorder` was found built and wired in but never credited here. |
 | **Manifests** | Compiler manifest pass (frontend, path-agnostic) — not started. | Manifests emitted for classifiable call sites; declared bounds feed the kernel's ceilings instead of the current hardcoded default. | Unchanged from the original table's Phase 2 half. |
-| **`db`/`spawn` enforcement** | `db` once B2 lands; `spawn` budget only once B6's compiled scheduler exists (see §8's spawn note) — both still fully blocked on codegen that doesn't exist. | `AdmissionDenied` compatibility tests pass for each as it lands. | Unchanged — the decision doc's "DB pools first" ordering is still inverted here, since DB doesn't compile yet. |
+| **`db`/`spawn` enforcement** | `db` still fully blocked on codegen that doesn't exist (`Ty::Db` is a hard `codegen.rs` rejection), pending B2. `spawn` is **partially ahead of this row's own sequencing** (**correction, 2026-09-07**: this row previously said `spawn` budget was "still fully blocked" too — the very next table row already credits the fix that made that stale): `Domain::Thread` is a real, live admission ceiling (`NIRDOSHA_KERNEL_MAX_THREAD`), acquired in `nir_thread_spawn` and released in `nir_thread_join` (§8's "Housekeeping" paragraph). What's still genuinely blocked, per §8's own argument, is a *budget* in the fuller sense the decision document meant — priority inheritance, non-blocking admission with parked-continuation waiters, and anything else that presumes a real compiled scheduler RFC 0006 hasn't built — none of which the simple ceiling above attempts. | `AdmissionDenied` compatibility tests pass for each as it lands. | Unchanged for `db` — the decision doc's "DB pools first" ordering is still inverted here, since DB doesn't compile yet. For `spawn`, corrected 2026-09-07: the ceiling half of this row shipped earlier than the row itself was updated to say. |
 | **4 — Global coordination and deadlock recovery** | Likely light/deferred until 2+ real contended domains exist (post-B2) — moot with only `Tcp`/`File` today. | Cross-shard detection SLOs, but only meaningful once there's more than one shard worth coordinating. | Unchanged. |
 | **5 — NFR composition, replay** | Single-function `nfr(...)` declaration, O(1) tracking, and threshold escalation are now ✅ **done** (`docs/LANGUAGE.md` §6f, §9 above) — ahead of this row's original sequencing, same pattern as Phase 2/3's admission mechanism landing early. Still open, as originally scoped: composition checks across a call chain, precedence/override semantics, per-principal ceilings, and opt-in replay. The decision document's "interpreter-parity revisit" is now moot outright, not just deferred: the interpreter was removed entirely in a separate pass this session (`run`/`serve`, `interpreter.rs`, and every module that only existed to serve it are gone from the tree) — there is no interpreter left to reach parity with. | Composition checks reject contradictory declarations; replay artifacts meet access-control rules. | The parity question this row used to defer is now closed by events, not by decision; single-function declaration/tracking/escalation moved from "not started" to "done" ahead of the rest of this row. |
 

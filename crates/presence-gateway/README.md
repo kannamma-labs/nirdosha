@@ -1,5 +1,23 @@
 # nirdosha-presence-gateway
 
+> **2026-09 — the server side of this crate's own contract no longer
+> exists.** Everything below describes talking to `nirdosha serve` (a
+> live HTTP server: `POST /api/_presence_connect`/`_presence_disconnect`,
+> `serve.rs::handle_presence`) and testing against it in-process
+> (`crates/compiler/tests/serve.rs::start_server`, `tests/mq.rs`). The
+> interpreter and `serve.rs` were deleted entirely (`docs/
+> API_TRUST_MODEL.md` §4a) — there is no `nirdosha serve` subcommand, no
+> compiled serving mode, and neither `crates/compiler/tests/serve.rs`
+> nor `crates/compiler/tests/mq.rs` exist anymore. This crate's own
+> `tests/gateway_integration.rs` (the "Testing" section below) also no
+> longer exists — this crate currently has no server it can talk to, and
+> no automated proof that it still works. The gateway process itself
+> (`src/`, this Cargo.toml's `[dependencies]`) is untouched and may well
+> still be structurally sound; what's gone is the other end of the
+> protocol it was built against. Read the rest of this file as a design
+> record of that protocol, not as a description of a currently-working
+> integration.
+
 `docs/WORKFLOW.md`'s "notify presence bridge" section and `docs/ROADMAP.md`'s Track
 A5 — the one piece of `workflow { }`'s `notify()` that `nirdosha` itself
 deliberately doesn't build: a real WebSocket connection to a browser.
