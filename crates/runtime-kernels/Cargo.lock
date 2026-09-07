@@ -736,6 +736,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-compiled-serve"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-runtime-kernels",
+ "serde_json",
+]
+
+[[package]]
 name = "nirdosha-runtime-kernels"
 version = "0.1.0"
 dependencies = [

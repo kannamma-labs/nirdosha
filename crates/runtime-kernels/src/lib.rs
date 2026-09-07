@@ -39,7 +39,17 @@
 //! around it.
 #![allow(clippy::missing_safety_doc)]
 
-mod kernel;
+// Made `pub`, not `mod`, specifically for `crates/compiled-serve`
+// (ROADMAP B8) -- the first real consumer of this crate as an ordinary
+// Rust dependency rather than only via the `extern "C"`/staticlib-
+// embedding path every compiled `.nir` binary uses. Every compiled
+// `.nir` binary still only ever calls the `#[no_mangle] extern "C"`
+// `nir_*` functions below (unaffected by this); `compiled-serve` is a
+// second, additive consumer needing real Rust-level access (`Domain`,
+// `acquire`/`release`, `dump_report`) for things a `.nir` program has
+// no reason to ever touch directly, matching this module's own "no
+// query interface for `.nir` code" doc comment.
+pub mod kernel;
 
 /// Not a real language builtin — no `.nir` program can call this
 /// (`codegen.rs` never emits a `declare`/`call` for it). Proves

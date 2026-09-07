@@ -176,6 +176,22 @@ pub enum Domain {
     /// released as soon as that request's connection returns to (or is
     /// evicted from) the pool.
     Http,
+    /// One outstanding compiled-`serve` (ROADMAP B8, `crates/compiled-serve`)
+    /// connection-handling thread — held for the whole life of a
+    /// keep-alive HTTP connection, including idle time between
+    /// requests, not just the time spent actually handling one. A
+    /// deliberately **separate** domain from `Thread`, not a reuse of
+    /// it: sharing `Thread`'s ceiling would mean a few hundred idle
+    /// browser tabs (each holding one keep-alive connection open,
+    /// ordinary behavior, not an attack) could fill it and start
+    /// denying user `spawn` calls inside request handlers — and since a
+    /// denied `spawn` returns a bare `-1` with no `Result` (a real,
+    /// separately-tracked language gap, not fixed here), a handler with
+    /// no way to notice would wedge on a `chan.recv()` that never
+    /// answers, invisibly, instead of failing fast. A dedicated domain
+    /// keeps "server saturated" and "compute saturated" distinguishable
+    /// in the flight recorder, and keeps one from starving the other.
+    ServeHttp,
 }
 
 impl Domain {
@@ -192,6 +208,7 @@ impl Domain {
             Domain::Db => "NIRDOSHA_KERNEL_MAX_DB",
             Domain::Mq => "NIRDOSHA_KERNEL_MAX_MQ",
             Domain::Http => "NIRDOSHA_KERNEL_MAX_HTTP",
+            Domain::ServeHttp => "NIRDOSHA_KERNEL_MAX_SERVE_HTTP",
         }
     }
 
@@ -243,6 +260,7 @@ static THREAD: DomainCounters = DomainCounters::new();
 static DB: DomainCounters = DomainCounters::new();
 static MQ: DomainCounters = DomainCounters::new();
 static HTTP: DomainCounters = DomainCounters::new();
+static SERVE_HTTP: DomainCounters = DomainCounters::new();
 
 fn counters_for(domain: Domain) -> &'static DomainCounters {
     match domain {
@@ -252,6 +270,7 @@ fn counters_for(domain: Domain) -> &'static DomainCounters {
         Domain::Db => &DB,
         Domain::Mq => &MQ,
         Domain::Http => &HTTP,
+        Domain::ServeHttp => &SERVE_HTTP,
     }
 }
 
@@ -331,7 +350,7 @@ pub fn stats(domain: Domain) -> (i64, u64, u64, u64) {
 /// it's ever seen, not just a diagnostic curiosity.
 pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
-    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq), ("http", Domain::Http)] {
+    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq), ("http", Domain::Http), ("serve_http", Domain::ServeHttp)] {
         let (held, grants, denials, stale_rehydrated) = stats(domain);
         out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated}\n"));
     }

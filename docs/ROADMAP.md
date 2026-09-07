@@ -2153,10 +2153,42 @@ Only `sandbox` (B6) remains fully `[OPEN]`.
    typeck rule on any exposed mutating (`create_`/`update_`/`delete_`)
    function with no `requires(...)` — `rfcs/0010-landing-and-serve-exposure.md`,
    `crates/compiler/tests/landing_dsl.rs` (11 tests) +
-   `crates/compiler/tests/serve_exposure.rs` (13 tests). This is grammar/
-   typeck only so far — nothing yet dispatches an exposed route over
-   real HTTP; that's the dispatch-table framework itself, still open,
-   described in the paragraph above.
+   `crates/compiler/tests/serve_exposure.rs` (13 tests).
+   **2026-09, same item, the HTTP engine itself**: a new crate,
+   `crates/compiled-serve` (`docs/adr/0010-runtime-kernels-rlib-for-compiled-serve.md`
+   for why it lives in `runtime-kernels`'s own separate workspace, not
+   the root one) — a real raw-`TcpListener` accept loop with per-
+   connection socket timeouts, a new `Domain::ServeHttp` admission
+   ceiling (fail-fast `503`, never a silent stall, deliberately separate
+   from `Domain::Thread` so idle keep-alive connections can never starve
+   a handler's own `spawn` calls), a real `413` body-size cap
+   (`MAX_BODY_BYTES`, the deleted interpreter-era `serve.rs`'s own
+   working `1 MiB` default, reused not reinvented), keep-alive +
+   `max_requests_per_connection`, CORS (never a wildcard on a
+   credentialed response), a fixed-window per-IP rate limiter, real
+   `Set-Cookie` (`HttpOnly; Secure; SameSite=Lax`), and `/healthz`
+   (always live)/`/readyz` (a real, explicit `Readiness` flag, for the
+   bind-before-replay ordering `docs/adr/0009` already specifies)/
+   `/metrics` (bearer-token-gated). Every route is a real function
+   pointer (`RouteHandler`'s own fixed ABI), never a name string — RBAC
+   happens *inside* the pointed-to function, this crate never
+   reimplements it. 21 tests (`crates/compiled-serve/src/tests.rs` +
+   `ratelimit.rs`), all against a real bound listener and real
+   `TcpStream` clients, no mocks. **Not yet wired to `codegen.rs`** —
+   every test route is hand-written, matching `RouteHandler`'s ABI
+   directly; making a real compiled `.nir` program's own exposed
+   functions reach this table (plus the `nirdosha build --serve` CLI
+   flag to link this crate in at all) is real, separate follow-up work,
+   the same "prove the mechanism, then wire it to codegen" order
+   `transact`'s own durability work (`docs/adr/0009`) already followed.
+   One real, disclosed limit found while building it: a panic inside a
+   `RouteHandler` (a plain `extern "C" fn`) aborts the whole process
+   immediately rather than unwinding — consistent with, not a departure
+   from, this project's "a compiled trap is an unconditional `abort()`"
+   philosophy (`codegen.rs::emit_transact`'s own doc comment), since a
+   real route handler is eventually compiled LLVM code either way. See
+   `crates/compiled-serve/README.md` and `docs/adr/0010`'s own
+   Consequences section for the full detail.
 9. `[DONE]` **B9. `sleep_ms` codegen** — 2026-09. `nir_sleep_ms`
    (`runtime-kernels/src/lib.rs`), a plain `std::thread::sleep` wrapper;
    needed anyway once `transact` (B1)'s own future retry/backoff work
