@@ -454,7 +454,11 @@ pub enum TypeErrorKind {
     /// literal `render` value is caught by the existing, more general
     /// `InvalidFieldValidationExpr { key: "render" }` instead — this
     /// variant only ever fires once that shape check already passed.
-    UnknownRenderValue { context: String, render: String, allowed: String },
+    /// `key` (rfcs/0009 Phase A) names which key the bad value was found
+    /// on -- originally always `"render"` (hence the field name below),
+    /// now also `"mark"`, `"type"`, `"aggregate"`, or a bare channel/
+    /// subkey name for `encode`'s own shape errors (`check_encode_entry`).
+    UnknownRenderValue { context: String, key: String, render: String, allowed: String },
 
     // ---- Track E4's `action { show_result: true }` --------------------
     /// `action "..." -> fn { show_result: true }` (on a `screen` or,
@@ -925,9 +929,9 @@ impl std::fmt::Display for TypeError {
                 "{line}:{col}: `panel \"{panel}\"` in `workspace {workspace}` — `source: {fn_name}` must take exactly one \
                  `i64` parameter and return `Result(json, _)`"
             ),
-            TypeErrorKind::UnknownRenderValue { context, render, allowed } => write!(
+            TypeErrorKind::UnknownRenderValue { context, key, render, allowed } => write!(
                 f,
-                "{line}:{col}: {context} {{ render: \"{render}\" }} — not a recognized render kind; use one of {allowed}"
+                "{line}:{col}: {context} {{ {key}: \"{render}\" }} — not a recognized value; use one of {allowed}"
             ),
             TypeErrorKind::ShowResultRequiresJsonResult { context, fn_name } => write!(
                 f,
@@ -1091,6 +1095,16 @@ pub struct Checker<'a> {
     /// variant — and by `infer_builtin_call`'s own early-return, which is
     /// the one place the actual signature gets used.
     plugins: HashMap<String, (Vec<Ty>, Ty)>,
+    /// rfcs/0009 Phase B — widget kinds a linked `ui_plugin::
+    /// NativeUiComponent` contributes on top of the std closed set
+    /// (`"divider" | "card" | "timeline"`), empty for every ordinary
+    /// `typecheck`/`typecheck_optional_main`/`typecheck_with_native_
+    /// plugins` caller. Consulted only by `check_screen_layout`'s
+    /// `LayoutNode::Widget` arm — the one existing extension point this
+    /// DSL already documented for "every future render-vocabulary
+    /// widget" (`ast::LayoutNode::Widget`'s own doc comment) before this
+    /// RFC gave it a real filler.
+    extra_widget_kinds: std::collections::HashSet<String>,
 }
 
 /// Type-check a whole program. `Ok(())` means every function body is well
@@ -1099,7 +1113,7 @@ pub struct Checker<'a> {
 /// rejects. Requires a zero-arg `fn main()` — the entrypoint every
 /// `run`/`build`/`emit-llvm` caller is about to execute.
 pub fn typecheck(program: &Program) -> Result<(), Vec<TypeError>> {
-    typecheck_impl(program, true, &HashMap::new(), &HashMap::new())
+    typecheck_impl(program, true, &HashMap::new(), &HashMap::new(), &std::collections::HashSet::new())
 }
 
 /// Same checks as `typecheck`, but does not require a `fn main()`. For
@@ -1114,7 +1128,7 @@ pub fn typecheck(program: &Program) -> Result<(), Vec<TypeError>> {
 /// `main`), so requiring one here would make every such program
 /// permanently unservable.
 pub fn typecheck_optional_main(program: &Program) -> Result<(), Vec<TypeError>> {
-    typecheck_impl(program, false, &HashMap::new(), &HashMap::new())
+    typecheck_impl(program, false, &HashMap::new(), &HashMap::new(), &std::collections::HashSet::new())
 }
 
 /// Same as `typecheck`, plus a native (compiled-path) plugin's declared
@@ -1124,7 +1138,28 @@ pub fn typecheck_optional_main(program: &Program) -> Result<(), Vec<TypeError>> 
 /// minimum a `.nir` program calling a linked native plugin symbol needs.
 pub fn typecheck_with_native_plugins(program: &Program, plugins: &[crate::plugin::NativePluginBuiltin]) -> Result<(), Vec<TypeError>> {
     let sigs = plugins.iter().map(|p| (p.name.clone(), (p.params.clone(), p.ret.clone()))).collect();
-    typecheck_impl(program, true, &sigs, &HashMap::new())
+    typecheck_impl(program, true, &sigs, &HashMap::new(), &std::collections::HashSet::new())
+}
+
+/// Same as `typecheck_optional_main`, plus every linked `ui_plugin::
+/// NativeUiComponent`'s `name` as an additional legal `LayoutNode::
+/// Widget` `kind` (rfcs/0009 Phase B) — `emit-ui`'s own entry point
+/// (`typecheck`'s `require_main: true` would reject the common
+/// nirdosha-lane "no `main`, only `screen`/`fn` declarations" shape
+/// `typecheck_optional_main`'s own doc comment already explains this
+/// isn't unique to plugins). Components contribute nothing to `sigs`/
+/// `plugins` — a UI component isn't callable from `.nir` code at all,
+/// only referenceable inside a `layout { ... }` block the same bare-
+/// identifier-leaf way `divider {}`/`card { ... }`/`timeline { ... }`
+/// already are (`parse_layout_node`'s catch-all `_` arm) — a plugin
+/// contributing `"sparkline"` lets a program write `sparkline { field:
+/// "amount" }` directly, no new syntax.
+pub fn typecheck_optional_main_with_ui_components(
+    program: &Program,
+    components: &[crate::ui_plugin::NativeUiComponent],
+) -> Result<(), Vec<TypeError>> {
+    let kinds = components.iter().map(|c| c.name.clone()).collect();
+    typecheck_impl(program, false, &HashMap::new(), &HashMap::new(), &kinds)
 }
 
 /// A non-fatal diagnostic — unlike `TypeError`, this never blocks
@@ -1338,6 +1373,7 @@ fn typecheck_impl(
     require_main: bool,
     plugins: &HashMap<String, (Vec<Ty>, Ty)>,
     plugin_effects: &HashMap<String, crate::effects::EffectSet>,
+    extra_widget_kinds: &std::collections::HashSet<String>,
 ) -> Result<(), Vec<TypeError>> {
     let registry = TypeRegistry::build(program);
     let mut c = Checker {
@@ -1347,6 +1383,7 @@ fn typecheck_impl(
         silent: false,
         current_ns: None,
         plugins: plugins.clone(),
+        extra_widget_kinds: extra_widget_kinds.clone(),
     };
 
     // ---- Row 11: register struct/enum type names + their constructors --
@@ -1712,6 +1749,7 @@ impl<'a> Checker<'a> {
     fn check_field_render_expr(&mut self, struct_name: &str, field_name: &str, field_ty: Option<&Ty>, value: &Expr) {
         self.check_render_expr(
             format!("`field {field_name}` on `{struct_name}`"),
+            "render",
             value,
             |s| matches!(s, "countdown" | "badge" | "searchable_select"),
             "\"countdown\", \"badge\", \"searchable_select\"",
@@ -1903,12 +1941,18 @@ impl<'a> Checker<'a> {
                 }
             }
             LayoutNode::Widget { kind, entries, span } => {
-                if !matches!(kind.as_str(), "divider" | "card" | "timeline") {
+                // rfcs/0009 Phase B: a linked `ui_plugin::NativeUiComponent`
+                // widens this closed set past the three std kinds -- still
+                // a closed set either way, just one `emit-ui`'s own linked
+                // plugins get a say in, not one a `.nir` program (or an
+                // agent authoring one) can grow itself.
+                if !matches!(kind.as_str(), "divider" | "card" | "timeline") && !self.extra_widget_kinds.contains(kind.as_str()) {
                     self.error(
                         TypeErrorKind::UnknownRenderValue {
                             context: format!("`layout` in `screen {}`", screen.struct_name),
+                            key: "kind".to_string(),
                             render: kind.clone(),
-                            allowed: "\"divider\", \"card\", \"timeline\"".to_string(),
+                            allowed: "\"divider\", \"card\", \"timeline\", or a linked UI-plugin component name".to_string(),
                         },
                         *span,
                     );
@@ -2037,12 +2081,92 @@ impl<'a> Checker<'a> {
                 if key == "render" {
                     self.check_render_expr(
                         format!("`visual \"{}\"`", v.label),
+                        "render",
                         value,
-                        |s| matches!(s, "graph" | "heatmap" | "timeline"),
-                        "\"graph\", \"heatmap\", \"timeline\"",
+                        |s| matches!(s, "graph" | "heatmap" | "timeline" | "chart"),
+                        "\"graph\", \"heatmap\", \"timeline\", \"chart\"",
                     );
+                } else if key == "mark" {
+                    self.check_render_expr(
+                        format!("`visual \"{}\"`'s `mark`", v.label),
+                        "mark",
+                        value,
+                        |s| matches!(s, "bar" | "line" | "area" | "point" | "arc" | "rule"),
+                        "\"bar\", \"line\", \"area\", \"point\", \"arc\", \"rule\"",
+                    );
+                } else if let Some(rest) = key.strip_prefix("encode.") {
+                    self.check_encode_entry(&format!("`visual \"{}\"`", v.label), rest, value);
                 }
             }
+        }
+    }
+
+    /// One `encode <channel> { <subkey>: value }` entry, already
+    /// flattened by the parser into `"encode.<channel>.<subkey>"`
+    /// (rfcs/0009 Phase A) — `rest` is `"<channel>.<subkey>"`. `owner` is
+    /// a pre-formatted, already-backtick-quoted description of whatever
+    /// declares this `encode` block (a dashboard `visual` or a workspace
+    /// `panel`, both share this one check — `check_render_expr`'s own
+    /// "one check, several callers with different surrounding syntax"
+    /// convention). There is deliberately no cross-check against a
+    /// struct's real fields here the way `screen`/`workspace` field
+    /// references get: both a `visual`'s and a `panel`'s backing fn
+    /// return opaque `json` (`Metric`'s own doc comment — "resolve to a
+    /// JSON array of `{label, value}` objects" is a runtime convention,
+    /// not a typechecked shape), so `field`'s value is only checked to
+    /// *be* a string, not to *name a real column* — a real, disclosed
+    /// narrowing, not an oversight.
+    fn check_encode_entry(&mut self, owner: &str, rest: &str, value: &Expr) {
+        let Some((channel, subkey)) = rest.split_once('.') else {
+            // Unreachable from `parse_encode_channel_entries` (it always
+            // emits exactly one dot), kept as a defensive no-op rather
+            // than a panic, same posture `MetricRender::from_kv` already
+            // takes toward an already-parser-guaranteed shape.
+            return;
+        };
+        if !matches!(channel, "x" | "y" | "color" | "size" | "theta") {
+            self.error(
+                TypeErrorKind::UnknownRenderValue {
+                    context: format!("{owner}'s `encode` channel"),
+                    key: "encode".to_string(),
+                    render: channel.to_string(),
+                    allowed: "\"x\", \"y\", \"color\", \"size\", \"theta\"".to_string(),
+                },
+                value.span(),
+            );
+            return;
+        }
+        match subkey {
+            "field" => self.check_render_expr(
+                format!("{owner}'s `encode {channel}`'s `field`"),
+                "field",
+                value,
+                |_| true,
+                "any string literal (not cross-checked against a real column -- the backing fn returns opaque json)",
+            ),
+            "type" => self.check_render_expr(
+                format!("{owner}'s `encode {channel}`'s `type`"),
+                "type",
+                value,
+                |s| matches!(s, "quantitative" | "nominal" | "ordinal" | "temporal"),
+                "\"quantitative\", \"nominal\", \"ordinal\", \"temporal\"",
+            ),
+            "aggregate" => self.check_render_expr(
+                format!("{owner}'s `encode {channel}`'s `aggregate`"),
+                "aggregate",
+                value,
+                |s| matches!(s, "sum" | "avg" | "count" | "min" | "max"),
+                "\"sum\", \"avg\", \"count\", \"min\", \"max\"",
+            ),
+            other => self.error(
+                TypeErrorKind::UnknownRenderValue {
+                    context: format!("{owner}'s `encode {channel}` key"),
+                    key: "encode".to_string(),
+                    render: other.to_string(),
+                    allowed: "\"field\", \"type\", \"aggregate\"".to_string(),
+                },
+                value.span(),
+            ),
         }
     }
 
@@ -2058,14 +2182,19 @@ impl<'a> Checker<'a> {
     /// of this one. `context` is a pre-formatted, already-backtick-
     /// quoted description for the error message, since this one check
     /// serves three different callers with different surrounding syntax.
-    fn check_render_expr(&mut self, context: String, value: &Expr, valid: fn(&str) -> bool, allowed: &str) {
+    fn check_render_expr(&mut self, context: String, key: &str, value: &Expr, valid: fn(&str) -> bool, allowed: &str) {
         let Expr::Str(render, _) = value else {
-            self.error(TypeErrorKind::InvalidFieldValidationExpr { key: "render".to_string() }, value.span());
+            self.error(TypeErrorKind::InvalidFieldValidationExpr { key: key.to_string() }, value.span());
             return;
         };
         if !valid(render) {
             self.error(
-                TypeErrorKind::UnknownRenderValue { context, render: render.clone(), allowed: allowed.to_string() },
+                TypeErrorKind::UnknownRenderValue {
+                    context,
+                    key: key.to_string(),
+                    render: render.clone(),
+                    allowed: allowed.to_string(),
+                },
                 value.span(),
             );
         }
@@ -2147,15 +2276,30 @@ impl<'a> Checker<'a> {
             }
             // `panel "..." { render: "..." }` (Track E2) — same closed
             // vocabulary `visual`'s own `render` gets, reusing
-            // `check_render_expr` rather than a second check.
+            // `check_render_expr` rather than a second check. `"chart"`
+            // + `mark`/`encode` (rfcs/0009 Phase A, extended to panels)
+            // reuse the exact same checks `check_dashboard`'s `visual`
+            // loop already runs.
             for (key, value) in &panel.entries {
+                let owner = format!("`panel \"{}\"` in `workspace {}`", panel.title, ws.name);
                 if key == "render" {
                     self.check_render_expr(
-                        format!("`panel \"{}\"` in `workspace {}`", panel.title, ws.name),
+                        owner,
+                        "render",
                         value,
-                        |s| matches!(s, "graph" | "heatmap" | "timeline"),
-                        "\"graph\", \"heatmap\", \"timeline\"",
+                        |s| matches!(s, "graph" | "heatmap" | "timeline" | "chart"),
+                        "\"graph\", \"heatmap\", \"timeline\", \"chart\"",
                     );
+                } else if key == "mark" {
+                    self.check_render_expr(
+                        format!("{owner}'s `mark`"),
+                        "mark",
+                        value,
+                        |s| matches!(s, "bar" | "line" | "area" | "point" | "arc" | "rule"),
+                        "\"bar\", \"line\", \"area\", \"point\", \"arc\", \"rule\"",
+                    );
+                } else if let Some(rest) = key.strip_prefix("encode.") {
+                    self.check_encode_entry(&owner, rest, value);
                 }
             }
         }
@@ -5028,6 +5172,7 @@ pub fn validate_fragment(json: &str, expected_ty: &Ty, env: &FragmentEnv) -> Res
         silent: false,
         current_ns: None,
         plugins: HashMap::new(),
+        extra_widget_kinds: std::collections::HashSet::new(),
     };
     let mut scopes = Scopes::new();
     for (name, ty) in &env.0 {

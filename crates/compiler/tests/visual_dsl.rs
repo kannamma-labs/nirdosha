@@ -195,3 +195,263 @@ fn a_dashboard_with_no_visual_items_typechecks_exactly_as_before() {
     assert!(program.dashboard.as_ref().unwrap().visuals.is_empty());
     typecheck(&program).expect("a dashboard with no visual items should typecheck as before");
 }
+
+// ---- rfcs/0009 Phase A: `render: "chart"` grammar-of-graphics --------
+
+const CHART_FN: &str = r#"
+    fn chart_revenue_by_month() -> Result(json, i64) requires(public) {
+        return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+    }
+"#;
+
+#[test]
+fn well_formed_chart_with_two_encoded_channels_parses_and_typechecks_cleanly() {
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "bar"
+                encode x {{ field: "month" type: "temporal" }}
+                encode y {{ field: "amount" type: "quantitative" aggregate: "sum" }}
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    let program = parse_ok(&src);
+    let v = &program.dashboard.as_ref().unwrap().visuals[0];
+    // `encode x { ... }`/`encode y { ... }` flatten into the same flat
+    // `entries` list `paginate {}` already flattens into on `screen` --
+    // no new AST node (parse_encode_channel_entries's own doc comment).
+    let keys: Vec<&str> = v.entries.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec!["render", "mark", "encode.x.field", "encode.x.type", "encode.y.field", "encode.y.type", "encode.y.aggregate"]
+    );
+    typecheck(&program).expect("a well-formed chart visual should typecheck cleanly");
+}
+
+#[test]
+fn chart_render_value_is_accepted_by_the_closed_set() {
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "line"
+                encode x {{ field: "month" type: "temporal" }}
+                encode y {{ field: "amount" type: "quantitative" }}
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    typecheck(&parse_ok(&src)).expect("`render: \"chart\"` should be accepted");
+}
+
+#[test]
+fn unknown_mark_is_rejected() {
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "pie"
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    assert!(matches!(
+        first_type_error(&src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "mark" && render == "pie"
+    ));
+}
+
+#[test]
+fn unknown_encode_channel_is_rejected() {
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "bar"
+                encode diagonal {{ field: "month" type: "temporal" }}
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    assert!(matches!(
+        first_type_error(&src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "encode" && render == "diagonal"
+    ));
+}
+
+#[test]
+fn unknown_encode_subkey_is_rejected() {
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "bar"
+                encode x {{ column: "month" }}
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    assert!(matches!(
+        first_type_error(&src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "encode" && render == "column"
+    ));
+}
+
+#[test]
+fn unknown_encoding_type_is_rejected() {
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "bar"
+                encode x {{ field: "month" type: "categorical" }}
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    assert!(matches!(
+        first_type_error(&src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "type" && render == "categorical"
+    ));
+}
+
+#[test]
+fn unknown_aggregate_is_rejected() {
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "bar"
+                encode y {{ field: "amount" type: "quantitative" aggregate: "median" }}
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    assert!(matches!(
+        first_type_error(&src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "aggregate" && render == "median"
+    ));
+}
+
+#[test]
+fn encode_field_accepts_any_string_since_the_backing_fn_returns_opaque_json() {
+    // No struct to resolve `field` against (`check_encode_entry`'s own
+    // doc comment) -- any string literal is accepted, unlike a
+    // `screen`'s `layout { field <name> }` reference.
+    let src = format!(
+        r#"
+        {CHART_FN}
+        dashboard {{
+            visual "Revenue by month" -> chart_revenue_by_month {{
+                render: "chart"
+                mark: "bar"
+                encode x {{ field: "anything_at_all" type: "nominal" }}
+            }}
+        }}
+        fn main() {{}}
+    "#
+    );
+    typecheck(&parse_ok(&src)).expect("an arbitrary `field` string should typecheck cleanly");
+}
+
+// ---- rfcs/0009 Phase A, extended to workspace panels ------------------
+
+const PANEL_CHART: &str = r#"
+    struct Case { id: i64 }
+    fn chart_by_case(case_id: i64) -> Result(json, i64) {
+        return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+    }
+    workspace W {
+        subject: Case
+        panel "Revenue" {
+            source: chart_by_case
+            render: "chart"
+            mark: "bar"
+            encode x { field: "month" type: "temporal" }
+            encode y { field: "amount" type: "quantitative" aggregate: "sum" }
+        }
+    }
+    fn main() {}
+"#;
+
+#[test]
+fn a_well_formed_panel_chart_parses_and_typechecks_cleanly() {
+    let program = parse_ok(PANEL_CHART);
+    let panel = &program.workspaces[0].panels[0];
+    let keys: Vec<&str> = panel.entries.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec!["source", "render", "mark", "encode.x.field", "encode.x.type", "encode.y.field", "encode.y.type", "encode.y.aggregate"]
+    );
+    typecheck(&program).expect("a well-formed panel chart should typecheck cleanly");
+}
+
+#[test]
+fn panel_unknown_mark_is_rejected() {
+    let src = r#"
+        struct Case { id: i64 }
+        fn chart_by_case(case_id: i64) -> Result(json, i64) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        workspace W {
+            subject: Case
+            panel "Revenue" {
+                source: chart_by_case
+                render: "chart"
+                mark: "pie"
+            }
+        }
+        fn main() {}
+    "#;
+    assert!(matches!(
+        first_type_error(src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "mark" && render == "pie"
+    ));
+}
+
+#[test]
+fn panel_unknown_encode_channel_is_rejected() {
+    let src = r#"
+        struct Case { id: i64 }
+        fn chart_by_case(case_id: i64) -> Result(json, i64) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        workspace W {
+            subject: Case
+            panel "Revenue" {
+                source: chart_by_case
+                render: "chart"
+                mark: "bar"
+                encode diagonal { field: "month" type: "temporal" }
+            }
+        }
+        fn main() {}
+    "#;
+    assert!(matches!(
+        first_type_error(src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "encode" && render == "diagonal"
+    ));
+}
