@@ -138,6 +138,7 @@ fn domain_name(d: u8) -> &'static str {
         2 => "thread",
         3 => "db",
         4 => "mq",
+        5 => "http",
         _ => "unknown",
     }
 }

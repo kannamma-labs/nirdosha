@@ -1997,19 +1997,46 @@ fully `[OPEN]`.
    authenticated request — do before general concurrency/sandboxing.
 5. `[DONE]` **B5. `http`/`https` codegen** — 2026-09. `http_get`/
    `http_post`/`https_get`/`https_post`, real (`std::net::TcpStream` for
-   plain HTTP, `native_tls::TlsStream` for HTTPS), `Connection: close` +
-   read-to-EOF + real chunked-transfer-encoding decoding (found
-   necessary by testing against a real production server, not designed
-   in advance). **Decided, not left to deploy time**: TLS is vendored
-   (`openssl = { features = ["vendored"] }`), not system-linked — found
-   necessary by an actual link failure against this environment's system
-   OpenSSL (a real ABI mismatch, `SSL_ctrl`/`SSL_CTX_ctrl` missing), same
-   "no system dependency" posture `rusqlite`'s `bundled` SQLite already
-   has. Verified end to end: a real local-TCP-server round trip
+   plain HTTP, `native_tls::TlsStream` for HTTPS), real chunked-transfer-
+   encoding decoding (found necessary by testing against a real
+   production server, not designed in advance). **Decided, not left to
+   deploy time**: TLS is vendored (`openssl = { features = ["vendored"] }`),
+   not system-linked — found necessary by an actual link failure against
+   this environment's system OpenSSL (a real ABI mismatch,
+   `SSL_ctrl`/`SSL_CTX_ctrl` missing), same "no system dependency"
+   posture `rusqlite`'s `bundled` SQLite already has.
+   **2026-09 follow-up, same item: real HTTP/1.1 keep-alive + pooling +
+   admission control** (`crates/runtime-kernels/src/kernel/http.rs`) —
+   the original `Connection: close` + read-to-EOF design was correct for
+   its own scope but structurally incompatible with pooling (a pooled
+   connection only has value if it survives past one request; under
+   `Connection: close` every "reuse" would immediately fail validation).
+   Replaced with a real incremental `Content-Length`/chunked-aware
+   response reader that never reads past one response's own boundary —
+   the only way keep-alive framing can work — plus a `PoolRegistry`-based
+   pool per scheme (`kernel::db`'s same pattern) keyed by `host:port`,
+   real liveness validation on checkout (a non-blocking peek for plain
+   TCP; TLS has no safe peek, so HTTPS relies on the server's own
+   declared `Connection: close` — honored via `ManageConnection::has_broken`,
+   never silently reused past it — plus at-most-once retry semantics),
+   and a new `Domain::Http` admission ceiling (previously **absent
+   entirely** — `http_get`/`post` had zero admission control before this
+   follow-up, a real, disclosed gap now closed, not a hypothetical one).
+   Verified end to end, including the actual point of the rewrite, not
+   just "no error": `crates/runtime-kernels/src/kernel/http.rs`'s own
+   tests prove real connection *reuse* (three requests against a real
+   local server, counted at exactly one `accept()`), a server-initiated
+   `Connection: close` correctly *not* being reused, and — caught by
+   its own test before this shipped, not found later — a real bug where
+   bytes over-read past one response's boundary (a single `read()` can
+   return more than one response's worth of bytes) were silently
+   dropped instead of carried into the next response's parse, corrupting
+   it; fixed by threading a `leftover` buffer through each pooled
+   connection. Plus the pre-existing real local-TCP-server round trip
    (`crates/compiler/tests/codegen.rs`'s
    `http_get_and_post_round_trip_against_a_real_local_server`) and a
    real HTTPS `GET` against `example.com` (manual, network-dependent,
-   not part of the automated suite).
+   not part of the automated suite) — both still green, unmodified.
 6. `thread`/`spawn`/`join`, `chan`/`send`/`recv` `[DONE]` (2026-09) —
    compiled, backed by a real admission-controlled kernel
    (`runtime-kernels`) and a dynamic deadlock detector

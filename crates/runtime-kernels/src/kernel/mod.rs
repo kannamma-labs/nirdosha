@@ -115,6 +115,7 @@
 #![allow(dead_code)]
 
 pub mod db;
+pub mod http;
 pub mod mailbox;
 pub mod nfr;
 pub mod pool;
@@ -162,6 +163,16 @@ pub enum Domain {
     /// just above, appended after it for the same "existing `Domain as
     /// u8` discriminants stay stable" reason.
     Mq,
+    /// One outstanding `http`/`https` connection (between `http_get`/
+    /// `http_post`/`https_get`/`https_post`'s pooled checkout and its
+    /// return) — same shape as `Db`/`Mq`, appended last for the same
+    /// discriminant-stability reason. Unlike `Db`, `http`/`https` has
+    /// no user-visible affine handle to hold this ceiling open across
+    /// (a client call is one request, not an open-then-`stop` session)
+    /// — admission is held for the duration of one pooled checkout,
+    /// released as soon as that request's connection returns to (or is
+    /// evicted from) the pool.
+    Http,
 }
 
 impl Domain {
@@ -177,6 +188,7 @@ impl Domain {
             Domain::Thread => "NIRDOSHA_KERNEL_MAX_THREAD",
             Domain::Db => "NIRDOSHA_KERNEL_MAX_DB",
             Domain::Mq => "NIRDOSHA_KERNEL_MAX_MQ",
+            Domain::Http => "NIRDOSHA_KERNEL_MAX_HTTP",
         }
     }
 
@@ -227,6 +239,7 @@ static FILE: DomainCounters = DomainCounters::new();
 static THREAD: DomainCounters = DomainCounters::new();
 static DB: DomainCounters = DomainCounters::new();
 static MQ: DomainCounters = DomainCounters::new();
+static HTTP: DomainCounters = DomainCounters::new();
 
 fn counters_for(domain: Domain) -> &'static DomainCounters {
     match domain {
@@ -235,6 +248,7 @@ fn counters_for(domain: Domain) -> &'static DomainCounters {
         Domain::Thread => &THREAD,
         Domain::Db => &DB,
         Domain::Mq => &MQ,
+        Domain::Http => &HTTP,
     }
 }
 
@@ -314,7 +328,7 @@ pub fn stats(domain: Domain) -> (i64, u64, u64, u64) {
 /// it's ever seen, not just a diagnostic curiosity.
 pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
-    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq)] {
+    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq), ("http", Domain::Http)] {
         let (held, grants, denials, stale_rehydrated) = stats(domain);
         out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated}\n"));
     }
