@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
+        "emit-catalog" => cmd_emit_catalog(args),
         other => {
             eprintln!("unknown subcommand `{other}` -- nirdosha has no interpreter/`run`/`serve` mode anymore; use `build` or `emit-llvm`.");
             print_usage();
@@ -46,6 +47,9 @@ fn print_usage() {
     eprintln!("  nirdosha emit-ast <file.nir>        print the parsed AST as JSON (docs/goal.md row 9)");
     eprintln!("  nirdosha emit-ui <file.nir> [-o out.html]");
     eprintln!("                                      derive a Material-styled web UI from struct/fn conventions");
+    eprintln!("  nirdosha emit-catalog [-o out.json]");
+    eprintln!("                                      print the std UI catalog (rfcs/0009 Phase 0) -- the closed");
+    eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
 }
 
 /// Load (resolving any `use "..."` — `docs/ROADMAP.md` Track F, F2 piece 3)
@@ -490,6 +494,56 @@ fn cmd_emit_ui(mut args: impl Iterator<Item = String>) -> ExitCode {
         },
         None => {
             println!("{html}");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// `nirdosha emit-catalog [-o out.json]` (rfcs/0009 Phase 0) -- prints
+/// `catalog/std/0.1.json`, a hand-written documentation of the closed
+/// layout/control/chart/theme vocabulary `ui_gen.rs`/`ui_gen_template.html`
+/// already render. Baked in at compile time (`include_str!`), not read
+/// from disk at runtime, the same "ships inside the binary" posture
+/// `nirdosha.gbnf` has for the core grammar. Parsed and re-serialized
+/// (rather than echoed byte-for-byte) purely so a hand-edit that breaks
+/// JSON syntax fails loudly here instead of shipping silently malformed
+/// output -- this command does not yet merge in anything from typeck or
+/// a linked plugin (rfcs/0009 Phase B); it is std only, disclosed, not
+/// hidden.
+const STD_CATALOG_JSON: &str = include_str!("../catalog/std/0.1.json");
+
+fn cmd_emit_catalog(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut output: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-o" => output = args.next(),
+            other => {
+                eprintln!("unknown argument `{other}` -- usage: nirdosha emit-catalog [-o out.json]");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let value: serde_json::Value = match serde_json::from_str(STD_CATALOG_JSON) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("internal error: catalog/std/0.1.json failed to parse: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let json = serde_json::to_string_pretty(&value).expect("a parsed serde_json::Value always re-serializes");
+    match output {
+        Some(out) => match std::fs::write(&out, &json) {
+            Ok(()) => {
+                println!("wrote {out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error writing {out}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        None => {
+            println!("{json}");
             ExitCode::SUCCESS
         }
     }
