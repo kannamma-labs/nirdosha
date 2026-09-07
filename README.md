@@ -147,11 +147,21 @@ binary itself, whether or not one is ever generated. See the
 [UI Engine](https://github.com/kannamma-labs/nirdosha/wiki/UI-Engine)
 wiki page for the full, current picture.
 
-**New: escaping the closed 4-chart/7-control catalog, without opening
-a runtime hole.** `render: "chart"` replaces "pick one of four fixed
-chart shapes" with a bounded grammar-of-graphics config — `mark` ×
-`encode <channel>` — still a fully closed, typechecked vocabulary the
-model can't escape, not arbitrary markup:
+**New: if you've hit "this framework only ships four chart shapes and
+a fixed widget list," you're not stuck there anymore — and you don't
+have to trade away the safety you came here for to fix it.**
+
+Every closed UI vocabulary eventually runs into the same wall: your
+dashboard needs a scatter plot, a gauge, a funnel — something outside
+the four hand-built shapes — and the usual answer is either fork the
+tool, or give up and let something (a model, a template) emit raw
+markup, at which point you've quietly reopened the exact XSS/injection
+surface a closed vocabulary was buying you out of. You get a real third
+option: `render: "chart"` turns "pick one of four fixed shapes" into a
+small, composable config — a mark (`bar`/`line`/`area`/`point`/`arc`/
+`rule`) crossed with encoding channels — that covers a much wider space
+of real charts, while staying exactly as closed and typechecked as the
+four shapes it sits alongside:
 
 ```nirdosha
 dashboard {
@@ -164,12 +174,11 @@ dashboard {
 }
 ```
 
-And when the fixed vocabulary genuinely isn't enough, a Rust crate can
-now contribute an entirely new `layout` widget kind — discovered
-automatically straight from the app's own `Cargo.toml`
-(`nirdosha emit-ui --manifest-path`), never authored by the model or a
-served request, so the extension boundary stays a build-time decision a
-human made, not a runtime one:
+And if even that isn't enough — you need a genuinely custom widget, not
+just a different chart shape — you're not waiting on a Nirdosha
+maintainer to build it for you, and you're not forking the compiler
+either. Add a Rust crate to your own project's `Cargo.toml`, and
+`nirdosha emit-ui` finds and links it for you, automatically:
 
 ```nirdosha
 layout {
@@ -177,26 +186,31 @@ layout {
 }
 ```
 
-Both are additive — every existing `bar_chart`/`graph`/`heatmap`/
-`timeline`/`divider`/`card` program is unaffected.
+Both are additive, so if neither of these applies to you today, nothing
+changes: every existing `bar_chart`/`graph`/`heatmap`/`timeline`/
+`divider`/`card` program you already have keeps working exactly as it
+did.
 
-**The security claim, made concrete.** Competing generative-UI specs
-(OpenUI, Vercel's json-render, Google's A2UI) resolve their component
-catalog *inside the running app process* — a Zod object the app's own
-code can edit any time, or a catalog picked via a live "capability
-negotiation" handshake at session start. Either way, *what the model is
-allowed to reference* is a runtime decision, reachable from the same
-process serving the agent. Nirdosha's catalog — std plus every linked
-component — is fully resolved and typechecked at `nirdosha build`/
-`emit-ui` time, before the binary an agent talks to even exists. There
-is no admin API, no hot-reload, no session negotiation, no code path at
-all that adds or changes a component after that point — an agent can
-reference what's in the compiled artifact and nothing else, full stop.
-Extending the catalog is something a human does once, by adding a
-reviewed Cargo dependency, never something reachable from a chat turn.
-See [`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md) §"Effect on
-the permission model" for the full argument, and for what shipped vs.
-what's still open.
+**And if the reason you're evaluating Nirdosha at all is that an agent
+is going to be writing and serving this code unsupervised, here's why
+this specific door doesn't undo that.** The other generative-UI specs
+you might compare this to (OpenUI, Vercel's json-render, Google's A2UI)
+all resolve their component catalog *inside the running app process* —
+a Zod object the app's own code can edit any time, or a catalog picked
+by a live "capability negotiation" handshake when a session starts.
+Either way, *what the agent is allowed to put on screen* is a decision
+your running server makes, reachable from the same process that's
+talking to the agent. That's not the case here: your catalog — the std
+one plus whatever crate you've linked — is fully resolved and
+typechecked at `nirdosha build`/`emit-ui` time, before the binary the
+agent ever talks to exists. There's no admin API, no hot-reload, no
+session negotiation for an agent (or anything else) to reach — it can
+reference what's in the artifact you built and compiled, and nothing
+else. Growing that vocabulary stays something *you* do, once, by adding
+a Cargo dependency you reviewed — never something a chat turn can do on
+its own. See [`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md)
+§"Effect on the permission model" for the full argument, and for
+exactly what's shipped versus what's still open.
 
 ## Why this exists, in one paragraph
 
