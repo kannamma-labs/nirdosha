@@ -1,5 +1,27 @@
 # Nirdosha sandboxing — what it brings, and our approach
 
+**Status, 2026-09 — explicitly descoped from the first production
+release.** Layers 1-2 below ("Done") describe real, historical work, but
+it lived entirely in `interpreter.rs`, deleted along with the rest of
+the tree-walking interpreter (`refactor: remove tree-walking
+interpreter and its only consumers`) — `sandbox`/`stop` and
+cross-process `chan` do not run in any form today, compiled or
+otherwise (`codegen.rs` rejects `sandbox` outright, naming the reason).
+Unlike every other post-interpreter-removal gap this project has closed
+this way (`transact`/`db`/`json`/`mq`/`http`/`workflow` all got a real,
+narrower Layer 1 *compiled* equivalent), sandboxing was deliberately
+left unmigrated: it has zero existing compiled-backend scaffolding —
+porting it means building real process-spawn/kill/reap kernels and a
+`--sandbox-worker` re-exec protocol from scratch, not translating an
+already-proven design into LLVM IR the way every other phase was. It
+depends on nothing else in the compiled backend, and nothing else
+depends on it, so this costs the release nothing beyond
+`examples/features/20_sandbox.nir`/`21_sandbox_channels.nir` staying in
+their already-disclosed "not runnable" state. Tracked as real,
+prioritized future work (`docs/ROADMAP.md` Track B, B6) — the design
+below is still the intended shape when that work resumes, not
+abandoned, just not on the v1 critical path.
+
 This is not the ProtoBox PRD (`../Nirdosha_Sandboxing_PRD.md`, kept as reference,
 not adopted wholesale). That document is a good prompt — the core instinct
 (sandbox handles as affine, ownership-tracked resources) is exactly right and
