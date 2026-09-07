@@ -1842,7 +1842,7 @@ fn generate_impl(
 fn ui_components_script(components: &[crate::ui_plugin::NativeUiComponent]) -> String {
     let mut out = String::new();
     for c in components {
-        out.push_str(c.render_js);
+        out.push_str(&c.render_js);
         out.push('\n');
         out.push_str(&format!(
             "WIDGET_RENDERERS[{}] = {};\n",

@@ -41,8 +41,9 @@ fn sparkline_component() -> NativeUiComponent {
             d.className = 'sparkline-stub'; \
             d.textContent = 'sparkline:' + (node.entries && node.entries.field); \
             return d; \
-        }",
-        render_fn: "render_sparkline",
+        }"
+        .to_string(),
+        render_fn: "render_sparkline".to_string(),
     }
 }
 
