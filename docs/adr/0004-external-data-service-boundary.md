@@ -1,7 +1,49 @@
 # 0004: External Data & Service Boundary — plugin-backed `db`/`mq` connections by URL scheme
 
 Date: 2026-09-05
-Status: accepted
+Status: accepted (decision stands; the mechanism itself no longer executes anywhere as of 2026-09-06 — see note below)
+
+> **2026-09-07 note, not a supersession.** This was accepted and shipped
+> correctly on 2026-09-05. The next day, `c82fa1f` ("refactor: remove
+> native plugin ecosystem") deleted `crates/plugin-example-mysql`/
+> `-activemq` (and the other three gallery crates) as a direct, disclosed
+> consequence of the separate interpreter-removal pass — its commit
+> message says plainly that every `plugin-example-*` crate "depended
+> entirely on the tree-walking interpreter's `PluginBuiltin`/`PluginFn`
+> dispatch, which no longer exists." Everything below describes real,
+> working code at the time it was written, but every noun in it —
+> `interpreter.rs`, `serve.rs`, `run_with_plugins`, `dbconn::connect`,
+> `HandleRegistry`, both named plugin crates — is now either deleted
+> entirely or (for `dbconn.rs`) stripped of the interpreter that called
+> it. This was a clean, intentional removal, not code lost in a merge:
+> `git log --oneline --all -- crates/plugin-example-mysql` shows a clean
+> linear history (add in `6264dd2`, two real feature commits including
+> this ADR's own `61d255e`, then one explicit delete in `c82fa1f`) —
+> nothing silently dropped in a merge, no orphaned branch holding work
+> this branch lost.
+>
+> **One real leftover worth knowing about, found while checking this**:
+> `mq_connect_via` — the one new builtin this ADR added — is still a
+> declared, typechecked builtin today (`ast::BUILTIN_NAMES`,
+> `typeck.rs::infer_builtin_call`, `effects.rs`, `ownership.rs`'s
+> `builtin_return_ty` all still list it). A `.nir` program can still
+> write `mq_connect_via(...)` and have it typecheck cleanly — but there
+> is no execution path left for it anywhere: the interpreter that
+> implemented it is gone, and `codegen.rs` hard-rejects `Ty::Mq`
+> entirely (`unsupported("codegen doesn't support mq yet")`). This isn't
+> unique to `mq_connect_via` — the same is true of every other `db`/`mq`
+> builtin (`db_connect`, `db_query`, `mq_publish`, ...), all of which
+> predate this ADR. It's the general "no backend left, in either path"
+> state this whole document's mechanism now shares with plain `db`/`mq`,
+> not a partial, botched removal specific to this ADR.
+>
+> No decision here is reversed by this note — routing a `scheme://`
+> string to a plugin by naming convention is still, in principle, the
+> right shape for whenever `db`/`mq` gain compiled-path codegen and a
+> revived (necessarily different — the compiled plugin ABI is scalar-
+> only, `rfcs/0008`) plugin mechanism. This note exists so a future
+> reader doesn't try to exercise this ADR's own evidence commands
+> against crates that no longer exist.
 
 ## Context
 

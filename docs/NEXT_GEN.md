@@ -6,6 +6,22 @@ against, written *before* the first line of it lands — the same order
 `docs/MOBILE.md`/`docs/WORKFLOW.md`/`docs/TRANSACT.md` were written in for their own
 features, not after.
 
+> **Drift note (2026-09-07, code as truth).** This document (last
+> touched 2026-09-04) reasons throughout about `interpreter.rs` and
+> `serve.rs` as live, current files — both were deleted entirely on
+> 2026-09-06 (`refactor: remove tree-walking interpreter and its only
+> consumers`). That affects two things below concretely: (1) F1's
+> "already reusable" `serve.rs` routes/identity-check reasoning is now
+> the same gap `docs/MOBILE.md`'s own drift note describes — no live
+> server exists to point a second renderer at; (2) F2's "shipped,
+> `[DONE]`" namespacing description leans on `interpreter.rs`'s
+> `fn_index`/name-resolution behavior specifically — since that file no
+> longer exists, whether namespacing still holds on the compiled
+> (`codegen.rs`) path needs re-checking against current code before
+> trusting this section's `[DONE]` claim at face value. F3's contract
+> checker (`contract_check.rs`, `smt.rs`) is unaffected — neither file
+> was touched by the interpreter removal.
+
 ## Why this came up
 
 Grew out of a direct 2026-09-03 conversation, prompted by two real bugs

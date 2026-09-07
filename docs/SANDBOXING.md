@@ -32,6 +32,20 @@ yet, and it invents a second, incompatible channel primitive alongside the
 buys us, independent of that syntax, and how we intend to get there without
 duplicating work already done.
 
+> **Drift note (2026-09-07, code as truth).** Row 1 below ("Done —
+> `sandbox`/`stop`") describes behavior (`SandboxChild`,
+> `Interpreter::with_sandbox_exe`, the `--sandbox-worker` re-exec) that
+> lived entirely in `interpreter.rs`/`main.rs`'s interpreter-only code
+> paths, deleted on 2026-09-06 (`refactor: remove tree-walking
+> interpreter and its only consumers`). `sandbox`/`stop` still parse and
+> typecheck, but `codegen.rs` explicitly rejects them
+> (`"codegen doesn't support 'sandbox' yet -- sandbox/stop are
+> interpreter-only for now"`), and there is no interpreter left to fall
+> back to — so today there is no way to actually *run* a `sandbox`
+> expression at all, compiled or otherwise. Read "Done" below as
+> "was done, on a runtime no longer in this tree," not as a current
+> capability.
+
 ## What it brings to the table
 
 **1. Sandboxes as a third tier of the safety story, not a bolt-on.**

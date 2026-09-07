@@ -593,9 +593,10 @@ fn main() {
 ```
 
 Naming `list_<struct>`/`create_<struct>`/`update_<struct>`/
-`delete_<struct>` functions like this is also what `nirdosha emit-ui`/
-`nirdosha serve` use to auto-generate a full CRUD web UI with zero
-extra syntax — see the `screen`/`dashboard` DSL in `docs/LANGUAGE.md` §11 if
+`delete_<struct>` functions like this is also what `nirdosha emit-ui`
+uses to auto-generate a full CRUD web UI with zero extra syntax (a
+static HTML file — there is no `nirdosha serve`/compiled serving mode
+anymore, the interpreter it depended on was deleted) — see the `screen`/`dashboard` DSL in `docs/LANGUAGE.md` §11 if
 you need to customize that generated UI (custom labels, field
 validation, role-gated visibility, dashboard tiles/charts).
 
@@ -606,8 +607,8 @@ Target } ... }` — durable, named states with `on <Event> -> <Target>`
 transitions, desugared into ordinary `fn`s (`start_<name>`,
 `advance_<name>`, etc.), so it needs no new runtime. `state { owner:
 role("...") }` names who may fire that state's outgoing events —
-checked live, per instance, not statically — and `nirdosha serve`/
-`emit-ui` generate a "Workflows" queue screen from it automatically
+checked live, per instance, not statically — and `nirdosha emit-ui`
+generates a "Workflows" queue screen from it automatically
 (each role sees only what's waiting on them, plus a "my requests" tab
 for whoever started an instance and an audit-trail "history" view), no
 extra syntax needed. See `docs/WORKFLOW.md` for the full construct.
@@ -629,23 +630,35 @@ verify before presenting code as final:
 
 ```sh
 nirdosha emit-ui file.nir -o /tmp/out.html   # full typecheck + ownership check, no side effects (doesn't run main())
-nirdosha file.nir --format=json              # actually runs it; structured Diagnostic JSON on any failure
+nirdosha build file.nir -o /tmp/out && /tmp/out   # actually compiles and runs it -- native binary, no interpreter
 ```
+
+**There is no interpreter anymore, and no `--format=json` flag.** An
+older workflow ran `nirdosha file.nir --format=json` to execute a
+program directly; that mode was deleted along with the tree-walking
+interpreter, and there is no fallback for it. `nirdosha build` only
+compiles what `codegen.rs::check_supported` accepts — `db`/`json`/`mq`/
+`transact`/`sandbox` and most Row 12 identity builtins
+(`oidc_validate_token`, `extract_claim`, ...) aren't in that set yet, so
+a program using any of them will fail `build`/`emit-llvm` with a named
+"unsupported" reason (`docs/LANGUAGE.md` §10's compiled-vs-not table) —
+that's not a bug to work around, it's today's real, disclosed boundary
+of what actually runs. `requires(role/claim:...)`/`acquire`/
+`check_role` **do** compile and run for real.
 
 **`nirdosha emit-ast file.nir` does *not* typecheck** — it only
 lexes/parses, by deliberate design (so a program that doesn't yet
 typecheck can still be inspected). A file that passes `emit-ast` can
 still be full of type errors — don't treat a clean `emit-ast` as "this
-compiles." Use `emit-ui` for a real typecheck-only pass, or just run it
-with `--format=json` if side effects (a real DB write, a real HTTP
-call) are acceptable for this check.
+compiles." Use `emit-ui` for a real typecheck-only pass that also
+accepts programs `build` can't yet run end to end.
 
-A `Diagnostic` (from `--format=json`) or a `type error: ...` line (from
-`emit-ui`) names the exact rule violated — read it and fix the named
-issue rather than guessing. If you don't have shell access (a plain
-chat interface), self-check your output line-by-line against the 9
-rules above before presenting it, and say plainly that it hasn't been
-run through the real compiler.
+A `type error: ...`/`ownership error: ...` line (from `emit-ui`) or an
+`unsupported: ...` line (from `build`/`emit-llvm`) names the exact rule
+violated — read it and fix the named issue rather than guessing. If you
+don't have shell access (a plain chat interface), self-check your
+output line-by-line against the 9 rules above before presenting it, and
+say plainly that it hasn't been run through the real compiler.
 
 ## Where to go deeper
 
@@ -658,7 +671,9 @@ Worked examples: `examples/*.nir` in the main repo
 
 Before telling the user code is finished, actually run it through the
 compiler (`nirdosha emit-ui file.nir -o /tmp/out.html` for a
-typecheck-only pass, then `nirdosha file.nir --format=json` to run it)
-if you have shell access. A `Diagnostic`/`type error` names the exact
-rule violated — fix that, don't guess. Do not rely on `nirdosha
+typecheck-only pass, then `nirdosha build file.nir -o /tmp/out &&
+/tmp/out` to actually run it — there is no interpreter and no
+`--format=json` flag anymore, see above) if you have shell access. A
+`type error`/`ownership error`/`unsupported` line names the exact rule
+violated — fix that, don't guess. Do not rely on `nirdosha
 emit-ast` as a typecheck signal — it only parses (see above).

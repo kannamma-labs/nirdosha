@@ -45,9 +45,18 @@
 //! larger undertaking than this pass, or most refinement-type systems
 //! without an invariant-inference research component, attempt.
 //!
-//! **Not wired to elide the interpreter's runtime check** — same
-//! reasoning as `refine.rs`: there's no backend yet to spend a Tier-1
-//! proof's performance payoff on, so the redundant runtime check stays.
+//! **Now wired to actually elide the runtime check.** This module's own
+//! doc comment once said otherwise ("no backend yet to spend a Tier-1
+//! proof's performance payoff on") — that stopped being true once the
+//! interpreter was deleted and `codegen.rs` (the LLVM backend) became
+//! the only backend: `emit_llvm_ir`/`build` take a `&SmtReport`
+//! directly, and `codegen.rs::guard_in_range`/`guard_index_in_bounds`
+//! skip emitting a trap wherever `SmtReport::proven_in_range`/
+//! `proven_index_bounds` already proved it can't fire. `refine.rs`'s
+//! own `RefineReport` has no equivalent consumer — it's exercised only
+//! by its own tests today, not read by `main.rs`/`codegen.rs` at all,
+//! so it isn't actually serving as a documented Z3-unavailable fallback
+//! in the real pipeline, whatever its module doc says.
 
 use std::collections::{HashMap, HashSet};
 

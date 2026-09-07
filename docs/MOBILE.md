@@ -16,6 +16,22 @@ has, or would need its own struct/fn-introspection pass duplicated.
 It can reuse it completely — that's the finding this whole doc is
 built on.
 
+> **Drift note (2026-09-07, code as truth).** `interpreter.rs` and
+> `serve.rs` — the "one HTTP backend any renderer talks to" this
+> doc's whole finding leans on — were both deleted entirely on
+> 2026-09-06 (`refactor: remove tree-walking interpreter and its only
+> consumers`), after this doc was last written (2026-09-04). There is
+> currently no `nirdosha serve` subcommand and no live server for a
+> mobile client (Standard or Rich profile) to call `POST /api/<fn>`/
+> `POST /_nirdosha/table/<name>` against. `ui_gen.rs`'s manifest-IR
+> reasoning (`build_screens`, `Screen`/`FieldSpec`/`Action`/`Metric`)
+> still holds — that part is compiled-path code and untouched — but
+> every claim below about `serve.rs`'s routes/redaction/identity
+> checks describes infrastructure that would need to be rebuilt on the
+> compiled path (or a revived server) before Track D could actually
+> ship, not infrastructure this doc can still assume is sitting there
+> ready to reuse.
+
 ## The finding that matters
 
 **This doesn't need a new frontend.** `ui_gen.rs::build_screens` already

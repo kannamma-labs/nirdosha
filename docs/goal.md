@@ -26,8 +26,11 @@ of the others (§1, §7).
 > checkable today is a narrower, concrete slice: `rand_seed`/`rand_f64`/
 > `rand_gaussian` (Phase 3) make a simulation run's random draws
 > byte-for-byte reproducible from a seed — no OS entropy, no hidden
-> global state (see `interpreter.rs`'s `Interpreter::rng` field and
-> `crates/compiler/tests/mission_critical.rs`'s determinism tests). That's the
+> global state (originally `interpreter.rs`'s `Interpreter::rng` field;
+> the interpreter was deleted 2026-09-06, so today this is
+> `crates/runtime-kernels`'s per-thread `nir_rand_seed`/`nir_rand_f64`/
+> `nir_rand_gaussian`, and `crates/compiler/tests/mission_critical.rs`'s
+> determinism tests). That's the
 > honest foundation a future row-10 implementation pass would extend,
 > not a claim that row 10 itself is done.
 
@@ -62,6 +65,18 @@ of the others (§1, §7).
 > mis-compiled; a program that never actually constructs/matches one
 > still compiles normally, since the `Option`/`Result` prelude's mere
 > presence isn't itself a use.
+
+> **Superseded, 2026-09-06:** `struct`/`enum`/`match` compile for real
+> now (`codegen.rs::declare_named_type`/`match_enum`/`match_literal`;
+> `docs/LANGUAGE.md` §10) — this was already stale within days of being
+> written above. More importantly, "interpreter-only" is no longer a
+> real category at all: the tree-walking interpreter (`interpreter.rs`)
+> and its HTTP server (`serve.rs`) were deleted entirely this date (see
+> `docs/API_TRUST_MODEL.md`'s provenance note). `codegen.rs` is the only
+> backend left; anything it doesn't yet accept (`db`/`json`/`http`/`mq`/
+> `transact`/`workflow`/`sandbox`) simply doesn't run in any form —
+> `codegen.rs::check_supported` is the one ground-truth list, not any
+> comparison against a reference interpreter.
 
 ---
 

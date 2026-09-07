@@ -12,23 +12,38 @@ performance.
 
 ## 1. Execution modes
 
+> **2026-09 — there is no interpreter anymore.** The tree-walking
+> interpreter (bare `nirdosha <file.nir>`, `--format=json`, `run`,
+> `serve`, `--sandbox-worker`) was deleted entirely
+> (`crates/compiler/src/interpreter.rs`/`serve.rs`, both removed —
+> `docs/API_TRUST_MODEL.md` §4a). Every "interpreter-only" label
+> elsewhere in this document (§2's type table, `db`/`json`/`mq`/
+> `transact`/`sandbox`/`file`, most Row 12 identity builtins, §11
+> onward's `nirdosha serve`-dependent DSL sections) now means **does
+> not run in any form today**, not "works, just not compiled" — there
+> is no fallback left to run it on. Only what §10's compiled-vs-
+> interpreter-only table marks "Yes" actually executes.
+
 ```sh
-nirdosha <file.nir> [--format=json]   # interpret (tree-walking)
 nirdosha build <file.nir> -o <out> [--opt0]   # compile to a native binary (LLVM, -O2 by default)
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
+nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
+                                       # derive a static Material-styled web UI (§11)
+nirdosha emit-catalog [-o out.json]   # print the std UI catalog as data (rfcs/0009 Phase 0)
+nirdosha init <project-name> [...]    # scaffold a self-contained starter project
+nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic struct+CRUD source from a JSON plan
 ```
 
-- **Interpret** — always works for every construct in this document.
-- **Build/emit-llvm** — only supports the subset covered in §10
+- **Build/emit-llvm/emit-ui** — only support the subset covered in §10
   ("What's compiled"). Everything else is rejected at compile time with
   a specific reason (`codegen::check_supported`), never silently
   mis-compiled.
-- `--format=json` — on failure, prints a structured `Diagnostic` (one
-  shape across type/ownership/runtime errors) instead of a plain-text
-  message. `emit-ast` always prints JSON — the same `Serialize`-derived
+- **`emit-ast`** always prints JSON — the same `Serialize`-derived
   shape a fragment-validation caller (`typeck::validate_fragment`) can
-  deserialize back.
+  deserialize back. There is no `--format=json` flag anymore (it was
+  interpreter/`run`-only); a `build`/`emit-llvm`/`emit-ui` failure
+  prints a plain-text diagnostic only.
 
 ---
 
@@ -998,6 +1013,24 @@ necessarily interpreted — a non-affine `struct`/`enum`/`match`, and
 
 ## 11. `screen`/`dashboard` — declarative UI DSL (Row 12, `emit-ui`/`serve` only)
 
+> **2026-09 — `nirdosha serve` no longer exists; read every `serve`
+> reference below as history.** `serve.rs` was deleted entirely
+> alongside the interpreter (§1, `docs/API_TRUST_MODEL.md` §4a/§5) —
+> there is no compiled serving mode and no live HTTP server anywhere in
+> this codebase today. What survives: `nirdosha emit-ui` still derives
+> the static manifest/HTML this section describes, and `ui_gen.rs`
+> still computes field-level `view`/`edit`/`pattern`/`format`/`min`/
+> `max` as client-side hide/disable/HTML5-attribute hints. What does
+> **not** survive, despite being described in present tense below:
+> server-side RBAC/field-masking enforcement (`redact_gated_fields`/
+> `check_edit_gates`/`check_field_validations`), the role-mapping cache
+> (§11a), theme live-reload (§11b), auto-generated DB schema migrations
+> "at serve startup" (§13), the workflow queue's `POST`/replay endpoints
+> (§14), and workspace/panel's backing routes (§15) — all of it was
+> `serve.rs`-resident and none of it runs. Treat this whole span as a
+> design record of what the interpreted `serve` used to enforce, not a
+> description of a currently-running server.
+
 `nirdosha emit-ui`/`nirdosha serve` already derive a full CRUD+dashboard
 web UI from nothing but a program's `struct` declarations and its
 `list_/create_/update_/delete_/get_<struct>` and `stat_/chart_<name>`
@@ -1647,10 +1680,10 @@ already known-sound before it's merged in. Two different files each
 declaring the same module identifier is a real, reported collision, not
 a silent overwrite; an import cycle is a clean error, not a hang. This
 is wired into every command that actually loads a `.nir` file from disk
-(`nirdosha <file>`, `build`, `emit-llvm`, `emit-ui`, `serve`,
-`--sandbox-worker`) — `nirdosha <file> --format=json`'s structured
-`--format=json` diagnostics are the one disclosed exception, not yet
-`use`-aware (`docs/NEXT_GEN.md` §F2's own risk register).
+— `build`, `emit-llvm`, `emit-ast`, `emit-ui` (`loader::load_program`,
+`main.rs`) — the complete list now that the bare-interpret entry point,
+`serve`, and `--sandbox-worker` were removed along with the interpreter
+(§1, `docs/API_TRUST_MODEL.md` §4a).
 
 **What's still `[OPEN]`, disclosed rather than silently unsupported:**
 a `screen`/`dashboard`/`workflow`/`workspace` block can't reference a

@@ -17,6 +17,16 @@ the rest, and does it the same way: study the ProtoLang mechanism, name the
 Nirdosha requirement it actually maps to (or admit it doesn't map to one),
 and either lock a narrow design or say plainly why it's deferred or rejected.
 
+> **Drift note (2026-09-07, code as truth).** `interpreter.rs` — cited
+> below (e.g. the I/O error model row, the HTTP request-building
+> reference) as where today's runtime behavior lives — was deleted
+> entirely on 2026-09-06 (`refactor: remove tree-walking interpreter
+> and its only consumers`), along with `serve.rs`/`nirdosha serve`.
+> Those specific behaviors aren't wrong as history, but nothing in this
+> tree currently executes them; see `docs/TRANSACT.md`/`docs/SANDBOXING.md`'s
+> own drift notes for the same fact applied to the two sections this
+> doc explicitly builds on.
+
 ## Method
 
 Every ProtoLang mechanism below gets one of four verdicts:

@@ -14,17 +14,29 @@
 //! `plugin-example-native-shout`/`plugin-example-native-kv`'s own
 //! posture toward the compiled-builtin ABI): this crate hands over
 //! plain data, not a Rust type living in the compiler crate. A consumer
-//! builds its own `ui_plugin::NativeUiComponent { name: NAME.into(),
-//! render_js: RENDER_JS, render_fn: RENDER_FN }`.
+//! builds its own `ui_plugin::NativeUiComponent { name: NAME.to_string(),
+//! render_js: RENDER_JS.to_string(), render_fn: RENDER_FN.to_string() }`
+//! (`render_js`/`render_fn` are owned `String`, not `&'static str` —
+//! a *discovered* component's JS is read from disk at `emit-ui` runtime,
+//! so the field can't stay a compile-time constant; `RENDER_JS`/
+//! `RENDER_FN` here still convert via `.to_string()`).
 //!
-//! **No Cargo-driven auto-discovery yet** (rfcs/0009's own "Open
-//! questions," shared with rfcs/0008 Phase 3): `crates/compiler/tests/
-//! ui_plugin_examples.rs` depends on this crate directly and reads
-//! these constants at test time, standing in for what a future
-//! `nirdosha build`/`emit-ui` discovery pass would do automatically —
-//! the same "hand-assemble it in Rust source for now" posture
-//! `crates/compiler/tests/native_plugin_codegen.rs` already has toward
-//! `NativePluginBuiltin` ahead of its own still-open Phase 3.
+//! **Cargo-driven auto-discovery exists for this crate specifically**
+//! (`ui_plugin::discover_components`, `nirdosha emit-ui
+//! --manifest-path`/auto-detected `Cargo.toml`): this crate's own
+//! `Cargo.toml` carries `[package.metadata.nirdosha] kind =
+//! "nir-ui-component"`, which is exactly what that discovery pass greps
+//! an app author's dependency graph for — see that `Cargo.toml`'s own
+//! comment and `crates/compiler/tests/ui_plugin_discovery.rs` for the
+//! real, no-hand-assembly, no-dev-dependency end-to-end proof.
+//! `crates/compiler/tests/ui_plugin_examples.rs` additionally depends on
+//! this crate directly via an ordinary `[dev-dependencies]` edge and
+//! reads these constants to hand-assemble a `NativeUiComponent` itself —
+//! a second, independent proof that the crate's exported constants are
+//! usable on their own, not a stand-in for discovery not existing.
+//! (Still open, and shared with `rfcs/0008` Phase 3: Cargo-driven
+//! discovery for native *builtins*, a genuinely different, harder
+//! problem — see `ui_plugin.rs`'s own doc comment for why.)
 
 /// The bare identifier a `.nir` program writes as a layout leaf:
 /// `sparkline { source: <fn> field: "..." }`.
