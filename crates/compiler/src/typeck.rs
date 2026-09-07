@@ -2095,7 +2095,7 @@ impl<'a> Checker<'a> {
                         "\"bar\", \"line\", \"area\", \"point\", \"arc\", \"rule\"",
                     );
                 } else if let Some(rest) = key.strip_prefix("encode.") {
-                    self.check_encode_entry(&v.label, rest, value);
+                    self.check_encode_entry(&format!("`visual \"{}\"`", v.label), rest, value);
                 }
             }
         }
@@ -2103,15 +2103,20 @@ impl<'a> Checker<'a> {
 
     /// One `encode <channel> { <subkey>: value }` entry, already
     /// flattened by the parser into `"encode.<channel>.<subkey>"`
-    /// (rfcs/0009 Phase A) — `rest` is `"<channel>.<subkey>"`. There is
-    /// deliberately no cross-check against a struct's real fields here
-    /// the way `screen`/`workspace` field references get: a `visual`'s
-    /// `target_fn` returns opaque `json` (`Metric`'s own doc comment —
-    /// "resolve to a JSON array of `{label, value}` objects" is a
-    /// runtime convention, not a typechecked shape), so `field`'s value
-    /// is only checked to *be* a string, not to *name a real column* —
-    /// a real, disclosed narrowing, not an oversight.
-    fn check_encode_entry(&mut self, visual_label: &str, rest: &str, value: &Expr) {
+    /// (rfcs/0009 Phase A) — `rest` is `"<channel>.<subkey>"`. `owner` is
+    /// a pre-formatted, already-backtick-quoted description of whatever
+    /// declares this `encode` block (a dashboard `visual` or a workspace
+    /// `panel`, both share this one check — `check_render_expr`'s own
+    /// "one check, several callers with different surrounding syntax"
+    /// convention). There is deliberately no cross-check against a
+    /// struct's real fields here the way `screen`/`workspace` field
+    /// references get: both a `visual`'s and a `panel`'s backing fn
+    /// return opaque `json` (`Metric`'s own doc comment — "resolve to a
+    /// JSON array of `{label, value}` objects" is a runtime convention,
+    /// not a typechecked shape), so `field`'s value is only checked to
+    /// *be* a string, not to *name a real column* — a real, disclosed
+    /// narrowing, not an oversight.
+    fn check_encode_entry(&mut self, owner: &str, rest: &str, value: &Expr) {
         let Some((channel, subkey)) = rest.split_once('.') else {
             // Unreachable from `parse_encode_channel_entries` (it always
             // emits exactly one dot), kept as a defensive no-op rather
@@ -2122,7 +2127,7 @@ impl<'a> Checker<'a> {
         if !matches!(channel, "x" | "y" | "color" | "size" | "theta") {
             self.error(
                 TypeErrorKind::UnknownRenderValue {
-                    context: format!("`visual \"{visual_label}\"`'s `encode` channel"),
+                    context: format!("{owner}'s `encode` channel"),
                     key: "encode".to_string(),
                     render: channel.to_string(),
                     allowed: "\"x\", \"y\", \"color\", \"size\", \"theta\"".to_string(),
@@ -2133,21 +2138,21 @@ impl<'a> Checker<'a> {
         }
         match subkey {
             "field" => self.check_render_expr(
-                format!("`visual \"{visual_label}\"`'s `encode {channel}`'s `field`"),
+                format!("{owner}'s `encode {channel}`'s `field`"),
                 "field",
                 value,
                 |_| true,
                 "any string literal (not cross-checked against a real column -- the backing fn returns opaque json)",
             ),
             "type" => self.check_render_expr(
-                format!("`visual \"{visual_label}\"`'s `encode {channel}`'s `type`"),
+                format!("{owner}'s `encode {channel}`'s `type`"),
                 "type",
                 value,
                 |s| matches!(s, "quantitative" | "nominal" | "ordinal" | "temporal"),
                 "\"quantitative\", \"nominal\", \"ordinal\", \"temporal\"",
             ),
             "aggregate" => self.check_render_expr(
-                format!("`visual \"{visual_label}\"`'s `encode {channel}`'s `aggregate`"),
+                format!("{owner}'s `encode {channel}`'s `aggregate`"),
                 "aggregate",
                 value,
                 |s| matches!(s, "sum" | "avg" | "count" | "min" | "max"),
@@ -2155,7 +2160,7 @@ impl<'a> Checker<'a> {
             ),
             other => self.error(
                 TypeErrorKind::UnknownRenderValue {
-                    context: format!("`visual \"{visual_label}\"`'s `encode {channel}` key"),
+                    context: format!("{owner}'s `encode {channel}` key"),
                     key: "encode".to_string(),
                     render: other.to_string(),
                     allowed: "\"field\", \"type\", \"aggregate\"".to_string(),
@@ -2271,16 +2276,30 @@ impl<'a> Checker<'a> {
             }
             // `panel "..." { render: "..." }` (Track E2) — same closed
             // vocabulary `visual`'s own `render` gets, reusing
-            // `check_render_expr` rather than a second check.
+            // `check_render_expr` rather than a second check. `"chart"`
+            // + `mark`/`encode` (rfcs/0009 Phase A, extended to panels)
+            // reuse the exact same checks `check_dashboard`'s `visual`
+            // loop already runs.
             for (key, value) in &panel.entries {
+                let owner = format!("`panel \"{}\"` in `workspace {}`", panel.title, ws.name);
                 if key == "render" {
                     self.check_render_expr(
-                        format!("`panel \"{}\"` in `workspace {}`", panel.title, ws.name),
+                        owner,
                         "render",
                         value,
-                        |s| matches!(s, "graph" | "heatmap" | "timeline"),
-                        "\"graph\", \"heatmap\", \"timeline\"",
+                        |s| matches!(s, "graph" | "heatmap" | "timeline" | "chart"),
+                        "\"graph\", \"heatmap\", \"timeline\", \"chart\"",
                     );
+                } else if key == "mark" {
+                    self.check_render_expr(
+                        format!("{owner}'s `mark`"),
+                        "mark",
+                        value,
+                        |s| matches!(s, "bar" | "line" | "area" | "point" | "arc" | "rule"),
+                        "\"bar\", \"line\", \"area\", \"point\", \"arc\", \"rule\"",
+                    );
+                } else if let Some(rest) = key.strip_prefix("encode.") {
+                    self.check_encode_entry(&owner, rest, value);
                 }
             }
         }

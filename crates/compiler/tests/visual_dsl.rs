@@ -376,3 +376,82 @@ fn encode_field_accepts_any_string_since_the_backing_fn_returns_opaque_json() {
     );
     typecheck(&parse_ok(&src)).expect("an arbitrary `field` string should typecheck cleanly");
 }
+
+// ---- rfcs/0009 Phase A, extended to workspace panels ------------------
+
+const PANEL_CHART: &str = r#"
+    struct Case { id: i64 }
+    fn chart_by_case(case_id: i64) -> Result(json, i64) {
+        return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+    }
+    workspace W {
+        subject: Case
+        panel "Revenue" {
+            source: chart_by_case
+            render: "chart"
+            mark: "bar"
+            encode x { field: "month" type: "temporal" }
+            encode y { field: "amount" type: "quantitative" aggregate: "sum" }
+        }
+    }
+    fn main() {}
+"#;
+
+#[test]
+fn a_well_formed_panel_chart_parses_and_typechecks_cleanly() {
+    let program = parse_ok(PANEL_CHART);
+    let panel = &program.workspaces[0].panels[0];
+    let keys: Vec<&str> = panel.entries.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec!["source", "render", "mark", "encode.x.field", "encode.x.type", "encode.y.field", "encode.y.type", "encode.y.aggregate"]
+    );
+    typecheck(&program).expect("a well-formed panel chart should typecheck cleanly");
+}
+
+#[test]
+fn panel_unknown_mark_is_rejected() {
+    let src = r#"
+        struct Case { id: i64 }
+        fn chart_by_case(case_id: i64) -> Result(json, i64) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        workspace W {
+            subject: Case
+            panel "Revenue" {
+                source: chart_by_case
+                render: "chart"
+                mark: "pie"
+            }
+        }
+        fn main() {}
+    "#;
+    assert!(matches!(
+        first_type_error(src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "mark" && render == "pie"
+    ));
+}
+
+#[test]
+fn panel_unknown_encode_channel_is_rejected() {
+    let src = r#"
+        struct Case { id: i64 }
+        fn chart_by_case(case_id: i64) -> Result(json, i64) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        workspace W {
+            subject: Case
+            panel "Revenue" {
+                source: chart_by_case
+                render: "chart"
+                mark: "bar"
+                encode diagonal { field: "month" type: "temporal" }
+            }
+        }
+        fn main() {}
+    "#;
+    assert!(matches!(
+        first_type_error(src),
+        TypeErrorKind::UnknownRenderValue { key, render, .. } if key == "encode" && render == "diagonal"
+    ));
+}

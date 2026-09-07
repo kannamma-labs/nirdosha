@@ -2145,6 +2145,7 @@ async function renderPanel(panel, container, id) {
     }
     if (panel.render === "heatmap") { body.appendChild(renderHeatGrid(list)); return; }
     if (panel.render === "timeline") { body.appendChild(renderTimelineList(list)); return; }
+    if (panel.render === "chart") { body.appendChild(renderGraphicsChart(list, panel.mark, panel.encoding)); return; }
     const cols = Object.keys(list[0]);
     const table = el("table", {}, [el("thead", {}, [el("tr", {}, cols.map((c) => el("th", { text: c })))])]);
     const tbody = el("tbody", {}, []);

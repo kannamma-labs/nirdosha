@@ -935,13 +935,17 @@ impl Parser {
     }
 
     /// `panel_decl ::= "panel" STRING "{" panel_item* "}"`
-    /// `panel_item ::= action_decl | kv_entry`
+    /// `panel_item ::= action_decl | "encode" IDENT "{" kv_entry* "}" | kv_entry`
     /// Called with the leading `"panel"` token already consumed by
     /// `parse_workspace_decl` (the same "caller consumes the dispatch
     /// keyword" shape `parse_dashboard_decl`'s `tile`/`chart` arm uses).
     /// `action_decl` inside a panel is `parse_action_decl` reused
     /// completely unchanged — zero new syntax for panel actions beyond
-    /// what a screen's own actions already have.
+    /// what a screen's own actions already have. `encode` (rfcs/0009
+    /// Phase A, extended to panels) is `parse_encode_channel_entries`
+    /// reused unchanged too — same `render: "chart"` grammar-of-graphics
+    /// config a dashboard `visual` already has, folded into this panel's
+    /// own flat `entries`.
     fn parse_panel_decl(&mut self) -> PResult<PanelDecl> {
         let span = self.span();
         let title = self.expect_str_lit("a panel title")?;
@@ -950,9 +954,12 @@ impl Parser {
         let mut actions = Vec::new();
         while self.peek().tok != Tok::RBrace {
             let is_action = matches!(&self.peek().tok, Tok::Ident(s) if s == "action");
+            let is_encode = matches!(&self.peek().tok, Tok::Ident(s) if s == "encode");
             if is_action {
                 self.expect_ident()?; // consume "action"
                 actions.push(self.parse_action_decl()?);
+            } else if is_encode {
+                entries.extend(self.parse_encode_channel_entries()?);
             } else {
                 entries.push(self.parse_kv_entry()?);
             }
