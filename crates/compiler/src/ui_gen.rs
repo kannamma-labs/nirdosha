@@ -70,7 +70,7 @@ use std::collections::{BTreeSet, HashMap};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 
-use crate::ast::{Effect, Expr, Field, FnDecl, LayoutNode, MetricRef, Program, Requirement, ScreenDecl, Ty};
+use crate::ast::{Effect, Expr, Field, FnDecl, LandingCondition, LayoutNode, MetricRef, Program, Requirement, ScreenDecl, Ty};
 use crate::effects::FnEffects;
 
 /// Prepended to every `Program.structs` by `ast::prelude_structs()` —
@@ -1643,6 +1643,34 @@ fn identity_catalog_json(roles: &[String], claims: &[(String, String)]) -> Strin
     serde_json::to_string(&value).expect("role/claim catalog is built from plain strings, always serializes")
 }
 
+/// `landing { role(...)/claim(...)/default -> <Screen> }`
+/// (`rfcs/0010-landing-and-serve-exposure.md`) as a plain ordered data
+/// table the template's own `landingTargetFor` reads client-side —
+/// `null` for a program with no `landing` block at all (the template's
+/// own bootstrap treats that as "no redirect," byte-identical to every
+/// build before this RFC). Each rule's `target` is converted to the
+/// same snake-case route the screen manifest's own `.snake` field
+/// already uses (`to_snake_case`, the one place a screen's struct name
+/// becomes its `#/<route>` hash) — `typeck::check_landing` already
+/// proved `target` names a real declared screen, so this never needs to
+/// re-check that here, only reformat it for the client router.
+fn landing_json(program: &Program) -> String {
+    let Some(landing) = &program.landing else { return "null".to_string() };
+    let rules: Vec<serde_json::Value> = landing
+        .rules
+        .iter()
+        .map(|r| {
+            let target = to_snake_case(&r.target);
+            match &r.condition {
+                LandingCondition::Default => serde_json::json!({"default": true, "target": target}),
+                LandingCondition::Requirement(Requirement::Role(role)) => serde_json::json!({"role": role, "target": target}),
+                LandingCondition::Requirement(Requirement::Claim(key, value)) => serde_json::json!({"claim": [key, value], "target": target}),
+            }
+        })
+        .collect();
+    serde_json::to_string(&rules).expect("landing rules are built from plain strings, always serialize")
+}
+
 /// A small, always-visible app-bar badge naming which identity mode
 /// this server is running in — the user-visible half of "the system
 /// understands if it's running in demo or production mode" (the other
@@ -1814,6 +1842,7 @@ fn generate_impl(
     };
     let (all_roles, all_claims) = crate::typeck::collect_role_claim_strings(program);
     let identity_catalog = identity_catalog_json(&all_roles, &all_claims);
+    let landing = landing_json(program);
     TEMPLATE
         .replace("__NIRDOSHA_MANIFEST__", &manifest)
         .replace("__NIRDOSHA_STATS__", &stats)
@@ -1822,6 +1851,7 @@ fn generate_impl(
         .replace("__NIRDOSHA_WORKSPACES__", &workspaces)
         .replace("__NIRDOSHA_IDENTITY_BASE__", &identity_base_js)
         .replace("__NIRDOSHA_IDENTITY_CATALOG__", &identity_catalog)
+        .replace("__NIRDOSHA_LANDING__", &landing)
         .replace("__NIRDOSHA_DEMO_MODE__", if demo_mode { "true" } else { "false" })
         .replace("__NIRDOSHA_PRODUCTION_MODE__", if production_mode { "true" } else { "false" })
         .replace("__NIRDOSHA_MODE_BADGE__", &mode_badge_html(demo_mode, production_mode))

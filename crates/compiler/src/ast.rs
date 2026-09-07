@@ -1663,6 +1663,21 @@ pub struct Program {
     /// At most one `dashboard { ... }` block — supplements (doesn't
     /// replace) `stat_`/`chart_` naming-convention inference.
     pub dashboard: Option<DashboardDecl>,
+    /// At most one `landing { ... }` block (`rfcs/0010-landing-and-serve-exposure.md`)
+    /// — see `LandingDecl`'s own doc comment. `None` for every program
+    /// that predates it, or simply doesn't declare one (no landing
+    /// redirect happens — the client bundle's own default route is
+    /// unaffected, same "additive, never a behavior change for an
+    /// existing program" property `dashboard`/`workspaces` above
+    /// already have).
+    pub landing: Option<LandingDecl>,
+    /// At most one `serve { expose ... }` block (`rfcs/0010-landing-and-serve-exposure.md`)
+    /// — see `ServeConfigDecl`'s own doc comment. `None` for every
+    /// program that predates it or simply doesn't declare one — the
+    /// exposure set (`typeck::check_serve_config`) then falls back to
+    /// only the implicit screen/dashboard-bound convention functions,
+    /// same as if an empty `serve { }` had been written.
+    pub serve_config: Option<ServeConfigDecl>,
     /// Declared `workflow Name { ... }` blocks (`docs/WORKFLOW.md`), in
     /// original source form. Consumed exactly once, by
     /// `workflow_lower::lower` right after parsing — every later pass
@@ -1933,6 +1948,65 @@ pub struct DashboardDecl {
     pub tiles: Vec<MetricRef>,
     pub charts: Vec<MetricRef>,
     pub visuals: Vec<MetricRef>,
+    pub span: Span,
+}
+
+/// What a `landing { ... }` rule gates on — reuses `Requirement` verbatim
+/// (no new proof/credential concept: `role(...)`/`claim(...)` here mean
+/// exactly what `requires(role: ...)`/`requires(claim: ..., ...)` already
+/// mean elsewhere) plus one addition a `requires(...)` gate never
+/// needed: `Default`, the required fallback arm every `landing` block
+/// must have exactly one of (`typeck::check_landing`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum LandingCondition {
+    Requirement(Requirement),
+    Default,
+}
+
+/// One `role("admin") -> AdminScreen` / `claim("department",
+/// "cardiology") -> CardiologyQueue` / `default -> HomeScreen` line.
+/// `target` is a `screen <Struct> { ... }` block's own `struct_name` —
+/// resolved against `Program.screens` by `typeck::check_landing`, the
+/// same "separate top-level declaration referencing an existing item by
+/// name" shape `ValidateDecl::fn_name` already uses for `fn`s.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LandingRule {
+    pub condition: LandingCondition,
+    pub target: String,
+    pub span: Span,
+}
+
+/// `landing { role("admin") -> AdminScreen  ...  default -> HomeScreen }`
+/// (`rfcs/0010-landing-and-serve-exposure.md`) — at most one per
+/// program (`parser::parse_program`'s own "only one `landing` block"
+/// check, mirroring `dashboard`'s), naming which `screen` an
+/// authenticated user's identity lands on first. `rules` keeps source
+/// order — evaluated first-match-wins (`typeck::check_landing`'s own
+/// doc comment has the full validation: exactly one `Default` rule,
+/// required; `Default` must be last; nothing unreachable before it).
+/// Produces no LLVM IR of its own — a pure data table `ui_gen.rs`'s
+/// generated client bundle reads to redirect after login, the same
+/// "server never renders UI" property this project's whole client-
+/// rendered-SPA design already has.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LandingDecl {
+    pub rules: Vec<LandingRule>,
+    pub span: Span,
+}
+
+/// `serve { expose fn_a, fn_b, ... }`
+/// (`rfcs/0010-landing-and-serve-exposure.md`) — a general per-program
+/// compiled-`serve` config section, deliberately not a single-purpose
+/// `expose { ... }` block: `expose` is its first entry, not its only
+/// reason to exist, so a later addition (port, TLS, CORS-origin config)
+/// extends this same struct instead of forcing another grammar change.
+/// At most one per program (`parser::parse_program`'s own "only one
+/// `serve` block" check, mirroring `dashboard`/`landing`).
+/// `typeck::check_serve_config`'s own doc comment has the full exposure-
+/// set/deny-by-default rules `expose` feeds into.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServeConfigDecl {
+    pub expose: Vec<(String, Span)>,
     pub span: Span,
 }
 
