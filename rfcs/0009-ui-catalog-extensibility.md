@@ -1,7 +1,9 @@
 # RFC 0009: Grammar-of-graphics charts and compile-time UI-plugin components — escaping the closed 4-chart/7-control catalog without opening a runtime hole
 
-> **Status.** Phase 0, Phase A, and Phase B's *mechanism* (not its
-> Cargo-auto-discovery ambition) are built and verified, on
+> **Status.** Phase 0, Phase A, and Phase B — including Cargo-metadata
+> auto-discovery for UI components specifically (not rfcs/0008 Phase
+> 3's native-builtin discovery, a genuinely different, harder problem —
+> see the discovery bullet below) — are built and verified, on
 > `phase0/ui-catalog-extensibility`, not a proposal — same "update only
 > this box, keep the original design capture below as written" style
 > `rfcs/0008`'s own Status box uses.
@@ -41,17 +43,7 @@
 >   extension point `ast::LayoutNode::Widget`'s own doc comment already
 >   reserved for this), not a full catalog-schema entry with typed
 >   `props`/`slots`/a `gbnf_fragment` the way the original sketch's
->   `NativeUiComponent` struct below has them. No Cargo-metadata
->   discovery, no `nirdosha build` auto-linking — a component slice is
->   still hand-assembled in Rust source (either inline,
->   `crates/compiler/tests/ui_plugin.rs`, or via an ordinary
->   `[dev-dependencies]` edge to a real separate crate,
->   `crates/ui-plugin-example-sparkline` + `tests/
->   ui_plugin_examples.rs` — a follow-up closing this RFC's own "proof
->   obligation" line literally, the way `plugin-example-native-shout`/
->   `-native-kv` already do for `rfcs/0008`), the same posture
->   `rfcs/0008`'s own `native_plugin_codegen.rs` has toward
->   `NativePluginBuiltin` ahead of its still-open Phase 3.
+>   `NativeUiComponent` struct below has them.
 >   `typeck::Checker.extra_widget_kinds` widens `check_screen_layout`'s
 >   closed set; `ui_gen::generate_with_ui_components` splices `render_js`
 >   into the emitted `<script>` and registers it into a new
@@ -59,26 +51,61 @@
 >   fallback. `layout_json`'s `Widget` arm also gained a generic
 >   `entries` object (every kv-entry, not just the `source`/`title` the
 >   three std kinds special-case) so a component's own config keys reach
->   its `render_js`. The reference crate's own widget
->   (`sparkline { source: <fn> field: "..." }`) is a genuinely useful
->   one, not a stub — it fetches its own data via `node.source` (the
->   `timeline` widget's own convention) and draws a small inline-SVG
->   trend line. 4 + 3 new tests (`tests/ui_plugin.rs`,
->   `tests/ui_plugin_examples.rs`) + both the hand-written and the real
->   crate's own `render.js` extracted and run headlessly in Chrome
->   (screenshotted).
-> - **Still open, named not hidden**: Cargo-driven discovery for both
->   the chart grammar's own future extensions and UI components (shared
->   with `rfcs/0008` Phase 3, per this document's own §Open questions);
->   `NativeUiComponent` widening past a widget kind to a full
->   props/slots/GBNF-carrying catalog entry; GBNF export for either
+>   its `render_js`. Proven three ways, each a real follow-up: hand-
+>   assembled inline (`crates/compiler/tests/ui_plugin.rs`); against a
+>   real, separate, zero-`nirdosha`-dependency crate consumed via an
+>   ordinary `[dev-dependencies]` edge (`crates/ui-plugin-example-
+>   sparkline` + `tests/ui_plugin_examples.rs` — closing this RFC's own
+>   "proof obligation" line literally, the way `plugin-example-native-
+>   shout`/`-native-kv` already do for `rfcs/0008`); and **discovered
+>   automatically** — see the next bullet. The reference crate's own
+>   widget (`sparkline { source: <fn> field: "..." }`) is a genuinely
+>   useful one, not a stub — it fetches its own data via `node.source`
+>   (the `timeline` widget's own convention) and draws a small
+>   inline-SVG trend line.
+> - **Cargo-metadata auto-discovery — done for UI components, still open
+>   for native builtins.** `ui_plugin::discover_components(manifest_path)`
+>   runs a real `cargo metadata --format-version 1` against an app
+>   author's own `Cargo.toml`, resolves the full dependency graph, and
+>   picks out every package declaring `[package.metadata.nirdosha] kind
+>   = "nir-ui-component"` (+ `name`/`render_fn`/`render_js_path`,
+>   `render_js` read from that file). `nirdosha emit-ui` gained
+>   `--manifest-path <Cargo.toml>`, or auto-detects one sitting next to
+>   the input `.nir` file — absent either, zero behavior change, nothing
+>   even shells out. This closes rfcs/0009's own "Open questions" item
+>   **for UI components specifically** — it does **not** close
+>   `rfcs/0008` Phase 3 (native-builtin discovery), because the two are
+>   genuinely different problems, not the same problem solved twice: a
+>   UI component crosses no ABI boundary (its whole "artifact" is three
+>   plain strings, one a path to JS source sitting in the crate's own
+>   tree — nothing to compile, nothing to link, no need for rfcs/0008
+>   Phase 2's proposed authoring macro), while a native builtin's real
+>   compiled `.a` bytes still have to be built and linked the harder way
+>   Phase 3 was always going to need. This document's own §Design
+>   originally assumed one shared discovery pass across both; that
+>   assumption didn't survive contact with how much simpler the
+>   UI-component case turned out to be — see `ui_plugin.rs`'s own doc
+>   comment for the full "why not shared" reasoning. 3 new end-to-end
+>   tests (`tests/ui_plugin_discovery.rs`) spawn the real compiled
+>   `nirdosha` binary against a scratch project whose own `Cargo.toml`
+>   path-depends on the reference crate — no Rust code written for the
+>   occasion, no compiler-side dev-dependency — proving auto-detection,
+>   the explicit flag, and the untouched no-manifest default all work.
+> - **Still open, named not hidden**: Cargo-driven discovery for native
+>   builtins (`rfcs/0008` Phase 2/3 — its own, harder problem, not
+>   solved here); `NativeUiComponent` widening past a widget kind to a
+>   full props/slots/GBNF-carrying catalog entry; GBNF export for either
 >   phase (`crates/grammar_export`'s `nirdosha.gbnf` covers the core
 >   `.nir` language only — no UI-specific grammar exists yet to extend);
->   `render_js` review-policy documentation. `cargo test -p nirdosha`
->   stayed green (35 test binaries) throughout every step above — no
->   existing behavior changed. (Unrelated, pre-existing, not investigated
->   here: `cargo build --workspace` fails on `crates/grammar_check` with
->   a shift-reduce conflict in its hand-maintained LALR(1) grammar —
+>   `render_js` review-policy documentation (a discovered component's JS
+>   is read from whatever crate the app author's `Cargo.toml` names —
+>   exactly as reviewed as any other dependency, which is to say: only
+>   as reviewed as the app author actually reviews their dependencies,
+>   same as always). `cargo test -p nirdosha` stayed green (36 test
+>   binaries) throughout every step above — no existing behavior
+>   changed. (Unrelated, pre-existing, not investigated here: `cargo
+>   build --workspace` fails on `crates/grammar_check` with a
+>   shift-reduce conflict in its hand-maintained LALR(1) grammar —
 >   confirmed unrelated to anything in this RFC, since nothing here
 >   touches the core `.nir` grammar/tokenizer at all; every build/test
 >   claim above is `-p nirdosha`-scoped specifically to avoid it.)
@@ -374,10 +401,13 @@ the metadata convention this RFC (and `rfcs/0008` Phase 3) define.
   against more than one plugin at once. **Still fully open** — no
   UI-specific GBNF exists yet at all (Status box).
 - **Should Phase B's discovery pass be a new code path or a literal
-  extension of `rfcs/0008` Phase 3?** This document assumes the
-  latter (one crate-discovery pass, two `kind` tags) but `rfcs/0008`
-  Phase 3 itself isn't built yet — the two should land together or in
-  direct sequence, not be designed twice independently. **Still open.**
+  extension of `rfcs/0008` Phase 3?** **Resolved, differently than this
+  document originally assumed**: a new, separate code path
+  (`ui_plugin::discover_components`), not an extension of Phase 3 —
+  see the Status box's discovery bullet for why the two turned out to
+  be genuinely different problems (no ABI boundary, no build/link step)
+  rather than one problem worth solving once. `rfcs/0008` Phase 3
+  remains its own, still-unbuilt, harder problem.
 - **`render_js` review policy.** Nothing here mandates *how* an app
   author reviews a UI-plugin crate before depending on it beyond
   "it's an ordinary Cargo dependency" — worth a documented convention
