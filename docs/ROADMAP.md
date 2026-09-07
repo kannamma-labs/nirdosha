@@ -1930,9 +1930,9 @@ fully `[OPEN]`.
    retry-with-backoff (possible in principle, since their return type is
    unconstrained — just not attempted this round), the durability log
    (`transact_log.rs`, deleted with the interpreter), and crash replay.
-2. `[PARTIAL]` **B2. `db` + `json` codegen.** 2026-09: `db_connect`/
-   `db_query`/`db_execute` (SQLite via `rusqlite`'s `bundled` feature,
-   `nir_db_*`, `runtime-kernels/src/lib.rs`) and all 9 `json_*` builtins
+2. `[DONE]` **B2. `db` + `json` codegen.** 2026-09: `db_connect`/
+   `db_query`/`db_execute` (SQLite via `rusqlite`'s `bundled` feature)
+   and all 9 `json_*` builtins
    (`json_parse`/`json_get`/`json_get_str`/`json_get_i64`/`json_get_f64`/
    `json_get_bool`/`json_array_get`/`json_array_len`/`json_set_str`) are
    real, compiled, and verified — `examples/features/27_database.nir`
@@ -1943,15 +1943,36 @@ fully `[OPEN]`.
    anticipated: `str` + accessor shims, not a from-scratch runtime value
    type), re-parsed by each accessor — a real, disclosed cost (no
    persisted parsed-tree handle) traded for zero new representation.
-   Named gaps, not silently dropped: a zero-payload `enum` variant as a
-   bind value isn't compiled yet (only `i64`/`f64`/`str`/`bool`);
-   `BLOB` columns have no first-class Nirdosha type (represented as
-   JSON `null`). Postgres (the interpreter-era `dbconn.rs`, which no
-   longer exists at all — removed with the interpreter) remains a real,
-   separate, deferred follow-up: `postgres`/`postgres-native-tls` are
-   *not* statically bundled the way `rusqlite` is, so a compiled binary
-   using a Postgres `db_connect` would need real dynamic-linking/
-   deployment design (a system TLS library at minimum).
+   **2026-09 follow-up, same item: Postgres, and real pooling for
+   both backends** (`docs/adr/0005-postgres-pooling-and-tls.md`,
+   `crates/runtime-kernels/src/kernel/db.rs`) — `postgres://`/
+   `postgresql://` connection strings now open a real, pooled Postgres
+   connection (`postgres`/`postgres-native-tls`, vendored TLS,
+   verify-by-default off-`localhost`), and `db_connect` for *either*
+   backend now checks out from a process-wide `PoolRegistry` (validated
+   with a real `SELECT 1` on every checkout, a stale connection
+   transparently evicted-and-replaced before the caller sees it — a new
+   `stale_rehydrated` flight-recorder counter makes this visible)
+   instead of opening a fresh connection every call. `:memory:` stays
+   deliberately unpooled (a `:memory:` database is private to its own
+   connection). Verified against a real local Postgres server, not just
+   SQLite: `crates/compiler/tests/postgres.rs` (recreated fresh — the
+   original, interpreter-only version was deleted along with
+   `nirdosha::run`/`interpreter::Value`, both gone; this one spawns the
+   real compiled binary instead), plus `runtime-kernels`'s own
+   `kernel::db::tests` (pooling identity, rehydration after a backend
+   killed out from under the pool via `pg_terminate_backend`,
+   string-literal-and-comment-aware `?`→`$1,$2,...` placeholder
+   rewriting) and `db_kernel_tests` — all `NIRDOSHA_TEST_POSTGRES_URL`-gated,
+   `#[ignore]` by default, never required by CI
+   (`docker-compose.dev.yml` at the repo root stands up a real local
+   server for this). Named gaps, not silently dropped: a zero-payload
+   `enum` variant as a bind value isn't compiled yet (only
+   `i64`/`f64`/`str`/`bool`); `BLOB`/unrecognized Postgres column types
+   have no first-class Nirdosha type (represented as JSON `null`); the
+   Postgres TLS path is not yet verified against a real `build-windows`
+   CI run (assumed to go through `native-tls`'s SChannel backend, same
+   as `http`/`https`, but unconfirmed).
 3. `[DONE]` **B3. `mq` codegen** — 2026-09. `mq_connect`/`mq_publish`/
    `mq_consume` (Redis via the `redis` crate, `LPUSH`/`BLPOP`), real,
    verified against a real local Redis instance
