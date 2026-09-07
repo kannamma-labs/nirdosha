@@ -258,7 +258,20 @@ const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "d
 /// `check_role_path`/`extract_claim_path` and the rest of Row 12
 /// (sessions/refresh/revocation/`validate_api_key`) remain real,
 /// narrower follow-up work, not attempted here.
-const IDENTITY_BUILTINS: &[&str] = &["check_role", "oidc_validate_token", "extract_claim", "identity_expired"];
+const IDENTITY_BUILTINS: &[&str] = &[
+    "check_role",
+    "oidc_validate_token",
+    "extract_claim",
+    "identity_expired",
+    "check_role_path",
+    "extract_claim_path",
+    "check_revocation",
+    "create_application_session",
+    "session_cookie",
+    "new_refresh_token",
+    "exchange_refresh_token",
+    "validate_api_key",
+];
 
 /// `db_connect`/`db_query`/`db_execute` — real SQLite connectivity
 /// (`Ty::Db`'s own doc comment, `nir_db_*`, `runtime-kernels/src/lib.rs`'s
@@ -1710,6 +1723,21 @@ fn emit_llvm_ir_impl<'a>(
     )
     .unwrap();
     writeln!(cg.out, "declare i32 @nir_extract_claim(ptr, i64, ptr, i64, ptr)").unwrap();
+    // The rest of Row 12 (`docs/nirdosha_row12_functions_identity.md`,
+    // `kernel::identity`'s own module doc has the full design): dotted-
+    // path claim lookup, sessions, refresh tokens, revocation, API keys.
+    writeln!(cg.out, "declare i32 @nir_check_role_path(ptr, i64, ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_extract_claim_path(ptr, i64, ptr, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_check_revocation(ptr, i64)").unwrap();
+    writeln!(cg.out, "declare void @nir_create_application_session(ptr, ptr, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_session_cookie(ptr, i64, i64, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_new_refresh_token(i64, ptr)").unwrap();
+    writeln!(
+        cg.out,
+        "declare i32 @nir_exchange_refresh_token(i64, i64, ptr, i64, ptr, i64, ptr, i64, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr)"
+    )
+    .unwrap();
+    writeln!(cg.out, "declare i32 @nir_validate_api_key(ptr, i64, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr)").unwrap();
     // `db`/`json` (`DB_BUILTINS`/`JSON_BUILTINS`'s own doc comments) —
     // real SQLite connectivity and JSON navigation. Every bind-value
     // param below is `ptr` to a `[N x NIR_BIND_VALUE_LLTY]` array (or
@@ -2608,6 +2636,22 @@ impl Codegen<'_> {
                 Ty::Named("Result".to_string(), vec![Ty::Named("ClaimView".to_string(), vec![]), Ty::Str])
             }
             Expr::Call(name, _, _) if name == "identity_expired" => Ty::Bool,
+            Expr::Call(name, _, _) if name == "check_role_path" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("RoleView".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "extract_claim_path" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("ClaimView".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "check_revocation" => Ty::Bool,
+            Expr::Call(name, _, _) if name == "create_application_session" => Ty::Named("ApplicationSession".to_string(), vec![]),
+            Expr::Call(name, _, _) if name == "session_cookie" => Ty::Str,
+            Expr::Call(name, _, _) if name == "new_refresh_token" => Ty::Named("RefreshTokenHandle".to_string(), vec![]),
+            Expr::Call(name, _, _) if name == "exchange_refresh_token" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "validate_api_key" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
+            }
             Expr::Call(name, _, _) if name == "db_connect" => {
                 Ty::Named("Result".to_string(), vec![Ty::Db, Ty::Str])
             }
@@ -4294,6 +4338,12 @@ impl Codegen<'_> {
             let now = self.expr(&args[1], scopes)?;
             return self.icmp("sgt", "i64", &now, &expires_at);
         }
+        if name == "check_revocation" {
+            return self.emit_check_revocation(args, scopes);
+        }
+        if name == "session_cookie" {
+            return self.emit_session_cookie(args, scopes);
+        }
         if name == "rand_seed" {
             // Every integer-typed `expr()` result is already `i64`
             // (module doc) regardless of `rand_seed`'s argument's own
@@ -5390,6 +5440,30 @@ impl Codegen<'_> {
         if name == "extract_claim" {
             return self.emit_extract_claim(args, scopes);
         }
+        if name == "check_role_path" {
+            return self.emit_check_role_path(args, scopes);
+        }
+        if name == "extract_claim_path" {
+            return self.emit_extract_claim_path(args, scopes);
+        }
+        if name == "check_revocation" {
+            return self.emit_check_revocation(args, scopes);
+        }
+        if name == "create_application_session" {
+            return self.emit_create_application_session(args, scopes);
+        }
+        if name == "session_cookie" {
+            return self.emit_session_cookie(args, scopes);
+        }
+        if name == "new_refresh_token" {
+            return self.emit_new_refresh_token(args, scopes);
+        }
+        if name == "exchange_refresh_token" {
+            return self.emit_exchange_refresh_token(args, scopes);
+        }
+        if name == "validate_api_key" {
+            return self.emit_validate_api_key(args, scopes);
+        }
         if name == "db_connect" {
             return self.emit_db_connect(args, scopes);
         }
@@ -5731,6 +5805,405 @@ impl Codegen<'_> {
         let msg_full = self.fresh_reg("extract_claim_err_msg_full");
         writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", MSG.len()).unwrap();
         writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `check_role_path(identity, path, role) -> Result(RoleView, str)` —
+    /// `emit_check_role`'s own twin, with a dotted `path` argument threaded
+    /// through to `nir_check_role_path` instead of assuming a top-level
+    /// `"roles"` key.
+    fn emit_check_role_path(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let role_view_ty = Ty::Named("RoleView".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![role_view_ty, Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("check_role_path_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("check_role_path_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("check_role_path_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("check_role_path_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+        let (path_ptr, path_len) = self.str_parts(&args[1], scopes)?;
+        let role_val = self.expr(&args[2], scopes)?;
+        let role_ptr = self.fresh_reg("check_role_path_role_ptr");
+        writeln!(self.out, "  {role_ptr} = extractvalue {{ptr, i64}} {role_val}, 0").unwrap();
+        let role_len = self.fresh_reg("check_role_path_role_len");
+        writeln!(self.out, "  {role_len} = extractvalue {{ptr, i64}} {role_val}, 1").unwrap();
+
+        let found = self.fresh_reg("check_role_path_found");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_check_role_path(ptr {claims_ptr}, i64 {claims_len}, ptr {path_ptr}, i64 {path_len}, ptr {role_ptr}, i64 {role_len})"
+        )
+        .unwrap();
+        let is_found = self.fresh_reg("check_role_path_is_found");
+        writeln!(self.out, "  {is_found} = icmp ne i32 {found}, 0").unwrap();
+
+        let err_msg = self.const_str_value("check_role_path_err_msg", "role not present at the given claims path");
+        self.emit_result_merge(&result_ty, &is_found, "{ptr, i64}", &role_val, &err_msg, "check_role_path")
+    }
+
+    /// `extract_claim_path(identity, path) -> Result(ClaimView, str)` —
+    /// `emit_extract_claim`'s own twin with a dotted path.
+    fn emit_extract_claim_path(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let claim_view_ty = Ty::Named("ClaimView".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![claim_view_ty, Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("extract_claim_path_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("extract_claim_path_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("extract_claim_path_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("extract_claim_path_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+        let (path_ptr, path_len) = self.str_parts(&args[1], scopes)?;
+
+        let out_scratch = self.fresh_reg("extract_claim_path_out_scratch");
+        self.emit_alloca(&out_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("extract_claim_path_found");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_extract_claim_path(ptr {claims_ptr}, i64 {claims_len}, ptr {path_ptr}, i64 {path_len}, ptr {out_scratch})"
+        )
+        .unwrap();
+        let is_found = self.fresh_reg("extract_claim_path_is_found");
+        writeln!(self.out, "  {is_found} = icmp ne i32 {found}, 0").unwrap();
+        let value_val = self.fresh_reg("extract_claim_path_value");
+        writeln!(self.out, "  {value_val} = load {{ptr, i64}}, ptr {out_scratch}").unwrap();
+
+        let err_msg = self.const_str_value("extract_claim_path_err_msg", "claim not present at the given path");
+        self.emit_result_merge(&result_ty, &is_found, "{ptr, i64}", &value_val, &err_msg, "extract_claim_path")
+    }
+
+    /// `check_revocation(identity) -> bool` — infallible, a plain GEP +
+    /// linked call + `icmp`, same "no `Result` wrap" shape
+    /// `identity_expired` already has (unlike that one, this needs a real
+    /// JSON-parsing kernel call, not just a memory read, since `"revoked"`
+    /// lives inside `claims_json`, not a dedicated struct field).
+    fn emit_check_revocation(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("check_revocation_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("check_revocation_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("check_revocation_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("check_revocation_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+        let revoked = self.fresh_reg("check_revocation_revoked");
+        writeln!(self.out, "  {revoked} = call i32 @nir_check_revocation(ptr {claims_ptr}, i64 {claims_len})").unwrap();
+        self.icmp("ne", "i32", &revoked, "0")
+    }
+
+    /// `create_application_session(identity) -> ApplicationSession` —
+    /// infallible. `identity_subject`/`identity_issuer` are plain copies
+    /// of the input identity's own `subject`/`issuer` fields (no kernel
+    /// call needed for those two); `session_id`/`created_at`/`expires_at`/
+    /// `last_accessed_at` are written directly into the destination
+    /// struct's own field pointers by `nir_create_application_session`,
+    /// same "the out-params *are* the field pointers" discipline
+    /// `emit_oidc_validate_token` already established.
+    fn emit_create_application_session(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let session_ty = Ty::Named("ApplicationSession".to_string(), vec![]);
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+
+        let read_str_field = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("create_session_identity_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {idx}").unwrap();
+            let val = cg.fresh_reg(&format!("create_session_identity_{field}_val"));
+            writeln!(cg.out, "  {val} = load {{ptr, i64}}, ptr {ptr}").unwrap();
+            val
+        };
+        let subject_val = read_str_field(self, "subject");
+        let issuer_val = read_str_field(self, "issuer");
+
+        let session_llty = self.llvm_ty(&session_ty)?;
+        let dest = self.fresh_reg("create_session_dest");
+        self.emit_alloca(&dest, &session_llty);
+        let field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&session_ty, field).expect("ApplicationSession always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("create_session_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {session_llty}, ptr {dest}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let session_id_ptr = field_ptr(self, "session_id");
+        let identity_subject_ptr = field_ptr(self, "identity_subject");
+        let identity_issuer_ptr = field_ptr(self, "identity_issuer");
+        let created_at_ptr = field_ptr(self, "created_at");
+        let expires_at_ptr = field_ptr(self, "expires_at");
+        let last_accessed_at_ptr = field_ptr(self, "last_accessed_at");
+
+        writeln!(self.out, "  store {{ptr, i64}} {subject_val}, ptr {identity_subject_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {issuer_val}, ptr {identity_issuer_ptr}").unwrap();
+        writeln!(
+            self.out,
+            "  call void @nir_create_application_session(ptr {session_id_ptr}, ptr {created_at_ptr}, ptr {expires_at_ptr}, ptr {last_accessed_at_ptr})"
+        )
+        .unwrap();
+        Ok(dest)
+    }
+
+    /// `session_cookie(session) -> str` — infallible, a plain formatted
+    /// string built from the session's own real `session_id`/
+    /// `created_at`/`expires_at` fields.
+    fn emit_session_cookie(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let session_ty = Ty::Named("ApplicationSession".to_string(), vec![]);
+        let session_ptr = self.expr_ptr_expected(&args[0], &session_ty, scopes)?;
+        let session_llty = self.llvm_ty(&session_ty)?;
+
+        let (sid_idx, _) = self.field_index_and_ty(&session_ty, "session_id").expect("ApplicationSession always has session_id, ast::prelude_structs");
+        let sid_field_ptr = self.fresh_reg("session_cookie_sid_field_ptr");
+        writeln!(self.out, "  {sid_field_ptr} = getelementptr inbounds {session_llty}, ptr {session_ptr}, i32 0, i32 {sid_idx}").unwrap();
+        let sid_val = self.fresh_reg("session_cookie_sid_val");
+        writeln!(self.out, "  {sid_val} = load {{ptr, i64}}, ptr {sid_field_ptr}").unwrap();
+        let sid_ptr = self.fresh_reg("session_cookie_sid_ptr");
+        writeln!(self.out, "  {sid_ptr} = extractvalue {{ptr, i64}} {sid_val}, 0").unwrap();
+        let sid_len = self.fresh_reg("session_cookie_sid_len");
+        writeln!(self.out, "  {sid_len} = extractvalue {{ptr, i64}} {sid_val}, 1").unwrap();
+
+        let read_i64_field = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&session_ty, field).expect("ApplicationSession always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("session_cookie_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {session_llty}, ptr {session_ptr}, i32 0, i32 {idx}").unwrap();
+            let val = cg.fresh_reg(&format!("session_cookie_{field}_val"));
+            writeln!(cg.out, "  {val} = load i64, ptr {ptr}").unwrap();
+            val
+        };
+        let created_at = read_i64_field(self, "created_at");
+        let expires_at = read_i64_field(self, "expires_at");
+
+        let out_scratch = self.fresh_reg("session_cookie_out_scratch");
+        self.emit_alloca(&out_scratch, "{ptr, i64}");
+        writeln!(
+            self.out,
+            "  call void @nir_session_cookie(ptr {sid_ptr}, i64 {sid_len}, i64 {created_at}, i64 {expires_at}, ptr {out_scratch})"
+        )
+        .unwrap();
+        let cookie_val = self.fresh_reg("session_cookie_val");
+        writeln!(self.out, "  {cookie_val} = load {{ptr, i64}}, ptr {out_scratch}").unwrap();
+        Ok(cookie_val)
+    }
+
+    /// `new_refresh_token(expires_at) -> RefreshTokenHandle` — infallible.
+    /// The `handle: box i64` field's own heap slot (a real `nir_alloc(8)`,
+    /// the same allocator `Expr::Box` construction already uses) is
+    /// passed *directly* as the kernel's `out_handle_id` — the box's
+    /// storage and the out-param are the same memory, no intermediate
+    /// scratch/copy needed, the same "out-param is the real field
+    /// pointer" discipline this file's other identity emitters already
+    /// use for aggregate fields.
+    fn emit_new_refresh_token(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let handle_ty = Ty::Named("RefreshTokenHandle".to_string(), vec![]);
+        let expires_at = self.expr(&args[0], scopes)?;
+
+        let heap_ptr = self.fresh_reg("new_refresh_token_heap");
+        writeln!(self.out, "  {heap_ptr} = call ptr @nir_alloc(i64 8)").unwrap();
+        writeln!(self.out, "  call void @nir_new_refresh_token(i64 {expires_at}, ptr {heap_ptr})").unwrap();
+
+        let handle_llty = self.llvm_ty(&handle_ty)?;
+        let dest = self.fresh_reg("new_refresh_token_dest");
+        self.emit_alloca(&dest, &handle_llty);
+        let (handle_idx, _) = self.field_index_and_ty(&handle_ty, "handle").expect("RefreshTokenHandle always has handle, ast::prelude_structs");
+        let handle_field_ptr = self.fresh_reg("new_refresh_token_handle_field_ptr");
+        writeln!(self.out, "  {handle_field_ptr} = getelementptr inbounds {handle_llty}, ptr {dest}, i32 0, i32 {handle_idx}").unwrap();
+        writeln!(self.out, "  store ptr {heap_ptr}, ptr {handle_field_ptr}").unwrap();
+        let (expires_idx, _) = self.field_index_and_ty(&handle_ty, "expires_at").expect("RefreshTokenHandle always has expires_at, ast::prelude_structs");
+        let expires_field_ptr = self.fresh_reg("new_refresh_token_expires_field_ptr");
+        writeln!(self.out, "  {expires_field_ptr} = getelementptr inbounds {handle_llty}, ptr {dest}, i32 0, i32 {expires_idx}").unwrap();
+        writeln!(self.out, "  store i64 {expires_at}, ptr {expires_field_ptr}").unwrap();
+        Ok(dest)
+    }
+
+    /// `exchange_refresh_token(identity, handle, new_issued_at) ->
+    /// Result(VerifiedIdentity, str)` — redeems `handle`'s own boxed id
+    /// (dereferenced here — two loads, `ptr` then the `i64` it points
+    /// at, same shape `Expr::Deref` already uses for any `box i64`) and,
+    /// on success, reissues `identity` with a fresh `issued_at`. Same
+    /// out-param-is-the-real-field-pointer + `Result`-merge shape
+    /// `emit_oidc_validate_token` already established for a
+    /// `VerifiedIdentity` payload.
+    fn emit_exchange_refresh_token(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let handle_ty = Ty::Named("RefreshTokenHandle".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![identity_ty.clone(), Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let read_str_field = |cg: &mut Self, field: &str| -> (String, String) {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let fptr = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_fptr"));
+            writeln!(cg.out, "  {fptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {idx}").unwrap();
+            let val = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_val"));
+            writeln!(cg.out, "  {val} = load {{ptr, i64}}, ptr {fptr}").unwrap();
+            let p = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_ptr"));
+            writeln!(cg.out, "  {p} = extractvalue {{ptr, i64}} {val}, 0").unwrap();
+            let l = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_len"));
+            writeln!(cg.out, "  {l} = extractvalue {{ptr, i64}} {val}, 1").unwrap();
+            (p, l)
+        };
+        let (subject_ptr, subject_len) = read_str_field(self, "subject");
+        let (issuer_ptr, issuer_len) = read_str_field(self, "issuer");
+        let (audience_ptr, audience_len) = read_str_field(self, "audience");
+        let (claims_ptr, claims_len) = read_str_field(self, "claims_json");
+
+        let handle_ptr = self.expr_ptr_expected(&args[1], &handle_ty, scopes)?;
+        let handle_llty = self.llvm_ty(&handle_ty)?;
+        let (handle_idx, _) = self.field_index_and_ty(&handle_ty, "handle").expect("RefreshTokenHandle always has handle, ast::prelude_structs");
+        let handle_field_ptr = self.fresh_reg("exchange_refresh_handle_field_ptr");
+        writeln!(self.out, "  {handle_field_ptr} = getelementptr inbounds {handle_llty}, ptr {handle_ptr}, i32 0, i32 {handle_idx}").unwrap();
+        let box_ptr = self.fresh_reg("exchange_refresh_box_ptr");
+        writeln!(self.out, "  {box_ptr} = load ptr, ptr {handle_field_ptr}").unwrap();
+        let handle_id = self.fresh_reg("exchange_refresh_handle_id");
+        writeln!(self.out, "  {handle_id} = load i64, ptr {box_ptr}").unwrap();
+
+        let new_issued_at = self.expr(&args[2], scopes)?;
+
+        let identity_scratch = self.fresh_reg("exchange_refresh_identity_scratch");
+        self.emit_alloca(&identity_scratch, &identity_llty);
+        let out_field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("exchange_refresh_out_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_scratch}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let out_subject_ptr = out_field_ptr(self, "subject");
+        let out_issuer_ptr = out_field_ptr(self, "issuer");
+        let out_audience_ptr = out_field_ptr(self, "audience");
+        let out_expires_at_ptr = out_field_ptr(self, "expires_at");
+        let out_issued_at_ptr = out_field_ptr(self, "issued_at");
+        let out_claims_json_ptr = out_field_ptr(self, "claims_json");
+
+        let err_scratch = self.fresh_reg("exchange_refresh_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let ok = self.fresh_reg("exchange_refresh_ok");
+        writeln!(
+            self.out,
+            "  {ok} = call i32 @nir_exchange_refresh_token(i64 {handle_id}, i64 {new_issued_at}, ptr {subject_ptr}, i64 {subject_len}, \
+             ptr {issuer_ptr}, i64 {issuer_len}, ptr {audience_ptr}, i64 {audience_len}, ptr {claims_ptr}, i64 {claims_len}, \
+             ptr {out_subject_ptr}, ptr {out_issuer_ptr}, ptr {out_audience_ptr}, ptr {out_expires_at_ptr}, ptr {out_issued_at_ptr}, \
+             ptr {out_claims_json_ptr}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.fresh_reg("exchange_refresh_is_ok");
+        writeln!(self.out, "  {is_ok} = icmp ne i32 {ok}, 0").unwrap();
+
+        self.emit_result_merge_agg(&result_ty, &is_ok, &identity_ty, &identity_scratch, &err_scratch, "exchange_refresh")
+    }
+
+    /// `validate_api_key(key, expected_hash) -> Result(VerifiedIdentity, str)`
+    /// — same out-param-is-the-real-field-pointer + `Result`-merge shape
+    /// as `exchange_refresh_token`/`oidc_validate_token`, a constant-time
+    /// hash compare decides success instead of a JWT/JWKS check.
+    fn emit_validate_api_key(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![identity_ty.clone(), Ty::Str]);
+
+        let (key_ptr, key_len) = self.str_parts(&args[0], scopes)?;
+        let (hash_ptr, hash_len) = self.str_parts(&args[1], scopes)?;
+
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let identity_scratch = self.fresh_reg("validate_api_key_identity_scratch");
+        self.emit_alloca(&identity_scratch, &identity_llty);
+        let out_field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("validate_api_key_out_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_scratch}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let out_subject_ptr = out_field_ptr(self, "subject");
+        let out_issuer_ptr = out_field_ptr(self, "issuer");
+        let out_audience_ptr = out_field_ptr(self, "audience");
+        let out_expires_at_ptr = out_field_ptr(self, "expires_at");
+        let out_issued_at_ptr = out_field_ptr(self, "issued_at");
+        let out_claims_json_ptr = out_field_ptr(self, "claims_json");
+
+        let err_scratch = self.fresh_reg("validate_api_key_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let ok = self.fresh_reg("validate_api_key_ok");
+        writeln!(
+            self.out,
+            "  {ok} = call i32 @nir_validate_api_key(ptr {key_ptr}, i64 {key_len}, ptr {hash_ptr}, i64 {hash_len}, ptr {out_subject_ptr}, \
+             ptr {out_issuer_ptr}, ptr {out_audience_ptr}, ptr {out_expires_at_ptr}, ptr {out_issued_at_ptr}, ptr {out_claims_json_ptr}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.fresh_reg("validate_api_key_is_ok");
+        writeln!(self.out, "  {is_ok} = icmp ne i32 {ok}, 0").unwrap();
+
+        self.emit_result_merge_agg(&result_ty, &is_ok, &identity_ty, &identity_scratch, &err_scratch, "validate_api_key")
+    }
+
+    /// A compile-time string literal as a real `{ptr, i64}` SSA value —
+    /// `emit_check_role`'s own `err_msg_global`/`insertvalue` sequence,
+    /// factored out so `check_role_path`/`extract_claim_path` (and any
+    /// future caller needing a fixed `Err` message) don't repeat it.
+    fn const_str_value(&mut self, global_prefix: &str, s: &str) -> String {
+        let global = self.fresh_global(global_prefix);
+        writeln!(self.string_globals, "{global} = private unnamed_addr constant [{} x i8] c\"{}\"", s.len(), llvm_escape_bytes(s.as_bytes())).unwrap();
+        let partial = self.fresh_reg(&format!("{global_prefix}_partial"));
+        writeln!(self.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr {global}, 0").unwrap();
+        let full = self.fresh_reg(&format!("{global_prefix}_full"));
+        writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 {}, 1", s.len()).unwrap();
+        full
+    }
+
+    /// `emit_result_merge`'s twin for an aggregate (multi-field struct)
+    /// `Ok` payload — `emit_oidc_validate_token`'s own tag/`memcpy`/
+    /// branch/merge sequence, factored out so
+    /// `exchange_refresh_token`/`validate_api_key` (both reissuing a full
+    /// `VerifiedIdentity`, the same shape `oidc_validate_token` already
+    /// has) don't repeat it a third and fourth time. `ok_scratch` is a
+    /// pointer to an already-fully-written `ok_ty`-typed value (built via
+    /// out-params pointing directly at its own fields, same discipline
+    /// every caller here already uses); `err_scratch` a pointer to an
+    /// already-written `{ptr, i64}` error message.
+    fn emit_result_merge_agg(&mut self, result_ty: &Ty, is_ok: &str, ok_ty: &Ty, ok_scratch: &str, err_scratch: &str, label_prefix: &str) -> Result<String, CodegenError> {
+        let result_llty = self.llvm_ty(result_ty)?;
+        let dest = self.fresh_reg(&format!("{label_prefix}_result_addr"));
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg(&format!("{label_prefix}_tag_ptr"));
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg(&format!("{label_prefix}_payload_ptr"));
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label(&format!("{label_prefix}_ok"));
+        let err_label = self.fresh_label(&format!("{label_prefix}_err"));
+        let merge_label = self.fresh_label(&format!("{label_prefix}_merge"));
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        let bytes = agg_byte_size_operand(ok_ty, &self.registry);
+        writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {payload_ptr}, ptr {ok_scratch}, i64 {bytes}, i1 false)").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let err_val = self.fresh_reg(&format!("{label_prefix}_err_val"));
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {err_val}, ptr {payload_ptr}").unwrap();
         writeln!(self.out, "  br label %{merge_label}").unwrap();
 
         writeln!(self.out, "{merge_label}:").unwrap();

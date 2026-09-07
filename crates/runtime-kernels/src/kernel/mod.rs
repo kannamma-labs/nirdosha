@@ -116,6 +116,7 @@
 
 pub mod db;
 pub mod http;
+pub mod identity;
 pub mod mailbox;
 pub mod nfr;
 pub mod pool;

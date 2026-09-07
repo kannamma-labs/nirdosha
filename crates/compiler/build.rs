@@ -45,7 +45,35 @@ fn main() {
     let kernels_manifest = kernels_dir.join("Cargo.toml");
     let kernels_target_dir = out_dir.join("runtime_kernels_target");
 
-    println!("cargo::rerun-if-changed={}", kernels_dir.join("src/lib.rs").display());
+    // **Real bug found and fixed this session, not a hypothetical one**:
+    // this used to watch only `src/lib.rs`, not the rest of `src/`
+    // (`kernel/*.rs`). Cargo has no visibility into this build script's
+    // own nested `cargo rustc` shell-out below, so it only re-runs this
+    // script (and, critically, only then recompiles `nirdosha` itself
+    // against a fresh `include_bytes!`-ed archive) when a path named
+    // here actually changes — editing only `kernel/db.rs`/`kernel/
+    // http.rs`/`kernel/identity.rs` (adding a new file, in each case)
+    // left `lib.rs` itself byte-for-byte unchanged, so this script never
+    // re-ran and `nirdosha` kept linking a stale archive missing the new
+    // symbols — a real `undefined reference` link failure, reproduced
+    // and root-caused via `cargo clean -p nirdosha` making the problem
+    // disappear (proving it was a stale-artifact issue, not a codegen
+    // bug). Walking the whole `src/` tree, not just `lib.rs`, closes
+    // this for every future kernel source file, not just the three that
+    // happened to trigger it this time.
+    fn watch_dir_recursive(dir: &std::path::Path) {
+        println!("cargo::rerun-if-changed={}", dir.display());
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                watch_dir_recursive(&path);
+            } else {
+                println!("cargo::rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    watch_dir_recursive(&kernels_dir.join("src"));
     println!("cargo::rerun-if-changed={}", kernels_manifest.display());
 
     // `CARGO`, not a bare `"cargo"` on `PATH`: cargo always sets this to
