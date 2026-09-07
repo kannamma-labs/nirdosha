@@ -147,6 +147,43 @@ binary itself, whether or not one is ever generated. See the
 [UI Engine](https://github.com/kannamma-labs/nirdosha/wiki/UI-Engine)
 wiki page for the full, current picture.
 
+**New: escaping the closed 4-chart/7-control catalog, without opening
+a runtime hole.** `render: "chart"` replaces "pick one of four fixed
+chart shapes" with a bounded grammar-of-graphics config — `mark` ×
+`encode <channel>` — still a fully closed, typechecked vocabulary the
+model can't escape, not arbitrary markup:
+
+```nirdosha
+dashboard {
+    visual "Revenue by month" -> chart_revenue_by_month {
+        render: "chart"
+        mark: "bar"
+        encode x { field: "month" type: "temporal" }
+        encode y { field: "amount" type: "quantitative" aggregate: "sum" }
+    }
+}
+```
+
+And when the fixed vocabulary genuinely isn't enough, a Rust crate can
+now contribute an entirely new `layout` widget kind — discovered
+automatically straight from the app's own `Cargo.toml`
+(`nirdosha emit-ui --manifest-path`), never authored by the model or a
+served request, so the extension boundary stays a build-time decision a
+human made, not a runtime one:
+
+```nirdosha
+layout {
+    sparkline { source: recent_sales_totals field: "amount" }
+}
+```
+
+Both are additive — every existing `bar_chart`/`graph`/`heatmap`/
+`timeline`/`divider`/`card` program is unaffected. See
+[`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md) for the full
+design, what shipped vs. what's still open, and why the extension
+boundary staying compile-time is a stronger security property than the
+runtime-registered catalogs competing generative-UI specs use.
+
 ## Why this exists, in one paragraph
 
 Nirdosha targets one specific problem: **a backend service written and
@@ -263,7 +300,13 @@ Real, compiled, and running today — the highlights:
   observability endpoint on a crossed threshold.
 - **UI engine (static)** — `nirdosha emit-ui` derives a Material-styled
   page from `struct`/`screen`/`dashboard` naming conventions — no
-  hand-written frontend code, no live backend.
+  hand-written frontend code, no live backend. `render: "chart"` adds a
+  bounded grammar-of-graphics config (`mark` × `encode <channel>`) on
+  top of the four fixed chart types, and a Rust crate can contribute an
+  additional `layout` widget kind — hand-assembled, or auto-discovered
+  straight from the app's own `Cargo.toml`
+  (`nirdosha emit-ui --manifest-path`) — with no runtime code-execution
+  hole ([`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md)).
 - **Cross-platform CI** — Linux, macOS, and Windows all build and run
   their full test suite on every push, not just at release time.
 
