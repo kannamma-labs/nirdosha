@@ -2858,91 +2858,16 @@ mod mq_kernel_tests {
 
 // ---- http/https kernels (`http_get`/`http_post`/`https_get`/`https_post`) --
 //
-// `ast::BUILTIN_NAMES`'s own doc comment has the full, already-locked
-// design (written before this backend existed, ported here unchanged):
-// plain HTTP over `std::net::TcpStream`, HTTPS over the identical
-// request/response handling wrapped in a `native_tls::TlsStream`.
-// **`Connection: close` + read-to-EOF, no `Content-Length`/chunked-
-// transfer-encoding parsing** — "no ... parsing needed for a first cut,
-// since the server closing the socket *is* the end-of-body signal" is
-// this design's own words, not a new cut made here. A network failure, a
-// malformed status line, or a non-UTF-8 body are all a real `Err`, never
-// a trap.
+// Real, pooled HTTP/1.1 keep-alive connections plus real admission
+// control (`Domain::Http`) — `kernel::http` has the full design and the
+// protocol rewrite this required (real `Content-Length`/chunked framing,
+// replacing the original connection-per-call `Connection: close` +
+// read-to-EOF cut, which was correct for its own scope but structurally
+// incompatible with pooling: a pool only has value if a connection
+// survives past one request). A network failure, a malformed status
+// line, or a non-UTF-8 body are all a real `Err`, never a trap.
 
-struct HttpParsed {
-    status: i64,
-    body: String,
-}
-
-/// Decodes an HTTP/1.1 `Transfer-Encoding: chunked` body — each chunk is
-/// a hex size line, that many raw bytes, a trailing `\r\n`, repeated
-/// until a zero-size chunk terminates the sequence (any trailer headers
-/// after the terminating chunk are ignored, same "don't need them for a
-/// first cut" scope as the rest of this module). Found necessary by
-/// actually testing `https_get` against a real server (`example.com`
-/// chunks by default) — not designed in ahead of time, but not
-/// optional either once found: without this, a chunked response's body
-/// comes back with raw `<hex-size>\r\n...\r\n` framing still in it,
-/// which is a real, visibly wrong bug for a large fraction of real HTTP
-/// servers, not an acceptable "first cut" gap the way skipping
-/// `Content-Length`-driven partial reads is (this module's read-to-EOF
-/// strategy already makes `Content-Length` itself redundant).
-fn decode_chunked_body(body: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(body.len());
-    let mut pos = 0usize;
-    loop {
-        let line_end = body[pos..].windows(2).position(|w| w == b"\r\n").ok_or_else(|| "malformed chunked body: no chunk-size line".to_string())?;
-        let size_line = std::str::from_utf8(&body[pos..pos + line_end]).map_err(|_| "malformed chunked body: chunk-size line is not valid UTF-8".to_string())?;
-        // A chunk-size line may carry `;`-separated extensions -- ignored,
-        // only the leading hex digits matter.
-        let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16).map_err(|_| format!("malformed chunked body: bad chunk size `{size_hex}`"))?;
-        pos += line_end + 2;
-        if size == 0 {
-            break; // terminating chunk -- any trailer headers after it are ignored
-        }
-        if pos + size > body.len() {
-            return Err("malformed chunked body: chunk size exceeds remaining data".to_string());
-        }
-        out.extend_from_slice(&body[pos..pos + size]);
-        pos += size;
-        if body.get(pos..pos + 2) != Some(b"\r\n") {
-            return Err("malformed chunked body: missing CRLF after chunk data".to_string());
-        }
-        pos += 2;
-    }
-    Ok(out)
-}
-
-fn parse_http_response(raw: &[u8]) -> Result<HttpParsed, String> {
-    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| "malformed HTTP response: no header/body separator".to_string())?;
-    let head = &raw[..sep];
-    let body = &raw[sep + 4..];
-    let head_str = std::str::from_utf8(head).map_err(|_| "malformed HTTP response: headers are not valid UTF-8".to_string())?;
-    let status_line = head_str.lines().next().ok_or_else(|| "malformed HTTP response: empty status line".to_string())?;
-    let mut parts = status_line.splitn(3, ' ');
-    let _version = parts.next();
-    let status_str = parts.next().ok_or_else(|| "malformed HTTP response: no status code in status line".to_string())?;
-    let status: i64 = status_str.parse().map_err(|_| format!("malformed HTTP response: bad status code `{status_str}`"))?;
-    let is_chunked = head_str.lines().skip(1).any(|line| {
-        line.split_once(':').map(|(k, v)| k.trim().eq_ignore_ascii_case("transfer-encoding") && v.trim().eq_ignore_ascii_case("chunked")).unwrap_or(false)
-    });
-    let body_bytes = if is_chunked { decode_chunked_body(body)? } else { body.to_vec() };
-    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| "HTTP response body is not valid UTF-8".to_string())?.to_string();
-    Ok(HttpParsed { status, body: body_str })
-}
-
-fn http_request_bytes(method: &str, host: &str, path: &str, body: Option<&str>, bearer_token: Option<&str>) -> Vec<u8> {
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
-    if let Some(token) = bearer_token {
-        req.push_str(&format!("Authorization: Bearer {token}\r\n"));
-    }
-    match body {
-        Some(b) => req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}", b.len())),
-        None => req.push_str("\r\n"),
-    }
-    req.into_bytes()
-}
+type HttpParsed = kernel::http::HttpParsed;
 
 fn do_http(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) -> Result<HttpParsed, String> {
     do_http_with_auth(host, port, path, method, body, None)
@@ -2955,21 +2880,11 @@ fn do_http(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) 
 /// builtins) never pass one, matching their own already-locked design
 /// (no auth header in that surface).
 fn do_http_with_auth(host: &str, port: i64, path: &str, method: &str, body: Option<&str>, bearer_token: Option<&str>) -> Result<HttpParsed, String> {
-    let mut stream = std::net::TcpStream::connect((host, port as u16)).map_err(|e| e.to_string())?;
-    stream.write_all(&http_request_bytes(method, host, path, body, bearer_token)).map_err(|e| e.to_string())?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
-    parse_http_response(&raw)
+    kernel::http::request_http(host, port, path, method, body, bearer_token)
 }
 
 fn do_https(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) -> Result<HttpParsed, String> {
-    let stream = std::net::TcpStream::connect((host, port as u16)).map_err(|e| e.to_string())?;
-    let connector = native_tls::TlsConnector::new().map_err(|e| e.to_string())?;
-    let mut stream = connector.connect(host, stream).map_err(|e| e.to_string())?;
-    stream.write_all(&http_request_bytes(method, host, path, body, None)).map_err(|e| e.to_string())?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
-    parse_http_response(&raw)
+    kernel::http::request_https(host, port, path, method, body)
 }
 
 unsafe fn write_http_result(result: Result<HttpParsed, String>, out_status: *mut i64, out_body: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
@@ -3076,45 +2991,15 @@ pub unsafe extern "C" fn nir_https_post(
 mod http_kernel_tests {
     use super::*;
 
-    #[test]
-    fn parse_http_response_extracts_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world";
-        let parsed = parse_http_response(raw).unwrap();
-        assert_eq!(parsed.status, 200);
-        assert_eq!(parsed.body, "hello world");
-    }
-
-    #[test]
-    fn parse_http_response_handles_empty_body() {
-        let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
-        let parsed = parse_http_response(raw).unwrap();
-        assert_eq!(parsed.status, 204);
-        assert_eq!(parsed.body, "");
-    }
-
-    #[test]
-    fn parse_http_response_rejects_malformed_input() {
-        assert!(parse_http_response(b"not an http response at all").is_err());
-    }
-
-    #[test]
-    fn parse_http_response_decodes_a_real_chunked_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nMozilla\r\n9\r\nDeveloper\r\n0\r\n\r\n";
-        let parsed = parse_http_response(raw).unwrap();
-        assert_eq!(parsed.status, 200);
-        assert_eq!(parsed.body, "MozillaDeveloper");
-    }
-
-    #[test]
-    fn parse_http_response_leaves_a_non_chunked_body_untouched() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        assert_eq!(parse_http_response(raw).unwrap().body, "hello");
-    }
-
-    #[test]
-    fn decode_chunked_body_rejects_truncated_input() {
-        assert!(decode_chunked_body(b"5\r\nabc").is_err());
-    }
+    // Response-parsing/chunked-decoding unit tests moved to
+    // `kernel::http::tests` -- they test that module's own
+    // `read_http_response`/`read_chunked_body` directly now, since the
+    // buffer-based `parse_http_response`/`decode_chunked_body` they used
+    // to test no longer exist (replaced by a real streaming reader, the
+    // only way keep-alive framing can work at all -- see `kernel::http`'s
+    // own module doc). What's left here is real-server, real-socket
+    // round-trip coverage through the public `do_http`/`nir_http_get`
+    // surface, now exercising the full pooled/keep-alive path for real.
 
     #[test]
     fn http_get_round_trips_against_a_real_local_server() {
