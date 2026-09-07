@@ -1,0 +1,34 @@
+[package]
+name = "nirdosha-ui-plugin-example-sparkline"
+version = "0.1.0"
+edition = "2024"
+description = "Reference compile-time UI-plugin component (rfcs/0009-ui-catalog-extensibility.md Phase B): a layout { sparkline { source: <fn> field: \"...\" } } widget kind, fetching its own data via node.source and drawing a small inline-SVG trend line. Consumed by crates/compiler/tests/ui_plugin_examples.rs the same way crates/plugin-example-native-kv is consumed by tests/native_plugin_examples.rs."
+
+# Same statically-greppable convention `plugin-example-native-shout`'s
+# own Cargo.toml already established for `kind = "native-compiled"`,
+# extended to a second kind: `kind = "nir-ui-component"` is what a
+# future `nirdosha build`/`emit-ui` auto-discovery pass (rfcs/0009's own
+# "Open questions" -- shared, still-open work with rfcs/0008 Phase 3)
+# would grep for to tell a UI-component crate from an ordinary
+# dependency. Not consumed by anything yet -- `crates/compiler/tests/
+# ui_plugin_examples.rs` reads this crate's `NAME`/`RENDER_FN`/
+# `RENDER_JS` constants directly, standing in for that discovery pass.
+[package.metadata.nirdosha]
+kind = "nir-ui-component"
+name = "sparkline"
+render_fn = "render_sparkline"
+
+# Deliberately zero dependency on the `nirdosha` crate itself -- same
+# posture `plugin-example-native-shout`/`plugin-example-native-kv`
+# already hold toward the compiled-builtin ABI, for the same reason: a
+# UI-plugin crate hands over plain data (a name, a JS function's text,
+# the name that function is declared under), never a Rust type living in
+# `nirdosha` itself. `ui_plugin::NativeUiComponent` is constructed by
+# whoever consumes this crate (today, `crates/compiler/tests/
+# ui_plugin_examples.rs`), not by this crate.
+[dependencies]
+
+[lib]
+# An ordinary rlib, unlike the native-builtin examples' `staticlib` --
+# nothing here crosses an ABI boundary; a consumer just reads these
+# constants at its own build time.

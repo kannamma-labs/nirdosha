@@ -1175,6 +1175,7 @@ dependencies = [
  "flate2",
  "hmac 0.12.1",
  "native-tls",
+ "nirdosha-ui-plugin-example-sparkline",
  "postgres",
  "postgres-native-tls",
  "r2d2",
@@ -1233,6 +1234,10 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
 ]
+
+[[package]]
+name = "nirdosha-ui-plugin-example-sparkline"
+version = "0.1.0"
 
 [[package]]
 name = "nom"

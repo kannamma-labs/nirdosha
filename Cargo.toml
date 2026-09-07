@@ -14,6 +14,13 @@ members = [
     # the automated "compiles and the real binary runs correctly" proof.
     "crates/plugin-example-native-shout",
     "crates/plugin-example-native-kv",
+    # rfcs/0009-ui-catalog-extensibility.md Phase B's real reference UI
+    # component -- a genuinely separate crate (not inline Rust in a
+    # test file) contributing a `layout { ... }` widget kind. See its
+    # own README and `crates/compiler/tests/ui_plugin_examples.rs` for
+    # the "reads real, separately-compiled bytes" proof, mirroring the
+    # two native-plugin examples above.
+    "crates/ui-plugin-example-sparkline",
     # `crates/bench`, the original six interpreter-era `plugin-example-*`
     # crates, `plugin-support`, and `plugin-examples` stay removed: each
     # depended entirely on the interpreter (interpreted plugin dispatch
