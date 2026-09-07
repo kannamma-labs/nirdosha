@@ -452,6 +452,15 @@ __NIRDOSHA_THEME_SCRIPT__
 
 <script>
 "use strict";
+// rfcs/0009 Phase B -- name -> render function, one entry per linked
+// `ui_plugin::NativeUiComponent` (empty for every build with none
+// linked, i.e. every build before this RFC and every plain `emit-ui`
+// call today). Populated by the plain top-level statements
+// `__NIRDOSHA_UI_COMPONENTS__` splices in below, never by anything
+// request- or model-supplied -- see `renderLayoutNode`'s `"widget"`
+// case for the one place this is read.
+const WIDGET_RENDERERS = {};
+__NIRDOSHA_UI_COMPONENTS__
 const MANIFEST = __NIRDOSHA_MANIFEST__;
 const STATS = __NIRDOSHA_STATS__;
 const CHARTS = __NIRDOSHA_CHARTS__;
@@ -1503,6 +1512,15 @@ function renderLayoutNode(node, ctx) {
         }
         return holder;
       }
+      // rfcs/0009 Phase B -- a plugin-contributed widget kind, checked
+      // by `typeck.rs::check_screen_layout`'s `extra_widget_kinds` (same
+      // allowlist discipline as the three std kinds above, just sourced
+      // from whatever `NativeUiComponent`s this build linked instead of
+      // a hardcoded list). Falls through to the plain empty div only if
+      // `node.kind` really isn't registered -- unreachable for a
+      // typeck-accepted program, kept as a defensive default rather than
+      // a thrown error, same posture the three std branches above have.
+      if (WIDGET_RENDERERS[node.kind]) return WIDGET_RENDERERS[node.kind](node);
       return el("div", {}, []);
     }
     default:
@@ -1615,6 +1633,162 @@ function renderBarChart(data) {
     valText.textContent = String(d.value);
     svg.appendChild(valText);
   });
+  return svg;
+}
+
+// ---- rfcs/0009 Phase A: grammar-of-graphics `render: "chart"` ---------
+// One generalized renderer in place of a hand-built function per chart
+// shape -- still zero external charting library, same stance
+// `renderBarChart` already holds. `encoding` is the flat array
+// `metrics_json` emits: `[{channel, field, type, aggregate}, ...]`.
+// `field` is only ever checked by typeck to *be* a string (rfcs/0009's
+// own `check_encode_entry` doc comment) -- there's no struct to resolve
+// it against, so a `field` naming a column `data` doesn't actually
+// carry renders as `undefined`/`NaN` values, not a crash.
+function renderGraphicsChart(data, mark, encoding) {
+  const width = 480, height = 320, margin = { top: 16, right: 16, bottom: 32, left: 48 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+  const rows = Array.isArray(data) ? data : [];
+  const find = (ch) => encoding.find((e) => e.channel === ch) || null;
+  const xEnc = find("x"), yEnc = find("y"), colorEnc = find("color"), thetaEnc = find("theta");
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `${mark} chart`);
+  if (rows.length === 0) return svg;
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const k in attrs) node.setAttribute(k, attrs[k]);
+    return node;
+  }
+  function aggregate(values, kind) {
+    const nums = values.map((v) => Number(v) || 0);
+    if (kind === "avg") return nums.reduce((a, b) => a + b, 0) / nums.length;
+    if (kind === "count") return nums.length;
+    if (kind === "min") return Math.min(...nums);
+    if (kind === "max") return Math.max(...nums);
+    return nums.reduce((a, b) => a + b, 0); // "sum", and the default when unset
+  }
+
+  if (mark === "arc") {
+    // theta (slice size) + optional color (category label); falls back
+    // to y/x if theta/color weren't declared, so a chart authored with
+    // only x/y still renders a pie instead of an empty circle.
+    const valueEnc = thetaEnc || yEnc;
+    const labelEnc = colorEnc || xEnc;
+    if (!valueEnc) return svg;
+    const slices = rows.map((r) => ({
+      label: labelEnc ? String(r[labelEnc.field]) : "",
+      value: Math.abs(Number(r[valueEnc.field]) || 0),
+    }));
+    const total = slices.reduce((a, s) => a + s.value, 0) || 1;
+    const cx = width / 2, cy = height / 2, radius = Math.min(width, height) / 2 - 24;
+    const palette = ["#6750A4", "#625B71", "#7D5260", "#B3261E", "#146C2E", "#0B57D0", "#8E4EC6", "#B26A00"];
+    let angle = -Math.PI / 2;
+    slices.forEach((s, i) => {
+      const frac = s.value / total;
+      const next = angle + frac * Math.PI * 2;
+      const x1 = cx + radius * Math.cos(angle), y1 = cy + radius * Math.sin(angle);
+      const x2 = cx + radius * Math.cos(next), y2 = cy + radius * Math.sin(next);
+      const large = frac > 0.5 ? 1 : 0;
+      const path = svgEl("path", { d: `M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${large} 1 ${x2} ${y2} Z`, fill: palette[i % palette.length] });
+      path.setAttribute("aria-label", `${s.label}: ${s.value}`);
+      svg.appendChild(path);
+      angle = next;
+    });
+    return svg;
+  }
+
+  if (!xEnc || !yEnc) return svg;
+
+  // Group-and-aggregate when declared (or the x channel is categorical);
+  // otherwise one point per row, sorted for a quantitative/temporal x.
+  let points;
+  if (yEnc.aggregate || xEnc.type === "nominal" || xEnc.type === "ordinal") {
+    const groups = new Map();
+    for (const r of rows) {
+      const key = String(r[xEnc.field]);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r[yEnc.field]);
+    }
+    points = Array.from(groups.entries()).map(([x, vals]) => ({ x, y: aggregate(vals, yEnc.aggregate || "sum") }));
+  } else {
+    points = rows.map((r) => ({ x: r[xEnc.field], y: Number(r[yEnc.field]) || 0 }));
+    if (xEnc.type === "quantitative") {
+      points.sort((a, b) => (a.x > b.x ? 1 : a.x < b.x ? -1 : 0));
+    } else if (xEnc.type === "temporal") {
+      // Only sort by real elapsed time when every value actually parses
+      // as one (ISO-8601-shaped strings, timestamps) -- a month-name
+      // string like "Jan"/"Feb" is legitimately `temporal` in meaning
+      // but not `Date.parse`-able, and alphabetizing it ("Apr" before
+      // "Jan") would silently scramble a caller's already-chronological
+      // row order into nonsense. Falling back to row order (row order
+      // that isn't actually chronological is on the caller, the same
+      // "field isn't cross-checked against anything real" disclosed
+      // limit `check_encode_entry` already documents) is the honest
+      // default when we can't prove a real ordering.
+      const t = (v) => { const d = Date.parse(v); return Number.isNaN(d) ? null : d; };
+      if (points.every((p) => t(p.x) !== null)) points.sort((a, b) => t(a.x) - t(b.x));
+    }
+  }
+  if (points.length === 0) return svg;
+
+  const categorical = xEnc.type === "nominal" || xEnc.type === "ordinal" || typeof points[0].x === "string";
+  const maxY = Math.max(1, ...points.map((p) => Math.abs(Number(p.y) || 0)));
+  const xPos = (i) => categorical
+    ? margin.left + (plotW / points.length) * (i + 0.5)
+    : margin.left + (plotW / Math.max(1, points.length - 1)) * i;
+  const yPos = (v) => margin.top + plotH - (Math.abs(Number(v) || 0) / maxY) * plotH;
+
+  svg.appendChild(svgEl("line", { x1: margin.left, y1: margin.top + plotH, x2: margin.left + plotW, y2: margin.top + plotH, stroke: "var(--md-outline)", "stroke-width": "1" }));
+
+  if (mark === "bar") {
+    const barW = Math.max(2, (plotW / points.length) * 0.6);
+    points.forEach((p, i) => {
+      const y = yPos(p.y);
+      const rect = svgEl("rect", { x: xPos(i) - barW / 2, y, width: barW, height: margin.top + plotH - y, rx: "3" });
+      rect.style.fill = "var(--md-primary)";
+      svg.appendChild(rect);
+    });
+  } else if (mark === "line" || mark === "area") {
+    const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${xPos(i)} ${yPos(p.y)}`).join(" ");
+    if (mark === "area") {
+      const area = svgEl("path", { d: `${d} L ${xPos(points.length - 1)} ${margin.top + plotH} L ${xPos(0)} ${margin.top + plotH} Z` });
+      area.style.fill = "var(--md-primary)";
+      area.style.opacity = "0.25";
+      svg.appendChild(area);
+    }
+    const line = svgEl("path", { d, fill: "none", "stroke-width": "2" });
+    line.style.stroke = "var(--md-primary)";
+    svg.appendChild(line);
+  } else if (mark === "point") {
+    points.forEach((p, i) => {
+      const circle = svgEl("circle", { cx: xPos(i), cy: yPos(p.y), r: "4" });
+      circle.style.fill = "var(--md-primary)";
+      svg.appendChild(circle);
+    });
+  } else if (mark === "rule") {
+    points.forEach((p, i) => {
+      const line = svgEl("line", { x1: xPos(i), y1: margin.top + plotH, x2: xPos(i), y2: yPos(p.y), "stroke-width": "2" });
+      line.style.stroke = "var(--md-primary)";
+      svg.appendChild(line);
+    });
+  }
+
+  const labelEvery = Math.max(1, Math.ceil(points.length / 8));
+  points.forEach((p, i) => {
+    if (i % labelEvery !== 0 && i !== points.length - 1) return;
+    const text = svgEl("text", { x: xPos(i), y: margin.top + plotH + 16, "text-anchor": "middle", "font-size": "10" });
+    text.style.fill = "var(--md-on-surface-variant)";
+    text.textContent = String(p.x);
+    svg.appendChild(text);
+  });
+
   return svg;
 }
 
@@ -1805,6 +1979,7 @@ async function renderDashboard() {
       if (rows.length === 0) { holder.appendChild(el("div", { class: "empty-state", text: "No data yet." })); return; }
       if (chart.render === "heatmap") holder.appendChild(renderHeatGrid(rows));
       else if (chart.render === "timeline") holder.appendChild(renderTimelineList(rows));
+      else if (chart.render === "chart") holder.appendChild(renderGraphicsChart(rows, chart.mark, chart.encoding));
       else holder.appendChild(renderBarChart(rows));
     });
   }
@@ -1970,6 +2145,7 @@ async function renderPanel(panel, container, id) {
     }
     if (panel.render === "heatmap") { body.appendChild(renderHeatGrid(list)); return; }
     if (panel.render === "timeline") { body.appendChild(renderTimelineList(list)); return; }
+    if (panel.render === "chart") { body.appendChild(renderGraphicsChart(list, panel.mark, panel.encoding)); return; }
     const cols = Object.keys(list[0]);
     const table = el("table", {}, [el("thead", {}, [el("tr", {}, cols.map((c) => el("th", { text: c })))])]);
     const tbody = el("tbody", {}, []);

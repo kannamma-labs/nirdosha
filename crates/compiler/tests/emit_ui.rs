@@ -186,10 +186,12 @@ fn stat_and_chart_functions_are_derived_as_dashboard_metrics() {
     assert!(html.contains(r#""fn":"stat_open_cases","label":"Open Cases""#));
     // Gated stat carries the role.
     assert!(html.contains(r#""fn":"stat_total_leakage_cents""#));
-    // (`render` -- Track E2 -- sorts alphabetically between `label` and
+    // (`render` -- Track E2 -- sorts alphabetically between `mark` and
     // `requiredClaim`; always `"bar_chart"` here since this metric has
-    // no declared `visual` entry.)
-    assert!(html.contains(r#""label":"Total Leakage Cents","render":"bar_chart","requiredClaim":null,"requiredRole":"analyst","requiresLogin":true"#));
+    // no declared `visual` entry. `mark`/`encoding` -- rfcs/0009 Phase A
+    // -- are always present too, `null`/`[]` for every non-`"chart"`
+    // metric, the client ignores them.)
+    assert!(html.contains(r#""label":"Total Leakage Cents","mark":null,"render":"bar_chart","requiredClaim":null,"requiredRole":"analyst","requiresLogin":true"#));
     // Chart derived from a zero-arg `json`-returning `chart_` fn.
     assert!(html.contains(r#""fn":"chart_leakage_by_service","label":"Leakage By Service""#));
     // Non-matching fns must not leak into either metric list.
@@ -586,6 +588,38 @@ fn workspace_and_panel_render_into_the_manifest() {
 }
 
 #[test]
+fn a_declared_panel_chart_carries_mark_and_encoding_into_the_manifest() {
+    // rfcs/0009 Phase A, extended to panels.
+    let src = r#"
+        struct Case { id: i64 }
+        fn chart_by_case(case_id: i64) -> Result(json, i64) requires(public) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        workspace W {
+            subject: Case
+            panel "Revenue" {
+                source: chart_by_case
+                render: "chart"
+                mark: "bar"
+                encode x { field: "month" type: "temporal" }
+                encode y { field: "amount" type: "quantitative" aggregate: "sum" }
+            }
+        }
+        fn main() {}
+    "#;
+    let html = emit_ui(src);
+    assert!(html.contains(r#""sourceFn":"chart_by_case""#));
+    assert!(html.contains(r#""render":"chart""#));
+    assert!(html.contains(r#""mark":"bar""#));
+    assert!(html.contains(
+        r#""encoding":[{"aggregate":null,"channel":"x","field":"month","type":"temporal"},{"aggregate":"sum","channel":"y","field":"amount","type":"quantitative"}]"#
+    ));
+    // Client-side wiring: renderPanel actually dispatches "chart" render
+    // to the same renderer renderDashboard's own chart items use.
+    assert!(html.contains(r#"if (panel.render === "chart") { body.appendChild(renderGraphicsChart(list, panel.mark, panel.encoding)); return; }"#));
+}
+
+#[test]
 fn a_program_with_no_workspace_block_renders_an_empty_workspaces_array() {
     let html = emit_ui(include_str!("fixtures/ui_todo.nir"));
     assert!(html.contains("const WORKSPACES = [];"), "no workspace block should mean a literally empty array, same as WORKFLOWS already does");
@@ -819,4 +853,50 @@ fn workflow_all_states_reach_the_manifest_in_declaration_order() {
 fn a_program_with_no_workflow_renders_an_empty_all_states_free_manifest() {
     let html = emit_ui(include_str!("fixtures/ui_todo.nir"));
     assert!(html.contains("const WORKFLOWS = [];"));
+}
+
+// ---- rfcs/0009 Phase A: `render: "chart"` reaches the manifest --------
+
+#[test]
+fn a_declared_chart_visual_carries_mark_and_encoding_into_the_manifest() {
+    let src = r#"
+        fn chart_revenue_by_month() -> Result(json, i64) requires(public) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        dashboard {
+            visual "Revenue by month" -> chart_revenue_by_month {
+                render: "chart"
+                mark: "bar"
+                encode x { field: "month" type: "temporal" }
+                encode y { field: "amount" type: "quantitative" aggregate: "sum" }
+            }
+        }
+        fn main() {}
+    "#;
+    let html = emit_ui(src);
+    assert!(html.contains(r#""fn":"chart_revenue_by_month""#));
+    assert!(html.contains(r#""render":"chart""#));
+    assert!(html.contains(r#""mark":"bar""#));
+    assert!(html.contains(
+        r#""encoding":[{"aggregate":null,"channel":"x","field":"month","type":"temporal"},{"aggregate":"sum","channel":"y","field":"amount","type":"quantitative"}]"#
+    ));
+}
+
+#[test]
+fn a_plain_chart_convention_fn_still_defaults_to_bar_chart_with_no_encoding() {
+    // Unaffected by rfcs/0009 Phase A: the naming-convention path (no
+    // declared `visual` entry at all) never reaches `parse_chart_config`
+    // -- `mark`/`encoding` stay `null`/`[]`, byte-for-byte the same
+    // manifest shape as before this field existed.
+    let src = r#"
+        fn chart_leakage_by_service() -> Result(json, i64) requires(public) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        fn main() {}
+    "#;
+    let html = emit_ui(src);
+    assert!(html.contains(r#""fn":"chart_leakage_by_service""#));
+    assert!(html.contains(r#""encoding":[]"#));
+    assert!(html.contains(r#""mark":null"#));
+    assert!(html.contains(r#""render":"bar_chart""#));
 }

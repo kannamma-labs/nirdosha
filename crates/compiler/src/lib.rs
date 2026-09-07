@@ -17,6 +17,7 @@ pub mod smt;
 pub mod token;
 pub mod typeck;
 pub mod ui_gen;
+pub mod ui_plugin;
 pub mod workflow_conformance;
 pub mod workflow_lower;
 
