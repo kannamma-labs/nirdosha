@@ -178,11 +178,25 @@ layout {
 ```
 
 Both are additive — every existing `bar_chart`/`graph`/`heatmap`/
-`timeline`/`divider`/`card` program is unaffected. See
-[`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md) for the full
-design, what shipped vs. what's still open, and why the extension
-boundary staying compile-time is a stronger security property than the
-runtime-registered catalogs competing generative-UI specs use.
+`timeline`/`divider`/`card` program is unaffected.
+
+**The security claim, made concrete.** Competing generative-UI specs
+(OpenUI, Vercel's json-render, Google's A2UI) resolve their component
+catalog *inside the running app process* — a Zod object the app's own
+code can edit any time, or a catalog picked via a live "capability
+negotiation" handshake at session start. Either way, *what the model is
+allowed to reference* is a runtime decision, reachable from the same
+process serving the agent. Nirdosha's catalog — std plus every linked
+component — is fully resolved and typechecked at `nirdosha build`/
+`emit-ui` time, before the binary an agent talks to even exists. There
+is no admin API, no hot-reload, no session negotiation, no code path at
+all that adds or changes a component after that point — an agent can
+reference what's in the compiled artifact and nothing else, full stop.
+Extending the catalog is something a human does once, by adding a
+reviewed Cargo dependency, never something reachable from a chat turn.
+See [`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md) §"Effect on
+the permission model" for the full argument, and for what shipped vs.
+what's still open.
 
 ## Why this exists, in one paragraph
 
