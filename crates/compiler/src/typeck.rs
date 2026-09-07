@@ -2385,6 +2385,18 @@ impl<'a> Checker<'a> {
                             self.error(TypeErrorKind::InvalidFieldValidationExpr { key: key.to_string() }, value.span());
                         }
                     }
+                    // `state Name { sla_seconds: N ... }` — `docs/ROADMAP.md`
+                    // A15's SLA/escalation design. Must be a non-negative
+                    // integer literal — `codegen::emit_workflow_start`/
+                    // `emit_workflow_advance` read this directly off the
+                    // AST at compile time (building the SLA config a real
+                    // `.nir` value could never legally construct
+                    // dynamically), the same "state ownership"/`label`
+                    // treatment above already gives `owner`/`label`.
+                    "sla_seconds" => match value {
+                        Expr::Int(n, _) if *n >= 0 => {}
+                        _ => self.error(TypeErrorKind::InvalidFieldValidationExpr { key: key.to_string() }, value.span()),
+                    },
                     _ => {}
                 }
             }
@@ -3811,7 +3823,8 @@ impl<'a> Checker<'a> {
             },
             ("len", 1) => match self.infer(&args[0], expected_ret, scopes) {
                 Ty::Vector(_, _) => Ty::I64,
-                found => self.wrong_arg(name, "a Vector", found, span),
+                Ty::Str => Ty::I64,
+                found => self.wrong_arg(name, "a Vector or str", found, span),
             },
             ("norm", 1) | ("norm1", 1) | ("norm_inf", 1) => {
                 match self.expect_f64_vector(&args[0], name, expected_ret, scopes, span) {
@@ -4148,6 +4161,22 @@ impl<'a> Checker<'a> {
                 self.check(&args[1], &Ty::Str, expected_ret, scopes);
                 Ty::Bool
             }
+            // Minimal compiled string-parsing primitives (`BUILTIN_NAMES`'
+            // own doc comment has the full scope). Both infallible --
+            // `str_slice`'s bounds are checked at runtime by a trap, not a
+            // `Result`; `str_index_of` returns `-1` rather than an `Err`
+            // for "not found", matching `nir_str_index_of`'s own contract.
+            ("str_slice", 3) => {
+                self.check(&args[0], &Ty::Str, expected_ret, scopes);
+                self.check(&args[1], &Ty::I64, expected_ret, scopes);
+                self.check(&args[2], &Ty::I64, expected_ret, scopes);
+                Ty::Str
+            }
+            ("str_index_of", 2) => {
+                self.check(&args[0], &Ty::Str, expected_ret, scopes);
+                self.check(&args[1], &Ty::Str, expected_ret, scopes);
+                Ty::I64
+            }
             // DB, layer 1 + layer 2 (`Ty::Db`'s doc comment) -- `path` is
             // really "connection string": a bare file path or `:memory:`
             // still means SQLite, `postgres://`/`postgresql://` selects
@@ -4354,6 +4383,13 @@ impl<'a> Checker<'a> {
                 self.check(&args[1], &Ty::I64, expected_ret, scopes); // instance_id
                 workflow_result_of(Ty::Json)
             }
+            // `docs/ROADMAP.md` A15's SLA/escalation design — backs
+            // every SLA-declaring workflow's synthesized
+            // `list_<workflow>_overdue()`.
+            ("__workflow_overdue", 1) => {
+                self.check(&args[0], &Ty::Str, expected_ret, scopes); // workflow_name
+                workflow_result_of(Ty::Json)
+            }
             ("__workflow_link_advance", 5) => {
                 self.check(&args[0], &Ty::Str, expected_ret, scopes); // workflow_name
                 self.check(&args[1], &Ty::I64, expected_ret, scopes); // instance_id
@@ -4401,8 +4437,9 @@ impl<'a> Checker<'a> {
             "dot" | "cross" | "solve" | "json_get" | "json_get_str" | "json_get_i64" | "json_get_f64"
             | "json_get_bool" | "json_array_get" | "check_role" | "extract_claim" | "extract_claim_path"
             | "db_query" | "db_execute" | "validate_api_key" | "mq_connect" | "constant_time_str_eq"
-            | "dec_from_i64" | "dec_round" => 2,
-            "http_get" | "https_get" | "exchange_refresh_token" | "mq_publish" | "mq_consume" | "check_role_path" => 3,
+            | "dec_from_i64" | "dec_round" | "str_index_of" => 2,
+            "http_get" | "https_get" | "exchange_refresh_token" | "mq_publish" | "mq_consume" | "check_role_path"
+            | "str_slice" => 3,
             "http_post" | "https_post" | "oidc_validate_token" | "send_email" | "send_sms" | "send_push" => 4,
             "mock_issue_token" => 7,
             "notify" | "__workflow_link_advance" | "__workflow_advance" => 5,

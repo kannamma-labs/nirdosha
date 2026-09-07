@@ -322,6 +322,30 @@ fn lower_one(w: &WorkflowDecl, program: &mut Program) -> Result<(), ParseError> 
         exported: true,
     });
 
+    // 4c. `list_<workflow_snake>_overdue() -> Result(json,
+    // WorkflowActionError)` — `docs/ROADMAP.md` A15's SLA/escalation
+    // design, only synthesized if at least one `state` declares
+    // `sla_seconds` (an unused feature costs nothing, same convention
+    // `link_token_name` above already follows for `LinkToken`). No
+    // `identity` param — this is an operational/admin query, not scoped
+    // to "my own" anything, unlike `pending_for_me`/`submitted_by_me`.
+    if w.states.iter().any(|s| s.entries.iter().any(|(k, _)| k == "sla_seconds")) {
+        program.fns.push(FnDecl {
+            name: format!("list_{}_overdue", to_snake_case(&w.name)),
+            params: vec![],
+            ret: result_ty(Ty::Json),
+            body: one_return(Expr::Call("__workflow_overdue".to_string(), vec![Expr::Str(w.name.clone(), span)], span)),
+            span,
+            declared_effects: None,
+            requires: None,
+            explicit_public: false,
+            nfr: None,
+            module: None,
+            ns: None,
+            exported: true,
+        });
+    }
+
     // 5. `<event>_via_link(instance_id: i64, token: <Workflow>LinkToken,
     // payload: json) -> Result(bool, WorkflowActionError)` — one per
     // distinct `link`-marked event, unauthenticated (no `requires`, no
