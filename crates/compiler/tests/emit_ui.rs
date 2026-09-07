@@ -588,6 +588,38 @@ fn workspace_and_panel_render_into_the_manifest() {
 }
 
 #[test]
+fn a_declared_panel_chart_carries_mark_and_encoding_into_the_manifest() {
+    // rfcs/0009 Phase A, extended to panels.
+    let src = r#"
+        struct Case { id: i64 }
+        fn chart_by_case(case_id: i64) -> Result(json, i64) requires(public) {
+            return match json_parse("[]") { Ok(v) => Ok(v), Err(e) => Err(0), }
+        }
+        workspace W {
+            subject: Case
+            panel "Revenue" {
+                source: chart_by_case
+                render: "chart"
+                mark: "bar"
+                encode x { field: "month" type: "temporal" }
+                encode y { field: "amount" type: "quantitative" aggregate: "sum" }
+            }
+        }
+        fn main() {}
+    "#;
+    let html = emit_ui(src);
+    assert!(html.contains(r#""sourceFn":"chart_by_case""#));
+    assert!(html.contains(r#""render":"chart""#));
+    assert!(html.contains(r#""mark":"bar""#));
+    assert!(html.contains(
+        r#""encoding":[{"aggregate":null,"channel":"x","field":"month","type":"temporal"},{"aggregate":"sum","channel":"y","field":"amount","type":"quantitative"}]"#
+    ));
+    // Client-side wiring: renderPanel actually dispatches "chart" render
+    // to the same renderer renderDashboard's own chart items use.
+    assert!(html.contains(r#"if (panel.render === "chart") { body.appendChild(renderGraphicsChart(list, panel.mark, panel.encoding)); return; }"#));
+}
+
+#[test]
 fn a_program_with_no_workspace_block_renders_an_empty_workspaces_array() {
     let html = emit_ui(include_str!("fixtures/ui_todo.nir"));
     assert!(html.contains("const WORKSPACES = [];"), "no workspace block should mean a literally empty array, same as WORKFLOWS already does");

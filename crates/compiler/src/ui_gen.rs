@@ -385,21 +385,30 @@ struct Panel {
     source: Action,
     actions: Vec<Action>,
     render: PanelRender,
+    /// rfcs/0009 Phase A, extended to panels — only populated when
+    /// `render == PanelRender::Chart`; `None`/empty for every other
+    /// kind, unchanged from before these fields existed. Same shape
+    /// `Metric.chart_mark`/`chart_encoding` already have.
+    chart_mark: Option<String>,
+    chart_encoding: Vec<(String, EncodingChannelSpec)>,
 }
 
 /// `panel "..." { render: "..." }`'s closed vocabulary (`docs/ROADMAP.md`
 /// Track E2) — `Table` (the default: `renderPanel`'s original plain-
 /// table rendering, unchanged for a panel that never sets `render`)
-/// plus the same three kinds `MetricRender` gives `visual`, reused
-/// unchanged client-side (`renderForceGraph`/`renderHeatGrid`/
-/// `renderTimelineList` don't care whether they were called from
-/// `renderDashboard` or `renderPanel`).
+/// plus the same kinds `MetricRender` gives `visual`, reused unchanged
+/// client-side (`renderForceGraph`/`renderHeatGrid`/`renderTimelineList`/
+/// `renderGraphicsChart` don't care whether they were called from
+/// `renderDashboard` or `renderPanel`). `Chart` (rfcs/0009 Phase A) is
+/// the one variant whose full config doesn't fit in this enum — see
+/// `Panel.chart_mark`/`chart_encoding`.
 #[derive(Clone, Copy, PartialEq)]
 enum PanelRender {
     Table,
     Graph,
     Heatmap,
     Timeline,
+    Chart,
 }
 
 impl PanelRender {
@@ -409,16 +418,18 @@ impl PanelRender {
             PanelRender::Graph => "graph",
             PanelRender::Heatmap => "heatmap",
             PanelRender::Timeline => "timeline",
+            PanelRender::Chart => "chart",
         }
     }
     /// Same trust posture as `MetricRender::from_kv` — typeck already
-    /// proved `render`, if present, is one of the three explicit kinds;
+    /// proved `render`, if present, is one of the explicit kinds;
     /// absent (or, defensively, anything else) means the default.
     fn from_kv(entries: &[(String, Expr)]) -> PanelRender {
         match kv_str(entries, "render") {
             Some("graph") => PanelRender::Graph,
             Some("heatmap") => PanelRender::Heatmap,
             Some("timeline") => PanelRender::Timeline,
+            Some("chart") => PanelRender::Chart,
             _ => PanelRender::Table,
         }
     }
@@ -1437,7 +1448,9 @@ fn build_workspaces(program: &Program, effects: &HashMap<String, FnEffects>) -> 
             let Some(source) = build_action(program, effects, "source", source_fn) else { continue };
             let actions: Vec<Action> = pd.actions.iter().filter_map(|a| build_custom_action(program, effects, a)).collect();
             let render = PanelRender::from_kv(&pd.entries);
-            panels.push(Panel { title: pd.title.clone(), source, actions, render });
+            let (chart_mark, chart_encoding) =
+                if render == PanelRender::Chart { parse_chart_config(&pd.entries) } else { (None, Vec::new()) };
+            panels.push(Panel { title: pd.title.clone(), source, actions, render, chart_mark, chart_encoding });
         }
 
         let title = kv_str(&wd.entries, "title").map(str::to_string).unwrap_or_else(|| to_display_label(&wd.name));
@@ -1469,6 +1482,14 @@ fn workspaces_json(workspaces: &[Workspace]) -> String {
             "panels": w.panels.iter().map(|p| serde_json::json!({
                 "title": p.title,
                 "render": p.render.as_str(),
+                // rfcs/0009 Phase A, extended to panels -- always
+                // present (null/[] for every non-"chart" panel), same
+                // "client ignores it" posture metrics_json's own
+                // mark/encoding keys already have.
+                "mark": p.chart_mark,
+                "encoding": p.chart_encoding.iter().map(|(channel, e)| serde_json::json!({
+                    "channel": channel, "field": e.field, "type": e.kind, "aggregate": e.aggregate,
+                })).collect::<Vec<_>>(),
                 "sourceFn": p.source.fn_name,
                 // Guaranteed exactly one param by `typeck.rs::
                 // check_workspace`'s shape check before `ui_gen` ever
