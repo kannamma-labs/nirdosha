@@ -292,7 +292,7 @@ fn a_cookie_route_gets_a_real_set_cookie_header_with_security_attributes() {
 }
 
 #[test]
-fn a_bearer_token_reaches_the_route_as_identity_json() {
+fn a_bearer_token_reaches_the_route_as_an_unverified_json_blob() {
     let (addr, _r) = start_test_server(ServeConfig::default());
     let req = "GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer sometoken\r\nConnection: close\r\n\r\n";
     let resp = raw_request(addr, req);

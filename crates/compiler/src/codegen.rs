@@ -269,6 +269,7 @@ const IDENTITY_BUILTINS: &[&str] = &[
     "check_revocation",
     "create_application_session",
     "session_cookie",
+    "verify_session",
     "new_refresh_token",
     "exchange_refresh_token",
     "validate_api_key",
@@ -1784,8 +1785,18 @@ fn emit_llvm_ir_impl<'a>(
     writeln!(cg.out, "declare i32 @nir_check_role_path(ptr, i64, ptr, i64, ptr, i64)").unwrap();
     writeln!(cg.out, "declare i32 @nir_extract_claim_path(ptr, i64, ptr, i64, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_check_revocation(ptr, i64)").unwrap();
-    writeln!(cg.out, "declare void @nir_create_application_session(ptr, ptr, ptr, ptr)").unwrap();
+    writeln!(
+        cg.out,
+        "declare void @nir_create_application_session(ptr, i64, ptr, i64, ptr, i64, ptr, i64, ptr, ptr, ptr, ptr)"
+    )
+    .unwrap();
     writeln!(cg.out, "declare void @nir_session_cookie(ptr, i64, i64, i64, ptr)").unwrap();
+    // Real server-side session lookup (red-team report A2) —
+    // `nir_verify_session`'s own doc comment (`identity.rs`) has the
+    // full design; shape mirrors `nir_validate_api_key` just below
+    // (one `str` input, the same 6-field `VerifiedIdentity` out-params
+    // plus `out_err`), just with a session id instead of an API key.
+    writeln!(cg.out, "declare i32 @nir_verify_session(ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr)").unwrap();
     writeln!(cg.out, "declare void @nir_new_refresh_token(i64, ptr)").unwrap();
     writeln!(
         cg.out,
@@ -2773,6 +2784,9 @@ impl Codegen<'_> {
             Expr::Call(name, _, _) if name == "check_revocation" => Ty::Bool,
             Expr::Call(name, _, _) if name == "create_application_session" => Ty::Named("ApplicationSession".to_string(), vec![]),
             Expr::Call(name, _, _) if name == "session_cookie" => Ty::Str,
+            Expr::Call(name, _, _) if name == "verify_session" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
+            }
             Expr::Call(name, _, _) if name == "new_refresh_token" => Ty::Named("RefreshTokenHandle".to_string(), vec![]),
             Expr::Call(name, _, _) if name == "exchange_refresh_token" => {
                 Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
@@ -5595,6 +5609,9 @@ impl Codegen<'_> {
         if name == "session_cookie" {
             return self.emit_session_cookie(args, scopes);
         }
+        if name == "verify_session" {
+            return self.emit_verify_session(args, scopes);
+        }
         if name == "new_refresh_token" {
             return self.emit_new_refresh_token(args, scopes);
         }
@@ -6117,8 +6134,28 @@ impl Codegen<'_> {
             writeln!(cg.out, "  {val} = load {{ptr, i64}}, ptr {ptr}").unwrap();
             val
         };
+        // `(ptr, i64)`-split versions of the same fields, additionally —
+        // needed as *scalar* call args to `nir_create_application_session`
+        // below (red-team report A2: previously this function's own
+        // identity argument was read here only to populate
+        // `ApplicationSession`'s own `identity_subject`/`identity_issuer`
+        // fields, never actually passed to the kernel — nothing durable
+        // backed a session id. Now it's also stored into a real
+        // server-side session record `verify_session` looks up against).
+        let split_str_field = |cg: &mut Self, field: &str| -> (String, String) {
+            let val = read_str_field(cg, field);
+            let ptr = cg.fresh_reg(&format!("create_session_identity_{field}_split_ptr"));
+            writeln!(cg.out, "  {ptr} = extractvalue {{ptr, i64}} {val}, 0").unwrap();
+            let len = cg.fresh_reg(&format!("create_session_identity_{field}_split_len"));
+            writeln!(cg.out, "  {len} = extractvalue {{ptr, i64}} {val}, 1").unwrap();
+            (ptr, len)
+        };
         let subject_val = read_str_field(self, "subject");
         let issuer_val = read_str_field(self, "issuer");
+        let (subject_ptr, subject_len) = split_str_field(self, "subject");
+        let (issuer_ptr, issuer_len) = split_str_field(self, "issuer");
+        let (audience_ptr, audience_len) = split_str_field(self, "audience");
+        let (claims_json_ptr, claims_json_len) = split_str_field(self, "claims_json");
 
         let session_llty = self.llvm_ty(&session_ty)?;
         let dest = self.fresh_reg("create_session_dest");
@@ -6140,10 +6177,57 @@ impl Codegen<'_> {
         writeln!(self.out, "  store {{ptr, i64}} {issuer_val}, ptr {identity_issuer_ptr}").unwrap();
         writeln!(
             self.out,
-            "  call void @nir_create_application_session(ptr {session_id_ptr}, ptr {created_at_ptr}, ptr {expires_at_ptr}, ptr {last_accessed_at_ptr})"
+            "  call void @nir_create_application_session(ptr {subject_ptr}, i64 {subject_len}, ptr {issuer_ptr}, i64 {issuer_len}, \
+             ptr {audience_ptr}, i64 {audience_len}, ptr {claims_json_ptr}, i64 {claims_json_len}, ptr {session_id_ptr}, \
+             ptr {created_at_ptr}, ptr {expires_at_ptr}, ptr {last_accessed_at_ptr})"
         )
         .unwrap();
         Ok(dest)
+    }
+
+    /// `verify_session(session_id) -> Result(VerifiedIdentity, str)`
+    /// (red-team report A2) — the real server-side lookup
+    /// `nir_create_application_session`'s own doc comment above promises
+    /// exists now. Structurally identical to [`Codegen::emit_validate_api_key`]
+    /// (same `Result(VerifiedIdentity, str)` shape, same aggregate-merge
+    /// pattern), just one `str` input (a session id) instead of two (a
+    /// key + expected hash).
+    fn emit_verify_session(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![identity_ty.clone(), Ty::Str]);
+
+        let (session_id_ptr, session_id_len) = self.str_parts(&args[0], scopes)?;
+
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let identity_scratch = self.fresh_reg("verify_session_identity_scratch");
+        self.emit_alloca(&identity_scratch, &identity_llty);
+        let out_field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("verify_session_out_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_scratch}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let out_subject_ptr = out_field_ptr(self, "subject");
+        let out_issuer_ptr = out_field_ptr(self, "issuer");
+        let out_audience_ptr = out_field_ptr(self, "audience");
+        let out_expires_at_ptr = out_field_ptr(self, "expires_at");
+        let out_issued_at_ptr = out_field_ptr(self, "issued_at");
+        let out_claims_json_ptr = out_field_ptr(self, "claims_json");
+
+        let err_scratch = self.fresh_reg("verify_session_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let ok = self.fresh_reg("verify_session_ok");
+        writeln!(
+            self.out,
+            "  {ok} = call i32 @nir_verify_session(ptr {session_id_ptr}, i64 {session_id_len}, ptr {out_subject_ptr}, ptr {out_issuer_ptr}, \
+             ptr {out_audience_ptr}, ptr {out_expires_at_ptr}, ptr {out_issued_at_ptr}, ptr {out_claims_json_ptr}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.fresh_reg("verify_session_is_ok");
+        writeln!(self.out, "  {is_ok} = icmp ne i32 {ok}, 0").unwrap();
+
+        self.emit_result_merge_agg(&result_ty, &is_ok, &identity_ty, &identity_scratch, &err_scratch, "verify_session")
     }
 
     /// `session_cookie(session) -> str` — infallible, a plain formatted
@@ -9359,7 +9443,52 @@ impl Codegen<'_> {
         // they agree); `local_ty_of` of the first arm's body is the
         // match's own result type, the same way `if_expr` uses
         // `block_trailing_ty` of the `then` block.
+        //
+        // For an enum-variant arm (`Ok(v) => v.subject`-shaped, e.g.
+        // `verify_session`'s natural usage), `local_ty_of` needs `v`'s
+        // own bound type in scope *before* it can resolve `v.subject`'s
+        // field type — but the real binding only happens later, per-arm,
+        // inside `match_enum`'s own codegen loop below. Without this,
+        // `local_ty_of(Expr::Ident("v"))` falls through to whatever
+        // stale/absent binding `scopes` already had for that name (or a
+        // wrong default), and the match's destination slot gets
+        // allocated with the wrong LLVM type — a real bug, not
+        // hypothetical: caught by compiling `Ok(v) => v.subject` against
+        // a real `Result(VerifiedIdentity, str)` for the first time
+        // (`verify_session`), which produced a genuine
+        // `'{ ptr, i64 }' but expected 'i64'` LLVM parse error. Fix:
+        // push a scratch scope with arms[0]'s own bindings (same
+        // substituted-payload-type derivation `match_enum` uses for
+        // real, just for this one type probe), resolve `result_ty`
+        // inside it, then pop — the pushed scope is discarded
+        // immediately after, `match_enum`'s own loop still does the
+        // real, value-carrying binding per arm exactly as before.
+        let mut probed_bindings = false;
+        if let Ty::Named(enum_name, type_args) = &scrutinee_ty {
+            if self.registry.is_enum(enum_name) {
+                if let Some(variants) = self.registry.enum_variants(enum_name) {
+                    if let Some(variant) = variants.iter().find(|v| v.name == arms[0].variant) {
+                        let type_params = self.registry.enum_type_params(enum_name).unwrap_or(&[]);
+                        let subst = zip_type_params(type_params, type_args);
+                        scopes.push();
+                        probed_bindings = true;
+                        for (name, decl_ty) in arms[0].bindings.iter().zip(variant.payload.iter()) {
+                            let field_ty = substitute_ty(decl_ty, &subst);
+                            // A placeholder value string: this scope
+                            // frame only exists to answer a type
+                            // question below, never to emit real IR
+                            // against, so there's no real SSA register
+                            // to bind here.
+                            scopes.define(name, field_ty, "undef".to_string());
+                        }
+                    }
+                }
+            }
+        }
         let result_ty = self.local_ty_of(&arms[0].body, scopes);
+        if probed_bindings {
+            scopes.pop();
+        }
         let merge_label = self.fresh_label("match_merge");
         let slot = if result_ty == Ty::Unit {
             None
