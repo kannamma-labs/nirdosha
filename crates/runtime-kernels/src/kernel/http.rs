@@ -396,6 +396,11 @@ fn http_pool_config() -> PoolConfig {
     if cfg.max_size < 1000 {
         cfg.max_size = 1000;
     }
+    // Red-team report A12 -- same fix as `db.rs`'s `db_pool_config`,
+    // see its own comment for the full rationale: never let the
+    // floor-to-1000 above push `max_size` past the domain's own
+    // resolved ceiling.
+    pool::clamp_max_size_to_ceiling(&mut cfg, super::ceiling_for(super::domain::http()));
     cfg
 }
 

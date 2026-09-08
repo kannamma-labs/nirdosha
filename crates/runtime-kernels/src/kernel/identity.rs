@@ -246,11 +246,25 @@ pub unsafe extern "C" fn nir_verify_session(
 /// string. `Max-Age` is the session's own real remaining lifetime
 /// (`expires_at - created_at`), not a hardcoded constant repeated here
 /// independently of `create_application_session`'s own lifetime.
+///
+/// **This is the single source of truth for every `Set-Cookie` attribute**
+/// (red team finding A5, `scratch/red-team-report-main-d7fae42.md`) — a
+/// downstream host crate (`compiled-serve`'s `write_response`) writes
+/// this string out to the wire verbatim and must never append its own
+/// `HttpOnly`/`Secure`/`SameSite`/`Path` on top; two layers each adding
+/// attributes produced a real bug (two disagreeing `SameSite` values in
+/// one header — `compiled-serve` used to append `SameSite=Lax` after
+/// this function's own `SameSite=Strict`, and browsers take the first
+/// occurrence, so the client silently got `Strict` while the server's
+/// own code thought it sent `Lax`). `SameSite=Strict` (not `Lax`) is the
+/// deliberate choice here, matching `docs/LANGUAGE.md`'s own documented
+/// `session_cookie` contract — the more conservative default for a
+/// first-party session cookie.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_session_cookie(session_id_ptr: *const u8, session_id_len: i64, created_at: i64, expires_at: i64, out_cookie: *mut crate::NirStrOut) {
     let session_id = unsafe { crate::str_from_raw(session_id_ptr, session_id_len) }.unwrap_or("");
     let max_age = (expires_at - created_at).max(0);
-    let cookie = format!("session={session_id}; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}");
+    let cookie = format!("session={session_id}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age}");
     unsafe { crate::write_str_out(out_cookie, cookie) };
 }
 
@@ -609,6 +623,7 @@ mod tests {
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Path=/"), "this crate is the single source of truth for every Set-Cookie attribute (A5) -- Path=/ must be here, not appended downstream");
         assert!(cookie.contains("Max-Age=28800"));
     }
 

@@ -358,13 +358,34 @@ struct DomainCounters {
     /// just stays honestly zero" posture `held`/`grants`/`denials`
     /// already have for a domain that never denies anything.
     stale_rehydrated: AtomicU64,
+    /// Unix seconds of the most recent [`record_stale_rehydrated`] call
+    /// for this domain, `0` meaning "never" — red-team report A13
+    /// (`scratch/red-team-report-main-d7fae42.md`): `stale_rehydrated`
+    /// alone can't distinguish "the pool is healthy, one connection went
+    /// stale a month ago" from "every connection just went stale at
+    /// once" (e.g. a server restart, a network partition) — both look
+    /// identical as a raw incrementing count. A last-seen timestamp,
+    /// surfaced alongside the count in [`dump_report`], answers *when*,
+    /// not just *how many*.
+    last_stale_rehydrated_at: AtomicI64,
     max: OnceLock<i64>,
 }
 
 impl DomainCounters {
     const fn new() -> Self {
-        DomainCounters { held: AtomicI64::new(0), grants: AtomicU64::new(0), denials: AtomicU64::new(0), stale_rehydrated: AtomicU64::new(0), max: OnceLock::new() }
+        DomainCounters {
+            held: AtomicI64::new(0),
+            grants: AtomicU64::new(0),
+            denials: AtomicU64::new(0),
+            stale_rehydrated: AtomicU64::new(0),
+            last_stale_rehydrated_at: AtomicI64::new(0),
+            max: OnceLock::new(),
+        }
     }
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Records one pooled checkout that had to evict a stale connection and
@@ -374,7 +395,16 @@ impl DomainCounters {
 /// is a pool-level event, not an admission decision — a rehydrated
 /// checkout still went through a real `acquire` either way.
 pub fn record_stale_rehydrated(domain: DomainId) {
-    counters_for(domain).stale_rehydrated.fetch_add(1, Ordering::Relaxed);
+    let counters = counters_for(domain);
+    counters.stale_rehydrated.fetch_add(1, Ordering::Relaxed);
+    counters.last_stale_rehydrated_at.store(now_unix_secs(), Ordering::Relaxed);
+}
+
+/// `0` if [`record_stale_rehydrated`] has never fired for `domain`,
+/// otherwise the unix-seconds timestamp of its most recent call — see
+/// [`DomainCounters::last_stale_rehydrated_at`]'s own doc comment.
+pub fn last_stale_rehydrated_at(domain: DomainId) -> i64 {
+    counters_for(domain).last_stale_rehydrated_at.load(Ordering::Relaxed)
 }
 
 /// Every domain's counters, indexed directly by [`DomainId`] — the open-
@@ -481,7 +511,16 @@ pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
     for (id, name) in registered_domains() {
         let (held, grants, denials, stale_rehydrated) = stats(id);
-        out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated}\n"));
+        // `last_stale_rehydrated_at` (red-team report A13) appended
+        // after `stale_rehydrated`, not replacing it — existing
+        // consumers asserting on `held=...`/`grants=...`/`denials=...`/
+        // `stale_rehydrated=...` substrings (this module's own
+        // regression tests, `nirdosha_ops_console.rs`) match a prefix of
+        // this line, unaffected by trailing fields.
+        let last_stale = last_stale_rehydrated_at(id);
+        out.push_str(&format!(
+            "  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated} last_stale_rehydrated_at={last_stale}\n"
+        ));
     }
     // RFC 0011 §5: "a broken reaper is a visible number going up, not a
     // silent absence" — appended as a trailing line, not folded into the
@@ -490,6 +529,13 @@ pub fn dump_report() -> String {
     // module's own regression tests, `nirdosha_ops_console.rs`) are
     // unaffected by this new line's presence.
     out.push_str(&format!("  reaper_panics={}\n", reaper::reaper_panics()));
+    // Red-team report A9: the reaper's actually-in-effect interval
+    // (post floor/soft-ceiling resolution), so a misconfiguration that
+    // used to be visible only via a stderr `eprintln!` at startup is
+    // queryable post-incident too. `0` means the reaper hasn't started
+    // in this process yet (see `reaper::reaper_configured_interval_secs`'s
+    // own doc comment).
+    out.push_str(&format!("  reaper_interval_secs={}\n", reaper::reaper_configured_interval_secs()));
     out
 }
 

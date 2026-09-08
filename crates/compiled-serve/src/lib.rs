@@ -84,10 +84,19 @@ pub use identity::{AuthConfig, VerifiedClaims};
 ///   same disclosed-not-hidden convention `nir_transact_decode_args`'s
 ///   own string output already uses) UTF-8 JSON response body here.
 /// - `out_cookie_{ptr,len}`: `null`/zero-length for "no `Set-Cookie`
-///   this response", otherwise a heap-allocated (leaked) cookie
-///   *value* string (e.g. `nirdosha_session=<id>`) — this crate attaches
-///   the real `HttpOnly; Secure; SameSite=Lax; Path=/` attributes and
-///   writes the header; a handler never builds the header line itself.
+///   this response", otherwise a heap-allocated (leaked) **complete,
+///   fully-attributed** cookie string (e.g.
+///   `session=<id>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=<n>`,
+///   `kernel::identity::nir_session_cookie`'s own output) — `http::
+///   write_response` writes whatever is handed here to the wire
+///   verbatim and does **not** append `HttpOnly`/`Secure`/`SameSite`/
+///   `Path` of its own (red team finding A5,
+///   `scratch/red-team-report-main-d7fae42.md`: two layers each adding
+///   attributes produced one `Set-Cookie` header with two disagreeing
+///   `SameSite` values). A handler that hands back a bare
+///   `name=value` here with no attributes will ship an insecure cookie
+///   with no `HttpOnly`/`Secure`/`SameSite` at all — this crate no
+///   longer fixes that up.
 /// - Return: `0` = success (`out_body` is the real JSON result, HTTP
 ///   200), `1` = business-level error (`out_body` is still a real JSON
 ///   error payload, HTTP 200 — matching this project's existing
@@ -240,13 +249,42 @@ impl Readiness {
 }
 
 impl Listener {
-    /// Runs the accept loop forever (or until the process exits) —
-    /// spawns a thread per accepted connection, unconditionally; the
-    /// **thread**, not this accept loop, checks `domain::serve_http()`
-    /// admission and fails fast with a real `503` if denied, so a
-    /// saturated ceiling never makes the accept loop itself stall or
-    /// queue (`rfcs/0010`'s own "admission failure is a fast, visible
-    /// 503, not a silent stall" design).
+    /// Runs the accept loop forever (or until the process exits).
+    ///
+    /// **`kernel::acquire(domain::serve_http())` is checked here, in the
+    /// accept loop itself, before any thread is spawned** — red-team
+    /// report A11/A23 (`scratch/red-team-report-main-d7fae42.md`): the
+    /// old design span thread per connection unconditionally and only
+    /// checked admission *inside* that thread, so a connection flood
+    /// exhausted the OS thread ceiling long before `domain::serve_http()`'s
+    /// own admission ceiling was ever consulted — the kernel's ceiling
+    /// was real but never actually the bottleneck it claimed to be. This
+    /// is safe to do here specifically because `kernel::acquire` is
+    /// non-blocking, lock-free CAS (`kernel::mod.rs`'s own doc comment) —
+    /// checking it costs nothing this loop couldn't already afford.
+    ///
+    /// **A denied connection is dropped immediately, not spawned into a
+    /// thread to write a `503`** — a real, disclosed behavior change
+    /// from the old design (which wrote a graceful `503 Service
+    /// Unavailable` body before closing). Spawning *any* thread per
+    /// denied connection — even a minimal one that only writes a
+    /// response — reintroduces the exact unbounded-thread-creation
+    /// problem this fix exists to close, since under a genuine
+    /// saturation attack the volume of *denied* connections is the
+    /// dominant cost, not the admitted ones. Writing the `503` directly
+    /// in this loop, synchronously, is not a safe alternative either: a
+    /// slow or malicious peer that accepts the TCP handshake and then
+    /// never reads its receive buffer would block this loop's `write`
+    /// call indefinitely (a classic slow-loris vector), stalling accept
+    /// for every other connection, admitted or not. Dropping the
+    /// `TcpStream` outright (its `Drop` impl closes the fd without
+    /// waiting for any unsent data — `SO_LINGER` is not set, so this
+    /// does not block) is the one response that's both cheap and safe
+    /// under adversarial input: the client sees a connection reset
+    /// instead of a graceful error body once truly at capacity, which
+    /// matches how a production load balancer or reverse proxy already
+    /// behaves at overload (fail fast and cheap, don't spend a thread or
+    /// a blocking write explaining why).
     pub fn run(self, routes: &'static [Route], config: ServeConfig, readiness: Readiness) -> std::io::Result<()> {
         let config = Arc::new(config);
         let limiter = Arc::new(ratelimit::RateLimiter::new());
@@ -255,6 +293,12 @@ impl Listener {
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            if !kernel::acquire(domain::serve_http()) {
+                // Dropped without a response -- see this fn's own doc
+                // comment for why neither a synchronous write nor a
+                // spawned thread is safe here.
+                continue;
+            }
             let config = Arc::clone(&config);
             let limiter = Arc::clone(&limiter);
             let readiness = readiness.clone();
@@ -375,10 +419,11 @@ impl Drop for ServeHttpLease {
 }
 
 fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, readiness: &Readiness) {
-    if !kernel::acquire(domain::serve_http()) {
-        let _ = http::write_response(&mut stream, 503, "text/plain", b"503 Service Unavailable -- server at capacity", &[], None);
-        return;
-    }
+    // `Listener::run` already called `kernel::acquire(domain::serve_http())`
+    // for this connection before spawning the thread that's now running
+    // this function (A11/A23 fix, see `run`'s own doc comment) — this
+    // function's job is only to hold that lease for the connection's
+    // whole lifetime and release it exactly once, on drop.
     let _lease = ServeHttpLease;
     let peer = stream.peer_addr().ok();
 

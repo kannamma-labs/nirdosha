@@ -2175,10 +2175,12 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
         unsafe { write_str_out(out_err, "connection string is not valid UTF-8".to_string()) };
         return 0;
     };
-    // RFC 0011 §2 step 1: which domain to `kernel::acquire` depends on
-    // whether `path`'s scheme is built-in -- decided *before* acquiring
-    // anything, so a plugin-routed connect never consumes the built-in
-    // `db` domain's ceiling (and vice versa).
+    // RFC 0011 §2 step 1: which domain ends up admission-gated depends
+    // on whether `path`'s scheme is built-in -- decided *before* either
+    // path acquires anything (each path's own callee -- `kernel::db::
+    // connect` below, or `plugin_provider::connect_conn_shape` -- does
+    // its own acquiring internally, A8 fix), so a plugin-routed connect
+    // never consumes the built-in `db` domain's ceiling (and vice versa).
     if !kernel::db::is_builtin_scheme(path) {
         return match kernel::plugin_provider::connect_conn_shape(path) {
             Ok(conn) => {
@@ -2192,10 +2194,12 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
             }
         };
     }
-    if !kernel::acquire(kernel::domain::db()) {
-        unsafe { write_str_out(out_err, "too many open db connections".to_string()) };
-        return 0;
-    }
+    // `kernel::db::connect` itself calls `kernel::acquire(domain::db())`
+    // at its own start and releases on any `Err` path internally (A8
+    // fix) — this call site holds no admission of its own to release on
+    // failure; a successful `Ok(_)` return here means one admission
+    // slot is now owned by `db_table()`'s newly inserted handle, released
+    // by `nir_db_stop` below when that handle closes.
     match kernel::db::connect(path) {
         Ok(conn) => {
             let id = db_table().insert(conn);
@@ -2203,7 +2207,6 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
             1
         }
         Err(e) => {
-            kernel::release(kernel::domain::db());
             unsafe { write_str_out(out_err, e) };
             0
         }
