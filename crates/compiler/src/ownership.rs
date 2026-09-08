@@ -277,7 +277,7 @@ fn builtin_return_ty(name: &str) -> Option<Ty> {
         "json_get_i64" | "json_array_len" => Some(result_of(Ty::I64)),
         "json_get_f64" => Some(result_of(Ty::F64)),
         "json_get_bool" => Some(result_of(Ty::Bool)),
-        "http_get" | "http_post" | "https_get" | "https_post" => {
+        "http_get" | "http_post" | "https_get" | "https_post" | "call_via" => {
             Some(result_of(Ty::Named("HttpResponse".to_string(), vec![])))
         }
         // Row 12: identity builtins all return Result(_, str) over a prelude
@@ -296,6 +296,9 @@ fn builtin_return_ty(name: &str) -> Option<Ty> {
         "mq_publish" => Some(result_of(Ty::Unit)),
         "mq_consume" => Some(result_of(Ty::Str)),
         "mock_issue_token" => Some(result_of(Ty::Str)),
+        // RFC 0011 §1: `Result(str, str)`, non-affine -- same shape as
+        // `json_get_str`/`mq_consume` right above, no `Ty::Handle` involved.
+        "env" => Some(result_of(Ty::Str)),
         _ => None,
     }
 }

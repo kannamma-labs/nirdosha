@@ -21,15 +21,18 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// One admission-relevant thing that happened. Deliberately tiny and
-/// allocation-free (10 bytes) — an event is recorded once per
-/// `acquire`/`release` call (boundary-only, never on the `send`/`recv`
-/// hot path, same scoping [`super::acquire`] itself uses), so the
-/// volume is inherently low, but the representation stays cheap anyway
-/// rather than assuming that.
+/// allocation-free — an event is recorded once per `acquire`/`release`
+/// call (boundary-only, never on the `send`/`recv` hot path, same
+/// scoping [`super::acquire`] itself uses), so the volume is inherently
+/// low, but the representation stays cheap anyway rather than assuming
+/// that. `domain` is `u16`, not `u8` — RFC 0011's open domain registry
+/// (`super::DomainId`) can exceed 255 once a single plugin provider
+/// registers, let alone several; `u16` (65536) stays comfortably above
+/// `super::MAX_DOMAINS` (4096) with room to spare.
 #[derive(Clone, Copy)]
 struct Event {
     seq: u64,
-    domain: u8,
+    domain: u16,
     kind: u8,
 }
 
@@ -73,9 +76,9 @@ static RECORDER: Recorder =
 /// queued for background flushing — this function itself never touches
 /// disk and never waits on anything but the page's own short-lived
 /// lock.
-pub fn record(domain: super::Domain, kind: EventKind) {
+pub fn record(domain: super::DomainId, kind: EventKind) {
     let seq = RECORDER.seq.fetch_add(1, Ordering::Relaxed);
-    let event = Event { seq, domain: domain as u8, kind: kind as u8 };
+    let event = Event { seq, domain: domain as u16, kind: kind as u8 };
     let active = RECORDER.active.load(Ordering::Acquire);
     let full = {
         let mut page = RECORDER.pages[active].lock().unwrap();
@@ -131,17 +134,8 @@ fn flush_async(page: Vec<Event>) {
     }
 }
 
-fn domain_name(d: u8) -> &'static str {
-    match d {
-        0 => "tcp",
-        1 => "file",
-        2 => "thread",
-        3 => "db",
-        4 => "mq",
-        5 => "http",
-        6 => "serve_http",
-        _ => "unknown",
-    }
+fn domain_name(d: u16) -> &'static str {
+    super::registered_domain_name(d as super::DomainId).unwrap_or("unknown")
 }
 
 fn kind_name(k: u8) -> &'static str {
@@ -259,7 +253,7 @@ mod tests {
         // hook calls, and it's the only thing that should produce a
         // file here.
         for _ in 0..5 {
-            record(super::super::Domain::File, EventKind::Grant);
+            record(super::super::domain::file(), EventKind::Grant);
         }
         assert!(!std::path::Path::new(PATH).exists(), "a page nowhere near full must not have flushed anything yet");
         flush_remaining();
@@ -270,7 +264,7 @@ mod tests {
         // itself automatically, with no further `flush_remaining()`
         // call -- appended as a second gzip member after part 1's.
         for _ in 0..CAP {
-            record(super::super::Domain::Tcp, EventKind::Release);
+            record(super::super::domain::tcp(), EventKind::Release);
         }
         // The flush runs on a background worker -- give it a real
         // moment to land before checking.

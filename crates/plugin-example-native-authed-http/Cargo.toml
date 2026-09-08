@@ -1,0 +1,49 @@
+[package]
+name = "nirdosha-plugin-native-authed-http"
+version = "0.1.0"
+edition = "2024"
+description = "Reference native (compiled-path) Nirdosha plugin (rfcs/0011-uniform-service-provider-model.md Phase 8): a real call-shape provider -- authedhttp_provider_authedhttp_{connect,request,is_valid,close} -- demonstrating the concrete gap the RFC's own Motivation names (no way to set a custom Authorization header from .nir today) by making a real HTTP/1.1 request with a bearer token sourced from the process environment at connect time, injected as `Authorization: Bearer <token>`."
+
+[package.metadata.nirdosha]
+kind = "native-compiled"
+builtins = [
+    # `_connect(host: str) -> i64` -- `host` here is the *whole* dial
+    # string call_via's plugin fallback passes through
+    # (`kernel::plugin_provider::call_via`'s own `host = url.to_string()`),
+    # e.g. `authedhttp://127.0.0.1:54321`, not a stripped `host:port` --
+    # this plugin parses the scheme off itself. Per RFC 0011 §2's
+    # negative-sentinel convention, a connect failure (most commonly: no
+    # `AUTHEDHTTP_BEARER_TOKEN` set) returns a negative `i64`, never a
+    # panic.
+    { name = "authedhttp_provider_authedhttp_connect", params = ["str"], ret = "i64" },
+    # `_request(raw_conn: i64, path: str, body: str) -> str` -- RFC 0011
+    # §2's corrected `call`-shape contract. Makes one real HTTP/1.1
+    # request per call (no keep-alive/pooling on this side; that's the
+    # kernel's own `PoolRegistry<PluginManagedConnection>` job, Phase 5),
+    # with the bearer token stashed at `_connect` time set as
+    # `Authorization: Bearer <token>`. Returns the response body as
+    # plain `str` -- no status code crosses this ABI (RFC 0011's own
+    # disclosed cost, `nir_call_via`'s doc comment: a successful
+    # plugin-routed `call_via` always reports `status: 200`).
+    { name = "authedhttp_provider_authedhttp_request", params = ["i64", "str", "str"], ret = "str" },
+    { name = "authedhttp_provider_authedhttp_is_valid", params = ["i64"], ret = "i64" },
+    { name = "authedhttp_provider_authedhttp_close", params = ["i64"], ret = "i64" },
+]
+
+# Same "zero dependency on the `nirdosha` crate, std only" story as
+# `plugin-example-native-shout`/`plugin-example-native-kv` -- see either
+# crate's own Cargo.toml comment. The HTTP/1.1 request/response framing
+# below is hand-rolled over `std::net::TcpStream`, the same minimal
+# approach `runtime-kernels::kernel::http` uses for its own client-side
+# requests (this plugin crate cannot depend on `runtime-kernels` either
+# -- no shared crate exists between `compiler`/`runtime-kernels` and a
+# plugin crate, this RFC's own Context section), not a new external HTTP
+# client dependency.
+[dependencies]
+
+[lib]
+crate-type = ["staticlib"]
+
+# No `[profile.release]` here -- see `plugin-example-native-shout/Cargo.toml`'s
+# identical comment: a workspace member's own copy is silently ignored by
+# Cargo.

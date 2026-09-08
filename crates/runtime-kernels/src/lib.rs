@@ -45,7 +45,7 @@
 // embedding path every compiled `.nir` binary uses. Every compiled
 // `.nir` binary still only ever calls the `#[no_mangle] extern "C"`
 // `nir_*` functions below (unaffected by this); `compiled-serve` is a
-// second, additive consumer needing real Rust-level access (`Domain`,
+// second, additive consumer needing real Rust-level access (`domain`,
 // `acquire`/`release`, `dump_report`) for things a `.nir` program has
 // no reason to ever touch directly, matching this module's own "no
 // query interface for `.nir` code" doc comment.
@@ -90,6 +90,120 @@ pub extern "C" fn nir_kernel_self_test_panic_containment() -> i32 {
         Ok(()) => 1,
         Err(_) => 0,
     }
+}
+
+/// The open domain registry's one bootstrap point — `codegen.rs`
+/// (`emit_c_main`) emits exactly one call to this, at the very top of
+/// every compiled program's `main`, strictly before any user code
+/// (`nir_main`) or any other kernel-preamble setup runs. This is what
+/// gives the 7 built-in domains their historical, stable ids 0-6 in a
+/// compiled binary: nothing else has had a chance to register a domain
+/// first. `kernel::domain::register_builtin_domains` is itself
+/// idempotent (`Once`-guarded) and every domain accessor
+/// (`kernel::domain::db()`, etc.) also self-registers on first use, so
+/// this call is a deliberate, redundant belt-and-suspenders bootstrap,
+/// not the only path that can make registration happen — see that
+/// function's own doc comment.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_kernel_register_builtin_domains() {
+    kernel::domain::register_builtin_domains();
+}
+
+/// RFC 0011 §4's per-provider registration point — `codegen.rs` emits
+/// one call to this per distinct validated plugin provider in
+/// `build_with_native_plugins`'s list, in the order given, immediately
+/// after the single `nir_kernel_register_builtin_domains()` bootstrap
+/// call above, still inside `main`'s preamble before any user code
+/// runs. `name`/`env_var` arrive as `(ptr, len)` pairs pointing at
+/// LLVM string-constant globals `codegen.rs` emits alongside this
+/// call — those globals live for the whole process (they're `.rodata`,
+/// never freed), so leaking a heap copy here to satisfy
+/// `register_domain`'s `&'static str` requirement is the correct
+/// permanent-leak posture (same one `NativePluginBuiltin`'s own str
+/// return-value convention already documents), not a real leak in any
+/// sense that matters for a process that's about to eagerly register
+/// every provider it will ever have, once, at startup.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_kernel_register_domain(
+    name_ptr: *const u8,
+    name_len: i64,
+    env_var_ptr: *const u8,
+    env_var_len: i64,
+    default_max: i64,
+) {
+    let name = unsafe { str_from_raw(name_ptr, name_len) }.expect("codegen only ever emits valid UTF-8 domain-name globals");
+    let env_var = unsafe { str_from_raw(env_var_ptr, env_var_len) }.expect("codegen only ever emits valid UTF-8 env-var-name globals");
+    let name: &'static str = Box::leak(name.to_string().into_boxed_str());
+    let env_var: &'static str = Box::leak(env_var.to_string().into_boxed_str());
+    kernel::register_domain(name, env_var, default_max);
+}
+
+/// RFC 0011 §2/§4's dispatch-table registration — `codegen.rs` emits
+/// one call to this immediately after this same provider's
+/// `nir_kernel_register_domain` call above (same preamble loop
+/// iteration), so `domain_name`/`domain_name_len` name an
+/// already-registered domain here: `kernel::domain_id_for_name` is a
+/// plain lookup, not a second registration path. `scheme` is the
+/// compiler's own already-normalized scheme identifier
+/// (`plugin::normalize_scheme`'s output) — this call does not
+/// re-normalize it.
+///
+/// The four function-pointer parameters are opaque addresses
+/// (`*const ()`, matching LLVM's untyped `ptr` at this boundary) rather
+/// than their real `extern "C" fn` types, because `_op`'s and
+/// `_request`'s real signatures differ in arity (one `str` arg vs two) —
+/// `is_call_shape` says which one `op_or_request_fn` actually is, so
+/// this function can transmute it back to the correct type on this side
+/// rather than `codegen.rs` needing two mutually-exclusive parameters,
+/// one always unused. Sound because a function pointer and a data
+/// pointer share the same representation on every platform this
+/// backend targets (the identical assumption every other `ptr`-typed
+/// `declare` in `codegen.rs` already makes for its own extern calls),
+/// and because `codegen.rs` only ever passes the address of a real,
+/// `declare`d symbol with the shape this call expects — never a value
+/// `.nir` code could influence.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_kernel_register_plugin_provider(
+    domain_name_ptr: *const u8,
+    domain_name_len: i64,
+    scheme_ptr: *const u8,
+    scheme_len: i64,
+    connect_fn: *const (),
+    op_or_request_fn: *const (),
+    is_valid_fn: *const (),
+    close_fn: *const (),
+    is_call_shape: i32,
+) {
+    let domain_name = unsafe { str_from_raw(domain_name_ptr, domain_name_len) }.expect("codegen only ever emits valid UTF-8 domain-name globals");
+    let scheme = unsafe { str_from_raw(scheme_ptr, scheme_len) }.expect("codegen only ever emits valid UTF-8 scheme globals");
+    let domain = kernel::domain_id_for_name(domain_name)
+        .expect("codegen emits nir_kernel_register_domain for this exact provider immediately before this call, in the same preamble loop iteration");
+    let connect_fn: extern "C" fn(kernel::pool::NirStr) -> i64 = unsafe { std::mem::transmute(connect_fn) };
+    let is_valid_fn: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(is_valid_fn) };
+    let close_fn: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(close_fn) };
+    let op = if is_call_shape != 0 {
+        let request_fn: extern "C" fn(i64, kernel::pool::NirStr, kernel::pool::NirStr) -> kernel::pool::NirStr = unsafe { std::mem::transmute(op_or_request_fn) };
+        kernel::plugin_provider::ProviderOp::Call { request_fn }
+    } else {
+        let op_fn: extern "C" fn(i64, kernel::pool::NirStr) -> kernel::pool::NirStr = unsafe { std::mem::transmute(op_or_request_fn) };
+        kernel::plugin_provider::ProviderOp::ConnStream { op_fn }
+    };
+    kernel::plugin_provider::register(scheme.to_string(), kernel::plugin_provider::ProviderFns { connect_fn, is_valid_fn, close_fn, op, domain });
+}
+
+/// RFC 0011 §5's reaper startup point — `codegen.rs` emits exactly one
+/// call to this, in every compiled program's `main` preamble,
+/// immediately after the domain/plugin-provider registration calls
+/// above. `kernel::reaper::start` is itself `Once`-guarded and directly
+/// callable (and tested) from plain Rust with no dependency on this FFI
+/// wrapper existing at all — this function exists only so a compiled
+/// `.nir` binary actually starts the reaper thread once, the same
+/// "codegen carries zero knowledge of the mechanism, just calls the one
+/// bootstrap entrypoint" shape `nir_kernel_register_builtin_domains`
+/// already established.
+#[unsafe(no_mangle)]
+pub extern "C" fn nir_kernel_start_reaper() {
+    kernel::reaper::start();
 }
 
 /// The flight recorder's one exit point — `codegen.rs`'s generated
@@ -782,13 +896,13 @@ pub unsafe extern "C" fn nir_tcp_connect(host_ptr: *const u8, host_len: i64, por
     // the same `-1` every other connect failure already returns; a
     // distinct error code is real future work, not a gap to route
     // around here.
-    if !kernel::acquire(kernel::Domain::Tcp) {
+    if !kernel::acquire(kernel::domain::tcp()) {
         return -1;
     }
     match TcpStream::connect((host, port)) {
         Ok(stream) => handle_of_stream(stream),
         Err(_) => {
-            kernel::release(kernel::Domain::Tcp);
+            kernel::release(kernel::domain::tcp());
             -1
         }
     }
@@ -800,13 +914,13 @@ pub unsafe extern "C" fn nir_tcp_connect(host_ptr: *const u8, host_len: i64, por
 #[unsafe(no_mangle)]
 pub extern "C" fn nir_tcp_listen(port: i64) -> i64 {
     let Ok(port) = u16::try_from(port) else { return -1 };
-    if !kernel::acquire(kernel::Domain::Tcp) {
+    if !kernel::acquire(kernel::domain::tcp()) {
         return -1;
     }
     match TcpListener::bind(("0.0.0.0", port)) {
         Ok(listener) => handle_of_listener(listener),
         Err(_) => {
-            kernel::release(kernel::Domain::Tcp);
+            kernel::release(kernel::domain::tcp());
             -1
         }
     }
@@ -821,13 +935,13 @@ pub extern "C" fn nir_tcp_listen(port: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_tcp_accept(listener_handle: i64) -> i64 {
     let listener = ManuallyDrop::new(unsafe { listener_from_handle(listener_handle) });
-    if !kernel::acquire(kernel::Domain::Tcp) {
+    if !kernel::acquire(kernel::domain::tcp()) {
         return -1;
     }
     match listener.accept() {
         Ok((stream, _addr)) => handle_of_stream(stream),
         Err(_) => {
-            kernel::release(kernel::Domain::Tcp);
+            kernel::release(kernel::domain::tcp());
             -1
         }
     }
@@ -881,7 +995,7 @@ pub unsafe extern "C" fn nir_tcp_stop(handle: i64) -> i32 {
     // accept originally admitted it -- all three fold into this one
     // close path (this fn's own doc comment), so the acquire:release
     // ratio stays 1:1 either way.
-    kernel::release(kernel::Domain::Tcp);
+    kernel::release(kernel::domain::tcp());
     0
 }
 
@@ -941,7 +1055,7 @@ pub unsafe extern "C" fn nir_file_open(path_ptr: *const u8, path_len: i64, mode_
     let Ok(path) = std::str::from_utf8(path) else { return -1 };
     let mode = unsafe { std::slice::from_raw_parts(mode_ptr, mode_len as usize) };
     let Ok(mode) = std::str::from_utf8(mode) else { return -1 };
-    if !kernel::acquire(kernel::Domain::File) {
+    if !kernel::acquire(kernel::domain::file()) {
         return -1;
     }
     let opened = match mode {
@@ -949,14 +1063,14 @@ pub unsafe extern "C" fn nir_file_open(path_ptr: *const u8, path_len: i64, mode_
         "w" => std::fs::File::create(path),
         "a" => std::fs::OpenOptions::new().append(true).create(true).open(path),
         _ => {
-            kernel::release(kernel::Domain::File);
+            kernel::release(kernel::domain::file());
             return -1;
         }
     };
     match opened {
         Ok(file) => handle_of_file(file),
         Err(_) => {
-            kernel::release(kernel::Domain::File);
+            kernel::release(kernel::domain::file());
             -1
         }
     }
@@ -1002,7 +1116,7 @@ pub unsafe extern "C" fn nir_file_stop(handle: i64) -> i32 {
         use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
         drop(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
     }
-    kernel::release(kernel::Domain::File);
+    kernel::release(kernel::domain::file());
     0
 }
 
@@ -1367,7 +1481,7 @@ pub extern "C" fn nir_thread_spawn(trampoline: extern "C" fn(*mut u8, *mut i64),
     // concurrently-outstanding `thread` handle held between `spawn` and
     // its matching `join`, the same ceiling `nir_tcp_connect`/
     // `nir_file_open` already enforce for their own domains.
-    if !kernel::acquire(kernel::Domain::Thread) {
+    if !kernel::acquire(kernel::domain::thread()) {
         unsafe {
             if !ctx.is_null() {
                 nir_free(ctx);
@@ -1423,7 +1537,7 @@ pub extern "C" fn nir_thread_spawn(trampoline: extern "C" fn(*mut u8, *mut i64),
         // inserted into `thread_table`, so `nir_thread_join` will never
         // run for it either).
         kernel::concurrency_thread_finished();
-        kernel::release(kernel::Domain::Thread);
+        kernel::release(kernel::domain::thread());
         unsafe {
             drop(Box::from_raw(result_ptr));
             if !ctx.is_null() {
@@ -1475,7 +1589,7 @@ pub extern "C" fn nir_thread_join(handle: i64) -> i64 {
     // that closes it — the same acquire-at-creation/release-at-close
     // pairing `nir_tcp_stop`/`nir_file_stop` already use for their own
     // domains.
-    kernel::release(kernel::Domain::Thread);
+    kernel::release(kernel::domain::thread());
     result
 }
 
@@ -1709,6 +1823,109 @@ pub unsafe extern "C" fn nir_oidc_validate_token(
             *out_expires_at = claims.expires_at;
             *out_issued_at = claims.issued_at;
             write_str_out(out_claims_json, claims.claims_json);
+            1
+        },
+        Err(msg) => unsafe {
+            write_str_out(out_err, msg);
+            0
+        },
+    }
+}
+
+/// `mock_issue_token`'s real implementation — the inverse of
+/// `oidc_validate_token` above: signs a token instead of verifying one.
+/// `mock_` is load-bearing, not decorative (the builtin's own typeck doc
+/// comment) — this issues a token from key material the caller supplies
+/// directly, standing in for a real IdP's own signing endpoint, never a
+/// substitute for one.
+///
+/// **HS256 (symmetric) only, deliberately.** `jwks_json` is the exact
+/// same shape `oidc_validate_token`/`decoding_key_for` already parse
+/// (`RawJwks`/`RawJwk` above); this looks up the first `kty: "oct"` entry
+/// and signs with it. RSA/EC issuance would need real private-key
+/// material (a JWK's `d` parameter and friends) this first pass doesn't
+/// handle — a real, disclosed follow-up, not attempted here. Verifying
+/// the token this produces against the *same* `jwks_json` already works
+/// today, unchanged, via `oidc_validate_token`'s own existing `"oct"` arm.
+fn issue_mock_token_inner(
+    subject: &str,
+    issuer: &str,
+    audience: &str,
+    issued_at: i64,
+    ttl_secs: i64,
+    claims_json: &str,
+    jwks_json: &str,
+) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let jwks: RawJwks = serde_json::from_str(jwks_json).map_err(|e| format!("malformed JWKS: {e}"))?;
+    let jwk = jwks
+        .keys
+        .iter()
+        .find(|k| k.kty == "oct")
+        .ok_or_else(|| "no `oct` (HMAC) signing key found in jwks_json -- mock_issue_token only supports HS256".to_string())?;
+    let k = jwk.k.as_deref().ok_or("JWK is missing required field `k`")?;
+    let raw_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(k)
+        .map_err(|_| "JWK field `k` is not valid base64url".to_string())?;
+    let encoding_key = jsonwebtoken::EncodingKey::from_secret(&raw_secret);
+
+    // `claims_json`'s own fields (e.g. a `"roles"` array `check_role`
+    // reads back out later) are preserved -- only the six standard claims
+    // this builtin itself owns are overwritten, same "caller-supplied
+    // extras survive" convention `oidc_validate_token`'s own `claims_json`
+    // output already has.
+    let mut claims: serde_json::Value = serde_json::from_str(claims_json).unwrap_or_default();
+    if !claims.is_object() {
+        claims = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let obj = claims.as_object_mut().expect("just ensured this is an object");
+    obj.insert("sub".to_string(), serde_json::Value::String(subject.to_string()));
+    obj.insert("iss".to_string(), serde_json::Value::String(issuer.to_string()));
+    obj.insert("aud".to_string(), serde_json::Value::String(audience.to_string()));
+    obj.insert("iat".to_string(), serde_json::Value::from(issued_at));
+    obj.insert("exp".to_string(), serde_json::Value::from(issued_at.saturating_add(ttl_secs)));
+
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.kid = Some(jwk.kid.clone());
+
+    jsonwebtoken::encode(&header, &claims, &encoding_key).map_err(|e| format!("failed to sign token: {e}"))
+}
+
+/// `1` (with `out_token` populated) on success, `0` (with `out_err`
+/// populated) otherwise — a malformed JWKS or a JWKS with no usable
+/// signing key is a real `Err`, never a trap, same as every other
+/// identity check in this codebase.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_mock_issue_token(
+    subject_ptr: *const u8,
+    subject_len: i64,
+    issuer_ptr: *const u8,
+    issuer_len: i64,
+    audience_ptr: *const u8,
+    audience_len: i64,
+    issued_at: i64,
+    ttl_secs: i64,
+    claims_json_ptr: *const u8,
+    claims_json_len: i64,
+    jwks_ptr: *const u8,
+    jwks_len: i64,
+    out_token: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(subject), Some(issuer), Some(audience), Some(claims_json), Some(jwks_json)) = (
+        unsafe { str_from_raw(subject_ptr, subject_len) },
+        unsafe { str_from_raw(issuer_ptr, issuer_len) },
+        unsafe { str_from_raw(audience_ptr, audience_len) },
+        unsafe { str_from_raw(claims_json_ptr, claims_json_len) },
+        unsafe { str_from_raw(jwks_ptr, jwks_len) },
+    ) else {
+        unsafe { write_str_out(out_err, "subject/issuer/audience/claims_json/jwks is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match issue_mock_token_inner(subject, issuer, audience, issued_at, ttl_secs, claims_json, jwks_json) {
+        Ok(token) => unsafe {
+            write_str_out(out_token, token);
             1
         },
         Err(msg) => unsafe {
@@ -1958,7 +2175,24 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
         unsafe { write_str_out(out_err, "connection string is not valid UTF-8".to_string()) };
         return 0;
     };
-    if !kernel::acquire(kernel::Domain::Db) {
+    // RFC 0011 §2 step 1: which domain to `kernel::acquire` depends on
+    // whether `path`'s scheme is built-in -- decided *before* acquiring
+    // anything, so a plugin-routed connect never consumes the built-in
+    // `db` domain's ceiling (and vice versa).
+    if !kernel::db::is_builtin_scheme(path) {
+        return match kernel::plugin_provider::connect_conn_shape(path) {
+            Ok(conn) => {
+                let id = kernel::plugin_provider::plugin_conn_table().insert(conn);
+                unsafe { *out_handle = id };
+                1
+            }
+            Err(e) => {
+                unsafe { write_str_out(out_err, e) };
+                0
+            }
+        };
+    }
+    if !kernel::acquire(kernel::domain::db()) {
         unsafe { write_str_out(out_err, "too many open db connections".to_string()) };
         return 0;
     }
@@ -1969,7 +2203,7 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
             1
         }
         Err(e) => {
-            kernel::release(kernel::Domain::Db);
+            kernel::release(kernel::domain::db());
             unsafe { write_str_out(out_err, e) };
             0
         }
@@ -1983,8 +2217,15 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_db_stop(handle: i64) -> i32 {
     if db_table().remove(handle).is_some() {
-        kernel::release(kernel::Domain::Db);
+        kernel::release(kernel::domain::db());
+        return 0;
     }
+    // RFC 0011 §2 step 2: core `db_table()` first, then `HandleTable<
+    // PluginConn>` on a miss -- `PluginConn`'s own `Drop` releases its
+    // provider's domain (the `Pooled` variant explicitly, the
+    // `Unpooled` variant via its own guard), so nothing else is needed
+    // here beyond removing it from the table and letting it drop.
+    kernel::plugin_provider::plugin_conn_table().remove(handle);
     0
 }
 
@@ -2025,10 +2266,35 @@ pub unsafe extern "C" fn nir_db_execute(
             unsafe { write_str_out(out_err, e) };
             0
         }
-        None => {
-            unsafe { write_str_out(out_err, "db handle is not open".to_string()) };
-            0
-        }
+        // RFC 0011 §2 step 2: a miss in `db_table()` falls through to
+        // `HandleTable<PluginConn>` before giving up -- "a miss in
+        // *both* is the same invalid-handle error every kernel boundary
+        // already returns," not a new error kind.
+        None => match kernel::plugin_provider::plugin_conn_table().with(handle, |conn| kernel::plugin_provider::op(conn, sql, binds_len > 0)) {
+            Some(Ok(affected_str)) => match affected_str.trim().parse::<i64>() {
+                Ok(n) => {
+                    unsafe { *out_affected = n };
+                    1
+                }
+                Err(_) => {
+                    unsafe {
+                        write_str_out(
+                            out_err,
+                            format!("plugin _op returned {affected_str:?} for db_execute, which is not a decimal affected-row count"),
+                        )
+                    };
+                    0
+                }
+            },
+            Some(Err(e)) => {
+                unsafe { write_str_out(out_err, e) };
+                0
+            }
+            None => {
+                unsafe { write_str_out(out_err, "db handle is not open".to_string()) };
+                0
+            }
+        },
     }
 }
 
@@ -2088,10 +2354,25 @@ pub unsafe extern "C" fn nir_db_query(
             unsafe { write_str_out(out_err, e) };
             0
         }
-        None => {
-            unsafe { write_str_out(out_err, "db handle is not open".to_string()) };
-            0
-        }
+        // RFC 0011 §2 step 2: same fallback priority as `nir_db_execute`
+        // above -- `_op`'s returned string is passed straight through as
+        // the JSON payload (this module's own doc comment: `Ty::Json` is
+        // already represented as raw text, so a plugin author's `_op`
+        // simply has to return well-formed JSON text by convention).
+        None => match kernel::plugin_provider::plugin_conn_table().with(handle, |conn| kernel::plugin_provider::op(conn, sql, binds_len > 0)) {
+            Some(Ok(json)) => {
+                unsafe { write_str_out(out_json, json) };
+                1
+            }
+            Some(Err(e)) => {
+                unsafe { write_str_out(out_err, e) };
+                0
+            }
+            None => {
+                unsafe { write_str_out(out_err, "db handle is not open".to_string()) };
+                0
+            }
+        },
     }
 }
 
@@ -2158,6 +2439,35 @@ mod db_kernel_tests {
             assert_eq!(updated, 1);
 
             assert_eq!(nir_db_stop(conn), 0);
+        }
+    }
+
+    /// Proves the `db` domain's admission ceiling is real, not
+    /// decorative — `nir_db_connect`/`nir_db_stop` already bracket every
+    /// connect-to-stop session with `kernel::acquire`/`release`
+    /// (confirmed pre-existing, not new to this phase; `kernel::db::connect`
+    /// itself never calls `acquire`, see that function's own doc comment).
+    /// `#[ignore]`d for the same reason `db.rs`'s own
+    /// `postgres_checkout_rehydrates_a_connection_killed_out_from_under_the_pool`
+    /// is: `NIRDOSHA_KERNEL_MAX_DB`'s ceiling is resolved once and cached
+    /// process-wide (`kernel::mod.rs`'s `max_for`), so lowering it here
+    /// would corrupt every other concurrently-running test in this binary
+    /// that also opens a `db` connection — safe only run alone
+    /// (`cargo test -- --ignored connect_past_the_db_ceiling...`).
+    #[test]
+    #[ignore]
+    fn connect_past_the_db_ceiling_is_denied_fast_not_blocked() {
+        unsafe { std::env::set_var("NIRDOSHA_KERNEL_MAX_DB", "2") };
+        unsafe {
+            let a = connect(":memory:").expect("first connect under the ceiling must succeed");
+            let b = connect(":memory:").expect("second connect under the ceiling must succeed");
+            let denied = connect(":memory:");
+            assert!(denied.is_err(), "third connect past a ceiling of 2 must be denied, not blocked");
+            assert_eq!(denied.unwrap_err(), "too many open db connections");
+            nir_db_stop(a);
+            nir_db_stop(b);
+            let c = connect(":memory:").expect("connect after release must succeed again");
+            nir_db_stop(c);
         }
     }
 
@@ -2385,6 +2695,29 @@ pub unsafe extern "C" fn nir_json_get_str(doc_ptr: *const u8, doc_len: i64, key_
         }
         None => {
             unsafe { write_str_out(out_err, format!("key `{key}` not found, or not a string")) };
+            0
+        }
+    }
+}
+
+/// `env(name) -> Result(str, str)` (RFC 0011 §1) — `Ok(value)` when the
+/// process environment variable is set, `Err(_)` when unset or not valid
+/// Unicode. Not resource-gated: no `kernel::acquire`/`Domain` involved,
+/// unlike `nir_db_connect` above — reading process environment state
+/// isn't a pooled/ceiling-bound resource.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_env_get(name_ptr: *const u8, name_len: i64, out_value: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
+    let Some(name) = (unsafe { str_from_raw(name_ptr, name_len) }) else {
+        unsafe { write_str_out(out_err, "variable name is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match std::env::var(name) {
+        Ok(value) => {
+            unsafe { write_str_out(out_value, value) };
+            1
+        }
+        Err(e) => {
+            unsafe { write_str_out(out_err, format!("{name}: {e}")) };
             0
         }
     }
@@ -2722,7 +3055,7 @@ pub unsafe extern "C" fn nir_mq_connect(host_ptr: *const u8, host_len: i64, port
         unsafe { write_str_out(out_err, "host is not valid UTF-8".to_string()) };
         return 0;
     };
-    if !kernel::acquire(kernel::Domain::Mq) {
+    if !kernel::acquire(kernel::domain::mq()) {
         unsafe { write_str_out(out_err, "too many open mq connections".to_string()) };
         return 0;
     }
@@ -2735,7 +3068,7 @@ pub unsafe extern "C" fn nir_mq_connect(host_ptr: *const u8, host_len: i64, port
             1
         }
         Err(e) => {
-            kernel::release(kernel::Domain::Mq);
+            kernel::release(kernel::domain::mq());
             unsafe { write_str_out(out_err, e.to_string()) };
             0
         }
@@ -2747,7 +3080,7 @@ pub unsafe extern "C" fn nir_mq_connect(host_ptr: *const u8, host_len: i64, port
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_mq_stop(handle: i64) -> i32 {
     if mq_table().remove(handle).is_some() {
-        kernel::release(kernel::Domain::Mq);
+        kernel::release(kernel::domain::mq());
     }
     0
 }
@@ -2870,7 +3203,7 @@ mod mq_kernel_tests {
 // ---- http/https kernels (`http_get`/`http_post`/`https_get`/`https_post`) --
 //
 // Real, pooled HTTP/1.1 keep-alive connections plus real admission
-// control (`Domain::Http`) — `kernel::http` has the full design and the
+// control (`domain::http()`) — `kernel::http` has the full design and the
 // protocol rewrite this required (real `Content-Length`/chunked framing,
 // replacing the original connection-per-call `Connection: close` +
 // read-to-EOF cut, which was correct for its own scope but structurally
@@ -2996,6 +3329,81 @@ pub unsafe extern "C" fn nir_https_post(
     };
     let result = do_https(host, port, path, "POST", Some(body));
     unsafe { write_http_result(result, out_status, out_body, out_err) }
+}
+
+/// `rest` is everything after `scheme://` -- `host` or `host:port`,
+/// optionally followed by a path/query this function ignores (`call_via`
+/// takes `path` as its own separate argument, matching `http_get`/
+/// `http_post`'s existing `(host, port, path)` split rather than a
+/// single combined URL).
+fn split_host_port(rest: &str, default_port: i64) -> (&str, i64) {
+    let host_part = rest.split(['/', '?']).next().unwrap_or(rest);
+    match host_part.rsplit_once(':') {
+        Some((host, port_str)) => match port_str.parse::<i64>() {
+            Ok(port) => (host, port),
+            Err(_) => (host_part, default_port),
+        },
+        None => (host_part, default_port),
+    }
+}
+
+/// `call_via(url, path, body) -> Result(HttpResponse, str)` —
+/// rfcs/0011-uniform-service-provider-model.md §1/§2's `call`-shape
+/// dispatch entrypoint. `url`'s scheme decides everything: `http://`/
+/// `https://` are served by the exact same pooled, admission-controlled
+/// core path `http_post`/`https_post` already use (this function is a
+/// thin scheme-sniff in front of `do_http`/`do_https`, not a second
+/// implementation of either); anything else falls through to
+/// `kernel::plugin_provider::call_via`.
+///
+/// **Plugin-routed status code, disclosed rather than left implicit**:
+/// RFC 0011 §2 pins `_request`'s ABI as a single `str` return with no
+/// separate status code — a plugin has no way to hand back a numeric
+/// status at all. A successful plugin-routed call therefore always
+/// reports `status: 200`; a plugin wanting to signal a non-2xx-shaped
+/// outcome has to encode that in its own returned body text (or fail
+/// the call outright, which surfaces as `Err`, not a status code).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_call_via(
+    url_ptr: *const u8,
+    url_len: i64,
+    path_ptr: *const u8,
+    path_len: i64,
+    body_ptr: *const u8,
+    body_len: i64,
+    out_status: *mut i64,
+    out_body: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(url), Some(path), Some(body)) =
+        (unsafe { str_from_raw(url_ptr, url_len) }, unsafe { str_from_raw(path_ptr, path_len) }, unsafe { str_from_raw(body_ptr, body_len) })
+    else {
+        unsafe { write_str_out(out_err, "url/path/body is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    if let Some(rest) = url.strip_prefix("http://") {
+        let (host, port) = split_host_port(rest, 80);
+        let result = do_http(host, port, path, "POST", Some(body));
+        return unsafe { write_http_result(result, out_status, out_body, out_err) };
+    }
+    if let Some(rest) = url.strip_prefix("https://") {
+        let (host, port) = split_host_port(rest, 443);
+        let result = do_https(host, port, path, "POST", Some(body));
+        return unsafe { write_http_result(result, out_status, out_body, out_err) };
+    }
+    match kernel::plugin_provider::call_via(url, path, body) {
+        Ok(response_body) => {
+            unsafe {
+                *out_status = 200;
+                write_str_out(out_body, response_body);
+            }
+            1
+        }
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            0
+        }
+    }
 }
 
 #[cfg(test)]

@@ -4506,6 +4506,26 @@ impl<'a> Checker<'a> {
                 self.check(&args[2], &Ty::Str, expected_ret, scopes); // path
                 result_of(Ty::Named("HttpResponse".to_string(), vec![]))
             }
+            // rfcs/0011-uniform-service-provider-model.md §1/§2: the
+            // `call`-shape's `.nir`-facing entrypoint (named `call_via`,
+            // not `https_request_via` -- that name baked an http-shaped
+            // bias into a generic scheme-dispatched builtin, corrected
+            // in the RFC itself before this landed). `url` carries the
+            // scheme this dispatches on at runtime (§2's whole point:
+            // the scheme isn't known until the program runs, so this
+            // can't be a compile-time match); `http://`/`https://` stay
+            // served by the exact same core path `http_get`/`http_post`
+            // already use, anything else falls through to a registered
+            // `call`-shape plugin. Reuses `HttpResponse` as a
+            // lowest-common-denominator return shape (§1's own
+            // disclosure: a non-HTTP provider's `{status, body}` isn't a
+            // claim that the response is HTTP underneath).
+            ("call_via", 3) => {
+                self.check(&args[0], &Ty::Str, expected_ret, scopes); // url
+                self.check(&args[1], &Ty::Str, expected_ret, scopes); // path
+                self.check(&args[2], &Ty::Str, expected_ret, scopes); // body
+                result_of(Ty::Named("HttpResponse".to_string(), vec![]))
+            }
             // Row 12: identity as a relying party.
             ("oidc_validate_token", 4) => {
                 self.check(&args[0], &Ty::Str, expected_ret, scopes); // token
@@ -4688,6 +4708,13 @@ impl<'a> Checker<'a> {
             ("mq_connect_via", 1) => {
                 self.check(&args[0], &Ty::Str, expected_ret, scopes);
                 result_of(Ty::Mq)
+            }
+            // RFC 0011 §1: reads a process environment variable. `Ok(value)`
+            // when set, `Err(_)` when unset -- same `Result(_, str)`
+            // convention as `db`/`mq`/HTTP above.
+            ("env", 1) => {
+                self.check(&args[0], &Ty::Str, expected_ret, scopes); // var name
+                result_of(Ty::Str)
             }
             ("mq_publish", 3) => {
                 self.check(&args[0], &Ty::Mq, expected_ret, scopes);

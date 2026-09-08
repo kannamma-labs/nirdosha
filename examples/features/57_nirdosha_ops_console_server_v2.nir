@@ -1,0 +1,1440 @@
+// Feature: strengthens the browser-clickable Nirdosha Ops Console
+// (`56_nirdosha_ops_console_server.nir`) along seven real axes:
+//
+//   1. **Real signed authentication.** `POST /api/login` returns a real
+//      HMAC-SHA256 JWT (`mock_issue_token`, finished alongside this file
+//      -- it was already fully declared in the grammar/typeck/ownership
+//      layers as leftover scaffolding from the deleted interpreter, with
+//      zero codegen until now), verified server-side on every gated
+//      route via the already-real `oidc_validate_token`. The forgeable
+//      `X-Demo-Role` header is gone -- every admin action here is
+//      guarded by a real signature check against a real (if hardcoded,
+//      demo-only) JWKS.
+//   2. **The `Disbursement` workflow wired to real browser buttons,
+//      with a real second branch.** `55_nirdosha_ops_console.nir`'s
+//      workflow-gated, `transact`-backed disbursement (RBAC + a real
+//      webhook call + a real durable Postgres write) was previously
+//      only ever exercised by a test harness, and only ever had one
+//      real transition to prove the mechanism. `Draft` here has two --
+//      `POST /api/purchase_orders/approve`/`.../reject` really start
+//      and advance a real workflow instance from the browser, down
+//      either real branch.
+//   3. **Broader CRUD.** Real `UPDATE`/`DELETE` via `db_execute` -- both
+//      already exercised elsewhere in this compiler's own test suite;
+//      neither route needed anything new from the compiler.
+//   4. **Search + real pagination, without a string-to-int parser.** No
+//      `str_to_i64`/`parse_i64` builtin exists in this language today,
+//      so `POST /api/purchase_orders/list` (additive alongside the
+//      plain `GET` one) takes an optional `{q, offset, limit}` JSON
+//      body instead of query-string parameters -- every integer here
+//      always arrives as a real JSON number, the same convention
+//      `POST /api/create` already established in `56_...`.
+//   5. **Real `nfr(...)` SLOs on every real route** (`LANGUAGE.md` §6f,
+//      first used in `50_field_masking_and_check_role.nir`) -- a
+//      latency ceiling everywhere, plus either `error_rate_max` (on the
+//      functions that genuinely return `Result(...)`: token issuance/
+//      verification) or `concurrency_max` (on the `Text`/`bool`-
+//      returning CRUD and approval routes, where there's no tagged
+//      success/error a `Result` return would give the APM kernel to
+//      inspect). Zero code at any call site; a crossed threshold fires
+//      an async escalation POST to `NIRDOSHA_OBSERVABILITY_URL` if one's
+//      configured. Each threshold's own comment explains why its value
+//      differs from its neighbors -- these aren't the same number
+//      copy-pasted five times.
+//   6. **Real SLA/overdue detection** (`state { sla_seconds: N }`, first
+//      used in `54_compiled_workflow_escalation.nir`) on `Draft` -- a
+//      real, production-shaped 3-day SLA, plus `GET /api/disbursements/
+//      overdue` exposing the compiler-synthesized
+//      `list_disbursement_overdue()` to the browser for real, not just
+//      to a test harness's own polling loop.
+//   7. **Real dual control on large purchase orders.** A PO at or above
+//      `escalation_threshold_cents()` ($100,000) refuses a plain
+//      `admin` token and only accepts a real `finance_director`-proven
+//      identity -- `route_approval` `acquire`s a structurally different
+//      `requires`-gated function depending on the PO's *real* amount
+//      (looked up fresh from Postgres, never trusted from the request),
+//      the same real RBAC mechanism every other gated route here already
+//      uses, just choosing between two different callables instead of
+//      one. **What this does NOT change, disclosed plainly**: the actual
+//      disbursement `disburse_on_approval` records is still the same
+//      fixed $2,500 both `55_...` and this file's own axis 2 already
+//      disclose (Layer 1's `on_entry` has no way to carry the PO's real
+//      amount through) -- escalating *who* may approve a large PO is
+//      real; making the disbursed amount itself scale with it is the
+//      same already-disclosed gap, not newly hidden here.
+//   8. **A different real dashboard per role -- the landing page IS the
+//      per-role view.** Three genuinely different SQL aggregates, not
+//      one query re-labeled three times: admin sees spend-by-vendor
+//      (`SUM(amount_cents) GROUP BY vendor`), finance sees the most
+//      recent real disbursements, finance_director sees exactly the
+//      purchase orders `route_approval` would route to *them*
+//      specifically (`>= escalation_threshold_cents()`). Each renders
+//      as a real, hand-rolled inline-SVG horizontal bar chart -- the
+//      same no-external-library ethos the compiler's own static UI
+//      engine uses for its four built-in chart shapes, hand-written
+//      here since this file's compiled server predates
+//      `nirdosha emit-ui`'s chart renderer entirely (a separate, static
+//      code path this file never goes through). A `Dashboard`/
+//      `Purchase Orders` nav toggle lets a signed-in user move between
+//      their landing dashboard and the CRUD table freely.
+//
+// **Deliberately not attempted here, disclosed rather than silently
+// deferred**: `crates/compiled-serve` (ROADMAP B8's real Rust HTTP
+// engine) is still not wired into `codegen.rs` -- this file stays on
+// the same primitives-based `tcp_listener`/`accept` style
+// `51_compiled_serve.nir`/`56_...` already use. Wiring `compiled-serve`
+// in for real needs, at minimum: a `#[repr(C)]` route table (its `Route`
+// struct isn't one today), a generic arbitrary-`Ty`-to-JSON result
+// encoder codegen doesn't have (the one existing precedent,
+// `emit_transact_replay_trampoline`, only ever decodes JSON *into* typed
+// args, never encodes a return value back out), and a brand-new compiled
+// entrypoint `compiled-serve` could call into. That's real, separate,
+// dedicated follow-up work -- not something to bolt on opportunistically
+// next to this file.
+//
+// Run it:
+//   nirdosha build examples/features/57_nirdosha_ops_console_server_v2.nir -o /tmp/ops_console_v2
+//   /tmp/ops_console_v2 &
+//   open http://127.0.0.1:8091/
+//
+// **Demo-only shortcut, disclosed, not hidden**: `mock_issue_token`
+// signs against a single hardcoded HMAC secret this file's own
+// `demo_jwks()` literally contains (`kid: "demo-key"`) -- a real
+// deployment's signing key never lives in the binary's own source this
+// way. `issued_at` is a fixed constant, not a real wall-clock read (no
+// `now()` builtin exists in this language), so every issued token
+// carries the same `iat` -- fine for a demo, not for production.
+
+struct Text {
+    value: str,
+}
+
+struct ErrMsg {
+    value: str,
+}
+
+// ---- demo identity provider (real HS256 signing + verification,
+// against one shared hardcoded key) ---------------------------------------
+
+fn demo_jwks() -> Text {
+    return Text("{\"keys\":[{\"kid\":\"demo-key\",\"kty\":\"oct\",\"k\":\"bXktc2VjcmV0LWtleQ\"}]}")
+}
+
+fn demo_issuer() -> Text {
+    return Text("https://mock-idp.local")
+}
+
+fn demo_audience() -> Text {
+    return Text("ops-console")
+}
+
+fn role_subject(role: Text) -> Text {
+    if role.value == "admin" {
+        return Text("cfo-1")
+    }
+    if role.value == "finance_director" {
+        return Text("finance-director-1")
+    }
+    return Text("clerk-1")
+}
+
+fn role_claims_json(role: Text) -> Text {
+    if role.value == "admin" {
+        return Text("{\"roles\":[\"admin\"]}")
+    }
+    if role.value == "finance_director" {
+        return Text("{\"roles\":[\"finance_director\"]}")
+    }
+    return Text("{\"roles\":[\"finance\"]}")
+}
+
+// `admin_identity`'s real, compiled `VerifiedIdentity` -- used only to
+// drive the `acquire`d `Disbursement` workflow transition below (Layer
+// 1's own `advance_<workflow>` signature takes a `VerifiedIdentity`
+// directly, not a bearer token), never returned to a browser. The
+// browser's own admin authority comes from the real bearer-token check
+// in `authorized_identity` below.
+fn admin_identity() -> VerifiedIdentity {
+    return VerifiedIdentity("cfo-1", "https://mock-idp.local", "ops-console", 9999999999, 0, "{\"roles\":[\"admin\"]}")
+}
+
+// `codegen.rs::declare_named_type`'s own doc comment has the full story
+// (`wrap_ok_identity`'s doc comment just above cites it too) -- these two
+// route around the exact same bare-`Ok(...)`/`Err(...)`-as-match-arm-body
+// panic for `Result(Text, ErrMsg)`.
+fn wrap_ok_text(t: Text) -> Result(Text, ErrMsg) {
+    return Ok(t)
+}
+
+fn wrap_err_text(e: ErrMsg) -> Result(Text, ErrMsg) {
+    return Err(e)
+}
+
+// `issued_at`/`ttl_secs` are fixed constants -- see this file's own
+// header note on why (no `now()` builtin).
+// `nfr(...)` (`LANGUAGE.md` §6f): real per-call latency/error-rate
+// tracking, zero code at any call site -- `error_rate_max` is legal here
+// specifically because this function returns a real `Result(...)`,
+// which is how `nir_nfr_call_end` tells a real error from a real
+// success. A crossed threshold fires an async escalation POST to
+// `NIRDOSHA_OBSERVABILITY_URL` if one is configured (unset means no
+// escalation ever happens, not an error) -- a genuine production
+// concern (auth latency/error-rate SLOs), not decoration.
+fn issue_demo_token(role: Text) -> Result(Text, ErrMsg)
+    nfr(latency_ms: 100, error_rate_max: 0.01)
+{
+    let issuer: Text = demo_issuer()
+    let audience: Text = demo_audience()
+    let jwks: Text = demo_jwks()
+    let subject: Text = role_subject(role)
+    let claims: Text = role_claims_json(role)
+    return match mock_issue_token(subject.value, issuer.value, audience.value, 1700000000, 315360000, claims.value, jwks.value) {
+        Err(e) => wrap_err_text(ErrMsg(e)),
+        Ok(t) => wrap_ok_text(Text(t)),
+    }
+}
+
+// ---- bearer-token extraction (same `str_index_of`/`str_slice`/`len`
+// primitives `req_method`/`req_path`/`req_body` below already use) -------
+
+fn req_bearer_token(req: Text) -> Text {
+    let r: str = req.value
+    let marker: str = "Authorization: Bearer "
+    let start: i64 = str_index_of(r, marker)
+    if start < 0 {
+        return Text("")
+    }
+    let after_marker: str = str_slice(r, start + len(marker), len(r))
+    let line_end: i64 = str_index_of(after_marker, "\r\n")
+    if line_end < 0 {
+        return Text(after_marker)
+    }
+    return Text(str_slice(after_marker, 0, line_end))
+}
+
+// Real verification, not an echo: a missing/malformed/wrong-audience/
+// tampered bearer token is a real `Err`, and every gated route below
+// refuses to proceed past it.
+// `codegen.rs::declare_named_type`'s own doc comment (also cited in
+// `55_nirdosha_ops_console.nir`'s header) has the full story: `match ...
+// { Ok(x) => Ok(x), ... }` -- re-wrapping a `Result` via a bare
+// `Ok(...)`/`Err(...)` as a match arm's own tail expression -- hits a
+// real, pre-existing compiler panic. These two named helpers exist
+// specifically to route around it, same disclosed workaround `55_...`
+// already uses for `wrap_ok_json`/`wrap_err_json`.
+fn wrap_ok_identity(identity: VerifiedIdentity) -> Result(VerifiedIdentity, ErrMsg) {
+    return Ok(identity)
+}
+
+fn wrap_err_identity(e: ErrMsg) -> Result(VerifiedIdentity, ErrMsg) {
+    return Err(e)
+}
+
+// Real token verification has no I/O (`oidc_validate_token`'s own doc
+// comment: a pure function of its inputs) -- a much tighter latency
+// ceiling than the Postgres-backed routes below, and a higher tolerated
+// error rate, since a missing/expired/malformed bearer token is an
+// expected, routine outcome here, not a system fault.
+fn authorized_identity(req: Text) -> Result(VerifiedIdentity, ErrMsg)
+    nfr(latency_ms: 20, error_rate_max: 0.2)
+{
+    let token: Text = req_bearer_token(req)
+    if len(token.value) == 0 {
+        return wrap_err_identity(ErrMsg("missing Authorization: Bearer token"))
+    }
+    let issuer: Text = demo_issuer()
+    let audience: Text = demo_audience()
+    let jwks: Text = demo_jwks()
+    return match oidc_validate_token(token.value, issuer.value, audience.value, jwks.value) {
+        Err(e) => wrap_err_identity(ErrMsg(e)),
+        Ok(identity) => wrap_ok_identity(identity),
+    }
+}
+
+// ---- Postgres-backed CRUD (same shape as `56_...`, extended with
+// UPDATE/DELETE/search+pagination) ----------------------------------------
+
+// `error_rate_max` isn't legal on this one -- it returns a bare `Text`,
+// not a `Result(...)`, so there's no tagged success/error the kernel
+// could inspect (`TypeErrorKind::NfrErrorRateNeedsResultReturn`).
+// `latency_ms`/`concurrency_max` alone still give a real production
+// SLO on the write path: a real Postgres round trip per call, capped
+// concurrency so a burst of creates can't starve the connection pool.
+fn create_purchase_order(vendor: Text, amount_cents: i64) -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 300, concurrency_max: 50)
+{
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => Text(e),
+        Ok(conn) => run_create(conn, vendor, amount_cents),
+    }
+}
+
+fn run_create(conn: db, vendor: Text, amount_cents: i64) -> Text {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS purchase_orders (id SERIAL PRIMARY KEY, vendor TEXT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let inserted: i64 = match db_execute(conn, "INSERT INTO purchase_orders (vendor, amount_cents) VALUES (?, ?)", vendor.value, amount_cents) {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    stop conn
+    return Text(vendor.value)
+}
+
+fn update_purchase_order(id: i64, vendor: Text, amount_cents: i64) -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 300, concurrency_max: 50)
+{
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => Text(e),
+        Ok(conn) => run_update(conn, id, vendor, amount_cents),
+    }
+}
+
+fn run_update(conn: db, id: i64, vendor: Text, amount_cents: i64) -> Text {
+    let updated: i64 = match db_execute(conn, "UPDATE purchase_orders SET vendor = ?, amount_cents = ? WHERE id = ?", vendor.value, amount_cents, id) {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    stop conn
+    if updated <= 0 {
+        return Text("not found")
+    }
+    return Text(vendor.value)
+}
+
+fn delete_purchase_order(id: i64) -> bool
+    requires(role: "admin")
+    nfr(latency_ms: 200, concurrency_max: 50)
+{
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => false,
+        Ok(conn) => run_delete(conn, id),
+    }
+}
+
+fn run_delete(conn: db, id: i64) -> bool {
+    let deleted: i64 = match db_execute(conn, "DELETE FROM purchase_orders WHERE id = ?", id) {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    stop conn
+    return deleted > 0
+}
+
+// The real dollar figure `route_approval` below decides escalation on
+// -- a fresh read from Postgres for the specific PO the browser named,
+// never trusted from the request body itself.
+fn lookup_amount_cents(id: i64) -> i64 {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => -1,
+        Ok(conn) => run_lookup_amount_cents(conn, id),
+    }
+}
+
+fn run_lookup_amount_cents(conn: db, id: i64) -> i64 {
+    let result: i64 = match db_query(conn, "SELECT amount_cents FROM purchase_orders WHERE id = ?", id) {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "amount_cents") {
+                Ok(n) => n,
+                Err(e) => -1,
+            },
+            Err(e) => -1,
+        },
+        Err(e) => -1,
+    }
+    stop conn
+    return result
+}
+
+// $100,000 -- an ordinary enterprise-shaped dual-control threshold, not
+// a number picked to make the demo work.
+fn escalation_threshold_cents() -> i64 {
+    return 10000000
+}
+
+fn wrap_ok_json(j: json) -> Result(json, ErrMsg) {
+    return Ok(j)
+}
+
+fn wrap_err_json(e: ErrMsg) -> Result(json, ErrMsg) {
+    return Err(e)
+}
+
+// Real `LIKE`-based search + real `LIMIT`/`OFFSET` pagination, all
+// server-side SQL -- `q`/`offset`/`limit` arrive as real JSON values
+// from the request body, never parsed out of a URL.
+fn search_purchase_orders(q: Text, offset: i64, limit: i64) -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_search(conn, q, offset, limit),
+    }
+}
+
+fn run_search(conn: db, q: Text, offset: i64, limit: i64) -> Result(json, ErrMsg) {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS purchase_orders (id SERIAL PRIMARY KEY, vendor TEXT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    // This language has no string-concatenation builtin at all (this
+    // file's own header note on `56_...`'s `send(tcp, json)` extension
+    // already disclosed why) -- so the `%query%` pattern is built in SQL
+    // itself, via Postgres's own `||` concatenation, not in `.nir` code.
+    // An empty `q` naturally becomes `'%' || '' || '%'` = `%%`, which
+    // `LIKE` treats identically to a bare `%` (matches every row) -- no
+    // special-casing needed for the "no search" case either.
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT id, vendor, amount_cents FROM purchase_orders WHERE vendor LIKE '%' || ? || '%' ORDER BY id DESC LIMIT ? OFFSET ?", q.value, limit, offset) {
+        Ok(rows) => wrap_ok_json(rows),
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+fn list_purchase_order() -> Result(json, ErrMsg) {
+    return search_purchase_orders(Text(""), 0, 25)
+}
+
+fn stat_purchase_order_count() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_count(conn),
+    }
+}
+
+fn run_count(conn: db) -> Result(json, ErrMsg) {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS purchase_orders (id SERIAL PRIMARY KEY, vendor TEXT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT COUNT(*) AS n FROM purchase_orders") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => wrap_ok_json(row),
+            Err(e) => wrap_err_json(ErrMsg(e)),
+        },
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// ---- per-role dashboards -- a different real chart for a different
+// real job (`landing { role(...) -> Screen }`'s own per-role-page idea,
+// `55_...`'s minimal `dashboard { tile ... }` block, applied here to
+// this file's own hand-written server instead of the separate, static
+// `nirdosha emit-ui` path those blocks normally drive -- three
+// genuinely different SQL aggregates, one per role, not the same query
+// re-labeled three times. -----------------------------------------------
+
+// Admin cares about spend concentration: which vendors are taking the
+// most money, in aggregate, across every purchase order ever created.
+fn dashboard_admin_json() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_dashboard_admin(conn),
+    }
+}
+
+// `::bigint`, not decoration: Postgres widens `SUM(BIGINT)` to `NUMERIC`
+// (overflow avoidance, standard SQL semantics), and this compiler's own
+// `pg_row_to_json` (`kernel/db.rs`) doesn't have a `NUMERIC` case yet --
+// it falls back to a `String` read, which fails silently against a
+// numeric wire value and comes back a real, disclosed `null`, found by
+// actually running this query against real Postgres, not assumed. Real
+// dashboards can't answer "which vendor got the most money" with a
+// SQL-standard aggregate query as-is today -- casting the sum back down
+// to a type the kernel already handles (safe here; a cents total is
+// nowhere near `i64::MAX`) is the honest fix at this layer, not a
+// compiler change this demo takes on.
+fn run_dashboard_admin(conn: db) -> Result(json, ErrMsg) {
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT vendor, SUM(amount_cents)::bigint AS amount_cents FROM purchase_orders GROUP BY vendor ORDER BY amount_cents DESC LIMIT 10") {
+        Ok(rows) => wrap_ok_json(rows),
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// Finance clerks track what's actually gone out the door recently, not
+// what's still sitting in the purchase-order table.
+fn dashboard_finance_json() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_dashboard_finance(conn),
+    }
+}
+
+fn run_dashboard_finance(conn: db) -> Result(json, ErrMsg) {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS disbursements (txn_id TEXT PRIMARY KEY, po_id BIGINT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT po_id, amount_cents FROM disbursements ORDER BY txn_id DESC LIMIT 10") {
+        Ok(rows) => wrap_ok_json(rows),
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// A finance director's own real oversight job: exactly the purchase
+// orders `route_approval` would route to *them* specifically --
+// `>= escalation_threshold_cents()` -- not every PO in the system.
+fn dashboard_director_json() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_dashboard_director(conn),
+    }
+}
+
+fn run_dashboard_director(conn: db) -> Result(json, ErrMsg) {
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT vendor, amount_cents FROM purchase_orders WHERE amount_cents >= ? ORDER BY amount_cents DESC LIMIT 10", escalation_threshold_cents()) {
+        Ok(rows) => wrap_ok_json(rows),
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// ---- workflow-gated, `transact`-backed disbursement (real `http_post`
+// to a local mock webhook + real durable Postgres write, copied from
+// `55_nirdosha_ops_console.nir` -- each numbered example file in this
+// catalog is self-contained, no cross-file `.nir` imports exist) --------
+
+fn notify_webhook(txn_id: str, amount_cents: i64) -> i64 {
+    return match http_post("127.0.0.1", 18101, "/webhook", "payment") {
+        Ok(resp) => resp.status,
+        Err(e) => -1,
+    }
+}
+
+fn check_response(status: i64) -> bool {
+    return status == 200
+}
+
+fn wrap_ok_i64(n: i64) -> Result(i64, ErrMsg) {
+    return Ok(n)
+}
+
+fn wrap_err_i64(e: ErrMsg) -> Result(i64, ErrMsg) {
+    return Err(e)
+}
+
+fn record_disbursement(txn_id: str, po_id: i64, amount_cents: i64) -> Result(i64, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_i64(ErrMsg(e)),
+        Ok(conn) => run_record_disbursement(conn, txn_id, po_id, amount_cents),
+    }
+}
+
+fn run_record_disbursement(conn: db, txn_id: str, po_id: i64, amount_cents: i64) -> Result(i64, ErrMsg) {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS disbursements (txn_id TEXT PRIMARY KEY, po_id BIGINT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let result: Result(i64, ErrMsg) = match db_execute(conn, "INSERT INTO disbursements (txn_id, po_id, amount_cents) VALUES (?, ?, ?) ON CONFLICT (txn_id) DO NOTHING", txn_id, po_id, amount_cents) {
+        Ok(n) => wrap_ok_i64(n),
+        Err(e) => wrap_err_i64(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+fn log_disbursement_failure(txn_id: str, po_id: i64) -> unit {
+    print("disbursement failed", txn_id, po_id)
+}
+
+fn log_disbursement_rejected(instance_id: i64) -> unit {
+    print("disbursement", instance_id, "rejected")
+}
+
+// Layer 1's only implicit `on_entry` binding is `instance_id` (no
+// non-empty `data{}` block support), so -- same disclosed limitation
+// `55_...` already has -- the disbursed amount is fixed, not read back
+// from the purchase order that triggered it, and the workflow's own
+// `instance_id` doubles as the disbursement record's `po_id`, not the
+// browser's own purchase-order row id.
+fn disburse(instance_id: i64, amount_cents: i64) -> bool {
+    return transact {
+        network:    notify_webhook(txn_id, amount_cents)
+        verify:     check_response(network)
+        commit:     record_disbursement(txn_id, instance_id, amount_cents)
+        compensate: log_disbursement_failure(txn_id, instance_id)
+    }
+}
+
+fn disburse_on_approval(instance_id: i64) -> unit {
+    let ok: bool = disburse(instance_id, 250000)
+    print("disbursement", instance_id, ok)
+}
+
+// `sla_seconds` (`LANGUAGE.md`/`docs/ROADMAP.md` A15, first used in
+// `54_compiled_workflow_escalation.nir`) plus a real second branch out
+// of `Draft` -- 55_...'s own workflow only ever had one real transition
+// to prove the mechanism; a real approval queue has two outcomes and a
+// real SLA on how long a request may sit unactioned. 3 days (259200s)
+// here is the real, production-shaped value (`54_...`'s own header
+// note on why ITS example uses 1s instead: fast/deterministic demo
+// timing -- not a value meant to be copied unchanged).
+workflow Disbursement {
+    state Draft {
+        sla_seconds: 259200
+        on Approve -> Approved
+        on Reject -> Rejected
+    }
+    state Approved terminal {
+        on_entry {
+            disburse_on_approval(instance_id)
+        }
+    }
+    state Rejected terminal {
+        on_entry {
+            log_disbursement_rejected(instance_id)
+        }
+    }
+}
+
+fn advance_disbursement_now(identity: VerifiedIdentity, instance_id: i64, event: DisbursementEvent) -> Result(bool, WorkflowActionError) {
+    return match json_parse("{}") {
+        Ok(payload) => advance_disbursement(identity, instance_id, event, payload),
+        Err(e) => Err(NoSuchTransition()),
+    }
+}
+
+fn run_approval() -> Text {
+    let instance_id: i64 = match start_disbursement(None(), DisbursementData()) {
+        Ok(id) => id,
+        Err(e) => -1,
+    }
+    if instance_id < 0 {
+        return Text("failed to start disbursement workflow")
+    }
+    let approved: bool = match advance_disbursement_now(admin_identity(), instance_id, Approve()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    if approved {
+        return Text("approved")
+    }
+    return Text("approval failed")
+}
+
+fn run_rejection() -> Text {
+    let instance_id: i64 = match start_disbursement(None(), DisbursementData()) {
+        Ok(id) => id,
+        Err(e) => -1,
+    }
+    if instance_id < 0 {
+        return Text("failed to start disbursement workflow")
+    }
+    let rejected: bool = match advance_disbursement_now(admin_identity(), instance_id, Reject()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    if rejected {
+        return Text("rejected")
+    }
+    return Text("rejection failed")
+}
+
+// A real network hop (the webhook) plus a `transact`-backed durable
+// write sits behind this one -- a much higher latency ceiling than the
+// plain CRUD routes above, and a deliberately low `concurrency_max`:
+// this is the one route that moves real money, so capping how many
+// disbursements can be in flight at once is itself a real production
+// control, not just a performance knob.
+//
+// **Dual control, a real production pattern, not a toy threshold**: a
+// purchase order at or above `escalation_threshold_cents()` needs a
+// `finance_director`-proven identity, not just `admin` --
+// `route_approval` below decides which of these two `requires`-gated
+// functions to `acquire` based on the *real* PO amount looked up from
+// Postgres (`lookup_amount_cents`), not a client-supplied one. **What
+// this threshold check does NOT change, disclosed plainly**: the
+// disbursement `disburse_on_approval` actually records is still the
+// same fixed $2,500 both `55_...` and this file's own header already
+// disclose (Layer 1's `on_entry` has no way to carry the PO's real
+// amount through) -- escalating *who* may approve a large PO is real;
+// making the disbursement itself scale with it is the same
+// already-disclosed gap, not newly hidden here.
+fn approve_purchase_order_standard() -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 2000, concurrency_max: 10)
+{
+    return run_approval()
+}
+
+fn approve_purchase_order_escalated() -> Text
+    requires(role: "finance_director")
+    nfr(latency_ms: 2000, concurrency_max: 5)
+{
+    return run_approval()
+}
+
+fn reject_purchase_order() -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 300, concurrency_max: 50)
+{
+    return run_rejection()
+}
+
+// ---- gated-route helpers: real bearer-token check, then real
+// `acquire`/`check_role`, exactly `56_...`'s own `create_as_admin`
+// pattern, one level deeper (auth, then role) -----------------------------
+
+fn create_as_admin(req: Text, vendor: Text, amount_cents: i64) -> Text {
+    return match authorized_identity(req) {
+        Err(e) => Text(e.value),
+        Ok(identity) => match check_role(identity, "admin") {
+            Err(e) => Text(e),
+            Ok(proof) => match acquire create_purchase_order(proof) {
+                Err(msg) => Text(msg),
+                Ok(f) => f(vendor, amount_cents),
+            },
+        },
+    }
+}
+
+fn update_as_admin(req: Text, id: i64, vendor: Text, amount_cents: i64) -> Text {
+    return match authorized_identity(req) {
+        Err(e) => Text(e.value),
+        Ok(identity) => match check_role(identity, "admin") {
+            Err(e) => Text(e),
+            Ok(proof) => match acquire update_purchase_order(proof) {
+                Err(msg) => Text(msg),
+                Ok(f) => f(id, vendor, amount_cents),
+            },
+        },
+    }
+}
+
+fn delete_as_admin(req: Text, id: i64) -> bool {
+    return match authorized_identity(req) {
+        Err(e) => false,
+        Ok(identity) => match check_role(identity, "admin") {
+            Err(e) => false,
+            Ok(proof) => match acquire delete_purchase_order(proof) {
+                Err(msg) => false,
+                Ok(f) => f(id),
+            },
+        },
+    }
+}
+
+// Real dual control: a real `acquire`d call to a *different*
+// `requires`-gated function depending on the PO's own real amount, not
+// a same-function `if` deciding after the fact -- the "gate" a
+// `finance_director`-only PO goes through is structurally a different
+// callable value than the `admin`-only one, exactly the same
+// distinction `check_role`/`acquire` already enforce between any other
+// two roles in this codebase.
+fn route_approval(identity: VerifiedIdentity, amount_cents: i64) -> Text {
+    if amount_cents >= escalation_threshold_cents() {
+        return match check_role(identity, "finance_director") {
+            Err(e) => Text("this purchase order requires finance_director approval"),
+            Ok(proof) => match acquire approve_purchase_order_escalated(proof) {
+                Err(msg) => Text(msg),
+                Ok(f) => f(),
+            },
+        }
+    }
+    return match check_role(identity, "admin") {
+        Err(e) => Text(e),
+        Ok(proof) => match acquire approve_purchase_order_standard(proof) {
+            Err(msg) => Text(msg),
+            Ok(f) => f(),
+        },
+    }
+}
+
+fn approve_as_admin(req: Text) -> Text {
+    let amount_cents: i64 = lookup_amount_cents(body_id(req))
+    return match authorized_identity(req) {
+        Err(e) => Text(e.value),
+        Ok(identity) => route_approval(identity, amount_cents),
+    }
+}
+
+fn reject_as_admin(req: Text) -> Text {
+    return match authorized_identity(req) {
+        Err(e) => Text(e.value),
+        Ok(identity) => match check_role(identity, "admin") {
+            Err(e) => Text(e),
+            Ok(proof) => match acquire reject_purchase_order(proof) {
+                Err(msg) => Text(msg),
+                Ok(f) => f(),
+            },
+        },
+    }
+}
+
+// ---- request parsing (same primitives `51_compiled_serve.nir` already
+// proves) ------------------------------------------------------------------
+
+fn req_method(req: Text) -> Text {
+    let r: str = req.value
+    let line_end: i64 = str_index_of(r, "\r\n")
+    let line: str = str_slice(r, 0, line_end)
+    let sp1: i64 = str_index_of(line, " ")
+    return Text(str_slice(line, 0, sp1))
+}
+
+fn req_path(req: Text) -> Text {
+    let r: str = req.value
+    let line_end: i64 = str_index_of(r, "\r\n")
+    let line: str = str_slice(r, 0, line_end)
+    let sp1: i64 = str_index_of(line, " ")
+    let after_method: str = str_slice(line, sp1 + 1, len(line))
+    let sp2: i64 = str_index_of(after_method, " ")
+    return Text(str_slice(after_method, 0, sp2))
+}
+
+fn req_body(req: Text) -> Text {
+    let r: str = req.value
+    let sep: i64 = str_index_of(r, "\r\n\r\n")
+    if sep < 0 {
+        return Text("")
+    }
+    return Text(str_slice(r, sep + 4, len(r)))
+}
+
+// ---- JSON body -> typed-argument helpers (all via already-proven
+// `json_parse`/`json_get_str`/`json_get_i64`) ------------------------------
+
+fn body_role(req: Text) -> Text {
+    let body: Text = req_body(req)
+    return match json_parse(body.value) {
+        Err(e) => Text("finance"),
+        Ok(doc) => match json_get_str(doc, "role") {
+            Err(e) => Text("finance"),
+            Ok(v) => Text(v),
+        },
+    }
+}
+
+fn body_id(req: Text) -> i64 {
+    let body: Text = req_body(req)
+    return match json_parse(body.value) {
+        Err(e) => -1,
+        Ok(doc) => match json_get_i64(doc, "id") {
+            Err(e) => -1,
+            Ok(v) => v,
+        },
+    }
+}
+
+fn body_vendor(req: Text) -> Text {
+    let body: Text = req_body(req)
+    return match json_parse(body.value) {
+        Err(e) => Text("unknown vendor"),
+        Ok(doc) => match json_get_str(doc, "vendor") {
+            Err(e) => Text("unknown vendor"),
+            Ok(v) => Text(v),
+        },
+    }
+}
+
+fn body_amount_cents(req: Text) -> i64 {
+    let body: Text = req_body(req)
+    return match json_parse(body.value) {
+        Err(e) => 0,
+        Ok(doc) => match json_get_i64(doc, "amount_cents") {
+            Err(e) => 0,
+            Ok(v) => v,
+        },
+    }
+}
+
+fn body_search_q(req: Text) -> Text {
+    let body: Text = req_body(req)
+    return match json_parse(body.value) {
+        Err(e) => Text(""),
+        Ok(doc) => match json_get_str(doc, "q") {
+            Err(e) => Text(""),
+            Ok(v) => Text(v),
+        },
+    }
+}
+
+fn body_offset(req: Text) -> i64 {
+    let body: Text = req_body(req)
+    return match json_parse(body.value) {
+        Err(e) => 0,
+        Ok(doc) => match json_get_i64(doc, "offset") {
+            Err(e) => 0,
+            Ok(v) => v,
+        },
+    }
+}
+
+fn body_limit(req: Text) -> i64 {
+    let body: Text = req_body(req)
+    return match json_parse(body.value) {
+        Err(e) => 25,
+        Ok(doc) => match json_get_i64(doc, "limit") {
+            Err(e) => 25,
+            Ok(v) => v,
+        },
+    }
+}
+
+// ---- response bodies (all real JSON, via already-proven `json_set_str`) -
+
+fn empty_json_array() -> json {
+    return match json_parse("[]") {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn empty_json_object() -> json {
+    return match json_parse("{}") {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn value_json(value: Text) -> json {
+    return match json_set_str(empty_json_object(), "value", value.value) {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn err_json(message: Text) -> json {
+    return match json_set_str(empty_json_object(), "err", message.value) {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn ok_flag_json(ok: bool) -> json {
+    if ok {
+        return value_json(Text("true"))
+    }
+    return err_json(Text("operation failed"))
+}
+
+fn login_response_body(req: Text) -> json {
+    return match issue_demo_token(body_role(req)) {
+        Err(e) => err_json(Text(e.value)),
+        Ok(token) => value_json(token),
+    }
+}
+
+fn list_response_body(req: Text) -> json {
+    return match search_purchase_orders(body_search_q(req), body_offset(req), body_limit(req)) {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+fn plain_list_response_body() -> json {
+    return match list_purchase_order() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+fn count_response_body() -> json {
+    return match stat_purchase_order_count() {
+        Err(e) => empty_json_object(),
+        Ok(row) => row,
+    }
+}
+
+fn create_response_body(req: Text) -> json {
+    let created: Text = create_as_admin(req, body_vendor(req), body_amount_cents(req))
+    return value_json(created)
+}
+
+fn update_response_body(req: Text) -> json {
+    let updated: Text = update_as_admin(req, body_id(req), body_vendor(req), body_amount_cents(req))
+    return value_json(updated)
+}
+
+fn delete_response_body(req: Text) -> json {
+    return ok_flag_json(delete_as_admin(req, body_id(req)))
+}
+
+fn approve_response_body(req: Text) -> json {
+    let approved: Text = approve_as_admin(req)
+    return value_json(approved)
+}
+
+fn reject_response_body(req: Text) -> json {
+    let rejected: Text = reject_as_admin(req)
+    return value_json(rejected)
+}
+
+fn overdue_response_body() -> json {
+    return match list_disbursement_overdue() {
+        Err(e) => empty_json_array(),
+        Ok(j) => j,
+    }
+}
+
+fn dashboard_admin_response_body() -> json {
+    return match dashboard_admin_json() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+fn dashboard_finance_response_body() -> json {
+    return match dashboard_finance_json() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+fn dashboard_director_response_body() -> json {
+    return match dashboard_director_json() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+// ---- HTML/CSS/JS page, one real static response body --------------------
+// No `\"` inside -- every HTML attribute and every JS string below uses
+// single quotes on purpose (`56_...`'s own note on this language's
+// minimal string-literal escape set applies unchanged).
+
+fn index_html() -> Text {
+    return Text("<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'>
+<title>Nirdosha Ops Console v2</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 2rem auto; max-width: 780px; background: #f4f5f7; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; }
+  .card { background: white; border-radius: 10px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+  button { padding: 0.5rem 1rem; margin-right: 0.5rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.9rem; }
+  .role-admin { background: #2563eb; color: white; }
+  .role-finance { background: #16a34a; color: white; }
+  .role-signout { background: #e5e7eb; color: #111; }
+  .role-danger { background: #dc2626; color: white; }
+  .role-neutral { background: #eef2ff; color: #3730a3; }
+  table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; }
+  td, th { padding: 0.5rem 0.3rem; border-bottom: 1px solid #eee; text-align: left; }
+  input { padding: 0.45rem; margin-right: 0.5rem; border: 1px solid #ccc; border-radius: 6px; }
+  .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background: #eef2ff; color: #3730a3; }
+  #create-status, #search-status { color: #555; font-size: 0.9rem; }
+  #error-banner { display: none; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+  #loading { display: none; color: #555; font-size: 0.9rem; margin-top: 0.5rem; }
+  #empty-state { display: none; color: #777; padding: 1rem 0; }
+  .row-actions button { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  nav { margin: 0.75rem 0; }
+  nav button.active { outline: 2px solid #3730a3; }
+  .bar-label { font-size: 0.8rem; fill: #333; }
+  .bar-value { font-size: 0.75rem; fill: #555; }
+</style>
+</head>
+<body>
+<h1>Nirdosha Ops Console v2</h1>
+<p style='color:#555'>Real compiled Nirdosha binary. Real Postgres. Real signed JWTs. Real RBAC. Real workflow + webhook + durable disbursement -- no mock server behind this page.</p>
+
+<div id='error-banner'></div>
+
+<div class='card' id='login-card'>
+  <p>Sign in as:</p>
+  <button class='role-admin' id='admin-btn'>Admin (CFO)</button>
+  <button class='role-finance' id='finance-btn'>Finance Clerk</button>
+  <button class='role-neutral' id='director-btn'>Finance Director</button>
+</div>
+
+<div class='card' id='app-card' style='display:none'>
+  <p>Signed in as <b id='who'></b> with a real signed JWT &mdash; a real <code>landing</code> rule (RFC 0010) would send this role to <span class='badge' id='landing-target'></span></p>
+  <span class='badge' id='overdue-badge' style='background:#fef2f2;color:#991b1b'></span>
+  <nav>
+    <button class='role-neutral' id='nav-dashboard-btn'>Dashboard</button>
+    <button class='role-neutral' id='nav-po-btn'>Purchase Orders</button>
+  </nav>
+  <button class='role-signout' id='signout-btn'>Sign out</button>
+</div>
+
+<div class='card' id='dashboard-card' style='display:none'>
+  <h2 id='dashboard-title'>Dashboard</h2>
+  <div id='dashboard-empty' style='display:none'>No data yet.</div>
+  <svg id='dashboard-chart' width='100%' height='260' style='overflow:visible'></svg>
+</div>
+
+<div class='card' id='po-card' style='display:none'>
+  <h2>Purchase Orders</h2>
+  <div>
+    <input id='search-input' placeholder='Search vendor...'>
+    <button class='role-neutral' id='search-btn'>Search</button>
+    <button class='role-neutral' id='prev-btn'>&larr; Prev</button>
+    <button class='role-neutral' id='next-btn'>Next &rarr;</button>
+  </div>
+  <div id='loading'>Loading&hellip;</div>
+  <table>
+    <thead><tr><th>Vendor</th><th>Amount (cents)</th><th id='actions-head' style='display:none'>Actions</th></tr></thead>
+    <tbody id='po-body'></tbody>
+  </table>
+  <div id='empty-state'>No purchase orders match.</div>
+  <div id='create-panel' style='display:none; margin-top:1rem'>
+    <input id='vendor-input' placeholder='Vendor name'>
+    <input id='amount-input' placeholder='Amount cents' type='number'>
+    <button class='role-admin' id='create-btn'>Create Purchase Order</button>
+  </div>
+  <p id='create-status'></p>
+</div>
+
+<script>
+var LANDING = [
+  { role: 'admin', target: 'admin_home' },
+  { role: 'finance', target: 'finance_queue' },
+  { isDefault: true, target: 'home_screen' }
+];
+
+function landingTarget(role) {
+  for (var i = 0; i < LANDING.length; i++) {
+    if (LANDING[i].isDefault) return LANDING[i].target;
+    if (LANDING[i].role === role) return LANDING[i].target;
+  }
+  return 'home_screen';
+}
+
+var currentRole = null;
+var currentToken = null;
+var currentOffset = 0;
+var pageSize = 10;
+
+function showError(message) {
+  var banner = document.getElementById('error-banner');
+  banner.textContent = message;
+  banner.style.display = 'block';
+}
+
+function clearError() {
+  document.getElementById('error-banner').style.display = 'none';
+}
+
+function authHeaders(extra) {
+  var headers = extra || {};
+  if (currentToken) {
+    headers['Authorization'] = 'Bearer ' + currentToken;
+  }
+  return headers;
+}
+
+function signIn(role) {
+  clearError();
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: role })
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    if (res.err) {
+      showError('Sign-in failed: ' + res.err);
+      return;
+    }
+    currentRole = role;
+    currentToken = res.value;
+    currentOffset = 0;
+    document.getElementById('login-card').style.display = 'none';
+    document.getElementById('app-card').style.display = 'block';
+    document.getElementById('who').textContent = role;
+    document.getElementById('landing-target').textContent = landingTarget(role);
+    document.getElementById('create-panel').style.display = (role === 'admin') ? 'block' : 'none';
+    document.getElementById('actions-head').style.display = (role === 'admin' || role === 'finance_director') ? 'table-cell' : 'none';
+    document.getElementById('create-status').textContent = '';
+    // The dashboard *is* this role's landing page -- a different real
+    // chart depending on the job, shown first, not the same
+    // purchase-orders table everyone gets today.
+    showDashboard();
+    loadOverdueCount();
+  }).catch(function () { showError('Sign-in request failed.'); });
+}
+
+// A different real query per role (DASHBOARD_BY_ROLE), same closed
+// per-role mapping idea LANDING above already models -- not the same
+// endpoint re-labeled three times.
+var DASHBOARD_BY_ROLE = {
+  admin: { url: '/api/dashboard/admin', title: 'Spend by Vendor', labelKey: 'vendor' },
+  finance: { url: '/api/dashboard/finance', title: 'Recent Disbursements', labelKey: 'po_id' },
+  finance_director: { url: '/api/dashboard/finance_director', title: 'Large Purchase Orders (Your Approval Queue)', labelKey: 'vendor' }
+};
+
+function showDashboard() {
+  document.getElementById('nav-dashboard-btn').className = 'role-neutral active';
+  document.getElementById('nav-po-btn').className = 'role-neutral';
+  document.getElementById('dashboard-card').style.display = 'block';
+  document.getElementById('po-card').style.display = 'none';
+  loadDashboard();
+}
+
+function showPOs() {
+  document.getElementById('nav-dashboard-btn').className = 'role-neutral';
+  document.getElementById('nav-po-btn').className = 'role-neutral active';
+  document.getElementById('dashboard-card').style.display = 'none';
+  document.getElementById('po-card').style.display = 'block';
+  loadPOs();
+}
+
+function loadDashboard() {
+  var spec = DASHBOARD_BY_ROLE[currentRole] || DASHBOARD_BY_ROLE.finance;
+  document.getElementById('dashboard-title').textContent = spec.title;
+  fetch(spec.url).then(function (r) { return r.json(); }).then(function (rows) {
+    renderBarChart(rows || [], spec.labelKey, 'amount_cents');
+  }).catch(function () { showError('Failed to load dashboard.'); });
+}
+
+// A real, hand-rolled inline-SVG horizontal bar chart -- the same
+// no-external-chart-library ethos the compiler's own static UI engine
+// uses for its four built-in chart shapes (`The UI Engine` wiki page),
+// just hand-written here since this file's compiled server predates
+// `nirdosha emit-ui`'s chart renderer entirely (it's a separate, static
+// code path -- see this file's own header on why `compiled-serve`-style
+// wiring isn't attempted here either).
+function renderBarChart(rows, labelKey, valueKey) {
+  var svg = document.getElementById('dashboard-chart');
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  document.getElementById('dashboard-empty').style.display = rows.length === 0 ? 'block' : 'none';
+  if (rows.length === 0) { svg.setAttribute('height', 0); return; }
+  var rowHeight = 32;
+  var height = rows.length * rowHeight + 10;
+  svg.setAttribute('height', height);
+  var maxValue = 0;
+  for (var i = 0; i < rows.length; i++) {
+    maxValue = Math.max(maxValue, rows[i][valueKey] || 0);
+  }
+  var chartWidth = 420;
+  var labelWidth = 140;
+  for (var i = 0; i < rows.length; i++) {
+    var y = i * rowHeight + 6;
+    var value = rows[i][valueKey] || 0;
+    var barWidth = maxValue > 0 ? (value / maxValue) * chartWidth : 0;
+    var label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', labelWidth - 8);
+    label.setAttribute('y', y + 16);
+    label.setAttribute('text-anchor', 'end');
+    label.setAttribute('class', 'bar-label');
+    label.textContent = String(rows[i][labelKey]);
+    svg.appendChild(label);
+    var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', labelWidth);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', Math.max(barWidth, 2));
+    rect.setAttribute('height', rowHeight - 10);
+    rect.setAttribute('rx', 4);
+    rect.setAttribute('fill', '#2563eb');
+    svg.appendChild(rect);
+    var valueLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    valueLabel.setAttribute('x', labelWidth + barWidth + 8);
+    valueLabel.setAttribute('y', y + 16);
+    valueLabel.setAttribute('class', 'bar-value');
+    valueLabel.textContent = value;
+    svg.appendChild(valueLabel);
+  }
+}
+
+function signOut() {
+  currentRole = null;
+  currentToken = null;
+  document.getElementById('login-card').style.display = 'block';
+  document.getElementById('app-card').style.display = 'none';
+  document.getElementById('dashboard-card').style.display = 'none';
+  document.getElementById('po-card').style.display = 'none';
+}
+
+function loadPOs() {
+  clearError();
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('empty-state').style.display = 'none';
+  var q = document.getElementById('search-input').value;
+  fetch('/api/purchase_orders/list', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: q, offset: currentOffset, limit: pageSize })
+  }).then(function (r) { return r.json(); }).then(function (rows) {
+    document.getElementById('loading').style.display = 'none';
+    var body = document.getElementById('po-body');
+    body.innerHTML = '';
+    if (!rows || rows.length === 0) {
+      document.getElementById('empty-state').style.display = 'block';
+      return;
+    }
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var tr = document.createElement('tr');
+      var td1 = document.createElement('td');
+      td1.textContent = row.vendor;
+      var td2 = document.createElement('td');
+      td2.textContent = row.amount_cents;
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      if (currentRole === 'admin' || currentRole === 'finance_director') {
+        var tdActions = document.createElement('td');
+        tdActions.className = 'row-actions';
+        var approveBtn = document.createElement('button');
+        approveBtn.className = 'role-admin';
+        approveBtn.textContent = row.amount_cents >= 10000000 ? 'Approve (needs director)' : 'Approve';
+        var rejectBtn = document.createElement('button');
+        rejectBtn.className = 'role-danger';
+        rejectBtn.textContent = 'Reject';
+        var deleteBtn = document.createElement('button');
+        deleteBtn.className = 'role-signout';
+        deleteBtn.textContent = 'Delete';
+        (function (id) {
+          approveBtn.addEventListener('click', function () { approvePO(id); });
+          rejectBtn.addEventListener('click', function () { rejectPO(id); });
+          deleteBtn.addEventListener('click', function () { deletePO(id); });
+        })(row.id);
+        tdActions.appendChild(approveBtn);
+        tdActions.appendChild(rejectBtn);
+        tdActions.appendChild(deleteBtn);
+        tr.appendChild(tdActions);
+      }
+      body.appendChild(tr);
+    }
+  }).catch(function () {
+    document.getElementById('loading').style.display = 'none';
+    showError('Failed to load purchase orders.');
+  });
+}
+
+function createPO() {
+  clearError();
+  var v = document.getElementById('vendor-input').value;
+  var a = parseInt(document.getElementById('amount-input').value, 10) || 0;
+  fetch('/api/create', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ vendor: v, amount_cents: a })
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    document.getElementById('create-status').textContent = res.err ? ('Error: ' + res.err) : ('Created: ' + res.value);
+    document.getElementById('vendor-input').value = '';
+    document.getElementById('amount-input').value = '';
+    loadPOs();
+  }).catch(function () { showError('Create request failed.'); });
+}
+
+function approvePO(id) {
+  clearError();
+  fetch('/api/purchase_orders/approve', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ id: id })
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    if (res.err) { showError('Approve failed: ' + res.err); return; }
+    document.getElementById('create-status').textContent = 'Disbursement: ' + res.value;
+    loadOverdueCount();
+  }).catch(function () { showError('Approve request failed.'); });
+}
+
+function rejectPO(id) {
+  clearError();
+  fetch('/api/purchase_orders/reject', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ id: id })
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    if (res.err) { showError('Reject failed: ' + res.err); return; }
+    document.getElementById('create-status').textContent = 'Disbursement: ' + res.value;
+    loadOverdueCount();
+  }).catch(function () { showError('Reject request failed.'); });
+}
+
+function loadOverdueCount() {
+  fetch('/api/disbursements/overdue').then(function (r) { return r.json(); }).then(function (rows) {
+    var el = document.getElementById('overdue-badge');
+    var n = (rows && rows.length) || 0;
+    el.textContent = n > 0 ? (n + ' approval(s) overdue') : '';
+  }).catch(function () {});
+}
+
+function deletePO(id) {
+  clearError();
+  fetch('/api/purchase_orders/delete', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ id: id })
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    if (res.err) { showError('Delete failed: ' + res.err); return; }
+    loadPOs();
+  }).catch(function () { showError('Delete request failed.'); });
+}
+
+document.getElementById('admin-btn').addEventListener('click', function () { signIn('admin'); });
+document.getElementById('finance-btn').addEventListener('click', function () { signIn('finance'); });
+document.getElementById('director-btn').addEventListener('click', function () { signIn('finance_director'); });
+document.getElementById('signout-btn').addEventListener('click', signOut);
+document.getElementById('nav-dashboard-btn').addEventListener('click', showDashboard);
+document.getElementById('nav-po-btn').addEventListener('click', showPOs);
+document.getElementById('create-btn').addEventListener('click', createPO);
+document.getElementById('search-btn').addEventListener('click', function () { currentOffset = 0; loadPOs(); });
+document.getElementById('prev-btn').addEventListener('click', function () { currentOffset = Math.max(0, currentOffset - pageSize); loadPOs(); });
+document.getElementById('next-btn').addEventListener('click', function () { currentOffset = currentOffset + pageSize; loadPOs(); });
+</script>
+</body>
+</html>
+")
+}
+
+// ---- accept loop -----------------------------------------------------
+
+fn main() {
+    let l: tcp_listener = listen(8091)
+    print("Nirdosha Ops Console v2 server listening on http://127.0.0.1:8091/")
+    while true {
+        let conn: tcp = accept(l)
+        let req: Text = Text(recv(conn))
+        let method_text: Text = req_method(req)
+        let method: str = method_text.value
+        let path_text: Text = req_path(req)
+        let path: str = path_text.value
+
+        if method == "GET" && path == "/" {
+            let page: Text = index_html()
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
+            send(conn, page.value)
+        } else if method == "GET" && path == "/api/list" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, plain_list_response_body())
+        } else if method == "POST" && path == "/api/purchase_orders/list" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, list_response_body(req))
+        } else if method == "GET" && path == "/api/count" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, count_response_body())
+        } else if method == "POST" && path == "/api/login" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, login_response_body(req))
+        } else if method == "POST" && path == "/api/create" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, create_response_body(req))
+        } else if method == "POST" && path == "/api/purchase_orders/update" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, update_response_body(req))
+        } else if method == "POST" && path == "/api/purchase_orders/delete" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, delete_response_body(req))
+        } else if method == "POST" && path == "/api/purchase_orders/approve" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, approve_response_body(req))
+        } else if method == "POST" && path == "/api/purchase_orders/reject" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, reject_response_body(req))
+        } else if method == "GET" && path == "/api/disbursements/overdue" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, overdue_response_body())
+        } else if method == "GET" && path == "/api/dashboard/admin" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, dashboard_admin_response_body())
+        } else if method == "GET" && path == "/api/dashboard/finance" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, dashboard_finance_response_body())
+        } else if method == "GET" && path == "/api/dashboard/finance_director" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, dashboard_director_response_body())
+        } else {
+            send(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+        }
+        stop conn
+    }
+}

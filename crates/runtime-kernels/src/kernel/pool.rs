@@ -35,8 +35,9 @@
 //! `r2d2_postgres`) — neither added as a dependency yet, since nothing
 //! calls this module yet either.
 
+use super::DomainId;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 pub use r2d2::{ManageConnection, Pool};
@@ -142,6 +143,63 @@ impl<M: ManageConnection> Default for PoolRegistry<M> {
     }
 }
 
+/// [`PoolRegistry::checkout_with_key_cap`]'s result: the common case is
+/// a normal pooled checkout, indistinguishable from what
+/// [`PoolRegistry::get_or_create`] always returned; past the per-
+/// provider key cap, a *new* key gets one direct, unpooled connection
+/// instead (RFC 0011 §5).
+pub enum Checkout<M: ManageConnection> {
+    /// A normal pooled checkout — caller calls `.get()` on this exactly
+    /// as it always has.
+    Pooled(Pool<M>),
+    /// The key cap was hit for a brand-new key: no `HashMap` entry, no
+    /// pool, no reaper coverage — one unpooled connection, already
+    /// `kernel::acquire`-admitted. Drop this guard (or call
+    /// [`UnpooledConnection::into_inner`] and drop what it returns) to
+    /// release the admission it holds.
+    Unpooled(UnpooledConnection<M>),
+}
+
+/// An unpooled, `kernel::acquire`/`release`-bracketed connection —
+/// [`PoolRegistry::checkout_with_key_cap`]'s fallback-path result.
+/// `release(domain)` runs exactly once, in [`Drop`], so the caller
+/// cannot forget it (RFC 0011 §5's own explicit warning: a skipped
+/// `acquire`/`release` on this path would turn the key cap into an
+/// admission-ceiling bypass, not just a memory-growth guard).
+pub struct UnpooledConnection<M: ManageConnection> {
+    conn: Option<M::Connection>,
+    domain: DomainId,
+}
+
+impl<M: ManageConnection> UnpooledConnection<M> {
+    pub fn get(&self) -> &M::Connection {
+        self.conn.as_ref().expect("conn is only ever None after into_inner/drop, which consume this value")
+    }
+
+    pub fn get_mut(&mut self) -> &mut M::Connection {
+        self.conn.as_mut().expect("conn is only ever None after drop")
+    }
+
+    // No `into_inner`, deliberately: a caller that needs to hold the
+    // raw connection past this guard's own scope (e.g. `conn`/`stream`-
+    // shape's session-scoped connect-to-stop lifecycle, stashed in a
+    // handle table) needs its own explicit acquire/release story at
+    // that point, which is Phase 6's job to design once real FFI
+    // dispatch exists — extracting the connection here while silently
+    // detaching it from this guard's automatic release would be exactly
+    // the "forget to release" hazard this guard exists to prevent.
+
+    pub fn domain(&self) -> DomainId {
+        self.domain
+    }
+}
+
+impl<M: ManageConnection> Drop for UnpooledConnection<M> {
+    fn drop(&mut self) {
+        super::release(self.domain);
+    }
+}
+
 impl<M: ManageConnection> PoolRegistry<M> {
     pub fn new() -> Self {
         PoolRegistry { pools: Mutex::new(HashMap::new()) }
@@ -172,11 +230,126 @@ impl<M: ManageConnection> PoolRegistry<M> {
         Ok(pool)
     }
 
-    /// Number of distinct keys with a live pool — test/diagnostic
-    /// visibility into the registry, not used on any hot path.
-    #[cfg(test)]
+    /// Number of distinct keys with a live pool. Used both as
+    /// test/diagnostic visibility into the registry and, non-test, by
+    /// [`PoolRegistry::checkout_with_key_cap`] to decide whether a new
+    /// key is still under `NIRDOSHA_KERNEL_POOL_MAX_KEYS` — registration-
+    /// frequency (once per distinct key), never a hot-path read.
     pub fn pool_count(&self) -> usize {
         self.pools.lock().unwrap().len()
+    }
+
+    /// [`PoolRegistry::get_or_create`], plus RFC 0011 §5's "what the
+    /// ceiling actually bounds" rule: refuses to build a pool whose
+    /// `config.max_size` would let r2d2 grow physical connections past
+    /// `domain`'s own admission ceiling — a startup-time error (named,
+    /// actionable), not a ceiling that silently goes decorative the
+    /// moment a provider's pool is allowed to outgrow it. Every plugin
+    /// provider pool (§4's single eager registration point, which knows
+    /// both numbers for a given provider at once) must go through this,
+    /// never bare `get_or_create`, once wired in Phase 6.
+    pub fn get_or_create_within_ceiling(
+        &self,
+        key: &str,
+        config: PoolConfig,
+        domain: DomainId,
+        make_manager: impl FnOnce() -> Result<M, String>,
+    ) -> Result<Pool<M>, String> {
+        let ceiling = super::ceiling_for(domain);
+        if i64::from(config.max_size) > ceiling {
+            return Err(format!(
+                "pool config max_size ({}) for key {key:?} exceeds its domain's admission ceiling ({ceiling}) -- \
+                 a ceiling nothing consults isn't a ceiling (rfcs/0011 §5); lower PoolConfig::max_size or raise the \
+                 domain's ceiling env var/default_max instead",
+                config.max_size
+            ));
+        }
+        self.get_or_create(key, config, make_manager)
+    }
+
+    /// `NIRDOSHA_KERNEL_POOL_MAX_KEYS` (RFC 0011 §5, name pinned exactly
+    /// in the RFC): the number of distinct pool keys one provider may
+    /// hold before a *new* key falls back to unpooled dialing instead of
+    /// growing this registry's `HashMap` without bound. Same
+    /// malformed-value-degrades-to-default posture every other env-var
+    /// convention in this file already uses, default 256 (the same
+    /// "generous, not tuned" posture as `MAX_DOMAINS`).
+    fn max_pool_keys() -> usize {
+        std::env::var("NIRDOSHA_KERNEL_POOL_MAX_KEYS").ok().and_then(|s| s.parse::<usize>().ok()).filter(|&n| n > 0).unwrap_or(256)
+    }
+
+    /// The RFC 0011 §5 key-cap + fallback rule, made real: a *new* pool
+    /// key past `NIRDOSHA_KERNEL_POOL_MAX_KEYS` distinct keys for this
+    /// provider doesn't grow the registry's `HashMap` at all — it falls
+    /// back to one direct, unpooled dial instead, still
+    /// `kernel::acquire`/`release`-bracketed exactly as if it were a
+    /// normal pooled checkout (the RFC's own explicit warning: skipping
+    /// `acquire` here would turn the key cap into an admission-ceiling
+    /// *bypass*, not just a memory-growth guard). `release` happens
+    /// automatically when the returned [`Checkout::Unpooled`] guard
+    /// drops — the caller cannot forget it the way a bare
+    /// acquire-then-remember-to-release pair could be gotten wrong.
+    /// An already-existing key never falls back, regardless of current
+    /// key count (this is a cap on *new* keys, not a demotion of
+    /// existing pools once the registry happens to be at/over the
+    /// threshold).
+    pub fn checkout_with_key_cap(
+        &self,
+        key: &str,
+        config: PoolConfig,
+        domain: DomainId,
+        make_manager: impl FnOnce() -> Result<M, String>,
+    ) -> Result<Checkout<M>, String> {
+        let already_has_key = self.pools.lock().unwrap().contains_key(key);
+        if already_has_key || self.pool_count() < Self::max_pool_keys() {
+            return self.get_or_create_within_ceiling(key, config, domain, make_manager).map(Checkout::Pooled);
+        }
+        if !super::acquire(domain) {
+            return Err(format!("too many concurrently held connections for this domain (unpooled fallback dial for key {key:?})"));
+        }
+        let manager = match make_manager() {
+            Ok(m) => m,
+            Err(e) => {
+                super::release(domain);
+                return Err(e);
+            }
+        };
+        match manager.connect() {
+            Ok(conn) => Ok(Checkout::Unpooled(UnpooledConnection { conn: Some(conn), domain })),
+            Err(e) => {
+                super::release(domain);
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// RFC 0011 §5's reaper primitive: one opportunistic
+    /// `pool.try_get()` per pool key currently registered, dropped
+    /// immediately. `try_get` never blocks and never opens a new
+    /// connection on an empty pool (confirmed against this repo's
+    /// pinned `r2d2 0.8.10`: `try_get_inner` only pops from the already-
+    /// idle list, `Err`ing immediately on empty rather than calling
+    /// `add_connection`) — the RFC's own "non-blocking checkout, not a
+    /// connection factory either" property. `test_on_check_out`
+    /// (`true` by default, never overridden by `PoolConfig::apply`)
+    /// makes r2d2 itself call `M::is_valid` on the popped connection
+    /// before handing it back — a stale connection fails there, r2d2
+    /// transparently drops and replaces it, and the manager's own
+    /// `is_valid` impl (`SqliteManager`/`PostgresManager`/`HttpManager`/
+    /// `PluginManagedConnection`, each in this crate) is what actually
+    /// calls `record_stale_rehydrated` on that path — this method
+    /// doesn't need to know a key's domain to make that counter move,
+    /// it just needs to trigger the checkout. Dropping the returned
+    /// `PooledConnection` immediately returns it to the pool (or, if
+    /// r2d2 evicted it as unrecoverable, simply lets it go).
+    fn sweep_one_round(&self) {
+        let keys: Vec<String> = { self.pools.lock().unwrap().keys().cloned().collect() };
+        for key in keys {
+            let pool = { self.pools.lock().unwrap().get(&key).cloned() };
+            if let Some(pool) = pool {
+                drop(pool.try_get());
+            }
+        }
     }
 
     /// Whether `key` specifically has a live pool right now — unlike
@@ -189,6 +362,181 @@ impl<M: ManageConnection> PoolRegistry<M> {
     #[cfg(test)]
     pub fn contains_key(&self, key: &str) -> bool {
         self.pools.lock().unwrap().contains_key(key)
+    }
+}
+
+/// A `str` value crossing the plugin ABI boundary by value — RFC 0011
+/// §2's `<shape>_provider_<scheme>_connect(host: str) -> i64` and
+/// `plugin.rs`'s own `NativePluginBuiltin` doc comment both describe
+/// this exact two-word `(ptr, len)` `#[repr(C)]` convention (matching
+/// `runtime-kernels/src/lib.rs`'s own established pattern for `str`
+/// crossing an `extern "C"` boundary by value, e.g. its `Dec128Bits`-
+/// shaped precedent). `ptr` is **not** NUL-terminated; `len` is
+/// load-bearing.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NirStr {
+    pub ptr: *const u8,
+    pub len: i64,
+}
+
+/// The `r2d2::ManageConnection` adapter RFC 0011 §5 describes: "the
+/// kernel supplies one generic adapter... that implements
+/// `ManageConnection` once by calling through whichever function
+/// pointers were resolved for a given provider at registration time."
+/// One `PluginManagedConnection` instance is the `M` for exactly one
+/// provider's `PoolRegistry<PluginManagedConnection>`, fixed to one
+/// `host` (the pool key) — `connect_fn` runs only when
+/// `PoolRegistry::get_or_create[_within_ceiling]` actually grows that
+/// pool, never called directly by anything else (§2 step 1).
+pub struct PluginManagedConnection {
+    pub connect_fn: extern "C" fn(NirStr) -> i64,
+    pub is_valid_fn: extern "C" fn(i64) -> i64,
+    pub close_fn: extern "C" fn(i64) -> i64,
+    pub host: String,
+    /// The provider's own registered domain (`plugin_provider::
+    /// ProviderFns::domain`) — needed only so `is_valid` below can call
+    /// `record_stale_rehydrated`, the identical thing `SqliteManager`/
+    /// `PostgresManager`/`HttpManager`'s own `is_valid` impls already do
+    /// on their `Err` path (`db.rs`/`http.rs`). Phase 5's original cut
+    /// of this struct omitted it (nothing needed it yet); Phase 7's
+    /// reaper is what makes proactive rehydration real for plugin
+    /// connections too, and the RFC's own §5 text says the reaper
+    /// "calls `is_valid_fn` through it exactly the way `db.rs`'s
+    /// `SqliteManager::is_valid` calls into `rusqlite` today" — that
+    /// parity was incomplete without this field.
+    pub domain: DomainId,
+}
+
+/// One live plugin connection — the kernel's own wrapper around the
+/// plugin's raw `i64`, never handed back to `.nir` code directly (§2:
+/// "the unwrap direction... `.nir` code holds the kernel id"). Carries
+/// its own `close_fn` (fixed at connect time, from the same provider
+/// that minted `raw`) so [`Drop`] can call it — r2d2's
+/// `ManageConnection` trait has no closing callback of its own; §2's
+/// own text is explicit that `close_fn` "only ever runs where r2d2
+/// already runs it": `has_broken`-triggered eviction, r2d2's own idle/
+/// lifetime reaping, or the reaper's sweep (Phase 7) — all of which
+/// just drop the `Connection` value, so `close_fn` belongs in `Drop`,
+/// not in any explicit "stop" call.
+pub struct PluginPoolConn {
+    pub raw: i64,
+    close_fn: extern "C" fn(i64) -> i64,
+}
+
+impl Drop for PluginPoolConn {
+    fn drop(&mut self) {
+        (self.close_fn)(self.raw);
+    }
+}
+
+impl std::fmt::Debug for PluginPoolConn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginPoolConn").field("raw", &self.raw).finish()
+    }
+}
+
+/// A plugin provider's `_connect`/`_is_valid` call returned a failure
+/// sentinel — §2's "0/1/negative sentinels every other kernel boundary
+/// already uses" convention, stringified the same way every other
+/// `ManageConnection::Error` in this crate already is
+/// (`CountingError` below, `db.rs`'s own manager errors).
+#[derive(Debug)]
+pub struct PluginConnError(pub String);
+
+impl std::fmt::Display for PluginConnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PluginConnError {}
+
+impl ManageConnection for PluginManagedConnection {
+    type Connection = PluginPoolConn;
+    type Error = PluginConnError;
+
+    fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        let host = NirStr { ptr: self.host.as_ptr(), len: self.host.len() as i64 };
+        let raw = (self.connect_fn)(host);
+        if raw < 0 {
+            return Err(PluginConnError(format!(
+                "native plugin provider connect failed for host {:?} (returned {raw}, rfcs/0011 §2's negative-sentinel convention)",
+                self.host
+            )));
+        }
+        Ok(PluginPoolConn { raw, close_fn: self.close_fn })
+    }
+
+    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        if (self.is_valid_fn)(conn.raw) != 0 {
+            Ok(())
+        } else {
+            super::record_stale_rehydrated(self.domain);
+            Err(PluginConnError(format!("native plugin provider is_valid returned false for connection {}", conn.raw)))
+        }
+    }
+
+    /// Always `false` — RFC 0011 §5's deliberate simplification, safe
+    /// specifically because `PoolConfig::apply` never overrides r2d2's
+    /// own `test_on_check_out` default (`true`, confirmed above), so
+    /// `is_valid` still runs on every checkout regardless of this
+    /// always-`false` shortcut; a genuinely broken connection is caught
+    /// there (or by the reaper's next sweep, Phase 7), not here.
+    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
+        false
+    }
+}
+
+/// One `PoolRegistry<M>`, type-erased so [`kernel::reaper`]
+/// (`crates/runtime-kernels/src/kernel/reaper.rs`) can hold a single
+/// process-wide list spanning every concrete `M` (`SqliteManager`,
+/// `PostgresManager`, `HttpManager`, `HttpsManager`,
+/// `PluginManagedConnection` — five distinct types, one trait). Every
+/// `PoolRegistry<M>` implements this the same way: forward to its own
+/// [`PoolRegistry::sweep_one_round`].
+pub trait Sweepable: Send + Sync {
+    fn sweep_one_round(&self);
+}
+
+impl<M: ManageConnection> Sweepable for PoolRegistry<M> {
+    fn sweep_one_round(&self) {
+        PoolRegistry::sweep_one_round(self)
+    }
+}
+
+static REAPER_TARGETS: OnceLock<Mutex<Vec<&'static dyn Sweepable>>> = OnceLock::new();
+
+/// Registers one process-wide `&'static PoolRegistry<M>` (any `M`) with
+/// the reaper — RFC 0011 §5: "every registered domain that's pool-backed
+/// also registers a `PoolRegistry<M>`." Idempotent by reference identity
+/// is not enforced here (the same `&'static` target pushed twice would
+/// just get swept twice per wake, harmlessly, since `sweep_one_round`
+/// itself is idempotent-safe) — every call site in this crate calls this
+/// at most once per registry anyway (`Once`-guarded at each call site),
+/// so double-registration is a call-site bug this doesn't need to guard
+/// against defensively.
+pub fn register_for_reaping(target: &'static dyn Sweepable) {
+    REAPER_TARGETS.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap().push(target);
+}
+
+/// [`kernel::reaper`]'s one sweep primitive: one opportunistic
+/// `try_get`+drop per pool key, across every registered
+/// [`PoolRegistry`], in registration order rotated by `offset`
+/// (RFC 0011 §5's fairness note — whichever pool registered last isn't
+/// swept last on *every* cycle). The lock guarding
+/// [`REAPER_TARGETS`] is held only long enough to clone the list of
+/// `&'static` references (cheap — a reference is `Copy`), never across
+/// an actual sweep, so a sweep taking a while (a slow `is_valid`) never
+/// blocks a concurrent `register_for_reaping` call.
+pub fn sweep_all_registered(offset: usize) {
+    let targets: Vec<&'static dyn Sweepable> = REAPER_TARGETS.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap().clone();
+    if targets.is_empty() {
+        return;
+    }
+    let n = targets.len();
+    for i in 0..n {
+        targets[(offset + i) % n].sweep_one_round();
     }
 }
 
@@ -317,5 +665,103 @@ mod tests {
             std::env::remove_var("NIRDOSHA_TESTPFX_POOL_MAX_SIZE");
             std::env::remove_var("NIRDOSHA_TESTPFX_POOL_IDLE_TIMEOUT_SECS");
         }
+    }
+
+    /// RFC 0011 §5's "what the ceiling actually bounds" rule: a
+    /// provider's `PoolConfig::max_size` must be ≤ its domain's own
+    /// admission ceiling, checked at registration time (here,
+    /// `get_or_create_within_ceiling`'s call), not left to r2d2 to grow
+    /// past silently.
+    #[test]
+    fn get_or_create_within_ceiling_refuses_a_max_size_past_the_domain_ceiling() {
+        let domain = super::super::register_domain("phase5_ceiling_test_domain", "NIRDOSHA_KERNEL_MAX_PHASE5_CEILING_TEST", 5);
+        let registry: PoolRegistry<CountingManager> = PoolRegistry::new();
+
+        let too_big = PoolConfig { max_size: 6, ..PoolConfig::default() };
+        let result = registry.get_or_create_within_ceiling("over", too_big, domain, || Ok(manager()));
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("max_size (6) exceeding the domain ceiling (5) must be refused, not silently allowed"),
+        };
+        assert!(err.contains("ceiling") && err.contains('6') && err.contains('5'), "expected a named, actionable ceiling error, got: {err}");
+        assert!(!registry.contains_key("over"), "a refused registration must not leave a pool behind");
+
+        let ok = PoolConfig { max_size: 5, ..PoolConfig::default() };
+        registry.get_or_create_within_ceiling("within", ok, domain, || Ok(manager())).expect("max_size equal to the ceiling must be allowed");
+        assert!(registry.contains_key("within"));
+    }
+
+    /// RFC 0011 §5's key-cap + fallback rule, the "dangerous direction to
+    /// get wrong" case named explicitly in the RFC: once
+    /// `NIRDOSHA_KERNEL_POOL_MAX_KEYS` distinct keys exist, a *new* key
+    /// must not grow the registry's `HashMap` — and the resulting
+    /// unpooled fallback dial must still move `kernel::acquire`'s
+    /// grant/denial counters exactly as if it were a normal checkout,
+    /// not silently bypass admission because it isn't a "real" checkout.
+    #[test]
+    fn checkout_with_key_cap_falls_back_to_unpooled_dialing_past_the_cap_and_still_brackets_acquire() {
+        // A small, low domain ceiling (2) so this test can also drive
+        // the *fallback path's own* acquire calls to a real denial,
+        // without needing thousands of iterations.
+        let domain = super::super::register_domain("phase5_key_cap_test_domain", "NIRDOSHA_KERNEL_MAX_PHASE5_KEY_CAP_TEST", 2);
+        // SAFETY (test-only): this env var is process-wide, but no other
+        // test in this crate reads NIRDOSHA_KERNEL_POOL_MAX_KEYS, and
+        // this test doesn't run concurrently with itself.
+        unsafe { std::env::set_var("NIRDOSHA_KERNEL_POOL_MAX_KEYS", "1") };
+
+        let registry: PoolRegistry<CountingManager> = PoolRegistry::new();
+        // max_size must fit the domain's own ceiling (2) too, since the
+        // pooled path goes through `get_or_create_within_ceiling`.
+        let cfg = PoolConfig { max_size: 2, ..PoolConfig::default() };
+
+        // First key: under the cap (0 existing keys < 1) -> pooled.
+        let first = registry.checkout_with_key_cap("k0", cfg, domain, || Ok(manager())).expect("the first key must be pooled");
+        assert!(matches!(first, Checkout::Pooled(_)), "the first key, under the cap, must be a normal pooled checkout");
+        assert_eq!(registry.pool_count(), 1);
+
+        let (held0, grants0, denials0, _) = super::super::stats(domain);
+        assert_eq!((held0, grants0, denials0), (0, 0, 0), "a pooled checkout must not itself move kernel::acquire's counters (unchanged from Phase 2b's convention: the caller brackets pooled checkouts, not pool.rs)");
+
+        // Second key: at the cap (1 existing key, not < 1) -> unpooled
+        // fallback. Must NOT grow the registry, and must go through
+        // kernel::acquire (grants: 0 -> 1, held: 0 -> 1).
+        let second = registry.checkout_with_key_cap("k1", cfg, domain, || Ok(manager())).expect("fallback dial must succeed while under the domain ceiling");
+        let guard1 = match second {
+            Checkout::Unpooled(g) => g,
+            Checkout::Pooled(_) => panic!("a key past the cap must fall back to unpooled, not silently pool anyway"),
+        };
+        assert_eq!(registry.pool_count(), 1, "an unpooled fallback must not add a HashMap entry");
+        let (held1, grants1, denials1, _) = super::super::stats(domain);
+        assert_eq!((held1, grants1, denials1), (1, 1, 0), "the fallback dial must be acquire-bracketed exactly like a real checkout");
+
+        // Third key: also past the cap -> another unpooled fallback,
+        // still within the domain ceiling of 2 (held 1 -> 2).
+        let third = registry.checkout_with_key_cap("k2", cfg, domain, || Ok(manager())).expect("second fallback dial must still succeed, at the ceiling");
+        let guard2 = match third {
+            Checkout::Unpooled(g) => g,
+            Checkout::Pooled(_) => panic!("must still fall back past the cap"),
+        };
+        assert_eq!(registry.pool_count(), 1, "still no HashMap growth from fallback keys");
+        let (held2, grants2, denials2, _) = super::super::stats(domain);
+        assert_eq!((held2, grants2, denials2), (2, 2, 0), "second fallback dial: held/grants both advance, at the domain ceiling now");
+
+        // Fourth key: past both the key cap AND the domain's own
+        // ceiling (already at 2/2 held) -> the fallback's own acquire
+        // must be denied, not silently let a third connection through.
+        let fourth = registry.checkout_with_key_cap("k3", cfg, domain, || Ok(manager()));
+        assert!(fourth.is_err(), "a fallback dial past the domain's own ceiling must be denied, not silently admitted");
+        assert_eq!(registry.pool_count(), 1, "a denied fallback must not add a HashMap entry either");
+        let (held3, grants3, denials3, _) = super::super::stats(domain);
+        assert_eq!((held3, grants3, denials3), (2, 2, 1), "the denied fallback must move the denials counter, not the held/grants ones");
+
+        // Dropping the fallback guards releases their admission --
+        // proving `release` isn't skipped just because the caller never
+        // explicitly called it.
+        drop(guard1);
+        drop(guard2);
+        let (held_after, _, _, _) = super::super::stats(domain);
+        assert_eq!(held_after, 0, "dropping every UnpooledConnection guard must release its admission back to zero");
+
+        unsafe { std::env::remove_var("NIRDOSHA_KERNEL_POOL_MAX_KEYS") };
     }
 }

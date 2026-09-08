@@ -2610,6 +2610,78 @@ fn oidc_validate_token_verifies_a_real_jwt_and_drives_check_role_and_extract_cla
     );
 }
 
+/// `mock_issue_token`'s real implementation, round-tripped through the
+/// exact same `oidc_validate_token`/`check_role`/`extract_claim` pipeline
+/// the test just above already proves against a hand-written fixture
+/// token -- this one signs its own token instead, against the same
+/// `kid:"key1"`/`kty:"oct"` JWKS, and feeds it straight back in. Real
+/// HMAC-SHA256 signing, not an echo: a wrong audience is still rejected
+/// by real signature/claim verification, and a JWKS with no usable
+/// signing key is a real `Err`, never a trap.
+#[test]
+fn mock_issue_token_signs_a_real_jwt_that_oidc_validate_token_accepts() {
+    let src = r#"
+        struct Text {
+            value: str,
+        }
+
+        fn main() {
+            let jwks: str = "{\"keys\":[{\"kid\":\"key1\",\"kty\":\"oct\",\"k\":\"bXktc2VjcmV0LWtleQ\"}]}"
+
+            let token: Text = match mock_issue_token("alice", "https://example.com", "my-app", 1700000000, 3600, "{\"roles\":[\"physician\"],\"department\":\"cardiology\"}", jwks) {
+                Err(e) => Text(e),
+                Ok(t) => Text(t),
+            }
+            print(len(token.value) > 0)
+
+            let identity: VerifiedIdentity = match oidc_validate_token(token.value, "https://example.com", "my-app", jwks) {
+                Err(e) => VerifiedIdentity("", "", "", 0, 0, "{}"),
+                Ok(id) => id,
+            }
+            print(identity.subject)
+            print(identity.issuer)
+            print(identity.audience)
+            print(identity.expires_at - identity.issued_at == 3600)
+
+            let has_physician: bool = match check_role(identity, "physician") {
+                Err(e) => false,
+                Ok(proof) => true,
+            }
+            print(has_physician)
+
+            let department: Text = match extract_claim(identity, "department") {
+                Err(e) => Text(e),
+                Ok(claim) => Text(claim.value),
+            }
+            print(department.value)
+
+            // Wrong audience is rejected by real claim verification, not
+            // just echoed back -- proves this is a real signed check, not
+            // a no-op stand-in.
+            let wrong_audience_rejected: bool = match oidc_validate_token(token.value, "https://example.com", "wrong-app", jwks) {
+                Err(e) => true,
+                Ok(id) => false,
+            }
+            print(wrong_audience_rejected)
+
+            // A JWKS with no usable (`oct`) signing key can't issue a
+            // token at all -- a real `Err`, never a trap.
+            let no_key_jwks: str = "{\"keys\":[]}"
+            let no_key_rejected: bool = match mock_issue_token("alice", "https://example.com", "my-app", 1700000000, 3600, "{}", no_key_jwks) {
+                Err(e) => true,
+                Ok(t) => false,
+            }
+            print(no_key_rejected)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        "1\nalice\nhttps://example.com\nmy-app\n1\n1\ncardiology\n1\n1\n"
+    );
+}
+
 /// Phase 2 (`db`, SQLite via `rusqlite`): a real, unmodified copy of
 /// `examples/features/27_database.nir` — `db_connect`/`db_execute`/
 /// `db_query`/`json_array_get`/`json_get_str`/`stop`, compiled and run
@@ -2623,6 +2695,40 @@ fn db_connect_execute_query_round_trips_real_sqlite_rows() {
     let (stdout, code) = compile_and_run(src);
     assert_eq!(code, 0);
     assert_eq!(stdout, "ada\n1\n");
+}
+
+/// `env(name) -> Result(str, str)` (RFC 0011 §1) — `Ok(value)` when the
+/// process environment variable is set at the compiled binary's own
+/// runtime (not at compile time), `Err(_)` when unset. Uniquely-named
+/// vars, same reasoning `unique_temp_path`'s own doc comment gives for
+/// SQLite files: a generic name here could collide with something real
+/// in whatever environment `cargo test` itself happens to run under.
+#[test]
+fn env_round_trips_ok_when_set_and_err_when_unset() {
+    // `describe`-as-a-fn would need `str` in its own signature -- banned
+    // (`typeck::TypeErrorKind::StrInFnSignature`, `result_of`'s own doc
+    // comment: builtins are exempt from this ban, plain user fns aren't)
+    // -- so both matches are inlined directly in `main` instead, same as
+    // `json_accessors_...`'s own `let name: str = match json_get_str(...)`
+    // shape just above.
+    let src = r#"
+        fn main() {
+            let set_var: str = match env("NIRDOSHA_RFC0011_ENV_TEST_SET_VAR") {
+                Err(e) => "MISSING",
+                Ok(v) => v,
+            }
+            print(set_var)
+            let unset_var: str = match env("NIRDOSHA_RFC0011_ENV_TEST_UNSET_VAR") {
+                Err(e) => "MISSING",
+                Ok(v) => v,
+            }
+            print(unset_var)
+        }
+    "#;
+    let (stdout, code) =
+        compile_and_run_with_env(src, codegen::OptLevel::O2, &[("NIRDOSHA_RFC0011_ENV_TEST_SET_VAR", "hello-rfc-0011")]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello-rfc-0011\nMISSING\n");
 }
 
 /// The rest of the `json_*` accessor surface `27_database.nir` doesn't
