@@ -114,11 +114,16 @@
 // to the compiler until a real caller exists.
 #![allow(dead_code)]
 
+pub mod db;
+pub mod http;
+pub mod identity;
+pub mod instance_lock;
 pub mod mailbox;
 pub mod nfr;
 pub mod pool;
 pub mod recorder;
 pub mod thread_pool;
+pub mod transact;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -161,6 +166,32 @@ pub enum Domain {
     /// just above, appended after it for the same "existing `Domain as
     /// u8` discriminants stay stable" reason.
     Mq,
+    /// One outstanding `http`/`https` connection (between `http_get`/
+    /// `http_post`/`https_get`/`https_post`'s pooled checkout and its
+    /// return) — same shape as `Db`/`Mq`, appended last for the same
+    /// discriminant-stability reason. Unlike `Db`, `http`/`https` has
+    /// no user-visible affine handle to hold this ceiling open across
+    /// (a client call is one request, not an open-then-`stop` session)
+    /// — admission is held for the duration of one pooled checkout,
+    /// released as soon as that request's connection returns to (or is
+    /// evicted from) the pool.
+    Http,
+    /// One outstanding compiled-`serve` (ROADMAP B8, `crates/compiled-serve`)
+    /// connection-handling thread — held for the whole life of a
+    /// keep-alive HTTP connection, including idle time between
+    /// requests, not just the time spent actually handling one. A
+    /// deliberately **separate** domain from `Thread`, not a reuse of
+    /// it: sharing `Thread`'s ceiling would mean a few hundred idle
+    /// browser tabs (each holding one keep-alive connection open,
+    /// ordinary behavior, not an attack) could fill it and start
+    /// denying user `spawn` calls inside request handlers — and since a
+    /// denied `spawn` returns a bare `-1` with no `Result` (a real,
+    /// separately-tracked language gap, not fixed here), a handler with
+    /// no way to notice would wedge on a `chan.recv()` that never
+    /// answers, invisibly, instead of failing fast. A dedicated domain
+    /// keeps "server saturated" and "compute saturated" distinguishable
+    /// in the flight recorder, and keeps one from starving the other.
+    ServeHttp,
 }
 
 impl Domain {
@@ -176,6 +207,8 @@ impl Domain {
             Domain::Thread => "NIRDOSHA_KERNEL_MAX_THREAD",
             Domain::Db => "NIRDOSHA_KERNEL_MAX_DB",
             Domain::Mq => "NIRDOSHA_KERNEL_MAX_MQ",
+            Domain::Http => "NIRDOSHA_KERNEL_MAX_HTTP",
+            Domain::ServeHttp => "NIRDOSHA_KERNEL_MAX_SERVE_HTTP",
         }
     }
 
@@ -193,13 +226,32 @@ struct DomainCounters {
     held: AtomicI64,
     grants: AtomicU64,
     denials: AtomicU64,
+    /// A pooled checkout (`kernel::db`, and later `kernel::http`) that
+    /// failed its `ManageConnection::is_valid` round-trip and was
+    /// evicted + transparently replaced before the caller ever saw the
+    /// staleness — this phase's own "APM rehydrates stale pooled
+    /// connections" design. Always `0` for a domain with no pooling
+    /// behind it (`Tcp`/`File`/`Thread`/`Mq` today) — same "the number
+    /// just stays honestly zero" posture `held`/`grants`/`denials`
+    /// already have for a domain that never denies anything.
+    stale_rehydrated: AtomicU64,
     max: OnceLock<i64>,
 }
 
 impl DomainCounters {
     const fn new() -> Self {
-        DomainCounters { held: AtomicI64::new(0), grants: AtomicU64::new(0), denials: AtomicU64::new(0), max: OnceLock::new() }
+        DomainCounters { held: AtomicI64::new(0), grants: AtomicU64::new(0), denials: AtomicU64::new(0), stale_rehydrated: AtomicU64::new(0), max: OnceLock::new() }
     }
+}
+
+/// Records one pooled checkout that had to evict a stale connection and
+/// open a fresh one before returning — called from `kernel::db`'s (and
+/// later `kernel::http`'s) `connect` path, never from `.nir`-visible
+/// code. Deliberately separate from [`acquire`]/[`release`]: rehydration
+/// is a pool-level event, not an admission decision — a rehydrated
+/// checkout still went through a real `acquire` either way.
+pub fn record_stale_rehydrated(domain: Domain) {
+    counters_for(domain).stale_rehydrated.fetch_add(1, Ordering::Relaxed);
 }
 
 static TCP: DomainCounters = DomainCounters::new();
@@ -207,6 +259,8 @@ static FILE: DomainCounters = DomainCounters::new();
 static THREAD: DomainCounters = DomainCounters::new();
 static DB: DomainCounters = DomainCounters::new();
 static MQ: DomainCounters = DomainCounters::new();
+static HTTP: DomainCounters = DomainCounters::new();
+static SERVE_HTTP: DomainCounters = DomainCounters::new();
 
 fn counters_for(domain: Domain) -> &'static DomainCounters {
     match domain {
@@ -215,6 +269,8 @@ fn counters_for(domain: Domain) -> &'static DomainCounters {
         Domain::Thread => &THREAD,
         Domain::Db => &DB,
         Domain::Mq => &MQ,
+        Domain::Http => &HTTP,
+        Domain::ServeHttp => &SERVE_HTTP,
     }
 }
 
@@ -266,10 +322,11 @@ pub fn release(domain: Domain) {
 
 /// Raw self-metrics — RFC 0007 §7's "kernel self-metrics are first-class"
 /// principle, in its smallest form: no exporter, no aggregation, just
-/// the numbers. `(currently_held, total_grants, total_denials)`.
-pub fn stats(domain: Domain) -> (i64, u64, u64) {
+/// the numbers. `(currently_held, total_grants, total_denials,
+/// total_stale_rehydrated)`.
+pub fn stats(domain: Domain) -> (i64, u64, u64, u64) {
     let c = counters_for(domain);
-    (c.held.load(Ordering::Relaxed), c.grants.load(Ordering::Relaxed), c.denials.load(Ordering::Relaxed))
+    (c.held.load(Ordering::Relaxed), c.grants.load(Ordering::Relaxed), c.denials.load(Ordering::Relaxed), c.stale_rehydrated.load(Ordering::Relaxed))
 }
 
 /// The flight recorder's one output: every domain's final counters,
@@ -293,23 +350,25 @@ pub fn stats(domain: Domain) -> (i64, u64, u64) {
 /// it's ever seen, not just a diagnostic curiosity.
 pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
-    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq)] {
-        let (held, grants, denials) = stats(domain);
-        out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials}\n"));
+    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq), ("http", Domain::Http), ("serve_http", Domain::ServeHttp)] {
+        let (held, grants, denials, stale_rehydrated) = stats(domain);
+        out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated}\n"));
     }
     out
 }
 
 /// A generic, process-wide table mapping an opaque, mint-once `i64`
-/// handle to a live Rust value `T` — for the next resource domain this
-/// project adds whose handle isn't already a raw OS fd (`json`'s parsed
-/// document, a `db` connection, an `mq` subscription). Same shape the
-/// now-removed `nirdosha-plugin-support::HandleRegistry` used, minus
-/// its interpreter-specific error-construction helpers (`Value`/
+/// handle to a live Rust value `T` — for a resource domain whose handle
+/// isn't already a raw OS fd (`json`'s parsed document, a `db`
+/// connection, an `mq` subscription). Same shape the now-removed
+/// `nirdosha-plugin-support::HandleRegistry` used, minus its
+/// interpreter-specific error-construction helpers (`Value`/
 /// `RuntimeError` don't exist on this side of the ABI boundary — this
 /// crate can't depend on the compiler crate at all, this file's own
-/// module doc). Not wired to any `nir_*` kernel yet; exists now so the
-/// next one that needs it doesn't invent its own table from scratch.
+/// module doc). **Doc-drift fix**: this comment used to say "not wired
+/// to any `nir_*` kernel yet" — `lib.rs`'s `db_table()` is a real,
+/// working `HandleTable<...>` today (`db`'s own `Domain::Db` doc
+/// comment above already reflects this; this one hadn't been updated).
 pub struct HandleTable<T> {
     next_id: AtomicI64,
     handles: Mutex<HashMap<i64, T>>,
@@ -547,12 +606,12 @@ mod tests {
 
     #[test]
     fn acquire_then_release_returns_to_zero_held() {
-        let (held_before, _, _) = stats(Domain::File);
+        let (held_before, _, _, _) = stats(Domain::File);
         assert!(acquire(Domain::File));
-        let (held_after_acquire, _, _) = stats(Domain::File);
+        let (held_after_acquire, _, _, _) = stats(Domain::File);
         assert_eq!(held_after_acquire, held_before + 1);
         release(Domain::File);
-        let (held_after_release, _, _) = stats(Domain::File);
+        let (held_after_release, _, _, _) = stats(Domain::File);
         assert_eq!(held_after_release, held_before);
     }
 
@@ -567,9 +626,9 @@ mod tests {
         unsafe { std::env::set_var("NIRDOSHA_KERNEL_MAX_TCP", "2") };
         assert!(acquire(Domain::Tcp));
         assert!(acquire(Domain::Tcp));
-        let (_, _, denials_before) = stats(Domain::Tcp);
+        let (_, _, denials_before, _) = stats(Domain::Tcp);
         assert!(!acquire(Domain::Tcp), "third acquire must be denied at a ceiling of 2");
-        let (held, _, denials_after) = stats(Domain::Tcp);
+        let (held, _, denials_after, _) = stats(Domain::Tcp);
         assert_eq!(held, 2, "a denied acquire must not increment held");
         assert_eq!(denials_after, denials_before + 1);
         release(Domain::Tcp);

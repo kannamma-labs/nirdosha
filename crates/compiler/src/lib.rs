@@ -5,7 +5,6 @@ pub mod crud_gen;
 pub mod effects;
 pub mod extraction_schema;
 pub mod init;
-pub mod instance_lock;
 pub mod loader;
 pub mod migrate;
 pub mod ownership;

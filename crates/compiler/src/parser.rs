@@ -336,6 +336,8 @@ impl Parser {
         let mut enums = prelude_enums();
         let mut screens = Vec::new();
         let mut dashboard = None;
+        let mut landing = None;
+        let mut serve_config = None;
         let mut workflows = Vec::new();
         let mut workspaces = Vec::new();
         let mut validates = Vec::new();
@@ -370,6 +372,26 @@ impl Parser {
                     }
                     dashboard = Some(d);
                 }
+                Tok::Landing => {
+                    let l = self.parse_landing_decl()?;
+                    if landing.is_some() {
+                        return Err(ParseError {
+                            message: "only one `landing { ... }` block is allowed per program".to_string(),
+                            span: l.span,
+                        });
+                    }
+                    landing = Some(l);
+                }
+                Tok::Serve => {
+                    let sc = self.parse_serve_config_decl()?;
+                    if serve_config.is_some() {
+                        return Err(ParseError {
+                            message: "only one `serve { ... }` block is allowed per program".to_string(),
+                            span: sc.span,
+                        });
+                    }
+                    serve_config = Some(sc);
+                }
                 Tok::Module => {
                     let (mut mfns, mut mstructs, mut menums) = self.parse_module_decl()?;
                     fns.append(&mut mfns);
@@ -379,7 +401,7 @@ impl Parser {
                 _ => fns.push(self.parse_fn_decl()?),
             }
         }
-        let mut program = Program { fns, structs, enums, screens, dashboard, workflows, workspaces, validates, imports };
+        let mut program = Program { fns, structs, enums, screens, dashboard, landing, serve_config, workflows, workspaces, validates, imports };
         crate::workflow_lower::lower(&mut program)?;
         Ok(program)
     }
@@ -442,9 +464,9 @@ impl Parser {
                         span: self.span(),
                     });
                 }
-                Tok::Screen | Tok::Dashboard => {
+                Tok::Screen | Tok::Dashboard | Tok::Landing | Tok::Serve => {
                     return Err(ParseError {
-                        message: "`screen`/`dashboard` blocks must be declared at top level, outside any `module`".to_string(),
+                        message: "`screen`/`dashboard`/`landing`/`serve` blocks must be declared at top level, outside any `module`".to_string(),
                         span: self.span(),
                     });
                 }
@@ -523,9 +545,9 @@ impl Parser {
                         span: self.span(),
                     });
                 }
-                Tok::Screen | Tok::Dashboard => {
+                Tok::Screen | Tok::Dashboard | Tok::Landing | Tok::Serve => {
                     return Err(ParseError {
-                        message: "`screen`/`dashboard` blocks must be declared at top level, outside any `module`".to_string(),
+                        message: "`screen`/`dashboard`/`landing`/`serve` blocks must be declared at top level, outside any `module`".to_string(),
                         span: self.span(),
                     });
                 }
@@ -905,6 +927,99 @@ impl Parser {
         }
         self.expect(&Tok::RBrace, "`}`")?;
         Ok(DashboardDecl { tiles, charts, visuals, span })
+    }
+
+    /// `landing_decl ::= "landing" "{" landing_rule* "}"`
+    /// `landing_rule ::= ("role" "(" STRING ")" | "claim" "(" STRING "," STRING ")" | "default")`
+    ///                   "->" IDENT
+    /// (`rfcs/0010-landing-and-serve-exposure.md`) — `role`/`claim`/
+    /// `default` are plain idents matched by string here, exactly the
+    /// same contextual-keyword treatment `tile`/`chart`/`visual` already
+    /// get inside `dashboard { ... }` just above, and the same
+    /// `role`/`claim` vocabulary `parse_requires_annotation` uses for
+    /// `requires(...)` (deliberately not shared code — the concrete
+    /// syntax differs, `role("x")` here vs. `role: "x"` there, since a
+    /// `landing` rule's target needs a trailing `-> IDENT` a `requires`
+    /// gate never has). Target resolution against a real `screen` is
+    /// `typeck::check_landing`'s job, not this layer's.
+    fn parse_landing_decl(&mut self) -> PResult<LandingDecl> {
+        let span = self.span();
+        self.expect(&Tok::Landing, "`landing`")?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut rules = Vec::new();
+        while self.peek().tok != Tok::RBrace {
+            let item_span = self.span();
+            let kw = self.expect_ident()?;
+            let condition = match kw.as_str() {
+                "role" => {
+                    self.expect(&Tok::LParen, "`(`")?;
+                    let role = self.expect_str_lit("a role name")?;
+                    self.expect(&Tok::RParen, "`)`")?;
+                    LandingCondition::Requirement(Requirement::Role(role))
+                }
+                "claim" => {
+                    self.expect(&Tok::LParen, "`(`")?;
+                    let name = self.expect_str_lit("a claim name")?;
+                    self.expect(&Tok::Comma, "`,`")?;
+                    let value = self.expect_str_lit("the claim's required value")?;
+                    self.expect(&Tok::RParen, "`)`")?;
+                    LandingCondition::Requirement(Requirement::Claim(name, value))
+                }
+                "default" => LandingCondition::Default,
+                other => {
+                    return Err(ParseError {
+                        message: format!("expected `role(...)`, `claim(...)`, or `default`, found identifier `{other}`"),
+                        span: item_span,
+                    });
+                }
+            };
+            self.expect(&Tok::Arrow, "`->`")?;
+            let target = self.expect_ident()?;
+            rules.push(LandingRule { condition, target, span: item_span });
+        }
+        self.expect(&Tok::RBrace, "`}`")?;
+        Ok(LandingDecl { rules, span })
+    }
+
+    /// `serve_decl ::= "serve" "{" ("expose" IDENT ("," IDENT)* ","?)? "}"`
+    /// (`rfcs/0010-landing-and-serve-exposure.md`) — `expose` is a plain
+    /// ident matched by string, same contextual-keyword treatment
+    /// `role`/`claim`/`default` get inside `landing { ... }`; a trailing
+    /// comma after the last name is allowed (matching `variant`'s own
+    /// trailing-comma convention in `parse_enum_decl`), so a multi-line
+    /// list reads naturally. Fn-name resolution and the deny-by-default
+    /// mutating-exposure rule are `typeck::check_serve_config`'s job, not
+    /// this layer's.
+    fn parse_serve_config_decl(&mut self) -> PResult<ServeConfigDecl> {
+        let span = self.span();
+        self.expect(&Tok::Serve, "`serve`")?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut expose = Vec::new();
+        while self.peek().tok != Tok::RBrace {
+            let kw_span = self.span();
+            let kw = self.expect_ident()?;
+            if kw != "expose" {
+                return Err(ParseError {
+                    message: format!("expected `expose`, found identifier `{kw}`"),
+                    span: kw_span,
+                });
+            }
+            loop {
+                let name_span = self.span();
+                let name = self.expect_ident()?;
+                expose.push((name, name_span));
+                if self.peek().tok == Tok::Comma {
+                    self.bump();
+                    if self.peek().tok == Tok::RBrace {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Tok::RBrace, "`}`")?;
+        Ok(ServeConfigDecl { expose, span })
     }
 
     /// `workspace_decl ::= "workspace" IDENT "{" workspace_item* "}"`

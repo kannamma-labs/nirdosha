@@ -18,12 +18,23 @@
 *.db
 *.db.lock
 
+# `transact`'s durability log (kernel::transact's default
+# NIRDOSHA_TRANSACT_LOG_PATH, cwd-relative) — a compiled binary's own
+# runtime output, not source. Left behind by running any compiled `.nir`
+# program with a live `transact` block from the repo root or a crate
+# directory without overriding the env var.
+nirdosha_transact_log.sqlite*
+
 # Flight recorder dump — a compiled `.nir` binary's own runtime output
 # (kernel::recorder's default NIRDOSHA_KERNEL_RECORDER_PATH), not source
 *flight_recorder*.log.gz
 
 # Claude Code local session/state (never commit)
 /.claude
+
+# Locally-run compiled binaries (e.g. the Ops Console server kept
+# running for a live browser demo) -- build artifacts, not source
+/.local-bin
 
 # Launch marketing drafts (not project documentation)
 /announcements

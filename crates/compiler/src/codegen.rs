@@ -258,7 +258,20 @@ const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "d
 /// `check_role_path`/`extract_claim_path` and the rest of Row 12
 /// (sessions/refresh/revocation/`validate_api_key`) remain real,
 /// narrower follow-up work, not attempted here.
-const IDENTITY_BUILTINS: &[&str] = &["check_role", "oidc_validate_token", "extract_claim", "identity_expired"];
+const IDENTITY_BUILTINS: &[&str] = &[
+    "check_role",
+    "oidc_validate_token",
+    "extract_claim",
+    "identity_expired",
+    "check_role_path",
+    "extract_claim_path",
+    "check_revocation",
+    "create_application_session",
+    "session_cookie",
+    "new_refresh_token",
+    "exchange_refresh_token",
+    "validate_api_key",
+];
 
 /// `db_connect`/`db_query`/`db_execute` — real SQLite connectivity
 /// (`Ty::Db`'s own doc comment, `nir_db_*`, `runtime-kernels/src/lib.rs`'s
@@ -339,6 +352,18 @@ const NOTIFY_BUILTINS: &[&str] = &["send_email", "send_sms", "send_push", "notif
 /// agree without either one computing offsets by hand). Field order:
 /// `tag`(i32) / `i`(i64) / `f`(double) / `s_ptr`(ptr) / `s_len`(i64).
 const NIR_BIND_VALUE_LLTY: &str = "{ i32, i64, double, ptr, i64 }";
+
+/// `transact { commit/compensate }`'s bounded retry-with-backoff
+/// (`Codegen::emit_call_with_retry`) — a fixed compile-time attempt
+/// count and a doubling backoff (`nir_sleep_ms`) between attempts, e.g.
+/// 100ms/200ms/400ms for the two retries after the first attempt.
+/// Deliberately small and fixed rather than configurable: this phase's
+/// durability guarantee doesn't depend on how many live retries happen
+/// before a `commit`/`compensate` is left `*_pending` for replay to
+/// finish later — retrying live is purely a latency optimization for
+/// the common transient-failure case, not the actual safety mechanism.
+const TRANSACT_RETRY_MAX_ATTEMPTS: i64 = 3;
+const TRANSACT_RETRY_BASE_BACKOFF_MS: i64 = 100;
 
 /// WGS84 ellipsoid constants — mirrors `interpreter.rs`'s own
 /// `WGS84_A`/`WGS84_F`/`wgs84_e2()` exactly (same values, same derived
@@ -1392,6 +1417,16 @@ struct Codegen<'a> {
     /// works unmodified), then swapping back; appended to `self.out` once
     /// at the very end, alongside `string_globals`.
     trampolines: String,
+    /// One entry per `transact` call site actually compiled — `(site_id,
+    /// trampoline_function_name)`, consumed once by `emit_c_main` to
+    /// emit `nir_transact_register_replay_site` calls in generated
+    /// `main`'s own prologue. Empty for a program that never uses
+    /// `transact` at all, so `nir_transact_log_init`/`nir_transact_replay_all`
+    /// are only emitted (and only ever open/touch a durability log file)
+    /// when the program actually needs them — the same zero-cost-when-
+    /// unused posture every other optional kernel subsystem here already
+    /// has.
+    transact_sites: Vec<(i64, String)>,
     tmp: usize,
     label: usize,
     smt_report: &'a SmtReport,
@@ -1562,6 +1597,7 @@ fn emit_llvm_ir_impl<'a>(
             entry_allocas: String::new(),
             string_globals: String::new(),
             trampolines: String::new(),
+            transact_sites: Vec::new(),
             tmp: 0,
             label: 0,
             smt_report,
@@ -1710,6 +1746,21 @@ fn emit_llvm_ir_impl<'a>(
     )
     .unwrap();
     writeln!(cg.out, "declare i32 @nir_extract_claim(ptr, i64, ptr, i64, ptr)").unwrap();
+    // The rest of Row 12 (`docs/nirdosha_row12_functions_identity.md`,
+    // `kernel::identity`'s own module doc has the full design): dotted-
+    // path claim lookup, sessions, refresh tokens, revocation, API keys.
+    writeln!(cg.out, "declare i32 @nir_check_role_path(ptr, i64, ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_extract_claim_path(ptr, i64, ptr, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_check_revocation(ptr, i64)").unwrap();
+    writeln!(cg.out, "declare void @nir_create_application_session(ptr, ptr, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_session_cookie(ptr, i64, i64, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_new_refresh_token(i64, ptr)").unwrap();
+    writeln!(
+        cg.out,
+        "declare i32 @nir_exchange_refresh_token(i64, i64, ptr, i64, ptr, i64, ptr, i64, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr)"
+    )
+    .unwrap();
+    writeln!(cg.out, "declare i32 @nir_validate_api_key(ptr, i64, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr)").unwrap();
     // `db`/`json` (`DB_BUILTINS`/`JSON_BUILTINS`'s own doc comments) —
     // real SQLite connectivity and JSON navigation. Every bind-value
     // param below is `ptr` to a `[N x NIR_BIND_VALUE_LLTY]` array (or
@@ -1732,6 +1783,20 @@ fn emit_llvm_ir_impl<'a>(
     // implementation; `sleep_ms`, ordinary compiled `sleep_ms(ms)` (`B9`).
     writeln!(cg.out, "declare void @nir_transact_gen_txn_id(ptr)").unwrap();
     writeln!(cg.out, "declare void @nir_sleep_ms(i64)").unwrap();
+    // Durability log + crash replay (`kernel::transact`'s own module doc
+    // has the full design) — every `nir_transact_*` here is a no-op on
+    // a program that never calls it (the log file is never even opened
+    // unless `nir_transact_log_init` itself is emitted, gated on
+    // `Codegen::transact_sites` being non-empty).
+    writeln!(cg.out, "declare i32 @nir_transact_log_init()").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_begin(ptr, i64, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_commit_pending(ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_compensate_pending(ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_committed(ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_transact_mark_compensated(ptr, i64)").unwrap();
+    writeln!(cg.out, "declare i64 @nir_transact_decode_args(ptr, i64, ptr, i64)").unwrap();
+    writeln!(cg.out, "declare void @nir_transact_register_replay_site(i64, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_transact_replay_all()").unwrap();
     // `mq`/`http`/`https` (`MQ_BUILTINS`/`HTTP_BUILTINS`'s own doc
     // comments) — real Redis connectivity and HTTP(S) client calls.
     writeln!(cg.out, "declare i32 @nir_mq_connect(ptr, i64, i64, ptr, ptr)").unwrap();
@@ -1939,6 +2004,21 @@ impl Codegen<'_> {
     /// i64 <word_off>` gives an always-8-byte-aligned address for any
     /// field store/load (every type this language has needs at most
     /// 8-byte alignment).
+    ///
+    /// A real, pre-existing gap found this session (2026-09), disclosed
+    /// rather than fixed here: `match <result_expr> { Ok(j) => Ok(j),
+    /// Err(e) => Err(e) }` -- re-wrapping a `Result` value inside a
+    /// `match` where an arm's own tail expression directly constructs
+    /// `Ok(...)`/`Err(...)` -- hits this function's own `unreachable!`
+    /// with `decl_name="Ok"` (or `"Err"`): whatever infers that arm's own
+    /// type resolves `Ok`/`Err` as if they named a plain, zero-type-
+    /// argument struct/enum, instead of the prelude `Result` enum's own
+    /// generic variant constructors. Confirmed independent of which
+    /// concrete types are involved. Workaround used throughout
+    /// `examples/features/55_nirdosha_ops_console.nir`: route each arm
+    /// through a small named helper (`fn wrap_ok(v: T) -> Result(T, E)
+    /// { return Ok(v) }`) instead of writing the bare constructor as the
+    /// arm's own tail expression.
     fn declare_named_type(&mut self, ty: &Ty) -> Result<(), CodegenError> {
         let Ty::Named(decl_name, args) = ty else {
             return Ok(());
@@ -1984,7 +2064,7 @@ impl Codegen<'_> {
             writeln!(self.named_type_decls, "%{mangled} = type {{ i64, [{n} x i64] }}").unwrap();
             Ok(())
         } else {
-            unreachable!("typeck.rs already proved every Ty::Named resolves to a struct or enum")
+            unreachable!("typeck.rs already proved every Ty::Named resolves to a struct or enum: decl_name={decl_name:?} args={args:?} mangled={mangled:?}")
         }
     }
 
@@ -2608,6 +2688,22 @@ impl Codegen<'_> {
                 Ty::Named("Result".to_string(), vec![Ty::Named("ClaimView".to_string(), vec![]), Ty::Str])
             }
             Expr::Call(name, _, _) if name == "identity_expired" => Ty::Bool,
+            Expr::Call(name, _, _) if name == "check_role_path" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("RoleView".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "extract_claim_path" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("ClaimView".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "check_revocation" => Ty::Bool,
+            Expr::Call(name, _, _) if name == "create_application_session" => Ty::Named("ApplicationSession".to_string(), vec![]),
+            Expr::Call(name, _, _) if name == "session_cookie" => Ty::Str,
+            Expr::Call(name, _, _) if name == "new_refresh_token" => Ty::Named("RefreshTokenHandle".to_string(), vec![]),
+            Expr::Call(name, _, _) if name == "exchange_refresh_token" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "validate_api_key" => {
+                Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
+            }
             Expr::Call(name, _, _) if name == "db_connect" => {
                 Ty::Named("Result".to_string(), vec![Ty::Db, Ty::Str])
             }
@@ -4294,6 +4390,12 @@ impl Codegen<'_> {
             let now = self.expr(&args[1], scopes)?;
             return self.icmp("sgt", "i64", &now, &expires_at);
         }
+        if name == "check_revocation" {
+            return self.emit_check_revocation(args, scopes);
+        }
+        if name == "session_cookie" {
+            return self.emit_session_cookie(args, scopes);
+        }
         if name == "rand_seed" {
             // Every integer-typed `expr()` result is already `i64`
             // (module doc) regardless of `rand_seed`'s argument's own
@@ -5390,6 +5492,30 @@ impl Codegen<'_> {
         if name == "extract_claim" {
             return self.emit_extract_claim(args, scopes);
         }
+        if name == "check_role_path" {
+            return self.emit_check_role_path(args, scopes);
+        }
+        if name == "extract_claim_path" {
+            return self.emit_extract_claim_path(args, scopes);
+        }
+        if name == "check_revocation" {
+            return self.emit_check_revocation(args, scopes);
+        }
+        if name == "create_application_session" {
+            return self.emit_create_application_session(args, scopes);
+        }
+        if name == "session_cookie" {
+            return self.emit_session_cookie(args, scopes);
+        }
+        if name == "new_refresh_token" {
+            return self.emit_new_refresh_token(args, scopes);
+        }
+        if name == "exchange_refresh_token" {
+            return self.emit_exchange_refresh_token(args, scopes);
+        }
+        if name == "validate_api_key" {
+            return self.emit_validate_api_key(args, scopes);
+        }
         if name == "db_connect" {
             return self.emit_db_connect(args, scopes);
         }
@@ -5731,6 +5857,405 @@ impl Codegen<'_> {
         let msg_full = self.fresh_reg("extract_claim_err_msg_full");
         writeln!(self.out, "  {msg_full} = insertvalue {{ptr, i64}} {msg_partial}, i64 {}, 1", MSG.len()).unwrap();
         writeln!(self.out, "  store {{ptr, i64}} {msg_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `check_role_path(identity, path, role) -> Result(RoleView, str)` —
+    /// `emit_check_role`'s own twin, with a dotted `path` argument threaded
+    /// through to `nir_check_role_path` instead of assuming a top-level
+    /// `"roles"` key.
+    fn emit_check_role_path(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let role_view_ty = Ty::Named("RoleView".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![role_view_ty, Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("check_role_path_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("check_role_path_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("check_role_path_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("check_role_path_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+        let (path_ptr, path_len) = self.str_parts(&args[1], scopes)?;
+        let role_val = self.expr(&args[2], scopes)?;
+        let role_ptr = self.fresh_reg("check_role_path_role_ptr");
+        writeln!(self.out, "  {role_ptr} = extractvalue {{ptr, i64}} {role_val}, 0").unwrap();
+        let role_len = self.fresh_reg("check_role_path_role_len");
+        writeln!(self.out, "  {role_len} = extractvalue {{ptr, i64}} {role_val}, 1").unwrap();
+
+        let found = self.fresh_reg("check_role_path_found");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_check_role_path(ptr {claims_ptr}, i64 {claims_len}, ptr {path_ptr}, i64 {path_len}, ptr {role_ptr}, i64 {role_len})"
+        )
+        .unwrap();
+        let is_found = self.fresh_reg("check_role_path_is_found");
+        writeln!(self.out, "  {is_found} = icmp ne i32 {found}, 0").unwrap();
+
+        let err_msg = self.const_str_value("check_role_path_err_msg", "role not present at the given claims path");
+        self.emit_result_merge(&result_ty, &is_found, "{ptr, i64}", &role_val, &err_msg, "check_role_path")
+    }
+
+    /// `extract_claim_path(identity, path) -> Result(ClaimView, str)` —
+    /// `emit_extract_claim`'s own twin with a dotted path.
+    fn emit_extract_claim_path(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let claim_view_ty = Ty::Named("ClaimView".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![claim_view_ty, Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("extract_claim_path_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("extract_claim_path_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("extract_claim_path_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("extract_claim_path_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+        let (path_ptr, path_len) = self.str_parts(&args[1], scopes)?;
+
+        let out_scratch = self.fresh_reg("extract_claim_path_out_scratch");
+        self.emit_alloca(&out_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("extract_claim_path_found");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_extract_claim_path(ptr {claims_ptr}, i64 {claims_len}, ptr {path_ptr}, i64 {path_len}, ptr {out_scratch})"
+        )
+        .unwrap();
+        let is_found = self.fresh_reg("extract_claim_path_is_found");
+        writeln!(self.out, "  {is_found} = icmp ne i32 {found}, 0").unwrap();
+        let value_val = self.fresh_reg("extract_claim_path_value");
+        writeln!(self.out, "  {value_val} = load {{ptr, i64}}, ptr {out_scratch}").unwrap();
+
+        let err_msg = self.const_str_value("extract_claim_path_err_msg", "claim not present at the given path");
+        self.emit_result_merge(&result_ty, &is_found, "{ptr, i64}", &value_val, &err_msg, "extract_claim_path")
+    }
+
+    /// `check_revocation(identity) -> bool` — infallible, a plain GEP +
+    /// linked call + `icmp`, same "no `Result` wrap" shape
+    /// `identity_expired` already has (unlike that one, this needs a real
+    /// JSON-parsing kernel call, not just a memory read, since `"revoked"`
+    /// lives inside `claims_json`, not a dedicated struct field).
+    fn emit_check_revocation(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let (claims_idx, _) = self.field_index_and_ty(&identity_ty, "claims_json").expect("VerifiedIdentity always has claims_json, ast::prelude_structs");
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let claims_field_ptr = self.fresh_reg("check_revocation_claims_ptr");
+        writeln!(self.out, "  {claims_field_ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {claims_idx}").unwrap();
+        let claims_val = self.fresh_reg("check_revocation_claims_val");
+        writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {claims_field_ptr}").unwrap();
+        let claims_ptr = self.fresh_reg("check_revocation_claims_data_ptr");
+        writeln!(self.out, "  {claims_ptr} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+        let claims_len = self.fresh_reg("check_revocation_claims_len");
+        writeln!(self.out, "  {claims_len} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+        let revoked = self.fresh_reg("check_revocation_revoked");
+        writeln!(self.out, "  {revoked} = call i32 @nir_check_revocation(ptr {claims_ptr}, i64 {claims_len})").unwrap();
+        self.icmp("ne", "i32", &revoked, "0")
+    }
+
+    /// `create_application_session(identity) -> ApplicationSession` —
+    /// infallible. `identity_subject`/`identity_issuer` are plain copies
+    /// of the input identity's own `subject`/`issuer` fields (no kernel
+    /// call needed for those two); `session_id`/`created_at`/`expires_at`/
+    /// `last_accessed_at` are written directly into the destination
+    /// struct's own field pointers by `nir_create_application_session`,
+    /// same "the out-params *are* the field pointers" discipline
+    /// `emit_oidc_validate_token` already established.
+    fn emit_create_application_session(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let session_ty = Ty::Named("ApplicationSession".to_string(), vec![]);
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+
+        let read_str_field = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("create_session_identity_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {idx}").unwrap();
+            let val = cg.fresh_reg(&format!("create_session_identity_{field}_val"));
+            writeln!(cg.out, "  {val} = load {{ptr, i64}}, ptr {ptr}").unwrap();
+            val
+        };
+        let subject_val = read_str_field(self, "subject");
+        let issuer_val = read_str_field(self, "issuer");
+
+        let session_llty = self.llvm_ty(&session_ty)?;
+        let dest = self.fresh_reg("create_session_dest");
+        self.emit_alloca(&dest, &session_llty);
+        let field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&session_ty, field).expect("ApplicationSession always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("create_session_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {session_llty}, ptr {dest}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let session_id_ptr = field_ptr(self, "session_id");
+        let identity_subject_ptr = field_ptr(self, "identity_subject");
+        let identity_issuer_ptr = field_ptr(self, "identity_issuer");
+        let created_at_ptr = field_ptr(self, "created_at");
+        let expires_at_ptr = field_ptr(self, "expires_at");
+        let last_accessed_at_ptr = field_ptr(self, "last_accessed_at");
+
+        writeln!(self.out, "  store {{ptr, i64}} {subject_val}, ptr {identity_subject_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {issuer_val}, ptr {identity_issuer_ptr}").unwrap();
+        writeln!(
+            self.out,
+            "  call void @nir_create_application_session(ptr {session_id_ptr}, ptr {created_at_ptr}, ptr {expires_at_ptr}, ptr {last_accessed_at_ptr})"
+        )
+        .unwrap();
+        Ok(dest)
+    }
+
+    /// `session_cookie(session) -> str` — infallible, a plain formatted
+    /// string built from the session's own real `session_id`/
+    /// `created_at`/`expires_at` fields.
+    fn emit_session_cookie(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let session_ty = Ty::Named("ApplicationSession".to_string(), vec![]);
+        let session_ptr = self.expr_ptr_expected(&args[0], &session_ty, scopes)?;
+        let session_llty = self.llvm_ty(&session_ty)?;
+
+        let (sid_idx, _) = self.field_index_and_ty(&session_ty, "session_id").expect("ApplicationSession always has session_id, ast::prelude_structs");
+        let sid_field_ptr = self.fresh_reg("session_cookie_sid_field_ptr");
+        writeln!(self.out, "  {sid_field_ptr} = getelementptr inbounds {session_llty}, ptr {session_ptr}, i32 0, i32 {sid_idx}").unwrap();
+        let sid_val = self.fresh_reg("session_cookie_sid_val");
+        writeln!(self.out, "  {sid_val} = load {{ptr, i64}}, ptr {sid_field_ptr}").unwrap();
+        let sid_ptr = self.fresh_reg("session_cookie_sid_ptr");
+        writeln!(self.out, "  {sid_ptr} = extractvalue {{ptr, i64}} {sid_val}, 0").unwrap();
+        let sid_len = self.fresh_reg("session_cookie_sid_len");
+        writeln!(self.out, "  {sid_len} = extractvalue {{ptr, i64}} {sid_val}, 1").unwrap();
+
+        let read_i64_field = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&session_ty, field).expect("ApplicationSession always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("session_cookie_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {session_llty}, ptr {session_ptr}, i32 0, i32 {idx}").unwrap();
+            let val = cg.fresh_reg(&format!("session_cookie_{field}_val"));
+            writeln!(cg.out, "  {val} = load i64, ptr {ptr}").unwrap();
+            val
+        };
+        let created_at = read_i64_field(self, "created_at");
+        let expires_at = read_i64_field(self, "expires_at");
+
+        let out_scratch = self.fresh_reg("session_cookie_out_scratch");
+        self.emit_alloca(&out_scratch, "{ptr, i64}");
+        writeln!(
+            self.out,
+            "  call void @nir_session_cookie(ptr {sid_ptr}, i64 {sid_len}, i64 {created_at}, i64 {expires_at}, ptr {out_scratch})"
+        )
+        .unwrap();
+        let cookie_val = self.fresh_reg("session_cookie_val");
+        writeln!(self.out, "  {cookie_val} = load {{ptr, i64}}, ptr {out_scratch}").unwrap();
+        Ok(cookie_val)
+    }
+
+    /// `new_refresh_token(expires_at) -> RefreshTokenHandle` — infallible.
+    /// The `handle: box i64` field's own heap slot (a real `nir_alloc(8)`,
+    /// the same allocator `Expr::Box` construction already uses) is
+    /// passed *directly* as the kernel's `out_handle_id` — the box's
+    /// storage and the out-param are the same memory, no intermediate
+    /// scratch/copy needed, the same "out-param is the real field
+    /// pointer" discipline this file's other identity emitters already
+    /// use for aggregate fields.
+    fn emit_new_refresh_token(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let handle_ty = Ty::Named("RefreshTokenHandle".to_string(), vec![]);
+        let expires_at = self.expr(&args[0], scopes)?;
+
+        let heap_ptr = self.fresh_reg("new_refresh_token_heap");
+        writeln!(self.out, "  {heap_ptr} = call ptr @nir_alloc(i64 8)").unwrap();
+        writeln!(self.out, "  call void @nir_new_refresh_token(i64 {expires_at}, ptr {heap_ptr})").unwrap();
+
+        let handle_llty = self.llvm_ty(&handle_ty)?;
+        let dest = self.fresh_reg("new_refresh_token_dest");
+        self.emit_alloca(&dest, &handle_llty);
+        let (handle_idx, _) = self.field_index_and_ty(&handle_ty, "handle").expect("RefreshTokenHandle always has handle, ast::prelude_structs");
+        let handle_field_ptr = self.fresh_reg("new_refresh_token_handle_field_ptr");
+        writeln!(self.out, "  {handle_field_ptr} = getelementptr inbounds {handle_llty}, ptr {dest}, i32 0, i32 {handle_idx}").unwrap();
+        writeln!(self.out, "  store ptr {heap_ptr}, ptr {handle_field_ptr}").unwrap();
+        let (expires_idx, _) = self.field_index_and_ty(&handle_ty, "expires_at").expect("RefreshTokenHandle always has expires_at, ast::prelude_structs");
+        let expires_field_ptr = self.fresh_reg("new_refresh_token_expires_field_ptr");
+        writeln!(self.out, "  {expires_field_ptr} = getelementptr inbounds {handle_llty}, ptr {dest}, i32 0, i32 {expires_idx}").unwrap();
+        writeln!(self.out, "  store i64 {expires_at}, ptr {expires_field_ptr}").unwrap();
+        Ok(dest)
+    }
+
+    /// `exchange_refresh_token(identity, handle, new_issued_at) ->
+    /// Result(VerifiedIdentity, str)` — redeems `handle`'s own boxed id
+    /// (dereferenced here — two loads, `ptr` then the `i64` it points
+    /// at, same shape `Expr::Deref` already uses for any `box i64`) and,
+    /// on success, reissues `identity` with a fresh `issued_at`. Same
+    /// out-param-is-the-real-field-pointer + `Result`-merge shape
+    /// `emit_oidc_validate_token` already established for a
+    /// `VerifiedIdentity` payload.
+    fn emit_exchange_refresh_token(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let handle_ty = Ty::Named("RefreshTokenHandle".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![identity_ty.clone(), Ty::Str]);
+
+        let identity_ptr = self.expr_ptr_expected(&args[0], &identity_ty, scopes)?;
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let read_str_field = |cg: &mut Self, field: &str| -> (String, String) {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let fptr = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_fptr"));
+            writeln!(cg.out, "  {fptr} = getelementptr inbounds {identity_llty}, ptr {identity_ptr}, i32 0, i32 {idx}").unwrap();
+            let val = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_val"));
+            writeln!(cg.out, "  {val} = load {{ptr, i64}}, ptr {fptr}").unwrap();
+            let p = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_ptr"));
+            writeln!(cg.out, "  {p} = extractvalue {{ptr, i64}} {val}, 0").unwrap();
+            let l = cg.fresh_reg(&format!("exchange_refresh_identity_{field}_len"));
+            writeln!(cg.out, "  {l} = extractvalue {{ptr, i64}} {val}, 1").unwrap();
+            (p, l)
+        };
+        let (subject_ptr, subject_len) = read_str_field(self, "subject");
+        let (issuer_ptr, issuer_len) = read_str_field(self, "issuer");
+        let (audience_ptr, audience_len) = read_str_field(self, "audience");
+        let (claims_ptr, claims_len) = read_str_field(self, "claims_json");
+
+        let handle_ptr = self.expr_ptr_expected(&args[1], &handle_ty, scopes)?;
+        let handle_llty = self.llvm_ty(&handle_ty)?;
+        let (handle_idx, _) = self.field_index_and_ty(&handle_ty, "handle").expect("RefreshTokenHandle always has handle, ast::prelude_structs");
+        let handle_field_ptr = self.fresh_reg("exchange_refresh_handle_field_ptr");
+        writeln!(self.out, "  {handle_field_ptr} = getelementptr inbounds {handle_llty}, ptr {handle_ptr}, i32 0, i32 {handle_idx}").unwrap();
+        let box_ptr = self.fresh_reg("exchange_refresh_box_ptr");
+        writeln!(self.out, "  {box_ptr} = load ptr, ptr {handle_field_ptr}").unwrap();
+        let handle_id = self.fresh_reg("exchange_refresh_handle_id");
+        writeln!(self.out, "  {handle_id} = load i64, ptr {box_ptr}").unwrap();
+
+        let new_issued_at = self.expr(&args[2], scopes)?;
+
+        let identity_scratch = self.fresh_reg("exchange_refresh_identity_scratch");
+        self.emit_alloca(&identity_scratch, &identity_llty);
+        let out_field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("exchange_refresh_out_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_scratch}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let out_subject_ptr = out_field_ptr(self, "subject");
+        let out_issuer_ptr = out_field_ptr(self, "issuer");
+        let out_audience_ptr = out_field_ptr(self, "audience");
+        let out_expires_at_ptr = out_field_ptr(self, "expires_at");
+        let out_issued_at_ptr = out_field_ptr(self, "issued_at");
+        let out_claims_json_ptr = out_field_ptr(self, "claims_json");
+
+        let err_scratch = self.fresh_reg("exchange_refresh_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let ok = self.fresh_reg("exchange_refresh_ok");
+        writeln!(
+            self.out,
+            "  {ok} = call i32 @nir_exchange_refresh_token(i64 {handle_id}, i64 {new_issued_at}, ptr {subject_ptr}, i64 {subject_len}, \
+             ptr {issuer_ptr}, i64 {issuer_len}, ptr {audience_ptr}, i64 {audience_len}, ptr {claims_ptr}, i64 {claims_len}, \
+             ptr {out_subject_ptr}, ptr {out_issuer_ptr}, ptr {out_audience_ptr}, ptr {out_expires_at_ptr}, ptr {out_issued_at_ptr}, \
+             ptr {out_claims_json_ptr}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.fresh_reg("exchange_refresh_is_ok");
+        writeln!(self.out, "  {is_ok} = icmp ne i32 {ok}, 0").unwrap();
+
+        self.emit_result_merge_agg(&result_ty, &is_ok, &identity_ty, &identity_scratch, &err_scratch, "exchange_refresh")
+    }
+
+    /// `validate_api_key(key, expected_hash) -> Result(VerifiedIdentity, str)`
+    /// — same out-param-is-the-real-field-pointer + `Result`-merge shape
+    /// as `exchange_refresh_token`/`oidc_validate_token`, a constant-time
+    /// hash compare decides success instead of a JWT/JWKS check.
+    fn emit_validate_api_key(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![identity_ty.clone(), Ty::Str]);
+
+        let (key_ptr, key_len) = self.str_parts(&args[0], scopes)?;
+        let (hash_ptr, hash_len) = self.str_parts(&args[1], scopes)?;
+
+        let identity_llty = self.llvm_ty(&identity_ty)?;
+        let identity_scratch = self.fresh_reg("validate_api_key_identity_scratch");
+        self.emit_alloca(&identity_scratch, &identity_llty);
+        let out_field_ptr = |cg: &mut Self, field: &str| -> String {
+            let (idx, _) = cg.field_index_and_ty(&identity_ty, field).expect("VerifiedIdentity always has this field, ast::prelude_structs");
+            let ptr = cg.fresh_reg(&format!("validate_api_key_out_{field}_ptr"));
+            writeln!(cg.out, "  {ptr} = getelementptr inbounds {identity_llty}, ptr {identity_scratch}, i32 0, i32 {idx}").unwrap();
+            ptr
+        };
+        let out_subject_ptr = out_field_ptr(self, "subject");
+        let out_issuer_ptr = out_field_ptr(self, "issuer");
+        let out_audience_ptr = out_field_ptr(self, "audience");
+        let out_expires_at_ptr = out_field_ptr(self, "expires_at");
+        let out_issued_at_ptr = out_field_ptr(self, "issued_at");
+        let out_claims_json_ptr = out_field_ptr(self, "claims_json");
+
+        let err_scratch = self.fresh_reg("validate_api_key_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let ok = self.fresh_reg("validate_api_key_ok");
+        writeln!(
+            self.out,
+            "  {ok} = call i32 @nir_validate_api_key(ptr {key_ptr}, i64 {key_len}, ptr {hash_ptr}, i64 {hash_len}, ptr {out_subject_ptr}, \
+             ptr {out_issuer_ptr}, ptr {out_audience_ptr}, ptr {out_expires_at_ptr}, ptr {out_issued_at_ptr}, ptr {out_claims_json_ptr}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.fresh_reg("validate_api_key_is_ok");
+        writeln!(self.out, "  {is_ok} = icmp ne i32 {ok}, 0").unwrap();
+
+        self.emit_result_merge_agg(&result_ty, &is_ok, &identity_ty, &identity_scratch, &err_scratch, "validate_api_key")
+    }
+
+    /// A compile-time string literal as a real `{ptr, i64}` SSA value —
+    /// `emit_check_role`'s own `err_msg_global`/`insertvalue` sequence,
+    /// factored out so `check_role_path`/`extract_claim_path` (and any
+    /// future caller needing a fixed `Err` message) don't repeat it.
+    fn const_str_value(&mut self, global_prefix: &str, s: &str) -> String {
+        let global = self.fresh_global(global_prefix);
+        writeln!(self.string_globals, "{global} = private unnamed_addr constant [{} x i8] c\"{}\"", s.len(), llvm_escape_bytes(s.as_bytes())).unwrap();
+        let partial = self.fresh_reg(&format!("{global_prefix}_partial"));
+        writeln!(self.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr {global}, 0").unwrap();
+        let full = self.fresh_reg(&format!("{global_prefix}_full"));
+        writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 {}, 1", s.len()).unwrap();
+        full
+    }
+
+    /// `emit_result_merge`'s twin for an aggregate (multi-field struct)
+    /// `Ok` payload — `emit_oidc_validate_token`'s own tag/`memcpy`/
+    /// branch/merge sequence, factored out so
+    /// `exchange_refresh_token`/`validate_api_key` (both reissuing a full
+    /// `VerifiedIdentity`, the same shape `oidc_validate_token` already
+    /// has) don't repeat it a third and fourth time. `ok_scratch` is a
+    /// pointer to an already-fully-written `ok_ty`-typed value (built via
+    /// out-params pointing directly at its own fields, same discipline
+    /// every caller here already uses); `err_scratch` a pointer to an
+    /// already-written `{ptr, i64}` error message.
+    fn emit_result_merge_agg(&mut self, result_ty: &Ty, is_ok: &str, ok_ty: &Ty, ok_scratch: &str, err_scratch: &str, label_prefix: &str) -> Result<String, CodegenError> {
+        let result_llty = self.llvm_ty(result_ty)?;
+        let dest = self.fresh_reg(&format!("{label_prefix}_result_addr"));
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg(&format!("{label_prefix}_tag_ptr"));
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg(&format!("{label_prefix}_payload_ptr"));
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label(&format!("{label_prefix}_ok"));
+        let err_label = self.fresh_label(&format!("{label_prefix}_err"));
+        let merge_label = self.fresh_label(&format!("{label_prefix}_merge"));
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        let bytes = agg_byte_size_operand(ok_ty, &self.registry);
+        writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {payload_ptr}, ptr {ok_scratch}, i64 {bytes}, i1 false)").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let err_val = self.fresh_reg(&format!("{label_prefix}_err_val"));
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {err_val}, ptr {payload_ptr}").unwrap();
         writeln!(self.out, "  br label %{merge_label}").unwrap();
 
         writeln!(self.out, "{merge_label}:").unwrap();
@@ -6297,6 +6822,283 @@ impl Codegen<'_> {
         }
     }
 
+    /// Calls `callee_name` once with `arg_operands` (already-formatted
+    /// `"<llty> <val>"` operands — from `call_args`, or from
+    /// `emit_replay_decode_operands` for a replay trampoline's decoded
+    /// values) and returns a real `i1`: `true` unconditionally for a
+    /// non-`Result` return type (there's nothing to retry against — the
+    /// call either ran or trapped, same as any ordinary call in this
+    /// file), or, when `sig_ret` is `Result(_, _)`, `true` only once an
+    /// attempt's tag word reads `0` (`Ok`) — retrying with doubling
+    /// backoff (`nir_sleep_ms`, `TRANSACT_RETRY_BASE_BACKOFF_MS` ×
+    /// 2^attempt) up to `TRANSACT_RETRY_MAX_ATTEMPTS` times, `false` if
+    /// every attempt came back `Err`. The caller decides what
+    /// "exhausted" means — for the live `transact` path, that's leaving
+    /// the row `commit_pending`/`compensate_pending` for a later replay
+    /// to finish, never a hard abort (`emit_transact`'s own doc comment
+    /// on why compiled traps can't be the retry-on-failure mechanism
+    /// here).
+    ///
+    /// Emits its own internal `header`/`body`/`ok`/`err`/`done` blocks
+    /// (a private control-flow region, same shape `guard_in_range`'s
+    /// trap check already uses) — callers must not assume the current
+    /// block is still whatever it was before this call returns; merge
+    /// results via a stored-to `alloca` slot afterward, never a `phi`
+    /// keyed on a label this function didn't hand back (`emit_transact`/
+    /// `emit_transact_replay_trampoline` both follow this already).
+    fn emit_call_with_retry(&mut self, callee_name: &str, sig_ret: &Ty, arg_operands: &[String], label_prefix: &str) -> Result<String, CodegenError> {
+        let is_result = matches!(sig_ret, Ty::Named(n, targs) if n == "Result" && targs.len() == 2);
+        if !is_result {
+            let ret_llty = self.llvm_ty(sig_ret)?;
+            if sig_ret.is_aggregate() {
+                let dest = self.fresh_reg(&format!("{label_prefix}_call_dest"));
+                self.emit_alloca(&dest, &ret_llty);
+                let mut all = vec![format!("ptr {dest}")];
+                all.extend(arg_operands.iter().cloned());
+                writeln!(self.out, "  call void @{callee_name}({})", all.join(", ")).unwrap();
+            } else if ret_llty == "void" {
+                writeln!(self.out, "  call void @{callee_name}({})", arg_operands.join(", ")).unwrap();
+            } else {
+                writeln!(self.out, "  call {ret_llty} @{callee_name}({})", arg_operands.join(", ")).unwrap();
+            }
+            return Ok("1".to_string());
+        }
+
+        let result_llty = self.llvm_ty(sig_ret)?;
+        let success_slot = self.fresh_reg(&format!("{label_prefix}_retry_success_addr"));
+        self.emit_alloca(&success_slot, "i1");
+        writeln!(self.out, "  store i1 false, ptr {success_slot}").unwrap();
+        let counter_slot = self.fresh_reg(&format!("{label_prefix}_retry_counter_addr"));
+        self.emit_alloca(&counter_slot, "i64");
+        writeln!(self.out, "  store i64 0, ptr {counter_slot}").unwrap();
+
+        let header = self.fresh_label(&format!("{label_prefix}_retry_header"));
+        let body = self.fresh_label(&format!("{label_prefix}_retry_body"));
+        let ok_label = self.fresh_label(&format!("{label_prefix}_retry_ok"));
+        let err_label = self.fresh_label(&format!("{label_prefix}_retry_err"));
+        let done = self.fresh_label(&format!("{label_prefix}_retry_done"));
+
+        writeln!(self.out, "  br label %{header}").unwrap();
+        writeln!(self.out, "{header}:").unwrap();
+        let counter = self.fresh_reg(&format!("{label_prefix}_retry_counter"));
+        writeln!(self.out, "  {counter} = load i64, ptr {counter_slot}").unwrap();
+        let under_max = self.fresh_reg(&format!("{label_prefix}_retry_under_max"));
+        writeln!(self.out, "  {under_max} = icmp slt i64 {counter}, {TRANSACT_RETRY_MAX_ATTEMPTS}").unwrap();
+        writeln!(self.out, "  br i1 {under_max}, label %{body}, label %{done}").unwrap();
+
+        writeln!(self.out, "{body}:").unwrap();
+        let call_dest = self.fresh_reg(&format!("{label_prefix}_call_dest"));
+        self.emit_alloca(&call_dest, &result_llty);
+        let mut all = vec![format!("ptr {call_dest}")];
+        all.extend(arg_operands.iter().cloned());
+        writeln!(self.out, "  call void @{callee_name}({})", all.join(", ")).unwrap();
+        let tag_ptr = self.fresh_reg(&format!("{label_prefix}_tag_ptr"));
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {call_dest}, i32 0, i32 0").unwrap();
+        let tag = self.fresh_reg(&format!("{label_prefix}_tag"));
+        writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+        let is_ok = self.fresh_reg(&format!("{label_prefix}_is_ok"));
+        writeln!(self.out, "  {is_ok} = icmp eq i64 {tag}, 0").unwrap();
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i1 true, ptr {success_slot}").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        let next_counter = self.fresh_reg(&format!("{label_prefix}_retry_next"));
+        writeln!(self.out, "  {next_counter} = add i64 {counter}, 1").unwrap();
+        writeln!(self.out, "  store i64 {next_counter}, ptr {counter_slot}").unwrap();
+        let backoff = self.fresh_reg(&format!("{label_prefix}_retry_backoff"));
+        writeln!(self.out, "  {backoff} = shl i64 {TRANSACT_RETRY_BASE_BACKOFF_MS}, {counter}").unwrap();
+        writeln!(self.out, "  call void @nir_sleep_ms(i64 {backoff})").unwrap();
+        writeln!(self.out, "  br label %{header}").unwrap();
+
+        writeln!(self.out, "{done}:").unwrap();
+        let result = self.fresh_reg(&format!("{label_prefix}_retry_result"));
+        writeln!(self.out, "  {result} = load i1, ptr {success_slot}").unwrap();
+        Ok(result)
+    }
+
+    /// The mirror image of `emit_db_binds`, for a replay trampoline: GEPs
+    /// `params.len()` `NirBindValue`s out of `arr_ptr` (already decoded
+    /// by `nir_transact_decode_args`) and builds the `"<llty> <val>"`
+    /// call-argument operands `emit_call_with_retry` needs, per real
+    /// LLVM parameter type (`is_transact_scalar`'s four shapes — the
+    /// only ones a `transact` `commit`/`compensate` callee can declare,
+    /// so this never sees anything else).
+    fn emit_replay_decode_operands(&mut self, arr_ptr: &str, params: &[Ty], label_prefix: &str) -> Result<Vec<String>, CodegenError> {
+        let arr_llty = format!("[{} x {NIR_BIND_VALUE_LLTY}]", params.len().max(1));
+        let mut operands = Vec::with_capacity(params.len());
+        for (i, ty) in params.iter().enumerate() {
+            let elem_ptr = self.fresh_reg(&format!("{label_prefix}_elem_ptr"));
+            writeln!(self.out, "  {elem_ptr} = getelementptr inbounds {arr_llty}, ptr {arr_ptr}, i32 0, i32 {i}").unwrap();
+            match ty {
+                Ty::Bool => {
+                    let field_ptr = self.fresh_reg(&format!("{label_prefix}_i_ptr"));
+                    writeln!(self.out, "  {field_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 1").unwrap();
+                    let val = self.fresh_reg(&format!("{label_prefix}_i_val"));
+                    writeln!(self.out, "  {val} = load i64, ptr {field_ptr}").unwrap();
+                    let b = self.fresh_reg(&format!("{label_prefix}_bool_val"));
+                    writeln!(self.out, "  {b} = icmp ne i64 {val}, 0").unwrap();
+                    operands.push(format!("i1 {b}"));
+                }
+                Ty::Str => {
+                    let sptr_field = self.fresh_reg(&format!("{label_prefix}_sptr_ptr"));
+                    writeln!(self.out, "  {sptr_field} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 3").unwrap();
+                    let sptr = self.fresh_reg(&format!("{label_prefix}_sptr"));
+                    writeln!(self.out, "  {sptr} = load ptr, ptr {sptr_field}").unwrap();
+                    let slen_field = self.fresh_reg(&format!("{label_prefix}_slen_ptr"));
+                    writeln!(self.out, "  {slen_field} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 4").unwrap();
+                    let slen = self.fresh_reg(&format!("{label_prefix}_slen"));
+                    writeln!(self.out, "  {slen} = load i64, ptr {slen_field}").unwrap();
+                    let partial = self.fresh_reg(&format!("{label_prefix}_str_partial"));
+                    writeln!(self.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr {sptr}, 0").unwrap();
+                    let full = self.fresh_reg(&format!("{label_prefix}_str_full"));
+                    writeln!(self.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 {slen}, 1").unwrap();
+                    operands.push(format!("{{ptr, i64}} {full}"));
+                }
+                Ty::F64 => {
+                    let field_ptr = self.fresh_reg(&format!("{label_prefix}_f_ptr"));
+                    writeln!(self.out, "  {field_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 2").unwrap();
+                    let val = self.fresh_reg(&format!("{label_prefix}_f_val"));
+                    writeln!(self.out, "  {val} = load double, ptr {field_ptr}").unwrap();
+                    operands.push(format!("double {val}"));
+                }
+                other if other.is_integer() => {
+                    let field_ptr = self.fresh_reg(&format!("{label_prefix}_i_ptr"));
+                    writeln!(self.out, "  {field_ptr} = getelementptr inbounds {NIR_BIND_VALUE_LLTY}, ptr {elem_ptr}, i32 0, i32 1").unwrap();
+                    let val = self.fresh_reg(&format!("{label_prefix}_i_val"));
+                    writeln!(self.out, "  {val} = load i64, ptr {field_ptr}").unwrap();
+                    operands.push(format!("i64 {val}"));
+                }
+                other => {
+                    return unsupported(format!(
+                        "transact replay trampoline: unsupported commit/compensate parameter type {other:?} \
+                         (typeck.rs::infer_transact already restricts these to is_transact_scalar's four shapes)"
+                    ));
+                }
+            }
+        }
+        Ok(operands)
+    }
+
+    /// Generates one top-level replay trampoline for a single `transact`
+    /// site (same `self.trampolines`/temporarily-swapped-`self.out`
+    /// mechanism `emit_spawn_trampoline` already established), matching
+    /// `kernel::transact::ReplayFn`'s real ABI exactly: `extern "C"
+    /// fn(*const u8, i64, i32) -> i32`. Decodes the row's JSON-encoded
+    /// args (`nir_transact_decode_args`) into one shared, worst-case-
+    /// sized `NirBindValue` buffer (`max(commit's arity, compensate's
+    /// arity)` — the two paths never run in the same call, so sharing
+    /// one buffer is safe and simpler than allocating two), then
+    /// dispatches to whichever of `commit.name`/`compensate.name` the
+    /// caller's `is_commit` flag selects, through the exact same
+    /// `emit_call_with_retry` bounded-retry logic the live path uses —
+    /// replaying a `commit` that itself needs a few attempts to succeed
+    /// gets the same treatment as it would have gotten live.
+    /// `kernel::transact::nir_transact_replay_all` (not this function)
+    /// is what marks the row `committed`/`compensated` on a real `1`
+    /// return, or leaves it pending (logged, not silently dropped) on
+    /// `0` — this trampoline only ever reports which one happened.
+    fn emit_transact_replay_trampoline(&mut self, site_id: i64, commit: &TransactSlot, compensate: &Option<TransactSlot>) -> Result<String, CodegenError> {
+        let tramp_name = self.fresh_global(&format!("transact_replay_{site_id}"));
+        // `.params.clone()`/`.ret.clone()`, not `.clone()` on the whole
+        // `&FnSig` — cloning the reference itself (always available,
+        // regardless of whether `FnSig` implements `Clone`, since every
+        // reference is trivially `Clone`/`Copy`) would silently keep the
+        // borrow of `self.sigs` alive for this whole function, colliding
+        // with every `&mut self` call below it. Same pattern
+        // `emit_transact_call` already uses.
+        let commit_params = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").params.clone();
+        let commit_ret = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").ret.clone();
+        let compensate_params_ret = compensate.as_ref().map(|c| {
+            let s = self.sigs.get(&c.name).expect("typeck.rs already resolved this call");
+            (s.params.clone(), s.ret.clone())
+        });
+        let max_arity = commit_params.len().max(compensate_params_ret.as_ref().map(|(p, _)| p.len()).unwrap_or(0)).max(1);
+
+        let saved_out = std::mem::take(&mut self.out);
+        // `emit_alloca`/`emit_call_with_retry` (called below, and shared
+        // with the *live* `emit_transact` path) both write through
+        // `self.entry_allocas`, a per-function scratch buffer normally
+        // owned and spliced back in by `Codegen::function`'s own
+        // "capture position, clear, ..., splice back" dance
+        // (`entry_allocas`'s own doc comment). This trampoline is a
+        // second, hand-built `define` outside that machinery (the same
+        // `self.out`-swap trick `emit_spawn_trampoline` already uses) —
+        // without saving/restoring `self.entry_allocas` too, this
+        // function's own allocas would either land in the *enclosing*
+        // live function's entry block (if some are already queued there
+        // mid-codegen) or silently vanish into a buffer nothing ever
+        // splices for this `define` at all — a real bug, caught by
+        // actually compiling a `transact` program and reading clang's
+        // own "use of undefined value" error, not reasoned about.
+        let saved_entry_allocas = std::mem::take(&mut self.entry_allocas);
+        writeln!(self.out, "define i32 {tramp_name}(ptr %args_json_ptr, i64 %args_json_len, i32 %is_commit) {{").unwrap();
+        writeln!(self.out, "entry:").unwrap();
+        let alloca_splice_pos = self.out.len();
+
+        let arr_llty = format!("[{max_arity} x {NIR_BIND_VALUE_LLTY}]");
+        let arr_ptr = self.fresh_reg("replay_arr");
+        self.emit_alloca(&arr_ptr, &arr_llty);
+        let decoded_n = self.fresh_reg("replay_decoded_n");
+        writeln!(self.out, "  {decoded_n} = call i64 @nir_transact_decode_args(ptr %args_json_ptr, i64 %args_json_len, ptr {arr_ptr}, i64 {max_arity})").unwrap();
+        let _ = decoded_n; // real decode-failure handling would need a third result branch -- not reachable for a row this same binary logged, only for a hand-corrupted log file.
+
+        let result_slot = self.fresh_reg("replay_result_addr");
+        self.emit_alloca(&result_slot, "i32");
+
+        let is_commit_b = self.fresh_reg("replay_is_commit_b");
+        writeln!(self.out, "  {is_commit_b} = icmp ne i32 %is_commit, 0").unwrap();
+        let do_commit = self.fresh_label("replay_do_commit");
+        let do_compensate = self.fresh_label("replay_do_compensate");
+        let done = self.fresh_label("replay_done");
+        writeln!(self.out, "  br i1 {is_commit_b}, label %{do_commit}, label %{do_compensate}").unwrap();
+
+        writeln!(self.out, "{do_commit}:").unwrap();
+        let commit_operands = self.emit_replay_decode_operands(&arr_ptr, &commit_params, "replay_commit")?;
+        let commit_success = self.emit_call_with_retry(&commit.name, &commit_ret, &commit_operands, "replay_commit")?;
+        let commit_result = self.fresh_reg("replay_commit_result_i32");
+        writeln!(self.out, "  {commit_result} = zext i1 {commit_success} to i32").unwrap();
+        writeln!(self.out, "  store i32 {commit_result}, ptr {result_slot}").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+
+        writeln!(self.out, "{do_compensate}:").unwrap();
+        if let Some(c) = compensate {
+            let (comp_params, comp_ret) = compensate_params_ret.expect("compensate is Some, so compensate_params_ret was computed above");
+            let comp_operands = self.emit_replay_decode_operands(&arr_ptr, &comp_params, "replay_compensate")?;
+            let comp_success = self.emit_call_with_retry(&c.name, &comp_ret, &comp_operands, "replay_compensate")?;
+            let comp_result = self.fresh_reg("replay_compensate_result_i32");
+            writeln!(self.out, "  {comp_result} = zext i1 {comp_success} to i32").unwrap();
+            writeln!(self.out, "  store i32 {comp_result}, ptr {result_slot}").unwrap();
+        } else {
+            // A row can only be `compensate_pending` if the live path
+            // itself marked it so, which only happens inside the `if let
+            // Some(c) = compensate` branch of `emit_transact` -- so this
+            // arm is unreachable for any row this binary's own live path
+            // produced. Still real, compiled code (not `unreachable`):
+            // a hand-edited/corrupted log row is the only way here, and
+            // reporting failure (leaving it `compensate_pending`) is the
+            // same safe response replay already gives any row it can't
+            // finish, not a crash.
+            writeln!(self.out, "  store i32 0, ptr {result_slot}").unwrap();
+        }
+        writeln!(self.out, "  br label %{done}").unwrap();
+
+        writeln!(self.out, "{done}:").unwrap();
+        let result = self.fresh_reg("replay_result");
+        writeln!(self.out, "  {result} = load i32, ptr {result_slot}").unwrap();
+        writeln!(self.out, "  ret i32 {result}").unwrap();
+        writeln!(self.out, "}}").unwrap();
+        writeln!(self.out).unwrap();
+
+        self.out.insert_str(alloca_splice_pos, &self.entry_allocas);
+        self.trampolines.push_str(&self.out);
+        self.out = saved_out;
+        self.entry_allocas = saved_entry_allocas;
+        Ok(tramp_name)
+    }
+
     /// `transact { precheck?/network/verify/commit/compensate?/log? }` —
     /// `docs/TRANSACT.md`, compiled for real 2026-09, Layer 1 only (the
     /// same scope the now-deleted interpreter itself shipped *first*,
@@ -6395,19 +7197,87 @@ impl Codegen<'_> {
         writeln!(self.out, "  store i1 {verify_val}, ptr {verify_slot}").unwrap();
         scopes.define("verify", verify_ty, verify_slot);
 
+        // A compile-time-unique id for this call site — used both as the
+        // durability log's own `site_id` column and as the key
+        // `nir_transact_register_replay_site` registers this site's
+        // generated trampoline under. Assigned by position in
+        // `self.transact_sites` (one push per `emit_transact` call,
+        // program-wide codegen order — stable within one build, not
+        // across a rebuild that adds/removes/reorders `transact` sites;
+        // see `docs/adr/0009-transact-durability-and-replay.md`'s
+        // disclosed fingerprint-guard gap).
+        let site_id = self.transact_sites.len() as i64;
+
+        // `txn_id`'s raw `ptr`/`i64` parts — every `nir_transact_*` durability
+        // call below takes these, not the `{ptr, i64}` struct value itself.
+        let txn_id_ptr_gep = self.fresh_reg("transact_txn_id_ptr_gep");
+        writeln!(self.out, "  {txn_id_ptr_gep} = getelementptr inbounds {{ptr, i64}}, ptr {txn_id_slot}, i32 0, i32 0").unwrap();
+        let txn_id_ptr_val = self.fresh_reg("transact_txn_id_ptr");
+        writeln!(self.out, "  {txn_id_ptr_val} = load ptr, ptr {txn_id_ptr_gep}").unwrap();
+        let txn_id_len_gep = self.fresh_reg("transact_txn_id_len_gep");
+        writeln!(self.out, "  {txn_id_len_gep} = getelementptr inbounds {{ptr, i64}}, ptr {txn_id_slot}, i32 0, i32 1").unwrap();
+        let txn_id_len_val = self.fresh_reg("transact_txn_id_len");
+        writeln!(self.out, "  {txn_id_len_val} = load i64, ptr {txn_id_len_gep}").unwrap();
+
+        // Durable row created right here, not at the top of the function
+        // — a `precheck`-rejected transact never reaches this point, so
+        // it never gets a row at all (nothing for replay to ever act on
+        // anyway). Best-effort, like `log` below: `nir_transact_log_init`
+        // already aborted the whole program at startup (`emit_c_main`) if
+        // the log couldn't be opened, so a failure return here would mean
+        // a `txn_id` collision or a mid-run I/O error — rare, and not
+        // something a live `abort()` should escalate to, matching this
+        // function's existing "durability is a best-effort side channel
+        // to the live control flow, not a gate on it" posture throughout.
+        writeln!(self.out, "  call i32 @nir_transact_begin(ptr {txn_id_ptr_val}, i64 {txn_id_len_val}, i64 {site_id})").unwrap();
+
         let commit_label = self.fresh_label("transact_commit");
         let compensate_label = self.fresh_label("transact_compensate");
         let after_verify_label = self.fresh_label("transact_after_verify");
         writeln!(self.out, "  br i1 {verify_val}, label %{commit_label}, label %{compensate_label}").unwrap();
 
         writeln!(self.out, "{commit_label}:").unwrap();
-        self.emit_transact_call(commit, scopes)?; // return value unconstrained, discarded
+        {
+            let (binds_ptr, binds_len) = self.emit_db_binds(&commit.args, scopes)?;
+            writeln!(self.out, "  call i32 @nir_transact_mark_commit_pending(ptr {txn_id_ptr_val}, i64 {txn_id_len_val}, ptr {binds_ptr}, i64 {binds_len})").unwrap();
+            let sig_params = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").params.clone();
+            let sig_ret = self.sigs.get(&commit.name).expect("typeck.rs already resolved this call").ret.clone();
+            let arg_operands = self.call_args(&commit.args, &sig_params, scopes)?;
+            let success = self.emit_call_with_retry(&commit.name, &sig_ret, &arg_operands, "transact_commit")?;
+            let mark_committed_label = self.fresh_label("transact_mark_committed");
+            let after_commit_label = self.fresh_label("transact_after_commit");
+            writeln!(self.out, "  br i1 {success}, label %{mark_committed_label}, label %{after_commit_label}").unwrap();
+            writeln!(self.out, "{mark_committed_label}:").unwrap();
+            writeln!(self.out, "  call i32 @nir_transact_mark_committed(ptr {txn_id_ptr_val}, i64 {txn_id_len_val})").unwrap();
+            writeln!(self.out, "  br label %{after_commit_label}").unwrap();
+            writeln!(self.out, "{after_commit_label}:").unwrap();
+            // `success == false` here means every live retry attempt came
+            // back `Err` — the row is left `commit_pending` (never
+            // marked), recoverable by the next `nir_transact_replay_all`
+            // rather than lost. The live `transact` expression's own `i1`
+            // result still reports `true` unconditionally below, matching
+            // this function's pre-existing, unchanged semantics: it
+            // reflects *which branch `verify` chose*, not whether
+            // `commit`'s own side effect is confirmed durable yet.
+        }
         writeln!(self.out, "  store i1 true, ptr {result_slot}").unwrap();
         writeln!(self.out, "  br label %{after_verify_label}").unwrap();
 
         writeln!(self.out, "{compensate_label}:").unwrap();
         if let Some(c) = compensate {
-            self.emit_transact_call(c, scopes)?; // return value unconstrained, discarded
+            let (binds_ptr, binds_len) = self.emit_db_binds(&c.args, scopes)?;
+            writeln!(self.out, "  call i32 @nir_transact_mark_compensate_pending(ptr {txn_id_ptr_val}, i64 {txn_id_len_val}, ptr {binds_ptr}, i64 {binds_len})").unwrap();
+            let sig_params = self.sigs.get(&c.name).expect("typeck.rs already resolved this call").params.clone();
+            let sig_ret = self.sigs.get(&c.name).expect("typeck.rs already resolved this call").ret.clone();
+            let arg_operands = self.call_args(&c.args, &sig_params, scopes)?;
+            let success = self.emit_call_with_retry(&c.name, &sig_ret, &arg_operands, "transact_compensate")?;
+            let mark_compensated_label = self.fresh_label("transact_mark_compensated");
+            let after_compensate_label = self.fresh_label("transact_after_compensate");
+            writeln!(self.out, "  br i1 {success}, label %{mark_compensated_label}, label %{after_compensate_label}").unwrap();
+            writeln!(self.out, "{mark_compensated_label}:").unwrap();
+            writeln!(self.out, "  call i32 @nir_transact_mark_compensated(ptr {txn_id_ptr_val}, i64 {txn_id_len_val})").unwrap();
+            writeln!(self.out, "  br label %{after_compensate_label}").unwrap();
+            writeln!(self.out, "{after_compensate_label}:").unwrap();
         }
         writeln!(self.out, "  store i1 false, ptr {result_slot}").unwrap();
         writeln!(self.out, "  br label %{after_verify_label}").unwrap();
@@ -6426,6 +7296,16 @@ impl Codegen<'_> {
         writeln!(self.out, "{after_precheck_label}:").unwrap();
         let result = self.fresh_reg("transact_result");
         writeln!(self.out, "  {result} = load i1, ptr {result_slot}").unwrap();
+
+        // The replay trampoline is generated unconditionally (even for a
+        // program whose durability log never actually records a pending
+        // row for this site at runtime) and registered under `site_id` —
+        // `emit_c_main`'s prologue calls `nir_transact_register_replay_site`
+        // for every entry in `self.transact_sites` before ever calling
+        // `nir_main`, so replay always has a trampoline for every site
+        // this build knows about, no runtime conditionality needed here.
+        let tramp_name = self.emit_transact_replay_trampoline(site_id, commit, compensate)?;
+        self.transact_sites.push((site_id, tramp_name));
 
         scopes.pop();
         Ok(result)
@@ -8700,6 +9580,41 @@ impl Codegen<'_> {
         }
         writeln!(self.out, "define i32 @main() {{").unwrap();
         writeln!(self.out, "entry:").unwrap();
+        // Durability log init + crash replay — strictly before any user
+        // code (including `nfr` registration, harmless either order, but
+        // definitely before `nir_main`) runs, and strictly after every
+        // `transact` site's replay trampoline is registered
+        // (`nir_transact_register_replay_site`), so `nir_transact_replay_all`
+        // never dispatches to a site that isn't registered yet. Entirely
+        // absent from the emitted IR for a program with no `transact` at
+        // all (`self.transact_sites` empty) — zero cost when unused, same
+        // convention every other optional kernel subsystem in this file
+        // already follows.
+        if !self.transact_sites.is_empty() {
+            let log_ok = self.fresh_reg("transact_log_init_ok");
+            writeln!(self.out, "  {log_ok} = call i32 @nir_transact_log_init()").unwrap();
+            let log_ok_b = self.fresh_reg("transact_log_init_ok_b");
+            writeln!(self.out, "  {log_ok_b} = icmp ne i32 {log_ok}, 0").unwrap();
+            let log_init_ok_label = self.fresh_label("transact_log_init_ok");
+            let log_init_fail_label = self.fresh_label("transact_log_init_fail");
+            writeln!(self.out, "  br i1 {log_ok_b}, label %{log_init_ok_label}, label %{log_init_fail_label}").unwrap();
+            writeln!(self.out, "{log_init_fail_label}:").unwrap();
+            // Fail fast and loud, matching `instance_lock`'s own stated
+            // philosophy (its doc comment) and `guard_in_range`'s existing
+            // trap convention elsewhere in this file — a program that
+            // declares `transact` but can't durably log it must not run
+            // silently without the guarantee it was written to rely on.
+            // `nir_transact_log_init` itself already printed the real
+            // reason (another instance holding the log, or a plain I/O
+            // error) to stderr before returning `0`.
+            writeln!(self.out, "  call void @abort()").unwrap();
+            writeln!(self.out, "  unreachable").unwrap();
+            writeln!(self.out, "{log_init_ok_label}:").unwrap();
+            for (site_id, tramp_name) in self.transact_sites.clone() {
+                writeln!(self.out, "  call void @nir_transact_register_replay_site(i64 {site_id}, ptr {tramp_name})").unwrap();
+            }
+            writeln!(self.out, "  call void @nir_transact_replay_all()").unwrap();
+        }
         // `nfr(...)` registration — once per tracked function, before
         // `nir_main` (the `.nir` program's own `main`) ever runs, so
         // every `nir_nfr_call_begin`/`_end` inside it already has a real
@@ -8856,6 +9771,17 @@ static RUNTIME_KERNELS_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/li
 #[allow(dead_code)] // only read under `#[cfg(windows)]` below; Unix has its own `-lm` arm
 static NATIVE_STATIC_LIBS: &str = include_str!(concat!(env!("OUT_DIR"), "/native_static_libs.txt"));
 
+// `(name.lib, bytes)` for every `NATIVE_STATIC_LIBS` token `build.rs`
+// found as a real file under its own private build (a crate-private
+// import lib like `windows.0.52.0.lib`, not a genuine system-provided
+// one) — see `build.rs`'s doc comment on `extra_native_libs.rs` for why
+// these need to be linked by embedded-and-rewritten path instead of a
+// bare `-lname` the way `kernel32.lib`/`advapi32.lib`/etc. are below.
+// Defines `EXTRA_NATIVE_LIBS: &[(&str, &[u8])]`, `#[allow(dead_code)]`d
+// from inside the generated snippet itself (only read under
+// `#[cfg(windows)]` below).
+include!(concat!(env!("OUT_DIR"), "/extra_native_libs.rs"));
+
 pub fn build(
     program: &Program,
     smt_report: &SmtReport,
@@ -8959,8 +9885,28 @@ fn build_impl(
     // for a program that never calls `https_get`/`https_post` (same
     // reasoning as `-lm` above) — the linker only pulls in what's
     // actually referenced.
+    //
+    // `SystemConfiguration.framework` is the same story, found the same
+    // way, one real macOS CI failure later: `tokio-postgres` (`Ty::Db`'s
+    // Postgres backend, `nir_db_connect` et al.) depends on `whoami` for
+    // its default-username resolution, and `whoami`'s macOS backend calls
+    // `SCDynamicStoreCopyComputerName` — a `SystemConfiguration.framework`
+    // symbol, not `Security`/`CoreFoundation`. rustc's release build
+    // merges `runtime-kernels` and its dependency graph into very few
+    // codegen units, so this reference rides along in the same object
+    // file as ordinary, always-linked runtime kernels (it surfaced on
+    // trivial programs with no `db` usage at all, not just ones that
+    // touch Postgres) — same "the linker only pulls in what's actually
+    // referenced [into that object file]" mechanics as the other two
+    // frameworks above, just a different object file.
     #[cfg(target_os = "macos")]
-    clang_cmd.arg("-framework").arg("Security").arg("-framework").arg("CoreFoundation");
+    clang_cmd
+        .arg("-framework")
+        .arg("Security")
+        .arg("-framework")
+        .arg("CoreFoundation")
+        .arg("-framework")
+        .arg("SystemConfiguration");
     // Windows has no equivalent hand-picked single flag — `std::net`
     // (the `nir_tcp_*` kernels) needs `ws2_32.lib`, and other stdlib
     // pieces need their own system libs beside it, so the captured,
@@ -8983,11 +9929,33 @@ fn build_impl(
     // flag) — that one is forwarded verbatim via `-Xlinker`, which routes
     // it straight to the linker unexamined, the same reason `-l` works
     // for the others.
+    // A handful of tokens above aren't genuine system-provided libs at
+    // all — a crate-private import lib like `windows.0.52.0.lib` (the
+    // `windows`/`windows-sys` family, at least) ships inside that crate's
+    // own build output, nowhere on the linker's default search path.
+    // `build.rs` already found and embedded any such file (see
+    // `extra_native_libs.rs`'s doc comment); write each one back out to a
+    // real temp path and link it *by path* (`runtime_lib_path`'s own
+    // pattern) instead of `-lname` — found on real Windows CI as `LNK1181:
+    // cannot open input file 'windows.0.52.0.lib'`, the exact "no such
+    // file" failure a bare `-l` produces when the named file isn't on any
+    // search path clang/the linker already knows about.
+    #[cfg(windows)]
+    let mut extra_lib_paths = Vec::new();
     #[cfg(windows)]
     for token in NATIVE_STATIC_LIBS.split_whitespace() {
         match token.strip_suffix(".lib") {
             Some(name) => {
-                clang_cmd.arg(format!("-l{name}"));
+                if let Some((_, bytes)) = EXTRA_NATIVE_LIBS.iter().find(|(n, _)| *n == token) {
+                    let mut p = std::env::temp_dir();
+                    p.push(format!("nirdosha_extralib_{}_{n}_{token}", std::process::id()));
+                    std::fs::write(&p, bytes)
+                        .map_err(|e| format!("writing {}: {e}", p.display()))?;
+                    clang_cmd.arg(&p);
+                    extra_lib_paths.push(p);
+                } else {
+                    clang_cmd.arg(format!("-l{name}"));
+                }
             }
             None => {
                 clang_cmd.arg("-Xlinker").arg(token);
@@ -9000,11 +9968,16 @@ fn build_impl(
     for p in &native_plugin_lib_paths {
         let _ = std::fs::remove_file(p);
     }
+    #[cfg(windows)]
+    for p in &extra_lib_paths {
+        let _ = std::fs::remove_file(p);
+    }
 
     match result {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => Err(format!(
-            "clang failed:\n{}",
+            "clang failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         )),
         Err(e) => Err(format!("could not run `clang`: {e} (is it installed and on PATH?)")),

@@ -39,7 +39,17 @@
 //! around it.
 #![allow(clippy::missing_safety_doc)]
 
-mod kernel;
+// Made `pub`, not `mod`, specifically for `crates/compiled-serve`
+// (ROADMAP B8) -- the first real consumer of this crate as an ordinary
+// Rust dependency rather than only via the `extern "C"`/staticlib-
+// embedding path every compiled `.nir` binary uses. Every compiled
+// `.nir` binary still only ever calls the `#[no_mangle] extern "C"`
+// `nir_*` functions below (unaffected by this); `compiled-serve` is a
+// second, additive consumer needing real Rust-level access (`Domain`,
+// `acquire`/`release`, `dump_report`) for things a `.nir` program has
+// no reason to ever touch directly, matching this module's own "no
+// query interface for `.nir` code" doc comment.
+pub mod kernel;
 
 /// Not a real language builtin — no `.nir` program can call this
 /// (`codegen.rs` never emits a `declare`/`call` for it). Proves
@@ -1868,8 +1878,8 @@ mod identity_kernel_tests {
 // pointer arithmetic) is the right fit here, same as `channel_table`/
 // `thread_table` above already use it for their own non-fd resources.
 
-fn db_table() -> &'static HandleTable<rusqlite::Connection> {
-    static TABLE: OnceLock<HandleTable<rusqlite::Connection>> = OnceLock::new();
+fn db_table() -> &'static HandleTable<kernel::db::DbConn> {
+    static TABLE: OnceLock<HandleTable<kernel::db::DbConn>> = OnceLock::new();
     TABLE.get_or_init(HandleTable::new)
 }
 
@@ -1883,6 +1893,7 @@ fn db_table() -> &'static HandleTable<rusqlite::Connection> {
 /// both sides, the same "trust the target's own layout rules, don't
 /// hand-replicate them" stance `agg_byte_size_operand`'s sizeof trick
 /// already takes.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct NirBindValue {
     pub tag: i32, // 0 = i64, 1 = f64, 2 = str, 3 = bool
@@ -1936,9 +1947,11 @@ fn sqlite_row_to_json(row: &rusqlite::Row, column_names: &[String]) -> serde_jso
 }
 
 /// `db_connect(path) -> Result(db, str)`. `path` is really "connection
-/// string" per `Ty::Db`'s own doc comment, but this kernel only ever
-/// opens SQLite — a bare path or `":memory:"`, both handled by
-/// `rusqlite::Connection::open` itself, no special-casing needed here.
+/// string" per `Ty::Db`'s own doc comment — a bare path or `":memory:"`
+/// opens (pooled, except `:memory:`) SQLite; a `postgres://`/
+/// `postgresql://` URL opens a real, pooled Postgres connection
+/// (`kernel::db::connect`'s own doc comment has the full scheme-dispatch
+/// and pooling design).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_handle: *mut i64, out_err: *mut NirStrOut) -> i32 {
     let Some(path) = (unsafe { str_from_raw(path_ptr, path_len) }) else {
@@ -1949,7 +1962,7 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
         unsafe { write_str_out(out_err, "too many open db connections".to_string()) };
         return 0;
     }
-    match rusqlite::Connection::open(path) {
+    match kernel::db::connect(path) {
         Ok(conn) => {
             let id = db_table().insert(conn);
             unsafe { *out_handle = id };
@@ -1957,7 +1970,7 @@ pub unsafe extern "C" fn nir_db_connect(path_ptr: *const u8, path_len: i64, out_
         }
         Err(e) => {
             kernel::release(kernel::Domain::Db);
-            unsafe { write_str_out(out_err, e.to_string()) };
+            unsafe { write_str_out(out_err, e) };
             0
         }
     }
@@ -1992,15 +2005,24 @@ pub unsafe extern "C" fn nir_db_execute(
         unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
         return 0;
     };
-    let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
-    let result = db_table().with(handle, |conn| conn.execute(sql, rusqlite::params_from_iter(binds.iter())));
+    let result: Option<Result<i64, String>> = db_table().with(handle, |conn| {
+        if let Some(sqlite) = conn.as_sqlite_mut() {
+            let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
+            return sqlite.execute(sql, rusqlite::params_from_iter(binds.iter())).map(|n| n as i64).map_err(|e| e.to_string());
+        }
+        let pg = conn.as_postgres_mut().expect("DbConn is either SQLite or Postgres");
+        let binds = unsafe { kernel::db::pg_bind_values_from_raw(binds_ptr, binds_len) };
+        let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = binds.iter().map(|b| b as &(dyn postgres::types::ToSql + Sync)).collect();
+        let rewritten = kernel::db::rewrite_placeholders(sql);
+        pg.execute(&rewritten, &refs).map(|n| n as i64).map_err(|e| e.to_string())
+    });
     match result {
         Some(Ok(n)) => {
-            unsafe { *out_affected = n as i64 };
+            unsafe { *out_affected = n };
             1
         }
         Some(Err(e)) => {
-            unsafe { write_str_out(out_err, e.to_string()) };
+            unsafe { write_str_out(out_err, e) };
             0
         }
         None => {
@@ -2035,15 +2057,26 @@ pub unsafe extern "C" fn nir_db_query(
         unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
         return 0;
     };
-    let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
-    let result: Option<Result<String, rusqlite::Error>> = db_table().with(handle, |conn| {
-        let mut stmt = conn.prepare(sql)?;
-        let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-        let mut rows = stmt.query(rusqlite::params_from_iter(binds.iter()))?;
-        let mut out_rows = Vec::new();
-        while let Some(row) = rows.next()? {
-            out_rows.push(sqlite_row_to_json(row, &column_names));
+    let result: Option<Result<String, String>> = db_table().with(handle, |conn| {
+        if let Some(sqlite) = conn.as_sqlite_mut() {
+            let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
+            let mut stmt = sqlite.prepare(sql).map_err(|e| e.to_string())?;
+            let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let mut rows = stmt.query(rusqlite::params_from_iter(binds.iter())).map_err(|e| e.to_string())?;
+            let mut out_rows = Vec::new();
+            loop {
+                let next = rows.next().map_err(|e| e.to_string())?;
+                let Some(row) = next else { break };
+                out_rows.push(sqlite_row_to_json(row, &column_names));
+            }
+            return Ok(serde_json::to_string(&serde_json::Value::Array(out_rows)).unwrap_or_else(|_| "[]".to_string()));
         }
+        let pg = conn.as_postgres_mut().expect("DbConn is either SQLite or Postgres");
+        let binds = unsafe { kernel::db::pg_bind_values_from_raw(binds_ptr, binds_len) };
+        let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = binds.iter().map(|b| b as &(dyn postgres::types::ToSql + Sync)).collect();
+        let rewritten = kernel::db::rewrite_placeholders(sql);
+        let rows = pg.query(&rewritten, &refs).map_err(|e| e.to_string())?;
+        let out_rows: Vec<serde_json::Value> = rows.iter().map(kernel::db::pg_row_to_json).collect();
         Ok(serde_json::to_string(&serde_json::Value::Array(out_rows)).unwrap_or_else(|_| "[]".to_string()))
     });
     match result {
@@ -2052,7 +2085,7 @@ pub unsafe extern "C" fn nir_db_query(
             1
         }
         Some(Err(e)) => {
-            unsafe { write_str_out(out_err, e.to_string()) };
+            unsafe { write_str_out(out_err, e) };
             0
         }
         None => {
@@ -2142,6 +2175,88 @@ mod db_kernel_tests {
             assert!(execute(conn, "NOT VALID SQL AT ALL", &[]).is_err());
             nir_db_stop(conn);
         }
+    }
+
+    /// Two `db_connect` calls to the same non-`:memory:` path see the
+    /// same underlying database — true regardless of pooling (it's the
+    /// same file either way), but a real regression guard that the
+    /// pooled path didn't break ordinary persistence semantics.
+    /// `kernel::db::tests` (module-private, sees `PoolRegistry::pool_count`
+    /// under `#[cfg(test)]`) is where pooling *itself* — same key reuses
+    /// one pool, `:memory:` never gets one at all — is actually proven.
+    #[test]
+    fn two_connects_to_the_same_file_path_see_the_same_data() {
+        let dir = std::env::temp_dir().join(format!("nirdosha_db_pool_test_{}.sqlite", std::process::id()));
+        let path = dir.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            let conn1 = connect(&path).expect("file-backed sqlite should open");
+            execute(conn1, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", &[]).expect("DDL should succeed");
+            execute(conn1, "INSERT INTO t (name) VALUES (?)", &[str_bind("first")]).expect("insert should succeed");
+            nir_db_stop(conn1);
+
+            let conn2 = connect(&path).expect("reconnecting to the same path should open");
+            let rows_json = query(conn2, "SELECT name FROM t", &[]).expect("query should succeed");
+            let rows: serde_json::Value = serde_json::from_str(&rows_json).unwrap();
+            assert_eq!(rows[0]["name"], "first");
+            nir_db_stop(conn2);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Real, opt-in, `#[ignore]`d Postgres coverage — same convention
+    /// `NIRDOSHA_TEST_POSTGRES_URL`-gated tests use throughout this
+    /// repo (`docker-compose.dev.yml` at the repo root stands up a real
+    /// local server for this). Run with:
+    ///   NIRDOSHA_TEST_POSTGRES_URL=postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev \
+    ///     cargo test --release -- --ignored
+    fn test_postgres_url() -> String {
+        std::env::var("NIRDOSHA_TEST_POSTGRES_URL").unwrap_or_else(|_| "postgres://postgres@127.0.0.1:5432/postgres".to_string())
+    }
+
+    #[test]
+    #[ignore]
+    fn postgres_connect_execute_query_round_trips_real_rows() {
+        let url = test_postgres_url();
+        unsafe {
+            let conn = connect(&url).expect("real postgres server must be reachable (see NIRDOSHA_TEST_POSTGRES_URL)");
+            let _ = execute(conn, "DROP TABLE IF EXISTS nirdosha_pg_kernel_test", &[]);
+            execute(conn, "CREATE TABLE nirdosha_pg_kernel_test (id BIGINT PRIMARY KEY, name TEXT, rating INTEGER)", &[]).expect("DDL should succeed");
+            let inserted = execute(conn, "INSERT INTO nirdosha_pg_kernel_test (id, name, rating) VALUES (1, ?, ?)", &[str_bind("ada"), i64_bind(5)]).expect("insert should succeed");
+            assert_eq!(inserted, 1);
+
+            let rows_json = query(conn, "SELECT name, rating FROM nirdosha_pg_kernel_test WHERE rating >= ?", &[i64_bind(5)]).expect("query should succeed");
+            let rows: serde_json::Value = serde_json::from_str(&rows_json).unwrap();
+            assert_eq!(rows[0]["name"], "ada");
+            assert_eq!(rows[0]["rating"], 5);
+
+            execute(conn, "DROP TABLE nirdosha_pg_kernel_test", &[]).expect("cleanup DDL should succeed");
+            nir_db_stop(conn);
+        }
+    }
+
+    /// Proves pooling for real against a live server, not just SQLite's
+    /// same-file coincidence above: sequential `db_connect`/`db_stop`
+    /// pairs against the same Postgres connection string must reuse a
+    /// pooled connection rather than opening a fresh TCP/TLS handshake
+    /// every time — indirectly observable here as "many sequential
+    /// connects complete quickly," the direct pool-identity assertion
+    /// lives in `kernel::db::tests` where `PoolRegistry` internals are
+    /// actually visible.
+    #[test]
+    #[ignore]
+    fn postgres_sequential_connects_are_fast_meaning_pooled() {
+        let url = test_postgres_url();
+        let start = std::time::Instant::now();
+        unsafe {
+            for _ in 0..20 {
+                let conn = connect(&url).expect("real postgres server must be reachable");
+                query(conn, "SELECT 1", &[]).expect("query should succeed");
+                nir_db_stop(conn);
+            }
+        }
+        let elapsed = start.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(5), "20 sequential connects took {elapsed:?} -- pooling should make this fast, not one fresh handshake each time");
     }
 }
 
@@ -2754,91 +2869,16 @@ mod mq_kernel_tests {
 
 // ---- http/https kernels (`http_get`/`http_post`/`https_get`/`https_post`) --
 //
-// `ast::BUILTIN_NAMES`'s own doc comment has the full, already-locked
-// design (written before this backend existed, ported here unchanged):
-// plain HTTP over `std::net::TcpStream`, HTTPS over the identical
-// request/response handling wrapped in a `native_tls::TlsStream`.
-// **`Connection: close` + read-to-EOF, no `Content-Length`/chunked-
-// transfer-encoding parsing** — "no ... parsing needed for a first cut,
-// since the server closing the socket *is* the end-of-body signal" is
-// this design's own words, not a new cut made here. A network failure, a
-// malformed status line, or a non-UTF-8 body are all a real `Err`, never
-// a trap.
+// Real, pooled HTTP/1.1 keep-alive connections plus real admission
+// control (`Domain::Http`) — `kernel::http` has the full design and the
+// protocol rewrite this required (real `Content-Length`/chunked framing,
+// replacing the original connection-per-call `Connection: close` +
+// read-to-EOF cut, which was correct for its own scope but structurally
+// incompatible with pooling: a pool only has value if a connection
+// survives past one request). A network failure, a malformed status
+// line, or a non-UTF-8 body are all a real `Err`, never a trap.
 
-struct HttpParsed {
-    status: i64,
-    body: String,
-}
-
-/// Decodes an HTTP/1.1 `Transfer-Encoding: chunked` body — each chunk is
-/// a hex size line, that many raw bytes, a trailing `\r\n`, repeated
-/// until a zero-size chunk terminates the sequence (any trailer headers
-/// after the terminating chunk are ignored, same "don't need them for a
-/// first cut" scope as the rest of this module). Found necessary by
-/// actually testing `https_get` against a real server (`example.com`
-/// chunks by default) — not designed in ahead of time, but not
-/// optional either once found: without this, a chunked response's body
-/// comes back with raw `<hex-size>\r\n...\r\n` framing still in it,
-/// which is a real, visibly wrong bug for a large fraction of real HTTP
-/// servers, not an acceptable "first cut" gap the way skipping
-/// `Content-Length`-driven partial reads is (this module's read-to-EOF
-/// strategy already makes `Content-Length` itself redundant).
-fn decode_chunked_body(body: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(body.len());
-    let mut pos = 0usize;
-    loop {
-        let line_end = body[pos..].windows(2).position(|w| w == b"\r\n").ok_or_else(|| "malformed chunked body: no chunk-size line".to_string())?;
-        let size_line = std::str::from_utf8(&body[pos..pos + line_end]).map_err(|_| "malformed chunked body: chunk-size line is not valid UTF-8".to_string())?;
-        // A chunk-size line may carry `;`-separated extensions -- ignored,
-        // only the leading hex digits matter.
-        let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16).map_err(|_| format!("malformed chunked body: bad chunk size `{size_hex}`"))?;
-        pos += line_end + 2;
-        if size == 0 {
-            break; // terminating chunk -- any trailer headers after it are ignored
-        }
-        if pos + size > body.len() {
-            return Err("malformed chunked body: chunk size exceeds remaining data".to_string());
-        }
-        out.extend_from_slice(&body[pos..pos + size]);
-        pos += size;
-        if body.get(pos..pos + 2) != Some(b"\r\n") {
-            return Err("malformed chunked body: missing CRLF after chunk data".to_string());
-        }
-        pos += 2;
-    }
-    Ok(out)
-}
-
-fn parse_http_response(raw: &[u8]) -> Result<HttpParsed, String> {
-    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| "malformed HTTP response: no header/body separator".to_string())?;
-    let head = &raw[..sep];
-    let body = &raw[sep + 4..];
-    let head_str = std::str::from_utf8(head).map_err(|_| "malformed HTTP response: headers are not valid UTF-8".to_string())?;
-    let status_line = head_str.lines().next().ok_or_else(|| "malformed HTTP response: empty status line".to_string())?;
-    let mut parts = status_line.splitn(3, ' ');
-    let _version = parts.next();
-    let status_str = parts.next().ok_or_else(|| "malformed HTTP response: no status code in status line".to_string())?;
-    let status: i64 = status_str.parse().map_err(|_| format!("malformed HTTP response: bad status code `{status_str}`"))?;
-    let is_chunked = head_str.lines().skip(1).any(|line| {
-        line.split_once(':').map(|(k, v)| k.trim().eq_ignore_ascii_case("transfer-encoding") && v.trim().eq_ignore_ascii_case("chunked")).unwrap_or(false)
-    });
-    let body_bytes = if is_chunked { decode_chunked_body(body)? } else { body.to_vec() };
-    let body_str = std::str::from_utf8(&body_bytes).map_err(|_| "HTTP response body is not valid UTF-8".to_string())?.to_string();
-    Ok(HttpParsed { status, body: body_str })
-}
-
-fn http_request_bytes(method: &str, host: &str, path: &str, body: Option<&str>, bearer_token: Option<&str>) -> Vec<u8> {
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
-    if let Some(token) = bearer_token {
-        req.push_str(&format!("Authorization: Bearer {token}\r\n"));
-    }
-    match body {
-        Some(b) => req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}", b.len())),
-        None => req.push_str("\r\n"),
-    }
-    req.into_bytes()
-}
+type HttpParsed = kernel::http::HttpParsed;
 
 fn do_http(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) -> Result<HttpParsed, String> {
     do_http_with_auth(host, port, path, method, body, None)
@@ -2851,21 +2891,11 @@ fn do_http(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) 
 /// builtins) never pass one, matching their own already-locked design
 /// (no auth header in that surface).
 fn do_http_with_auth(host: &str, port: i64, path: &str, method: &str, body: Option<&str>, bearer_token: Option<&str>) -> Result<HttpParsed, String> {
-    let mut stream = std::net::TcpStream::connect((host, port as u16)).map_err(|e| e.to_string())?;
-    stream.write_all(&http_request_bytes(method, host, path, body, bearer_token)).map_err(|e| e.to_string())?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
-    parse_http_response(&raw)
+    kernel::http::request_http(host, port, path, method, body, bearer_token)
 }
 
 fn do_https(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) -> Result<HttpParsed, String> {
-    let stream = std::net::TcpStream::connect((host, port as u16)).map_err(|e| e.to_string())?;
-    let connector = native_tls::TlsConnector::new().map_err(|e| e.to_string())?;
-    let mut stream = connector.connect(host, stream).map_err(|e| e.to_string())?;
-    stream.write_all(&http_request_bytes(method, host, path, body, None)).map_err(|e| e.to_string())?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
-    parse_http_response(&raw)
+    kernel::http::request_https(host, port, path, method, body)
 }
 
 unsafe fn write_http_result(result: Result<HttpParsed, String>, out_status: *mut i64, out_body: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
@@ -2972,45 +3002,15 @@ pub unsafe extern "C" fn nir_https_post(
 mod http_kernel_tests {
     use super::*;
 
-    #[test]
-    fn parse_http_response_extracts_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world";
-        let parsed = parse_http_response(raw).unwrap();
-        assert_eq!(parsed.status, 200);
-        assert_eq!(parsed.body, "hello world");
-    }
-
-    #[test]
-    fn parse_http_response_handles_empty_body() {
-        let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
-        let parsed = parse_http_response(raw).unwrap();
-        assert_eq!(parsed.status, 204);
-        assert_eq!(parsed.body, "");
-    }
-
-    #[test]
-    fn parse_http_response_rejects_malformed_input() {
-        assert!(parse_http_response(b"not an http response at all").is_err());
-    }
-
-    #[test]
-    fn parse_http_response_decodes_a_real_chunked_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nMozilla\r\n9\r\nDeveloper\r\n0\r\n\r\n";
-        let parsed = parse_http_response(raw).unwrap();
-        assert_eq!(parsed.status, 200);
-        assert_eq!(parsed.body, "MozillaDeveloper");
-    }
-
-    #[test]
-    fn parse_http_response_leaves_a_non_chunked_body_untouched() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        assert_eq!(parse_http_response(raw).unwrap().body, "hello");
-    }
-
-    #[test]
-    fn decode_chunked_body_rejects_truncated_input() {
-        assert!(decode_chunked_body(b"5\r\nabc").is_err());
-    }
+    // Response-parsing/chunked-decoding unit tests moved to
+    // `kernel::http::tests` -- they test that module's own
+    // `read_http_response`/`read_chunked_body` directly now, since the
+    // buffer-based `parse_http_response`/`decode_chunked_body` they used
+    // to test no longer exist (replaced by a real streaming reader, the
+    // only way keep-alive framing can work at all -- see `kernel::http`'s
+    // own module doc). What's left here is real-server, real-socket
+    // round-trip coverage through the public `do_http`/`nir_http_get`
+    // surface, now exercising the full pooled/keep-alive path for real.
 
     #[test]
     fn http_get_round_trips_against_a_real_local_server() {
@@ -3319,8 +3319,14 @@ fn provider_table_name(channel: &str) -> &'static str {
 fn load_active_provider_config(conn_handle: i64, channel: &str) -> Result<ProviderConfig, String> {
     let table = provider_table_name(channel);
     let sql = format!("SELECT host, port, path, api_key, from_address FROM {table} WHERE active = 1 LIMIT 1");
+    // SQLite-only for now — this predates Phase 1's Postgres support and
+    // isn't in that phase's own scope to extend; a Postgres `conn_handle`
+    // here is a disclosed, narrow `Err`, not a silent wrong answer.
     let row = db_table().with(conn_handle, |conn| {
-        conn.query_row(&sql, [], |r| {
+        let Some(sqlite) = conn.as_sqlite_mut() else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        sqlite.query_row(&sql, [], |r| {
             Ok(ProviderConfig {
                 host: r.get(0)?,
                 port: r.get(1)?,
