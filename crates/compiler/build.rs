@@ -152,6 +152,43 @@ fn main() {
              `nirdosha` compiler itself, same as before this change",
         );
 
+    // TEMPORARY diagnostic for the recurring Windows CRT-mismatch link
+    // failure (`__imp_realloc`/`__imp_strcspn`/... unresolved from
+    // `bundled` SQLite's object file) that `+crt-static` above was
+    // supposed to fix but empirically hasn't, across several real CI
+    // attempts. `cargo:warning=` lines surface in the outer build's own
+    // "Build" step output (unlike ordinary stdout/stderr from this
+    // script, which cargo swallows unless the build fails) -- this is
+    // the only way to see what actually happened inside the nested
+    // `cargo rustc` invocation from outside it. Grepped, not dumped in
+    // full, to keep the outer build log legible: every line that could
+    // plausibly show whether `+crt-static`/`/MT` vs `/MD` actually took
+    // effect for `libsqlite3-sys`'s own `cl.exe` invocation.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!(
+            "cargo:warning=[crt-static diag] RUSTFLAGS passed to nested build: {:?}",
+            cmd.get_envs().find(|(k, _)| *k == "RUSTFLAGS")
+        );
+        let mut any = false;
+        for line in stderr.lines() {
+            let l = line.to_ascii_lowercase();
+            if l.contains("crt-static")
+                || l.contains("sqlite3")
+                || l.contains("/mt")
+                || l.contains("/md")
+                || l.contains("cl.exe")
+                || l.contains("target-feature")
+            {
+                println!("cargo:warning=[crt-static diag] {line}");
+                any = true;
+            }
+        }
+        if !any {
+            println!("cargo:warning=[crt-static diag] no matching line found in -vv output at all");
+        }
+    }
+
     assert!(
         output.status.success(),
         "cargo rustc failed to build ../runtime-kernels into a staticlib:\n{}",
