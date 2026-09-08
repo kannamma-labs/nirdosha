@@ -180,17 +180,25 @@ fn status_text(status: u16) -> &'static str {
     }
 }
 
-/// Writes one real HTTP/1.1 response, `Set-Cookie` (`HttpOnly; Secure;
-/// SameSite=Lax; Path=/` unconditionally, `rfcs/0010`'s own "Set-Cookie
-/// gets actually wired" requirement) included whenever `cookie` is
-/// `Some`.
+/// Writes one real HTTP/1.1 response, `Set-Cookie: {cookie}` included
+/// verbatim whenever `cookie` is `Some` — `cookie` must already be a
+/// complete, fully-attributed cookie string (`HttpOnly`/`Secure`/
+/// `SameSite`/`Path`/`Max-Age` all included by whoever built it, e.g.
+/// `kernel::identity::nir_session_cookie`). This function does **not**
+/// append any attributes of its own (red team finding A5,
+/// `scratch/red-team-report-main-d7fae42.md`): it used to unconditionally
+/// append `HttpOnly; Secure; SameSite=Lax; Path=/` on top of whatever the
+/// caller already supplied, which — for the one real caller, the kernel's
+/// own `SameSite=Strict` session cookie — produced a single header with
+/// two disagreeing `SameSite` values. One layer owns the full attribute
+/// string now; this one just writes it out.
 pub fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8], extra_headers: &[(String, String)], cookie: Option<&str>) -> std::io::Result<()> {
     let mut out = format!("HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n", status_text(status), body.len());
     for (k, v) in extra_headers {
         out.push_str(&format!("{k}: {v}\r\n"));
     }
     if let Some(cookie) = cookie {
-        out.push_str(&format!("Set-Cookie: {cookie}; HttpOnly; Secure; SameSite=Lax; Path=/\r\n"));
+        out.push_str(&format!("Set-Cookie: {cookie}\r\n"));
     }
     out.push_str("\r\n");
     stream.write_all(out.as_bytes())?;

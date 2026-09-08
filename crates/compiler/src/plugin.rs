@@ -59,6 +59,25 @@ use crate::ast::Ty;
 /// pointer once to read the `i64` id (see `crates/plugin-example-
 /// native-kv`'s `kv_get`/`kv_set` for a real, working example of both
 /// the `.nir`-side `&h` call and the Rust-side `*const i64` deref).
+///
+/// **A panic inside `static_lib`'s own `extern "C"` code is a process
+/// abort, not a `Result` this compiler or the kernel can catch or
+/// recover from** (red-team report A7, `scratch/red-team-report-
+/// main-d7fae42.md`) — a panic crossing a plain `extern "C"` boundary
+/// unwinds into undefined behavior at that boundary, so Rust aborts the
+/// whole process there by design; no `catch_unwind` on either side of
+/// this ABI can intercept it (`runtime-kernels/src/kernel/reaper.rs`'s
+/// own doc comment has the full "why," including why the reaper's own
+/// `catch_unwind` deliberately only ever contains *kernel*-side panics,
+/// never a plugin's). The only mitigation today is plugin-author
+/// discipline plus process abort — there is no sandbox (ROADMAP B6,
+/// explicitly descoped from v1) and no mechanism in this repo that can
+/// force a third-party plugin crate's own `Cargo.toml` to set
+/// `panic = "abort"` or otherwise enforce non-unwinding behavior. If
+/// you're writing a native plugin, treat this as load-bearing: a panic
+/// in your `_connect`/`_op`/`_request`/`_is_valid`/`_close` takes down
+/// every in-flight request the whole process was serving, not just your
+/// own connection.
 pub struct NativePluginBuiltin {
     /// Must equal the corresponding `PluginBuiltin.name` this native
     /// form backs, and must also be the exact `#[no_mangle] extern "C"`
