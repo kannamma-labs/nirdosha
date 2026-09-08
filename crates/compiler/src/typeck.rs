@@ -4569,6 +4569,10 @@ impl<'a> Checker<'a> {
                 self.check(&args[0], &Ty::Named("ApplicationSession".to_string(), vec![]), expected_ret, scopes);
                 Ty::Str
             }
+            ("verify_session", 1) => {
+                self.check(&args[0], &Ty::Str, expected_ret, scopes);
+                result_of(Ty::Named("VerifiedIdentity".to_string(), vec![]))
+            }
             ("new_refresh_token", 1) => {
                 self.check(&args[0], &Ty::I64, expected_ret, scopes);
                 Ty::Named("RefreshTokenHandle".to_string(), vec![])
@@ -4648,6 +4652,23 @@ impl<'a> Checker<'a> {
             // real (runtime) gate on that, same "some proven away
             // statically, some at runtime" split every Tier-2 check here
             // already makes (`docs/LANGUAGE.md` §8).
+            //
+            // **Disclosed gap, not silently missing**: a non-empty bind
+            // array against a *plugin-routed* connection (rfcs/0011's
+            // `db_connect` scheme-dispatch fallback) is a real, named
+            // `Err` at request time (`kernel::plugin_provider::op`'s own
+            // `binds_present` check), not caught here at typecheck time.
+            // This checker has no way to trace which `db_connect(...)`
+            // call produced a given `Ty::Db` value (built-in vs.
+            // plugin-routed is a runtime property of the connection
+            // string, not part of `Ty::Db` itself), so a static diagnostic
+            // isn't available without either a refined handle type or a
+            // dataflow pass this checker doesn't have — see rfcs/0011
+            // §2's own disclosure of this exact limitation for the full
+            // reasoning, including why it's a "surprises late" gap and
+            // not a SQL-injection exposure (`str` has no concatenation at
+            // all in this language, so binds are the only parameterization
+            // route to begin with, plugin-routed or not).
             ("db_query", n) if (2..=10).contains(&n) => {
                 self.check(&args[0], &Ty::Db, expected_ret, scopes);
                 self.check(&args[1], &Ty::Str, expected_ret, scopes); // sql

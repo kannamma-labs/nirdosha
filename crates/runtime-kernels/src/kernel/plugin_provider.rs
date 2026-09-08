@@ -301,7 +301,17 @@ pub fn connect_conn_shape(url: &str) -> Result<PluginConn, String> {
 /// don't cross the plugin `_op` boundary in this phase.
 pub fn op(conn: &PluginConn, arg: &str, binds_present: bool) -> Result<String, String> {
     if binds_present {
-        return Err("bind parameters are not yet supported for plugin-routed db_query/db_execute calls -- inline values into the query string instead".to_string());
+        // "Inline the value into the query string instead" is not
+        // actually actionable advice for a genuinely dynamic value --
+        // `str` has no concatenation in this language (docs/LANGUAGE.md
+        // §2), so the only "inline" a caller can do is a compile-time
+        // literal already baked into the `sql` argument. Say that
+        // plainly rather than pointing at a workaround that doesn't
+        // exist for runtime-computed values.
+        return Err("bind parameters are not supported for plugin-routed db_query/db_execute calls in this phase (rfcs/0011 §2) -- \
+                     a dynamic value can't be spliced into the query string either, since this language has no string \
+                     concatenation; only a query with every value already fixed at compile time works against a plugin-routed connection today"
+            .to_string());
     }
     let ProviderOp::ConnStream { op_fn } = conn.provider.op else {
         return Err("internal error: a call-shape provider's PluginConn reached conn-shape op dispatch".to_string());
