@@ -238,6 +238,17 @@ fn db_pool_config() -> PoolConfig {
     if cfg.max_size < 1000 {
         cfg.max_size = 1000;
     }
+    // Red-team report A12 (`scratch/red-team-report-main-d7fae42.md`):
+    // the unconditional floor-to-1000 above ignored an operator's own
+    // smaller `NIRDOSHA_KERNEL_MAX_DB` -- `plugin_pool_config`
+    // (`plugin_provider.rs`) already clamps *down* to a provider's
+    // ceiling; this floor-to-1000 clamped back *up* past it, so a
+    // deliberately small `db` ceiling silently stopped being "the
+    // choke point" (the RFC's own claim) the moment the pool itself
+    // became the tighter constraint instead. Never let `max_size`
+    // exceed the domain's own resolved ceiling, regardless of the
+    // 1000-floor above.
+    pool::clamp_max_size_to_ceiling(&mut cfg, super::ceiling_for(super::domain::db()));
     cfg
 }
 
@@ -248,18 +259,21 @@ fn db_pool_config() -> PoolConfig {
 /// review): the default budget now covers connect *plus* the mandatory
 /// `SELECT 1` above, not connect alone.
 ///
-/// **This function itself never calls `kernel::acquire`/`release`** —
-/// don't mistake that for the `db` domain's ceiling being unenforced.
-/// The admission gate lives one layer up, around this function's only
-/// two callers: `lib.rs`'s `nir_db_connect` (`kernel::acquire(domain::db())`
-/// before calling this, released on error) and `nir_db_stop`
-/// (`kernel::release(domain::db())` on handle close) — the
-/// connect-to-stop session lifecycle is bracketed there, not here,
-/// because the affine `db` handle (and thus the session's true end) is
-/// a `HandleTable` concept `lib.rs` owns, not something this module
-/// tracks. A grep of this file alone for `acquire` will find nothing;
-/// check `lib.rs`'s `nir_db_connect`/`nir_db_stop` before concluding the
-/// ceiling is decorative.
+/// **This function itself calls `kernel::acquire(domain::db())` at its
+/// own start** (red-team report A8, `scratch/red-team-report-main-d7fae42.md`
+/// — a future third caller of this function could otherwise forget to
+/// bracket admission itself; making `connect` self-contained closes
+/// that hazard structurally instead of relying on every caller to
+/// remember). A successful `Ok(_)` return here holds exactly one
+/// `domain::db()` admission slot that the caller now owns and must
+/// release exactly once, when this connection's session ends — `lib.rs`'s
+/// `nir_db_stop` (`kernel::release(domain::db())` on handle close) is
+/// that release point today; the connect-to-stop *session* lifecycle
+/// still lives at the caller's own `HandleTable`, since the affine `db`
+/// handle (and thus the session's true end) is a concept `lib.rs` owns,
+/// not something this module tracks. Every `Err(_)` return path below
+/// releases its own admission before returning — a failed connect
+/// attempt is fully self-contained, nothing for the caller to release.
 /// RFC 0011 §2 step 1: "check built-in schemes first... if none match,"
 /// fall through to the plugin provider table. `lib.rs`'s `nir_db_connect`
 /// needs this *before* it can decide which domain to
@@ -274,6 +288,19 @@ pub fn is_builtin_scheme(conn_str: &str) -> bool {
 }
 
 pub fn connect(conn_str: &str) -> Result<DbConn, String> {
+    if !super::acquire(super::domain::db()) {
+        return Err("too many open db connections".to_string());
+    }
+    match connect_inner(conn_str) {
+        Ok(conn) => Ok(conn),
+        Err(e) => {
+            super::release(super::domain::db());
+            Err(e)
+        }
+    }
+}
+
+fn connect_inner(conn_str: &str) -> Result<DbConn, String> {
     if conn_str.starts_with("postgres://") || conn_str.starts_with("postgresql://") {
         let pool = postgres_pool_registry().get_or_create(conn_str, db_pool_config(), || build_postgres_manager(conn_str))?;
         let conn = pool.get().map_err(|e| e.to_string())?;
