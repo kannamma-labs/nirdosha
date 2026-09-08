@@ -83,8 +83,16 @@ fn main() {
     // resolve first on `PATH` matches.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
 
+    // `-vv` (very verbose): besides the usual build noise, this makes
+    // Cargo forward every build script's own stdout to *this* process's
+    // stdout, each line prefixed `[pkgname version] `. That's the only
+    // authoritative source for where a dependency's native library
+    // actually lives -- see the `find_link_search_dirs` doc comment below
+    // for why `--print=native-static-libs` alone (just the bare names)
+    // isn't enough.
     let output = Command::new(&cargo)
         .arg("rustc")
+        .arg("-vv")
         .arg("--release")
         .arg("--manifest-path")
         .arg(&kernels_manifest)
@@ -147,8 +155,8 @@ fn main() {
     std::fs::write(out_dir.join("native_static_libs.txt"), native_libs)
         .expect("writing native_static_libs.txt into OUT_DIR");
 
-    // Some crates (the `windows`/`windows-sys` family, at least -- found via
-    // a real Windows CI failure, `LNK1181: cannot open input file
+    // Some crates (the `windows`/`windows-sys` family, at least -- found
+    // via a real Windows CI failure, `LNK1181: cannot open input file
     // 'windows.0.52.0.lib'`, not anticipated in advance) ship their own
     // private, version-named import lib rather than relying on one the
     // system already provides. `--print=native-static-libs` correctly
@@ -158,17 +166,33 @@ fn main() {
     // stay external and must be supplied at final link time, the same as
     // a genuine system lib (`kernel32.lib`, `advapi32.lib`, ...). But
     // unlike a genuine system lib, they don't live on the linker's default
-    // search path at all -- only inside this *build's own* private target
-    // dir, wherever the owning crate's build script copied it.
+    // search path at all -- and, a first attempt at this fix discovered
+    // the hard way (a second real Windows CI failure, identical LNK1181,
+    // after a fix that only searched `kernels_target_dir`), they don't
+    // necessarily live *anywhere under this build's own target dir*
+    // either: `windows_x86_64_msvc` ships `windows.0.52.0.lib` inside its
+    // own crate directory (wherever Cargo's registry cache put it) and
+    // points `-L` straight at that, never copying it anywhere.
     //
-    // Referencing that path directly (a `-L` flag into `kernels_target_dir`)
-    // would silently break on any machine other than the one that built
-    // `nirdosha` itself -- the same "no dependency on the original build
-    // machine" reasoning `libnirdosha_runtime.a`'s own `include_bytes!`
-    // embedding already rests on. So instead: every native-static-libs
-    // token actually found as a real file under this build's own target
-    // dir gets copied into `OUT_DIR` and recorded in a generated Rust
-    // snippet (`extra_native_libs.rs`, embedding each file's bytes via
+    // The only fully general way to know *where* a `cargo:rustc-link-lib`
+    // token's file actually lives is to ask Cargo directly, not guess at a
+    // file layout convention: the `-vv` flag on the `cargo rustc` call
+    // above makes Cargo forward every build script's own stdout to this
+    // process, each line prefixed `[pkgname version] ` -- including its
+    // `cargo:rustc-link-search=...` directives, verbatim, for exactly the
+    // dependency graph this specific build just resolved. `find_link_
+    // search_dirs` below collects every such directory; each
+    // native-static-libs token is then looked up directly in those
+    // directories (not a blind recursive walk).
+    //
+    // Referencing any of those paths directly (a `-L` flag into this
+    // build's own environment) would silently break on any machine other
+    // than the one that built `nirdosha` itself -- the same "no dependency
+    // on the original build machine" reasoning `libnirdosha_runtime.a`'s
+    // own `include_bytes!` embedding already rests on. So instead: every
+    // native-static-libs token actually found this way gets copied into
+    // `OUT_DIR` and recorded in a generated Rust snippet
+    // (`extra_native_libs.rs`, embedding each file's bytes via
     // `include_bytes!`) that `codegen.rs` `include!`s alongside
     // `NATIVE_STATIC_LIBS` -- at actual link time, it writes the bytes
     // back out to a temp file and links that file *by path*, sidestepping
@@ -177,6 +201,12 @@ fn main() {
     // matching file found (`kernel32.lib`, `advapi32.lib`, ...) is left
     // exactly as it was -- a bare name, assumed to be a genuine,
     // always-present system lib.
+    let combined_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    let search_dirs = find_link_search_dirs(&combined_output);
     let extra_libs_dir = out_dir.join("extra_native_libs");
     std::fs::create_dir_all(&extra_libs_dir).expect("creating extra_native_libs dir under OUT_DIR");
     let mut extra_libs_rs = String::from(
@@ -188,7 +218,16 @@ fn main() {
         if !token.ends_with(".lib") {
             continue; // only the MSVC-style `name.lib` tokens are ever such a file
         }
-        if let Some(found) = find_file_named(&kernels_target_dir, token) {
+        let found = search_dirs
+            .iter()
+            .map(|dir| dir.join(token))
+            .find(|p| p.is_file())
+            // Fallback: some crate that copies its lib into its own build
+            // script OUT_DIR (unlike `windows_x86_64_msvc`'s "ship it in
+            // the crate dir" approach) -- still under this build's target
+            // dir, just not named by a `-vv`-visible search-path line.
+            .or_else(|| find_file_named(&kernels_target_dir, token));
+        if let Some(found) = found {
             let dest = extra_libs_dir.join(token);
             std::fs::copy(&found, &dest).unwrap_or_else(|e| {
                 panic!("copying {} to {}: {e}", found.display(), dest.display())
@@ -204,9 +243,35 @@ fn main() {
         .expect("writing extra_native_libs.rs into OUT_DIR");
 }
 
+/// Parses every `cargo:rustc-link-search=...` line out of `-vv`'s
+/// build-script-stdout forwarding (each line prefixed `[pkgname version] `
+/// by Cargo itself, which this doesn't need to key on -- the `cargo:`
+/// marker alone is enough). Handles the `native=`/`framework=`/`all=`
+/// kind prefixes cargo itself accepts, plus a bare path with no kind
+/// prefix at all (both are valid). Returns every directory named this
+/// way, in the order seen, without deduplicating -- a handful of
+/// duplicates costs nothing against `.is_file()` lookups below.
+fn find_link_search_dirs(build_output: &str) -> Vec<PathBuf> {
+    const MARKER: &str = "cargo:rustc-link-search=";
+    let mut dirs = Vec::new();
+    for line in build_output.lines() {
+        let Some(i) = line.find(MARKER) else { continue };
+        let value = &line[i + MARKER.len()..];
+        let path = match value.split_once('=') {
+            // `native=<path>` / `framework=<path>` / `all=<path>` -- the
+            // kind prefix, when present, is always one bare identifier
+            // with no '=' of its own, so the first split is unambiguous.
+            Some((kind, path)) if kind.chars().all(|c| c.is_ascii_alphabetic()) => path,
+            _ => value,
+        };
+        dirs.push(PathBuf::from(path.trim()));
+    }
+    dirs
+}
+
 /// Recursively searches `dir` for a file named exactly `name`, returning
-/// the first match. Used to locate a native-static-libs token's actual
-/// backing file somewhere under this build's own private target dir (see
+/// the first match. Fallback for a native-static-libs token not found via
+/// any `-vv`-reported search directory (see `find_link_search_dirs` and
 /// the `extra_native_libs.rs` doc comment above) -- `kernels_target_dir`
 /// is a few thousand files at most (one crate graph's worth of build
 /// artifacts), so an unindexed walk is cheap relative to the `cargo rustc`
