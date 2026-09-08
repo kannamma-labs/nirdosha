@@ -9874,8 +9874,28 @@ fn build_impl(
     // for a program that never calls `https_get`/`https_post` (same
     // reasoning as `-lm` above) — the linker only pulls in what's
     // actually referenced.
+    //
+    // `SystemConfiguration.framework` is the same story, found the same
+    // way, one real macOS CI failure later: `tokio-postgres` (`Ty::Db`'s
+    // Postgres backend, `nir_db_connect` et al.) depends on `whoami` for
+    // its default-username resolution, and `whoami`'s macOS backend calls
+    // `SCDynamicStoreCopyComputerName` — a `SystemConfiguration.framework`
+    // symbol, not `Security`/`CoreFoundation`. rustc's release build
+    // merges `runtime-kernels` and its dependency graph into very few
+    // codegen units, so this reference rides along in the same object
+    // file as ordinary, always-linked runtime kernels (it surfaced on
+    // trivial programs with no `db` usage at all, not just ones that
+    // touch Postgres) — same "the linker only pulls in what's actually
+    // referenced [into that object file]" mechanics as the other two
+    // frameworks above, just a different object file.
     #[cfg(target_os = "macos")]
-    clang_cmd.arg("-framework").arg("Security").arg("-framework").arg("CoreFoundation");
+    clang_cmd
+        .arg("-framework")
+        .arg("Security")
+        .arg("-framework")
+        .arg("CoreFoundation")
+        .arg("-framework")
+        .arg("SystemConfiguration");
     // Windows has no equivalent hand-picked single flag — `std::net`
     // (the `nir_tcp_*` kernels) needs `ws2_32.lib`, and other stdlib
     // pieces need their own system libs beside it, so the captured,
