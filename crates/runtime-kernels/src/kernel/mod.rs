@@ -120,106 +120,229 @@ pub mod identity;
 pub mod instance_lock;
 pub mod mailbox;
 pub mod nfr;
+pub mod plugin_provider;
 pub mod pool;
+pub mod reaper;
 pub mod recorder;
 pub mod thread_pool;
 pub mod transact;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// One resource domain the kernel admits/tracks. Deliberately a closed,
-/// explicit enum (not a string or an open trait) — the same "notation
-/// with nothing to check" argument `ast::Effect`'s own doc comment
-/// makes for why *that* set is closed too: a domain with no kernel
-/// logic behind it yet would be a variant nothing exercises. Add one
-/// here, and its own two entries in `counters_for`/`Domain::env_var`,
-/// exactly when a real resource (a `json` handle table, a `db`
-/// connection pool) needs it — not speculatively ahead of that.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Domain {
-    Tcp,
-    File,
-    /// One outstanding `thread` handle (between `spawn` and its
-    /// matching `join`) — the same ceiling-on-concurrently-held
-    /// resources tcp/file already get, now that `spawn`/`join` are real
-    /// (`nir_thread_spawn`/`nir_thread_join`, `lib.rs`'s "chan/spawn/
-    /// join kernels" section). `chan` deliberately has no domain here:
-    /// unlike a thread handle, a channel handle is never released
-    /// (`Ty::Channel` has no `stop` case — `nir_chan_new`'s own doc
-    /// comment), so a concurrently-*held* ceiling doesn't fit its
-    /// lifecycle the way it fits an affine handle's acquire/release
-    /// pair; a total-ever-created cap would be a different, not-yet-
-    /// asked-for kind of limit.
-    Thread,
-    /// One outstanding `db` connection (between `db_connect` and its
-    /// matching `stop`) — same ceiling-on-concurrently-held-affine-
-    /// handles shape as `Tcp`/`File` above, now that a real SQLite
-    /// backend exists (`nir_db_connect`, `lib.rs`'s "db kernels"
-    /// section). Appended after `Thread`, not inserted earlier, so
-    /// every existing `Domain as u8` discriminant this module's own
-    /// flight-recorder encoding (`kernel::recorder::domain_name`)
-    /// depends on stays stable.
-    Db,
-    /// One outstanding `mq` (Redis) connection — same shape as `Db`
-    /// just above, appended after it for the same "existing `Domain as
-    /// u8` discriminants stay stable" reason.
-    Mq,
-    /// One outstanding `http`/`https` connection (between `http_get`/
-    /// `http_post`/`https_get`/`https_post`'s pooled checkout and its
-    /// return) — same shape as `Db`/`Mq`, appended last for the same
-    /// discriminant-stability reason. Unlike `Db`, `http`/`https` has
-    /// no user-visible affine handle to hold this ceiling open across
-    /// (a client call is one request, not an open-then-`stop` session)
-    /// — admission is held for the duration of one pooled checkout,
-    /// released as soon as that request's connection returns to (or is
-    /// evicted from) the pool.
-    Http,
-    /// One outstanding compiled-`serve` (ROADMAP B8, `crates/compiled-serve`)
-    /// connection-handling thread — held for the whole life of a
-    /// keep-alive HTTP connection, including idle time between
-    /// requests, not just the time spent actually handling one. A
-    /// deliberately **separate** domain from `Thread`, not a reuse of
-    /// it: sharing `Thread`'s ceiling would mean a few hundred idle
-    /// browser tabs (each holding one keep-alive connection open,
-    /// ordinary behavior, not an attack) could fill it and start
-    /// denying user `spawn` calls inside request handlers — and since a
-    /// denied `spawn` returns a bare `-1` with no `Result` (a real,
-    /// separately-tracked language gap, not fixed here), a handler with
-    /// no way to notice would wedge on a `chan.recv()` that never
-    /// answers, invisibly, instead of failing fast. A dedicated domain
-    /// keeps "server saturated" and "compute saturated" distinguishable
-    /// in the flight recorder, and keeps one from starving the other.
-    ServeHttp,
+/// A resource domain the kernel admits/tracks, identified by a plain
+/// `u32` index into [`DOMAIN_SLOTS`] rather than a closed enum variant —
+/// **RFC 0011 §3's open registry**, replacing the old closed `enum
+/// Domain` (7 hardcoded variants) so a future plugin-registered domain
+/// (a `db`/`call`-shape provider's own scheme, RFC 0011 §2) can mint a
+/// domain at runtime instead of needing a recompile of this crate. `0`
+/// is a valid id here (unlike [`HandleTable`]'s reserved-`0` convention)
+/// — the first domain [`domain::register_builtin_domains`] registers
+/// (`tcp`) legitimately gets id `0`.
+pub type DomainId = u32;
+
+/// Hard ceiling on how many domains this process can ever register —
+/// 7 built-ins plus however many plugin providers a program links in
+/// (RFC 0011 §2/§4). 4096 is deliberately generous headroom over any
+/// realistic plugin count, chosen so [`recorder::Event`]'s `u16` domain
+/// field (65536 range) stays comfortably larger than this ceiling with
+/// room to spare, per this phase's own recorder-widening rationale.
+/// Exceeding it is a loud startup-time panic in [`register_domain`],
+/// never silent truncation or wraparound.
+const MAX_DOMAINS: usize = 4096;
+
+static NEXT_DOMAIN: AtomicU32 = AtomicU32::new(0);
+
+/// Per-domain metadata captured at registration time — the env-var name
+/// and default ceiling `max_for` needs to lazily resolve a domain's
+/// ceiling on first `acquire`, now that these aren't compile-time enum
+/// methods (`Domain::env_var`/`Domain::default_max`) anymore.
+struct DomainMeta {
+    env_var: &'static str,
+    default_max: i64,
 }
 
-impl Domain {
-    /// Read once per domain, lazily, on first `acquire` — an operator
-    /// can raise or lower the ceiling per deployment without a
-    /// recompile, the same override-by-env-var convention
-    /// `crates/compiler/src/pool.rs`'s `PoolConfig` already
-    /// establishes for the interpreter's own (now-removed) DB pooling.
-    fn env_var(self) -> &'static str {
-        match self {
-            Domain::Tcp => "NIRDOSHA_KERNEL_MAX_TCP",
-            Domain::File => "NIRDOSHA_KERNEL_MAX_FILE",
-            Domain::Thread => "NIRDOSHA_KERNEL_MAX_THREAD",
-            Domain::Db => "NIRDOSHA_KERNEL_MAX_DB",
-            Domain::Mq => "NIRDOSHA_KERNEL_MAX_MQ",
-            Domain::Http => "NIRDOSHA_KERNEL_MAX_HTTP",
-            Domain::ServeHttp => "NIRDOSHA_KERNEL_MAX_SERVE_HTTP",
-        }
+static DOMAIN_META: [OnceLock<DomainMeta>; MAX_DOMAINS] = [const { OnceLock::new() }; MAX_DOMAINS];
+static DOMAIN_NAMES: [OnceLock<&'static str>; MAX_DOMAINS] = [const { OnceLock::new() }; MAX_DOMAINS];
+
+/// Name → id, so [`register_domain`] can be idempotent by name (calling
+/// it twice for the same name — e.g. `domain::register_builtin_domains()`
+/// running more than once, see that function's own doc comment — returns
+/// the same [`DomainId`] rather than minting a second one).
+static NAME_INDEX: OnceLock<Mutex<HashMap<&'static str, DomainId>>> = OnceLock::new();
+
+/// Registers one resource domain, minting a fresh [`DomainId`] the first
+/// time `name` is seen and returning the existing one on any later call
+/// with the same `name` — registration is rare (startup-time only, never
+/// on any hot path), so this serializes on one lock for the whole
+/// operation rather than trying to be lock-free, unlike [`acquire`]/
+/// [`release`] which very much need to be.
+///
+/// `env_var`/`default_max` follow the same override-by-env-var
+/// convention `crates/compiler/src/pool.rs`'s `PoolConfig` already
+/// establishes: `env_var` is read once, lazily, on this domain's first
+/// `acquire` (`max_for`), falling back to `default_max` if unset,
+/// unparseable, or `<= 0`.
+///
+/// Panics loudly if registering a genuinely new name would exceed
+/// [`MAX_DOMAINS`] — a startup-time configuration error, never something
+/// a well-behaved running program should silently truncate or wrap
+/// around on.
+pub fn register_domain(name: &'static str, env_var: &'static str, default_max: i64) -> DomainId {
+    let index = NAME_INDEX.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = index.lock().unwrap();
+    if let Some(&existing) = map.get(name) {
+        return existing;
+    }
+    let id = NEXT_DOMAIN.fetch_add(1, Ordering::Relaxed);
+    if (id as usize) >= MAX_DOMAINS {
+        // Drop the lock *before* panicking, deliberately -- panicking
+        // while still holding a `std::sync::Mutex` guard poisons it
+        // permanently, which would make every future `register_domain`
+        // call (even for an already-registered name, whose lookup above
+        // also needs this same lock) panic too, forever, for the rest of
+        // the process. In real production use this panic is meant to be
+        // fatal anyway (a startup-time configuration error), so it
+        // wouldn't matter -- but it does matter to anything that catches
+        // this panic and keeps running (this module's own test for this
+        // exact case), so this is cleaned up regardless of who's asking.
+        drop(map);
+        panic!(
+            "nirdosha kernel: MAX_DOMAINS ({MAX_DOMAINS}) exceeded registering domain {name:?} -- \
+             raise MAX_DOMAINS or investigate a domain-registration loop/leak"
+        );
+    }
+    DOMAIN_META[id as usize].set(DomainMeta { env_var, default_max }).ok().expect("a freshly-minted DomainId's slot must be unclaimed");
+    DOMAIN_NAMES[id as usize].set(name).ok().expect("a freshly-minted DomainId's slot must be unclaimed");
+    map.insert(name, id);
+    id
+}
+
+/// Looks up an already-registered domain's id by name, without
+/// registering anything — RFC 0011 §2's plugin-provider dispatch table
+/// registration (`plugin_provider::register`) needs a provider's
+/// `DomainId` to store alongside its function pointers, and by the time
+/// that call happens (`codegen.rs` always emits `nir_kernel_register_
+/// domain` for a given provider immediately before `nir_kernel_register_
+/// plugin_provider` for the same one, in the same preamble loop
+/// iteration), the domain is already registered — so this is a plain
+/// lookup, not a second registration path. `None` would mean codegen
+/// emitted these calls out of order or for mismatched providers, a
+/// compiler bug, not a runtime condition to recover from gracefully.
+pub fn domain_id_for_name(name: &str) -> Option<DomainId> {
+    let index = NAME_INDEX.get_or_init(|| Mutex::new(HashMap::new()));
+    index.lock().unwrap_or_else(|e| e.into_inner()).get(name).copied()
+}
+
+/// Domain ids/names actually registered so far, in registration order —
+/// [`dump_report`] and [`recorder::domain_name`] both need this instead
+/// of a fixed 7-entry list now that the domain set is open.
+fn registered_domains() -> Vec<(DomainId, &'static str)> {
+    let n = (NEXT_DOMAIN.load(Ordering::Relaxed) as usize).min(MAX_DOMAINS) as u32;
+    (0..n).filter_map(|id| DOMAIN_NAMES[id as usize].get().map(|&name| (id, name))).collect()
+}
+
+/// Looks up the name for one domain id — `None` for an id past whatever
+/// has been registered so far (e.g. a corrupt/foreign value), in which
+/// case the caller (`recorder::domain_name`) falls back to `"unknown"`
+/// the same way it always has.
+fn registered_domain_name(id: DomainId) -> Option<&'static str> {
+    DOMAIN_NAMES.get(id as usize).and_then(|cell| cell.get().copied())
+}
+
+/// The 7 built-in resource domains this kernel has always tracked —
+/// `(name, env_var, default_max)`, in the fixed order `tcp, file,
+/// thread, db, mq, http, serve_http`. **This one array is the only
+/// place that order is written down** — it both drives
+/// [`domain::register_builtin_domains`]'s registration loop and, via
+/// that same loop, is what fills [`domain`]'s 7 `OnceLock<DomainId>`
+/// cells. `codegen.rs` emits exactly one call to
+/// `nir_kernel_register_builtin_domains` (→ `domain::
+/// register_builtin_domains`) in every compiled program's `main`
+/// preamble, strictly before any user code — it carries zero knowledge
+/// of this set or its order, unlike an earlier design this phase
+/// replaced (codegen emitting one `register_domain(...)` call per
+/// built-in, a second, driftable copy of this exact list).
+const BUILTIN_DOMAINS: [(&str, &str, i64); 7] = [
+    ("tcp", "NIRDOSHA_KERNEL_MAX_TCP", 10_000),
+    ("file", "NIRDOSHA_KERNEL_MAX_FILE", 10_000),
+    ("thread", "NIRDOSHA_KERNEL_MAX_THREAD", 10_000),
+    ("db", "NIRDOSHA_KERNEL_MAX_DB", 10_000),
+    ("mq", "NIRDOSHA_KERNEL_MAX_MQ", 10_000),
+    ("http", "NIRDOSHA_KERNEL_MAX_HTTP", 10_000),
+    ("serve_http", "NIRDOSHA_KERNEL_MAX_SERVE_HTTP", 10_000),
+];
+
+/// Stable, non-compile-time-constant handles to the 7 built-in domains
+/// — replaces the old closed `enum Domain`'s variants. Every accessor
+/// here (`tcp()`, `file()`, ...) reads an `OnceLock<DomainId>` cell
+/// filled once by [`register_builtin_domains`], instead of being a bare
+/// compile-time constant the way `domain::tcp()` used to be — a real,
+/// documented precondition this phase introduces (see each accessor's
+/// own doc comment) where none existed before.
+pub mod domain {
+    use super::{register_domain, DomainId, BUILTIN_DOMAINS};
+    use std::sync::{Once, OnceLock};
+
+    static TCP: OnceLock<DomainId> = OnceLock::new();
+    static FILE: OnceLock<DomainId> = OnceLock::new();
+    static THREAD: OnceLock<DomainId> = OnceLock::new();
+    static DB: OnceLock<DomainId> = OnceLock::new();
+    static MQ: OnceLock<DomainId> = OnceLock::new();
+    static HTTP: OnceLock<DomainId> = OnceLock::new();
+    static SERVE_HTTP: OnceLock<DomainId> = OnceLock::new();
+
+    static INIT: Once = Once::new();
+
+    /// Registers all 7 built-in domains, in [`BUILTIN_DOMAINS`]'s fixed
+    /// order, filling this module's 7 cells so `tcp()`/`file()`/...
+    /// resolve to stable ids for the rest of the process's life.
+    /// Idempotent (`Once`-guarded): safe to call more than once, from
+    /// more than one thread — later calls are no-ops. `codegen.rs`
+    /// emits exactly one call to this (via `nir_kernel_register_builtin_
+    /// domains`) at the very top of every compiled program's `main`,
+    /// strictly before any user code, which is what actually gives the
+    /// 7 built-ins their historical, stable ids 0-6 in a compiled
+    /// binary (nothing else can have registered a domain first). Each
+    /// accessor below also calls this itself before reading its cell —
+    /// a deliberate self-healing safety net for callers that reach a
+    /// domain accessor outside a compiled program's `main` (this
+    /// crate's own unit tests, `compiled-serve`'s tests, any future
+    /// direct library use) rather than a hard "you forgot to call this"
+    /// panic — `Once` makes the net free after the first real call.
+    pub fn register_builtin_domains() {
+        INIT.call_once(|| {
+            let cells = [&TCP, &FILE, &THREAD, &DB, &MQ, &HTTP, &SERVE_HTTP];
+            for (cell, (name, env_var, default_max)) in cells.into_iter().zip(BUILTIN_DOMAINS.iter()) {
+                let id = register_domain(name, env_var, *default_max);
+                cell.set(id).ok().expect("register_builtin_domains must only ever run its registration body once (Once-guarded)");
+            }
+        });
     }
 
-    /// Deliberately generous, not a production-tuned ceiling — this
-    /// exists to prove the admission mechanism is real and load-bearing,
-    /// not to actually constrain a well-behaved program today. Tighten
-    /// per-deployment via the env var above once there's a real reason
-    /// to.
-    fn default_max(self) -> i64 {
-        10_000
+    macro_rules! accessor {
+        ($name:ident, $cell:ident, $doc:literal) => {
+            #[doc = $doc]
+            ///
+            /// Precondition: [`register_builtin_domains`] must have run
+            /// at least once in this process before this is called (it
+            /// self-registers on demand if not, so this is a safety net
+            /// rather than a hard requirement — see that function's own
+            /// doc comment).
+            pub fn $name() -> DomainId {
+                register_builtin_domains();
+                *$cell.get().expect("register_builtin_domains just ran unconditionally above; the cell must be set")
+            }
+        };
     }
+    accessor!(tcp, TCP, "The built-in `tcp` domain.");
+    accessor!(file, FILE, "The built-in `file` domain.");
+    accessor!(thread, THREAD, "The built-in `thread` domain.");
+    accessor!(db, DB, "The built-in `db` domain.");
+    accessor!(mq, MQ, "The built-in `mq` domain.");
+    accessor!(http, HTTP, "The built-in `http` domain.");
+    accessor!(serve_http, SERVE_HTTP, "The built-in `serve_http` domain.");
 }
 
 struct DomainCounters {
@@ -250,34 +373,40 @@ impl DomainCounters {
 /// code. Deliberately separate from [`acquire`]/[`release`]: rehydration
 /// is a pool-level event, not an admission decision — a rehydrated
 /// checkout still went through a real `acquire` either way.
-pub fn record_stale_rehydrated(domain: Domain) {
+pub fn record_stale_rehydrated(domain: DomainId) {
     counters_for(domain).stale_rehydrated.fetch_add(1, Ordering::Relaxed);
 }
 
-static TCP: DomainCounters = DomainCounters::new();
-static FILE: DomainCounters = DomainCounters::new();
-static THREAD: DomainCounters = DomainCounters::new();
-static DB: DomainCounters = DomainCounters::new();
-static MQ: DomainCounters = DomainCounters::new();
-static HTTP: DomainCounters = DomainCounters::new();
-static SERVE_HTTP: DomainCounters = DomainCounters::new();
+/// Every domain's counters, indexed directly by [`DomainId`] — the open-
+/// registry replacement for the old 7 named `static`s + `counters_for`
+/// match. A plain array index, same as before: this is the load-bearing
+/// non-blocking property (this module's own doc comment, point 2) —
+/// `acquire`/`release` must stay zero-lock, zero-allocation, zero-syscall
+/// reads/writes into this array, exactly as they were against the old
+/// named statics.
+static DOMAIN_SLOTS: [DomainCounters; MAX_DOMAINS] = [const { DomainCounters::new() }; MAX_DOMAINS];
 
-fn counters_for(domain: Domain) -> &'static DomainCounters {
-    match domain {
-        Domain::Tcp => &TCP,
-        Domain::File => &FILE,
-        Domain::Thread => &THREAD,
-        Domain::Db => &DB,
-        Domain::Mq => &MQ,
-        Domain::Http => &HTTP,
-        Domain::ServeHttp => &SERVE_HTTP,
-    }
+fn counters_for(domain: DomainId) -> &'static DomainCounters {
+    &DOMAIN_SLOTS[domain as usize]
 }
 
-fn max_for(domain: Domain, counters: &DomainCounters) -> i64 {
+fn max_for(domain: DomainId, counters: &DomainCounters) -> i64 {
     *counters.max.get_or_init(|| {
-        std::env::var(domain.env_var()).ok().and_then(|s| s.parse::<i64>().ok()).filter(|&n| n > 0).unwrap_or_else(|| domain.default_max())
+        let meta = DOMAIN_META[domain as usize].get().expect("max_for called for a DomainId that was never registered");
+        std::env::var(meta.env_var).ok().and_then(|s| s.parse::<i64>().ok()).filter(|&n| n > 0).unwrap_or(meta.default_max)
     })
+}
+
+/// Public wrapper around a domain's resolved admission ceiling —
+/// RFC 0011 §5's "what the ceiling actually bounds": `pool.rs`'s
+/// registration-time enforcement (`get_or_create_within_ceiling`) reads
+/// this to refuse building a provider's pool if its own
+/// `PoolConfig::max_size` would exceed it, rather than letting r2d2
+/// silently grow physical connections past a ceiling nothing consults.
+/// Reuses `max_for`'s own env-var-resolution/caching rather than a
+/// second copy of that logic.
+pub fn ceiling_for(domain: DomainId) -> i64 {
+    max_for(domain, counters_for(domain))
 }
 
 /// Attempts to admit one more concurrently-held resource in `domain`.
@@ -288,7 +417,7 @@ fn max_for(domain: Domain, counters: &DomainCounters) -> i64 {
 /// return `-1` uniformly today — this is deliberately not yet a
 /// distinct error code; that's real future work, not a gap to route
 /// around today, see this module's own doc comment).
-pub fn acquire(domain: Domain) -> bool {
+pub fn acquire(domain: DomainId) -> bool {
     let counters = counters_for(domain);
     let max = max_for(domain, counters);
     let mut current = counters.held.load(Ordering::Relaxed);
@@ -315,7 +444,7 @@ pub fn acquire(domain: Domain) -> bool {
 /// runs at most once per handle in a well-typed program (this crate's
 /// own "the checker is the real gate" convention), so a matched
 /// acquire/release pair per handle is a real invariant, not a hope.
-pub fn release(domain: Domain) {
+pub fn release(domain: DomainId) {
     counters_for(domain).held.fetch_sub(1, Ordering::AcqRel);
     recorder::record(domain, recorder::EventKind::Release);
 }
@@ -324,7 +453,7 @@ pub fn release(domain: Domain) {
 /// principle, in its smallest form: no exporter, no aggregation, just
 /// the numbers. `(currently_held, total_grants, total_denials,
 /// total_stale_rehydrated)`.
-pub fn stats(domain: Domain) -> (i64, u64, u64, u64) {
+pub fn stats(domain: DomainId) -> (i64, u64, u64, u64) {
     let c = counters_for(domain);
     (c.held.load(Ordering::Relaxed), c.grants.load(Ordering::Relaxed), c.denials.load(Ordering::Relaxed), c.stale_rehydrated.load(Ordering::Relaxed))
 }
@@ -350,10 +479,17 @@ pub fn stats(domain: Domain) -> (i64, u64, u64, u64) {
 /// it's ever seen, not just a diagnostic curiosity.
 pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
-    for (name, domain) in [("tcp", Domain::Tcp), ("file", Domain::File), ("thread", Domain::Thread), ("db", Domain::Db), ("mq", Domain::Mq), ("http", Domain::Http), ("serve_http", Domain::ServeHttp)] {
-        let (held, grants, denials, stale_rehydrated) = stats(domain);
+    for (id, name) in registered_domains() {
+        let (held, grants, denials, stale_rehydrated) = stats(id);
         out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated}\n"));
     }
+    // RFC 0011 §5: "a broken reaper is a visible number going up, not a
+    // silent absence" — appended as a trailing line, not folded into the
+    // per-domain loop above (it isn't a domain), so existing consumers
+    // asserting on a `{name}: held=... grants=...` substring (this
+    // module's own regression tests, `nirdosha_ops_console.rs`) are
+    // unaffected by this new line's presence.
+    out.push_str(&format!("  reaper_panics={}\n", reaper::reaper_panics()));
     out
 }
 
@@ -367,8 +503,7 @@ pub fn dump_report() -> String {
 /// crate can't depend on the compiler crate at all, this file's own
 /// module doc). **Doc-drift fix**: this comment used to say "not wired
 /// to any `nir_*` kernel yet" — `lib.rs`'s `db_table()` is a real,
-/// working `HandleTable<...>` today (`db`'s own `Domain::Db` doc
-/// comment above already reflects this; this one hadn't been updated).
+/// working `HandleTable<...>` today.
 pub struct HandleTable<T> {
     next_id: AtomicI64,
     handles: Mutex<HashMap<i64, T>>,
@@ -382,7 +517,27 @@ impl<T> Default for HandleTable<T> {
 
 impl<T> HandleTable<T> {
     pub fn new() -> Self {
-        HandleTable { next_id: AtomicI64::new(1), handles: Mutex::new(HashMap::new()) }
+        Self::new_starting_at(1)
+    }
+
+    /// Same as [`HandleTable::new`], except minted ids start at `start`
+    /// instead of `1`. RFC 0011 §2's plugin-conn `HandleTable` needs
+    /// this: `.nir`'s `handle(Db)` type is minted by either `lib.rs`'s
+    /// core `db_table()` (a separate `HandleTable<DbConn>`) or
+    /// `plugin_provider::plugin_conn_table()` (`HandleTable<PluginConn>`)
+    /// — two independent `next_id` counters that, both starting at `1`,
+    /// could otherwise both mint the same numeric id, and step 2's
+    /// "check `db_table()` first, then `HandleTable<PluginConn>` on a
+    /// miss" priority would then resolve a plugin-table id that
+    /// collides with an unrelated, still-live core `db` id to the
+    /// *wrong* connection instead of falling through correctly. Starting
+    /// the plugin table at a disjoint, high range (`1 << 62`) makes that
+    /// collision structurally impossible rather than merely unlikely —
+    /// the same "closed by construction, not by convention" posture §2
+    /// already argues for `next_id`'s own never-reused-once-removed
+    /// property within a single table.
+    pub fn new_starting_at(start: i64) -> Self {
+        HandleTable { next_id: AtomicI64::new(start), handles: Mutex::new(HashMap::new()) }
     }
 
     /// Takes ownership of `value`, mints a fresh id (never `0` —
@@ -606,12 +761,12 @@ mod tests {
 
     #[test]
     fn acquire_then_release_returns_to_zero_held() {
-        let (held_before, _, _, _) = stats(Domain::File);
-        assert!(acquire(Domain::File));
-        let (held_after_acquire, _, _, _) = stats(Domain::File);
+        let (held_before, _, _, _) = stats(domain::file());
+        assert!(acquire(domain::file()));
+        let (held_after_acquire, _, _, _) = stats(domain::file());
         assert_eq!(held_after_acquire, held_before + 1);
-        release(Domain::File);
-        let (held_after_release, _, _, _) = stats(Domain::File);
+        release(domain::file());
+        let (held_after_release, _, _, _) = stats(domain::file());
         assert_eq!(held_after_release, held_before);
     }
 
@@ -624,15 +779,15 @@ mod tests {
         // the first time, since the ceiling is resolved once and cached
         // (`max_for`'s `OnceLock`). This is the only test touching Tcp.
         unsafe { std::env::set_var("NIRDOSHA_KERNEL_MAX_TCP", "2") };
-        assert!(acquire(Domain::Tcp));
-        assert!(acquire(Domain::Tcp));
-        let (_, _, denials_before, _) = stats(Domain::Tcp);
-        assert!(!acquire(Domain::Tcp), "third acquire must be denied at a ceiling of 2");
-        let (held, _, denials_after, _) = stats(Domain::Tcp);
+        assert!(acquire(domain::tcp()));
+        assert!(acquire(domain::tcp()));
+        let (_, _, denials_before, _) = stats(domain::tcp());
+        assert!(!acquire(domain::tcp()), "third acquire must be denied at a ceiling of 2");
+        let (held, _, denials_after, _) = stats(domain::tcp());
         assert_eq!(held, 2, "a denied acquire must not increment held");
         assert_eq!(denials_after, denials_before + 1);
-        release(Domain::Tcp);
-        release(Domain::Tcp);
+        release(domain::tcp());
+        release(domain::tcp());
     }
 
     #[test]
@@ -715,5 +870,80 @@ mod tests {
 
         let s = STALL.lock().unwrap();
         assert_eq!((s.live, s.blocked), (1, 0));
+    }
+
+    /// One combined test for the open domain registry, deliberately not
+    /// split into separate `#[test]`s: `cargo test`'s default
+    /// parallelism gives no ordering guarantee between two independent
+    /// tests even behind a shared lock (a lock only prevents them
+    /// *overlapping*, not which acquires it first) — and the last part
+    /// of this test deliberately exhausts the process-wide registry
+    /// (see its own comment below), which would make a *separately*
+    /// scheduled idempotence check that happens to run afterward fail
+    /// for an unrelated reason. Keeping idempotence → round-trip →
+    /// exhaustion as ordered steps inside one function body is what
+    /// actually guarantees that order.
+    ///
+    /// Covers: registering the same name twice is idempotent (returns
+    /// the same [`DomainId`], doesn't mint a second one); the 7
+    /// built-ins keep their historical ids 0-6 through registration and
+    /// well past 300 additional registrations; a domain id past 255
+    /// still resolves to its real name (proving the recorder's widened
+    /// `u16` field doesn't truncate the way the old `u8` field would);
+    /// and registering brand-new names all the way to [`MAX_DOMAINS`]
+    /// is a loud panic, never silent truncation or wraparound.
+    ///
+    /// **Deliberately exhausts the process-wide domain registry** in its
+    /// last step. Every other test in this crate only ever resolves
+    /// already-registered names (the 7 built-ins via
+    /// `domain::tcp()`/`domain::db()`/etc., idempotent lookups, not new
+    /// registrations), so this doesn't break anything else in this test
+    /// binary today. A future phase adding a same-process (not a
+    /// spawned compiled-binary child process, which gets a fresh
+    /// registry automatically) unit test that registers new domain
+    /// names in *this* crate's test binary will need to account for
+    /// that — flagged here rather than left as a silent trap.
+    #[test]
+    fn open_registry_idempotence_255_plus_domains_and_max_domains_overflow() {
+        let a = register_domain("registry_idempotence_test_domain", "NIRDOSHA_KERNEL_MAX_REGISTRY_IDEMPOTENCE_TEST", 1);
+        let b = register_domain("registry_idempotence_test_domain", "NIRDOSHA_KERNEL_MAX_REGISTRY_IDEMPOTENCE_TEST", 1);
+        assert_eq!(a, b, "registering the same domain name twice must return the same DomainId, not mint a second one");
+
+        domain::register_builtin_domains();
+        let builtins: [(DomainId, &str); 7] =
+            [(0, "tcp"), (1, "file"), (2, "thread"), (3, "db"), (4, "mq"), (5, "http"), (6, "serve_http")];
+        for (id, name) in builtins {
+            assert_eq!(registered_domain_name(id), Some(name), "built-in domain ids must be stable at 0-6");
+        }
+
+        let mut synthetic_ids = Vec::new();
+        for i in 0..300 {
+            let name: &'static str = Box::leak(format!("registry_round_trip_synthetic_domain_{i}").into_boxed_str());
+            let env_var: &'static str = Box::leak(format!("NIRDOSHA_KERNEL_MAX_SYNTH_{i}").into_boxed_str());
+            synthetic_ids.push(register_domain(name, env_var, 1));
+        }
+        let high_id = *synthetic_ids.last().unwrap();
+        assert!(high_id > 255, "must have registered at least one domain with an id past the old u8 ceiling, got {high_id}");
+        assert_eq!(
+            registered_domain_name(high_id),
+            Some("registry_round_trip_synthetic_domain_299"),
+            "a domain id past 255 must still resolve to its real name, not silently truncate the way a u8 field would"
+        );
+
+        // The built-ins' ids must still read back correctly after 300
+        // more domains registered after them -- registration is
+        // append-only, so ids already minted never move.
+        for (id, name) in builtins {
+            assert_eq!(registered_domain_name(id), Some(name), "built-in domain ids must stay stable even after later registrations");
+        }
+
+        let overflowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in 0..(MAX_DOMAINS + 16) {
+                let name: &'static str = Box::leak(format!("registry_overflow_synthetic_domain_{i}").into_boxed_str());
+                let env_var: &'static str = Box::leak(format!("NIRDOSHA_KERNEL_MAX_OVERFLOW_{i}").into_boxed_str());
+                register_domain(name, env_var, 1);
+            }
+        }));
+        assert!(overflowed.is_err(), "registering far more than MAX_DOMAINS distinct new domains must panic, not silently succeed or wrap around");
     }
 }

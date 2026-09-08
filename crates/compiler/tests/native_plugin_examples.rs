@@ -83,16 +83,32 @@ fn the_shipped_example_plugin_crates_compile_and_run_correctly() {
     let kv_store_kind = || Ty::Handle("KvStore".to_string());
     let kv_store_ref = || Ty::Ref(Box::new(kv_store_kind()));
     let plugins = vec![
-        NativePluginBuiltin { name: "plugin_shout".to_string(), params: vec![Ty::Str], ret: Ty::Str, static_lib: shout_lib },
-        NativePluginBuiltin { name: "kv_open".to_string(), params: vec![], ret: kv_store_kind(), static_lib: kv_lib },
+        NativePluginBuiltin { name: "plugin_shout".to_string(), params: vec![Ty::Str], ret: Ty::Str, static_lib: shout_lib, env_var: None, default_max: None },
+        NativePluginBuiltin { name: "kv_open".to_string(), params: vec![], ret: kv_store_kind(), static_lib: kv_lib, env_var: None, default_max: None },
         NativePluginBuiltin {
             name: "kv_set".to_string(),
             params: vec![kv_store_ref(), Ty::Str, Ty::Str],
             ret: Ty::I64,
             static_lib: kv_lib,
+            env_var: None,
+            default_max: None,
         },
-        NativePluginBuiltin { name: "kv_get".to_string(), params: vec![kv_store_ref(), Ty::Str], ret: Ty::Str, static_lib: kv_lib },
-        NativePluginBuiltin { name: "kv_close".to_string(), params: vec![kv_store_kind()], ret: Ty::I64, static_lib: kv_lib },
+        NativePluginBuiltin {
+            name: "kv_get".to_string(),
+            params: vec![kv_store_ref(), Ty::Str],
+            ret: Ty::Str,
+            static_lib: kv_lib,
+            env_var: None,
+            default_max: None,
+        },
+        NativePluginBuiltin {
+            name: "kv_close".to_string(),
+            params: vec![kv_store_kind()],
+            ret: Ty::I64,
+            static_lib: kv_lib,
+            env_var: None,
+            default_max: None,
+        },
     ];
     for p in &plugins {
         p.validate().unwrap_or_else(|e| panic!("{e}"));
@@ -130,6 +146,123 @@ fn the_shipped_example_plugin_crates_compile_and_run_correctly() {
     // something non-empty came back -> kv_set/kv_close both report
     // success (1) -> 1*10 + 1 == 11.
     assert_eq!(output.status.code(), Some(11), "compiled binary's exit code: {output:?}");
+
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+/// rfcs/0011-uniform-service-provider-model.md Phase 8's own closing
+/// checklist item, proven the same way the test above proves Phases 1/4
+/// of rfcs/0008: not a synthetic inline plugin (`native_plugin_codegen.rs`'s
+/// own tests use those, for speed), but the real, separately-compiled
+/// `crates/plugin-example-native-authed-http` crate, linked into a real
+/// `nirdosha build` output and run as a real process — against a real
+/// local HTTP server, on an ephemeral port, observing a real
+/// `Authorization: Bearer <token>` header that only the plugin (reading
+/// `AUTHEDHTTP_BEARER_TOKEN` from the process environment at connect
+/// time) could have set.
+#[test]
+fn the_shipped_authed_http_plugin_compiles_and_makes_a_real_authenticated_request() {
+    build_release("nirdosha-plugin-native-authed-http");
+    let authedhttp_lib = read_staticlib("nirdosha-plugin-native-authed-http");
+
+    let plugins = vec![
+        NativePluginBuiltin {
+            name: "authedhttp_provider_authedhttp_connect".to_string(),
+            params: vec![Ty::Str],
+            ret: Ty::I64,
+            static_lib: authedhttp_lib,
+            env_var: None,
+            default_max: None,
+        },
+        NativePluginBuiltin {
+            name: "authedhttp_provider_authedhttp_request".to_string(),
+            params: vec![Ty::I64, Ty::Str, Ty::Str],
+            ret: Ty::Str,
+            static_lib: authedhttp_lib,
+            env_var: None,
+            default_max: None,
+        },
+        NativePluginBuiltin {
+            name: "authedhttp_provider_authedhttp_is_valid".to_string(),
+            params: vec![Ty::I64],
+            ret: Ty::I64,
+            static_lib: authedhttp_lib,
+            env_var: None,
+            default_max: None,
+        },
+        NativePluginBuiltin {
+            name: "authedhttp_provider_authedhttp_close".to_string(),
+            params: vec![Ty::I64],
+            ret: Ty::I64,
+            static_lib: authedhttp_lib,
+            env_var: None,
+            default_max: None,
+        },
+    ];
+    for p in &plugins {
+        p.validate().unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    // A real local HTTP server, bound to an ephemeral port (`:0`) --
+    // never a fixed port, to avoid CI collisions -- whose only job is to
+    // observe the incoming request's `Authorization` header and echo a
+    // fixed body back.
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("binding an ephemeral local test server should succeed");
+    let port = server.server_addr().to_ip().expect("this test only binds an IP address, not a unix socket").port();
+
+    const EXPECTED_TOKEN: &str = "rfc0011-phase8-secret-token";
+    let observed_auth_header: std::sync::Arc<std::sync::Mutex<Option<String>>> = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let observed_auth_header_for_server = observed_auth_header.clone();
+    let server_thread = std::thread::spawn(move || {
+        // Exactly one request is expected -- `call_via` is called once
+        // in the `.nir` program below.
+        let request = server.recv().expect("the test server should receive exactly one request");
+        let auth = request.headers().iter().find(|h| h.field.equiv("Authorization")).map(|h| h.value.as_str().to_string());
+        *observed_auth_header_for_server.lock().unwrap() = auth;
+        let response = tiny_http::Response::from_string("authed-ok".to_string());
+        request.respond(response).expect("responding to the test request should succeed");
+    });
+
+    let src = r#"
+        fn main() -> i64 {
+            let result: str = match call_via("authedhttp://127.0.0.1:PORT_PLACEHOLDER", "/secure", "payload") {
+                Err(e) => "ERR",
+                Ok(resp) => resp.body,
+            }
+            if result == "authed-ok" {
+                return 1
+            }
+            return 0
+        }
+    "#
+    .replace("PORT_PLACEHOLDER", &port.to_string());
+
+    let program = typecheck_and_own_with_plugins(&src, &plugins);
+    let report = analyze(&program);
+
+    let out_dir = std::env::temp_dir().join(format!("nirdosha_authed_http_plugin_example_bin_{}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let out_path = out_dir.join("authed_http_plugin_example_bin");
+
+    codegen::build_with_native_plugins(&program, &report, &out_path, codegen::OptLevel::O2, &plugins, &Default::default())
+        .expect("build_with_native_plugins should compile and link cleanly");
+
+    // The bearer token is set on the *compiled binary's own* process
+    // environment (not this test process's) -- `_connect` reads it via
+    // `std::env::var` at connect time, inside that child process.
+    let output = Command::new(&out_path)
+        .env("AUTHEDHTTP_BEARER_TOKEN", EXPECTED_TOKEN)
+        .output()
+        .expect("running the compiled binary should succeed");
+
+    server_thread.join().expect("the test server thread should not panic");
+
+    assert_eq!(output.status.code(), Some(1), "compiled binary's exit code (1 == the plugin's response body round-tripped correctly): {output:?}");
+    assert_eq!(
+        observed_auth_header.lock().unwrap().as_deref(),
+        Some(format!("Bearer {EXPECTED_TOKEN}").as_str()),
+        "the real local server must have observed exactly the Authorization header the plugin was told to send via env(...)"
+    );
 
     let _ = std::fs::remove_dir_all(out_dir);
 }

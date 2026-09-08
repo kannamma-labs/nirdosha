@@ -225,7 +225,7 @@ fn a_body_over_the_max_size_is_rejected_with_413() {
 /// so that case isn't (and can't safely be) exercised here.
 ///
 /// A tight, isolated unit test of the `Drop` impl itself, not an
-/// end-to-end request through a real `Listener` — `Domain::ServeHttp`'s
+/// end-to-end request through a real `Listener` — `domain::serve_http()`'s
 /// held count is a single process-wide counter shared by every
 /// concurrently-running test in this binary (`cargo test`'s default
 /// parallelism), so a broader "run N real requests, compare the
@@ -236,10 +236,10 @@ fn a_body_over_the_max_size_is_rejected_with_413() {
 /// test to interleave in, keeps the same real guarantee without it.
 #[test]
 fn serve_http_lease_drop_releases_exactly_one_admission() {
-    assert!(kernel::acquire(Domain::ServeHttp));
-    let (held_before, _, _, _) = kernel::stats(Domain::ServeHttp);
+    assert!(kernel::acquire(domain::serve_http()));
+    let (held_before, _, _, _) = kernel::stats(domain::serve_http());
     drop(ServeHttpLease);
-    let (held_after, _, _, _) = kernel::stats(Domain::ServeHttp);
+    let (held_after, _, _, _) = kernel::stats(domain::serve_http());
     assert_eq!(held_after, held_before - 1);
 }
 

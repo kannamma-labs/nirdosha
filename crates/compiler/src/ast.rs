@@ -1110,6 +1110,11 @@ pub enum Effect {
     Concurrent,
     /// `connect`/`listen`/`accept`, `tcp`'s `send`/`recv`/`stop`.
     Network,
+    /// `env` — reads a process environment variable. Unscoped (RFC 0011
+    /// §6: "Decided: `Effect::Env`... unscoped") — kept distinct from
+    /// `Io` because it reads process-local configuration state, not the
+    /// outside world.
+    Env,
 }
 
 impl Effect {
@@ -1119,6 +1124,7 @@ impl Effect {
             Effect::Io => "io",
             Effect::Concurrent => "concurrent",
             Effect::Network => "network",
+            Effect::Env => "env",
         }
     }
 }
@@ -2544,6 +2550,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     // hand-rolled, per docs/PROTOLANG_PORT.md's std_io §12 stance.
     "https_get",
     "https_post",
+    // rfcs/0011-uniform-service-provider-model.md §1/§2: the `call`-shape
+    // provider dispatch entrypoint -- `http://`/`https://` served by the
+    // same core path as the four builtins above, any other scheme
+    // falling through to a registered `call`-shape plugin at runtime.
+    "call_via",
     // Row 12: identity as a relying party. The runtime validates tokens
     // issued by external IdPs and returns an unforgeable-in-the-type-system
     // VerifiedIdentity. `oidc_validate_token` performs mock OIDC/JWT
@@ -2642,6 +2653,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     // `mq_connect`'s own hardcoded Redis backend -- see
     // `interpreter.rs`'s "mq_connect_via" arm.
     "mq_connect_via",
+    // RFC 0011 §1/§6: reads a process environment variable.
+    // `env(name: str) -> Result(str, str)` -- `Ok` when set, `Err` when
+    // unset. `Effect::Env`, unscoped (§6: "Decided"). No handle, no
+    // `Domain`, not resource-gated -- unlike `db`/`mq`/`http` above.
+    "env",
     // Row 12's deliberate mock-only exception to "the runtime never
     // mints tokens" -- see its own doc comment at the builtin's typeck
     // signature (`typeck.rs`) for why the `mock_` prefix is load-bearing.
