@@ -261,6 +261,7 @@ const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "d
 const IDENTITY_BUILTINS: &[&str] = &[
     "check_role",
     "oidc_validate_token",
+    "mock_issue_token",
     "extract_claim",
     "identity_expired",
     "check_role_path",
@@ -280,6 +281,11 @@ const IDENTITY_BUILTINS: &[&str] = &[
 /// `postgresql://`) is a real, deferred follow-up (dynamic TLS linking),
 /// not silently dropped.
 const DB_BUILTINS: &[&str] = &["db_connect", "db_query", "db_execute"];
+
+/// `env` (RFC 0011 §1) — reads a process environment variable via
+/// `nir_env_get`. Not resource-gated: no `Domain`, no handle, no pool —
+/// unlike `DB_BUILTINS` right above.
+const ENV_BUILTINS: &[&str] = &["env"];
 
 /// `json_parse`/`json_get`/`json_get_str`/`json_get_i64`/`json_get_f64`/
 /// `json_get_bool`/`json_array_get`/`json_array_len`/`json_set_str` —
@@ -305,6 +311,17 @@ const MQ_BUILTINS: &[&str] = &["mq_connect", "mq_publish", "mq_consume"];
 /// struct, and every call here is a one-shot request/response, never a
 /// persisted connection handle.
 const HTTP_BUILTINS: &[&str] = &["http_get", "http_post", "https_get", "https_post"];
+
+/// `call_via` — rfcs/0011-uniform-service-provider-model.md §1/§2's
+/// `call`-shape provider dispatch entrypoint. Kept as its own const
+/// list, not folded into `HTTP_BUILTINS` above, since it isn't a fixed
+/// core-HTTP call the way those four are: `http://`/`https://` sniff
+/// straight through to the same core path, but any other scheme
+/// resolves at runtime against the plugin-provider table
+/// (`kernel::plugin_provider`) — a real, disclosed dispatch difference
+/// worth its own named list even though `emit_call_via`'s own codegen
+/// shape mirrors `emit_http_call`'s closely.
+const CALL_BUILTINS: &[&str] = &["call_via"];
 
 /// `workflow` Layer 1 (`docs/WORKFLOW.md`) — every builtin
 /// `workflow_lower.rs` desugars a `workflow` block's synthesized
@@ -1121,10 +1138,12 @@ fn check_expr(e: &Expr, plugin_names: &std::collections::HashSet<String>, regist
                 && !DEC128_BUILTINS.contains(&name.as_str())
                 && !IDENTITY_BUILTINS.contains(&name.as_str())
                 && !DB_BUILTINS.contains(&name.as_str())
+                && !ENV_BUILTINS.contains(&name.as_str())
                 && !JSON_BUILTINS.contains(&name.as_str())
                 && !SLEEP_BUILTINS.contains(&name.as_str())
                 && !MQ_BUILTINS.contains(&name.as_str())
                 && !HTTP_BUILTINS.contains(&name.as_str())
+                && !CALL_BUILTINS.contains(&name.as_str())
                 && !WORKFLOW_BUILTINS.contains(&name.as_str())
                 && !NOTIFY_BUILTINS.contains(&name.as_str())
             {
@@ -1559,6 +1578,9 @@ pub fn emit_llvm_ir_with_native_plugins<'a>(
             return unsupported(msg);
         }
     }
+    if let Err(msg) = crate::plugin::validate_plugin_roster(native_plugins) {
+        return unsupported(msg);
+    }
     emit_llvm_ir_impl(program, smt_report, native_plugins, reject_plugin_names)
 }
 
@@ -1746,6 +1768,16 @@ fn emit_llvm_ir_impl<'a>(
     )
     .unwrap();
     writeln!(cg.out, "declare i32 @nir_extract_claim(ptr, i64, ptr, i64, ptr)").unwrap();
+    // `mock_issue_token` (`IDENTITY_BUILTINS`'s own doc comment) — the
+    // inverse of `oidc_validate_token`: signs a token instead of
+    // verifying one, HS256-only, `nir_mock_issue_token`'s own doc comment
+    // has the scope. `out_token`/`out_err` are `{ptr, i64}`-shaped, same
+    // as every other `str`-payload out-param above.
+    writeln!(
+        cg.out,
+        "declare i32 @nir_mock_issue_token(ptr, i64, ptr, i64, ptr, i64, i64, i64, ptr, i64, ptr, i64, ptr, ptr)"
+    )
+    .unwrap();
     // The rest of Row 12 (`docs/nirdosha_row12_functions_identity.md`,
     // `kernel::identity`'s own module doc has the full design): dotted-
     // path claim lookup, sessions, refresh tokens, revocation, API keys.
@@ -1778,6 +1810,10 @@ fn emit_llvm_ir_impl<'a>(
     writeln!(cg.out, "declare i32 @nir_json_get_f64(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_json_get_bool(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_json_set_str(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    // `env` (`ENV_BUILTINS`'s own doc comment, RFC 0011 §1) — reads a
+    // process environment variable. Not resource-gated (no `Domain`, no
+    // handle) — same reason `nir_json_get_str` isn't either.
+    writeln!(cg.out, "declare i32 @nir_env_get(ptr, i64, ptr, ptr)").unwrap();
     // `transact { ... }` (`docs/TRANSACT.md`, `Codegen::emit_transact`'s
     // own doc comment has the compiled-backend scope). `txn_id`'s real
     // implementation; `sleep_ms`, ordinary compiled `sleep_ms(ms)` (`B9`).
@@ -1807,6 +1843,12 @@ fn emit_llvm_ir_impl<'a>(
     writeln!(cg.out, "declare i32 @nir_http_post(ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_https_get(ptr, i64, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_https_post(ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
+    // rfcs/0011-uniform-service-provider-model.md §1/§2's `call`-shape
+    // dispatch entrypoint (`CALL_BUILTINS`'s own doc comment) —
+    // `(url_ptr, url_len, path_ptr, path_len, body_ptr, body_len,
+    // out_status, out_body, out_err)`, `emit_call_via`'s own shape below
+    // mirrors `emit_http_call`'s `nir_http_post`-style call closely.
+    writeln!(cg.out, "declare i32 @nir_call_via(ptr, i64, ptr, i64, ptr, i64, ptr, ptr, ptr)").unwrap();
     // `workflow` Layer 1 (`docs/WORKFLOW.md`, `Codegen::emit_workflow_start`'s
     // own doc comment has the full scope) — the in-memory instance
     // table, SLA/escalation detection, and the four notification
@@ -1824,6 +1866,37 @@ fn emit_llvm_ir_impl<'a>(
     // in `ast::BUILTIN_NAMES` at all — there is no `Expr` that lowers to
     // a `call` to this).
     writeln!(cg.out, "declare void @nir_kernel_flight_recorder_dump()").unwrap();
+    // RFC 0011 §3's open domain registry bootstrap — `emit_c_main` emits
+    // exactly one call to this, at the very top of `main`, strictly
+    // before any user code, so the 7 built-in domains get their
+    // historical, stable ids 0-6. This declare, like the one above,
+    // carries zero knowledge of the built-in domain set or its order —
+    // that's `runtime-kernels`'s own `BUILTIN_DOMAINS` array, the only
+    // place that order is written down.
+    writeln!(cg.out, "declare void @nir_kernel_register_builtin_domains()").unwrap();
+    writeln!(cg.out, "declare void @nir_kernel_register_domain(ptr, i64, ptr, i64, i64)").unwrap();
+    // RFC 0011 §2/§4's plugin-provider dispatch table registration —
+    // `domain_name` matches the immediately-preceding `nir_kernel_
+    // register_domain` call's own `name` argument exactly (the kernel
+    // looks up that already-registered `DomainId` by name rather than
+    // re-deriving it), `scheme` is the compiler's own already-normalized
+    // scheme identifier (`plugin::normalize_scheme`'s output, not the
+    // raw declared scheme text). The four trailing `ptr`s are the
+    // provider's own function addresses, taken directly from the global
+    // symbols this file already `declare`s for every native plugin
+    // builtin (just below) — opaque `ptr`s here since their *real* LLVM
+    // signatures differ per shape (`_op`'s one `str` arg vs `_request`'s
+    // two); `is_call_shape` tells the kernel which one it's holding, so
+    // it can transmute it back to the correct `extern "C" fn` type on
+    // its own side rather than this call needing two mutually-exclusive
+    // parameters.
+    writeln!(cg.out, "declare void @nir_kernel_register_plugin_provider(ptr, i64, ptr, i64, ptr, ptr, ptr, ptr, i32)").unwrap();
+    // RFC 0011 §5's reaper bootstrap — `emit_c_main` emits exactly one
+    // call to this, immediately after the registration calls above,
+    // still strictly before any user code runs. Carries no arguments;
+    // `kernel::reaper::start` reads its own interval from
+    // `NIRDOSHA_KERNEL_REAPER_INTERVAL_SECS` on the kernel side.
+    writeln!(cg.out, "declare void @nir_kernel_start_reaper()").unwrap();
     // "%lld\n\0" — 6 bytes (%, l, l, d, \n, \0), not 5; LLVM's array
     // constant size has to match the literal exactly, byte for byte.
     writeln!(cg.out, "@.int_fmt = private unnamed_addr constant [6 x i8] c\"%lld\\0A\\00\"").unwrap();
@@ -1875,7 +1948,7 @@ fn emit_llvm_ir_impl<'a>(
         cg.function(f)?;
     }
 
-    cg.emit_c_main(program)?;
+    cg.emit_c_main(program, native_plugins)?;
     // See `string_globals`'s own doc — every `str` literal's backing
     // global constant, collected during function codegen since it can't
     // be written mid-function-body, appended here once at the end.
@@ -2684,6 +2757,9 @@ impl Codegen<'_> {
             Expr::Call(name, _, _) if name == "oidc_validate_token" => {
                 Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
             }
+            Expr::Call(name, _, _) if name == "mock_issue_token" => {
+                Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str])
+            }
             Expr::Call(name, _, _) if name == "extract_claim" => {
                 Ty::Named("Result".to_string(), vec![Ty::Named("ClaimView".to_string(), vec![]), Ty::Str])
             }
@@ -2707,6 +2783,13 @@ impl Codegen<'_> {
             Expr::Call(name, _, _) if name == "db_connect" => {
                 Ty::Named("Result".to_string(), vec![Ty::Db, Ty::Str])
             }
+            // RFC 0011 §1 -- same `Result(str, str)` shape as `json_get_str`
+            // below; needed here (not just in `emit_env`'s own dispatch)
+            // so a `match env(...)` scrutinee is correctly routed through
+            // the aggregate (`expr_ptr`) codegen path instead of falling
+            // through to `fn call`'s scalar-only dispatch and hitting its
+            // "typeck.rs already resolved this call" `expect` panic.
+            Expr::Call(name, _, _) if name == "env" => Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]),
             Expr::Call(name, _, _) if name == "db_execute" => {
                 Ty::Named("Result".to_string(), vec![Ty::I64, Ty::Str])
             }
@@ -2740,7 +2823,9 @@ impl Codegen<'_> {
             Expr::Call(name, _, _) if name == "mq_consume" => {
                 Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str])
             }
-            Expr::Call(name, _, _) if name == "http_get" || name == "http_post" || name == "https_get" || name == "https_post" => {
+            Expr::Call(name, _, _)
+                if name == "http_get" || name == "http_post" || name == "https_get" || name == "https_post" || name == "call_via" =>
+            {
                 Ty::Named("Result".to_string(), vec![Ty::Named("HttpResponse".to_string(), vec![]), Ty::Str])
             }
             // `workflow` Layer 1 (`WORKFLOW_BUILTINS`/`NOTIFY_BUILTINS`'
@@ -5489,6 +5574,9 @@ impl Codegen<'_> {
         if name == "oidc_validate_token" {
             return self.emit_oidc_validate_token(args, scopes);
         }
+        if name == "mock_issue_token" {
+            return self.emit_mock_issue_token(args, scopes);
+        }
         if name == "extract_claim" {
             return self.emit_extract_claim(args, scopes);
         }
@@ -5518,6 +5606,9 @@ impl Codegen<'_> {
         }
         if name == "db_connect" {
             return self.emit_db_connect(args, scopes);
+        }
+        if name == "env" {
+            return self.emit_env(args, scopes);
         }
         if name == "db_execute" {
             return self.emit_db_execute(args, scopes);
@@ -5572,6 +5663,9 @@ impl Codegen<'_> {
         }
         if name == "https_post" {
             return self.emit_http_call("nir_https_post", args, true, scopes);
+        }
+        if name == "call_via" {
+            return self.emit_call_via(args, scopes);
         }
         if name == "__workflow_start" {
             return self.emit_workflow_start(args, scopes);
@@ -5785,6 +5879,42 @@ impl Codegen<'_> {
 
         writeln!(self.out, "{merge_label}:").unwrap();
         Ok(dest)
+    }
+
+    /// `mock_issue_token(subject, issuer, audience, issued_at, ttl_secs,
+    /// claims_json, jwks_json) -> Result(str, str)` — the inverse of
+    /// `emit_oidc_validate_token` just above: a single `str` payload, not
+    /// a six-field struct, so this follows `emit_json_get_str`'s simpler
+    /// shape instead (`nir_mock_issue_token`'s own doc comment has the
+    /// real HS256-only scope).
+    fn emit_mock_issue_token(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]);
+        let (subject_ptr, subject_len) = self.str_parts(&args[0], scopes)?;
+        let (issuer_ptr, issuer_len) = self.str_parts(&args[1], scopes)?;
+        let (audience_ptr, audience_len) = self.str_parts(&args[2], scopes)?;
+        let issued_at = self.expr(&args[3], scopes)?;
+        let ttl_secs = self.expr(&args[4], scopes)?;
+        let (claims_ptr, claims_len) = self.str_parts(&args[5], scopes)?;
+        let (jwks_ptr, jwks_len) = self.str_parts(&args[6], scopes)?;
+
+        let token_scratch = self.fresh_reg("mock_issue_token_value_scratch");
+        self.emit_alloca(&token_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("mock_issue_token_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("mock_issue_token_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_mock_issue_token(ptr {subject_ptr}, i64 {subject_len}, ptr {issuer_ptr}, i64 {issuer_len}, \
+             ptr {audience_ptr}, i64 {audience_len}, i64 {issued_at}, i64 {ttl_secs}, ptr {claims_ptr}, i64 {claims_len}, \
+             ptr {jwks_ptr}, i64 {jwks_len}, ptr {token_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let token_val = self.fresh_reg("mock_issue_token_value");
+        writeln!(self.out, "  {token_val} = load {{ptr, i64}}, ptr {token_scratch}").unwrap();
+        let err_val = self.fresh_reg("mock_issue_token_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &token_val, &err_val, "mock_issue_token")
     }
 
     /// `extract_claim(identity, name) -> Result(ClaimView, str)` — real
@@ -6382,6 +6512,37 @@ impl Codegen<'_> {
     }
 
     /// `db_connect(path) -> Result(db, str)`.
+    /// `env(name) -> Result(str, str)` (RFC 0011 §1) — `Ok(value)` when
+    /// the process environment variable is set, `Err(_)` when unset. Not
+    /// resource-gated: no `Domain`, no handle, unlike `db_connect` right
+    /// below — same shape as `emit_json_get_str`, just one `str` arg
+    /// instead of two.
+    fn emit_env(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]);
+        let (name_ptr, name_len) = self.str_parts(&args[0], scopes)?;
+        let value_scratch = self.fresh_reg("env_value_scratch");
+        self.emit_alloca(&value_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("env_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        // Named `env_found`, not `env_ok` -- `emit_result_merge`'s own
+        // `label_prefix` below is `"env"`, which mints labels literally
+        // named `env_ok`/`env_err`/`env_merge`. `fresh_reg`/`fresh_label`
+        // keep separate counters, so a register also named `env_ok` can
+        // land on the same numeric suffix as the label on a second call
+        // to `env(...)` in the same function -- `%env_ok.9` bound once as
+        // an `i32` value and again as a branch target is a genuine LLVM
+        // parse error ("not a basic block"), caught by compiling a
+        // program with two `env(...)` calls, not by the single-call case.
+        let found = self.fresh_reg("env_found");
+        writeln!(self.out, "  {found} = call i32 @nir_env_get(ptr {name_ptr}, i64 {name_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let value_val = self.fresh_reg("env_value");
+        writeln!(self.out, "  {value_val} = load {{ptr, i64}}, ptr {value_scratch}").unwrap();
+        let err_val = self.fresh_reg("env_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &value_val, &err_val, "env")
+    }
+
     fn emit_db_connect(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
         let result_ty = Ty::Named("Result".to_string(), vec![Ty::Db, Ty::Str]);
         let (path_ptr, path_len) = self.str_parts(&args[0], scopes)?;
@@ -6766,6 +6927,88 @@ impl Codegen<'_> {
         let ok_label = self.fresh_label("http_ok");
         let err_label = self.fresh_label("http_err");
         let merge_label = self.fresh_label("http_merge");
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        let http_bytes = agg_byte_size_operand(&http_response_ty, &self.registry);
+        writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {payload_ptr}, ptr {http_scratch}, i64 {http_bytes}, i1 false)").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {err_val}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        Ok(dest)
+    }
+
+    /// `call_via(url, path, body) -> Result(HttpResponse, str)` —
+    /// rfcs/0011-uniform-service-provider-model.md §1/§2's `call`-shape
+    /// dispatch entrypoint. Structurally the same result-merge shape as
+    /// [`Codegen::emit_http_call`] (same `HttpResponse`/`Result` layout,
+    /// same ok/err/merge label pattern) — kept as its own function
+    /// rather than folded into `emit_http_call` because the call-site
+    /// argument shape genuinely differs (`(url, path, body)`, no
+    /// separate `host`/`port`, and always exactly 3 args — `call_via`
+    /// has no bodyless-GET-shaped sibling the way `http_get`/`http_post`
+    /// do).
+    fn emit_call_via(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let http_response_ty = Ty::Named("HttpResponse".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![http_response_ty.clone(), Ty::Str]);
+
+        let (url_ptr, url_len) = self.str_parts(&args[0], scopes)?;
+        let (path_ptr, path_len) = self.str_parts(&args[1], scopes)?;
+        let (body_ptr, body_len) = self.str_parts(&args[2], scopes)?;
+
+        let status_scratch = self.fresh_reg("call_via_status_scratch");
+        self.emit_alloca(&status_scratch, "i64");
+        let body_scratch = self.fresh_reg("call_via_body_scratch");
+        self.emit_alloca(&body_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("call_via_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        let found = self.fresh_reg("call_via_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_call_via(ptr {url_ptr}, i64 {url_len}, ptr {path_ptr}, i64 {path_len}, \
+             ptr {body_ptr}, i64 {body_len}, ptr {status_scratch}, ptr {body_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+
+        let http_llty = self.llvm_ty(&http_response_ty)?;
+        let http_scratch = self.fresh_reg("call_via_response_scratch");
+        self.emit_alloca(&http_scratch, &http_llty);
+        let (status_idx, _) =
+            self.field_index_and_ty(&http_response_ty, "status").expect("HttpResponse always has status, ast::prelude_structs");
+        let (body_idx, _) = self.field_index_and_ty(&http_response_ty, "body").expect("HttpResponse always has body, ast::prelude_structs");
+        let status_field_ptr = self.fresh_reg("call_via_status_field_ptr");
+        writeln!(self.out, "  {status_field_ptr} = getelementptr inbounds {http_llty}, ptr {http_scratch}, i32 0, i32 {status_idx}").unwrap();
+        let status_val = self.fresh_reg("call_via_status_val");
+        writeln!(self.out, "  {status_val} = load i64, ptr {status_scratch}").unwrap();
+        writeln!(self.out, "  store i64 {status_val}, ptr {status_field_ptr}").unwrap();
+        let body_field_ptr = self.fresh_reg("call_via_body_field_ptr");
+        writeln!(self.out, "  {body_field_ptr} = getelementptr inbounds {http_llty}, ptr {http_scratch}, i32 0, i32 {body_idx}").unwrap();
+        let body_val = self.fresh_reg("call_via_body_val");
+        writeln!(self.out, "  {body_val} = load {{ptr, i64}}, ptr {body_scratch}").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {body_val}, ptr {body_field_ptr}").unwrap();
+
+        let err_val = self.fresh_reg("call_via_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let dest = self.fresh_reg("call_via_result_addr");
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("call_via_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        let payload_ptr = self.fresh_reg("call_via_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+
+        let ok_label = self.fresh_label("call_via_ok");
+        let err_label = self.fresh_label("call_via_err");
+        let merge_label = self.fresh_label("call_via_merge");
         writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
 
         writeln!(self.out, "{ok_label}:").unwrap();
@@ -9561,7 +9804,7 @@ impl Codegen<'_> {
     /// one truncates/extends its result to `i32`, the same "the returned
     /// value is the program's result" convention `main.rs`'s CLI already
     /// uses for the interpreter.
-    fn emit_c_main(&mut self, program: &Program) -> Result<(), CodegenError> {
+    fn emit_c_main(&mut self, program: &Program, native_plugins: &[crate::plugin::NativePluginBuiltin]) -> Result<(), CodegenError> {
         let main_fn = program.fns.iter().find(|f| f.name == "main").expect("typeck.rs already required a main");
         if main_fn.ret.is_aggregate() {
             // There's no sensible "exit code" for a raw Vector/Matrix
@@ -9580,6 +9823,77 @@ impl Codegen<'_> {
         }
         writeln!(self.out, "define i32 @main() {{").unwrap();
         writeln!(self.out, "entry:").unwrap();
+        // RFC 0011 §3's open domain registry bootstrap — strictly first,
+        // before durability/transact replay and `nfr` registration below,
+        // so every built-in domain accessor (`domain::db()`, etc.) any of
+        // that setup might reach is already resolved to a stable id.
+        writeln!(self.out, "  call void @nir_kernel_register_builtin_domains()").unwrap();
+        // RFC 0011 §4's per-provider registration: one `nir_kernel_
+        // register_domain(...)` call per distinct validated plugin
+        // provider in `native_plugins`, in the order given, immediately
+        // after the built-in bootstrap call above and still strictly
+        // before any user code runs. A provider's identity is
+        // self-describing (its own normalized scheme), so — unlike the
+        // built-ins' fixed 0-6 order — there's no positional-order
+        // drift risk here to worry about; codegen just walks the list
+        // it was given.
+        let native_plugin_names: std::collections::HashSet<&str> = native_plugins.iter().map(|p| p.name.as_str()).collect();
+        for np in native_plugins {
+            let Some((shape, scheme)) = crate::plugin::provider_shape_and_scheme(&np.name) else { continue };
+            let domain_name = format!("{shape}_provider_{scheme}");
+            let env_var = np.env_var.map(str::to_string).unwrap_or_else(|| format!("NIRDOSHA_KERNEL_MAX_{}_{}", shape.to_ascii_uppercase(), scheme.to_ascii_uppercase()));
+            let default_max = np.default_max.unwrap_or(10_000);
+
+            let name_global = self.fresh_global("plugin_domain_name");
+            writeln!(self.string_globals, "{name_global} = private unnamed_addr constant [{} x i8] c\"{}\"", domain_name.len(), llvm_escape_bytes(domain_name.as_bytes())).unwrap();
+            let env_var_global = self.fresh_global("plugin_domain_env_var");
+            writeln!(self.string_globals, "{env_var_global} = private unnamed_addr constant [{} x i8] c\"{}\"", env_var.len(), llvm_escape_bytes(env_var.as_bytes())).unwrap();
+
+            writeln!(
+                self.out,
+                "  call void @nir_kernel_register_domain(ptr {name_global}, i64 {}, ptr {env_var_global}, i64 {}, i64 {default_max})",
+                domain_name.len(),
+                env_var.len(),
+            )
+            .unwrap();
+
+            // RFC 0011 §2/§4: the dispatch-table registration, right
+            // after this same provider's domain registration above.
+            // `validate_plugin_roster` (Phase 3) already proved exactly
+            // one of `_op`/`_request` exists for this `_connect` — same
+            // "shape isn't a separate declared field, inferred from
+            // which sibling is present" rule, re-applied here rather
+            // than threaded through as new state.
+            let prefix = np.name.trim_end_matches("_connect");
+            let op_name = format!("{prefix}_op");
+            let request_name = format!("{prefix}_request");
+            let is_valid_name = format!("{prefix}_is_valid");
+            let close_name = format!("{prefix}_close");
+            let (op_or_request_name, is_call_shape) = if native_plugin_names.contains(request_name.as_str()) {
+                (request_name.as_str(), 1)
+            } else {
+                (op_name.as_str(), 0)
+            };
+
+            let scheme_global = self.fresh_global("plugin_scheme");
+            writeln!(self.string_globals, "{scheme_global} = private unnamed_addr constant [{} x i8] c\"{}\"", scheme.len(), llvm_escape_bytes(scheme.as_bytes())).unwrap();
+
+            writeln!(
+                self.out,
+                "  call void @nir_kernel_register_plugin_provider(ptr {name_global}, i64 {}, ptr {scheme_global}, i64 {}, ptr @{}, ptr @{op_or_request_name}, ptr @{is_valid_name}, ptr @{close_name}, i32 {is_call_shape})",
+                domain_name.len(),
+                scheme.len(),
+                np.name,
+            )
+            .unwrap();
+        }
+        // RFC 0011 §5's reaper — one call, after every domain/plugin-
+        // provider registration above (so a pool-backed registry that
+        // self-registers with the reaper on first use, e.g.
+        // `db.rs`/`http.rs`/`plugin_provider.rs`'s own registries, has
+        // whatever it needs already resolved), still strictly before any
+        // user code runs.
+        writeln!(self.out, "  call void @nir_kernel_start_reaper()").unwrap();
         // Durability log init + crash replay — strictly before any user
         // code (including `nfr` registration, harmless either order, but
         // definitely before `nir_main`) runs, and strictly after every
@@ -9924,22 +10238,22 @@ fn build_impl(
     // ordinary, cross-target library flag) skips that preflight check
     // entirely and does reach the linker's search path — so each
     // `foo.lib` token here is stripped to `foo` and passed as `-lfoo`
-    // instead. rustc's list also has at least one token that isn't
-    // `.lib`-suffixed at all (`/defaultlib:msvcrt`) — forwarded verbatim
-    // via `-Xlinker`, the same reason `-l` works for the others: `msvcrt`
-    // (the *dynamic* CRT import lib, still the current, non-deprecated
-    // name in every post-2015 MSVC toolchain — not a "legacy" runtime, a
-    // theory a previous version of this comment wrongly asserted after
-    // a real Windows CI failure and then had to walk back after dropping
-    // it made the *same* unresolved symbols persist) is exactly what
-    // `bundled` SQLite's own compiled C code (`sqlite3.o`) needs for
-    // `_beginthreadex`/`_endthreadex`/`realloc`/`strcspn`/`strspn` — none
-    // of those live in `ucrt.lib` alone. The real conflict
-    // (`LNK4098: defaultlib 'msvcrt' conflicts with use of other libs`)
-    // is with clang's own *static*-CRT default (`libcmt.lib`) for a bare
-    // `.ll`/staticlib link with no explicit runtime flag — `libcmt` is
-    // excluded below so `msvcrt` (forwarded here) wins outright instead
-    // of the two fighting.
+    // instead. A non-`.lib` token (e.g. `/defaultlib:...`, on a
+    // dynamic-CRT build) is forwarded verbatim via `-Xlinker` instead,
+    // the same reason `-l` works for the others.
+    //
+    // `build.rs`'s own `+crt-static` flag (its doc comment on the
+    // `RUSTFLAGS` it sets has the full story: `bundled` SQLite's C code
+    // and this compiler's own generated `declare`s for libc functions
+    // structurally expect different CRT linkage models otherwise) means
+    // this list shouldn't even contain a `msvcrt`-style dynamic-CRT
+    // `/defaultlib:` token on a correctly-configured Windows build
+    // anymore — three real, wrong `-Xlinker`/`NODEFAULTLIB` guesses were
+    // tried and disproven in this exact spot before finding that real
+    // root cause, each fixing one symbol set by excluding a library the
+    // *other* half of the link needed. Nothing platform-specific is
+    // hand-picked here anymore; every token is just forwarded as
+    // `rustc` itself reports it.
     // A handful of tokens above aren't genuine system-provided libs at
     // all — a crate-private import lib like `windows.0.52.0.lib` (the
     // `windows`/`windows-sys` family, at least) ships inside that crate's

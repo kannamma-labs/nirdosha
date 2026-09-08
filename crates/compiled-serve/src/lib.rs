@@ -35,7 +35,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nirdosha_runtime_kernels::kernel::{self, Domain};
+use nirdosha_runtime_kernels::kernel::{self, domain};
 
 mod http;
 mod ratelimit;
@@ -93,7 +93,7 @@ pub struct Route {
 #[derive(Clone)]
 pub struct ServeConfig {
     /// Header-read timeout — a client that connects and sends nothing
-    /// must not park a thread (and a `Domain::ServeHttp` lease) forever.
+    /// must not park a thread (and a `domain::serve_http()` lease) forever.
     pub header_timeout: Duration,
     /// Body-read timeout, separate from the header timeout — a slow
     /// body (not a slow header) gets its own budget.
@@ -112,7 +112,7 @@ pub struct ServeConfig {
     pub allowed_origins: Vec<String>,
     /// Paths rate-limited by `ratelimit` — e.g. `/auth/login`,
     /// `/api/_demo_login`. Every other path is unlimited at this layer
-    /// (`Domain::ServeHttp`'s own admission ceiling is the general
+    /// (`domain::serve_http()`'s own admission ceiling is the general
     /// backstop).
     pub rate_limited_paths: Vec<&'static str>,
     pub rate_limit_max_per_window: u32,
@@ -194,7 +194,7 @@ impl Readiness {
 impl Listener {
     /// Runs the accept loop forever (or until the process exits) —
     /// spawns a thread per accepted connection, unconditionally; the
-    /// **thread**, not this accept loop, checks `Domain::ServeHttp`
+    /// **thread**, not this accept loop, checks `domain::serve_http()`
     /// admission and fails fast with a real `503` if denied, so a
     /// saturated ceiling never makes the accept loop itself stall or
     /// queue (`rfcs/0010`'s own "admission failure is a fast, visible
@@ -216,7 +216,7 @@ impl Listener {
     }
 }
 
-/// Releases a `Domain::ServeHttp` lease exactly once, on drop.
+/// Releases a `domain::serve_http()` lease exactly once, on drop.
 ///
 /// **Only covers a panic in this crate's own Rust logic** (`dispatch`'s
 /// own code — CORS, rate limiting, JSON marshaling — everything except
@@ -242,12 +242,12 @@ struct ServeHttpLease;
 
 impl Drop for ServeHttpLease {
     fn drop(&mut self) {
-        kernel::release(Domain::ServeHttp);
+        kernel::release(domain::serve_http());
     }
 }
 
 fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, readiness: &Readiness) {
-    if !kernel::acquire(Domain::ServeHttp) {
+    if !kernel::acquire(domain::serve_http()) {
         let _ = http::write_response(&mut stream, 503, "text/plain", b"503 Service Unavailable -- server at capacity", &[], None);
         return;
     }

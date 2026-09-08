@@ -28,6 +28,7 @@
 //! `mq_connect`/`mq_publish`/`mq_consume`; `db_connect` when its
 //! connection-string argument is (or might be, per `db_connect_effect`)
 //! Postgres |
+//! | `env` | `env` (RFC 0011 §1) — unscoped (§6: "Decided") |
 //!
 //! `spawn`/`sandbox` also inherit whatever the spawned function's own
 //! effect set is (transitively) — the *caller* triggered that work, even
@@ -213,7 +214,7 @@ pub(crate) fn builtin_effect(name: &str) -> EffectSet {
         // Same effect `connect`/`listen`/`accept`/`tcp`'s `send`/`recv`/
         // `stop` already get -- `http_get`/`http_post` are a real TCP
         // connection under the hood.
-        "http_get" | "http_post" | "https_get" | "https_post" => {
+        "http_get" | "http_post" | "https_get" | "https_post" | "call_via" => {
             s.insert(Effect::Network);
         }
         // `json_*` builtins are pure: they only ever read the already-
@@ -255,6 +256,12 @@ pub(crate) fn builtin_effect(name: &str) -> EffectSet {
         // `Io` (`Ty::Mq`'s doc comment).
         "mq_connect" | "mq_publish" | "mq_consume" | "mq_connect_via" => {
             s.insert(Effect::Network);
+        }
+        // RFC 0011 §6: "Decided: `Effect::Env`... unscoped" -- a plain
+        // by-name tag, no argument-dependent widening like `db_connect`
+        // gets, since there's no scheme/backend distinction to make.
+        "env" => {
+            s.insert(Effect::Env);
         }
         _ => {}
     }
