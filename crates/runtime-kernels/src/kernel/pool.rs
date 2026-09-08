@@ -242,7 +242,61 @@ pub struct UnpooledConnection<M: ManageConnection> {
     domain: DomainId,
 }
 
+/// Proof that [`super::acquire`] was actually called and granted for
+/// `domain` — the only way [`UnpooledConnection::new`] accepts a domain
+/// (red-team report A22, `scratch/red-team-report-main-d7fae42.md`):
+/// before this, `UnpooledConnection`'s `Drop` unconditionally released,
+/// relying entirely on every construction site remembering to
+/// `super::acquire` *first*, an implicit invariant a future call site
+/// could get wrong (construct one for an already-admitted connection
+/// without a fresh acquire, double-releasing and driving `held` negative).
+/// Minting one *is* the acquire call — there is no other way to obtain
+/// one, so "an `AdmissionGrant` exists" and "its domain's admission was
+/// actually granted" are the same fact by construction, not a separately
+/// maintained invariant. Kept separate from the actual dial (`make_manager`/
+/// `connect`) so `checkout_with_key_cap` can still fail fast on a denied
+/// domain *before* attempting an expensive network connect, not after.
+///
+/// A real RAII guard in its own right, not just a marker: `Drop`
+/// releases automatically, so a connect attempt that fails *after* a
+/// successful acquire (the `manager.connect()` `Err` branch below) needs
+/// no manual `super::release` call either — dropping the grant does it.
+struct AdmissionGrant(Option<DomainId>);
+
+impl AdmissionGrant {
+    fn acquire(domain: DomainId) -> Result<Self, String> {
+        if !super::acquire(domain) {
+            return Err("too many concurrently held connections for this domain (unpooled fallback dial)".to_string());
+        }
+        Ok(AdmissionGrant(Some(domain)))
+    }
+
+    /// Hands the domain to [`UnpooledConnection::new`] and disarms this
+    /// guard's own `Drop` — ownership of the release obligation moves to
+    /// the `UnpooledConnection` being built, which releases on *its* own
+    /// `Drop` instead. Never called anywhere else; not `pub`.
+    fn into_domain(mut self) -> DomainId {
+        self.0.take().expect("AdmissionGrant::acquire always sets Some")
+    }
+}
+
+impl Drop for AdmissionGrant {
+    fn drop(&mut self) {
+        if let Some(domain) = self.0.take() {
+            super::release(domain);
+        }
+    }
+}
+
 impl<M: ManageConnection> UnpooledConnection<M> {
+    /// Consumes `grant` — the only way to build one, and the only way to
+    /// obtain a `grant` at all is [`AdmissionGrant::acquire`] actually
+    /// succeeding, so this constructor can never run without a real,
+    /// matching `super::acquire` behind it.
+    fn new(conn: M::Connection, grant: AdmissionGrant) -> Self {
+        UnpooledConnection { conn: Some(conn), domain: grant.into_domain() }
+    }
+
     pub fn get(&self) -> &M::Connection {
         self.conn.as_ref().expect("conn is only ever None after into_inner/drop, which consume this value")
     }
@@ -395,22 +449,19 @@ impl<M: ManageConnection> PoolRegistry<M> {
         if already_has_key || self.pool_count() < Self::max_pool_keys() {
             return self.get_or_create_within_ceiling(key, config, domain, make_manager).map(Checkout::Pooled);
         }
-        if !super::acquire(domain) {
-            return Err(format!("too many concurrently held connections for this domain (unpooled fallback dial for key {key:?})"));
-        }
-        let manager = match make_manager() {
-            Ok(m) => m,
-            Err(e) => {
-                super::release(domain);
-                return Err(e);
-            }
-        };
+        // Acquire *before* dialing (fail fast on a saturated domain,
+        // never attempt an expensive network connect just to discover
+        // admission was already denied) — `AdmissionGrant::acquire`'s
+        // own doc comment (A22 fix) has the full "why a separate proof
+        // type, not a bare bool" reasoning. If `make_manager`/`connect`
+        // fails after this succeeds, letting `grant` drop releases
+        // automatically; no manual `super::release` call needed on
+        // either failure path below.
+        let grant = AdmissionGrant::acquire(domain).map_err(|e| format!("{e} (key {key:?})"))?;
+        let manager = make_manager()?;
         match manager.connect() {
-            Ok(conn) => Ok(Checkout::Unpooled(UnpooledConnection { conn: Some(conn), domain })),
-            Err(e) => {
-                super::release(domain);
-                Err(e.to_string())
-            }
+            Ok(conn) => Ok(Checkout::Unpooled(UnpooledConnection::new(conn, grant))),
+            Err(e) => Err(e.to_string()),
         }
     }
 

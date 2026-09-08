@@ -1390,6 +1390,21 @@ pub(crate) fn implicitly_exposed_fn_names(program: &Program) -> std::collections
                 }
             }
         }
+        // Red-team report A15 (`scratch/red-team-report-main-d7fae42.md`):
+        // a `screen` `action` handler is reachable from the compiled UI
+        // (a button click) exactly the same way `list`/`create`/`update`/
+        // `delete` are, but was missing from this set -- a user who built
+        // a screen with a button-driven action and forgot the matching
+        // `serve { expose ... }` entry got a silent "the button does
+        // nothing" failure once compiled `serve` wired it up, with no
+        // signal at compile time. Additive only, strictly more
+        // permissive than before (widens what's implicitly reachable,
+        // never narrows it) -- `workspace` panels/actions and `visual`s
+        // are a real, separate gap the report also names, not covered
+        // by this fix; still explicitly required in `serve { expose }`.
+        for action in &screen.actions {
+            set.insert(action.target_fn.clone());
+        }
     }
     if let Some(dash) = &program.dashboard {
         for m in dash.tiles.iter().chain(dash.charts.iter()) {

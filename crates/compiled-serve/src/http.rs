@@ -67,10 +67,25 @@ pub fn read_request(stream: &mut TcpStream, body_timeout: Duration) -> Result<Op
     let method = parts.next().ok_or(ReadError::Malformed)?.to_string();
     let path = parts.next().ok_or(ReadError::Malformed)?.to_string();
 
+    // Red-team report A25 (`scratch/red-team-report-main-d7fae42.md`):
+    // `MAX_HEADER_BYTES` caps the whole header *block*, but a client
+    // could still spend that entire budget on one mega-header line (or
+    // many small ones) -- each `String` allocated per header, times
+    // every connection. A header-count cap and a per-line length cap
+    // catch both shapes without changing the overall block cap's own
+    // purpose.
+    const MAX_HEADER_COUNT: usize = 64;
+    const MAX_HEADER_LINE_BYTES: usize = 4 * 1024;
     let mut headers = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
+        }
+        if line.len() > MAX_HEADER_LINE_BYTES {
+            return Err(ReadError::TooLarge);
+        }
+        if headers.len() >= MAX_HEADER_COUNT {
+            return Err(ReadError::TooLarge);
         }
         if let Some((k, v)) = line.split_once(':') {
             headers.push((k.trim().to_string(), v.trim().to_string()));
@@ -87,7 +102,16 @@ pub fn read_request(stream: &mut TcpStream, body_timeout: Duration) -> Result<Op
     }
 
     let already_read = buf.len() - (header_end + 4);
-    let mut body = buf[header_end + 4..].to_vec();
+    // Red-team report A28 (`scratch/red-team-report-main-d7fae42.md`):
+    // for the common case (a small body that arrived in the same
+    // `read()` call as the headers), `buf[header_end+4..].to_vec()`
+    // allocated and copied bytes that were already sitting in `buf`,
+    // for no reason -- `drain` removes the header block *in place*
+    // (a memmove within `buf`'s own existing allocation, not a fresh
+    // one) and `buf` itself becomes the body, reused directly rather
+    // than copied into a second `Vec`.
+    buf.drain(..header_end + 4);
+    let mut body = buf;
     if content_length > already_read {
         let _ = stream.set_read_timeout(Some(body_timeout));
         let mut remaining = vec![0u8; content_length - already_read];

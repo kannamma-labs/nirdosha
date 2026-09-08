@@ -124,9 +124,35 @@ pub unsafe extern "C" fn nir_transact_log_init() -> i32 {
             return 0;
         }
     };
+    // Red-team report A19 (`scratch/red-team-report-main-d7fae42.md`):
+    // `PRAGMA journal_mode=WAL` is itself a query (it returns one row
+    // naming the mode that's actually now active), not a plain
+    // statement -- run through `execute_batch` (which discards row
+    // results, meant for a sequence of statements) below, its outcome
+    // was never actually checked. If the underlying filesystem doesn't
+    // support WAL's shared-memory mapping requirement (some NAS/network
+    // mounts), SQLite silently keeps the *previous* journal mode instead
+    // of erroring, and this durability log's entire reason for
+    // existing -- "a crash can't silently lose a pending transact" --
+    // quietly stops being true. Queried explicitly here, checked, and
+    // treated as a real init failure if it didn't actually take.
+    let actual_mode: Result<String, _> = conn.query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0));
+    match actual_mode {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
+        Ok(mode) => {
+            eprintln!(
+                "nirdosha: transact log at {path} could not enable WAL journal mode (still {mode:?} after requesting it) -- \
+                 durability on crash is not guaranteed on this filesystem; refusing to start rather than silently degrading"
+            );
+            return 0;
+        }
+        Err(e) => {
+            eprintln!("nirdosha: failed to query journal_mode while initializing transact log at {path}: {e}");
+            return 0;
+        }
+    }
     let setup = conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=FULL;
+        "PRAGMA synchronous=FULL;
          CREATE TABLE IF NOT EXISTS nirdosha_transact_log (
              txn_id TEXT PRIMARY KEY,
              site_id INTEGER NOT NULL,
@@ -249,6 +275,33 @@ struct PendingRow {
     args_json: String,
 }
 
+/// Materializes every pending row into a `Vec` before returning — red-
+/// team report A27 (`scratch/red-team-report-main-d7fae42.md`)
+/// recommended processing rows streaming (`while let Some(row) =
+/// rows.next()?`) instead, to avoid an unbounded-at-startup allocation
+/// for a workload that's accumulated many pending rows over time.
+/// **Investigated and deliberately not done — the naive version of that
+/// fix introduces a real hazard that doesn't exist today, not a smaller
+/// one**: `LOG` is a plain `std::sync::Mutex<Connection>` (`with_log`'s
+/// own definition, not reentrant), and this function's only caller,
+/// `nir_transact_replay_all`, calls `mark_state` per row — which itself
+/// calls `with_log` again to update that row's state. Streaming rows
+/// out of this same `with_log` closure while also calling `mark_state`
+/// per row, still inside it, would deadlock on the *second* `lock()`
+/// call from the same thread. Worse, even a version of this fix that
+/// first restructured `mark_state` to take an already-held `&Connection`
+/// (avoiding that specific deadlock) would then need to hold `LOG`'s
+/// lock across `nir_transact_replay_all`'s call into a *replay
+/// trampoline* — an opaque, compiled `extern "C"` function pointer this
+/// module has no visibility into and no ability to reason about what it
+/// might itself call — for the whole duration of replay. That's a new,
+/// strictly worse deadlock/lock-order hazard traded for a memory
+/// optimization that only matters in the narrow, already-abnormal case
+/// of many transacts staying pending across a restart (ordinary
+/// operation completes and clears each one quickly). Bounding the
+/// one-time `Vec`'s size is real, disclosed future work if this ever
+/// becomes a practical problem — not something to solve by trading it
+/// for a real correctness hazard today.
 fn scan_pending_rows() -> Vec<PendingRow> {
     with_log(|conn| {
         let mut stmt = match conn.prepare(
@@ -344,6 +397,25 @@ mod tests {
 
     fn temp_log_path(label: &str) -> String {
         std::env::temp_dir().join(format!("nirdosha_transact_test_{label}_{}.sqlite", std::process::id())).to_str().unwrap().to_string()
+    }
+
+    /// Red-team report A19: `nir_transact_log_init`'s own production
+    /// code (not testable directly here -- it's a process-singleton FFI
+    /// fn guarded by a file lock and a `OnceLock`, per `open_test_log`'s
+    /// own doc comment above) now queries `PRAGMA journal_mode=WAL`'s
+    /// actual return value instead of discarding it via `execute_batch`.
+    /// This test exercises that exact query pattern directly against a
+    /// fresh file-backed connection, confirming the `query_row` call
+    /// itself is correct (right column, right type) and that SQLite
+    /// genuinely reports `"wal"` back on an ordinary filesystem -- the
+    /// happy path `nir_transact_log_init`'s own logic depends on.
+    #[test]
+    fn pragma_journal_mode_wal_is_queryable_and_reports_wal_on_an_ordinary_filesystem() {
+        let path = temp_log_path("wal_query_check");
+        let conn = Connection::open(&path).unwrap();
+        let mode: String = conn.query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0)).unwrap();
+        assert!(mode.eq_ignore_ascii_case("wal"), "expected WAL mode to actually take effect on an ordinary filesystem, got {mode:?}");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Each test gets its own log connection, not the shared global
