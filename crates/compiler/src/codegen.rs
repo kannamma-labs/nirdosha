@@ -9973,18 +9973,24 @@ fn build_impl(
             }
         }
     }
-    // Excludes the static CRT (`libcmt.lib`) clang would otherwise
-    // default to for this bare `.ll`/staticlib link, so the dynamic one
-    // `/defaultlib:msvcrt` above actually names wins outright instead of
-    // the two conflicting (`LNK4098`) and leaving `bundled` SQLite's
-    // `_beginthreadex`/`realloc`/`strcspn`/`strspn` unresolved either way
-    // — found on real Windows CI across two prior wrong turns in this
-    // same spot: dropping `/defaultlib:msvcrt` outright, then separately
-    // trying `/NODEFAULTLIB:MSVCRT` (excluding the library that's
-    // actually needed, not the one in the way) — both left the identical
-    // six symbols unresolved, proving neither was ever the real fix.
-    #[cfg(windows)]
-    clang_cmd.arg("-Xlinker").arg("/NODEFAULTLIB:LIBCMT");
+    // No `/NODEFAULTLIB:<X>` here, after three real wrong turns in this
+    // exact spot each fixing one missing-symbol set by excluding a
+    // library the *other* half of the link needed (`msvcrt` dropped
+    // outright, `/NODEFAULTLIB:MSVCRT`, `/NODEFAULTLIB:LIBCMT` — this
+    // last one traded `bundled` SQLite's unresolved externals for a
+    // freshly-unresolved `printf` from `codegen.rs`'s own generated
+    // `nir_main`). The actual root cause: `codegen.rs`'s plain
+    // (non-`dllimport`) `declare`s for libc functions structurally
+    // expect the *static* CRT, while `cc`-crate-compiled C code
+    // (`bundled` SQLite) defaults to the *dynamic* one — no
+    // `-Xlinker` flag on this side of the link can reconcile two
+    // objects built expecting different CRT models. `build.rs` fixes it
+    // at the source instead: `-C target-feature=+crt-static` on the
+    // nested `cargo rustc` build makes both `rustc`'s own generated code
+    // and (via the `cc` crate's own `CARGO_CFG_TARGET_FEATURE` check,
+    // switching `cl.exe` from `/MD` to `/MT`) SQLite's compiled object
+    // agree on the static CRT throughout — see that flag's own doc
+    // comment for the full story.
     let result = clang_cmd.arg("-o").arg(output_path).output();
     let _ = std::fs::remove_file(&ll_path); // best-effort cleanup either way
     let _ = std::fs::remove_file(&runtime_lib_path);
