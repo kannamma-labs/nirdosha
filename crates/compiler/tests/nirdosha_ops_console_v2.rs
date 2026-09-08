@@ -179,10 +179,62 @@ fn nirdosha_ops_console_v2_answers_real_http_requests_with_real_auth_workflow_an
 
     // The `Disbursement` workflow, wired to a real route: starts a real
     // instance, advances Draft -> Approved, which really calls the mock
-    // webhook and really writes a durable `disbursements` row.
-    let approved = request("POST", "/api/purchase_orders/approve", &format!("Authorization: Bearer {admin_token}\r\n"), "{}");
+    // webhook and really writes a durable `disbursements` row. This PO
+    // is below the escalation threshold, so a plain admin token suffices.
+    let approved = request("POST", "/api/purchase_orders/approve", &format!("Authorization: Bearer {admin_token}\r\n"), &format!("{{\"id\":{id}}}"));
     let approved_body = json_body(&approved);
     assert_eq!(approved_body["value"], "approved", "approve response: {approved_body}");
+
+    // Real dual control: a purchase order at/above the escalation
+    // threshold refuses a plain admin token and only accepts a real
+    // finance_director one -- a structurally different `acquire`d
+    // callable, not an `if` inside the same function.
+    let large_created = request(
+        "POST",
+        "/api/create",
+        &format!("Authorization: Bearer {admin_token}\r\n"),
+        "{\"vendor\":\"Big Ticket Vendor\",\"amount_cents\":15000000}",
+    );
+    let large_created_body = json_body(&large_created);
+    assert_eq!(large_created_body["value"], "Big Ticket Vendor", "large create response: {large_created_body}");
+    let large_list = request("POST", "/api/purchase_orders/list", "", "{\"q\":\"Big Ticket\",\"offset\":0,\"limit\":10}");
+    let large_id = json_body(&large_list).as_array().unwrap()[0]["id"].as_i64().expect("large row should have a real id");
+
+    let admin_denied_large = request(
+        "POST",
+        "/api/purchase_orders/approve",
+        &format!("Authorization: Bearer {admin_token}\r\n"),
+        &format!("{{\"id\":{large_id}}}"),
+    );
+    let admin_denied_large_body = json_body(&admin_denied_large);
+    assert!(
+        admin_denied_large_body["value"].as_str().unwrap_or("").contains("finance_director"),
+        "a plain admin token must not be able to approve a large PO: {admin_denied_large_body}"
+    );
+
+    let director_login = request("POST", "/api/login", "", "{\"role\":\"finance_director\"}");
+    let director_token = json_body(&director_login)["value"].as_str().expect("director login should return a real token").to_string();
+    let director_approved_large = request(
+        "POST",
+        "/api/purchase_orders/approve",
+        &format!("Authorization: Bearer {director_token}\r\n"),
+        &format!("{{\"id\":{large_id}}}"),
+    );
+    let director_approved_large_body = json_body(&director_approved_large);
+    assert_eq!(director_approved_large_body["value"], "approved", "director approve response: {director_approved_large_body}");
+
+    // Real REJECT: the workflow's other real branch out of Draft.
+    let rejected = request("POST", "/api/purchase_orders/reject", &format!("Authorization: Bearer {admin_token}\r\n"), "{}");
+    let rejected_body = json_body(&rejected);
+    assert_eq!(rejected_body["value"], "rejected", "reject response: {rejected_body}");
+
+    // Real overdue detection (`list_disbursement_overdue`, driven by
+    // `Draft`'s own `sla_seconds`) -- nothing should be stale yet at
+    // test speed, but the route itself must answer with a real JSON
+    // array, not an error.
+    let overdue = request("GET", "/api/disbursements/overdue", "", "");
+    let overdue_rows = json_body(&overdue);
+    assert!(overdue_rows.is_array(), "overdue response should be a real JSON array: {overdue_rows}");
 
     // Real DELETE.
     let deleted = request(
