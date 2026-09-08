@@ -10029,6 +10029,24 @@ fn build_impl(
             }
         }
     }
+    // Dropping the `/defaultlib:msvcrt` *token* above wasn't the whole
+    // fix — found on real Windows CI, a real fourth failure in this same
+    // thread, identical `LNK4098`/`LNK2019` symptoms with the conflicting
+    // library now spelled `MSVCRT` (uppercase). That's the linker's own
+    // case-normalized name for a `/DEFAULTLIB:` directive embedded
+    // *inside one of the linked object files themselves* (an ordinary
+    // MSVC/`cl.exe` convention — a `.obj`/`.lib` can carry its own
+    // default-library preference, independent of anything on the command
+    // line), not something `NATIVE_STATIC_LIBS`/our own token list ever
+    // controlled at all. `bundled` SQLite's own compiled object is the
+    // most likely source (compiled by `cc`/`cl.exe` under whatever CRT
+    // linkage it defaults to on this toolchain), but the exact origin
+    // doesn't matter — the fix is the same one the linker's own `LNK4098`
+    // warning already names: explicitly tell it to ignore that embedded
+    // preference, the same way an explicit command-line `/defaultlib:`
+    // would have needed dropping if it *had* been the cause.
+    #[cfg(windows)]
+    clang_cmd.arg("-Xlinker").arg("/NODEFAULTLIB:MSVCRT");
     let result = clang_cmd.arg("-o").arg(output_path).output();
     let _ = std::fs::remove_file(&ll_path); // best-effort cleanup either way
     let _ = std::fs::remove_file(&runtime_lib_path);
