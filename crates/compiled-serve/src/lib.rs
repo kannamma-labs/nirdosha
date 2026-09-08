@@ -56,10 +56,15 @@ pub use http::MAX_BODY_BYTES;
 ///   real per-route decode is `codegen.rs`'s job once wired, not this
 ///   crate's).
 /// - `identity_json_{ptr,len}`: `""`/zero-length when the request
-///   carried no valid bearer token, otherwise a JSON object this
-///   crate's own request pipeline already resolved and verified
-///   upstream (`{"sub":...,"roles":[...],"claims":{...},"exp":...}`) —
-///   a handler never re-parses a raw `Authorization` header itself.
+///   carried no bearer token, otherwise a JSON object built from the
+///   `Authorization: Bearer <token>` header — a handler never re-parses
+///   a raw `Authorization` header itself. **Not yet real JWT
+///   verification** (see [`crate::Request::bearer_identity_json`]'s own
+///   doc comment for the full, disclosed story): today this is
+///   `{"token": "<raw>"}`, not the verified `{"sub":...,"roles":
+///   [...],"claims":{...},"exp":...}` shape a handler will eventually
+///   receive once `nir_oidc_validate_token` (`kernel::identity`) is
+///   wired in here — a separate, real follow-up, not done yet.
 /// - `out_body_{ptr,len}`: the handler writes a heap-allocated (leaked,
 ///   same disclosed-not-hidden convention `nir_transact_decode_args`'s
 ///   own string output already uses) UTF-8 JSON response body here.
