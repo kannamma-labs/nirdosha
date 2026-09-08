@@ -37,6 +37,25 @@ pub fn reaper_panics() -> u64 {
     REAPER_PANICS.load(Ordering::Relaxed)
 }
 
+/// `0` until [`start`] actually resolves and records a real interval —
+/// [`super::dump_report`]'s own caller treats `0` as "the reaper hasn't
+/// started in this process," never as a resolved zero-second interval
+/// (`resolve_interval_secs`'s own floor of 1 makes a *resolved* `0`
+/// structurally impossible).
+static REAPER_CONFIGURED_INTERVAL_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Red-team report A9 (`scratch/red-team-report-main-d7fae42.md`):
+/// `resolve_interval_secs`'s floor/soft-ceiling downgrades used to be
+/// visible only via a stderr `eprintln!`, easy to lose in a systemd
+/// journal — an operator querying `dump_report` post-incident had no way
+/// to see the reaper was misconfigured. This is the actual, currently
+/// in-effect interval (post floor/ceiling resolution), not the raw env
+/// var value, so a `0`-vs-floored-`1` or an accepted-above-ceiling value
+/// is visible without needing to go find the startup log line.
+pub fn reaper_configured_interval_secs() -> u64 {
+    REAPER_CONFIGURED_INTERVAL_SECS.load(Ordering::Relaxed)
+}
+
 /// Checked once per wake, never joined against today — `ThreadPool` (as
 /// read, this module's own doc comment) has no shutdown/join API, so a
 /// real compiled Nirdosha binary already has no graceful-shutdown story
@@ -156,6 +175,7 @@ pub fn start() {
     static STARTED: Once = Once::new();
     STARTED.call_once(|| {
         let interval = interval();
+        REAPER_CONFIGURED_INTERVAL_SECS.store(interval.as_secs(), Ordering::Relaxed);
         // `submit`'s `Job` (`thread_pool.rs`) is private to that module
         // -- callers never name it, they just pass a closure that
         // structurally matches it, the same pattern every other

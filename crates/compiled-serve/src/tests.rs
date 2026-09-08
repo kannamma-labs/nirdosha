@@ -75,7 +75,11 @@ extern "C" fn cookie_route(
     out_cookie_len: *mut i64,
 ) -> i32 {
     let (body_ptr, body_len) = leak_bytes(b"{\"ok\":true}".to_vec());
-    let (cookie_ptr, cookie_len) = leak_bytes(b"nirdosha_session=abc123".to_vec());
+    // A complete, fully-attributed cookie string -- since A5's fix,
+    // `write_response` writes this out verbatim and appends nothing of
+    // its own, matching what `kernel::identity::nir_session_cookie`
+    // itself actually hands a real handler.
+    let (cookie_ptr, cookie_len) = leak_bytes(b"nirdosha_session=abc123; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800".to_vec());
     unsafe {
         write_out(body_ptr, body_len, out_body_ptr, out_body_len);
         write_out(cookie_ptr, cookie_len, out_cookie_ptr, out_cookie_len);
@@ -314,7 +318,10 @@ fn a_cookie_route_gets_a_real_set_cookie_header_with_security_attributes() {
     let (addr, _r) = start_test_server(ServeConfig::default());
     let req = "GET /api/cookie HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
     let resp = raw_request(addr, req);
-    assert!(resp.contains("Set-Cookie: nirdosha_session=abc123; HttpOnly; Secure; SameSite=Lax; Path=/"), "response headers: {resp}");
+    assert!(
+        resp.contains("Set-Cookie: nirdosha_session=abc123; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800"),
+        "write_response must write the handler's cookie verbatim, appending nothing of its own (A5): {resp}"
+    );
 }
 
 /// Real verification, not the old placeholder: a bearer token only
@@ -466,4 +473,51 @@ fn metrics_answers_unauthenticated_when_no_token_is_configured() {
     let (addr, _r) = start_test_server(ServeConfig::default());
     let req = "GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
     assert_eq!(status_of(&raw_request(addr, req)), 200);
+}
+
+/// Red-team report A11/A23 (`scratch/red-team-report-main-d7fae42.md`):
+/// `kernel::acquire(domain::serve_http())` is now checked in the accept
+/// loop itself, before any thread is spawned for the connection (see
+/// `Listener::run`'s own doc comment for the full "why," including why
+/// a denied connection is dropped rather than answered with a `503`).
+/// This test proves that end to end: with the ceiling saturated by one
+/// held-open connection, a second connection attempt gets no response
+/// at all -- the server closes it immediately, rather than spawning a
+/// thread that (in the old design) would have written a `503` body.
+///
+/// `#[ignore]`d for the same reason every other test touching a
+/// cached-forever built-in domain ceiling in this codebase already is
+/// (`NIRDOSHA_KERNEL_MAX_DB`'s own regression test, `lib.rs`'s
+/// `db_kernel_tests` module, has the full rationale): `domain::
+/// serve_http()`'s ceiling is resolved once, lazily, and cached for the
+/// rest of the process -- setting the env var here only has any effect
+/// if this is the very first thing in the whole test binary to ever
+/// call `kernel::acquire(domain::serve_http())`, which every other test
+/// in this file's own `start_test_server` calls too. Safe only run
+/// alone: `cargo test -- --ignored a_connection_past_the_serve_http_ceiling_is_dropped_not_answered`.
+#[test]
+#[ignore]
+fn a_connection_past_the_serve_http_ceiling_is_dropped_not_answered() {
+    unsafe { std::env::set_var("NIRDOSHA_KERNEL_MAX_SERVE_HTTP", "1") };
+    let (addr, _r) = start_test_server(ServeConfig::default());
+
+    // First connection: holds the ceiling's one slot open by never
+    // completing its HTTP request (no full header block sent, so the
+    // server's own `handle_connection` thread stays parked in
+    // `read_headers` -- `header_timeout`'s default 10s is far longer
+    // than this test needs).
+    let _held = ClientStream::connect(addr).expect("first connection, under the ceiling of 1, must be accepted");
+
+    // Second connection, past the now-saturated ceiling of 1: the
+    // accept loop's own `kernel::acquire` must deny it and drop the
+    // stream immediately -- `read_to_end` returning zero bytes (a clean
+    // EOF with nothing written first) is exactly what a dropped-without-
+    // a-response connection looks like from the client's side.
+    let mut denied = ClientStream::connect(addr).expect("TCP accept itself still succeeds; kernel::acquire denies it after");
+    denied.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut buf = Vec::new();
+    let _ = denied.read_to_end(&mut buf);
+    assert!(buf.is_empty(), "a connection past the serve_http ceiling must get no response at all (dropped, not a 503 body): {:?}", String::from_utf8_lossy(&buf));
+
+    unsafe { std::env::remove_var("NIRDOSHA_KERNEL_MAX_SERVE_HTTP") };
 }
