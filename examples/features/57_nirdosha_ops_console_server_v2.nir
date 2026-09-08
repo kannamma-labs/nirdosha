@@ -26,6 +26,18 @@
 //      body instead of query-string parameters -- every integer here
 //      always arrives as a real JSON number, the same convention
 //      `POST /api/create` already established in `56_...`.
+//   5. **Real `nfr(...)` SLOs on every real route** (`LANGUAGE.md` §6f,
+//      first used in `50_field_masking_and_check_role.nir`) -- a
+//      latency ceiling everywhere, plus either `error_rate_max` (on the
+//      two functions that genuinely return `Result(...)`: token
+//      issuance/verification) or `concurrency_max` (on the `Text`/`bool`-
+//      returning CRUD and approval routes, where there's no tagged
+//      success/error a `Result` return would give the APM kernel to
+//      inspect). Zero code at any call site; a crossed threshold fires
+//      an async escalation POST to `NIRDOSHA_OBSERVABILITY_URL` if one's
+//      configured. Each threshold's own comment explains why its value
+//      differs from its neighbors -- these aren't the same number
+//      copy-pasted five times.
 //
 // **Deliberately not attempted here, disclosed rather than silently
 // deferred**: `crates/compiled-serve` (ROADMAP B8's real Rust HTTP
@@ -115,7 +127,17 @@ fn wrap_err_text(e: ErrMsg) -> Result(Text, ErrMsg) {
 
 // `issued_at`/`ttl_secs` are fixed constants -- see this file's own
 // header note on why (no `now()` builtin).
-fn issue_demo_token(role: Text) -> Result(Text, ErrMsg) {
+// `nfr(...)` (`LANGUAGE.md` §6f): real per-call latency/error-rate
+// tracking, zero code at any call site -- `error_rate_max` is legal here
+// specifically because this function returns a real `Result(...)`,
+// which is how `nir_nfr_call_end` tells a real error from a real
+// success. A crossed threshold fires an async escalation POST to
+// `NIRDOSHA_OBSERVABILITY_URL` if one is configured (unset means no
+// escalation ever happens, not an error) -- a genuine production
+// concern (auth latency/error-rate SLOs), not decoration.
+fn issue_demo_token(role: Text) -> Result(Text, ErrMsg)
+    nfr(latency_ms: 100, error_rate_max: 0.01)
+{
     let issuer: Text = demo_issuer()
     let audience: Text = demo_audience()
     let jwks: Text = demo_jwks()
@@ -163,7 +185,14 @@ fn wrap_err_identity(e: ErrMsg) -> Result(VerifiedIdentity, ErrMsg) {
     return Err(e)
 }
 
-fn authorized_identity(req: Text) -> Result(VerifiedIdentity, ErrMsg) {
+// Real token verification has no I/O (`oidc_validate_token`'s own doc
+// comment: a pure function of its inputs) -- a much tighter latency
+// ceiling than the Postgres-backed routes below, and a higher tolerated
+// error rate, since a missing/expired/malformed bearer token is an
+// expected, routine outcome here, not a system fault.
+fn authorized_identity(req: Text) -> Result(VerifiedIdentity, ErrMsg)
+    nfr(latency_ms: 20, error_rate_max: 0.2)
+{
     let token: Text = req_bearer_token(req)
     if len(token.value) == 0 {
         return wrap_err_identity(ErrMsg("missing Authorization: Bearer token"))
@@ -180,7 +209,16 @@ fn authorized_identity(req: Text) -> Result(VerifiedIdentity, ErrMsg) {
 // ---- Postgres-backed CRUD (same shape as `56_...`, extended with
 // UPDATE/DELETE/search+pagination) ----------------------------------------
 
-fn create_purchase_order(vendor: Text, amount_cents: i64) -> Text requires(role: "admin") {
+// `error_rate_max` isn't legal on this one -- it returns a bare `Text`,
+// not a `Result(...)`, so there's no tagged success/error the kernel
+// could inspect (`TypeErrorKind::NfrErrorRateNeedsResultReturn`).
+// `latency_ms`/`concurrency_max` alone still give a real production
+// SLO on the write path: a real Postgres round trip per call, capped
+// concurrency so a burst of creates can't starve the connection pool.
+fn create_purchase_order(vendor: Text, amount_cents: i64) -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 300, concurrency_max: 50)
+{
     return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
         Err(e) => Text(e),
         Ok(conn) => run_create(conn, vendor, amount_cents),
@@ -200,7 +238,10 @@ fn run_create(conn: db, vendor: Text, amount_cents: i64) -> Text {
     return Text(vendor.value)
 }
 
-fn update_purchase_order(id: i64, vendor: Text, amount_cents: i64) -> Text requires(role: "admin") {
+fn update_purchase_order(id: i64, vendor: Text, amount_cents: i64) -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 300, concurrency_max: 50)
+{
     return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
         Err(e) => Text(e),
         Ok(conn) => run_update(conn, id, vendor, amount_cents),
@@ -219,7 +260,10 @@ fn run_update(conn: db, id: i64, vendor: Text, amount_cents: i64) -> Text {
     return Text(vendor.value)
 }
 
-fn delete_purchase_order(id: i64) -> bool requires(role: "admin") {
+fn delete_purchase_order(id: i64) -> bool
+    requires(role: "admin")
+    nfr(latency_ms: 200, concurrency_max: 50)
+{
     return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
         Err(e) => false,
         Ok(conn) => run_delete(conn, id),
@@ -404,7 +448,16 @@ fn run_approval() -> Text {
     return Text("approval failed")
 }
 
-fn approve_purchase_order() -> Text requires(role: "admin") {
+// A real network hop (the webhook) plus a `transact`-backed durable
+// write sits behind this one -- a much higher latency ceiling than the
+// plain CRUD routes above, and a deliberately low `concurrency_max`:
+// this is the one route that moves real money, so capping how many
+// disbursements can be in flight at once is itself a real production
+// control, not just a performance knob.
+fn approve_purchase_order() -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 2000, concurrency_max: 10)
+{
     return run_approval()
 }
 
