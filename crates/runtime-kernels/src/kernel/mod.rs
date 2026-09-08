@@ -762,10 +762,41 @@ fn register_wait_and_check_stall() -> (bool, usize) {
 /// `codegen.rs`'s `guard_io_ok`/`guard_recv_ok`), extended here to a
 /// failure kind only this runtime kernel, not generated LLVM IR, can
 /// actually observe.
+/// Guards the print-and-abort sequence below against a real, observed
+/// race (a CI failure on `build-macos`, not a hypothetical): `STALL`'s
+/// lock is only held for the `blocked >= live` check itself
+/// (`register_wait_and_check_stall`), released well before this
+/// function's `eprintln!`/`process::abort()` actually run. If a thread's
+/// wait ends (`concurrency_wait_end`) and it immediately begins a *new*
+/// one before the first detector's `abort()` has actually taken effect
+/// — `eprintln!`, a real syscall, is not instantaneous — that second
+/// `concurrency_wait_begin` call can independently cross the same
+/// `blocked >= live` threshold a second time and race this same branch,
+/// printing its own, by-then-stale snapshot of `waiting_registry`
+/// (observed on CI: the same thread id reported against two different
+/// channel handles across two separate printed reports, since its wait
+/// target had already changed between them) before the *first* thread's
+/// `abort()` actually terminates the process. Only the thread that wins
+/// this compare-exchange gets to print and abort; a losing thread parks
+/// briefly instead of racing to print a second, possibly-inconsistent
+/// report — the winner's `abort()` will end the process very shortly
+/// either way, so there's nothing else useful for the loser to do.
+static DEADLOCK_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn concurrency_wait_begin(target: WaitTarget) {
     waiting_registry().lock().unwrap().insert(std::thread::current().id(), target);
     let (deadlocked, live) = register_wait_and_check_stall();
     if deadlocked {
+        if DEADLOCK_REPORTED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            // Another thread already won the race to report and abort —
+            // park here rather than exit this function normally (which
+            // would let generated code proceed as if nothing were
+            // wrong); the winner's `abort()` ends the whole process
+            // imminently.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
         let mut lines: Vec<String> =
             waiting_registry().lock().unwrap().iter().map(|(tid, target)| format!("  {tid:?} is blocked in {target}")).collect();
         lines.sort();
