@@ -2232,14 +2232,41 @@ port, one real) sharing one durability log, proving `docs/adr/0009`'s
 replay mechanism recovers a disbursement across a real binary-version
 change, not just a re-run of the identical process.
 
-**Honest scope, stated in the file's own header comment too**: verified
-by running the compiled binary directly, not by serving it and clicking
-through a browser — compiled `serve`'s dispatch-table framework
-(`crates/compiled-serve`, B8 above) is real and tested on its own but
-not yet wired to `codegen.rs`, so nothing actually answers an HTTP
-request from this program's own binary yet. "Each role lands on its own
-screen" is demonstrated as real, checked *data* (the `LANDING` table
-`ui_gen.rs` emits), not a live click-through.
+**Verified two ways, not just one.** `55_nirdosha_ops_console.nir`
+itself is verified by running its compiled binary directly, not by
+serving it and clicking through a browser — compiled `serve`'s
+dispatch-table framework (`crates/compiled-serve`, B8 above) is real
+and tested on its own but not yet wired to `codegen.rs`, so nothing
+actually answers an HTTP request from *that specific binary* yet.
+**2026-09, same day: a real, live, browser-clickable version of the
+same scenario**, `examples/features/56_nirdosha_ops_console_server.nir`
+— the primitives-based `tcp_listener`/`accept` style
+(`51_compiled_serve.nir`'s already-real, already-working mode) extended
+just far enough to serve a real page: `GET /` returns a real hand-
+written HTML/CSS/JS control panel, `GET /api/list`/`GET /api/count`
+send a real Postgres `db_query` result straight over the socket, and
+`POST /api/create` really parses a posted JSON body and really calls
+the same `acquire`/`check_role`-gated `create_purchase_order` the other
+file does. Verified by a real compiled server process and real
+`TcpStream` clients
+(`crates/compiler/tests/nirdosha_ops_console.rs`'s
+`nirdosha_ops_console_server_answers_real_http_requests_with_real_postgres_data`,
+`#[ignore]`-gated, needs Postgres) — and by hand, with real `curl`
+requests and a real browser tab open against `http://127.0.0.1:8090/`.
+**One small, real, disclosed language extension landed alongside it**:
+`send(tcp, json)` is now legal (`typeck.rs::Expr::Send`'s own doc
+comment) — `json` shares `str`'s exact `{ptr, i64}` representation, and
+this language has no string-concatenation or JSON-array-building
+primitive a hand-written route could otherwise use to compose a
+multi-row response with. **One honest shortcut, not hidden**: the
+`X-Demo-Role` header this server reads to gate `POST /api/create` is a
+plain, unsigned, `curl`-forgeable demo convenience, not a real JWT —
+this backend has no compiled token-*signing* primitive at all yet (only
+`oidc_validate_token` *verification* is real), so there is no real
+token to check here. "Each role lands on its own screen" is real in
+both files: as checked *data* (the `LANDING` table `ui_gen.rs` emits)
+in the first, and as an actual client-side redirect a browser will
+really perform in the second.
 
 **One real, previously-undiscovered codegen bug found and disclosed
 while building this** (`codegen.rs::declare_named_type`'s own doc

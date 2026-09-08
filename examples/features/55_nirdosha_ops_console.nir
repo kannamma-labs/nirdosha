@@ -4,23 +4,29 @@
 // HTTP call, real role-based identity with a per-role `landing` screen,
 // and a real workflow-gated, `transact`-backed payment disbursement.
 //
-// **Honest scope, stated up front, not discovered later**: this program
-// is verified by compiling and *running the binary directly*
+// **Verified two ways.** This file's own scenario is verified by
+// compiling and *running the binary directly*
 // (`crates/compiler/tests/nirdosha_ops_console.rs`'s
 // `nirdosha_ops_console_runs_the_full_scenario_against_real_postgres_and_http`,
 // plus a genuine crash-and-replay test against a second, separately
-// compiled binary), not by serving it and clicking through a browser.
-// Compiled `serve`'s dispatch-table framework (`crates/compiled-serve`,
-// ROADMAP B8) is real and tested on its own but not yet wired to
-// `codegen.rs` (that crate's own module doc has the reason) -- so
-// nothing here actually answers an HTTP request from this program's own
-// compiled binary yet. The `landing`/`screen`/`dashboard` declarations
-// below are real and typechecked, and `nirdosha emit-ui` against this
-// file produces a real `LANDING` data table a served bundle would use
-// (verified directly in the same test file, by inspecting
-// `ui_gen::generate`'s own output) -- but "each role lands on their own
-// screen" is demonstrated as real, checked *data*, not a live
-// click-through.
+// compiled binary) -- not by serving it and clicking through a browser.
+// `crates/compiled-serve`'s own dispatch-table framework (ROADMAP B8) is
+// real and tested on its own but still not wired to `codegen.rs` (that
+// crate's own module doc has the reason), so *this specific file's* own
+// compiled binary still answers no HTTP requests. **A real, live,
+// browser-clickable version of the same scenario does exist, though,
+// as a separate, smaller companion file**:
+// `examples/features/56_nirdosha_ops_console_server.nir`, using the
+// primitives-based `tcp_listener`/`accept` style
+// (`51_compiled_serve.nir`'s own real, working mode) instead of waiting
+// on the `compiled-serve` wiring -- see that file's own header for the
+// full detail, including the one honest shortcut it takes (an unsigned
+// demo header standing in for a real JWT, since this backend has no
+// compiled token-*signing* primitive at all). The `landing`/`screen`/
+// `dashboard` declarations below are real and typechecked either way,
+// and `nirdosha emit-ui` against this file produces a real `LANDING`
+// data table a served bundle would use (verified directly in the same
+// test file, by inspecting `ui_gen::generate`'s own output).
 //
 // **One real, previously-undiscovered codegen bug found while writing
 // this, disclosed rather than fixed** (`codegen.rs::declare_named_type`'s

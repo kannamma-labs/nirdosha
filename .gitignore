@@ -32,6 +32,10 @@ nirdosha_transact_log.sqlite*
 # Claude Code local session/state (never commit)
 /.claude
 
+# Locally-run compiled binaries (e.g. the Ops Console server kept
+# running for a live browser demo) -- build artifacts, not source
+/.local-bin
+
 # Launch marketing drafts (not project documentation)
 /announcements
 scratch/
