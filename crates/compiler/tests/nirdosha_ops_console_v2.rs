@@ -236,6 +236,30 @@ fn nirdosha_ops_console_v2_answers_real_http_requests_with_real_auth_workflow_an
     let overdue_rows = json_body(&overdue);
     assert!(overdue_rows.is_array(), "overdue response should be a real JSON array: {overdue_rows}");
 
+    // Three genuinely different per-role dashboards, each a real SQL
+    // aggregate over the same rows this test already created/mutated
+    // above -- not the same query answering all three.
+    let admin_dashboard = request("GET", "/api/dashboard/admin", "", "");
+    let admin_dashboard_rows = json_body(&admin_dashboard);
+    assert!(
+        admin_dashboard_rows.as_array().is_some_and(|rows| rows.iter().any(|r| r["vendor"] == "Big Ticket Vendor" && r["amount_cents"] == 15000000)),
+        "admin dashboard should show real spend-by-vendor, including the large PO's own real amount (proves the SUM(...)::bigint cast really works, not a null): {admin_dashboard_rows}"
+    );
+
+    let finance_dashboard = request("GET", "/api/dashboard/finance", "", "");
+    let finance_dashboard_rows = json_body(&finance_dashboard);
+    assert!(
+        finance_dashboard_rows.as_array().is_some_and(|rows| !rows.is_empty()),
+        "finance dashboard should show at least the disbursements this test already approved: {finance_dashboard_rows}"
+    );
+
+    let director_dashboard = request("GET", "/api/dashboard/finance_director", "", "");
+    let director_dashboard_rows = json_body(&director_dashboard);
+    assert!(
+        director_dashboard_rows.as_array().is_some_and(|rows| rows.iter().all(|r| r["amount_cents"].as_i64().unwrap_or(0) >= 10000000)),
+        "finance_director dashboard should only ever contain POs at/above the real escalation threshold: {director_dashboard_rows}"
+    );
+
     // Real DELETE.
     let deleted = request(
         "POST",

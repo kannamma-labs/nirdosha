@@ -9977,22 +9977,22 @@ fn build_impl(
     // ordinary, cross-target library flag) skips that preflight check
     // entirely and does reach the linker's search path — so each
     // `foo.lib` token here is stripped to `foo` and passed as `-lfoo`
-    // instead. rustc's list also has at least one token that isn't
-    // `.lib`-suffixed at all (`/defaultlib:msvcrt`) — forwarded verbatim
-    // via `-Xlinker`, the same reason `-l` works for the others: `msvcrt`
-    // (the *dynamic* CRT import lib, still the current, non-deprecated
-    // name in every post-2015 MSVC toolchain — not a "legacy" runtime, a
-    // theory a previous version of this comment wrongly asserted after
-    // a real Windows CI failure and then had to walk back after dropping
-    // it made the *same* unresolved symbols persist) is exactly what
-    // `bundled` SQLite's own compiled C code (`sqlite3.o`) needs for
-    // `_beginthreadex`/`_endthreadex`/`realloc`/`strcspn`/`strspn` — none
-    // of those live in `ucrt.lib` alone. The real conflict
-    // (`LNK4098: defaultlib 'msvcrt' conflicts with use of other libs`)
-    // is with clang's own *static*-CRT default (`libcmt.lib`) for a bare
-    // `.ll`/staticlib link with no explicit runtime flag — `libcmt` is
-    // excluded below so `msvcrt` (forwarded here) wins outright instead
-    // of the two fighting.
+    // instead. A non-`.lib` token (e.g. `/defaultlib:...`, on a
+    // dynamic-CRT build) is forwarded verbatim via `-Xlinker` instead,
+    // the same reason `-l` works for the others.
+    //
+    // `build.rs`'s own `+crt-static` flag (its doc comment on the
+    // `RUSTFLAGS` it sets has the full story: `bundled` SQLite's C code
+    // and this compiler's own generated `declare`s for libc functions
+    // structurally expect different CRT linkage models otherwise) means
+    // this list shouldn't even contain a `msvcrt`-style dynamic-CRT
+    // `/defaultlib:` token on a correctly-configured Windows build
+    // anymore — three real, wrong `-Xlinker`/`NODEFAULTLIB` guesses were
+    // tried and disproven in this exact spot before finding that real
+    // root cause, each fixing one symbol set by excluding a library the
+    // *other* half of the link needed. Nothing platform-specific is
+    // hand-picked here anymore; every token is just forwarded as
+    // `rustc` itself reports it.
     // A handful of tokens above aren't genuine system-provided libs at
     // all — a crate-private import lib like `windows.0.52.0.lib` (the
     // `windows`/`windows-sys` family, at least) ships inside that crate's
