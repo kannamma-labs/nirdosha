@@ -288,6 +288,7 @@ fn builtin_return_ty(name: &str) -> Option<Ty> {
         "extract_claim" | "extract_claim_path" => Some(result_of(Ty::Named("ClaimView".to_string(), vec![]))),
         "validate_api_key" => Some(result_of(Ty::Named("VerifiedIdentity".to_string(), vec![]))),
         "exchange_refresh_token" => Some(result_of(Ty::Named("VerifiedIdentity".to_string(), vec![]))),
+        "verify_session" => Some(result_of(Ty::Named("VerifiedIdentity".to_string(), vec![]))),
         "db_connect" => Some(result_of(Ty::Db)),
         "db_query" => Some(result_of(Ty::Json)),
         "db_execute" => Some(result_of(Ty::I64)),

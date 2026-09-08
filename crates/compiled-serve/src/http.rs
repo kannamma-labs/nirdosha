@@ -41,17 +41,22 @@ impl Request {
         !self.header("connection").map(|v| v.eq_ignore_ascii_case("close")).unwrap_or(false)
     }
 
-    /// Decodes `Authorization: Bearer <token>` into the verified-identity
-    /// JSON a [`crate::RouteHandler`] receives — **not implemented as
-    /// real JWT verification in this first cut**, disclosed rather than
-    /// silently stubbed: real verification (`nir_oidc_validate_token`)
-    /// lives in `kernel::identity`, callable from here once the
-    /// `codegen.rs` wiring (a separate, real follow-up — this crate's
-    /// own module doc) lands. Today, a present bearer token round-trips
-    /// as `{"token": "<raw>"}` — enough for a hand-written test route to
-    /// exercise the identity-plumbing *shape* end to end without this
-    /// crate pretending to verify anything it doesn't yet.
-    pub fn bearer_identity_json(&self) -> Option<String> {
+    /// Decodes `Authorization: Bearer <token>` into a JSON blob a
+    /// [`crate::RouteHandler`] receives — **this is NOT verification**.
+    /// No signature check, no issuer/audience check, no expiry check:
+    /// any client presenting any string as a bearer token gets this
+    /// same shape back, verified or not. Real verification
+    /// (`nir_oidc_validate_token`) lives in `kernel::identity`, callable
+    /// from here once the `codegen.rs` wiring (a separate, real
+    /// follow-up — this crate's own module doc) lands, or via a real
+    /// session-lookup builtin (`verify_session`) once a request carries
+    /// a session cookie instead of a bearer token. Today, a present
+    /// bearer token round-trips as `{"token": "<raw>"}` — enough for a
+    /// hand-written test route to exercise the request-plumbing *shape*
+    /// end to end. **A handler must not treat this as an authenticated
+    /// principal** — the name says "unverified" on purpose, so nobody
+    /// mistakes it for one.
+    pub fn unverified_bearer_token_json(&self) -> Option<String> {
         let auth = self.header("authorization")?;
         let token = auth.strip_prefix("Bearer ")?;
         Some(format!("{{\"token\":{}}}", serde_json::to_string(token).ok()?))

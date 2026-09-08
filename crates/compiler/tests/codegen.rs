@@ -2356,6 +2356,26 @@ fn row12_remaining_identity_builtins_compile_and_run_for_real() {
             let cookie: str = session_cookie(session)
             print(cookie)
 
+            // verify_session: a real server-side lookup (red-team report
+            // A2) -- the session minted above round-trips the same
+            // subject/issuer it was created with, and an unknown session
+            // id is a clean Err, not a panic or a false positive.
+            let looked_up_subject: str = match verify_session(session.session_id) {
+                Ok(v) => v.subject,
+                Err(e) => e,
+            }
+            print(looked_up_subject)
+            let looked_up_issuer: str = match verify_session(session.session_id) {
+                Ok(v) => v.issuer,
+                Err(e) => e,
+            }
+            print(looked_up_issuer)
+            let unknown_session_ok: bool = match verify_session("not-a-real-session-id") {
+                Ok(v) => true,
+                Err(e) => false,
+            }
+            print(unknown_session_ok)
+
             // new_refresh_token / exchange_refresh_token, including real
             // single-use enforcement server-side (not just the affine
             // box field's own compile-time single-use guarantee).
@@ -2390,10 +2410,13 @@ fn row12_remaining_identity_builtins_compile_and_run_for_real() {
     assert_eq!(lines[4], "alice", "session.identity_subject must copy the identity's own subject");
     assert_eq!(lines[5], "28800", "a fresh session's real 8-hour lifetime");
     assert!(lines[6].contains("HttpOnly") && lines[6].contains("Max-Age=28800"), "session_cookie: {}", lines[6]);
-    assert_eq!(lines[7], "alice", "exchange_refresh_token should reissue the same subject");
-    assert_eq!(lines[8], "42", "exchange_refresh_token should carry the new issued_at through");
-    assert_eq!(lines[9], "1", "the correct api key must validate");
-    assert_eq!(lines[10], "0", "the wrong api key must not validate");
+    assert_eq!(lines[7], "alice", "verify_session must look up the same subject the session was created with");
+    assert_eq!(lines[8], "https://example.com", "verify_session must look up the same issuer the session was created with");
+    assert_eq!(lines[9], "0", "verify_session against an unknown session id must be a clean Err, not a false positive");
+    assert_eq!(lines[10], "alice", "exchange_refresh_token should reissue the same subject");
+    assert_eq!(lines[11], "42", "exchange_refresh_token should carry the new issued_at through");
+    assert_eq!(lines[12], "1", "the correct api key must validate");
+    assert_eq!(lines[13], "0", "the wrong api key must not validate");
 }
 
 /// `nfr(...)`'s per-call instrumentation (registration global, the

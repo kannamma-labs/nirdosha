@@ -55,11 +55,18 @@ pub use http::MAX_BODY_BYTES;
 ///   `nir_transact_decode_args`'s sibling mechanism, conceptually — a
 ///   real per-route decode is `codegen.rs`'s job once wired, not this
 ///   crate's).
-/// - `identity_json_{ptr,len}`: `""`/zero-length when the request
-///   carried no valid bearer token, otherwise a JSON object this
-///   crate's own request pipeline already resolved and verified
-///   upstream (`{"sub":...,"roles":[...],"claims":{...},"exp":...}`) —
-///   a handler never re-parses a raw `Authorization` header itself.
+/// - `unverified_bearer_token_json_{ptr,len}`: `""`/zero-length when
+///   the request carried no bearer token, otherwise `{"token":"<raw>"}`
+///   — the raw token text, **not verified in any way** by this crate
+///   (no signature check, no issuer/audience check, no expiry check).
+///   This is NOT the "already resolved and verified upstream" identity
+///   object an earlier draft of this doc comment claimed — that claim
+///   was false; see `Request::unverified_bearer_token_json`'s own doc
+///   comment (`http.rs`) for why. A handler that needs a real,
+///   verified principal must call `oidc_validate_token`/
+///   `nir_oidc_validate_token` (or, for a session cookie instead of a
+///   bearer token, `verify_session`) itself — this crate hands over the
+///   raw material, never a verified result.
 /// - `out_body_{ptr,len}`: the handler writes a heap-allocated (leaked,
 ///   same disclosed-not-hidden convention `nir_transact_decode_args`'s
 ///   own string output already uses) UTF-8 JSON response body here.
@@ -76,8 +83,8 @@ pub use http::MAX_BODY_BYTES;
 pub type RouteHandler = extern "C" fn(
     args_json_ptr: *const u8,
     args_json_len: i64,
-    identity_json_ptr: *const u8,
-    identity_json_len: i64,
+    unverified_bearer_token_json_ptr: *const u8,
+    unverified_bearer_token_json_len: i64,
     out_body_ptr: *mut *mut u8,
     out_body_len: *mut i64,
     out_cookie_ptr: *mut *mut u8,
@@ -307,8 +314,8 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
     let Some(route) = routes.iter().find(|r| r.path == req.path) else {
         return with_cors(http::Response::error(404, "not found"), req, config);
     };
-    let identity_json = req.bearer_identity_json();
-    let (status, body, cookie) = call_route(route.handler, &req.body, identity_json.as_deref());
+    let unverified_bearer_token_json = req.unverified_bearer_token_json();
+    let (status, body, cookie) = call_route(route.handler, &req.body, unverified_bearer_token_json.as_deref());
     let mut resp = http::Response { status, body, headers: Vec::new(), cookie };
     resp = with_cors(resp, req, config);
     resp
@@ -318,8 +325,8 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
 /// pointer with the fixed ABI [`RouteHandler`] documents, and reading
 /// back its leaked (`Box::leak`-style, same convention `runtime-kernels`
 /// already uses for cross-boundary string output) output buffers.
-fn call_route(handler: RouteHandler, args_json: &[u8], identity_json: Option<&str>) -> (u16, Vec<u8>, Option<String>) {
-    let (id_ptr, id_len) = match identity_json {
+fn call_route(handler: RouteHandler, args_json: &[u8], unverified_bearer_token_json: Option<&str>) -> (u16, Vec<u8>, Option<String>) {
+    let (id_ptr, id_len) = match unverified_bearer_token_json {
         Some(s) => (s.as_ptr(), s.len() as i64),
         None => (std::ptr::null(), 0),
     };
