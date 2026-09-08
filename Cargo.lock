@@ -1211,6 +1211,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-plugin-native-authed-http"
+version = "0.1.0"
+
+[[package]]
 name = "nirdosha-plugin-native-kv"
 version = "0.1.0"
 

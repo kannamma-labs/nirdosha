@@ -2697,6 +2697,40 @@ fn db_connect_execute_query_round_trips_real_sqlite_rows() {
     assert_eq!(stdout, "ada\n1\n");
 }
 
+/// `env(name) -> Result(str, str)` (RFC 0011 §1) — `Ok(value)` when the
+/// process environment variable is set at the compiled binary's own
+/// runtime (not at compile time), `Err(_)` when unset. Uniquely-named
+/// vars, same reasoning `unique_temp_path`'s own doc comment gives for
+/// SQLite files: a generic name here could collide with something real
+/// in whatever environment `cargo test` itself happens to run under.
+#[test]
+fn env_round_trips_ok_when_set_and_err_when_unset() {
+    // `describe`-as-a-fn would need `str` in its own signature -- banned
+    // (`typeck::TypeErrorKind::StrInFnSignature`, `result_of`'s own doc
+    // comment: builtins are exempt from this ban, plain user fns aren't)
+    // -- so both matches are inlined directly in `main` instead, same as
+    // `json_accessors_...`'s own `let name: str = match json_get_str(...)`
+    // shape just above.
+    let src = r#"
+        fn main() {
+            let set_var: str = match env("NIRDOSHA_RFC0011_ENV_TEST_SET_VAR") {
+                Err(e) => "MISSING",
+                Ok(v) => v,
+            }
+            print(set_var)
+            let unset_var: str = match env("NIRDOSHA_RFC0011_ENV_TEST_UNSET_VAR") {
+                Err(e) => "MISSING",
+                Ok(v) => v,
+            }
+            print(unset_var)
+        }
+    "#;
+    let (stdout, code) =
+        compile_and_run_with_env(src, codegen::OptLevel::O2, &[("NIRDOSHA_RFC0011_ENV_TEST_SET_VAR", "hello-rfc-0011")]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello-rfc-0011\nMISSING\n");
+}
+
 /// The rest of the `json_*` accessor surface `27_database.nir` doesn't
 /// happen to exercise — `json_get_i64`/`json_get_f64`/`json_get_bool`/
 /// `json_array_len` read out of a real `db_query` row (SQLite has no

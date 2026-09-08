@@ -35,9 +35,9 @@
 
 use r2d2::ManageConnection;
 use std::str::FromStr;
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 
-use super::pool::{PoolConfig, PoolRegistry};
+use super::pool::{self, PoolConfig, PoolRegistry};
 
 // ---- SQLite: a minimal custom manager, not `r2d2_sqlite` -----------
 //
@@ -83,7 +83,7 @@ impl ManageConnection for SqliteManager {
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         let result = conn.query_row("SELECT 1", [], |_| Ok(())).map(|_| ());
         if result.is_err() {
-            super::record_stale_rehydrated(super::Domain::Db);
+            super::record_stale_rehydrated(super::domain::db());
         }
         result
     }
@@ -95,7 +95,14 @@ impl ManageConnection for SqliteManager {
 
 fn sqlite_pool_registry() -> &'static PoolRegistry<SqliteManager> {
     static REGISTRY: OnceLock<PoolRegistry<SqliteManager>> = OnceLock::new();
-    REGISTRY.get_or_init(PoolRegistry::new)
+    static REGISTERED: Once = Once::new();
+    let registry = REGISTRY.get_or_init(PoolRegistry::new);
+    // RFC 0011 §5: every pool-backed registry registers itself with the
+    // reaper once, the first time it's actually reached — a lazily-built
+    // process, same posture `domain::db()`'s own self-registration
+    // already has (Phase 2a).
+    REGISTERED.call_once(|| pool::register_for_reaping(registry));
+    registry
 }
 
 // ---- Postgres --------------------------------------------------------
@@ -126,7 +133,7 @@ impl ManageConnection for PostgresManager {
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         let result = conn.simple_query("SELECT 1").map(|_| ());
         if result.is_err() {
-            super::record_stale_rehydrated(super::Domain::Db);
+            super::record_stale_rehydrated(super::domain::db());
         }
         result
     }
@@ -138,7 +145,10 @@ impl ManageConnection for PostgresManager {
 
 fn postgres_pool_registry() -> &'static PoolRegistry<PostgresManager> {
     static REGISTRY: OnceLock<PoolRegistry<PostgresManager>> = OnceLock::new();
-    REGISTRY.get_or_init(PoolRegistry::new)
+    static REGISTERED: Once = Once::new();
+    let registry = REGISTRY.get_or_init(PoolRegistry::new);
+    REGISTERED.call_once(|| pool::register_for_reaping(registry));
+    registry
 }
 
 fn is_local_host(host: &postgres::config::Host) -> bool {
@@ -216,11 +226,11 @@ impl DbConn {
 }
 
 /// `env_var`/`default_max` pair this phase's pool sizing follows —
-/// `pool.max_size` must be `≥` `Domain::Db`'s own admission ceiling
+/// `pool.max_size` must be `≥` the `db` domain's own admission ceiling
 /// (this phase's own review: admission never blocks, but `Pool::get()`
 /// does, so the ceiling — not a smaller pool — has to stay the one real
-/// choke point). `Domain::Db`'s default ceiling is 10,000
-/// (`kernel/mod.rs::Domain::default_max`) — deliberately generous, not
+/// choke point). The `db` domain's default ceiling is 10,000
+/// (`kernel/mod.rs::BUILTIN_DOMAINS`) — deliberately generous, not
 /// production-tuned, so this phase's own pool default follows the same
 /// posture rather than silently becoming the tighter constraint.
 fn db_pool_config() -> PoolConfig {
@@ -237,6 +247,32 @@ fn db_pool_config() -> PoolConfig {
 /// the validation round-trip, not just the connect (this phase's own
 /// review): the default budget now covers connect *plus* the mandatory
 /// `SELECT 1` above, not connect alone.
+///
+/// **This function itself never calls `kernel::acquire`/`release`** —
+/// don't mistake that for the `db` domain's ceiling being unenforced.
+/// The admission gate lives one layer up, around this function's only
+/// two callers: `lib.rs`'s `nir_db_connect` (`kernel::acquire(domain::db())`
+/// before calling this, released on error) and `nir_db_stop`
+/// (`kernel::release(domain::db())` on handle close) — the
+/// connect-to-stop session lifecycle is bracketed there, not here,
+/// because the affine `db` handle (and thus the session's true end) is
+/// a `HandleTable` concept `lib.rs` owns, not something this module
+/// tracks. A grep of this file alone for `acquire` will find nothing;
+/// check `lib.rs`'s `nir_db_connect`/`nir_db_stop` before concluding the
+/// ceiling is decorative.
+/// RFC 0011 §2 step 1: "check built-in schemes first... if none match,"
+/// fall through to the plugin provider table. `lib.rs`'s `nir_db_connect`
+/// needs this *before* it can decide which domain to
+/// `kernel::acquire` — a bare path/`:memory:`/`postgres[ql]://` always
+/// means the built-in `db` domain and this module's own `connect`
+/// below; anything else means a plugin's own registered domain and
+/// `plugin_provider::connect_conn_shape` instead. Kept in sync with
+/// `connect`'s own scheme matching by construction: both read this one
+/// function's result rather than duplicating the scheme list.
+pub fn is_builtin_scheme(conn_str: &str) -> bool {
+    conn_str.starts_with("postgres://") || conn_str.starts_with("postgresql://") || !conn_str.contains("://")
+}
+
 pub fn connect(conn_str: &str) -> Result<DbConn, String> {
     if conn_str.starts_with("postgres://") || conn_str.starts_with("postgresql://") {
         let pool = postgres_pool_registry().get_or_create(conn_str, db_pool_config(), || build_postgres_manager(conn_str))?;
@@ -528,7 +564,7 @@ mod tests {
         // already observed the close by the time this call returns.
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        let before = super::super::stats(super::super::Domain::Db).3;
+        let before = super::super::stats(super::super::domain::db()).3;
         // The pooled connection killer's own checkout is now itself
         // stale for the *next* caller too, in general -- but the one
         // under test here is the original, now-terminated backend:
@@ -538,7 +574,7 @@ mod tests {
         let row = conn.query_one("SELECT 1", &[]).expect("the rehydrated connection must actually work");
         let one: i32 = row.get(0);
         assert_eq!(one, 1);
-        let after = super::super::stats(super::super::Domain::Db).3;
+        let after = super::super::stats(super::super::domain::db()).3;
         assert!(after > before, "record_stale_rehydrated must have fired for the killed connection");
     }
 }

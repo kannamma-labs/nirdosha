@@ -76,6 +76,20 @@ pub struct NativePluginBuiltin {
     /// invocation alongside the generated `.ll` — see
     /// `codegen::build_with_native_plugins`.
     pub static_lib: &'static [u8],
+    /// rfcs/0011-uniform-service-provider-model.md §2/§5's
+    /// convention-plus-override rule: a `<shape>_provider_<scheme>_connect`
+    /// registration's admission ceiling is normally derived from its
+    /// scheme (`NIRDOSHA_KERNEL_MAX_<SCHEME>`-shaped default), but a
+    /// provider may pin its own env var name here instead. `None` for
+    /// every non-provider native builtin (the vast majority — anything
+    /// not named `..._connect`), and for a provider willing to accept the
+    /// convention default.
+    pub env_var: Option<&'static str>,
+    /// Same convention-plus-override pairing as `env_var`, for the
+    /// numeric ceiling itself (§5's `default_max`) rather than the env
+    /// var that can override it at runtime. `None` means "use this
+    /// registry's generic default," not "unlimited."
+    pub default_max: Option<i64>,
 }
 
 impl NativePluginBuiltin {
@@ -143,5 +157,201 @@ impl NativePluginBuiltin {
             ));
         }
         Ok(())
+    }
+}
+
+/// rfcs/0011-uniform-service-provider-model.md §2, "Scheme → identifier
+/// normalization, spelled out exactly": take the substring before
+/// `://`, lowercase it, map `+`/`.`/`-` to `_`. `mysql+tls://...` →
+/// `mysql_tls`; `POSTGRESQL://...` → `postgresql`. This exact function
+/// is duplicated verbatim in `runtime-kernels` (§2's own "one function,
+/// not two independent implementations that could drift" — there is no
+/// shared crate between `compiler` and `runtime-kernels` to put a single
+/// copy in), used there for the identical purpose: turning a runtime
+/// `.nir` string into the same identifier this function computes at
+/// build time from a plugin's declared scheme. Keep both copies in sync
+/// by hand if this one ever changes.
+pub fn normalize_scheme(scheme: &str) -> String {
+    let bare = scheme.split("://").next().unwrap_or(scheme);
+    bare.to_ascii_lowercase().chars().map(|c| if c == '+' || c == '.' || c == '-' { '_' } else { c }).collect()
+}
+
+/// Splits a native plugin builtin's name into `(shape, normalized_scheme)`
+/// when it's a provider's `_connect` entry (`"db_provider_mysql_connect"`
+/// -> `("db", "mysql")`), or `None` for any other native builtin (the
+/// common case — an ordinary scalar-ABI function with no provider shape,
+/// e.g. `plugin_shout`). Used by `codegen.rs`'s Phase 4 eager-registration
+/// pass to derive `register_domain`'s `name`/`env_var` arguments per
+/// rfcs/0011 §3 ("for a plugin provider, `<shape>_provider_<normalized_
+/// scheme>`") and §2 ("`NIRDOSHA_KERNEL_MAX_<SHAPE>_<NORMALIZED_SCHEME>`
+/// convention default"). Deliberately re-derives the same
+/// `_provider_`/`_connect` parse `validate_plugin_roster` already does
+/// rather than sharing state with it, since that function only returns
+/// pass/fail, not the parsed pieces.
+pub fn provider_shape_and_scheme(name: &str) -> Option<(&str, String)> {
+    let connect_prefix = name.strip_suffix("_connect")?;
+    let provider_at = connect_prefix.find("_provider_")?;
+    let shape = &connect_prefix[..provider_at];
+    let scheme_raw = &connect_prefix[provider_at + "_provider_".len()..];
+    if scheme_raw.is_empty() {
+        return None;
+    }
+    Some((shape, normalize_scheme(scheme_raw)))
+}
+
+/// rfcs/0011 §2: "Built-in scheme identifiers, pinned exactly rather
+/// than left implicit (this is the set a plugin may *not* register)."
+/// `sqlite` has no `://` to strip (a bare path or `:memory:` — a
+/// fallback rule, not a normalized scheme) but is still a reserved
+/// identifier a plugin scheme must not collide with.
+pub const BUILTIN_SCHEME_IDENTIFIERS: &[&str] = &["sqlite", "postgres", "postgresql", "redis", "http", "https"];
+
+/// rfcs/0011 §2: "A shape's plugin contract is four functions or none,
+/// checked at build time" + the two scheme-collision rules. Operates on
+/// the whole registered roster (unlike [`NativePluginBuiltin::validate`],
+/// which only checks one builtin's own ABI shape) because both checks
+/// here are inherently cross-plugin: whether a `_connect` function's
+/// siblings exist, and whether two providers' normalized schemes
+/// collide. Only names containing `_provider_` and ending in `_connect`
+/// participate — every other native plugin builtin (the common case:
+/// an ordinary scalar-ABI function with no provider shape at all, e.g.
+/// `plugin_shout`) is untouched by this check.
+pub fn validate_plugin_roster(plugins: &[NativePluginBuiltin]) -> Result<(), String> {
+    let names: std::collections::HashSet<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
+
+    let mut seen_schemes: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for name in plugins.iter().map(|p| p.name.as_str()) {
+        let Some(connect_prefix) = name.strip_suffix("_connect") else { continue };
+        let Some(provider_at) = connect_prefix.find("_provider_") else { continue };
+        let scheme_raw = &connect_prefix[provider_at + "_provider_".len()..];
+        if scheme_raw.is_empty() {
+            continue;
+        }
+        let scheme = normalize_scheme(scheme_raw);
+
+        if BUILTIN_SCHEME_IDENTIFIERS.contains(&scheme.as_str()) {
+            return Err(format!(
+                "native plugin provider `{name}`: scheme `{scheme}` collides with a built-in identifier \
+                 ({BUILTIN_SCHEME_IDENTIFIERS:?}) -- a plugin may not register a built-in scheme (rfcs/0011 §2)"
+            ));
+        }
+        if let Some(other) = seen_schemes.get(&scheme) {
+            return Err(format!(
+                "native plugin providers `{other}` and `{name}`: both normalize to scheme `{scheme}` -- \
+                 two plugins may not register the same identifier (rfcs/0011 §2)"
+            ));
+        }
+        seen_schemes.insert(scheme, name);
+
+        // "Four functions or none": `_connect` requires `_is_valid`,
+        // `_close`, and either `_op` (conn/stream shape) or `_request`
+        // (call shape) — the shape isn't a separate declared field, it's
+        // inferred from which sibling is present.
+        let prefix = connect_prefix; // e.g. "db_provider_mysql"
+        let has_op = names.contains(format!("{prefix}_op").as_str());
+        let has_request = names.contains(format!("{prefix}_request").as_str());
+        if !has_op && !has_request {
+            return Err(format!(
+                "native plugin provider `{name}`: registered `_connect` without a matching `{prefix}_op` \
+                 (conn/stream shape) or `{prefix}_request` (call shape) -- a shape's plugin contract is four \
+                 functions or none (rfcs/0011 §2)"
+            ));
+        }
+        if !names.contains(format!("{prefix}_is_valid").as_str()) {
+            return Err(format!(
+                "native plugin provider `{name}`: registered `_connect` without a matching `{prefix}_is_valid` \
+                 -- a shape's plugin contract is four functions or none (rfcs/0011 §2)"
+            ));
+        }
+        if !names.contains(format!("{prefix}_close").as_str()) {
+            return Err(format!(
+                "native plugin provider `{name}`: registered `_connect` without a matching `{prefix}_close` \
+                 -- a shape's plugin contract is four functions or none (rfcs/0011 §2)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(name: &str) -> NativePluginBuiltin {
+        NativePluginBuiltin { name: name.to_string(), params: vec![Ty::Str], ret: Ty::I64, static_lib: &[], env_var: None, default_max: None }
+    }
+
+    #[test]
+    fn normalize_scheme_matches_the_rfc_examples() {
+        assert_eq!(normalize_scheme("mysql+tls://host"), "mysql_tls");
+        assert_eq!(normalize_scheme("POSTGRESQL://host"), "postgresql");
+        assert_eq!(normalize_scheme("s3.compat-v2://host"), "s3_compat_v2");
+    }
+
+    #[test]
+    fn a_well_formed_four_function_conn_shape_set_passes() {
+        let plugins = vec![
+            provider("db_provider_fakescheme_connect"),
+            provider("db_provider_fakescheme_op"),
+            provider("db_provider_fakescheme_is_valid"),
+            provider("db_provider_fakescheme_close"),
+        ];
+        validate_plugin_roster(&plugins).expect("a well-formed four-function set must validate");
+    }
+
+    #[test]
+    fn a_well_formed_four_function_call_shape_set_passes() {
+        let plugins = vec![
+            provider("authedhttp_provider_authedhttp_connect"),
+            provider("authedhttp_provider_authedhttp_request"),
+            provider("authedhttp_provider_authedhttp_is_valid"),
+            provider("authedhttp_provider_authedhttp_close"),
+        ];
+        validate_plugin_roster(&plugins).expect("a well-formed call-shape four-function set must validate");
+    }
+
+    #[test]
+    fn a_connect_missing_close_fails_with_the_named_function() {
+        let plugins = vec![
+            provider("db_provider_fakescheme_connect"),
+            provider("db_provider_fakescheme_op"),
+            provider("db_provider_fakescheme_is_valid"),
+        ];
+        let err = validate_plugin_roster(&plugins).expect_err("a missing _close must fail");
+        assert!(err.contains("db_provider_fakescheme_close"), "expected the missing function named, got: {err}");
+    }
+
+    #[test]
+    fn two_plugins_normalizing_to_the_same_identifier_fail_with_the_named_collision() {
+        let plugins = vec![
+            provider("db_provider_mysql_connect"),
+            provider("db_provider_mysql_op"),
+            provider("db_provider_mysql_is_valid"),
+            provider("db_provider_mysql_close"),
+            provider("mq_provider_mysql_connect"),
+            provider("mq_provider_mysql_op"),
+            provider("mq_provider_mysql_is_valid"),
+            provider("mq_provider_mysql_close"),
+        ];
+        let err = validate_plugin_roster(&plugins).expect_err("colliding normalized schemes must fail");
+        assert!(err.contains("mysql"), "expected the colliding identifier named, got: {err}");
+    }
+
+    #[test]
+    fn a_plugin_scheme_colliding_with_postgres_fails() {
+        let plugins = vec![
+            provider("db_provider_postgres_connect"),
+            provider("db_provider_postgres_op"),
+            provider("db_provider_postgres_is_valid"),
+            provider("db_provider_postgres_close"),
+        ];
+        let err = validate_plugin_roster(&plugins).expect_err("a built-in scheme collision must fail");
+        assert!(err.contains("postgres"), "expected the built-in identifier named, got: {err}");
+    }
+
+    #[test]
+    fn non_provider_native_builtins_are_untouched_by_roster_validation() {
+        let plugins = vec![provider("plugin_shout")];
+        validate_plugin_roster(&plugins).expect("a plain native builtin with no _provider_..._connect shape must pass untouched");
     }
 }

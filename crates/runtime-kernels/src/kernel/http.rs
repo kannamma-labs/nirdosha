@@ -32,11 +32,11 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 
 use r2d2::ManageConnection;
 
-use super::pool::{PoolConfig, PoolRegistry};
+use super::pool::{self, PoolConfig, PoolRegistry};
 
 pub struct HttpParsed {
     pub status: i64,
@@ -317,7 +317,7 @@ impl ManageConnection for HttpManager {
         };
         let _ = conn.stream.set_nonblocking(false);
         if result.is_err() {
-            super::record_stale_rehydrated(super::Domain::Http);
+            super::record_stale_rehydrated(super::domain::http());
         }
         result.map_err(HttpError)
     }
@@ -329,7 +329,12 @@ impl ManageConnection for HttpManager {
 
 fn http_pool_registry() -> &'static PoolRegistry<HttpManager> {
     static REGISTRY: OnceLock<PoolRegistry<HttpManager>> = OnceLock::new();
-    REGISTRY.get_or_init(PoolRegistry::new)
+    static REGISTERED: Once = Once::new();
+    let registry = REGISTRY.get_or_init(PoolRegistry::new);
+    // RFC 0011 §5: every pool-backed registry registers itself with the
+    // reaper once, lazily, the first time it's reached.
+    REGISTERED.call_once(|| pool::register_for_reaping(registry));
+    registry
 }
 
 // ---- HTTPS ---------------------------------------------------------------
@@ -376,11 +381,14 @@ impl ManageConnection for HttpsManager {
 
 fn https_pool_registry() -> &'static PoolRegistry<HttpsManager> {
     static REGISTRY: OnceLock<PoolRegistry<HttpsManager>> = OnceLock::new();
-    REGISTRY.get_or_init(PoolRegistry::new)
+    static REGISTERED: Once = Once::new();
+    let registry = REGISTRY.get_or_init(PoolRegistry::new);
+    REGISTERED.call_once(|| pool::register_for_reaping(registry));
+    registry
 }
 
 /// Same reasoning as `kernel::db::db_pool_config` -- `pool.max_size`
-/// must stay `≥` `Domain::Http`'s own admission ceiling, so the
+/// must stay `≥` the `http` domain's own admission ceiling, so the
 /// ceiling (not a smaller pool) stays the one real, observable choke
 /// point.
 fn http_pool_config() -> PoolConfig {
@@ -417,12 +425,12 @@ fn send_and_read(stream: &mut (impl Read + Write), req_bytes: &[u8], leftover: V
 }
 
 /// One request, over a pooled, keep-alive connection. Admission
-/// (`kernel::acquire(Domain::Http)`/`release`) is held for exactly the
+/// (`kernel::acquire(domain::http())`/`release`) is held for exactly the
 /// duration of this one call (both attempts, if a retry happens) --
 /// unlike `db`'s affine handle, an HTTP client call has no
 /// caller-visible session to hold it open across.
 pub fn request_http(host: &str, port: i64, path: &str, method: &str, body: Option<&str>, bearer_token: Option<&str>) -> Result<HttpParsed, String> {
-    if !super::acquire(super::Domain::Http) {
+    if !super::acquire(super::domain::http()) {
         return Err("too many open http connections".to_string());
     }
     let result = (|| {
@@ -455,12 +463,12 @@ pub fn request_http(host: &str, port: i64, path: &str, method: &str, body: Optio
             }
         }
     })();
-    super::release(super::Domain::Http);
+    super::release(super::domain::http());
     result
 }
 
 pub fn request_https(host: &str, port: i64, path: &str, method: &str, body: Option<&str>) -> Result<HttpParsed, String> {
-    if !super::acquire(super::Domain::Http) {
+    if !super::acquire(super::domain::http()) {
         return Err("too many open http connections".to_string());
     }
     let result = (|| {
@@ -490,7 +498,7 @@ pub fn request_https(host: &str, port: i64, path: &str, method: &str, body: Opti
             }
         }
     })();
-    super::release(super::Domain::Http);
+    super::release(super::domain::http());
     result
 }
 
