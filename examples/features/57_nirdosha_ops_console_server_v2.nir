@@ -1,5 +1,5 @@
 // Feature: strengthens the browser-clickable Nirdosha Ops Console
-// (`56_nirdosha_ops_console_server.nir`) along four real axes:
+// (`56_nirdosha_ops_console_server.nir`) along seven real axes:
 //
 //   1. **Real signed authentication.** `POST /api/login` returns a real
 //      HMAC-SHA256 JWT (`mock_issue_token`, finished alongside this file
@@ -10,12 +10,15 @@
 //      `X-Demo-Role` header is gone -- every admin action here is
 //      guarded by a real signature check against a real (if hardcoded,
 //      demo-only) JWKS.
-//   2. **The `Disbursement` workflow wired to a real browser button.**
-//      `55_nirdosha_ops_console.nir`'s workflow-gated, `transact`-backed
-//      disbursement (RBAC + a real webhook call + a real durable
-//      Postgres write) was previously only ever exercised by a test
-//      harness. `POST /api/purchase_orders/approve` really starts and
-//      advances a real workflow instance from the browser.
+//   2. **The `Disbursement` workflow wired to real browser buttons,
+//      with a real second branch.** `55_nirdosha_ops_console.nir`'s
+//      workflow-gated, `transact`-backed disbursement (RBAC + a real
+//      webhook call + a real durable Postgres write) was previously
+//      only ever exercised by a test harness, and only ever had one
+//      real transition to prove the mechanism. `Draft` here has two --
+//      `POST /api/purchase_orders/approve`/`.../reject` really start
+//      and advance a real workflow instance from the browser, down
+//      either real branch.
 //   3. **Broader CRUD.** Real `UPDATE`/`DELETE` via `db_execute` -- both
 //      already exercised elsewhere in this compiler's own test suite;
 //      neither route needed anything new from the compiler.
@@ -29,8 +32,8 @@
 //   5. **Real `nfr(...)` SLOs on every real route** (`LANGUAGE.md` §6f,
 //      first used in `50_field_masking_and_check_role.nir`) -- a
 //      latency ceiling everywhere, plus either `error_rate_max` (on the
-//      two functions that genuinely return `Result(...)`: token
-//      issuance/verification) or `concurrency_max` (on the `Text`/`bool`-
+//      functions that genuinely return `Result(...)`: token issuance/
+//      verification) or `concurrency_max` (on the `Text`/`bool`-
 //      returning CRUD and approval routes, where there's no tagged
 //      success/error a `Result` return would give the APM kernel to
 //      inspect). Zero code at any call site; a crossed threshold fires
@@ -38,6 +41,27 @@
 //      configured. Each threshold's own comment explains why its value
 //      differs from its neighbors -- these aren't the same number
 //      copy-pasted five times.
+//   6. **Real SLA/overdue detection** (`state { sla_seconds: N }`, first
+//      used in `54_compiled_workflow_escalation.nir`) on `Draft` -- a
+//      real, production-shaped 3-day SLA, plus `GET /api/disbursements/
+//      overdue` exposing the compiler-synthesized
+//      `list_disbursement_overdue()` to the browser for real, not just
+//      to a test harness's own polling loop.
+//   7. **Real dual control on large purchase orders.** A PO at or above
+//      `escalation_threshold_cents()` ($100,000) refuses a plain
+//      `admin` token and only accepts a real `finance_director`-proven
+//      identity -- `route_approval` `acquire`s a structurally different
+//      `requires`-gated function depending on the PO's *real* amount
+//      (looked up fresh from Postgres, never trusted from the request),
+//      the same real RBAC mechanism every other gated route here already
+//      uses, just choosing between two different callables instead of
+//      one. **What this does NOT change, disclosed plainly**: the actual
+//      disbursement `disburse_on_approval` records is still the same
+//      fixed $2,500 both `55_...` and this file's own axis 2 already
+//      disclose (Layer 1's `on_entry` has no way to carry the PO's real
+//      amount through) -- escalating *who* may approve a large PO is
+//      real; making the disbursed amount itself scale with it is the
+//      same already-disclosed gap, not newly hidden here.
 //
 // **Deliberately not attempted here, disclosed rather than silently
 // deferred**: `crates/compiled-serve` (ROADMAP B8's real Rust HTTP
@@ -93,12 +117,18 @@ fn role_subject(role: Text) -> Text {
     if role.value == "admin" {
         return Text("cfo-1")
     }
+    if role.value == "finance_director" {
+        return Text("finance-director-1")
+    }
     return Text("clerk-1")
 }
 
 fn role_claims_json(role: Text) -> Text {
     if role.value == "admin" {
         return Text("{\"roles\":[\"admin\"]}")
+    }
+    if role.value == "finance_director" {
+        return Text("{\"roles\":[\"finance_director\"]}")
     }
     return Text("{\"roles\":[\"finance\"]}")
 }
@@ -279,6 +309,37 @@ fn run_delete(conn: db, id: i64) -> bool {
     return deleted > 0
 }
 
+// The real dollar figure `route_approval` below decides escalation on
+// -- a fresh read from Postgres for the specific PO the browser named,
+// never trusted from the request body itself.
+fn lookup_amount_cents(id: i64) -> i64 {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => -1,
+        Ok(conn) => run_lookup_amount_cents(conn, id),
+    }
+}
+
+fn run_lookup_amount_cents(conn: db, id: i64) -> i64 {
+    let result: i64 = match db_query(conn, "SELECT amount_cents FROM purchase_orders WHERE id = ?", id) {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "amount_cents") {
+                Ok(n) => n,
+                Err(e) => -1,
+            },
+            Err(e) => -1,
+        },
+        Err(e) => -1,
+    }
+    stop conn
+    return result
+}
+
+// $100,000 -- an ordinary enterprise-shaped dual-control threshold, not
+// a number picked to make the demo work.
+fn escalation_threshold_cents() -> i64 {
+    return 10000000
+}
+
 fn wrap_ok_json(j: json) -> Result(json, ErrMsg) {
     return Ok(j)
 }
@@ -392,6 +453,10 @@ fn log_disbursement_failure(txn_id: str, po_id: i64) -> unit {
     print("disbursement failed", txn_id, po_id)
 }
 
+fn log_disbursement_rejected(instance_id: i64) -> unit {
+    print("disbursement", instance_id, "rejected")
+}
+
 // Layer 1's only implicit `on_entry` binding is `instance_id` (no
 // non-empty `data{}` block support), so -- same disclosed limitation
 // `55_...` already has -- the disbursed amount is fixed, not read back
@@ -412,13 +477,28 @@ fn disburse_on_approval(instance_id: i64) -> unit {
     print("disbursement", instance_id, ok)
 }
 
+// `sla_seconds` (`LANGUAGE.md`/`docs/ROADMAP.md` A15, first used in
+// `54_compiled_workflow_escalation.nir`) plus a real second branch out
+// of `Draft` -- 55_...'s own workflow only ever had one real transition
+// to prove the mechanism; a real approval queue has two outcomes and a
+// real SLA on how long a request may sit unactioned. 3 days (259200s)
+// here is the real, production-shaped value (`54_...`'s own header
+// note on why ITS example uses 1s instead: fast/deterministic demo
+// timing -- not a value meant to be copied unchanged).
 workflow Disbursement {
     state Draft {
+        sla_seconds: 259200
         on Approve -> Approved
+        on Reject -> Rejected
     }
     state Approved terminal {
         on_entry {
             disburse_on_approval(instance_id)
+        }
+    }
+    state Rejected terminal {
+        on_entry {
+            log_disbursement_rejected(instance_id)
         }
     }
 }
@@ -448,17 +528,63 @@ fn run_approval() -> Text {
     return Text("approval failed")
 }
 
+fn run_rejection() -> Text {
+    let instance_id: i64 = match start_disbursement(None(), DisbursementData()) {
+        Ok(id) => id,
+        Err(e) => -1,
+    }
+    if instance_id < 0 {
+        return Text("failed to start disbursement workflow")
+    }
+    let rejected: bool = match advance_disbursement_now(admin_identity(), instance_id, Reject()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    if rejected {
+        return Text("rejected")
+    }
+    return Text("rejection failed")
+}
+
 // A real network hop (the webhook) plus a `transact`-backed durable
 // write sits behind this one -- a much higher latency ceiling than the
 // plain CRUD routes above, and a deliberately low `concurrency_max`:
 // this is the one route that moves real money, so capping how many
 // disbursements can be in flight at once is itself a real production
 // control, not just a performance knob.
-fn approve_purchase_order() -> Text
+//
+// **Dual control, a real production pattern, not a toy threshold**: a
+// purchase order at or above `escalation_threshold_cents()` needs a
+// `finance_director`-proven identity, not just `admin` --
+// `route_approval` below decides which of these two `requires`-gated
+// functions to `acquire` based on the *real* PO amount looked up from
+// Postgres (`lookup_amount_cents`), not a client-supplied one. **What
+// this threshold check does NOT change, disclosed plainly**: the
+// disbursement `disburse_on_approval` actually records is still the
+// same fixed $2,500 both `55_...` and this file's own header already
+// disclose (Layer 1's `on_entry` has no way to carry the PO's real
+// amount through) -- escalating *who* may approve a large PO is real;
+// making the disbursement itself scale with it is the same
+// already-disclosed gap, not newly hidden here.
+fn approve_purchase_order_standard() -> Text
     requires(role: "admin")
     nfr(latency_ms: 2000, concurrency_max: 10)
 {
     return run_approval()
+}
+
+fn approve_purchase_order_escalated() -> Text
+    requires(role: "finance_director")
+    nfr(latency_ms: 2000, concurrency_max: 5)
+{
+    return run_approval()
+}
+
+fn reject_purchase_order() -> Text
+    requires(role: "admin")
+    nfr(latency_ms: 300, concurrency_max: 50)
+{
+    return run_rejection()
 }
 
 // ---- gated-route helpers: real bearer-token check, then real
@@ -504,12 +630,46 @@ fn delete_as_admin(req: Text, id: i64) -> bool {
     }
 }
 
+// Real dual control: a real `acquire`d call to a *different*
+// `requires`-gated function depending on the PO's own real amount, not
+// a same-function `if` deciding after the fact -- the "gate" a
+// `finance_director`-only PO goes through is structurally a different
+// callable value than the `admin`-only one, exactly the same
+// distinction `check_role`/`acquire` already enforce between any other
+// two roles in this codebase.
+fn route_approval(identity: VerifiedIdentity, amount_cents: i64) -> Text {
+    if amount_cents >= escalation_threshold_cents() {
+        return match check_role(identity, "finance_director") {
+            Err(e) => Text("this purchase order requires finance_director approval"),
+            Ok(proof) => match acquire approve_purchase_order_escalated(proof) {
+                Err(msg) => Text(msg),
+                Ok(f) => f(),
+            },
+        }
+    }
+    return match check_role(identity, "admin") {
+        Err(e) => Text(e),
+        Ok(proof) => match acquire approve_purchase_order_standard(proof) {
+            Err(msg) => Text(msg),
+            Ok(f) => f(),
+        },
+    }
+}
+
 fn approve_as_admin(req: Text) -> Text {
+    let amount_cents: i64 = lookup_amount_cents(body_id(req))
+    return match authorized_identity(req) {
+        Err(e) => Text(e.value),
+        Ok(identity) => route_approval(identity, amount_cents),
+    }
+}
+
+fn reject_as_admin(req: Text) -> Text {
     return match authorized_identity(req) {
         Err(e) => Text(e.value),
         Ok(identity) => match check_role(identity, "admin") {
             Err(e) => Text(e),
-            Ok(proof) => match acquire approve_purchase_order(proof) {
+            Ok(proof) => match acquire reject_purchase_order(proof) {
                 Err(msg) => Text(msg),
                 Ok(f) => f(),
             },
@@ -711,6 +871,18 @@ fn approve_response_body(req: Text) -> json {
     return value_json(approved)
 }
 
+fn reject_response_body(req: Text) -> json {
+    let rejected: Text = reject_as_admin(req)
+    return value_json(rejected)
+}
+
+fn overdue_response_body() -> json {
+    return match list_disbursement_overdue() {
+        Err(e) => empty_json_array(),
+        Ok(j) => j,
+    }
+}
+
 // ---- HTML/CSS/JS page, one real static response body --------------------
 // No `\"` inside -- every HTML attribute and every JS string below uses
 // single quotes on purpose (`56_...`'s own note on this language's
@@ -753,10 +925,12 @@ fn index_html() -> Text {
   <p>Sign in as:</p>
   <button class='role-admin' id='admin-btn'>Admin (CFO)</button>
   <button class='role-finance' id='finance-btn'>Finance Clerk</button>
+  <button class='role-neutral' id='director-btn'>Finance Director</button>
 </div>
 
 <div class='card' id='app-card' style='display:none'>
   <p>Signed in as <b id='who'></b> with a real signed JWT &mdash; a real <code>landing</code> rule (RFC 0010) would send this role to <span class='badge' id='landing-target'></span></p>
+  <span class='badge' id='overdue-badge' style='background:#fef2f2;color:#991b1b'></span>
   <button class='role-signout' id='signout-btn'>Sign out</button>
 </div>
 
@@ -840,9 +1014,10 @@ function signIn(role) {
     document.getElementById('who').textContent = role;
     document.getElementById('landing-target').textContent = landingTarget(role);
     document.getElementById('create-panel').style.display = (role === 'admin') ? 'block' : 'none';
-    document.getElementById('actions-head').style.display = (role === 'admin') ? 'table-cell' : 'none';
+    document.getElementById('actions-head').style.display = (role === 'admin' || role === 'finance_director') ? 'table-cell' : 'none';
     document.getElementById('create-status').textContent = '';
     loadPOs();
+    loadOverdueCount();
   }).catch(function () { showError('Sign-in request failed.'); });
 }
 
@@ -880,20 +1055,25 @@ function loadPOs() {
       td2.textContent = row.amount_cents;
       tr.appendChild(td1);
       tr.appendChild(td2);
-      if (currentRole === 'admin') {
+      if (currentRole === 'admin' || currentRole === 'finance_director') {
         var tdActions = document.createElement('td');
         tdActions.className = 'row-actions';
         var approveBtn = document.createElement('button');
         approveBtn.className = 'role-admin';
-        approveBtn.textContent = 'Approve';
-        approveBtn.addEventListener('click', function () { approvePO(); });
+        approveBtn.textContent = row.amount_cents >= 10000000 ? 'Approve (needs director)' : 'Approve';
+        var rejectBtn = document.createElement('button');
+        rejectBtn.className = 'role-danger';
+        rejectBtn.textContent = 'Reject';
         var deleteBtn = document.createElement('button');
-        deleteBtn.className = 'role-danger';
+        deleteBtn.className = 'role-signout';
         deleteBtn.textContent = 'Delete';
         (function (id) {
+          approveBtn.addEventListener('click', function () { approvePO(id); });
+          rejectBtn.addEventListener('click', function () { rejectPO(id); });
           deleteBtn.addEventListener('click', function () { deletePO(id); });
         })(row.id);
         tdActions.appendChild(approveBtn);
+        tdActions.appendChild(rejectBtn);
         tdActions.appendChild(deleteBtn);
         tr.appendChild(tdActions);
       }
@@ -921,16 +1101,38 @@ function createPO() {
   }).catch(function () { showError('Create request failed.'); });
 }
 
-function approvePO() {
+function approvePO(id) {
   clearError();
   fetch('/api/purchase_orders/approve', {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({})
+    body: JSON.stringify({ id: id })
   }).then(function (r) { return r.json(); }).then(function (res) {
     if (res.err) { showError('Approve failed: ' + res.err); return; }
     document.getElementById('create-status').textContent = 'Disbursement: ' + res.value;
+    loadOverdueCount();
   }).catch(function () { showError('Approve request failed.'); });
+}
+
+function rejectPO(id) {
+  clearError();
+  fetch('/api/purchase_orders/reject', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ id: id })
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    if (res.err) { showError('Reject failed: ' + res.err); return; }
+    document.getElementById('create-status').textContent = 'Disbursement: ' + res.value;
+    loadOverdueCount();
+  }).catch(function () { showError('Reject request failed.'); });
+}
+
+function loadOverdueCount() {
+  fetch('/api/disbursements/overdue').then(function (r) { return r.json(); }).then(function (rows) {
+    var el = document.getElementById('overdue-badge');
+    var n = (rows && rows.length) || 0;
+    el.textContent = n > 0 ? (n + ' approval(s) overdue') : '';
+  }).catch(function () {});
 }
 
 function deletePO(id) {
@@ -947,6 +1149,7 @@ function deletePO(id) {
 
 document.getElementById('admin-btn').addEventListener('click', function () { signIn('admin'); });
 document.getElementById('finance-btn').addEventListener('click', function () { signIn('finance'); });
+document.getElementById('director-btn').addEventListener('click', function () { signIn('finance_director'); });
 document.getElementById('signout-btn').addEventListener('click', signOut);
 document.getElementById('create-btn').addEventListener('click', createPO);
 document.getElementById('search-btn').addEventListener('click', function () { currentOffset = 0; loadPOs(); });
@@ -999,6 +1202,12 @@ fn main() {
         } else if method == "POST" && path == "/api/purchase_orders/approve" {
             send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
             send(conn, approve_response_body(req))
+        } else if method == "POST" && path == "/api/purchase_orders/reject" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+            send(conn, reject_response_body(req))
+        } else if method == "GET" && path == "/api/disbursements/overdue" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, overdue_response_body())
         } else {
             send(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
         }
