@@ -3,6 +3,14 @@ name = "nirdosha"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+# `build.rs`'s own `cargo metadata` parsing (locating where a dependency
+# like `windows_x86_64_msvc` ships its bundled `.lib` file -- see its
+# `extra_native_libs.rs` doc comment) -- same crate, same version already
+# pinned below for the compiler itself, so this adds no new dependency to
+# the tree, just a second (build-time) compilation of one already there.
+serde_json = "1"
+
 [dependencies]
 z3 = "0.20.2"
 serde = { version = "1", features = ["derive"] }
