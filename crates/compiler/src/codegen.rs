@@ -9925,10 +9925,22 @@ fn build_impl(
     // entirely and does reach the linker's search path — so each
     // `foo.lib` token here is stripped to `foo` and passed as `-lfoo`
     // instead. rustc's list also has at least one token that isn't
-    // `.lib`-suffixed at all (`/defaultlib:msvcrt`, already a raw linker
-    // flag) — that one is forwarded verbatim via `-Xlinker`, which routes
-    // it straight to the linker unexamined, the same reason `-l` works
-    // for the others.
+    // `.lib`-suffixed at all (`/defaultlib:msvcrt`) -- originally
+    // forwarded verbatim via `-Xlinker` on the theory that any raw linker
+    // flag rustc names must be needed, the same reason `-l` works for the
+    // others. **That theory turned out to be wrong for this specific
+    // flag**, found by a real third Windows CI failure once the first two
+    // were fixed: forcing the legacy, pre-UCRT `msvcrt` C runtime
+    // conflicts with `bundled` SQLite's real compiled C code (`sqlite3.o`,
+    // built expecting the modern UCRT/`vcruntime` split clang already
+    // links by default) -- `LNK4098`/multiple `LNK4217` "conflicts with
+    // use of other libs" warnings, then real `LNK2019` unresolved
+    // externals (`__imp_realloc`, `__imp_strcspn`, `__imp__beginthreadex`,
+    // ...) that clang's own default CRT choice would have resolved fine
+    // without this override. Every `/defaultlib:` token is dropped for
+    // exactly this reason -- clang already picks the correct default CRT
+    // for its own target, and forcing a different one is what breaks
+    // linking real C code, not something that could ever fix it.
     // A handful of tokens above aren't genuine system-provided libs at
     // all — a crate-private import lib like `windows.0.52.0.lib` (the
     // `windows`/`windows-sys` family, at least) ships inside that crate's
@@ -9958,7 +9970,9 @@ fn build_impl(
                 }
             }
             None => {
-                clang_cmd.arg("-Xlinker").arg(token);
+                if !token.to_ascii_lowercase().starts_with("/defaultlib:") {
+                    clang_cmd.arg("-Xlinker").arg(token);
+                }
             }
         }
     }
