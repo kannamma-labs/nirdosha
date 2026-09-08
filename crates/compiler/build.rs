@@ -90,16 +90,39 @@ fn main() {
     // actually lives -- see the `find_link_search_dirs` doc comment below
     // for why `--print=native-static-libs` alone (just the bare names)
     // isn't enough.
-    let output = Command::new(&cargo)
-        .arg("rustc")
+    let mut cmd = Command::new(&cargo);
+    cmd.arg("rustc")
         .arg("-vv")
         .arg("--release")
         .arg("--manifest-path")
         .arg(&kernels_manifest)
         .arg("--target-dir")
-        .arg(&kernels_target_dir)
-        .arg("--")
-        .arg("--print=native-static-libs")
+        .arg(&kernels_target_dir);
+    // Windows only, root-causing a real multi-commit CI failure chain:
+    // `bundled` SQLite's C source (compiled by the `cc` crate's own
+    // `cl.exe` invocation) defaults to the *dynamic* CRT (`/MD`), which
+    // decorates its libc calls as DLL imports (`__imp_realloc`,
+    // `__imp__beginthreadex`, ...) -- while `codegen.rs`'s own generated
+    // LLVM IR `declare`s libc functions (`printf`, `malloc`, ...) as
+    // plain, non-`dllimport` externals, which only a *static*-CRT link
+    // (`libcmt.lib`) satisfies directly. Two halves of the same binary
+    // structurally expecting different CRT linkage models is exactly
+    // what no `/NODEFAULTLIB:<X>` combination could ever fix -- found
+    // the hard way, across several real Windows CI failures, each fixing
+    // one symbol set by excluding a library the *other* half needed.
+    // `+crt-static` makes `rustc` link its own generated code against
+    // `libcmt.lib` too, and the `cc` crate independently reads this same
+    // target feature (`CARGO_CFG_TARGET_FEATURE`) to pass `/MT` instead
+    // of `/MD` to `cl.exe` for `bundled` SQLite's build -- one consistent
+    // static-CRT model across the whole embedded archive, matching what
+    // `codegen.rs`'s plain `declare`s already assumed, rather than one
+    // more hand-picked `-Xlinker` flag reacting to whichever symbol
+    // happened to be missing this time.
+    cmd.arg("--").arg("--print=native-static-libs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        cmd.arg("-C").arg("target-feature=+crt-static");
+    }
+    let output = cmd
         .output()
         .expect(
             "failed to invoke `cargo rustc` to build ../runtime-kernels -- \
