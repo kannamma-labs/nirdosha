@@ -3147,21 +3147,39 @@ impl<'a> Checker<'a> {
                     }
                     // `send`/`recv` double as a `tcp` connection's I/O —
                     // same keywords, reused rather than duplicated, the
-                    // same way `stop` is. A TCP payload is always `str`
-                    // (see `Ty::Tcp`'s doc comment): there's no per-
-                    // connection payload type to check against the way a
-                    // `chan T`'s `T` gives one.
+                    // same way `stop` is. A TCP payload is `str` *or*
+                    // `json` (2026-09, widened from `str`-only while
+                    // building `examples/features/55_nirdosha_ops_console.nir`'s
+                    // real primitives-based server: `json` compiles to
+                    // the exact same `{ptr, i64}` representation `str`
+                    // does — `codegen.rs::str_parts`'s own `expr()` +
+                    // `extractvalue` pair already works unchanged for
+                    // either, confirmed by actually sending a real
+                    // `db_query` result over a socket, not assumed — so
+                    // there's no representational reason to force a
+                    // `json` response body through a hand-built `str`
+                    // first when this language has no string-
+                    // concatenation/array-building primitives to build
+                    // one with anyway). `found != Ty::Error` guards the
+                    // usual "already reported, don't pile on" case; any
+                    // other mismatch is still a real error.
                     Ty::Tcp => {
-                        self.check(value, &Ty::Str, expected_ret, scopes);
+                        let found = self.infer(value, expected_ret, scopes);
+                        if found != Ty::Str && found != Ty::Json && found != Ty::Error {
+                            self.error(TypeErrorKind::TypeMismatch { expected: Ty::Str, found }, value.span());
+                        }
                         Ty::Unit
                     }
                     // `send`/`recv` triple as a `file`'s own I/O too, same
                     // reuse `tcp` already gets rather than a dedicated
-                    // `read`/`write` pair — a `file` payload is `str`
-                    // only, for the same reason a `tcp` one is (see
-                    // `Ty::File`'s doc comment).
+                    // `read`/`write` pair — a `file` payload accepts the
+                    // same `str`/`json` pair as `tcp`, for the same
+                    // reason (see `Ty::File`'s doc comment).
                     Ty::File => {
-                        self.check(value, &Ty::Str, expected_ret, scopes);
+                        let found = self.infer(value, expected_ret, scopes);
+                        if found != Ty::Str && found != Ty::Json && found != Ty::Error {
+                            self.error(TypeErrorKind::TypeMismatch { expected: Ty::Str, found }, value.span());
+                        }
                         Ty::Unit
                     }
                     other => {

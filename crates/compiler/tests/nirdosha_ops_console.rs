@@ -27,6 +27,7 @@ use nirdosha::token::Lexer;
 use nirdosha::typeck::typecheck;
 
 const SRC: &str = include_str!("../../../examples/features/55_nirdosha_ops_console.nir");
+const SERVER_SRC: &str = include_str!("../../../examples/features/56_nirdosha_ops_console_server.nir");
 
 fn parse_checked(src: &str) -> Program {
     let toks = Lexer::new(src).tokenize().expect("lex should succeed");
@@ -267,4 +268,79 @@ fn nirdosha_ops_console_emit_ui_produces_a_real_per_role_landing_table() {
     assert_eq!(rules[1]["target"], "finance_queue");
     assert_eq!(rules[2]["default"], true);
     assert_eq!(rules[2]["target"], "home_screen");
+}
+
+/// `examples/features/56_nirdosha_ops_console_server.nir` — the real,
+/// browser-servable companion to `SRC` above
+/// (`51_compiled_serve.nir`'s own primitives-based `tcp_listener`/
+/// `accept` style, extended just far enough to serve a real page). Real
+/// client sockets against a real long-running compiled server process,
+/// same shape `codegen.rs`'s own
+/// `compiled_serve_routes_by_path_to_two_compiled_functions` already
+/// established for testing this style — `#[ignore]`-gated here (not
+/// there) because this one needs a real local Postgres, matching every
+/// other Postgres-touching test in this file. The server's own fixed
+/// `127.0.0.1:8090` (baked into the `.nir` source, same disclosed
+/// non-parametrizable-via-env-var limitation the module doc above
+/// already states for the port `18099`/Postgres address) means this
+/// test can't run concurrently with a second copy of itself, but that's
+/// true of manually running the demo at the same time too — same
+/// tradeoff, not a new one.
+#[test]
+#[ignore]
+fn nirdosha_ops_console_server_answers_real_http_requests_with_real_postgres_data() {
+    let program = parse_checked(SERVER_SRC);
+    let report = analyze(&program);
+    let bin = unique_temp_path("server_bin");
+    codegen::build(&program, &report, &bin, codegen::OptLevel::O2).expect("codegen::build should succeed for this program");
+    let mut child = Command::new(&bin).spawn().expect("compiled server should start");
+
+    let request = |method: &str, path: &str, headers: &str, body: &str| -> String {
+        let mut attempt = 0;
+        let mut conn = loop {
+            match TcpStream::connect(("127.0.0.1", 8090)) {
+                Ok(s) => break s,
+                Err(_) if attempt < 100 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("could not connect to the compiled server: {e}"),
+            }
+        };
+        let req = format!("{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len());
+        conn.write_all(req.as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        conn.read_to_end(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf).into_owned()
+    };
+
+    let index = request("GET", "/", "", "");
+    let list = request("GET", "/api/list", "", "");
+    let forbidden = request("POST", "/api/create", "X-Demo-Role: finance\r\n", "{\"vendor\":\"Denied Co\",\"amount_cents\":1}");
+    let created = request(
+        "POST",
+        "/api/create",
+        "X-Demo-Role: admin\r\n",
+        "{\"vendor\":\"Browser Test Vendor\",\"amount_cents\":31337}",
+    );
+    let list_after = request("GET", "/api/list", "", "");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&bin);
+
+    assert!(index.starts_with("HTTP/1.1 200 OK"), "index response: {index}");
+    assert!(index.contains("Nirdosha Ops Console"), "index response: {index}");
+    assert!(index.contains("id='admin-btn'"), "index response should contain the real page markup: {index}");
+
+    assert!(list.starts_with("HTTP/1.1 200 OK"), "list response: {list}");
+    assert!(list.contains("application/json"), "list response: {list}");
+
+    assert!(forbidden.starts_with("HTTP/1.1 403 Forbidden"), "forbidden response: {forbidden}");
+    assert!(forbidden.contains("forbidden"), "forbidden response: {forbidden}");
+
+    assert!(created.starts_with("HTTP/1.1 200 OK"), "created response: {created}");
+    assert!(created.contains("Browser Test Vendor"), "created response: {created}");
+
+    assert!(list_after.contains("Browser Test Vendor"), "the newly created row should show up in a real subsequent list: {list_after}");
 }
