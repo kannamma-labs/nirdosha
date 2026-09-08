@@ -2004,6 +2004,21 @@ impl Codegen<'_> {
     /// i64 <word_off>` gives an always-8-byte-aligned address for any
     /// field store/load (every type this language has needs at most
     /// 8-byte alignment).
+    ///
+    /// A real, pre-existing gap found this session (2026-09), disclosed
+    /// rather than fixed here: `match <result_expr> { Ok(j) => Ok(j),
+    /// Err(e) => Err(e) }` -- re-wrapping a `Result` value inside a
+    /// `match` where an arm's own tail expression directly constructs
+    /// `Ok(...)`/`Err(...)` -- hits this function's own `unreachable!`
+    /// with `decl_name="Ok"` (or `"Err"`): whatever infers that arm's own
+    /// type resolves `Ok`/`Err` as if they named a plain, zero-type-
+    /// argument struct/enum, instead of the prelude `Result` enum's own
+    /// generic variant constructors. Confirmed independent of which
+    /// concrete types are involved. Workaround used throughout
+    /// `examples/features/55_nirdosha_ops_console.nir`: route each arm
+    /// through a small named helper (`fn wrap_ok(v: T) -> Result(T, E)
+    /// { return Ok(v) }`) instead of writing the bare constructor as the
+    /// arm's own tail expression.
     fn declare_named_type(&mut self, ty: &Ty) -> Result<(), CodegenError> {
         let Ty::Named(decl_name, args) = ty else {
             return Ok(());
@@ -2049,7 +2064,7 @@ impl Codegen<'_> {
             writeln!(self.named_type_decls, "%{mangled} = type {{ i64, [{n} x i64] }}").unwrap();
             Ok(())
         } else {
-            unreachable!("typeck.rs already proved every Ty::Named resolves to a struct or enum")
+            unreachable!("typeck.rs already proved every Ty::Named resolves to a struct or enum: decl_name={decl_name:?} args={args:?} mangled={mangled:?}")
         }
     }
 

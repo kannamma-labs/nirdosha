@@ -2213,6 +2213,44 @@ Only `sandbox` (B6) remains fully `[OPEN]`.
     (`send_email`-fallback) path. See `docs/WORKFLOW.md`'s own
     "Status, 2026-09" section for the full detail.
 
+### The "Nirdosha Ops Console" — Track B's own cross-cutting integration proof
+
+2026-09: `examples/features/55_nirdosha_ops_console.nir` — one real,
+compiled program combining B1/B2/B4/B5/B9/B10 above plus `rfcs/0010`'s
+`landing`/`serve` exposure model into a single coherent scenario (real
+Postgres-backed purchase-order CRUD, real RBAC via `acquire`/
+`check_role`, a real HTTP call to a webhook, and a workflow-gated,
+`transact`-backed disbursement), verified by compiling and running the
+actual binary against a real local Postgres + a real `TcpListener` mock
+webhook — `crates/compiler/tests/nirdosha_ops_console.rs`, three tests:
+the full scenario end to end (`#[ignore]`-gated, needs a real Postgres),
+`nirdosha emit-ui`'s own `LANDING` table proven to contain the correct
+per-role screen mapping (not `#[ignore]`-gated — `emit-ui` never runs
+the program), and a genuine crash-and-replay test — two *separately
+compiled binaries* (one whose `commit` targets an unreachable Postgres
+port, one real) sharing one durability log, proving `docs/adr/0009`'s
+replay mechanism recovers a disbursement across a real binary-version
+change, not just a re-run of the identical process.
+
+**Honest scope, stated in the file's own header comment too**: verified
+by running the compiled binary directly, not by serving it and clicking
+through a browser — compiled `serve`'s dispatch-table framework
+(`crates/compiled-serve`, B8 above) is real and tested on its own but
+not yet wired to `codegen.rs`, so nothing actually answers an HTTP
+request from this program's own binary yet. "Each role lands on its own
+screen" is demonstrated as real, checked *data* (the `LANDING` table
+`ui_gen.rs` emits), not a live click-through.
+
+**One real, previously-undiscovered codegen bug found and disclosed
+while building this** (`codegen.rs::declare_named_type`'s own doc
+comment has the full detail, not fixed here): `match <result_expr> {
+Ok(j) => Ok(j), Err(e) => Err(e) }` — re-wrapping a `Result` where an
+arm's own tail expression directly constructs `Ok(...)`/`Err(...)` —
+hits a real `unreachable!` in codegen, independent of which concrete
+types are involved. Worked around throughout this file by routing each
+arm through a small named helper function instead of writing the bare
+constructor as the arm's own tail expression.
+
 ---
 
 ## Track C — Agent-Facing API (`docs/nirdosha-agent-api.md`)
