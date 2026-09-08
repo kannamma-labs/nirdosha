@@ -1,40 +1,42 @@
 # Nirdosha — निर्दोष
 
 <p align="center">
-<b>A systems language your AI agent can write — that humans can trust.</b><br/>
-No GC. No data races. No deadlocks. No buffer overflow. <i>Proven at build time, not promised.</i>
+  <b>A systems language designed so your AI agent can't write the bugs AI agents always write.</b><br/>
+  No GC. No data races. No deadlocks. No buffer overflow. <i>Proven at build time — not promised, not tested.</i>
 </p>
 
 <p align="center">
-<a href="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml"><img src="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml/badge.svg" alt="build"/></a>
-<a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"/></a>
-<a href="https://github.com/kannamma-labs/nirdosha/wiki"><img src="https://img.shields.io/badge/docs-wiki-blue" alt="Wiki"/></a>
-<a href="./docs/PUBLIC_ROADMAP.md"><img src="https://img.shields.io/badge/ROADMAP-view-purple" alt="Roadmap"/></a>
-<a href="./MAINTAINERS.md"><img src="https://img.shields.io/badge/maintainers-5-green" alt="Maintainers"/></a>
-<a href="https://github.com/sponsors/arunsoman"><img src="https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa" alt="Sponsor"/></a>
+  <a href="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml"><img src="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml/badge.svg" alt="build"/></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"/></a>
+  <a href="https://github.com/kannamma-labs/nirdosha/wiki"><img src="https://img.shields.io/badge/docs-wiki-blue" alt="Wiki"/></a>
+  <a href="./docs/PUBLIC_ROADMAP.md"><img src="https://img.shields.io/badge/ROADMAP-view-purple" alt="Roadmap"/></a>
+  <a href="./MAINTAINERS.md"><img src="https://img.shields.io/badge/maintainers-5-green" alt="Maintainers"/></a>
+  <a href="https://github.com/sponsors/arunsoman"><img src="https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa" alt="Sponsor"/></a>
 </p>
-
----
-
-**Existing languages assume a human author.** Nirdosha assumes the author might be an LLM — and constrains the language so entire classes of bugs are *unexpressible*, not just discouraged. The same constraints give humans unusually strong static guarantees for high-assurance backend code.
-
-> 💡 **Why this works at all: [A Language Is Only as Good as Its Ecosystem](https://github.com/kannamma-labs/nirdosha/wiki/A-Language-Is-Only-as-Good-as-Its-Ecosystem)** — Nirdosha's capability ceiling is Rust's, because every capability underneath is an ordinary Rust crate.
-
-## See it
 
 ![A themed dashboard with live SQLite data, a sortable/searchable table, and a role-gated approval action — the same screen under a lower-privileged identity, with a field dropped and an action disabled](./demo.gif)
 
 ## Try it in 30 seconds
 
-1. **🍴 [Fork this repo](https://github.com/kannamma-labs/nirdosha/fork)** (top-right corner — takes 5 seconds, no local setup needed)
-2. **[Open in GitHub Codespaces](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)** — the fork builds in your browser in about a minute
-3. Run it:
+1. **🍴 [Fork this repo](https://github.com/kannamma-labs/nirdosha/fork)** — 5 seconds, no local setup
+2. **[Open your fork in GitHub Codespaces](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)** — it builds in your browser in about a minute
+3. Run your first program:
 
 ```sh
 cargo run -p nirdosha --release -- build examples/syntax/hello_nir.nir -o hello && ./hello
 ```
 
-Prefer installing a binary? Linux, Windows, and Apple Silicon macOS builds ship on every [release](https://github.com/kannamma-labs/nirdosha/releases). No compiler needed.
+Prefer a binary instead? Linux, Windows, and Apple Silicon macOS builds ship on every [release](https://github.com/kannamma-labs/nirdosha/releases) — no compiler needed.
+
+## The part that sounds fake but isn't
+
+Paste [`agent-skills/nirdosha/paste-anywhere-prompt.md`](./agent-skills/nirdosha/paste-anywhere-prompt.md) into any LLM chat — ChatGPT, Claude, Gemini — describe an app in plain English, and it writes working `.nir` code.
+
+That exact prompt has produced a working **e-commerce store**, a **food-delivery platform**, a **telecom revenue-assurance system**, and an **online trading platform** — each hundreds of lines, each from an LLM with zero prior Nirdosha exposure. Mechanism and evidence: [LLM Integration](https://github.com/kannamma-labs/nirdosha/wiki/LLM-Integration).
+
+## Why you won't be waiting on us
+
+> 💡 **[A Language Is Only as Good as Its Ecosystem](https://github.com/kannamma-labs/nirdosha/wiki/A-Language-Is-Only-as-Good-as-Its-Ecosystem)** — every capability a compiled `.nir` binary has is an ordinary Rust crate underneath, so Nirdosha's capability ceiling is Rust's. Databases, TLS, JWT, Redis — reachable by design, not by waiting on maintainers. *"Good artists copy, great artists steal."*
 
 ---
 
