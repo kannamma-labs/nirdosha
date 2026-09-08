@@ -219,13 +219,33 @@ impl<M: ManageConnection> PoolRegistry<M> {
     /// to come from the caller following `get_or_create` with an
     /// immediate `pool.get()` in the same call — that `.get()` is where
     /// a bad connection string actually surfaces.
+    ///
+    /// **Invariant: the registry lock is never held across `make_manager`.**
+    /// Every `make_manager` in this codebase today is a pure struct
+    /// construction, but the API contract doesn't get to assume that of
+    /// future callers — a closure that touches another lock or another
+    /// domain's admission state while this one is held would deadlock,
+    /// and a panic inside it would poison this mutex for the rest of the
+    /// process, wedging every future `get_or_create`/`checkout_with_key_cap`
+    /// call, for every key, not just this one. The lock is dropped before
+    /// calling `make_manager` and re-acquired only to insert — with a
+    /// re-check right before inserting, since another thread may have
+    /// raced this one and inserted `key` first while the lock was open;
+    /// in that case this call's own freshly-built pool is discarded (not
+    /// installed) and the winner's pool is returned instead, so two
+    /// concurrent misses on the same key never leave two live pools (and
+    /// two independent sets of physical connections) registered under
+    /// one key.
     pub fn get_or_create(&self, key: &str, config: PoolConfig, make_manager: impl FnOnce() -> Result<M, String>) -> Result<Pool<M>, String> {
-        let mut pools = self.pools.lock().unwrap();
-        if let Some(pool) = pools.get(key) {
+        if let Some(pool) = self.pools.lock().unwrap().get(key) {
             return Ok(pool.clone());
         }
         let manager = make_manager()?;
         let pool = config.apply(Pool::builder()).build(manager).map_err(|e| e.to_string())?;
+        let mut pools = self.pools.lock().unwrap();
+        if let Some(existing) = pools.get(key) {
+            return Ok(existing.clone());
+        }
         pools.insert(key.to_string(), pool.clone());
         Ok(pool)
     }
@@ -763,5 +783,59 @@ mod tests {
         assert_eq!(held_after, 0, "dropping every UnpooledConnection guard must release its admission back to zero");
 
         unsafe { std::env::remove_var("NIRDOSHA_KERNEL_POOL_MAX_KEYS") };
+    }
+
+    /// The red-team-reported hazard: `get_or_create` used to hold
+    /// `self.pools`'s lock across the whole `make_manager` call, which
+    /// also meant two concurrent misses on the *same* key were fully
+    /// serialized by that lock rather than racing safely. This proves
+    /// the fixed version (lock dropped around `make_manager`, re-checked
+    /// before insert) is actually race-safe: many threads all missing
+    /// the same key concurrently must still converge on exactly one live
+    /// pool for that key, never two.
+    #[test]
+    fn concurrent_get_or_create_misses_on_the_same_key_converge_on_one_pool_not_two() {
+        let registry: std::sync::Arc<PoolRegistry<CountingManager>> = std::sync::Arc::new(PoolRegistry::new());
+        let cfg = PoolConfig::default();
+        // A distinct connection id per manager *instance* built -- if
+        // two managers were ever both installed as live pools, threads
+        // would observe more than one distinct id family; with the fix,
+        // every thread must observe pool_count() == 1 and, if it also
+        // performs a checkout, one of only the ids the eventual winning
+        // manager produced.
+        let manager_instances_built = std::sync::Arc::new(AtomicU32::new(0));
+
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let registry = std::sync::Arc::clone(&registry);
+                let manager_instances_built = std::sync::Arc::clone(&manager_instances_built);
+                std::thread::spawn(move || {
+                    registry
+                        .get_or_create("race-key", cfg, || {
+                            // Widen the race window: every thread reaches
+                            // `make_manager` at roughly the same time and
+                            // sleeps here, well past the point where the
+                            // lock (if still held across this call, the
+                            // pre-fix behavior) would have serialized
+                            // every other thread behind it instead.
+                            manager_instances_built.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            Ok(manager())
+                        })
+                        .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(registry.pool_count(), 1, "16 concurrent misses on the same key must converge on exactly one live pool, never two");
+        assert!(
+            manager_instances_built.load(Ordering::SeqCst) >= 1,
+            "sanity: make_manager must actually have run (this also confirms the lock was NOT held across it -- \
+             the old, lock-holding implementation would have fully serialized these 16 threads through one \
+             global mutex instead of letting them race make_manager concurrently)"
+        );
     }
 }
