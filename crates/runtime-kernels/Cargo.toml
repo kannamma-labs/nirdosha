@@ -1,15 +1,34 @@
-# Deliberately its own workspace root (this empty `[workspace]` table),
-# NOT a member of the repo's root workspace — see
-# `crates/compiler/build.rs`'s own doc comment for why: a `cargo
-# build`/`cargo rustc` invoked *from inside* `crates/compiler/build.rs`
-# (itself running under an outer `cargo build` of the very same
-# workspace) would contend for that workspace's own `target/` directory
-# lock — the outer build already holds it and is waiting on this build
-# script to finish, so a nested `cargo` call sharing that lock would
-# deadlock, not merely run slowly. An entirely separate workspace, built
-# into its own private `--target-dir` under `OUT_DIR`, has no lock in
-# common with the outer build at all.
+# Deliberately its own workspace root (this `[workspace]` table), NOT a
+# member of the repo's root workspace — see `crates/compiler/build.rs`'s
+# own doc comment for why: a `cargo build`/`cargo rustc` invoked *from
+# inside* `crates/compiler/build.rs` (itself running under an outer
+# `cargo build` of the very same workspace) would contend for that
+# workspace's own `target/` directory lock — the outer build already
+# holds it and is waiting on this build script to finish, so a nested
+# `cargo` call sharing that lock would deadlock, not merely run slowly.
+# An entirely separate workspace, built into its own private
+# `--target-dir` under `OUT_DIR`, has no lock in common with the outer
+# build at all.
+#
+# `../compiled-serve` (ROADMAP B8, `docs/adr/0010-runtime-kernels-rlib-for-compiled-serve.md`)
+# joins this same separate workspace, not the root one, for the
+# identical reason: `compiled-serve` will eventually need the same
+# "compiler's `build.rs` shells out to `cargo rustc` on it" embedding
+# treatment this crate already gets (to conditionally link it into a
+# `nirdosha build --serve`d binary) — putting it in the root workspace
+# would just move today's very problem there. **The naive fix tried
+# first, and why it failed, not silently abandoned**: adding
+# `crates/compiled-serve` as a root-workspace member with a plain
+# `path = "../runtime-kernels"` dependency produced a real `cargo`
+# error, `multiple workspace roots found in the same workspace` — Cargo
+# does not allow a member of one workspace to path-depend on a package
+# that is itself a *different* workspace's root. Grouping both crates
+# into this one separate workspace instead (`members` below) is what
+# actually resolves it: `compiled-serve` becomes an ordinary sibling
+# member here, with a normal intra-workspace path dependency on this
+# crate, and the root workspace still has no idea either of them exists.
 [workspace]
+members = [".", "../compiled-serve"]
 
 [package]
 name = "nirdosha-runtime-kernels"
@@ -17,11 +36,19 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-# Also linked as a plain Rust `staticlib`, same as before this crate
-# existed — `crate-type` is a `[lib]` setting either way; nothing about
-# switching from a bare `rustc` invocation to `cargo` changes what kind
-# of artifact comes out.
-crate-type = ["staticlib"]
+# `staticlib` (unchanged, still what `crates/compiler/build.rs` embeds
+# via `include_bytes!` into every compiled `.nir` binary) **plus**
+# `rlib`, added for `crates/compiled-serve` (ROADMAP B8) — the first
+# real consumer of this crate as an ordinary Rust dependency
+# (`nirdosha-runtime-kernels = { path = ... }`) rather than only via the
+# FFI/staticlib-embedding path. A `staticlib`-only crate produces a
+# plain `.a` with C-ABI symbols and no Rust crate metadata at all —
+# nothing another Rust crate's `cargo build` could actually link
+# against as a dependency; `rlib` is the artifact kind that makes that
+# possible. Purely additive: `cargo rustc ... --crate-type staticlib`
+# (`build.rs`'s own invocation) is unaffected by `rlib` also being
+# produced alongside it.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 # The actual point of this whole crate split (rfcs/0005-plugin-boundary-
@@ -112,6 +139,9 @@ redis = "0.27"
 # `bundled` SQLite already requires the same); nothing extra at runtime.
 native-tls = "0.2"
 openssl = { version = "0.10", features = ["vendored"] }
+r2d2_postgres = "0.18.2"
+postgres = "0.19.14"
+postgres-native-tls = "0.5.3"
 
 [profile.release]
 # `unwind` (the default -- kept explicit here as a record of a real

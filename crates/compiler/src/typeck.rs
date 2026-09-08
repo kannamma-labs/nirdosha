@@ -416,6 +416,36 @@ pub enum TypeErrorKind {
     /// user-defined function.
     UnknownDashboardFn { metric_kind: String, fn_name: String },
 
+    // ---- `landing { ... }` (`rfcs/0010-landing-and-serve-exposure.md`) --
+    /// A `landing` rule's `-> <target>` doesn't name a real `screen`.
+    UnknownLandingTarget { target: String },
+    /// A `landing` block with zero `default -> ...` rules — an
+    /// authenticated user matching no other rule would have nowhere to
+    /// land, a statically-catchable bug rather than a runtime surprise.
+    LandingMissingDefault,
+    /// More than one `default -> ...` rule in the same `landing` block.
+    LandingDuplicateDefault,
+    /// A rule (of any kind) written after the block's `default` rule —
+    /// `default` must be evaluated last (it always matches), so anything
+    /// after it can never run.
+    LandingRuleAfterDefault,
+    /// A `role(...)`/`claim(...)` rule identical to an earlier rule in
+    /// the same block — the earlier one always wins first-match-wins, so
+    /// the later one can never fire. Almost always a copy-paste mistake.
+    LandingUnreachableRule { earlier_span: Span },
+    /// `serve { expose <name> }` where `<name>` doesn't resolve to a
+    /// real declared `fn`.
+    UnknownExposedFn { fn_name: String },
+    /// A `create_`/`update_`/`delete_`-prefixed function that's part of
+    /// the compiled-`serve` exposure set (bound to a `screen`'s
+    /// `create`/`update`/`delete`, or explicitly `serve { expose ... }`d)
+    /// but has no `requires(...)` — and no `requires(public)` either,
+    /// which would make the "public" choice an explicit one rather than
+    /// an oversight. Deny-by-default: a mutating route reachable over
+    /// HTTP with no gate at all is a compile error, not a warning,
+    /// because unlike a read this can change data.
+    ExposedMutatingFnMissingRequires { fn_name: String },
+
     // ---- Track E1's `workspace`/`panel` DSL ---------------------------
     /// `workspace <Name>` with no `subject: <Struct>` entry at all.
     WorkspaceMissingSubject(String),
@@ -899,6 +929,35 @@ impl std::fmt::Display for TypeError {
                 f,
                 "{line}:{col}: `{metric_kind} ... -> {fn_name}` — no function named `{fn_name}` is declared"
             ),
+            TypeErrorKind::UnknownLandingTarget { target } => write!(
+                f,
+                "{line}:{col}: `landing` rule targets `{target}`, but no `screen {target} {{ ... }}` is declared"
+            ),
+            TypeErrorKind::LandingMissingDefault => write!(
+                f,
+                "{line}:{col}: `landing` block has no `default -> <screen>` rule — every landing block needs \
+                 exactly one, so an identity matching no other rule always has somewhere to go"
+            ),
+            TypeErrorKind::LandingDuplicateDefault => write!(f, "{line}:{col}: `landing` block has more than one `default -> ...` rule — only one is allowed"),
+            TypeErrorKind::LandingRuleAfterDefault => write!(
+                f,
+                "{line}:{col}: a `landing` rule appears after the block's `default -> ...` rule — `default` always \
+                 matches, so nothing after it can ever run; move it before `default`"
+            ),
+            TypeErrorKind::LandingUnreachableRule { earlier_span } => write!(
+                f,
+                "{line}:{col}: this `landing` rule is identical to the one at {}:{} — the earlier rule always \
+                 matches first, so this one can never fire",
+                earlier_span.line, earlier_span.col
+            ),
+            TypeErrorKind::UnknownExposedFn { fn_name } => write!(f, "{line}:{col}: `serve {{ expose {fn_name} }}` — no function named `{fn_name}` is declared"),
+            TypeErrorKind::ExposedMutatingFnMissingRequires { fn_name } => write!(
+                f,
+                "{line}:{col}: `{fn_name}` is exposed to compiled `serve` (bound to a `screen`'s \
+                 `create`/`update`/`delete`, or `serve {{ expose {fn_name} }}`) and its name looks mutating, \
+                 but it has no `requires(...)` — add `requires(role: ...)`/`requires(claim: ..., ...)` to gate \
+                 it, or `requires(public)` if an unauthenticated mutating route is genuinely intended"
+            ),
             TypeErrorKind::WorkspaceMissingSubject(name) => write!(
                 f,
                 "{line}:{col}: `workspace {name}` has no `subject: <Struct>` entry — every workspace must name the struct it's scoped per-instance-of"
@@ -1201,6 +1260,18 @@ pub enum TypeWarningKind {
     /// so this surfaces the *unintentional* case rather than forbidding
     /// the intentional one.
     WorkflowStateHasNoOwner { workflow: String, state: String },
+    /// `rfcs/0010-landing-and-serve-exposure.md`'s confidentiality axis:
+    /// deny-by-default (`TypeErrorKind::ExposedMutatingFnMissingRequires`)
+    /// only covers *mutating* exposed routes — an exposed `list_`/
+    /// `stat_`/`chart_` fn with no `requires(...)` is allowed (reads are
+    /// often legitimately public), but its full result set is then
+    /// public data by construction, which is worth surfacing rather than
+    /// assuming everyone read the RFC. One summarized warning per
+    /// program, not one per function — `gen-crud` generates exactly the
+    /// convention names this targets, so a naive one-per-function
+    /// warning would drown every generated screen in noise the moment it
+    /// compiles.
+    ExposedPublicReadsSummary { count: usize },
 }
 
 impl std::fmt::Display for TypeWarning {
@@ -1219,6 +1290,13 @@ impl std::fmt::Display for TypeWarning {
                 "{line}:{col}: warning: `workflow {workflow}`'s state `{state}` has no `owner: role(...)` \
                  — any signed-in caller will be able to advance it once served; add an `owner` if that's \
                  not intended"
+            ),
+            TypeWarningKind::ExposedPublicReadsSummary { count } => write!(
+                f,
+                "{line}:{col}: warning: {count} exposed read-only route(s) (e.g. this one) have no \
+                 `requires(...)` at all — an open read is public data by construction once served, not \
+                 automatically a safe default; add `requires(role: ...)`/`requires(claim: ..., ...)` to any \
+                 that shouldn't be, or `requires(public)` to mark the rest intentional"
             ),
         }
     }
@@ -1284,6 +1362,85 @@ pub fn workflow_owner_warnings(program: &Program) -> Vec<TypeWarning> {
             })
         })
         .collect()
+}
+
+/// The **implicit** half of `rfcs/0010-landing-and-serve-exposure.md`'s
+/// compiled-`serve` exposure set: every `list`/`create`/`update`/
+/// `delete` target bound in a `screen { ... }` block, plus every
+/// `tile`/`chart` target in the `dashboard { ... }` block — the
+/// convention-named functions `ui_gen.rs` already treats as UI-callable,
+/// so exposing them over HTTP needs no new annotation. Deliberately
+/// narrower than `ui_gen.rs`'s own *automatic*, no-`screen`-block-at-all
+/// naming-convention inference (Row 12's original pure-convention
+/// feature): a `list_x`/`create_x`/... function that exists but isn't
+/// actually bound inside a declared `screen`/`dashboard` block is never
+/// implicitly exposed here, even if its name would otherwise match —
+/// see the RFC's own "disclosed narrowing" note. `visual`s, `workspace`
+/// panels, and `screen` `action`s are also not in this implicit set yet
+/// (a real, disclosed scope limit, not an oversight) — anything not
+/// covered here still reaches compiled `serve` only via an explicit
+/// `serve { expose ... }` entry.
+fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for screen in &program.screens {
+        for (key, value) in &screen.entries {
+            if matches!(key.as_str(), "list" | "create" | "update" | "delete") {
+                if let Expr::Ident(name, _) = value {
+                    set.insert(name.clone());
+                }
+            }
+        }
+    }
+    if let Some(dash) = &program.dashboard {
+        for m in dash.tiles.iter().chain(dash.charts.iter()) {
+            set.insert(m.target_fn.clone());
+        }
+    }
+    set
+}
+
+/// The full exposure set: `implicitly_exposed_fn_names` above, plus
+/// every `serve { expose ... }` entry (if a `serve` block exists at
+/// all). Shared by `Checker::check_serve_exposure` (the hard,
+/// deny-by-default error) and `exposed_public_read_warnings` below (the
+/// softer confidentiality warning) so the two checks can never
+/// disagree about what's actually reachable.
+fn exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
+    let mut set = implicitly_exposed_fn_names(program);
+    if let Some(sc) = &program.serve_config {
+        set.extend(sc.expose.iter().map(|(name, _)| name.clone()));
+    }
+    set
+}
+
+/// `rfcs/0010-landing-and-serve-exposure.md`'s confidentiality axis, the
+/// soft counterpart to `Checker::check_serve_exposure`'s hard
+/// deny-by-default rule: an exposed `list_`/`stat_`/`chart_`-shaped
+/// route (anything in the exposure set that ISN'T `create_`/`update_`/
+/// `delete_`-prefixed, since those are already covered by the hard
+/// error) with no `requires(...)` at all returns its full result set to
+/// any unauthenticated visitor once served — allowed (reads are often
+/// legitimately public), but worth surfacing. One summarized warning
+/// for the whole program (`ExposedPublicReadsSummary`'s own doc comment
+/// has the reasoning), anchored at the first offending fn's own span,
+/// not one warning per function.
+pub fn exposed_public_read_warnings(program: &Program) -> Vec<TypeWarning> {
+    let exposed = exposed_fn_names(program);
+    let mut offending: Vec<&FnDecl> = program
+        .fns
+        .iter()
+        .filter(|f| {
+            exposed.contains(&f.name)
+                && !(f.name.starts_with("create_") || f.name.starts_with("update_") || f.name.starts_with("delete_"))
+                && f.requires.is_none()
+                && !f.explicit_public
+        })
+        .collect();
+    offending.sort_by_key(|f| (f.span.line, f.span.col));
+    match offending.first() {
+        Some(f) => vec![TypeWarning { kind: TypeWarningKind::ExposedPublicReadsSummary { count: offending.len() }, span: f.span }],
+        None => Vec::new(),
+    }
 }
 
 /// Every `role(...)`/`claim(k, v)` string this program declares anywhere,
@@ -1555,6 +1712,10 @@ fn typecheck_impl(
     for v in &program.validates {
         c.check_validate(v, program);
     }
+    if let Some(landing) = &program.landing {
+        c.check_landing(landing, program);
+    }
+    c.check_serve_exposure(program);
 
     for f in &program.fns {
         c.check_fn(f);
@@ -2317,6 +2478,110 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `landing { role(...)/claim(...)/default -> <screen> }`
+    /// (`rfcs/0010-landing-and-serve-exposure.md`). Four independent
+    /// checks, each reported at its own rule's span rather than folded
+    /// into one generic "malformed landing block" error:
+    ///
+    /// 1. every `-> <target>` resolves to a real `screen <target> { ... }`
+    ///    (mirrors `check_metric_ref`'s own `target_fn` resolution, just
+    ///    against `program.screens` instead of `self.sigs`);
+    /// 2. exactly one `default` rule exists — zero is a real, statically-
+    ///    catchable UX bug (an identity matching nothing has nowhere to
+    ///    land), more than one is ambiguous;
+    /// 3. `default`, if present, is the *last* rule — anything after it
+    ///    is unreachable (`default` always matches);
+    /// 4. no `role`/`claim` rule is a byte-for-byte duplicate of an
+    ///    earlier one in the same block — first-match-wins makes the
+    ///    later one dead code, almost always a copy-paste mistake.
+    ///
+    /// Rule 3 and rule 4 both report "unreachable," but deliberately as
+    /// two different `TypeErrorKind`s: rule 3's cause (position relative
+    /// to `default`) and rule 4's (an identical earlier condition) are
+    /// different mistakes with different fixes, and collapsing them into
+    /// one message would leave the fix to guesswork.
+    fn check_landing(&mut self, landing: &LandingDecl, program: &Program) {
+        let mut default_seen: Option<Span> = None;
+        // `Requirement` has no `Hash` derive (`PartialEq`/`Eq` only) — a
+        // small `Vec` scan is fine here, since a real `landing` block has
+        // a handful of rules, not thousands.
+        let mut seen_requirements: Vec<(&Requirement, Span)> = Vec::new();
+
+        for rule in &landing.rules {
+            if !program.screens.iter().any(|s| s.struct_name == rule.target) {
+                self.error(TypeErrorKind::UnknownLandingTarget { target: rule.target.clone() }, rule.span);
+            }
+
+            // A second `default` is reported as `LandingDuplicateDefault`
+            // specifically, never *also* as `LandingRuleAfterDefault` —
+            // the two checks below are deliberately mutually exclusive
+            // per rule (each `match` arm owns exactly one of them), so a
+            // rule is never double-reported for what is really one
+            // mistake.
+            match &rule.condition {
+                LandingCondition::Default => {
+                    if default_seen.is_some() {
+                        self.error(TypeErrorKind::LandingDuplicateDefault, rule.span);
+                    } else {
+                        default_seen = Some(rule.span);
+                    }
+                }
+                LandingCondition::Requirement(req) => {
+                    if default_seen.is_some() {
+                        // Anything at all after `default` is unreachable
+                        // — reported once per offending rule, at that
+                        // rule's own span, not `default`'s.
+                        self.error(TypeErrorKind::LandingRuleAfterDefault, rule.span);
+                    } else if let Some((_, earlier_span)) = seen_requirements.iter().find(|(seen, _)| *seen == req) {
+                        self.error(TypeErrorKind::LandingUnreachableRule { earlier_span: *earlier_span }, rule.span);
+                    } else {
+                        seen_requirements.push((req, rule.span));
+                    }
+                }
+            }
+        }
+
+        if default_seen.is_none() {
+            self.error(TypeErrorKind::LandingMissingDefault, landing.span);
+        }
+    }
+
+    /// `rfcs/0010-landing-and-serve-exposure.md`'s deny-by-default rule:
+    /// every `create_`/`update_`/`delete_`-prefixed function in the
+    /// exposure set (`exposed_fn_names` — implicit `screen`/`dashboard`
+    /// bindings plus any explicit `serve { expose ... }` entry) must have
+    /// a `requires(...)`, `requires(public)` included (an *explicit*
+    /// "yes, public" is fine; a plain absence is not). Runs
+    /// unconditionally, even for a program with no `serve { ... }` block
+    /// at all — the risk this closes (`gen-crud` producing a live,
+    /// unauthenticated mutating route with no human ever deciding it
+    /// should exist) comes entirely from `screen`'s own `create`/
+    /// `update`/`delete` bindings, which need no `serve` block to exist.
+    /// `serve { expose ... }`'s own entries are resolved against real
+    /// `fn`s here too (`UnknownExposedFn`) — the one part of this check
+    /// that *does* need `program.serve_config` to be `Some`.
+    fn check_serve_exposure(&mut self, program: &Program) {
+        if let Some(sc) = &program.serve_config {
+            for (name, span) in &sc.expose {
+                if !self.sigs.contains_key(name) {
+                    self.error(TypeErrorKind::UnknownExposedFn { fn_name: name.clone() }, *span);
+                }
+            }
+        }
+        for name in exposed_fn_names(program) {
+            if !(name.starts_with("create_") || name.starts_with("update_") || name.starts_with("delete_")) {
+                continue;
+            }
+            // A name from `serve_config.expose` that doesn't resolve to a
+            // real `fn` was already reported as `UnknownExposedFn` above
+            // — nothing further to check about it here.
+            let Some(f) = program.fns.iter().find(|f| f.name == name) else { continue };
+            if f.requires.is_none() && !f.explicit_public {
+                self.error(TypeErrorKind::ExposedMutatingFnMissingRequires { fn_name: f.name.clone() }, f.span);
+            }
+        }
+    }
+
     fn check_duplicate_type_params(&mut self, type_params: &[String], span: Span) {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for p in type_params {
@@ -2882,21 +3147,39 @@ impl<'a> Checker<'a> {
                     }
                     // `send`/`recv` double as a `tcp` connection's I/O —
                     // same keywords, reused rather than duplicated, the
-                    // same way `stop` is. A TCP payload is always `str`
-                    // (see `Ty::Tcp`'s doc comment): there's no per-
-                    // connection payload type to check against the way a
-                    // `chan T`'s `T` gives one.
+                    // same way `stop` is. A TCP payload is `str` *or*
+                    // `json` (2026-09, widened from `str`-only while
+                    // building `examples/features/55_nirdosha_ops_console.nir`'s
+                    // real primitives-based server: `json` compiles to
+                    // the exact same `{ptr, i64}` representation `str`
+                    // does — `codegen.rs::str_parts`'s own `expr()` +
+                    // `extractvalue` pair already works unchanged for
+                    // either, confirmed by actually sending a real
+                    // `db_query` result over a socket, not assumed — so
+                    // there's no representational reason to force a
+                    // `json` response body through a hand-built `str`
+                    // first when this language has no string-
+                    // concatenation/array-building primitives to build
+                    // one with anyway). `found != Ty::Error` guards the
+                    // usual "already reported, don't pile on" case; any
+                    // other mismatch is still a real error.
                     Ty::Tcp => {
-                        self.check(value, &Ty::Str, expected_ret, scopes);
+                        let found = self.infer(value, expected_ret, scopes);
+                        if found != Ty::Str && found != Ty::Json && found != Ty::Error {
+                            self.error(TypeErrorKind::TypeMismatch { expected: Ty::Str, found }, value.span());
+                        }
                         Ty::Unit
                     }
                     // `send`/`recv` triple as a `file`'s own I/O too, same
                     // reuse `tcp` already gets rather than a dedicated
-                    // `read`/`write` pair — a `file` payload is `str`
-                    // only, for the same reason a `tcp` one is (see
-                    // `Ty::File`'s doc comment).
+                    // `read`/`write` pair — a `file` payload accepts the
+                    // same `str`/`json` pair as `tcp`, for the same
+                    // reason (see `Ty::File`'s doc comment).
                     Ty::File => {
-                        self.check(value, &Ty::Str, expected_ret, scopes);
+                        let found = self.infer(value, expected_ret, scopes);
+                        if found != Ty::Str && found != Ty::Json && found != Ty::Error {
+                            self.error(TypeErrorKind::TypeMismatch { expected: Ty::Str, found }, value.span());
+                        }
                         Ty::Unit
                     }
                     other => {

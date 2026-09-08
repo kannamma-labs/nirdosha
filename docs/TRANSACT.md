@@ -9,29 +9,37 @@ here. Nirdosha's "external effect" already *is* a named function call
 support is a rollback-and-replay discipline layered over calls that already
 exist, not a new subsystem. One keyword, six slots.
 
-**Status, 2026-09 — the interpreter these five layers were built against is
-deleted; only Layer 1 has a compiled-backend equivalent today.** All five
-layers below describe real, historical work (in-process control flow, a
-real durability log, crash replay, `network`'s own `retry`/`timeout`, a real
-cross-process `network`/`commit` test) — but that work lived entirely in
-`interpreter.rs`/`transact_log.rs`, both removed with the interpreter, so
-none of layers 2–5 run in any form today. `codegen.rs`'s `emit_transact`
-compiles Layer 1 for real (precheck/network/verify/commit/compensate/log,
-the implicit `network`/`verify`/`txn_id` bindings, a real `bool` result —
+**Status, 2026-09-08 — all five layers now have a real compiled-backend
+equivalent, built independently of the deleted interpreter's own copy, not
+recovered from it verbatim.** `codegen.rs`'s `emit_transact` compiles
+Layer 1 for real (precheck/network/verify/commit/compensate/log, the
+implicit `network`/`verify`/`txn_id` bindings, a real `bool` result —
 `examples/features/36_transact.nir` compiled and run, unmodified,
 `crates/compiler/tests/codegen.rs`'s
 `transact_commits_and_compensates_for_real_matching_the_checked_in_example`).
 `network`'s `retry`/`timeout` are not a deferred nicety but an
-**architectural** gap in the compiled model: a compiled trap is an
-unconditional `abort()` (unlike the interpreter's own catchable
-`RuntimeError`), and `network`'s declared return type is restricted to a
-bare scalar (`Ty::is_transact_scalar`, never `Result(_, _)`) — so there is
-no non-trapping failure signal for a retry loop to react to at all;
-rejected explicitly (`check_expr`'s pre-pass), not silently ignored.
-`commit`/`compensate`'s own retry-with-backoff (theoretically possible,
-since their return type is unconstrained), the durability log, and crash
-replay remain real, separate, disclosed follow-up work — see
-`docs/PHASE0.md`'s "Twenty-fifth update" for the full detail.
+**architectural** gap in the compiled model, permanent, not a follow-up
+item: a compiled trap is an unconditional `abort()` (unlike the
+interpreter's own catchable `RuntimeError`), and `network`'s declared
+return type is restricted to a bare scalar (`Ty::is_transact_scalar`,
+never `Result(_, _)`) — so there is no non-trapping failure signal for a
+retry loop to react to at all; rejected explicitly (`check_expr`'s
+pre-pass), not silently ignored.
+
+Layers 2–5 — `commit`/`compensate`'s own bounded retry-with-backoff, a
+real fsync'd durability log, and compiler-synthesized crash replay —
+landed 2026-09-08 (`docs/adr/0009-transact-durability-and-replay.md`,
+`crates/runtime-kernels/src/kernel/transact.rs`). Verified against real
+compiled binaries, including a genuine two-separate-OS-process crash/
+replay scenario (`crates/compiler/tests/codegen.rs`'s
+`transact_replay_finishes_a_commit_pending_row_left_by_a_prior_process`),
+not just re-described from the deleted interpreter's own historical
+tests. Two narrowings relative to this document's original,
+interpreter-era design, disclosed in the ADR: replay dispatches by a
+bare per-site `site_id` with no build-version fingerprint guard yet, and
+the durability log is local-SQLite only (unsafe under a multi-replica
+deployment) — a Postgres-backed log for fleet-wide use is real,
+separate follow-up work.
 
 > **Drift note (2026-09-07, code as truth).** That "implemented" claim
 > was true against the tree-walking interpreter, which — along with
@@ -47,6 +55,13 @@ replay remain real, separate, disclosed follow-up work — see
 > current compiled-only binary — treat this document as the target
 > design for `transact` on the compiled path, not a description of
 > what `nirdosha build` produces today.
+>
+> **Resolved, 2026-09-08.** The gap this note describes is closed —
+> `codegen.rs` now compiles all five layers (see the Status paragraph
+> above and `docs/adr/0009-transact-durability-and-replay.md`), not just
+> Layer 1. Left in place as a historical record of the interpreter's
+> deletion and the real gap it opened, not because it still describes
+> the current state.
 
 ## What it brings to the table
 
@@ -441,8 +456,8 @@ practice:
   asymmetry is "Crash replay"'s named `Stuck` gap above.
 - **Compiled backend (`codegen.rs`) was out of scope until the
   interpreter version was proven** — true when written, moot since
-  2026-09: the interpreter that "proved" it is deleted, and `transact`'s
-  Layer 1 now has a real compiled equivalent (this doc's own status
-  header above). `db`/`json` also compile now, so they've dropped off
-  the "still interpreter-only" list too; `sandbox`/`mq`/`http`/`https`
-  remain on it.
+  2026-09: the interpreter that "proved" it is deleted, and `transact`
+  (all five layers, not just Layer 1 — this doc's own status header
+  above) now has a real compiled equivalent. `db`/`json`/`mq`/`http`/
+  `https` also compile now, so they've all dropped off the "still
+  interpreter-only" list too; only `sandbox` remains on it.

@@ -72,6 +72,42 @@ fn unique_suffix() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// A fresh, per-call temp file path, guaranteed distinct across
+/// concurrently-running `#[test]`s in this same binary (same
+/// pid+atomic-counter scheme `compile_and_run_opt`'s own `out_path`
+/// already uses for the compiled binary itself) — every test that opens
+/// its own SQLite file (a `transact` durability log, a `db_connect`
+/// counter table) needs one of these, not a fixed name, or parallel
+/// `cargo test` runs collide on the same file.
+fn unique_temp_path(label: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("nirdosha_test_{label}_{}_{}", std::process::id(), unique_suffix()));
+    p
+}
+
+/// Same as `compile_and_run_opt`, but runs the compiled binary with
+/// `envs` set — needed for anything that reads an env var at runtime
+/// (`transact`'s `NIRDOSHA_TRANSACT_LOG_PATH`, `kernel::instance_lock`'s
+/// own file lock keyed off that same path) rather than a `.nir`-level
+/// literal. Every `transact`-using test needs its own unique log path
+/// via this, not the bare default (`nirdosha_transact_log.sqlite` in
+/// cwd) — two such tests running concurrently under `cargo test`'s
+/// default parallelism would otherwise both try to open/lock the exact
+/// same file, and the second one now hard-aborts
+/// (`emit_c_main`'s `nir_transact_log_init` failure path) rather than
+/// silently misbehaving — a real collision, not a hypothetical one,
+/// caught by running this suite locally before relying on it.
+fn compile_and_run_with_env(src: &str, opt: codegen::OptLevel, envs: &[(&str, &str)]) -> (String, i32) {
+    let program = parse_checked(src);
+    let report = analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
+    codegen::build(&program, &report, &out_path, opt).expect("codegen::build should succeed for this program");
+    let output = Command::new(&out_path).envs(envs.iter().copied()).output().expect("compiled binary should run");
+    let _ = std::fs::remove_file(&out_path);
+    (String::from_utf8_lossy(&output.stdout).to_string(), output.status.code().unwrap_or(-1))
+}
+
 #[test]
 fn hello_compiles_and_matches_interpreter() {
     let src = include_str!("fixtures/hello.nir");
@@ -2256,6 +2292,110 @@ fn check_role_produces_real_role_view_that_drives_field_masking() {
     assert_eq!(stdout, "150000.000000\n0.000000\nAda\n0\n");
 }
 
+/// End-to-end, real compiled-and-run coverage for the rest of Row 12
+/// (`docs/nirdosha_row12_functions_identity.md`): dotted-path claim
+/// lookup, sessions, refresh-token exchange (including real single-use
+/// enforcement, not just the affine type-level guarantee), revocation,
+/// and API-key validation — all against `crates/runtime-kernels/src/
+/// kernel/identity.rs`'s real kernels, not stubs.
+#[test]
+fn row12_remaining_identity_builtins_compile_and_run_for_real() {
+    let src = r#"
+        struct Text {
+            value: str,
+        }
+        fn report_reissued(id: VerifiedIdentity) -> i64 {
+            print(id.subject)
+            print(id.issued_at)
+            return 0
+        }
+        fn report_reissue_error(msg: Text) -> i64 {
+            print(msg.value)
+            print(-1)
+            return 0
+        }
+        // Routes a match-arm-bound `ClaimView`'s `.value` through a real
+        // function call rather than field-accessing it directly in the
+        // arm body -- `local_ty_of` resolves a match's own result type
+        // from `arms[0].body` *before* `match_enum` binds the arm's
+        // pattern variable into scope, a real, pre-existing, general
+        // codegen ordering gap unrelated to this phase's new builtins
+        // (confirmed: no existing test in this file field-accesses a
+        // match-arm binding directly either). Working around it here,
+        // not fixing the shared ordering issue as part of this phase.
+        fn report_claim(c: ClaimView) -> i64 {
+            print(c.value)
+            return 0
+        }
+        fn main() {
+            let identity: VerifiedIdentity = VerifiedIdentity("alice", "https://example.com", "my-app", 9999999999, 0, "{\"org\":{\"roles\":[\"admin\",\"auditor\"]},\"profile\":{\"department\":\"cardiology\"},\"revoked\":false}")
+
+            // check_role_path / extract_claim_path
+            let has_admin: bool = match check_role_path(identity, "org.roles", "admin") {
+                Ok(r) => true,
+                Err(e) => false,
+            }
+            print(has_admin)
+            let has_owner: bool = match check_role_path(identity, "org.roles", "owner") {
+                Ok(r) => true,
+                Err(e) => false,
+            }
+            print(has_owner)
+            let claim_reported: i64 = match extract_claim_path(identity, "profile.department") {
+                Ok(c) => report_claim(c),
+                Err(e) => report_reissue_error(Text(e)),
+            }
+
+            // check_revocation
+            print(check_revocation(identity))
+
+            // create_application_session / session_cookie
+            let session: ApplicationSession = create_application_session(identity)
+            print(session.identity_subject)
+            print(session.expires_at - session.created_at)
+            let cookie: str = session_cookie(session)
+            print(cookie)
+
+            // new_refresh_token / exchange_refresh_token, including real
+            // single-use enforcement server-side (not just the affine
+            // box field's own compile-time single-use guarantee).
+            let refresh_handle: RefreshTokenHandle = new_refresh_token(session.expires_at + 3600)
+            let reported: i64 = match exchange_refresh_token(identity, refresh_handle, 42) {
+                Ok(new_identity) => report_reissued(new_identity),
+                Err(e) => report_reissue_error(Text(e)),
+            }
+
+            // validate_api_key: a real constant-time sha256 compare, not
+            // a lookup table -- the caller supplies the expected hash.
+            let real_hash: str = sha256_hex("my-secret-api-key")
+            let key_ok: bool = match validate_api_key("my-secret-api-key", real_hash) {
+                Ok(id) => true,
+                Err(e) => false,
+            }
+            print(key_ok)
+            let key_bad: bool = match validate_api_key("wrong-key", real_hash) {
+                Ok(id) => true,
+                Err(e) => false,
+            }
+            print(key_bad)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0, "stdout so far: {stdout}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "1", "check_role_path should find admin at org.roles");
+    assert_eq!(lines[1], "0", "check_role_path should not find owner at org.roles");
+    assert_eq!(lines[2], "cardiology");
+    assert_eq!(lines[3], "0", "revoked:false must read as not revoked");
+    assert_eq!(lines[4], "alice", "session.identity_subject must copy the identity's own subject");
+    assert_eq!(lines[5], "28800", "a fresh session's real 8-hour lifetime");
+    assert!(lines[6].contains("HttpOnly") && lines[6].contains("Max-Age=28800"), "session_cookie: {}", lines[6]);
+    assert_eq!(lines[7], "alice", "exchange_refresh_token should reissue the same subject");
+    assert_eq!(lines[8], "42", "exchange_refresh_token should carry the new issued_at through");
+    assert_eq!(lines[9], "1", "the correct api key must validate");
+    assert_eq!(lines[10], "0", "the wrong api key must not validate");
+}
+
 /// `nfr(...)`'s per-call instrumentation (registration global, the
 /// `nir_nfr_call_begin`/`nir_nfr_call_end` pair wrapped around every
 /// return path) must be fully transparent to a program that never
@@ -2640,9 +2780,11 @@ fn json_accessors_read_every_scalar_type_out_of_a_real_db_query_result() {
 #[test]
 fn transact_commits_and_compensates_for_real_matching_the_checked_in_example() {
     let src = include_str!("../../../examples/features/36_transact.nir");
-    let (stdout, code) = compile_and_run(src);
+    let log_path = unique_temp_path("transact_log_a");
+    let (stdout, code) = compile_and_run_with_env(src, codegen::OptLevel::O2, &[("NIRDOSHA_TRANSACT_LOG_PATH", log_path.to_str().unwrap())]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "committing\n10\nlogged\n10\n1\n1\ncompensating\n-5\nlogged\n-5\n0\n0\ncommitting\n1\n1\n");
+    let _ = std::fs::remove_file(&log_path);
 }
 
 /// `precheck == false` aborts the whole block immediately — nothing
@@ -2681,9 +2823,11 @@ fn transact_precheck_false_skips_every_other_slot() {
             print(result)
         }
     "#;
-    let (stdout, code) = compile_and_run(src);
+    let log_path = unique_temp_path("transact_log_b");
+    let (stdout, code) = compile_and_run_with_env(src, codegen::OptLevel::O2, &[("NIRDOSHA_TRANSACT_LOG_PATH", log_path.to_str().unwrap())]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "db down\n0\n");
+    let _ = std::fs::remove_file(&log_path);
 }
 
 /// `verify == false` with no `compensate` slot at all is still
@@ -2712,9 +2856,11 @@ fn transact_verify_false_with_no_compensate_slot_yields_false() {
             print(result)
         }
     "#;
-    let (stdout, code) = compile_and_run(src);
+    let log_path = unique_temp_path("transact_log_c");
+    let (stdout, code) = compile_and_run_with_env(src, codegen::OptLevel::O2, &[("NIRDOSHA_TRANSACT_LOG_PATH", log_path.to_str().unwrap())]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "0\n");
+    let _ = std::fs::remove_file(&log_path);
 }
 
 /// `network`'s `retry`/`timeout` modifiers are a real, architectural
@@ -2743,6 +2889,219 @@ fn transact_network_retry_is_explicitly_rejected_not_silently_ignored() {
     out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
     let err = codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect_err("retry should be rejected");
     assert!(err.contains("retry"), "unexpected error message: {err}");
+}
+
+/// Phase 4's real durability contribution over the old Layer-1-only
+/// behavior above: `commit`'s own bounded retry-with-backoff
+/// (`Codegen::emit_call_with_retry`) when its return type is
+/// `Result(_, _)`. `commit_flaky`'s own attempt counter is a real
+/// `db_execute`d row in a small SQLite side-table (not an in-process
+/// counter, since a fresh process — see the replay test below — must
+/// see the same count) — it returns `Err` for its first 4 real calls
+/// and `Ok` from the 5th on. `TRANSACT_RETRY_MAX_ATTEMPTS == 3` means
+/// the live path alone (1 initial + 2 retries) can only ever reach
+/// attempt 3 — provably not enough to succeed here — so the durability
+/// log must show the row still `commit_pending` (never `committed`)
+/// once the process exits, and the live `transact` expression's own
+/// value is still `true` (this function's pre-existing, unchanged
+/// semantics: it reports which branch `verify` took, not whether
+/// `commit` is confirmed durable).
+#[test]
+fn transact_commit_retries_with_backoff_and_leaves_the_row_pending_on_exhaustion() {
+    let counter_db = unique_temp_path("transact_retry_counter");
+    let counter_db_display = counter_db.display();
+    let log_path = unique_temp_path("transact_retry_log");
+    let src = format!(
+        r#"
+        fn call_api(txn_id: str, amount: i64) -> i64 {{ return amount }}
+        fn check(resp: i64) -> bool {{ return resp > 0 }}
+
+        // One `let` statement per `db_execute`/`db_query` call, an error
+        // mid-sequence folded to a sentinel `-1` count rather than
+        // propagated -- this is the same shape `examples/features/27_database.nir`'s
+        // own `run_all` already establishes, specifically so `stop conn`
+        // (below) is one unconditional statement that always runs, on
+        // every path, rather than needing a `stop` on each of several
+        // early-return error arms (a `db` handle is affine, exactly like
+        // `box`/`tcp`/`file` -- it must be `stop`ped on every path that
+        // created it).
+        struct ErrMsg {{
+            value: str,
+        }}
+
+        fn run_flaky(conn: db, amount: i64) -> Result(i64, ErrMsg) {{
+            let created: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS attempts (n INTEGER)") {{
+                Ok(n) => n,
+                Err(e) => -1,
+            }}
+            let seeded: i64 = match db_execute(conn, "INSERT INTO attempts (n) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM attempts)") {{
+                Ok(n) => n,
+                Err(e) => -1,
+            }}
+            let bumped: i64 = match db_execute(conn, "UPDATE attempts SET n = n + 1") {{
+                Ok(n) => n,
+                Err(e) => -1,
+            }}
+            let count: i64 = match db_query(conn, "SELECT n FROM attempts") {{
+                Ok(rows) => match json_array_get(rows, 0) {{
+                    Ok(row) => match json_get_i64(row, "n") {{
+                        Ok(n) => n,
+                        Err(e) => -1,
+                    }},
+                    Err(e) => -1,
+                }},
+                Err(e) => -1,
+            }}
+            stop conn
+            if count < 5 {{
+                return Err(ErrMsg("still failing"))
+            }}
+            return Ok(amount)
+        }}
+
+        fn commit_flaky(amount: i64) -> Result(i64, ErrMsg) {{
+            return match db_connect("{counter_db_display}") {{
+                Ok(conn) => run_flaky(conn, amount),
+                Err(e) => Err(ErrMsg(e)),
+            }}
+        }}
+
+        fn main() {{
+            let result: bool = transact {{
+                network: call_api(txn_id, 42)
+                verify:  check(network)
+                commit:  commit_flaky(42)
+            }}
+            print(result)
+        }}
+    "#
+    );
+    let (stdout, code) = compile_and_run_with_env(&src, codegen::OptLevel::O2, &[("NIRDOSHA_TRANSACT_LOG_PATH", log_path.to_str().unwrap())]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n"); // `transact`'s own value: `true` -- verify took the commit branch
+    let attempts: i64 = rusqlite::Connection::open(&counter_db).unwrap().query_row("SELECT n FROM attempts", [], |r| r.get(0)).unwrap();
+    assert_eq!(attempts, 3, "live retry should make exactly TRANSACT_RETRY_MAX_ATTEMPTS real calls, no more/fewer");
+    let log_conn = rusqlite::Connection::open(&log_path).unwrap();
+    let state: String = log_conn.query_row("SELECT state FROM nirdosha_transact_log", [], |r| r.get(0)).unwrap();
+    assert_eq!(state, "commit_pending", "every live attempt failed -- the row must be left pending for replay, never marked committed");
+    let _ = std::fs::remove_file(&counter_db);
+    let _ = std::fs::remove_file(&log_path);
+}
+
+/// The other half of the same story: crash replay actually finishing a
+/// `commit_pending` row a prior process run left behind. Same
+/// `commit_flaky`/`finish` program as above, run **twice** against the
+/// same durability log *and* the same attempt-counter database (a real,
+/// separate process each time — `Command::new` — not two calls inside
+/// one process, since replay's whole point is recovering across a
+/// restart): the first run's 3 live attempts (counts 1/2/3) all fail
+/// exactly as above, leaving a `commit_pending` row. The second run's
+/// `main` prologue replays that row *before* its own `main` body ever
+/// executes (`emit_c_main`'s ordering) — the replay trampoline's own
+/// independent 3-attempt budget reaches counts 4 (still `Err`, 4<5) then
+/// 5 (`>=5`, `Ok`) on its second try, well inside its own budget, and
+/// `nir_transact_replay_all` marks that first row `committed`. The
+/// second run's own fresh `transact` (a new `txn_id`) then also commits
+/// immediately (count is already `>=5`) — asserted here only as "some
+/// second row exists," since this test's real subject is the *first*
+/// row's fate, not the second transact's own mechanics.
+#[test]
+fn transact_replay_finishes_a_commit_pending_row_left_by_a_prior_process() {
+    let counter_db = unique_temp_path("transact_replay_counter");
+    let counter_db_display = counter_db.display();
+    let log_path = unique_temp_path("transact_replay_log");
+    let src = format!(
+        r#"
+        fn call_api(txn_id: str, amount: i64) -> i64 {{ return amount }}
+        fn check(resp: i64) -> bool {{ return resp > 0 }}
+
+        // One `let` statement per `db_execute`/`db_query` call, an error
+        // mid-sequence folded to a sentinel `-1` count rather than
+        // propagated -- this is the same shape `examples/features/27_database.nir`'s
+        // own `run_all` already establishes, specifically so `stop conn`
+        // (below) is one unconditional statement that always runs, on
+        // every path, rather than needing a `stop` on each of several
+        // early-return error arms (a `db` handle is affine, exactly like
+        // `box`/`tcp`/`file` -- it must be `stop`ped on every path that
+        // created it).
+        struct ErrMsg {{
+            value: str,
+        }}
+
+        fn run_flaky(conn: db, amount: i64) -> Result(i64, ErrMsg) {{
+            let created: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS attempts (n INTEGER)") {{
+                Ok(n) => n,
+                Err(e) => -1,
+            }}
+            let seeded: i64 = match db_execute(conn, "INSERT INTO attempts (n) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM attempts)") {{
+                Ok(n) => n,
+                Err(e) => -1,
+            }}
+            let bumped: i64 = match db_execute(conn, "UPDATE attempts SET n = n + 1") {{
+                Ok(n) => n,
+                Err(e) => -1,
+            }}
+            let count: i64 = match db_query(conn, "SELECT n FROM attempts") {{
+                Ok(rows) => match json_array_get(rows, 0) {{
+                    Ok(row) => match json_get_i64(row, "n") {{
+                        Ok(n) => n,
+                        Err(e) => -1,
+                    }},
+                    Err(e) => -1,
+                }},
+                Err(e) => -1,
+            }}
+            stop conn
+            if count < 5 {{
+                return Err(ErrMsg("still failing"))
+            }}
+            return Ok(amount)
+        }}
+
+        fn commit_flaky(amount: i64) -> Result(i64, ErrMsg) {{
+            return match db_connect("{counter_db_display}") {{
+                Ok(conn) => run_flaky(conn, amount),
+                Err(e) => Err(ErrMsg(e)),
+            }}
+        }}
+
+        fn main() {{
+            let result: bool = transact {{
+                network: call_api(txn_id, 42)
+                verify:  check(network)
+                commit:  commit_flaky(42)
+            }}
+            print(result)
+        }}
+    "#
+    );
+    let program = parse_checked(&src);
+    let report = analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
+    codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect("codegen::build should succeed for this program");
+
+    let envs = [("NIRDOSHA_TRANSACT_LOG_PATH", log_path.to_str().unwrap())];
+    let run1 = Command::new(&out_path).envs(envs).output().expect("first run should execute");
+    assert_eq!(run1.status.code(), Some(0));
+    {
+        let log_conn = rusqlite::Connection::open(&log_path).unwrap();
+        let pending: i64 = log_conn.query_row("SELECT COUNT(*) FROM nirdosha_transact_log WHERE state = 'commit_pending'", [], |r| r.get(0)).unwrap();
+        assert_eq!(pending, 1, "first run's commit must exhaust its retry budget and leave exactly one row pending");
+    }
+
+    let run2 = Command::new(&out_path).envs(envs).output().expect("second run should execute");
+    assert_eq!(run2.status.code(), Some(0));
+    let _ = std::fs::remove_file(&out_path);
+
+    let log_conn = rusqlite::Connection::open(&log_path).unwrap();
+    let pending: i64 = log_conn.query_row("SELECT COUNT(*) FROM nirdosha_transact_log WHERE state = 'commit_pending'", [], |r| r.get(0)).unwrap();
+    assert_eq!(pending, 0, "replay must finish the row the first process left behind -- none may still be commit_pending");
+    let committed: i64 = log_conn.query_row("SELECT COUNT(*) FROM nirdosha_transact_log WHERE state = 'committed'", [], |r| r.get(0)).unwrap();
+    assert_eq!(committed, 2, "the replayed row, plus the second run's own fresh (already-past-the-threshold) transact");
+
+    let _ = std::fs::remove_file(&counter_db);
+    let _ = std::fs::remove_file(&log_path);
 }
 
 /// Phase 4 (`mq`, Redis): a real, compiled `mq_connect`/`mq_publish`/

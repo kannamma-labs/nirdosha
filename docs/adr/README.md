@@ -43,3 +43,9 @@ honest downside, not just the win.
 | [0002](./0002-ban-str-in-fn-signatures.md) | Ban `str` as a function argument/return type | accepted |
 | [0003](./0003-runtime-kernels-cargo-dependency.md) | Split the compiled-path runtime kernels into their own Cargo-dependency-aware crate | accepted |
 | [0004](./0004-external-data-service-boundary.md) | External Data & Service Boundary — plugin-backed `db`/`mq` connections by URL scheme | accepted |
+| [0005](./0005-postgres-pooling-and-tls.md) | Postgres `db_connect` — pooling design and TLS-by-default | accepted |
+| [0006](./0006-http-keepalive-pooling.md) | `http`/`https` — real keep-alive, pooling, and admission control | accepted |
+| [0007](./0007-identity-row12-remaining-builtins.md) | The rest of Row 12 — dotted-path claims, sessions, refresh tokens, revocation, API keys | accepted |
+| [0008](./0008-build-rs-watch-full-kernel-src-tree.md) | `crates/compiler/build.rs` must watch all of `runtime-kernels/src`, not just `lib.rs` | accepted |
+| [0009](./0009-transact-durability-and-replay.md) | `transact` — durability log, bounded retry, and crash replay | accepted |
+| [0010](./0010-runtime-kernels-rlib-for-compiled-serve.md) | `runtime-kernels` also builds as an `rlib`, for `compiled-serve` | accepted |

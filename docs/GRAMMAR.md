@@ -110,7 +110,7 @@ program     ::= use_decl* item*
 // outside its one legal slot, not a special-cased rejection.
 use_decl    ::= "use" string
 
-item        ::= fn_decl | struct_decl | enum_decl | screen_decl | dashboard_decl | module_decl | workflow_decl | workspace_decl | validate_decl
+item        ::= fn_decl | struct_decl | enum_decl | screen_decl | dashboard_decl | landing_decl | serve_decl | module_decl | workflow_decl | workspace_decl | validate_decl
 
 // `Mod::Name` / `Mod::Enum::Variant` — a qualified reference
 // (`docs/ROADMAP.md` Track F, F2). Only ever a *reference*: a declaration's
@@ -274,6 +274,28 @@ layout_body ::= "{" kv_entry* layout_node* "}"
 dashboard_decl ::= "dashboard" "{" dashboard_item* "}"
 dashboard_item ::= ("tile" | "chart") string "->" ident
                   | "visual" string "->" ident ("{" kv_entry* "}")?
+
+// `landing { role("admin") -> AdminScreen  claim("dept", "x") -> DeptScreen
+// default -> HomeScreen }` (`rfcs/0010-landing-and-serve-exposure.md`) --
+// per-role/claim default-screen dispatch, consumed client-side by the
+// generated bundle after sign-in. `landing` is a real reserved keyword
+// (like `dashboard`/`screen` above); `role`/`claim`/`default` are
+// contextual-only, the same "keyword only within this one leading
+// position" treatment `tile`/`chart`/`visual` get inside
+// `dashboard_item`. `target` (after `->`) must name a real `screen`'s
+// own struct name (`typeck::check_landing`).
+landing_decl ::= "landing" "{" landing_rule* "}"
+landing_rule ::= ("role" "(" string ")" | "claim" "(" string "," string ")" | "default") "->" ident
+
+// `serve { expose fn_a, fn_b }` (`rfcs/0010-landing-and-serve-exposure.md`)
+// -- the compiled-`serve` config section; `expose` lists functions
+// reachable over HTTP beyond the implicit `screen`/`dashboard`-bound set
+// (`typeck::exposed_fn_names`). `serve` is a real reserved keyword;
+// `expose` is contextual-only, same treatment as `role`/`claim`/
+// `default` inside `landing_decl` just above. A general per-program
+// serve-config section by design -- `expose` is its first entry, not
+// its only reason to exist.
+serve_decl ::= "serve" "{" ("expose" ident ("," ident)* ","?)? "}"
 
 // `visual "<label>" -> <fn> { render: "graph"|"heatmap"|"timeline" }`
 // (`docs/ROADMAP.md` Track E2, `examples/ctms/UI_CONSTRUCTS.md` §2) --

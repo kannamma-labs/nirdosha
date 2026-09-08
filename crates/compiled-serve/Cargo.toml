@@ -1,0 +1,31 @@
+[package]
+name = "nirdosha-compiled-serve"
+version = "0.1.0"
+edition = "2024"
+# Pins this crate to `../runtime-kernels`'s own separate workspace, not
+# the repo root's — Cargo's default workspace-root discovery walks
+# *upward* from a manifest with no `package.workspace` key looking for
+# the nearest ancestor `[workspace]`, which would find the root
+# `Cargo.toml` first purely by directory proximity, regardless of what
+# `../runtime-kernels/Cargo.toml`'s own `[workspace] members` list says
+# — confirmed directly: omitting this key produced `package ... is a
+# member of the wrong workspace`. See that crate's own Cargo.toml
+# comment for why both crates need to share one workspace, separate
+# from the root one, at all.
+workspace = "../runtime-kernels"
+
+[lib]
+# A real, separate library crate, not folded into `nirdosha-runtime-kernels`
+# — that crate is embedded into *every* compiled binary unconditionally
+# (Row 6, zero-cost-when-unused); a full HTTP server is a heavier,
+# genuinely optional thing, only linked when `nirdosha build --serve`
+# is used (ROADMAP B8, `rfcs/0010-landing-and-serve-exposure.md`).
+name = "nirdosha_compiled_serve"
+
+[dependencies]
+# Peer dependency, not the `extern "C"`/staticlib-embedding path every
+# compiled `.nir` binary uses — `docs/adr/0010-runtime-kernels-rlib-for-compiled-serve.md`
+# is what makes this possible at all (`runtime-kernels` didn't produce
+# a linkable `rlib` before that decision).
+nirdosha-runtime-kernels = { path = "../runtime-kernels" }
+serde_json = "1"

@@ -1,0 +1,418 @@
+// Feature: a real, compiled, browser-servable HTTP server for the
+// "Nirdosha Ops Console" -- the primitives-based `tcp_listener`/`accept`
+// style (`examples/features/51_compiled_serve.nir`, ROADMAP B8's own
+// real, working mode today) extended just far enough to serve a real
+// page a real browser can load, click through, and see real Postgres
+// data in.
+//
+// Run it:
+//   nirdosha build examples/features/56_nirdosha_ops_console_server.nir -o /tmp/ops_console_server
+//   /tmp/ops_console_server &
+//   open http://127.0.0.1:8090/
+//
+// **What's real**: the HTML/CSS/JS page below is served for real, over a
+// real socket, by this compiled binary. `GET /api/list` and `GET
+// /api/count` send a real Postgres `db_query` result's own `json` value
+// straight over the wire (a small, real, disclosed language extension
+// landed alongside this file -- `send(tcp, json)` is now legal,
+// `typeck.rs`'s own `Expr::Send` doc comment has the detail: `json`
+// shares `str`'s exact `{ptr, i64}` representation, and this language
+// has no string-concatenation/JSON-array-building primitive a hand-
+// written route could otherwise use to compose one). `POST /api/create`
+// really parses the posted JSON body, really calls `create_as_admin`
+// (the same `acquire`/`check_role`-gated function `55_nirdosha_ops_console.nir`
+// defines), and really writes a new row to Postgres.
+//
+// **What's a disclosed demo shortcut, not real**: this compiled backend
+// has no token-*signing* primitive at all (only `oidc_validate_token`
+// *verification* is real -- Row 12 never got a compiled `mock_issue_token`
+// either, see `52_compiled_workflow_state_machine.nir`'s own note on the
+// same gap), so there is no real JWT to check here. The `X-Demo-Role`
+// request header this server reads is a plain, unsigned, forgeable demo
+// convenience -- anyone can set it to `admin` with `curl`. The `acquire`/
+// `check_role` call inside `create_as_admin` is completely real (a
+// request without `X-Demo-Role: admin` never reaches it at all, and if
+// it did, `check_role` would run for real against a real, if hardcoded,
+// `VerifiedIdentity`) -- what's *not* real is which identity this
+// server hands it, since nothing here cryptographically ties the header
+// to the browser's own "Sign in as" button beyond "this demo's own JS
+// sets it." A production `serve` needs `crates/compiled-serve` wired to
+// `codegen.rs` (ROADMAP B8, not done yet) and a real signed token from a
+// real IdP.
+//
+// **Same primitives-based scope disclosed in `51_compiled_serve.nir`**:
+// GET/POST only, the whole request (headers + body) assumed to arrive
+// in one `recv` (true for an ordinary small browser `fetch()` on
+// `localhost`, not adversarially guaranteed), one request per
+// connection, sequential.
+
+struct Text {
+    value: str,
+}
+
+struct ErrMsg {
+    value: str,
+}
+
+fn admin_identity() -> VerifiedIdentity {
+    return VerifiedIdentity("cfo-1", "https://mock-idp.local", "ops-console", 9999999999, 0, "{\"roles\":[\"admin\"]}")
+}
+
+fn create_purchase_order(vendor: Text, amount_cents: i64) -> Text requires(role: "admin") {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => Text(e),
+        Ok(conn) => run_create(conn, vendor, amount_cents),
+    }
+}
+
+fn run_create(conn: db, vendor: Text, amount_cents: i64) -> Text {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS purchase_orders (id SERIAL PRIMARY KEY, vendor TEXT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let inserted: i64 = match db_execute(conn, "INSERT INTO purchase_orders (vendor, amount_cents) VALUES (?, ?)", vendor.value, amount_cents) {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    stop conn
+    return Text(vendor.value)
+}
+
+fn create_as_admin(vendor: Text, amount_cents: i64) -> Text {
+    return match check_role(admin_identity(), "admin") {
+        Err(e) => Text(e),
+        Ok(proof) => match acquire create_purchase_order(proof) {
+            Err(msg) => Text(msg),
+            Ok(f) => f(vendor, amount_cents),
+        },
+    }
+}
+
+fn wrap_ok_json(j: json) -> Result(json, ErrMsg) {
+    return Ok(j)
+}
+
+fn wrap_err_json(e: ErrMsg) -> Result(json, ErrMsg) {
+    return Err(e)
+}
+
+fn list_purchase_order() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_list(conn),
+    }
+}
+
+fn run_list(conn: db) -> Result(json, ErrMsg) {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS purchase_orders (id SERIAL PRIMARY KEY, vendor TEXT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT vendor, amount_cents FROM purchase_orders ORDER BY id DESC") {
+        Ok(rows) => wrap_ok_json(rows),
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+fn stat_purchase_order_count() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_count(conn),
+    }
+}
+
+fn run_count(conn: db) -> Result(json, ErrMsg) {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS purchase_orders (id SERIAL PRIMARY KEY, vendor TEXT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT COUNT(*) AS n FROM purchase_orders") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => wrap_ok_json(row),
+            Err(e) => wrap_err_json(ErrMsg(e)),
+        },
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// ---- request parsing (same primitives `51_compiled_serve.nir` already
+// proves -- `str_index_of`/`str_slice`/`len`) -----------------------------
+
+fn req_method(req: Text) -> Text {
+    let r: str = req.value
+    let line_end: i64 = str_index_of(r, "\r\n")
+    let line: str = str_slice(r, 0, line_end)
+    let sp1: i64 = str_index_of(line, " ")
+    return Text(str_slice(line, 0, sp1))
+}
+
+fn req_path(req: Text) -> Text {
+    let r: str = req.value
+    let line_end: i64 = str_index_of(r, "\r\n")
+    let line: str = str_slice(r, 0, line_end)
+    let sp1: i64 = str_index_of(line, " ")
+    let after_method: str = str_slice(line, sp1 + 1, len(line))
+    let sp2: i64 = str_index_of(after_method, " ")
+    return Text(str_slice(after_method, 0, sp2))
+}
+
+fn req_body(req: Text) -> Text {
+    let r: str = req.value
+    let sep: i64 = str_index_of(r, "\r\n\r\n")
+    if sep < 0 {
+        return Text("")
+    }
+    return Text(str_slice(r, sep + 4, len(r)))
+}
+
+fn req_has_admin_header(req: Text) -> bool {
+    return str_index_of(req.value, "X-Demo-Role: admin") >= 0
+}
+
+// ---- HTML/CSS/JS page, one real static response body --------------------
+// No `\"` inside -- every HTML attribute and every JS string below uses
+// single quotes on purpose, so this whole page needs zero escaping in
+// this language's own minimal string-literal escape set (`\"`/`\\`/`\n`/
+// `\t`/`\r` only -- `token.rs`'s own doc comment).
+
+fn index_html() -> Text {
+    return Text("<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'>
+<title>Nirdosha Ops Console</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 2rem auto; max-width: 720px; background: #f4f5f7; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; }
+  .card { background: white; border-radius: 10px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+  button { padding: 0.5rem 1rem; margin-right: 0.5rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.95rem; }
+  .role-admin { background: #2563eb; color: white; }
+  .role-finance { background: #16a34a; color: white; }
+  .role-signout { background: #e5e7eb; color: #111; }
+  table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; }
+  td, th { padding: 0.5rem 0.3rem; border-bottom: 1px solid #eee; text-align: left; }
+  input { padding: 0.45rem; margin-right: 0.5rem; border: 1px solid #ccc; border-radius: 6px; }
+  .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background: #eef2ff; color: #3730a3; }
+  #create-status { color: #555; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Nirdosha Ops Console</h1>
+<p style='color:#555'>Real compiled Nirdosha binary. Real Postgres. Real RBAC. Real HTTP -- no mock server behind this page.</p>
+
+<div class='card' id='login-card'>
+  <p>Sign in as:</p>
+  <button class='role-admin' id='admin-btn'>Admin (CFO)</button>
+  <button class='role-finance' id='finance-btn'>Finance Clerk</button>
+</div>
+
+<div class='card' id='app-card' style='display:none'>
+  <p>Signed in as <b id='who'></b> &mdash; a real <code>landing</code> rule (RFC 0010) sends this role to <span class='badge' id='landing-target'></span></p>
+  <button class='role-signout' id='signout-btn'>Sign out</button>
+</div>
+
+<div class='card' id='po-card' style='display:none'>
+  <h2>Purchase Orders</h2>
+  <table>
+    <thead><tr><th>Vendor</th><th>Amount (cents)</th></tr></thead>
+    <tbody id='po-body'></tbody>
+  </table>
+  <div id='create-panel' style='display:none; margin-top:1rem'>
+    <input id='vendor-input' placeholder='Vendor name'>
+    <input id='amount-input' placeholder='Amount cents' type='number'>
+    <button class='role-admin' id='create-btn'>Create Purchase Order</button>
+  </div>
+  <p id='create-status'></p>
+</div>
+
+<script>
+var LANDING = [
+  { role: 'admin', target: 'admin_home' },
+  { role: 'finance', target: 'finance_queue' },
+  { isDefault: true, target: 'home_screen' }
+];
+
+function landingTarget(role) {
+  for (var i = 0; i < LANDING.length; i++) {
+    if (LANDING[i].isDefault) return LANDING[i].target;
+    if (LANDING[i].role === role) return LANDING[i].target;
+  }
+  return 'home_screen';
+}
+
+var currentRole = null;
+
+function signIn(role) {
+  currentRole = role;
+  document.getElementById('login-card').style.display = 'none';
+  document.getElementById('app-card').style.display = 'block';
+  document.getElementById('po-card').style.display = 'block';
+  document.getElementById('who').textContent = role;
+  document.getElementById('landing-target').textContent = landingTarget(role);
+  document.getElementById('create-panel').style.display = (role === 'admin') ? 'block' : 'none';
+  document.getElementById('create-status').textContent = '';
+  loadPOs();
+}
+
+function signOut() {
+  currentRole = null;
+  document.getElementById('login-card').style.display = 'block';
+  document.getElementById('app-card').style.display = 'none';
+  document.getElementById('po-card').style.display = 'none';
+}
+
+function loadPOs() {
+  fetch('/api/list').then(function (r) { return r.json(); }).then(function (rows) {
+    var body = document.getElementById('po-body');
+    body.innerHTML = '';
+    for (var i = 0; i < rows.length; i++) {
+      var tr = document.createElement('tr');
+      var td1 = document.createElement('td');
+      td1.textContent = rows[i].vendor;
+      var td2 = document.createElement('td');
+      td2.textContent = rows[i].amount_cents;
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      body.appendChild(tr);
+    }
+  });
+}
+
+function createPO() {
+  var v = document.getElementById('vendor-input').value;
+  var a = parseInt(document.getElementById('amount-input').value, 10) || 0;
+  fetch('/api/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Demo-Role': currentRole || '' },
+    body: JSON.stringify({ vendor: v, amount_cents: a })
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    document.getElementById('create-status').textContent = res.err ? ('Error: ' + res.err) : ('Created: ' + res.value);
+    document.getElementById('vendor-input').value = '';
+    document.getElementById('amount-input').value = '';
+    loadPOs();
+  });
+}
+
+document.getElementById('admin-btn').addEventListener('click', function () { signIn('admin'); });
+document.getElementById('finance-btn').addEventListener('click', function () { signIn('finance'); });
+document.getElementById('signout-btn').addEventListener('click', signOut);
+document.getElementById('create-btn').addEventListener('click', createPO);
+</script>
+</body>
+</html>
+")
+}
+
+// ---- accept loop ---------------------------------------------------------
+//
+// Everything below is inlined into `main`'s own loop body, deliberately
+// -- `conn: tcp` is affine (no `&tcp` borrow form exists yet, the same
+// real limitation `55_nirdosha_ops_console.nir`'s own `db` helpers
+// already ran into), so passing it into a separate `respond_*`/`handle_*`
+// function would *move* it there, leaving `main`'s own trailing `stop
+// conn` referencing an already-moved value. `send(conn, ...)` itself
+// (the keyword form, not an ordinary call) is fine to use repeatedly in
+// one function, same as `51_compiled_serve.nir`'s own two-`send`-calls-
+// per-route precedent -- the restriction is specifically about handing
+// the handle itself to another function.
+
+fn empty_json_array() -> json {
+    return match json_parse("[]") {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn empty_json_object() -> json {
+    return match json_parse("{}") {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn list_response_body() -> json {
+    return match list_purchase_order() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+fn count_response_body() -> json {
+    return match stat_purchase_order_count() {
+        Err(e) => empty_json_object(),
+        Ok(row) => row,
+    }
+}
+
+fn create_response_body(req: Text) -> json {
+    let body_text: Text = req_body(req)
+    let body: str = body_text.value
+    let vendor: str = match json_parse(body) {
+        Err(e) => "unknown vendor",
+        Ok(doc) => match json_get_str(doc, "vendor") {
+            Err(e) => "unknown vendor",
+            Ok(v) => v,
+        },
+    }
+    let amount: i64 = match json_parse(body) {
+        Err(e) => 0,
+        Ok(doc) => match json_get_i64(doc, "amount_cents") {
+            Err(e) => 0,
+            Ok(a) => a,
+        },
+    }
+    let created: Text = create_as_admin(Text(vendor), amount)
+    let resp_doc: Result(json, str) = json_set_str(empty_json_object(), "value", created.value)
+    return match resp_doc {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn forbidden_response_body() -> json {
+    let err_doc: Result(json, str) = json_set_str(empty_json_object(), "err", "forbidden -- send X-Demo-Role: admin")
+    return match err_doc {
+        Err(e) => empty_json_object(),
+        Ok(j) => j,
+    }
+}
+
+fn main() {
+    let l: tcp_listener = listen(8090)
+    print("Nirdosha Ops Console server listening on http://127.0.0.1:8090/")
+    while true {
+        let conn: tcp = accept(l)
+        let req: Text = Text(recv(conn))
+        let method_text: Text = req_method(req)
+        let method: str = method_text.value
+        let path_text: Text = req_path(req)
+        let path: str = path_text.value
+
+        if method == "GET" && path == "/" {
+            let page: Text = index_html()
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
+            send(conn, page.value)
+        } else if method == "GET" && path == "/api/list" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, list_response_body())
+        } else if method == "GET" && path == "/api/count" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, count_response_body())
+        } else if method == "POST" && path == "/api/create" {
+            if req_has_admin_header(req) {
+                send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+                send(conn, create_response_body(req))
+            } else {
+                send(conn, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+                send(conn, forbidden_response_body())
+            }
+        } else {
+            send(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+        }
+        stop conn
+    }
+}

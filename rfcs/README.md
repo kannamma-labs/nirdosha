@@ -21,6 +21,7 @@ this list.
 | [0007](./0007-apm-runtime-kernel.md) | A compiled-path resource-control kernel — boundary-leased admission, fail-open telemetry, and NFRs-as-language |
 | [0008](./0008-native-plugin-abi-widening.md) | Native plugin ABI widening and Cargo-driven discovery — a compile-time-only path to a real plugin ecosystem |
 | [0009](./0009-ui-catalog-extensibility.md) | Grammar-of-graphics charts and compile-time UI-plugin components — escaping the closed 4-chart/7-control catalog without opening a runtime hole |
+| [0010](./0010-landing-and-serve-exposure.md) | Per-role/claim `landing` screens, and the compiled-`serve` route-exposure model (deny-by-default on mutating exposure) |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a

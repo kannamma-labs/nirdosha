@@ -34,9 +34,14 @@ const WELL_FORMED: &str = r#"
     }
 
     fn list_product() -> Text { return Text("[]") }
-    fn create_product(p: Product) -> Text { return Text(p.name) }
-    fn update_product(p: Product) -> Text { return Text(p.name) }
-    fn delete_product(id: i64) -> i64 { return id }
+    // `requires(public)` on each -- not a security decision this shape-
+    // checking fixture cares about, just satisfying `rfcs/0010-landing-and-serve-exposure.md`'s
+    // deny-by-default rule (a `create_`/`update_`/`delete_`-named
+    // function bound to a `screen`'s own `create`/`update`/`delete`
+    // needs *some* explicit `requires(...)`, public included).
+    fn create_product(p: Product) -> Text requires(public) { return Text(p.name) }
+    fn update_product(p: Product) -> Text requires(public) { return Text(p.name) }
+    fn delete_product(id: i64) -> i64 requires(public) { return id }
     fn restock_product(id: i64) -> i64 { return id }
 
     fn stat_product_count() -> i64 { return 0 }

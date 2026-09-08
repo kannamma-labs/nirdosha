@@ -109,6 +109,26 @@ pub enum Tok {
     /// inference; see `Screen`'s doc comment for the same reserved-vs-
     /// contextual reasoning.
     Dashboard,
+    /// `landing { role("admin") -> AdminScreen  default -> HomeScreen }`
+    /// (`rfcs/0010-landing-and-serve-exposure.md`) — a real reserved
+    /// keyword, same "no existing example could have used this as an
+    /// identifier for something else" reasoning `Dashboard`/`Screen`
+    /// already use, since `landing` names the per-role default-screen
+    /// block a top-level item, not a contextual field inside one.
+    /// `role`/`claim`/`default` *inside* the block are plain idents
+    /// matched by string (`parse_landing_decl`), same as `tile`/`chart`/
+    /// `visual` already are inside `dashboard { ... }` — only the block
+    /// introducer itself needs reserving.
+    Landing,
+    /// `serve { expose fn_a, fn_b, ... }`
+    /// (`rfcs/0010-landing-and-serve-exposure.md`) — the compiled-`serve`
+    /// config section. A real reserved keyword for the same reason
+    /// `Landing` just above is: it names a top-level block, not a
+    /// contextual field. `expose` itself, inside the block, is a plain
+    /// ident matched by string (`parse_serve_config_decl`), same
+    /// contextual-keyword treatment as `role`/`claim`/`default` inside
+    /// `landing { ... }`.
+    Serve,
     /// `module "Display Name" { fn ... struct ... enum ... }` — pure
     /// nav-grouping sugar for `ui_gen.rs` (`docs/GRAMMAR.md`'s `module_decl`),
     /// not a real scoping/namespace construct: every declaration inside
@@ -445,6 +465,8 @@ impl<'a> Lexer<'a> {
                     "match" => Tok::Match,
                     "screen" => Tok::Screen,
                     "dashboard" => Tok::Dashboard,
+                    "landing" => Tok::Landing,
+                    "serve" => Tok::Serve,
                     "module" => Tok::Module,
                     "workflow" => Tok::Workflow,
                     "state" => Tok::State,

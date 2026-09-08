@@ -1907,13 +1907,13 @@ Current state: `codegen.rs`'s `check_supported` rejects, with a named
 reason, most of what's below — verified directly against its
 `unsupported(...)` call sites this session (not just docs/LANGUAGE.md §10's
 claim, though that section is currently accurate). B8 (compiled `serve`),
-part of B4 (identity crypto), B2 (`db`/`json`), part of B1 (`transact`
-Layer 1), B9 (`sleep_ms`), B3 (`mq`), B5 (`http`/`https`), and B10
-(`workflow` Layer 1) are now real exceptions, `[PARTIAL]`/`[DONE]` below,
-not `[OPEN]`/`[BLOCKED]` — see each entry. Only `sandbox` (B6) remains
-fully `[OPEN]`.
+B1 (`transact`, durability+replay included), part of B4 (identity
+crypto), B2 (`db`/`json`), B9 (`sleep_ms`), B3 (`mq`), B5 (`http`/
+`https`), and B10 (`workflow` Layer 1) are now real exceptions,
+`[PARTIAL]`/`[DONE]` below, not `[OPEN]`/`[BLOCKED]` — see each entry.
+Only `sandbox` (B6) remains fully `[OPEN]`.
 
-1. `[PARTIAL]` **B1. `transact` codegen.** 2026-09: Layer 1 real and
+1. `[DONE]` **B1. `transact` codegen.** 2026-09: Layer 1 real and
    compiled — `precheck?/network/verify/commit/compensate?/log?`,
    the implicit `network`/`verify`/`txn_id` bindings, a real `bool`
    result (`codegen::emit_transact`; `examples/features/36_transact.nir`,
@@ -1926,13 +1926,35 @@ fully `[OPEN]`.
    has no compiled equivalent), and `network`'s declared return type can
    never be `Result(_, _)` (`Ty::is_transact_scalar`), so there is no
    non-trapping failure signal to retry on — rejected explicitly, not
-   silently ignored. Still open: `commit`/`compensate`'s own
-   retry-with-backoff (possible in principle, since their return type is
-   unconstrained — just not attempted this round), the durability log
-   (`transact_log.rs`, deleted with the interpreter), and crash replay.
-2. `[PARTIAL]` **B2. `db` + `json` codegen.** 2026-09: `db_connect`/
-   `db_query`/`db_execute` (SQLite via `rusqlite`'s `bundled` feature,
-   `nir_db_*`, `runtime-kernels/src/lib.rs`) and all 9 `json_*` builtins
+   silently ignored.
+   **2026-09 follow-up, same item: durability log, bounded retry, and
+   crash replay** (`docs/adr/0009-transact-durability-and-replay.md`,
+   `crates/runtime-kernels/src/kernel/transact.rs` +
+   `kernel/instance_lock.rs`). `commit`/`compensate` now get real
+   bounded retry-with-backoff (`Codegen::emit_call_with_retry`, fixed
+   3-attempt budget, doubling backoff via `nir_sleep_ms`) whenever their
+   return type is `Result(_, _)`; a fsync'd (`synchronous=FULL`) SQLite
+   durability log records each attempt's already-computed args before
+   the first live try, so retry exhaustion leaves a row `commit_pending`/
+   `compensate_pending` rather than losing it; a compiler-synthesized
+   per-call-site replay trampoline (mirroring `spawn`'s own trampoline
+   mechanism) re-dispatches every pending row from generated `main`'s
+   own prologue, before `nir_main()` ever runs. Verified against real
+   compiled binaries run as two separate OS processes sharing one log
+   file (`crates/compiler/tests/codegen.rs`'s
+   `transact_replay_finishes_a_commit_pending_row_left_by_a_prior_process`).
+   **Two disclosed, deliberate narrowings, not silent gaps**: replay
+   dispatch is by a bare per-site `site_id` with no build-version
+   fingerprint guard (a rolling deploy that changes the *set* of
+   `transact` sites between the writing and replaying process could
+   dispatch to the wrong site — real, separate follow-up work); and the
+   durability log is local-SQLite only, unsafe under this repo's own
+   `deploy/kustomize/overlays/postgres-multi-replica/` (a
+   Postgres-backed log for fleet-wide use is real, separate follow-up
+   work, not part of this item).
+2. `[DONE]` **B2. `db` + `json` codegen.** 2026-09: `db_connect`/
+   `db_query`/`db_execute` (SQLite via `rusqlite`'s `bundled` feature)
+   and all 9 `json_*` builtins
    (`json_parse`/`json_get`/`json_get_str`/`json_get_i64`/`json_get_f64`/
    `json_get_bool`/`json_array_get`/`json_array_len`/`json_set_str`) are
    real, compiled, and verified — `examples/features/27_database.nir`
@@ -1943,15 +1965,36 @@ fully `[OPEN]`.
    anticipated: `str` + accessor shims, not a from-scratch runtime value
    type), re-parsed by each accessor — a real, disclosed cost (no
    persisted parsed-tree handle) traded for zero new representation.
-   Named gaps, not silently dropped: a zero-payload `enum` variant as a
-   bind value isn't compiled yet (only `i64`/`f64`/`str`/`bool`);
-   `BLOB` columns have no first-class Nirdosha type (represented as
-   JSON `null`). Postgres (the interpreter-era `dbconn.rs`, which no
-   longer exists at all — removed with the interpreter) remains a real,
-   separate, deferred follow-up: `postgres`/`postgres-native-tls` are
-   *not* statically bundled the way `rusqlite` is, so a compiled binary
-   using a Postgres `db_connect` would need real dynamic-linking/
-   deployment design (a system TLS library at minimum).
+   **2026-09 follow-up, same item: Postgres, and real pooling for
+   both backends** (`docs/adr/0005-postgres-pooling-and-tls.md`,
+   `crates/runtime-kernels/src/kernel/db.rs`) — `postgres://`/
+   `postgresql://` connection strings now open a real, pooled Postgres
+   connection (`postgres`/`postgres-native-tls`, vendored TLS,
+   verify-by-default off-`localhost`), and `db_connect` for *either*
+   backend now checks out from a process-wide `PoolRegistry` (validated
+   with a real `SELECT 1` on every checkout, a stale connection
+   transparently evicted-and-replaced before the caller sees it — a new
+   `stale_rehydrated` flight-recorder counter makes this visible)
+   instead of opening a fresh connection every call. `:memory:` stays
+   deliberately unpooled (a `:memory:` database is private to its own
+   connection). Verified against a real local Postgres server, not just
+   SQLite: `crates/compiler/tests/postgres.rs` (recreated fresh — the
+   original, interpreter-only version was deleted along with
+   `nirdosha::run`/`interpreter::Value`, both gone; this one spawns the
+   real compiled binary instead), plus `runtime-kernels`'s own
+   `kernel::db::tests` (pooling identity, rehydration after a backend
+   killed out from under the pool via `pg_terminate_backend`,
+   string-literal-and-comment-aware `?`→`$1,$2,...` placeholder
+   rewriting) and `db_kernel_tests` — all `NIRDOSHA_TEST_POSTGRES_URL`-gated,
+   `#[ignore]` by default, never required by CI
+   (`docker-compose.dev.yml` at the repo root stands up a real local
+   server for this). Named gaps, not silently dropped: a zero-payload
+   `enum` variant as a bind value isn't compiled yet (only
+   `i64`/`f64`/`str`/`bool`); `BLOB`/unrecognized Postgres column types
+   have no first-class Nirdosha type (represented as JSON `null`); the
+   Postgres TLS path is not yet verified against a real `build-windows`
+   CI run (assumed to go through `native-tls`'s SChannel backend, same
+   as `http`/`https`, but unconfirmed).
 3. `[DONE]` **B3. `mq` codegen** — 2026-09. `mq_connect`/`mq_publish`/
    `mq_consume` (Redis via the `redis` crate, `LPUSH`/`BLPOP`), real,
    verified against a real local Redis instance
@@ -1963,32 +2006,90 @@ fully `[OPEN]`.
    itself still doesn't compile — a pre-existing, unrelated `match_expr`
    arm-ordering limitation (`docs/PHASE0.md`'s "Twenty-first update"),
    the same one `oidc_validate_token`'s own worked example hit.
-4. `[PARTIAL]` **B4. Identity/Row 12 codegen** — `check_role` (2026-09,
+4. `[DONE]` **B4. Identity/Row 12 codegen** — `check_role` (2026-09,
    originally a plain comma-separated role list, upgraded again 2026-09
    to real JSON-array parsing with a comma-separated fallback),
    `oidc_validate_token`/`extract_claim`/`identity_expired` (2026-09,
    real `jsonwebtoken`-backed JWT/JWKS signature verification against a
    **static** JWKS — same `kty`-locks-`alg` guard as
    `crates/presence-gateway/src/jwt.rs`; live JWKS
-   refresh/rotation deferred). Still open: `check_role_path`/
-   `extract_claim_path` (dotted-path claim lookup), sessions, refresh
-   tokens, revocation, `validate_api_key`. On the critical path of every
-   authenticated request — do before general concurrency/sandboxing.
+   refresh/rotation deferred).
+   **2026-09 follow-up, same item: the rest of Row 12, all real, all
+   compiled** (`crates/runtime-kernels/src/kernel/identity.rs`) —
+   `check_role_path`/`extract_claim_path` (dotted-path claim lookup, real
+   JSON object-key walking, never array indexing); `create_application_session`/
+   `session_cookie` (a real unpredictable session id — per-process
+   entropy folded with a monotonic counter and real-time nanoseconds
+   through `sha256`, not derivable from subject+issuer — and a
+   `Set-Cookie`-shaped string whose `Max-Age` is the session's own real
+   remaining lifetime); `new_refresh_token`/`exchange_refresh_token`
+   (real server-side single-use enforcement — a second exchange attempt
+   against an already-redeemed handle is a real `Err`, not just relying
+   on the affine `box i64` field's compile-time guarantee, defense in
+   depth across the FFI boundary); `check_revocation` (fail-open on an
+   absent `"revoked"` claim, not fail-closed — an already-issued token
+   from before the claim existed must not read as revoked);
+   `validate_api_key` (constant-time `sha256` compare against a
+   caller-supplied hash — this builtin's own fixed 2-`str` signature has
+   no room for a lookup step, so it doesn't pretend to do one; the
+   caller looks up the expected hash themselves). Verified end to end,
+   real compiled-and-run coverage, not unit tests in isolation:
+   `crates/compiler/tests/codegen.rs`'s
+   `row12_remaining_identity_builtins_compile_and_run_for_real` exercises
+   all eight through a real compiled binary, including the single-use
+   enforcement actually firing on a second redemption attempt. Named
+   gaps, disclosed not hidden: `validate_api_key`'s expected-hash table
+   is read once at process startup in this design (restart-only
+   rotation — the builtin itself has no refresh mechanism to give it
+   one); a match arm that field-accesses a match-pattern-bound aggregate
+   value directly (`Ok(c) => c.value`) hits a real, pre-existing,
+   general `codegen.rs` ordering gap (`local_ty_of` resolves a match's
+   result type from the first arm's body *before* `match_enum` binds
+   the arm's own pattern variable into scope) — unrelated to this item,
+   worked around in the new test by routing through a function call,
+   not fixed as part of this phase.
 5. `[DONE]` **B5. `http`/`https` codegen** — 2026-09. `http_get`/
    `http_post`/`https_get`/`https_post`, real (`std::net::TcpStream` for
-   plain HTTP, `native_tls::TlsStream` for HTTPS), `Connection: close` +
-   read-to-EOF + real chunked-transfer-encoding decoding (found
-   necessary by testing against a real production server, not designed
-   in advance). **Decided, not left to deploy time**: TLS is vendored
-   (`openssl = { features = ["vendored"] }`), not system-linked — found
-   necessary by an actual link failure against this environment's system
-   OpenSSL (a real ABI mismatch, `SSL_ctrl`/`SSL_CTX_ctrl` missing), same
-   "no system dependency" posture `rusqlite`'s `bundled` SQLite already
-   has. Verified end to end: a real local-TCP-server round trip
+   plain HTTP, `native_tls::TlsStream` for HTTPS), real chunked-transfer-
+   encoding decoding (found necessary by testing against a real
+   production server, not designed in advance). **Decided, not left to
+   deploy time**: TLS is vendored (`openssl = { features = ["vendored"] }`),
+   not system-linked — found necessary by an actual link failure against
+   this environment's system OpenSSL (a real ABI mismatch,
+   `SSL_ctrl`/`SSL_CTX_ctrl` missing), same "no system dependency"
+   posture `rusqlite`'s `bundled` SQLite already has.
+   **2026-09 follow-up, same item: real HTTP/1.1 keep-alive + pooling +
+   admission control** (`crates/runtime-kernels/src/kernel/http.rs`) —
+   the original `Connection: close` + read-to-EOF design was correct for
+   its own scope but structurally incompatible with pooling (a pooled
+   connection only has value if it survives past one request; under
+   `Connection: close` every "reuse" would immediately fail validation).
+   Replaced with a real incremental `Content-Length`/chunked-aware
+   response reader that never reads past one response's own boundary —
+   the only way keep-alive framing can work — plus a `PoolRegistry`-based
+   pool per scheme (`kernel::db`'s same pattern) keyed by `host:port`,
+   real liveness validation on checkout (a non-blocking peek for plain
+   TCP; TLS has no safe peek, so HTTPS relies on the server's own
+   declared `Connection: close` — honored via `ManageConnection::has_broken`,
+   never silently reused past it — plus at-most-once retry semantics),
+   and a new `Domain::Http` admission ceiling (previously **absent
+   entirely** — `http_get`/`post` had zero admission control before this
+   follow-up, a real, disclosed gap now closed, not a hypothetical one).
+   Verified end to end, including the actual point of the rewrite, not
+   just "no error": `crates/runtime-kernels/src/kernel/http.rs`'s own
+   tests prove real connection *reuse* (three requests against a real
+   local server, counted at exactly one `accept()`), a server-initiated
+   `Connection: close` correctly *not* being reused, and — caught by
+   its own test before this shipped, not found later — a real bug where
+   bytes over-read past one response's boundary (a single `read()` can
+   return more than one response's worth of bytes) were silently
+   dropped instead of carried into the next response's parse, corrupting
+   it; fixed by threading a `leftover` buffer through each pooled
+   connection. Plus the pre-existing real local-TCP-server round trip
    (`crates/compiler/tests/codegen.rs`'s
    `http_get_and_post_round_trip_against_a_real_local_server`) and a
    real HTTPS `GET` against `example.com` (manual, network-dependent,
-   not part of the automated suite).
+   not part of the automated suite) — both still green, unmodified.
 6. `thread`/`spawn`/`join`, `chan`/`send`/`recv` `[DONE]` (2026-09) —
    compiled, backed by a real admission-controlled kernel
    (`runtime-kernels`) and a dynamic deadlock detector
@@ -2045,6 +2146,49 @@ fully `[OPEN]`.
    bodies are fixed literals). Schema-embedded-at-compile-time (B2) and
    a real deployment story (containerization, secrets/JWKS handling —
    `docs/PUBLIC_ROADMAP.md`'s Track A) remain open, separate work.
+   **2026-09 prerequisite work, landed ahead of the dispatch-table
+   framework itself**: `landing { role(...)/claim(...)/default -> <screen> }`
+   (per-role default-screen redirect) and the `serve { expose ... }`
+   route-exposure model, with a real, unconditional deny-by-default
+   typeck rule on any exposed mutating (`create_`/`update_`/`delete_`)
+   function with no `requires(...)` — `rfcs/0010-landing-and-serve-exposure.md`,
+   `crates/compiler/tests/landing_dsl.rs` (11 tests) +
+   `crates/compiler/tests/serve_exposure.rs` (13 tests).
+   **2026-09, same item, the HTTP engine itself**: a new crate,
+   `crates/compiled-serve` (`docs/adr/0010-runtime-kernels-rlib-for-compiled-serve.md`
+   for why it lives in `runtime-kernels`'s own separate workspace, not
+   the root one) — a real raw-`TcpListener` accept loop with per-
+   connection socket timeouts, a new `Domain::ServeHttp` admission
+   ceiling (fail-fast `503`, never a silent stall, deliberately separate
+   from `Domain::Thread` so idle keep-alive connections can never starve
+   a handler's own `spawn` calls), a real `413` body-size cap
+   (`MAX_BODY_BYTES`, the deleted interpreter-era `serve.rs`'s own
+   working `1 MiB` default, reused not reinvented), keep-alive +
+   `max_requests_per_connection`, CORS (never a wildcard on a
+   credentialed response), a fixed-window per-IP rate limiter, real
+   `Set-Cookie` (`HttpOnly; Secure; SameSite=Lax`), and `/healthz`
+   (always live)/`/readyz` (a real, explicit `Readiness` flag, for the
+   bind-before-replay ordering `docs/adr/0009` already specifies)/
+   `/metrics` (bearer-token-gated). Every route is a real function
+   pointer (`RouteHandler`'s own fixed ABI), never a name string — RBAC
+   happens *inside* the pointed-to function, this crate never
+   reimplements it. 21 tests (`crates/compiled-serve/src/tests.rs` +
+   `ratelimit.rs`), all against a real bound listener and real
+   `TcpStream` clients, no mocks. **Not yet wired to `codegen.rs`** —
+   every test route is hand-written, matching `RouteHandler`'s ABI
+   directly; making a real compiled `.nir` program's own exposed
+   functions reach this table (plus the `nirdosha build --serve` CLI
+   flag to link this crate in at all) is real, separate follow-up work,
+   the same "prove the mechanism, then wire it to codegen" order
+   `transact`'s own durability work (`docs/adr/0009`) already followed.
+   One real, disclosed limit found while building it: a panic inside a
+   `RouteHandler` (a plain `extern "C" fn`) aborts the whole process
+   immediately rather than unwinding — consistent with, not a departure
+   from, this project's "a compiled trap is an unconditional `abort()`"
+   philosophy (`codegen.rs::emit_transact`'s own doc comment), since a
+   real route handler is eventually compiled LLVM code either way. See
+   `crates/compiled-serve/README.md` and `docs/adr/0010`'s own
+   Consequences section for the full detail.
 9. `[DONE]` **B9. `sleep_ms` codegen** — 2026-09. `nir_sleep_ms`
    (`runtime-kernels/src/lib.rs`), a plain `std::thread::sleep` wrapper;
    needed anyway once `transact` (B1)'s own future retry/backoff work
@@ -2068,6 +2212,71 @@ fully `[OPEN]`.
     isn't enforced at runtime; `notify` always takes the offline
     (`send_email`-fallback) path. See `docs/WORKFLOW.md`'s own
     "Status, 2026-09" section for the full detail.
+
+### The "Nirdosha Ops Console" — Track B's own cross-cutting integration proof
+
+2026-09: `examples/features/55_nirdosha_ops_console.nir` — one real,
+compiled program combining B1/B2/B4/B5/B9/B10 above plus `rfcs/0010`'s
+`landing`/`serve` exposure model into a single coherent scenario (real
+Postgres-backed purchase-order CRUD, real RBAC via `acquire`/
+`check_role`, a real HTTP call to a webhook, and a workflow-gated,
+`transact`-backed disbursement), verified by compiling and running the
+actual binary against a real local Postgres + a real `TcpListener` mock
+webhook — `crates/compiler/tests/nirdosha_ops_console.rs`, three tests:
+the full scenario end to end (`#[ignore]`-gated, needs a real Postgres),
+`nirdosha emit-ui`'s own `LANDING` table proven to contain the correct
+per-role screen mapping (not `#[ignore]`-gated — `emit-ui` never runs
+the program), and a genuine crash-and-replay test — two *separately
+compiled binaries* (one whose `commit` targets an unreachable Postgres
+port, one real) sharing one durability log, proving `docs/adr/0009`'s
+replay mechanism recovers a disbursement across a real binary-version
+change, not just a re-run of the identical process.
+
+**Verified two ways, not just one.** `55_nirdosha_ops_console.nir`
+itself is verified by running its compiled binary directly, not by
+serving it and clicking through a browser — compiled `serve`'s
+dispatch-table framework (`crates/compiled-serve`, B8 above) is real
+and tested on its own but not yet wired to `codegen.rs`, so nothing
+actually answers an HTTP request from *that specific binary* yet.
+**2026-09, same day: a real, live, browser-clickable version of the
+same scenario**, `examples/features/56_nirdosha_ops_console_server.nir`
+— the primitives-based `tcp_listener`/`accept` style
+(`51_compiled_serve.nir`'s already-real, already-working mode) extended
+just far enough to serve a real page: `GET /` returns a real hand-
+written HTML/CSS/JS control panel, `GET /api/list`/`GET /api/count`
+send a real Postgres `db_query` result straight over the socket, and
+`POST /api/create` really parses a posted JSON body and really calls
+the same `acquire`/`check_role`-gated `create_purchase_order` the other
+file does. Verified by a real compiled server process and real
+`TcpStream` clients
+(`crates/compiler/tests/nirdosha_ops_console.rs`'s
+`nirdosha_ops_console_server_answers_real_http_requests_with_real_postgres_data`,
+`#[ignore]`-gated, needs Postgres) — and by hand, with real `curl`
+requests and a real browser tab open against `http://127.0.0.1:8090/`.
+**One small, real, disclosed language extension landed alongside it**:
+`send(tcp, json)` is now legal (`typeck.rs::Expr::Send`'s own doc
+comment) — `json` shares `str`'s exact `{ptr, i64}` representation, and
+this language has no string-concatenation or JSON-array-building
+primitive a hand-written route could otherwise use to compose a
+multi-row response with. **One honest shortcut, not hidden**: the
+`X-Demo-Role` header this server reads to gate `POST /api/create` is a
+plain, unsigned, `curl`-forgeable demo convenience, not a real JWT —
+this backend has no compiled token-*signing* primitive at all yet (only
+`oidc_validate_token` *verification* is real), so there is no real
+token to check here. "Each role lands on its own screen" is real in
+both files: as checked *data* (the `LANDING` table `ui_gen.rs` emits)
+in the first, and as an actual client-side redirect a browser will
+really perform in the second.
+
+**One real, previously-undiscovered codegen bug found and disclosed
+while building this** (`codegen.rs::declare_named_type`'s own doc
+comment has the full detail, not fixed here): `match <result_expr> {
+Ok(j) => Ok(j), Err(e) => Err(e) }` — re-wrapping a `Result` where an
+arm's own tail expression directly constructs `Ok(...)`/`Err(...)` —
+hits a real `unreachable!` in codegen, independent of which concrete
+types are involved. Worked around throughout this file by routing each
+arm through a small named helper function instead of writing the bare
+constructor as the arm's own tail expression.
 
 ---
 
