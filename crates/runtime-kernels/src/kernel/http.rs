@@ -225,6 +225,32 @@ fn parse_headers(head_str: &str) -> Result<(i64, bool, Option<usize>, bool), Str
 /// into the next call on this connection — silently discarding them
 /// (as an early version of this function did) corrupts the next
 /// response's framing.
+///
+/// Red-team report A17 (`scratch/red-team-report-main-d7fae42.md`): a
+/// picture of where the boundaries actually fall, since the ~200 lines
+/// below thread `header_buf`/`content_length`/leftover bytes through
+/// several cases (fixed-length, chunked, connection-close-delimited) it
+/// takes real effort to hold in your head from the code text alone.
+///
+/// One underlying `read()` off the socket, in the *content-length* case:
+/// ```text
+/// header_buf (grows across possibly several `read()` calls) ─────────┐
+/// ┌───────────────────────────────┬────┬─────────────────┬───────────┴──────┐
+/// │ status line + headers          │\r\n│ this response's  │ next response's │
+/// │ "HTTP/1.1 200 OK\r\n..."        │\r\n│ body             │ own bytes, if    │
+/// │                                 │    │ (content_length) │ any arrived in   │
+/// │                                 │    │                  │ the same read()  │
+/// └───────────────────────────────┴────┴─────────────────┴──────────────────┘
+///                                       ^-- HttpParsed.body ends exactly here
+///                                                          ^-- returned as
+///                                                              `leftover`, never
+///                                                              processed as part
+///                                                              of *this* response
+/// ```
+/// The chunked case replaces the fixed `content_length` slice with a
+/// sequence of `<hex-size>\r\n<chunk-bytes>\r\n` runs terminated by a
+/// `0\r\n\r\n` chunk — `leftover` is still "whatever came after that
+/// terminator, in the same `read()`," the same boundary rule either way.
 fn read_http_response(stream: &mut impl Read, prefix: Vec<u8>) -> Result<(HttpParsed, bool, Vec<u8>), String> {
     let mut header_buf = prefix;
     let mut chunk = [0u8; 4096];

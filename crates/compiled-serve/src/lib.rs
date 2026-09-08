@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nirdosha_runtime_kernels::kernel::{self, domain};
+use nirdosha_runtime_kernels::constant_time_eq;
 
 mod http;
 mod ratelimit;
@@ -137,6 +138,18 @@ pub struct ServeConfig {
     /// — empty by default (rate-limit on the direct peer only). Never
     /// trust `X-Forwarded-For` from an untrusted peer: that's trivially
     /// spoofable by any client.
+    ///
+    /// `ServeConfig::default()` seeds this from
+    /// `NIRDOSHA_SERVE_TRUSTED_PROXIES` (a comma-separated list of plain
+    /// IPs, e.g. `10.0.0.1,10.0.0.2`) if set — red-team report A16
+    /// (`scratch/red-team-report-main-d7fae42.md`): without this, adding
+    /// a trusted proxy (a new ingress, say) required a rebuild. **CIDR
+    /// ranges are not supported here** (the report's own text
+    /// acknowledges this is real, separate follow-up work, not a small
+    /// fix) — every entry must be a single, literal `IpAddr`; an invalid
+    /// entry in the env var is skipped with a loud `eprintln!`, not a
+    /// silent drop, matching this crate's own degrade-to-default-not-fail
+    /// posture for config parsing elsewhere.
     pub trusted_proxies: Vec<IpAddr>,
     /// A bearer token `/metrics` requires — `None` means `/metrics`
     /// answers unauthenticated, which is fine only when the listener
@@ -156,10 +169,32 @@ impl Default for ServeConfig {
             rate_limited_paths: Vec::new(),
             rate_limit_max_per_window: 20,
             rate_limit_window: Duration::from_secs(60),
-            trusted_proxies: Vec::new(),
+            trusted_proxies: trusted_proxies_from_env(),
             metrics_token: None,
         }
     }
+}
+
+/// See [`ServeConfig::trusted_proxies`]'s own doc comment for the format
+/// and rationale (A16). Reads `NIRDOSHA_SERVE_TRUSTED_PROXIES` once, at
+/// `ServeConfig::default()` construction time -- not cached across calls
+/// the way `kernel`'s own domain ceilings are (A24's own finding is
+/// exactly why this crate doesn't repeat that mistake for a value an
+/// operator might reasonably expect to change between deployments of a
+/// freshly-constructed config, e.g. in a test).
+fn trusted_proxies_from_env() -> Vec<IpAddr> {
+    let Ok(raw) = std::env::var("NIRDOSHA_SERVE_TRUSTED_PROXIES") else { return Vec::new() };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.parse::<IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                eprintln!("nirdosha compiled-serve: NIRDOSHA_SERVE_TRUSTED_PROXIES entry {s:?} is not a valid IP address -- skipped");
+                None
+            }
+        })
+        .collect()
 }
 
 /// A bound-but-not-yet-accepting listener — the bind-before-replay
@@ -421,9 +456,43 @@ fn call_route(handler: RouteHandler, args_json: &[u8], unverified_bearer_token_j
 /// CSRF hole a custom-header requirement on mutating routes (real,
 /// separate follow-up on the client-bundle side — `ui_gen.rs`'s own
 /// fetch wrapper contract, not this crate) exists to close.
+/// `(scheme, host, port)`, with an *implicit* default port
+/// (`https` → 443, `http` → 80, anything else → `None`, treated as
+/// "always distinct from any explicit port") filled in when the origin
+/// string carries none — red-team report A21
+/// (`scratch/red-team-report-main-d7fae42.md`): a browser normalizes
+/// `https://app.example.com:443` and `https://app.example.com` to the
+/// *same* origin for CORS purposes, but a bare `==` string comparison
+/// (this function's old shape) treated them as different, so a
+/// configured `allowed_origins` entry without an explicit port could
+/// silently fail to match a request that carried one (or vice versa) —
+/// a CORS failure for what both sides consider the same origin.
+fn parse_origin(origin: &str) -> Option<(&str, &str, u16)> {
+    let (scheme, rest) = origin.split_once("://")?;
+    let default_port = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => 0, // no sensible default; an explicit port is required to match at all
+    };
+    match rest.rsplit_once(':') {
+        Some((host, port_str)) => match port_str.parse::<u16>() {
+            Ok(port) => Some((scheme, host, port)),
+            Err(_) => Some((scheme, rest, default_port)), // not a real port (e.g. an IPv6 host's own ':') -- treat the whole thing as host
+        },
+        None => Some((scheme, rest, default_port)),
+    }
+}
+
+fn origins_match(a: &str, b: &str) -> bool {
+    match (parse_origin(a), parse_origin(b)) {
+        (Some(pa), Some(pb)) => pa == pb,
+        _ => a == b, // either side failed to parse -- fall back to the old literal comparison rather than silently matching nothing
+    }
+}
+
 fn cors_headers_for(req: &http::Request, config: &ServeConfig) -> Vec<(String, String)> {
     let Some(origin) = req.header("origin") else { return Vec::new() };
-    if !config.allowed_origins.iter().any(|o| o == origin) {
+    if !config.allowed_origins.iter().any(|o| origins_match(o, origin)) {
         return Vec::new();
     }
     vec![
@@ -450,7 +519,13 @@ fn cors_preflight_response(req: &http::Request, config: &ServeConfig) -> http::R
 fn metrics_response(req: &http::Request, config: &ServeConfig) -> http::Response {
     match &config.metrics_token {
         Some(token) => {
-            let ok = req.header("authorization").map(|h| h == format!("Bearer {token}")).unwrap_or(false);
+            // Red-team report A20: plain `==` on the full `Bearer <token>`
+            // string is a real timing oracle against `/metrics` for a
+            // short or guessable token -- `constant_time_eq` is the same
+            // function `kernel::identity`'s own API-key validation
+            // already uses for exactly this reason.
+            let expected = format!("Bearer {token}");
+            let ok = req.header("authorization").map(|h| constant_time_eq(h.as_bytes(), expected.as_bytes())).unwrap_or(false);
             if !ok {
                 return http::Response::error(401, "unauthorized");
             }
