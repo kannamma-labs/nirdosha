@@ -9939,7 +9939,8 @@ fn build_impl(
     match result {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => Err(format!(
-            "clang failed:\n{}",
+            "clang failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         )),
         Err(e) => Err(format!("could not run `clang`: {e} (is it installed and on PATH?)")),

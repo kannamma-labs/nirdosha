@@ -146,4 +146,8 @@ fn main() {
         });
     std::fs::write(out_dir.join("native_static_libs.txt"), native_libs)
         .expect("writing native_static_libs.txt into OUT_DIR");
+    // Temporary CI diagnostic (see PR discussion on the Windows LNK1181
+    // link failure) -- surfaces the exact captured list in the `Build`
+    // step's own log, without needing to reach a link failure to see it.
+    println!("cargo::warning=native_static_libs captured: {native_libs}");
 }
