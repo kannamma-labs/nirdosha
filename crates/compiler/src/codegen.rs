@@ -261,6 +261,7 @@ const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "d
 const IDENTITY_BUILTINS: &[&str] = &[
     "check_role",
     "oidc_validate_token",
+    "mock_issue_token",
     "extract_claim",
     "identity_expired",
     "check_role_path",
@@ -1746,6 +1747,16 @@ fn emit_llvm_ir_impl<'a>(
     )
     .unwrap();
     writeln!(cg.out, "declare i32 @nir_extract_claim(ptr, i64, ptr, i64, ptr)").unwrap();
+    // `mock_issue_token` (`IDENTITY_BUILTINS`'s own doc comment) — the
+    // inverse of `oidc_validate_token`: signs a token instead of
+    // verifying one, HS256-only, `nir_mock_issue_token`'s own doc comment
+    // has the scope. `out_token`/`out_err` are `{ptr, i64}`-shaped, same
+    // as every other `str`-payload out-param above.
+    writeln!(
+        cg.out,
+        "declare i32 @nir_mock_issue_token(ptr, i64, ptr, i64, ptr, i64, i64, i64, ptr, i64, ptr, i64, ptr, ptr)"
+    )
+    .unwrap();
     // The rest of Row 12 (`docs/nirdosha_row12_functions_identity.md`,
     // `kernel::identity`'s own module doc has the full design): dotted-
     // path claim lookup, sessions, refresh tokens, revocation, API keys.
@@ -2683,6 +2694,9 @@ impl Codegen<'_> {
             }
             Expr::Call(name, _, _) if name == "oidc_validate_token" => {
                 Ty::Named("Result".to_string(), vec![Ty::Named("VerifiedIdentity".to_string(), vec![]), Ty::Str])
+            }
+            Expr::Call(name, _, _) if name == "mock_issue_token" => {
+                Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str])
             }
             Expr::Call(name, _, _) if name == "extract_claim" => {
                 Ty::Named("Result".to_string(), vec![Ty::Named("ClaimView".to_string(), vec![]), Ty::Str])
@@ -5489,6 +5503,9 @@ impl Codegen<'_> {
         if name == "oidc_validate_token" {
             return self.emit_oidc_validate_token(args, scopes);
         }
+        if name == "mock_issue_token" {
+            return self.emit_mock_issue_token(args, scopes);
+        }
         if name == "extract_claim" {
             return self.emit_extract_claim(args, scopes);
         }
@@ -5785,6 +5802,42 @@ impl Codegen<'_> {
 
         writeln!(self.out, "{merge_label}:").unwrap();
         Ok(dest)
+    }
+
+    /// `mock_issue_token(subject, issuer, audience, issued_at, ttl_secs,
+    /// claims_json, jwks_json) -> Result(str, str)` — the inverse of
+    /// `emit_oidc_validate_token` just above: a single `str` payload, not
+    /// a six-field struct, so this follows `emit_json_get_str`'s simpler
+    /// shape instead (`nir_mock_issue_token`'s own doc comment has the
+    /// real HS256-only scope).
+    fn emit_mock_issue_token(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]);
+        let (subject_ptr, subject_len) = self.str_parts(&args[0], scopes)?;
+        let (issuer_ptr, issuer_len) = self.str_parts(&args[1], scopes)?;
+        let (audience_ptr, audience_len) = self.str_parts(&args[2], scopes)?;
+        let issued_at = self.expr(&args[3], scopes)?;
+        let ttl_secs = self.expr(&args[4], scopes)?;
+        let (claims_ptr, claims_len) = self.str_parts(&args[5], scopes)?;
+        let (jwks_ptr, jwks_len) = self.str_parts(&args[6], scopes)?;
+
+        let token_scratch = self.fresh_reg("mock_issue_token_value_scratch");
+        self.emit_alloca(&token_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg("mock_issue_token_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let found = self.fresh_reg("mock_issue_token_ok");
+        writeln!(
+            self.out,
+            "  {found} = call i32 @nir_mock_issue_token(ptr {subject_ptr}, i64 {subject_len}, ptr {issuer_ptr}, i64 {issuer_len}, \
+             ptr {audience_ptr}, i64 {audience_len}, i64 {issued_at}, i64 {ttl_secs}, ptr {claims_ptr}, i64 {claims_len}, \
+             ptr {jwks_ptr}, i64 {jwks_len}, ptr {token_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let is_ok = self.icmp("ne", "i32", &found, "0")?;
+        let token_val = self.fresh_reg("mock_issue_token_value");
+        writeln!(self.out, "  {token_val} = load {{ptr, i64}}, ptr {token_scratch}").unwrap();
+        let err_val = self.fresh_reg("mock_issue_token_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &token_val, &err_val, "mock_issue_token")
     }
 
     /// `extract_claim(identity, name) -> Result(ClaimView, str)` — real
