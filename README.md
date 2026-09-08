@@ -81,6 +81,8 @@ The result: an HR staffer who isn't also an admin can call the function and get 
 
 `effect(pure)` is checked against what the function *actually does* — annotate a function that performs I/O as `pure` and `nirdosha build` rejects it, naming the real effect it found. `nfr(latency_ms: 50, concurrency_max: 1000)` wires real per-call tracking into the APM kernel with zero code at any call site, and escalates to `NIRDOSHA_OBSERVABILITY_URL` automatically if one is configured. The full file also carries a `validate` block with a genuine Z3-proven post-condition — `tenure_bonus_pct`'s `result` provably stays in `[0, 20]` for *every* possible input, not just the ones a test tries. Flip that bound to something false and `nirdosha build` fails outright, naming a real counterexample. Full runnable source: [`examples/features/50_field_masking_and_check_role.nir`](./examples/features/50_field_masking_and_check_role.nir).
 
+**What these guarantees do *not* cover:** `&` references are typechecked but have no `&mut`-style liveness/exclusivity enforcement beyond "the referent isn't already moved" — a Rust-style borrow checker doesn't exist yet (only `box`'s affine tracking is fully enforced). There's no built-in audit-trail feature (PCI DSS requirement 10 would need one built at the application layer). And the built-in crypto (`hmac`/`sha2`/`ring`) is standard RustCrypto, not a NIST CMVP-validated module, so FIPS 140-3 compliance is not a claim this project makes.
+
 </details>
 
 <details>

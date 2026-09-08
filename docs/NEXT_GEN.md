@@ -1,7 +1,16 @@
 # Nirdosha — next-generation language & UI architecture (design discussion)
 
-**Status: discussion only. Nothing in this document is implemented.**
-This is the spec `docs/ROADMAP.md` Track F points to and will execute
+**Status: mixed — this file started as pure discussion, but three of
+its four tracks have since shipped at least part of what they
+describe; it is not "nothing in this document is implemented" anymore.**
+Trust each section's own status line, not this banner: **F2** (module/
+package system) and **F3** (Hoare-style `validate` contracts,
+`contract_check.rs`/`smt.rs`) are tagged `[DONE]` below with real,
+non-prototype code behind them; **F4** (UI layout/widget catalog) has
+its Phase A `[DONE]`, Phases B/C still `[OPEN]`. **F1** (multi-renderer
+UI manifest) is the one track still pure discussion — prose and design,
+no active prototype code. This is the spec
+`docs/ROADMAP.md` Track F points to and will execute
 against, written *before* the first line of it lands — the same order
 `docs/MOBILE.md`/`docs/WORKFLOW.md`/`docs/TRANSACT.md` were written in for their own
 features, not after.
