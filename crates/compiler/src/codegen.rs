@@ -9771,6 +9771,17 @@ static RUNTIME_KERNELS_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/li
 #[allow(dead_code)] // only read under `#[cfg(windows)]` below; Unix has its own `-lm` arm
 static NATIVE_STATIC_LIBS: &str = include_str!(concat!(env!("OUT_DIR"), "/native_static_libs.txt"));
 
+// `(name.lib, bytes)` for every `NATIVE_STATIC_LIBS` token `build.rs`
+// found as a real file under its own private build (a crate-private
+// import lib like `windows.0.52.0.lib`, not a genuine system-provided
+// one) — see `build.rs`'s doc comment on `extra_native_libs.rs` for why
+// these need to be linked by embedded-and-rewritten path instead of a
+// bare `-lname` the way `kernel32.lib`/`advapi32.lib`/etc. are below.
+// Defines `EXTRA_NATIVE_LIBS: &[(&str, &[u8])]`, `#[allow(dead_code)]`d
+// from inside the generated snippet itself (only read under
+// `#[cfg(windows)]` below).
+include!(concat!(env!("OUT_DIR"), "/extra_native_libs.rs"));
+
 pub fn build(
     program: &Program,
     smt_report: &SmtReport,
@@ -9918,11 +9929,33 @@ fn build_impl(
     // flag) — that one is forwarded verbatim via `-Xlinker`, which routes
     // it straight to the linker unexamined, the same reason `-l` works
     // for the others.
+    // A handful of tokens above aren't genuine system-provided libs at
+    // all — a crate-private import lib like `windows.0.52.0.lib` (the
+    // `windows`/`windows-sys` family, at least) ships inside that crate's
+    // own build output, nowhere on the linker's default search path.
+    // `build.rs` already found and embedded any such file (see
+    // `extra_native_libs.rs`'s doc comment); write each one back out to a
+    // real temp path and link it *by path* (`runtime_lib_path`'s own
+    // pattern) instead of `-lname` — found on real Windows CI as `LNK1181:
+    // cannot open input file 'windows.0.52.0.lib'`, the exact "no such
+    // file" failure a bare `-l` produces when the named file isn't on any
+    // search path clang/the linker already knows about.
+    #[cfg(windows)]
+    let mut extra_lib_paths = Vec::new();
     #[cfg(windows)]
     for token in NATIVE_STATIC_LIBS.split_whitespace() {
         match token.strip_suffix(".lib") {
             Some(name) => {
-                clang_cmd.arg(format!("-l{name}"));
+                if let Some((_, bytes)) = EXTRA_NATIVE_LIBS.iter().find(|(n, _)| *n == token) {
+                    let mut p = std::env::temp_dir();
+                    p.push(format!("nirdosha_extralib_{}_{n}_{token}", std::process::id()));
+                    std::fs::write(&p, bytes)
+                        .map_err(|e| format!("writing {}: {e}", p.display()))?;
+                    clang_cmd.arg(&p);
+                    extra_lib_paths.push(p);
+                } else {
+                    clang_cmd.arg(format!("-l{name}"));
+                }
             }
             None => {
                 clang_cmd.arg("-Xlinker").arg(token);
@@ -9933,6 +9966,10 @@ fn build_impl(
     let _ = std::fs::remove_file(&ll_path); // best-effort cleanup either way
     let _ = std::fs::remove_file(&runtime_lib_path);
     for p in &native_plugin_lib_paths {
+        let _ = std::fs::remove_file(p);
+    }
+    #[cfg(windows)]
+    for p in &extra_lib_paths {
         let _ = std::fs::remove_file(p);
     }
 
