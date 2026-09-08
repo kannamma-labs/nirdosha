@@ -402,24 +402,65 @@ impl postgres::types::ToSql for PgBindValue {
     /// 8-byte `int8` wire value against an `INTEGER` (`int4`) column is
     /// a real wire-format mismatch, not a hypothetical one -- this is
     /// exactly the failure this match was added to fix.
+    /// Red-team report A18 (`scratch/red-team-report-main-d7fae42.md`):
+    /// the old `_ => v.to_sql(ty, out)` fallback branches called the
+    /// inner `i64`/`f64` value's own `to_sql` directly (not
+    /// `to_sql_checked`, which is the only place `postgres-types`
+    /// itself would have run an `accepts` check) — for a column type
+    /// this match doesn't explicitly recognize (`NUMERIC`, `MONEY`,
+    /// `DATE`, ...), that meant unconditionally writing `i64`/`f64`'s
+    /// own wire encoding (a fixed-width binary integer/float) against a
+    /// column whose real wire format is completely different (`NUMERIC`
+    /// is a variable-length base-10000-digit structure, nothing like a
+    /// raw `i64`) — not a hypothetical mismatch, a real wrong-bytes-on-
+    /// the-wire risk. Every arm below is now an explicit, individually
+    /// verified match; anything not recognized is a clean, named `Err`
+    /// instead of a best-effort encode into a format that might not
+    /// even be validated server-side before being stored.
     fn to_sql(&self, ty: &postgres::types::Type, out: &mut postgres::types::private::BytesMut) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
         match self {
             PgBindValue::I64(v) => match *ty {
                 postgres::types::Type::INT2 => (*v as i16).to_sql(ty, out),
                 postgres::types::Type::INT4 => (*v as i32).to_sql(ty, out),
-                _ => v.to_sql(ty, out),
+                postgres::types::Type::INT8 => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind an i64 value against Postgres column type {ty} -- only int2/int4/int8 are supported").into()),
             },
             PgBindValue::F64(v) => match *ty {
                 postgres::types::Type::FLOAT4 => (*v as f32).to_sql(ty, out),
-                _ => v.to_sql(ty, out),
+                postgres::types::Type::FLOAT8 => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind an f64 value against Postgres column type {ty} -- only float4/float8 are supported").into()),
             },
-            PgBindValue::Str(v) => v.to_sql(ty, out),
-            PgBindValue::Bool(v) => v.to_sql(ty, out),
+            PgBindValue::Str(v) => match *ty {
+                postgres::types::Type::TEXT | postgres::types::Type::VARCHAR | postgres::types::Type::BPCHAR | postgres::types::Type::NAME => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind a str value against Postgres column type {ty} -- only text/varchar/bpchar/name are supported").into()),
+            },
+            PgBindValue::Bool(v) => match *ty {
+                postgres::types::Type::BOOL => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind a bool value against Postgres column type {ty} -- only bool is supported").into()),
+            },
         }
     }
 
-    fn accepts(_ty: &postgres::types::Type) -> bool {
-        true
+    /// Every type each `to_sql` arm above actually accepts, matched
+    /// exactly — `to_sql_checked!()` below calls this *before* `to_sql`,
+    /// so an unsupported type is now rejected at that earlier check too,
+    /// not just inside `to_sql`'s own fallback arms (defense in depth:
+    /// the two must stay in sync, which is exactly what makes this a
+    /// visible, testable invariant rather than an implicit one).
+    fn accepts(ty: &postgres::types::Type) -> bool {
+        matches!(
+            *ty,
+            postgres::types::Type::INT2
+                | postgres::types::Type::INT4
+                | postgres::types::Type::INT8
+                | postgres::types::Type::FLOAT4
+                | postgres::types::Type::FLOAT8
+                | postgres::types::Type::TEXT
+                | postgres::types::Type::VARCHAR
+                | postgres::types::Type::BPCHAR
+                | postgres::types::Type::NAME
+                | postgres::types::Type::BOOL
+        )
     }
 
     postgres::types::to_sql_checked!();
@@ -462,6 +503,49 @@ pub fn pg_row_to_json(row: &postgres::Row) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Red-team report A18: `PgBindValue::accepts` must recognize every
+    /// type each `to_sql` arm actually handles (INT2/INT4/INT8,
+    /// FLOAT4/FLOAT8, TEXT/VARCHAR/BPCHAR/NAME, BOOL) and reject
+    /// anything else, including plausible-looking numeric types this
+    /// codebase deliberately does not claim to support yet (NUMERIC,
+    /// MONEY) -- a pure function, no live Postgres connection needed.
+    #[test]
+    fn pg_bind_value_accepts_only_the_explicitly_supported_types() {
+        use postgres::types::{ToSql, Type};
+        assert!(PgBindValue::accepts(&Type::INT2));
+        assert!(PgBindValue::accepts(&Type::INT4));
+        assert!(PgBindValue::accepts(&Type::INT8));
+        assert!(PgBindValue::accepts(&Type::FLOAT4));
+        assert!(PgBindValue::accepts(&Type::FLOAT8));
+        assert!(PgBindValue::accepts(&Type::TEXT));
+        assert!(PgBindValue::accepts(&Type::VARCHAR));
+        assert!(PgBindValue::accepts(&Type::BPCHAR));
+        assert!(PgBindValue::accepts(&Type::NAME));
+        assert!(PgBindValue::accepts(&Type::BOOL));
+
+        assert!(!PgBindValue::accepts(&Type::NUMERIC), "NUMERIC's wire format is nothing like a raw i64/f64 -- must not be silently accepted");
+        assert!(!PgBindValue::accepts(&Type::MONEY));
+        assert!(!PgBindValue::accepts(&Type::DATE));
+        assert!(!PgBindValue::accepts(&Type::TIMESTAMP));
+        assert!(!PgBindValue::accepts(&Type::JSON));
+    }
+
+    /// The other half of A18: an explicitly-unsupported type must fail
+    /// with a clean, named `Err` from `to_sql` itself too, not just from
+    /// `accepts` -- both are checked separately by design (this file's
+    /// own doc comment on `accepts`).
+    #[test]
+    fn pg_bind_value_to_sql_rejects_an_unsupported_type_with_a_named_error() {
+        use postgres::types::{ToSql, Type};
+        let mut out = postgres::types::private::BytesMut::new();
+        let result = PgBindValue::I64(42).to_sql(&Type::NUMERIC, &mut out);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("binding an i64 against NUMERIC must be a clean Err, not a wrong-bytes-on-the-wire encode"),
+        };
+        assert!(err.to_string().contains("numeric"), "error should name the offending type: {err}");
+    }
 
     #[test]
     fn rewrite_placeholders_counts_positionally() {

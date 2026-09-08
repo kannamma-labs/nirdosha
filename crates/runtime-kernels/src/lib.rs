@@ -573,6 +573,96 @@ fn sha256(a: &[u8], b: &[u8]) -> [u8; 32] {
     out
 }
 
+/// RFC 2104 HMAC-SHA256, built on the [`sha256`] primitive above —
+/// added as red-team report A26's own recommended defense-in-depth
+/// convention (`scratch/red-team-report-main-d7fae42.md`): "hash a
+/// secret for storage" should reach for HMAC by default, plain
+/// `sha256`/`sha256_hex` for content hashing only.
+///
+/// **Not wired into `nir_validate_api_key`'s existing hashing in this
+/// same fix, deliberately disclosed rather than silently done** — the
+/// report's own text already concedes length extension doesn't
+/// meaningfully weaken that specific call site (a high-entropy API key
+/// hashed keylessly, not a low-entropy secret an attacker could feasibly
+/// extend against). Actually using HMAC there would need a *separate*
+/// server-side secret key (an HMAC "pepper") to hash the API key
+/// against — a real, unreviewed piece of config/secret-management
+/// surface (where does that key live? how does it rotate?) that doesn't
+/// exist anywhere in this codebase today, the same class of judgment
+/// call A1's fix already declined to invent unilaterally for JWKS
+/// config. This function exists so the *next* piece of code that
+/// genuinely needs to hash a secret with a real HMAC key has the right
+/// primitive ready, rather than reaching for plain `sha256` by default.
+///
+/// `key` longer than one block (64 bytes) is hashed down first per the
+/// spec (RFC 2104 §2, step "If K is longer than B... hash it"); `sha256`
+/// is reused for that, not a second SHA-256 entry point.
+#[allow(dead_code)] // intentionally unused in production today -- see this fn's own doc comment (A26)
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    const IPAD: u8 = 0x36;
+    const OPAD: u8 = 0x5c;
+
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hashed = sha256(key, &[]);
+        key_block[..32].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad_key = [0u8; BLOCK_SIZE];
+    let mut opad_key = [0u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad_key[i] = key_block[i] ^ IPAD;
+        opad_key[i] = key_block[i] ^ OPAD;
+    }
+
+    let inner = sha256(&ipad_key, message);
+    sha256(&opad_key, &inner)
+}
+
+#[cfg(test)]
+mod hmac_sha256_tests {
+    use super::hmac_sha256;
+
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// RFC 4231 §4.2, Test Case 1 -- a known-answer test for this
+    /// hand-rolled implementation, not just internal self-consistency.
+    #[test]
+    fn matches_rfc_4231_test_case_1() {
+        let key = [0x0bu8; 20];
+        let data = b"Hi There";
+        let expected = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
+        assert_eq!(to_hex(&hmac_sha256(&key, data)), expected);
+    }
+
+    /// RFC 4231 §4.3, Test Case 2 -- a short, ASCII key and message,
+    /// different shape from Test Case 1's binary key.
+    #[test]
+    fn matches_rfc_4231_test_case_2() {
+        let key = b"Jefe";
+        let data = b"what do ya want for nothing?";
+        let expected = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+        assert_eq!(to_hex(&hmac_sha256(key, data)), expected);
+    }
+
+    /// RFC 4231 §4.6, Test Case 6 -- a key longer than SHA-256's own
+    /// 64-byte block size, exercising the "hash the key down first"
+    /// branch (`hmac_sha256`'s own doc comment, RFC 2104 §2) that
+    /// neither test case above touches.
+    #[test]
+    fn matches_rfc_4231_test_case_6_key_longer_than_one_block() {
+        let key = [0xaau8; 131];
+        let data = b"Test Using Larger Than Block-Size Key - Hash Key First";
+        let expected = "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54";
+        assert_eq!(to_hex(&hmac_sha256(&key, data)), expected);
+    }
+}
+
 /// Lowercase hex encoding, matching `interpreter.rs`'s own
 /// `format!("{b:02x}")` per byte exactly.
 fn hex_encode(bytes: &[u8], out: &mut [u8]) {
@@ -588,7 +678,13 @@ fn hex_encode(bytes: &[u8], out: &mut [u8]) {
 /// leak of *length* — the property this function actually protects is
 /// "don't leak *which byte* differs"), otherwise XOR-accumulate every
 /// byte pair with no early exit.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+///
+/// `pub` (red-team report A20, `scratch/red-team-report-main-d7fae42.md`):
+/// `crates/compiled-serve`'s own `metrics_token` comparison used a plain
+/// `==`, a real timing oracle against `/metrics` for a short or
+/// guessable token — reusing this function there instead of a second,
+/// independent implementation.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
