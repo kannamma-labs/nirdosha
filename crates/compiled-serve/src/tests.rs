@@ -289,6 +289,34 @@ fn cors_reflects_only_a_configured_origin_never_a_wildcard() {
     assert!(!resp.contains("Access-Control-Allow-Origin"));
 }
 
+/// Red-team report A21 (`scratch/red-team-report-main-d7fae42.md`): a
+/// browser normalizes `https://allowed.example:443` and
+/// `https://allowed.example` to the same origin for CORS purposes -- a
+/// request carrying the explicit default port must still match a
+/// configured origin without one.
+#[test]
+fn cors_matches_an_explicit_default_port_against_a_configured_origin_without_one() {
+    let mut config = ServeConfig::default();
+    config.allowed_origins = vec!["https://allowed.example".to_string()];
+    let (addr, _r) = start_test_server(config);
+
+    let req = "GET /api/echo HTTP/1.1\r\nHost: x\r\nOrigin: https://allowed.example:443\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+    let resp = raw_request(addr, req);
+    assert!(
+        resp.contains("Access-Control-Allow-Origin: https://allowed.example:443"),
+        "an explicit :443 must still match the same https origin configured without a port: {resp}"
+    );
+}
+
+#[test]
+fn origins_match_normalizes_explicit_default_ports() {
+    assert!(origins_match("https://a.example", "https://a.example:443"));
+    assert!(origins_match("http://a.example", "http://a.example:80"));
+    assert!(!origins_match("https://a.example", "https://a.example:8443"), "a non-default explicit port must NOT match a bare origin");
+    assert!(!origins_match("https://a.example", "http://a.example"), "scheme must still be part of the match");
+    assert!(!origins_match("https://a.example", "https://b.example"), "host must still be part of the match");
+}
+
 #[test]
 fn options_preflight_from_an_allowed_origin_gets_a_real_204() {
     let mut config = ServeConfig::default();
@@ -520,4 +548,25 @@ fn a_connection_past_the_serve_http_ceiling_is_dropped_not_answered() {
     assert!(buf.is_empty(), "a connection past the serve_http ceiling must get no response at all (dropped, not a 503 body): {:?}", String::from_utf8_lossy(&buf));
 
     unsafe { std::env::remove_var("NIRDOSHA_KERNEL_MAX_SERVE_HTTP") };
+}
+
+/// Red-team report A16. `#[ignore]`d: `NIRDOSHA_SERVE_TRUSTED_PROXIES`
+/// is a real process-wide env var, and every other test in this file
+/// calls `ServeConfig::default()` too -- setting it here while other
+/// tests run in parallel (`cargo test`'s default) would leak into their
+/// own `default()` calls. Safe only run alone.
+#[test]
+#[ignore]
+fn trusted_proxies_from_env_parses_a_comma_separated_list_and_skips_invalid_entries() {
+    unsafe { std::env::set_var("NIRDOSHA_SERVE_TRUSTED_PROXIES", "10.0.0.1, 10.0.0.2,not-an-ip,192.168.1.1") };
+    let proxies = trusted_proxies_from_env();
+    let expected: Vec<std::net::IpAddr> = vec!["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap(), "192.168.1.1".parse().unwrap()];
+    assert_eq!(proxies, expected, "valid entries (whitespace-trimmed) must parse in order; the invalid one must be skipped, not abort the whole list");
+    unsafe { std::env::remove_var("NIRDOSHA_SERVE_TRUSTED_PROXIES") };
+}
+
+#[test]
+fn trusted_proxies_from_env_is_empty_when_unset() {
+    unsafe { std::env::remove_var("NIRDOSHA_SERVE_TRUSTED_PROXIES") };
+    assert!(trusted_proxies_from_env().is_empty());
 }

@@ -813,7 +813,14 @@ second call site.
 ### 5. Proactive rehydration: a bounded sweep that never touches the hot path
 
 Every registered domain that's pool-backed also registers a
-`PoolRegistry<M>` (§ `pool.rs`, unchanged) keyed by provider. A new
+`PoolRegistry<M>` (§ `pool.rs`, unchanged) keyed by provider —
+**lazily, on that pool's first real use, not eagerly at every domain's
+registration time** (red-team report A29, `scratch/red-team-report-
+main-d7fae42.md`: this sentence's own phrasing read as implying eager
+registration; `pool::register_for_reaping`'s own `Once`-guarded call
+site, next to each pool's own accessor function, is what actually makes
+it lazy — an idle compiled program that never opens a `db`/`http`/
+plugin connection registers zero pools with the reaper). A new
 `kernel::reaper` module realizes its periodic wake using
 `kernel::thread_pool::ThreadPool` **as it actually exists**, verified
 against the real API (`submit(self: &Arc<Self>, job: Job) ->
