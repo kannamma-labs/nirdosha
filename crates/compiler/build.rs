@@ -118,9 +118,31 @@ fn main() {
     // `codegen.rs`'s plain `declare`s already assumed, rather than one
     // more hand-picked `-Xlinker` flag reacting to whichever symbol
     // happened to be missing this time.
+    //
+    // **Must be `RUSTFLAGS`, not a trailing `cargo rustc -- <flag>`** --
+    // a real, silent no-op found only by the identical six symbols still
+    // being unresolved on the very next Windows CI run after adding this
+    // exact flag the first time, in the wrong place. `cargo rustc --
+    // <extra-args>` forwards those args to the *root* package's own
+    // final `rustc` invocation only -- never to any dependency's build
+    // script or its own `rustc`/`cc` invocations. `libsqlite3-sys`'s
+    // build script reads `CARGO_CFG_TARGET_FEATURE` (an env var Cargo
+    // populates per-crate from `RUSTFLAGS`/the target's own feature set,
+    // not from another crate's trailing rustc args) to decide `/MT` vs
+    // `/MD` -- it never saw `crt-static` under the previous approach,
+    // so `cl.exe` kept defaulting to `/MD` regardless. `RUSTFLAGS` is a
+    // build-wide environment variable Cargo threads through to *every*
+    // crate's compilation uniformly, which is what actually reaches it.
+    // Appended to, not overwritten -- an outer build that already sets
+    // `RUSTFLAGS` (a custom lint config, say) keeps that intact.
     cmd.arg("--").arg("--print=native-static-libs");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        cmd.arg("-C").arg("target-feature=+crt-static");
+        let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C target-feature=+crt-static");
+        cmd.env("RUSTFLAGS", rustflags);
     }
     let output = cmd
         .output()

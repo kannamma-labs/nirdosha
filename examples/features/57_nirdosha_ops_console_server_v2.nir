@@ -62,6 +62,21 @@
 //      amount through) -- escalating *who* may approve a large PO is
 //      real; making the disbursed amount itself scale with it is the
 //      same already-disclosed gap, not newly hidden here.
+//   8. **A different real dashboard per role -- the landing page IS the
+//      per-role view.** Three genuinely different SQL aggregates, not
+//      one query re-labeled three times: admin sees spend-by-vendor
+//      (`SUM(amount_cents) GROUP BY vendor`), finance sees the most
+//      recent real disbursements, finance_director sees exactly the
+//      purchase orders `route_approval` would route to *them*
+//      specifically (`>= escalation_threshold_cents()`). Each renders
+//      as a real, hand-rolled inline-SVG horizontal bar chart -- the
+//      same no-external-library ethos the compiler's own static UI
+//      engine uses for its four built-in chart shapes, hand-written
+//      here since this file's compiled server predates
+//      `nirdosha emit-ui`'s chart renderer entirely (a separate, static
+//      code path this file never goes through). A `Dashboard`/
+//      `Purchase Orders` nav toggle lets a signed-in user move between
+//      their landing dashboard and the CRUD table freely.
 //
 // **Deliberately not attempted here, disclosed rather than silently
 // deferred**: `crates/compiled-serve` (ROADMAP B8's real Rust HTTP
@@ -399,6 +414,84 @@ fn run_count(conn: db) -> Result(json, ErrMsg) {
             Ok(row) => wrap_ok_json(row),
             Err(e) => wrap_err_json(ErrMsg(e)),
         },
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// ---- per-role dashboards -- a different real chart for a different
+// real job (`landing { role(...) -> Screen }`'s own per-role-page idea,
+// `55_...`'s minimal `dashboard { tile ... }` block, applied here to
+// this file's own hand-written server instead of the separate, static
+// `nirdosha emit-ui` path those blocks normally drive -- three
+// genuinely different SQL aggregates, one per role, not the same query
+// re-labeled three times. -----------------------------------------------
+
+// Admin cares about spend concentration: which vendors are taking the
+// most money, in aggregate, across every purchase order ever created.
+fn dashboard_admin_json() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_dashboard_admin(conn),
+    }
+}
+
+// `::bigint`, not decoration: Postgres widens `SUM(BIGINT)` to `NUMERIC`
+// (overflow avoidance, standard SQL semantics), and this compiler's own
+// `pg_row_to_json` (`kernel/db.rs`) doesn't have a `NUMERIC` case yet --
+// it falls back to a `String` read, which fails silently against a
+// numeric wire value and comes back a real, disclosed `null`, found by
+// actually running this query against real Postgres, not assumed. Real
+// dashboards can't answer "which vendor got the most money" with a
+// SQL-standard aggregate query as-is today -- casting the sum back down
+// to a type the kernel already handles (safe here; a cents total is
+// nowhere near `i64::MAX`) is the honest fix at this layer, not a
+// compiler change this demo takes on.
+fn run_dashboard_admin(conn: db) -> Result(json, ErrMsg) {
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT vendor, SUM(amount_cents)::bigint AS amount_cents FROM purchase_orders GROUP BY vendor ORDER BY amount_cents DESC LIMIT 10") {
+        Ok(rows) => wrap_ok_json(rows),
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// Finance clerks track what's actually gone out the door recently, not
+// what's still sitting in the purchase-order table.
+fn dashboard_finance_json() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_dashboard_finance(conn),
+    }
+}
+
+fn run_dashboard_finance(conn: db) -> Result(json, ErrMsg) {
+    let schema_ok: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS disbursements (txn_id TEXT PRIMARY KEY, po_id BIGINT NOT NULL, amount_cents BIGINT NOT NULL)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT po_id, amount_cents FROM disbursements ORDER BY txn_id DESC LIMIT 10") {
+        Ok(rows) => wrap_ok_json(rows),
+        Err(e) => wrap_err_json(ErrMsg(e)),
+    }
+    stop conn
+    return result
+}
+
+// A finance director's own real oversight job: exactly the purchase
+// orders `route_approval` would route to *them* specifically --
+// `>= escalation_threshold_cents()` -- not every PO in the system.
+fn dashboard_director_json() -> Result(json, ErrMsg) {
+    return match db_connect("postgres://postgres@127.0.0.1:5432/postgres") {
+        Err(e) => wrap_err_json(ErrMsg(e)),
+        Ok(conn) => run_dashboard_director(conn),
+    }
+}
+
+fn run_dashboard_director(conn: db) -> Result(json, ErrMsg) {
+    let result: Result(json, ErrMsg) = match db_query(conn, "SELECT vendor, amount_cents FROM purchase_orders WHERE amount_cents >= ? ORDER BY amount_cents DESC LIMIT 10", escalation_threshold_cents()) {
+        Ok(rows) => wrap_ok_json(rows),
         Err(e) => wrap_err_json(ErrMsg(e)),
     }
     stop conn
@@ -883,6 +976,27 @@ fn overdue_response_body() -> json {
     }
 }
 
+fn dashboard_admin_response_body() -> json {
+    return match dashboard_admin_json() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+fn dashboard_finance_response_body() -> json {
+    return match dashboard_finance_json() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
+fn dashboard_director_response_body() -> json {
+    return match dashboard_director_json() {
+        Err(e) => empty_json_array(),
+        Ok(rows) => rows,
+    }
+}
+
 // ---- HTML/CSS/JS page, one real static response body --------------------
 // No `\"` inside -- every HTML attribute and every JS string below uses
 // single quotes on purpose (`56_...`'s own note on this language's
@@ -913,6 +1027,10 @@ fn index_html() -> Text {
   #loading { display: none; color: #555; font-size: 0.9rem; margin-top: 0.5rem; }
   #empty-state { display: none; color: #777; padding: 1rem 0; }
   .row-actions button { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  nav { margin: 0.75rem 0; }
+  nav button.active { outline: 2px solid #3730a3; }
+  .bar-label { font-size: 0.8rem; fill: #333; }
+  .bar-value { font-size: 0.75rem; fill: #555; }
 </style>
 </head>
 <body>
@@ -931,7 +1049,17 @@ fn index_html() -> Text {
 <div class='card' id='app-card' style='display:none'>
   <p>Signed in as <b id='who'></b> with a real signed JWT &mdash; a real <code>landing</code> rule (RFC 0010) would send this role to <span class='badge' id='landing-target'></span></p>
   <span class='badge' id='overdue-badge' style='background:#fef2f2;color:#991b1b'></span>
+  <nav>
+    <button class='role-neutral' id='nav-dashboard-btn'>Dashboard</button>
+    <button class='role-neutral' id='nav-po-btn'>Purchase Orders</button>
+  </nav>
   <button class='role-signout' id='signout-btn'>Sign out</button>
+</div>
+
+<div class='card' id='dashboard-card' style='display:none'>
+  <h2 id='dashboard-title'>Dashboard</h2>
+  <div id='dashboard-empty' style='display:none'>No data yet.</div>
+  <svg id='dashboard-chart' width='100%' height='260' style='overflow:visible'></svg>
 </div>
 
 <div class='card' id='po-card' style='display:none'>
@@ -1010,15 +1138,99 @@ function signIn(role) {
     currentOffset = 0;
     document.getElementById('login-card').style.display = 'none';
     document.getElementById('app-card').style.display = 'block';
-    document.getElementById('po-card').style.display = 'block';
     document.getElementById('who').textContent = role;
     document.getElementById('landing-target').textContent = landingTarget(role);
     document.getElementById('create-panel').style.display = (role === 'admin') ? 'block' : 'none';
     document.getElementById('actions-head').style.display = (role === 'admin' || role === 'finance_director') ? 'table-cell' : 'none';
     document.getElementById('create-status').textContent = '';
-    loadPOs();
+    // The dashboard *is* this role's landing page -- a different real
+    // chart depending on the job, shown first, not the same
+    // purchase-orders table everyone gets today.
+    showDashboard();
     loadOverdueCount();
   }).catch(function () { showError('Sign-in request failed.'); });
+}
+
+// A different real query per role (DASHBOARD_BY_ROLE), same closed
+// per-role mapping idea LANDING above already models -- not the same
+// endpoint re-labeled three times.
+var DASHBOARD_BY_ROLE = {
+  admin: { url: '/api/dashboard/admin', title: 'Spend by Vendor', labelKey: 'vendor' },
+  finance: { url: '/api/dashboard/finance', title: 'Recent Disbursements', labelKey: 'po_id' },
+  finance_director: { url: '/api/dashboard/finance_director', title: 'Large Purchase Orders (Your Approval Queue)', labelKey: 'vendor' }
+};
+
+function showDashboard() {
+  document.getElementById('nav-dashboard-btn').className = 'role-neutral active';
+  document.getElementById('nav-po-btn').className = 'role-neutral';
+  document.getElementById('dashboard-card').style.display = 'block';
+  document.getElementById('po-card').style.display = 'none';
+  loadDashboard();
+}
+
+function showPOs() {
+  document.getElementById('nav-dashboard-btn').className = 'role-neutral';
+  document.getElementById('nav-po-btn').className = 'role-neutral active';
+  document.getElementById('dashboard-card').style.display = 'none';
+  document.getElementById('po-card').style.display = 'block';
+  loadPOs();
+}
+
+function loadDashboard() {
+  var spec = DASHBOARD_BY_ROLE[currentRole] || DASHBOARD_BY_ROLE.finance;
+  document.getElementById('dashboard-title').textContent = spec.title;
+  fetch(spec.url).then(function (r) { return r.json(); }).then(function (rows) {
+    renderBarChart(rows || [], spec.labelKey, 'amount_cents');
+  }).catch(function () { showError('Failed to load dashboard.'); });
+}
+
+// A real, hand-rolled inline-SVG horizontal bar chart -- the same
+// no-external-chart-library ethos the compiler's own static UI engine
+// uses for its four built-in chart shapes (`The UI Engine` wiki page),
+// just hand-written here since this file's compiled server predates
+// `nirdosha emit-ui`'s chart renderer entirely (it's a separate, static
+// code path -- see this file's own header on why `compiled-serve`-style
+// wiring isn't attempted here either).
+function renderBarChart(rows, labelKey, valueKey) {
+  var svg = document.getElementById('dashboard-chart');
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  document.getElementById('dashboard-empty').style.display = rows.length === 0 ? 'block' : 'none';
+  if (rows.length === 0) { svg.setAttribute('height', 0); return; }
+  var rowHeight = 32;
+  var height = rows.length * rowHeight + 10;
+  svg.setAttribute('height', height);
+  var maxValue = 0;
+  for (var i = 0; i < rows.length; i++) {
+    maxValue = Math.max(maxValue, rows[i][valueKey] || 0);
+  }
+  var chartWidth = 420;
+  var labelWidth = 140;
+  for (var i = 0; i < rows.length; i++) {
+    var y = i * rowHeight + 6;
+    var value = rows[i][valueKey] || 0;
+    var barWidth = maxValue > 0 ? (value / maxValue) * chartWidth : 0;
+    var label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', labelWidth - 8);
+    label.setAttribute('y', y + 16);
+    label.setAttribute('text-anchor', 'end');
+    label.setAttribute('class', 'bar-label');
+    label.textContent = String(rows[i][labelKey]);
+    svg.appendChild(label);
+    var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', labelWidth);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', Math.max(barWidth, 2));
+    rect.setAttribute('height', rowHeight - 10);
+    rect.setAttribute('rx', 4);
+    rect.setAttribute('fill', '#2563eb');
+    svg.appendChild(rect);
+    var valueLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    valueLabel.setAttribute('x', labelWidth + barWidth + 8);
+    valueLabel.setAttribute('y', y + 16);
+    valueLabel.setAttribute('class', 'bar-value');
+    valueLabel.textContent = value;
+    svg.appendChild(valueLabel);
+  }
 }
 
 function signOut() {
@@ -1026,6 +1238,7 @@ function signOut() {
   currentToken = null;
   document.getElementById('login-card').style.display = 'block';
   document.getElementById('app-card').style.display = 'none';
+  document.getElementById('dashboard-card').style.display = 'none';
   document.getElementById('po-card').style.display = 'none';
 }
 
@@ -1151,6 +1364,8 @@ document.getElementById('admin-btn').addEventListener('click', function () { sig
 document.getElementById('finance-btn').addEventListener('click', function () { signIn('finance'); });
 document.getElementById('director-btn').addEventListener('click', function () { signIn('finance_director'); });
 document.getElementById('signout-btn').addEventListener('click', signOut);
+document.getElementById('nav-dashboard-btn').addEventListener('click', showDashboard);
+document.getElementById('nav-po-btn').addEventListener('click', showPOs);
 document.getElementById('create-btn').addEventListener('click', createPO);
 document.getElementById('search-btn').addEventListener('click', function () { currentOffset = 0; loadPOs(); });
 document.getElementById('prev-btn').addEventListener('click', function () { currentOffset = Math.max(0, currentOffset - pageSize); loadPOs(); });
@@ -1208,6 +1423,15 @@ fn main() {
         } else if method == "GET" && path == "/api/disbursements/overdue" {
             send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
             send(conn, overdue_response_body())
+        } else if method == "GET" && path == "/api/dashboard/admin" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, dashboard_admin_response_body())
+        } else if method == "GET" && path == "/api/dashboard/finance" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, dashboard_finance_response_body())
+        } else if method == "GET" && path == "/api/dashboard/finance_director" {
+            send(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+            send(conn, dashboard_director_response_body())
         } else {
             send(conn, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
         }
