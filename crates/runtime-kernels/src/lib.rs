@@ -1718,6 +1718,109 @@ pub unsafe extern "C" fn nir_oidc_validate_token(
     }
 }
 
+/// `mock_issue_token`'s real implementation — the inverse of
+/// `oidc_validate_token` above: signs a token instead of verifying one.
+/// `mock_` is load-bearing, not decorative (the builtin's own typeck doc
+/// comment) — this issues a token from key material the caller supplies
+/// directly, standing in for a real IdP's own signing endpoint, never a
+/// substitute for one.
+///
+/// **HS256 (symmetric) only, deliberately.** `jwks_json` is the exact
+/// same shape `oidc_validate_token`/`decoding_key_for` already parse
+/// (`RawJwks`/`RawJwk` above); this looks up the first `kty: "oct"` entry
+/// and signs with it. RSA/EC issuance would need real private-key
+/// material (a JWK's `d` parameter and friends) this first pass doesn't
+/// handle — a real, disclosed follow-up, not attempted here. Verifying
+/// the token this produces against the *same* `jwks_json` already works
+/// today, unchanged, via `oidc_validate_token`'s own existing `"oct"` arm.
+fn issue_mock_token_inner(
+    subject: &str,
+    issuer: &str,
+    audience: &str,
+    issued_at: i64,
+    ttl_secs: i64,
+    claims_json: &str,
+    jwks_json: &str,
+) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let jwks: RawJwks = serde_json::from_str(jwks_json).map_err(|e| format!("malformed JWKS: {e}"))?;
+    let jwk = jwks
+        .keys
+        .iter()
+        .find(|k| k.kty == "oct")
+        .ok_or_else(|| "no `oct` (HMAC) signing key found in jwks_json -- mock_issue_token only supports HS256".to_string())?;
+    let k = jwk.k.as_deref().ok_or("JWK is missing required field `k`")?;
+    let raw_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(k)
+        .map_err(|_| "JWK field `k` is not valid base64url".to_string())?;
+    let encoding_key = jsonwebtoken::EncodingKey::from_secret(&raw_secret);
+
+    // `claims_json`'s own fields (e.g. a `"roles"` array `check_role`
+    // reads back out later) are preserved -- only the six standard claims
+    // this builtin itself owns are overwritten, same "caller-supplied
+    // extras survive" convention `oidc_validate_token`'s own `claims_json`
+    // output already has.
+    let mut claims: serde_json::Value = serde_json::from_str(claims_json).unwrap_or_default();
+    if !claims.is_object() {
+        claims = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let obj = claims.as_object_mut().expect("just ensured this is an object");
+    obj.insert("sub".to_string(), serde_json::Value::String(subject.to_string()));
+    obj.insert("iss".to_string(), serde_json::Value::String(issuer.to_string()));
+    obj.insert("aud".to_string(), serde_json::Value::String(audience.to_string()));
+    obj.insert("iat".to_string(), serde_json::Value::from(issued_at));
+    obj.insert("exp".to_string(), serde_json::Value::from(issued_at.saturating_add(ttl_secs)));
+
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.kid = Some(jwk.kid.clone());
+
+    jsonwebtoken::encode(&header, &claims, &encoding_key).map_err(|e| format!("failed to sign token: {e}"))
+}
+
+/// `1` (with `out_token` populated) on success, `0` (with `out_err`
+/// populated) otherwise — a malformed JWKS or a JWKS with no usable
+/// signing key is a real `Err`, never a trap, same as every other
+/// identity check in this codebase.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_mock_issue_token(
+    subject_ptr: *const u8,
+    subject_len: i64,
+    issuer_ptr: *const u8,
+    issuer_len: i64,
+    audience_ptr: *const u8,
+    audience_len: i64,
+    issued_at: i64,
+    ttl_secs: i64,
+    claims_json_ptr: *const u8,
+    claims_json_len: i64,
+    jwks_ptr: *const u8,
+    jwks_len: i64,
+    out_token: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(subject), Some(issuer), Some(audience), Some(claims_json), Some(jwks_json)) = (
+        unsafe { str_from_raw(subject_ptr, subject_len) },
+        unsafe { str_from_raw(issuer_ptr, issuer_len) },
+        unsafe { str_from_raw(audience_ptr, audience_len) },
+        unsafe { str_from_raw(claims_json_ptr, claims_json_len) },
+        unsafe { str_from_raw(jwks_ptr, jwks_len) },
+    ) else {
+        unsafe { write_str_out(out_err, "subject/issuer/audience/claims_json/jwks is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match issue_mock_token_inner(subject, issuer, audience, issued_at, ttl_secs, claims_json, jwks_json) {
+        Ok(token) => unsafe {
+            write_str_out(out_token, token);
+            1
+        },
+        Err(msg) => unsafe {
+            write_str_out(out_err, msg);
+            0
+        },
+    }
+}
+
 /// `1` if `role` (as UTF-8 bytes) is present in `claims`'s roles, `0`
 /// otherwise — including if either buffer isn't valid UTF-8, the same
 /// "fail closed on malformed input" posture every other identity check
