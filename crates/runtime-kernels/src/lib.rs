@@ -2866,6 +2866,213 @@ pub unsafe extern "C" fn nir_json_set_str(
     }
 }
 
+/// `codegen.rs`'s generic `Ty`<->JSON walk (Stage 1 of reviving compiled
+/// `serve`, `rfcs/0010-landing-and-serve-exposure.md`) needs a shape
+/// none of the builtins above provide: encoding one bare scalar as JSON
+/// *text* on its own, not keyed inside an object (`nir_json_get_*`'s own
+/// shape) and not building one (`nir_json_set_str`'s). A struct's own
+/// field values -- and a `Result`'s inner payload -- are computed one at
+/// a time by walking a compiled value whose `Ty` is known statically at
+/// codegen time, long before there's an object to put them in; these are
+/// the leaves that walk produces, combined back into a real object by
+/// `nir_json_set_raw` below. Always succeed on a well-typed input (an
+/// `i64`/`f64`/`bool`/`str` value out of already-typechecked compiled
+/// code cannot fail to become JSON text), so -- unlike every
+/// `nir_json_get_*`/`_decode_*` sibling here, which has to handle
+/// attacker-controlled request bytes -- none of these four take an
+/// `out_err` or return a status.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_encode_i64(value: i64, out_json: *mut NirStrOut) {
+    unsafe { write_str_out(out_json, value.to_string()) };
+}
+
+/// Non-finite (`NaN`/`+-inf`) encodes as JSON `null` -- JSON has no
+/// literal for either. Same choice the deleted interpreter's own
+/// `encode_value` made (`Value::Float(f) => if f.is_finite() {...} else
+/// { JsonVal::Null }`, recovered via `git show
+/// 05a747c~1:crates/compiler/src/serve.rs` as this rewrite's own ground
+/// truth for wire-compatible behavior) -- kept for exact parity with
+/// what `ui_gen_template.html`'s client already expects, not re-derived.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_encode_f64(value: f64, out_json: *mut NirStrOut) {
+    let text = if value.is_finite() { serde_json::Number::from_f64(value).map(|n| n.to_string()).unwrap_or_else(|| "null".to_string()) } else { "null".to_string() };
+    unsafe { write_str_out(out_json, text) };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_encode_bool(value: i32, out_json: *mut NirStrOut) {
+    unsafe { write_str_out(out_json, if value != 0 { "true" } else { "false" }.to_string()) };
+}
+
+/// Real JSON string quoting/escaping (`serde_json`'s own `Display`),
+/// not hand-rolled -- the one encoder of the four that can't just
+/// `to_string()` the raw Rust value, since a `str` value can contain
+/// quotes/backslashes/control characters JSON text must escape.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_encode_str(value_ptr: *const u8, value_len: i64, out_json: *mut NirStrOut) {
+    let text = match unsafe { str_from_raw(value_ptr, value_len) } {
+        Some(s) => serde_json::Value::String(s.to_string()).to_string(),
+        None => "null".to_string(),
+    };
+    unsafe { write_str_out(out_json, text) };
+}
+
+/// The decode-side counterpart to the four encoders above: parses `json`
+/// as a **bare** value (an array element, not a keyed object field --
+/// `nir_json_get_i64`'s own shape) and requires it to be a JSON integer.
+/// Used when a route argument's own declared `Ty` is a plain scalar, not
+/// a struct -- `nir_json_array_get` hands codegen that argument's raw
+/// JSON text with no key to look it up by, so decoding it needs this
+/// bare-value shape, not `nir_json_get_i64`'s keyed one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_decode_i64(json_ptr: *const u8, json_len: i64, out_value: *mut i64, out_err: *mut NirStrOut) -> i32 {
+    match unsafe { parse_json(json_ptr, json_len) } {
+        Ok(v) => match v.as_i64() {
+            Some(n) => {
+                unsafe { *out_value = n };
+                1
+            }
+            None => {
+                unsafe { write_str_out(out_err, "expected a JSON integer".to_string()) };
+                0
+            }
+        },
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_decode_f64(json_ptr: *const u8, json_len: i64, out_value: *mut f64, out_err: *mut NirStrOut) -> i32 {
+    match unsafe { parse_json(json_ptr, json_len) } {
+        Ok(v) => match v.as_f64() {
+            Some(f) => {
+                unsafe { *out_value = f };
+                1
+            }
+            None => {
+                unsafe { write_str_out(out_err, "expected a JSON number".to_string()) };
+                0
+            }
+        },
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            0
+        }
+    }
+}
+
+/// Same permissive "a real JSON boolean, or the integers `0`/`1`"
+/// acceptance `nir_json_get_bool`'s own doc comment establishes and
+/// justifies (a `db`-sourced boolean re-serializes as a plain integer,
+/// no schema-level way to know otherwise) -- kept identical here rather
+/// than a stricter decoder, so a value that already round-tripped
+/// through `db`/`json_get_bool` once keeps round-tripping through this
+/// bare-value path too.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_decode_bool(json_ptr: *const u8, json_len: i64, out_value: *mut i32, out_err: *mut NirStrOut) -> i32 {
+    match unsafe { parse_json(json_ptr, json_len) } {
+        Ok(v) => {
+            let found = match v {
+                serde_json::Value::Bool(b) => Some(b),
+                serde_json::Value::Number(ref n) if n.as_i64() == Some(0) => Some(false),
+                serde_json::Value::Number(ref n) if n.as_i64() == Some(1) => Some(true),
+                _ => None,
+            };
+            match found {
+                Some(b) => {
+                    unsafe { *out_value = b as i32 };
+                    1
+                }
+                None => {
+                    unsafe { write_str_out(out_err, "expected a JSON boolean (or 0/1 integer)".to_string()) };
+                    0
+                }
+            }
+        }
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_decode_str(json_ptr: *const u8, json_len: i64, out_value: *mut NirStrOut, out_err: *mut NirStrOut) -> i32 {
+    match unsafe { parse_json(json_ptr, json_len) } {
+        Ok(v) => match v.as_str() {
+            Some(s) => {
+                unsafe { write_str_out(out_value, s.to_string()) };
+                1
+            }
+            None => {
+                unsafe { write_str_out(out_err, "expected a JSON string".to_string()) };
+                0
+            }
+        },
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            0
+        }
+    }
+}
+
+/// `json_set_str`'s sibling for a value that's already JSON text (a
+/// nested struct's own already-encoded object, a `nir_json_encode_*`
+/// scalar's output, a `Result`'s wrapped payload) rather than a bare
+/// Rust string to be quoted -- the object-building primitive the struct/
+/// `Result` encode walk in `codegen.rs` folds over one field at a time,
+/// starting from `"{}"`. `raw` must itself already be valid JSON (it was
+/// produced by one of this same walk's own encode calls, or is the
+/// literal `"{}"` starting point) -- a real `Err`, not a garbage splice,
+/// if it somehow isn't.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_json_set_raw(
+    doc_ptr: *const u8,
+    doc_len: i64,
+    key_ptr: *const u8,
+    key_len: i64,
+    raw_ptr: *const u8,
+    raw_len: i64,
+    out_json: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let mut parsed = match unsafe { parse_json(doc_ptr, doc_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, e) };
+            return 0;
+        }
+    };
+    let Some(key) = (unsafe { str_from_raw(key_ptr, key_len) }) else {
+        unsafe { write_str_out(out_err, "key is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let raw_value = match unsafe { parse_json(raw_ptr, raw_len) } {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { write_str_out(out_err, format!("value for key `{key}` is not valid JSON: {e}")) };
+            return 0;
+        }
+    };
+    if parsed.is_null() {
+        parsed = serde_json::Value::Object(serde_json::Map::new());
+    }
+    match parsed.as_object_mut() {
+        Some(map) => {
+            map.insert(key.to_string(), raw_value);
+            unsafe { write_str_out(out_json, serde_json::to_string(&parsed).unwrap_or_else(|_| "null".to_string())) };
+            1
+        }
+        None => {
+            unsafe { write_str_out(out_err, "not a JSON object (and not null)".to_string()) };
+            0
+        }
+    }
+}
+
 #[cfg(test)]
 mod json_kernel_tests {
     use super::*;
@@ -2955,6 +3162,68 @@ mod json_kernel_tests {
     #[test]
     fn get_bool_rejects_any_other_integer() {
         assert_eq!(get_bool(r#"{"active":2}"#, "active"), None);
+    }
+
+    #[test]
+    fn encode_scalars_round_trip_through_decode() {
+        let mut json = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe { nir_json_encode_i64(42, &mut json) };
+        assert_eq!(to_str(&json), "42");
+        let text = to_str(&json);
+        let mut value = 0i64;
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        assert_eq!(unsafe { nir_json_decode_i64(text.as_ptr(), text.len() as i64, &mut value, &mut err) }, 1);
+        assert_eq!(value, 42);
+
+        unsafe { nir_json_encode_bool(1, &mut json) };
+        assert_eq!(to_str(&json), "true");
+        let mut b = 0i32;
+        let text = to_str(&json);
+        assert_eq!(unsafe { nir_json_decode_bool(text.as_ptr(), text.len() as i64, &mut b, &mut err) }, 1);
+        assert_eq!(b, 1);
+
+        unsafe { nir_json_encode_str(b"hi \"there\"".as_ptr(), 10, &mut json) };
+        assert_eq!(to_str(&json), r#""hi \"there\"""#);
+        let text = to_str(&json);
+        let mut s = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        assert_eq!(unsafe { nir_json_decode_str(text.as_ptr(), text.len() as i64, &mut s, &mut err) }, 1);
+        assert_eq!(to_str(&s), "hi \"there\"");
+    }
+
+    #[test]
+    fn encode_f64_non_finite_becomes_null() {
+        let mut json = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        unsafe { nir_json_encode_f64(f64::NAN, &mut json) };
+        assert_eq!(to_str(&json), "null");
+        unsafe { nir_json_encode_f64(1.5, &mut json) };
+        assert_eq!(to_str(&json), "1.5");
+    }
+
+    #[test]
+    fn set_raw_builds_an_object_from_pre_encoded_fields() {
+        let mut doc = "{}".to_string();
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        for (key, raw) in [("id", "1"), ("active", "true"), ("nested", r#"{"x":1}"#)] {
+            let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+            let ok = unsafe { nir_json_set_raw(doc.as_ptr(), doc.len() as i64, key.as_ptr(), key.len() as i64, raw.as_ptr(), raw.len() as i64, &mut out, &mut err) };
+            assert_eq!(ok, 1, "set_raw(`{key}`) failed: {}", to_str(&err));
+            doc = to_str(&out);
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(parsed["id"], 1);
+        assert_eq!(parsed["active"], true);
+        assert_eq!(parsed["nested"]["x"], 1);
+    }
+
+    #[test]
+    fn set_raw_rejects_a_malformed_raw_value() {
+        let doc = "{}";
+        let key = "x";
+        let raw = "not json";
+        let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe { nir_json_set_raw(doc.as_ptr(), doc.len() as i64, key.as_ptr(), key.len() as i64, raw.as_ptr(), raw.len() as i64, &mut out, &mut err) };
+        assert_eq!(ok, 0);
     }
 }
 

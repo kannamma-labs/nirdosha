@@ -173,6 +173,32 @@ fn an_unregistered_path_returns_404() {
     assert_eq!(status_of(&resp), 404);
 }
 
+/// `GET /` serves the baked-in UI (if any) as real HTML, real content
+/// type included — not the `application/json` every other response on
+/// this server correctly still uses.
+#[test]
+fn root_serves_the_baked_in_ui_as_real_html() {
+    let mut config = ServeConfig::default();
+    config.ui_html = b"<!doctype html><title>t</title>".to_vec();
+    let (addr, _r) = start_test_server(config);
+    let req = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    let resp = raw_request(addr, req);
+    assert_eq!(status_of(&resp), 200);
+    assert!(resp.to_ascii_lowercase().contains("content-type: text/html"), "response: {resp}");
+    assert!(body_of(&resp).contains("<!doctype html>"), "body: {}", body_of(&resp));
+}
+
+/// No `ui_html` baked in (this crate's own `ServeConfig::default()`,
+/// and every test above that doesn't set it) — `GET /` 404s rather
+/// than serving an empty page silently.
+#[test]
+fn root_with_no_ui_baked_in_is_404() {
+    let (addr, _r) = start_test_server(ServeConfig::default());
+    let req = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    let resp = raw_request(addr, req);
+    assert_eq!(status_of(&resp), 404);
+}
+
 #[test]
 fn a_route_returning_code_2_maps_to_401() {
     let (addr, _r) = start_test_server(ServeConfig::default());
@@ -291,13 +317,26 @@ fn a_cookie_route_gets_a_real_set_cookie_header_with_security_attributes() {
     assert!(resp.contains("Set-Cookie: nirdosha_session=abc123; HttpOnly; Secure; SameSite=Lax; Path=/"), "response headers: {resp}");
 }
 
+/// Real verification, not the old placeholder: a bearer token only
+/// reaches a route as `identity_json` when it actually verifies against
+/// the server's own `AuthConfig` — minting one via
+/// `identity::mock_issue_token` (the same path `/api/_demo_login`
+/// itself calls) rather than an arbitrary opaque string, since an
+/// arbitrary string is exactly what real verification now correctly
+/// rejects (see `a_garbled_bearer_token_is_rejected_before_reaching_the_route`
+/// below).
 #[test]
 fn a_bearer_token_reaches_the_route_as_identity_json() {
-    let (addr, _r) = start_test_server(ServeConfig::default());
-    let req = "GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer sometoken\r\nConnection: close\r\n\r\n";
-    let resp = raw_request(addr, req);
-    assert_eq!(status_of(&resp), 200);
-    assert!(body_of(&resp).contains("sometoken"), "body: {}", body_of(&resp));
+    let config = ServeConfig::default();
+    let token = identity::mock_issue_token("alice", &config.auth, &["admin".to_string()], &[("dept".to_string(), "eng".to_string())]).expect("minting a demo token should succeed");
+    let (addr, _r) = start_test_server(config);
+    let req = format!("GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    let resp = raw_request(addr, &req);
+    assert_eq!(status_of(&resp), 200, "body: {}", body_of(&resp));
+    let body = body_of(&resp);
+    assert!(body.contains("\"subject\":\"alice\""), "body: {body}");
+    assert!(body.contains("roles") && body.contains("admin"), "body: {body}");
+    assert!(body.contains("eng"), "body: {body}");
 }
 
 #[test]
@@ -306,6 +345,65 @@ fn no_authorization_header_reaches_the_route_as_a_null_identity() {
     let req = "GET /api/identity HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
     let resp = raw_request(addr, req);
     assert_eq!(body_of(&resp), "{\"identity\":null}");
+}
+
+/// A present-but-invalid `Authorization` header is a hard `401` before
+/// the route is ever reached — never silently treated as "no identity"
+/// (that would let a caller shrug off a bad token and get an anonymous
+/// response from a route that might otherwise have required one).
+#[test]
+fn a_garbled_bearer_token_is_rejected_before_reaching_the_route() {
+    let (addr, _r) = start_test_server(ServeConfig::default());
+    let req = "GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer not-a-real-jwt\r\nConnection: close\r\n\r\n";
+    let resp = raw_request(addr, req);
+    assert_eq!(status_of(&resp), 401, "body: {}", body_of(&resp));
+}
+
+/// `/api/_demo_login` mints a real token; feeding it straight back in
+/// as a bearer token on an ordinary route proves the whole loop is
+/// real, not just that minting alone succeeds.
+#[test]
+fn demo_login_mints_a_token_that_a_real_route_accepts() {
+    let (addr, _r) = start_test_server(ServeConfig::default());
+    let body = r#"{"subject":"bob","roles":["editor"],"claims":{"team":"docs"}}"#;
+    let login_req = format!("POST /api/_demo_login HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    let login_resp = raw_request(addr, &login_req);
+    assert_eq!(status_of(&login_resp), 200, "body: {}", body_of(&login_resp));
+    let login_body: serde_json::Value = serde_json::from_str(&body_of(&login_resp)).expect("demo login body should be real JSON");
+    let token = login_body["token"].as_str().expect("demo login response should carry a token");
+
+    let whoami_req = format!("GET /api/_whoami HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    let whoami_resp = raw_request(addr, &whoami_req);
+    assert_eq!(status_of(&whoami_resp), 200, "body: {}", body_of(&whoami_resp));
+    assert!(body_of(&whoami_resp).contains("\"subject\":\"bob\""), "body: {}", body_of(&whoami_resp));
+
+    let route_req = format!("GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    let route_resp = raw_request(addr, &route_req);
+    assert_eq!(status_of(&route_resp), 200);
+    assert!(body_of(&route_resp).contains("editor"), "body: {}", body_of(&route_resp));
+}
+
+/// `/api/_demo_login` doesn't exist at all outside demo mode — a real
+/// identity server has no self-service login.
+#[test]
+fn demo_login_is_not_available_outside_demo_mode() {
+    let mut config = ServeConfig::default();
+    config.demo_mode = false;
+    let (addr, _r) = start_test_server(config);
+    let req = "POST /api/_demo_login HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+    let resp = raw_request(addr, req);
+    assert_eq!(status_of(&resp), 404);
+}
+
+/// `/api/_whoami` with no `Authorization` header at all is a plain
+/// `401` (there's no identity to confirm), distinct from the
+/// invalid-token case above only in its message, not its status.
+#[test]
+fn whoami_with_no_header_is_401() {
+    let (addr, _r) = start_test_server(ServeConfig::default());
+    let req = "GET /api/_whoami HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    let resp = raw_request(addr, req);
+    assert_eq!(status_of(&resp), 401);
 }
 
 #[test]

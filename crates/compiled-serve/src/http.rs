@@ -41,21 +41,6 @@ impl Request {
         !self.header("connection").map(|v| v.eq_ignore_ascii_case("close")).unwrap_or(false)
     }
 
-    /// Decodes `Authorization: Bearer <token>` into the verified-identity
-    /// JSON a [`crate::RouteHandler`] receives — **not implemented as
-    /// real JWT verification in this first cut**, disclosed rather than
-    /// silently stubbed: real verification (`nir_oidc_validate_token`)
-    /// lives in `kernel::identity`, callable from here once the
-    /// `codegen.rs` wiring (a separate, real follow-up — this crate's
-    /// own module doc) lands. Today, a present bearer token round-trips
-    /// as `{"token": "<raw>"}` — enough for a hand-written test route to
-    /// exercise the identity-plumbing *shape* end to end without this
-    /// crate pretending to verify anything it doesn't yet.
-    pub fn bearer_identity_json(&self) -> Option<String> {
-        let auth = self.header("authorization")?;
-        let token = auth.strip_prefix("Bearer ")?;
-        Some(format!("{{\"token\":{}}}", serde_json::to_string(token).ok()?))
-    }
 }
 
 pub enum ReadError {
@@ -145,6 +130,16 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 
 pub struct Response {
     pub status: u16,
+    /// Was hardcoded to `application/json` at the one call site that
+    /// actually writes a response (`lib.rs::handle_connection`) —
+    /// harmless sloppiness for every route this crate served before
+    /// (JSON API responses, and plain-text `/healthz`/`/readyz`/
+    /// `/metrics` bodies browsers/`curl` don't care about the label
+    /// on), but a real bug for `GET /`'s HTML page (Stage 3 of
+    /// reviving compiled `serve`): a browser served real HTML labeled
+    /// `application/json` may refuse to render it as a page at all.
+    /// Real per-response content type, not a second hardcoded guess.
+    pub content_type: &'static str,
     pub body: Vec<u8>,
     pub headers: Vec<(String, String)>,
     pub cookie: Option<String>,
@@ -152,11 +147,14 @@ pub struct Response {
 
 impl Response {
     pub fn ok_text(status: u16, text: &str) -> Response {
-        Response { status, body: text.as_bytes().to_vec(), headers: Vec::new(), cookie: None }
+        Response { status, content_type: "text/plain", body: text.as_bytes().to_vec(), headers: Vec::new(), cookie: None }
+    }
+    pub fn ok_html(status: u16, html: &[u8]) -> Response {
+        Response { status, content_type: "text/html; charset=utf-8", body: html.to_vec(), headers: Vec::new(), cookie: None }
     }
     pub fn error(status: u16, message: &str) -> Response {
         let body = serde_json::json!({"err": message});
-        Response { status, body: serde_json::to_vec(&body).unwrap_or_default(), headers: Vec::new(), cookie: None }
+        Response { status, content_type: "application/json", body: serde_json::to_vec(&body).unwrap_or_default(), headers: Vec::new(), cookie: None }
     }
 }
 

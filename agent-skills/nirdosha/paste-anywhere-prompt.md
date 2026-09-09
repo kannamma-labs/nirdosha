@@ -85,6 +85,31 @@ generate *valid* Nirdosha on the first try.
    and *that* form requires a trailing `_ =>` wildcard arm (variant
    arms never use `_`, since coverage is checked by variant, not by
    value).
+
+   **A variant arm's pattern is flat, one variant deep — it can never
+   nest another constructor.** `Err(DbError(_)) => ...` is a parse
+   error (`expected \`)\`, found LParen`), every time — a pattern's
+   payload position can only bind a plain name (or `_`), never another
+   variant call. To inspect *what kind* of error a bound payload itself
+   is, bind the whole payload to a name and `match` on that name again,
+   nested:
+   ```nirdosha
+   // WRONG — parse error, "expected `)`, found LParen":
+   match setup {
+       Ok(_) => "ready",
+       Err(DbError(_)) => "db error",
+       Err(NotFound(_)) => "not found",
+   }
+
+   // RIGHT — bind the payload, then match on it in a second match:
+   match setup {
+       Ok(_) => "ready",
+       Err(e) => match e {
+           DbError(_) => "db error",
+           NotFound(_) => "not found",
+       },
+   }
+   ```
 9. **A `match` arm's body must be a single expression — never a
    `{ statement; statement }` block.** This is the single most common
    mistake an LLM makes writing Nirdosha (it's valid in Rust, which is
