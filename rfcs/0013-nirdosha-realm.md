@@ -77,20 +77,48 @@ Five non-negotiable principles, referenced by name throughout:
    exhaustion rather than degrading unboundedly.
 5. **Local-first, scale-out by plugin, never by requirement.**
 
-### Physical layout
+### Physical layout, and when it gets created
 
 ```text
 my-project/
-├── .realm/
-│   ├── realm.db          # SQLite (rusqlite, "bundled" feature —
-│   │                      # already a workspace dependency:
-│   │                      # crates/compiler/Cargo.toml:35,
-│   │                      # crates/runtime-kernels/Cargo.toml:111)
-│   └── content/           # sha256-addressed blobs (source docs,
-│                           # not .nir — see "What's ingested" below)
+├── .nir/
+│   ├── realm.db           # SQLite (rusqlite, "bundled" feature —
+│   │                       # already a workspace dependency:
+│   │                       # crates/compiler/Cargo.toml:35,
+│   │                       # crates/runtime-kernels/Cargo.toml:111)
+│   └── content/            # sha256-addressed blobs (source docs,
+│                            # not .nir source — see "What's ingested")
 ├── src/*.nir
 └── nirdosha.toml
 ```
+
+`.nir/` is scaffolded automatically — not via a separate `init`-style
+step a user has to remember to run. **Every successful `nirdosha hi`
+invocation** (i.e. after RFC 0012's activation contract resolves
+credentials and is about to enter the console loop — never on a
+failed activation, which shouldn't leave stray directories behind for
+someone who was only checking whether `hi` was configured) does, in
+order:
+
+1. If `.nir/` doesn't exist under the current working directory,
+   create it (`.nir/realm.db`, `.nir/content/`).
+2. Run the code half of `realm sync` (below) over every `.nir` file
+   in the project, incrementally — content-addressing means a
+   second, third, hundredth invocation with no code changes touches
+   zero rows and costs a stat + hash comparison per file, not a
+   re-parse.
+3. Enter the console loop as today, unaffected otherwise.
+
+This means the `CodeUnit` graph is always current the moment a
+question or a generation request can be asked, with no separate
+"remember to sync" step — the same "don't make the user remember to
+maintain it" property that made the "recorded by the tool" choice
+right for code↔knowledge links (below). Document ingestion
+(`realm ingest`) stays explicit and out of this auto-scaffold: `hi`
+has no way to guess which of a project's Markdown files are
+requirements/decisions worth chunking and indexing versus a README or
+a changelog, so that step is opt-in, never inferred from file
+presence alone.
 
 Zero new dependencies for the local default: `rusqlite` (bundled) is
 already vendored and linked into `crates/compiler`. This is a strictly
@@ -183,7 +211,8 @@ picks the lowest-risk of two options:
   prompt, timestamp — the same fields RFC 0012's `hi::Activation`
   already redacts carefully in `Debug`). No grammar change, no new
   `.nir` syntax, zero compatibility risk — purely additive metadata
-  that lives in `.realm/realm.db`, never in the `.nir` file itself.
+  that lives in `.nir/realm.db`, never in the `.nir` *source* file
+  itself.
 - **v2 (explicitly deferred, not designed here): an in-source
   annotation** (a doc-comment convention or a new attribute
   production) so links survive code written outside `hi` entirely —
@@ -205,8 +234,9 @@ Both directions are the same bounded graph walk, just starting from a
 different node kind, and both only ever *flag*, never rewrite (per
 principle 3 above):
 
-**Code → knowledge** (`realm sync` after any `.nir` edit, or on
-demand):
+**Code → knowledge** (`realm sync`'s code half — run automatically on
+every `hi` startup per "Physical layout" above, or standalone via
+`nirdosha realm sync` for CI/non-interactive use):
 
 1. Re-run the per-item `ast_hash` walk above for changed files.
 2. For each `CodeUnit` whose `ast_hash` no longer matches the hash
@@ -232,8 +262,9 @@ changed document — new chunk `content_hash` under the same
 3. `nirdosha hi :impact R17` prints the same report from the other
    end: every `CodeUnit`/`Test` this requirement change touches.
 
-Both commands are read-only with respect to `.nir` source and
-requirement text — they only ever write flags into `realm.db`. Fixing
+Both directions are read-only with respect to `.nir` source and
+requirement text — they only ever write flags into `.nir/realm.db`.
+Fixing
 the drift (editing code, editing the requirement, or explicitly
 clearing the flag once reviewed) stays a human or an explicit,
 separate `hi` action, never something `sync`/`impact` does on its own.
@@ -267,8 +298,11 @@ possible by not baking FTS-only assumptions into the graph schema.
 ```text
 nirdosha realm ingest <doc.md>        content-address, chunk, FTS-index
                                         a requirement/decision/design doc
-nirdosha realm sync [<file.nir> ...]   re-run emit-ast, diff ast_hash
-                                        per CodeUnit, flag stale links
+nirdosha realm sync [<file.nir> ...]   the same code-sync step `hi` runs
+                                        automatically on startup, exposed
+                                        standalone (CI/non-interactive;
+                                        does NOT scaffold .nir/ document
+                                        ingestion, only the code half)
 nirdosha realm link <req-id> <qualified-name>
                                         record a manual IMPLEMENTS edge
 nirdosha realm impact <target>         non-interactive impact report
@@ -290,7 +324,19 @@ plus two new `hi` console verbs, alongside the existing `:explain`
 the same per-command arg-loop dispatch style as `init`/`build`
 (`crates/compiler/src/main.rs`'s `match first.as_str()`) — no new CLI
 framework, consistent with RFC 0012's explicit choice not to introduce
-one.
+one. `nirdosha realm sync` as a standalone subcommand exists mainly
+for CI (a merge/PR check can run `nirdosha realm sync && nirdosha
+realm impact <target>` without ever entering the interactive console)
+— for everyday use the point of "Physical layout"'s auto-scaffold is
+that a person never needs to type `realm sync` themselves.
+
+One escape hatch, following the project's existing `NIRDOSHA_`-
+prefixed, `.ok()`-based env-var convention (`crates/runtime-kernels/
+src/kernel/nfr.rs:183`, `pool.rs:101`, and RFC 0012's own trio):
+`NIRDOSHA_REALM_DISABLE=1` skips both the auto-scaffold and the
+auto-sync step on `hi` startup entirely — for a project that never
+wants a `.nir/` directory materializing on disk, or a CI image running
+`hi` read-only.
 
 ### Bounding and resource posture
 
@@ -328,13 +374,25 @@ only place that decision is made.
 
 ## Compatibility
 
-Purely additive, same bar RFC 0012 met for `hi`. `.realm/` is a new,
-optional directory; no existing `.nir` program, `build`, `emit-ast`,
-or CI invocation changes behavior, because nothing in `nirdosha`
-today reads or depends on `.realm/`'s existence. `emit-ast` itself is
-called exactly as it already exists — this RFC adds a caller, not a
-new output shape, so its existing `--emit-ast` CLI behavior and
+Additive to every existing subcommand: no existing `.nir` program,
+`build`, `emit-ast`, or CI invocation of those changes behavior,
+because nothing in `nirdosha` today reads or depends on `.nir/`'s
+(the directory's) existence, and `emit-ast` itself is called exactly
+as it already exists — this RFC adds a caller, not a new output
+shape, so its existing `--emit-ast` CLI behavior and
 `docs/nirdosha-agent-api.md`'s C4 spec are both unchanged.
+
+**`hi` itself is the one exception, and it's worth being honest about
+rather than filing under "purely additive."** Before this RFC, running
+`nirdosha hi` had no filesystem side effect beyond the console session
+itself. After this RFC, a successful activation now creates `.nir/` on
+disk the first time it runs in a project — a real, visible change to
+what invoking `hi` does, gated only by the `NIRDOSHA_REALM_DISABLE`
+escape hatch above. This is called out explicitly rather than folded
+into "purely additive" language, because a new default write-on-
+startup is exactly the kind of thing RFC 0012's own template bar
+("does an existing program's behavior change? ... say why") asks to
+be named, not assumed harmless.
 
 ## Rejected alternatives
 
@@ -382,7 +440,7 @@ new output shape, so its existing `--emit-ast` CLI behavior and
   modules once `use "..."` (loader-resolved imports,
   `crates/compiler/src/main.rs:455`'s own comment on `loader::
   load_program`) is in play — collision handling isn't designed here.
-- Whether `.realm/realm.db` is meant to be committed to version
+- Whether `.nir/realm.db` is meant to be committed to version
   control (so a team shares one traceability graph) or is per-checkout
   local state (so every clone re-ingests) — this changes whether
   `content/` blobs need dedup-friendly `.gitattributes` handling.
@@ -400,3 +458,16 @@ new output shape, so its existing `--emit-ast` CLI behavior and
 - The vector-search plugin boundary's actual shape (provider trait,
   `Domain` reuse or a new one) — intentionally left to whichever RFC
   proposes the first real vector-store plugin, not pre-designed here.
+- **`.nir/` the hidden directory vs. `.nir` the source-file
+  extension.** Named this way deliberately (parallels `.git/` sitting
+  next to the files it tracks), but it does mean `ls -a` in a project
+  root shows both `.nir/` and `ledger.nir` side by side, and any doc
+  or tooling that greps for "`.nir`" to mean "a Nirdosha source file"
+  now needs to be a little more careful. Not reconsidered here since
+  it was requested as the concrete directory name for this RFC, but
+  worth a second look if that confusion turns out to bite in practice.
+- Whether the auto-scaffold-on-`hi`-startup step should also print
+  something the first time it creates `.nir/` in a project (so the
+  new on-disk artifact isn't a silent surprise the first time), or
+  stay silent every time the way a fast no-op sync does on every
+  subsequent run.
