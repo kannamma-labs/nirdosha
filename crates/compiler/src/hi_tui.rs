@@ -18,7 +18,7 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -34,6 +34,14 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::{explain_diagnostic, failure_counters, generate_and_build, parse_line, Activation, Command, FailureCounters, LlmClient, LogEvent, SessionLog, TokenUsage};
+
+/// The one-time full-screen intro played by [`run`] before the console
+/// proper starts -- see that fn's own comment for why it's a distinct
+/// phase from the small, permanent header glyph `draw_header` renders.
+#[path = "hi_logo_anim.rs"]
+mod logo_anim;
+#[path = "hi_logo_pixels.rs"]
+mod logo_pixels;
 
 const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 
@@ -264,12 +272,47 @@ pub(super) fn run(activation: Activation, log: SessionLog) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, activation, log);
+    terminal.hide_cursor()?;
+    let splash_result = show_splash(&mut terminal);
+    terminal.show_cursor()?;
+
+    let result = splash_result.and_then(|()| run_app(&mut terminal, activation, log));
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+/// Plays `logo_anim`'s reveal -> type -> idle-breathe animation
+/// full-screen, once, before the console proper starts -- a distinct
+/// phase from `draw_header`'s small, permanent glyph (which stays
+/// exactly as it was: this doesn't touch that path at all). Ends the
+/// moment [`logo_anim::intro_done_at`] elapses, or immediately on any
+/// keypress so it never gets in a returning user's way; Ctrl+C during
+/// the splash quits the same as it does everywhere else in `hi`.
+fn show_splash(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    let start = Instant::now();
+    let hold = logo_anim::intro_done_at();
+    loop {
+        let elapsed = start.elapsed().as_secs_f32();
+        terminal.draw(|f| {
+            let area = f.area();
+            logo_anim::render(f.buffer_mut(), area, elapsed);
+        })?;
+        if elapsed >= hold {
+            return Ok(());
+        }
+        let remaining = Duration::from_secs_f32((hold - elapsed).max(0.0));
+        let frame_budget = Duration::from_millis(16);
+        if event::poll(remaining.min(frame_budget))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, activation: Activation, log: SessionLog) -> io::Result<()> {
