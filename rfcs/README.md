@@ -23,6 +23,7 @@ this list.
 | [0009](./0009-ui-catalog-extensibility.md) | Grammar-of-graphics charts and compile-time UI-plugin components — escaping the closed 4-chart/7-control catalog without opening a runtime hole |
 | [0010](./0010-landing-and-serve-exposure.md) | Per-role/claim `landing` screens, and the compiled-`serve` route-exposure model (deny-by-default on mutating exposure) |
 | [0011](./0011-uniform-service-provider-model.md) | A uniform service-provider model — open admission domains, revived plugin dispatch, and proactive rehydration for any future backend |
+| [0012](./0012-nirdosha-hi-agentic-console.md) | `nirdosha hi` — a native LLM console gated on provider credentials |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a

@@ -21,6 +21,7 @@ fn main() -> ExitCode {
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
         "emit-catalog" => cmd_emit_catalog(args),
+        "hi" => cmd_hi(args),
         other => {
             eprintln!("unknown subcommand `{other}` -- nirdosha has no interpreter/`run`/`serve` mode anymore; use `build` or `emit-llvm`.");
             print_usage();
@@ -53,6 +54,8 @@ fn print_usage() {
     eprintln!("  nirdosha emit-catalog [-o out.json]");
     eprintln!("                                      print the std UI catalog (rfcs/0009 Phase 0) -- the closed");
     eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
+    eprintln!("  nirdosha hi                          interactive LLM console (rfcs/0012) -- gated on");
+    eprintln!("                                      NIRDOSHA_LLM_PROVIDER_KEY+_MODEL or OPENAI_API_KEY");
 }
 
 /// Load (resolving any `use "..."` — `docs/ROADMAP.md` Track F, F2 piece 3)
@@ -343,6 +346,25 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `nirdosha hi` (rfcs/0012-nirdosha-hi-agentic-console.md) -- thin on
+/// purpose: the activation contract and the console loop itself both
+/// live in `nirdosha::hi` (the library half), so they're unit-testable
+/// and so a future second caller (an editor extension, say) doesn't
+/// have to re-shell out to this binary just to reuse them. No flags
+/// today -- the console's own `:`-prefixed commands are where its
+/// interaction surface actually lives, not CLI args.
+fn cmd_hi(_args: impl Iterator<Item = String>) -> ExitCode {
+    let activation = match nirdosha::hi::resolve_activation(&|k| std::env::var(k).ok()) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    nirdosha::hi::run_console(activation);
+    ExitCode::SUCCESS
 }
 
 fn cmd_emit_llvm(mut args: impl Iterator<Item = String>) -> ExitCode {
