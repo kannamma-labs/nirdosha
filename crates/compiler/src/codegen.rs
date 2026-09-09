@@ -12137,6 +12137,26 @@ mod json_roundtrip_tests {
         clang_cmd.arg(&ll_path).arg(&runtime_lib_path).arg(OptLevel::O0.clang_flag());
         #[cfg(unix)]
         clang_cmd.arg("-lm");
+        // Real macOS CI failure, not anticipated in advance (this
+        // harness's own doc comment used to claim these tests "never
+        // call anything that needs them" — wrong: `rustc`'s release
+        // build merges `runtime-kernels` and its whole dependency graph
+        // into very few codegen units, so `native-tls`/`tokio-postgres`
+        // symbols needing these frameworks ride along in
+        // `RUNTIME_KERNELS_LIB` regardless of what the specific test
+        // calls — the exact same mechanics `build_impl`'s own identical
+        // `#[cfg(target_os = "macos")]` block already documents, just
+        // never copied into this simplified test-only linker
+        // invocation). Every test in this module links this same
+        // `RUNTIME_KERNELS_LIB`, so this needs no per-test conditioning.
+        #[cfg(target_os = "macos")]
+        clang_cmd
+            .arg("-framework")
+            .arg("Security")
+            .arg("-framework")
+            .arg("CoreFoundation")
+            .arg("-framework")
+            .arg("SystemConfiguration");
         let link_result = clang_cmd.arg("-o").arg(&bin_path).output().expect("running clang");
         let _ = std::fs::remove_file(&ll_path);
         let _ = std::fs::remove_file(&runtime_lib_path);
@@ -12502,6 +12522,26 @@ mod serve_wrapper_tests {
         clang_cmd.arg(&ll_path).arg(&runtime_lib_path).arg(OptLevel::O0.clang_flag());
         #[cfg(unix)]
         clang_cmd.arg("-lm");
+        // Real macOS CI failure, not anticipated in advance (this
+        // harness's own doc comment used to claim these tests "never
+        // call anything that needs them" — wrong: `rustc`'s release
+        // build merges `runtime-kernels` and its whole dependency graph
+        // into very few codegen units, so `native-tls`/`tokio-postgres`
+        // symbols needing these frameworks ride along in
+        // `RUNTIME_KERNELS_LIB` regardless of what the specific test
+        // calls — the exact same mechanics `build_impl`'s own identical
+        // `#[cfg(target_os = "macos")]` block already documents, just
+        // never copied into this simplified test-only linker
+        // invocation). Every test in this module links this same
+        // `RUNTIME_KERNELS_LIB`, so this needs no per-test conditioning.
+        #[cfg(target_os = "macos")]
+        clang_cmd
+            .arg("-framework")
+            .arg("Security")
+            .arg("-framework")
+            .arg("CoreFoundation")
+            .arg("-framework")
+            .arg("SystemConfiguration");
         let link_result = clang_cmd.arg("-o").arg(&bin_path).output().expect("running clang");
         let _ = std::fs::remove_file(&ll_path);
         let _ = std::fs::remove_file(&runtime_lib_path);
