@@ -739,6 +739,7 @@ dependencies = [
 name = "nirdosha-compiled-serve"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "nirdosha-runtime-kernels",
  "serde_json",
 ]

@@ -21,6 +21,7 @@ fn main() -> ExitCode {
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
         "emit-catalog" => cmd_emit_catalog(args),
+        "hi" => cmd_hi(args),
         other => {
             eprintln!("unknown subcommand `{other}` -- nirdosha has no interpreter/`run`/`serve` mode anymore; use `build` or `emit-llvm`.");
             print_usage();
@@ -53,6 +54,8 @@ fn print_usage() {
     eprintln!("  nirdosha emit-catalog [-o out.json]");
     eprintln!("                                      print the std UI catalog (rfcs/0009 Phase 0) -- the closed");
     eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
+    eprintln!("  nirdosha hi                          interactive LLM console (rfcs/0012) -- gated on");
+    eprintln!("                                      NIRDOSHA_LLM_PROVIDER_KEY+_MODEL or OPENAI_API_KEY");
 }
 
 /// Load (resolving any `use "..."` — `docs/ROADMAP.md` Track F, F2 piece 3)
@@ -304,10 +307,17 @@ fn cmd_init(mut args: impl Iterator<Item = String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `--serve`'s own default port when no `--serve <port>` value is
+/// given — matches `examples/features/51_compiled_serve.nir`'s own
+/// hand-written demo port, so a `curl http://127.0.0.1:8080/...`
+/// habit from that primitives-only example still works here.
+const DEFAULT_SERVE_PORT: u16 = 8080;
+
 fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
     let mut opt = nirdosha::codegen::OptLevel::O2;
+    let mut serve: Option<u16> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => output = args.next(),
@@ -318,11 +328,27 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             // asked not to (debugging a miscompile without an optimizer
             // in the way is the reason to ask).
             "--opt0" => opt = nirdosha::codegen::OptLevel::O0,
+            // Reviving compiled `nirdosha serve` (`rfcs/0010-landing-
+            // and-serve-exposure.md`) -- an optional trailing port
+            // number (`--serve 9000`) overrides `DEFAULT_SERVE_PORT`;
+            // anything else (missing, or the next token doesn't parse
+            // as a port) leaves the default in place and that token
+            // free to be consumed as the usual positional `<file.nir>`/
+            // other flag.
+            "--serve" => {
+                serve = Some(DEFAULT_SERVE_PORT);
+                if let Some(next) = args.next() {
+                    match next.parse::<u16>() {
+                        Ok(port) => serve = Some(port),
+                        Err(_) => input = Some(next),
+                    }
+                }
+            }
             other => input = Some(other.to_string()),
         }
     }
     let (Some(path), Some(out)) = (input, output) else {
-        eprintln!("usage: nirdosha build <file.nir> -o <out> [--opt0]");
+        eprintln!("usage: nirdosha build <file.nir> -o <out> [--opt0] [--serve [port]]");
         return ExitCode::FAILURE;
     };
     let (program, _src) = match typecheck_and_own(&path) {
@@ -333,7 +359,30 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
     };
     let smt_report = nirdosha::smt::analyze(&program);
-    match nirdosha::codegen::build(&program, &smt_report, std::path::Path::new(&out), opt) {
+    let result = match serve {
+        Some(port) => {
+            // Only meaningful once a program is actually served -- a
+            // plain `nirdosha build` prints nothing new here.
+            print_ungated_fn_warnings(&program);
+            // The UI is generated *now*, at compile time, and baked
+            // into the binary as a plain byte string
+            // (`codegen::build_serve`) -- unlike the deleted
+            // interpreted `serve.rs`, a compiled process has no
+            // `Program` AST left at runtime to call `ui_gen::generate`
+            // against. Demo mode only, deliberately, for this first cut
+            // (`compiled_serve::ServeConfig::default()`'s own doc
+            // comment has the same disclosure) -- real production
+            // identity flags for `--serve` are real, separate
+            // follow-up work.
+            let registry = nirdosha::ast::TypeRegistry::build(&program);
+            let effects = nirdosha::effects::infer_effects(&program, &registry);
+            let ui_html = nirdosha::ui_gen::generate(&program, &effects, None, false, true, false, None).into_bytes();
+            let opts = nirdosha::codegen::ServeCodegenOptions { port, ui_html };
+            nirdosha::codegen::build_serve(&program, &smt_report, std::path::Path::new(&out), opt, &opts)
+        }
+        None => nirdosha::codegen::build(&program, &smt_report, std::path::Path::new(&out), opt),
+    };
+    match result {
         Ok(()) => {
             println!("wrote {out}");
             ExitCode::SUCCESS
@@ -343,6 +392,25 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `nirdosha hi` (rfcs/0012-nirdosha-hi-agentic-console.md) -- thin on
+/// purpose: the activation contract and the console loop itself both
+/// live in `nirdosha::hi` (the library half), so they're unit-testable
+/// and so a future second caller (an editor extension, say) doesn't
+/// have to re-shell out to this binary just to reuse them. No flags
+/// today -- the console's own `:`-prefixed commands are where its
+/// interaction surface actually lives, not CLI args.
+fn cmd_hi(_args: impl Iterator<Item = String>) -> ExitCode {
+    let activation = match nirdosha::hi::resolve_activation(&|k| std::env::var(k).ok()) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    nirdosha::hi::run_console(activation);
+    ExitCode::SUCCESS
 }
 
 fn cmd_emit_llvm(mut args: impl Iterator<Item = String>) -> ExitCode {

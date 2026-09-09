@@ -111,17 +111,88 @@ impl PoolConfig {
                 Err(_) => default,
             }
         };
-        PoolConfig {
+        let mut cfg = PoolConfig {
             max_size: env_u32("MAX_SIZE", d.max_size),
             min_idle: Some(env_u32("MIN_IDLE", d.min_idle.unwrap_or(0))),
             connect_timeout: env_secs("CONNECT_TIMEOUT_SECS", Some(d.connect_timeout)).unwrap_or(d.connect_timeout),
             idle_timeout: env_secs("IDLE_TIMEOUT_SECS", d.idle_timeout),
             max_lifetime: env_secs("MAX_LIFETIME_SECS", d.max_lifetime),
+        };
+        cfg.validate(prefix);
+        cfg
+    }
+
+    /// Catches structurally-broken combinations `from_env`'s own
+    /// field-by-field degrade-to-default can't catch (each field taken
+    /// in isolation might be perfectly parseable and still combine into
+    /// a config that either never works or silently loses the reaping
+    /// an operator intended) — red-team report A6.
+    ///
+    /// Two different severities, deliberately: `min_idle > max_size` is
+    /// not "an unusual choice," it's "r2d2 will refuse to build a pool
+    /// with this config at all" (r2d2 requires `min_idle <= max_size`) —
+    /// clamping it down, loudly, keeps `from_env`'s own "degrades to a
+    /// still-functional value, never fails the whole program" posture
+    /// intact instead of producing a config that fails at first
+    /// `get_or_create`. `idle_timeout > max_lifetime` is milder (r2d2
+    /// still builds the pool fine; idle recycling just never fires
+    /// before lifetime recycling would've closed the connection anyway)
+    /// so it's warn-only, matching this file's existing soft-degrade
+    /// convention for individual fields above.
+    fn validate(&mut self, prefix: &str) {
+        if self.min_idle.unwrap_or(0) > self.max_size {
+            eprintln!(
+                "nirdosha: NIRDOSHA_{prefix}_POOL_MIN_IDLE ({}) exceeds NIRDOSHA_{prefix}_POOL_MAX_SIZE ({}) -- \
+                 r2d2 requires min_idle <= max_size and would refuse to build this pool; \
+                 clamping min_idle down to max_size",
+                self.min_idle.unwrap_or(0),
+                self.max_size
+            );
+            self.min_idle = Some(self.max_size);
+        }
+        if let (Some(idle), Some(lifetime)) = (self.idle_timeout, self.max_lifetime) {
+            if idle > lifetime {
+                eprintln!(
+                    "nirdosha: NIRDOSHA_{prefix}_POOL_IDLE_TIMEOUT_SECS ({}s) exceeds \
+                     NIRDOSHA_{prefix}_POOL_MAX_LIFETIME_SECS ({}s) -- idle recycling will never fire \
+                     before lifetime recycling closes the connection first; accepted as configured, \
+                     but this likely isn't what was intended",
+                    idle.as_secs(),
+                    lifetime.as_secs()
+                );
+            }
+        }
+        if self.connect_timeout.is_zero() {
+            eprintln!(
+                "nirdosha: NIRDOSHA_{prefix}_POOL_CONNECT_TIMEOUT_SECS resolved to 0 -- \
+                 every checkout attempt against an exhausted pool will fail instantly instead of \
+                 waiting any amount of time; accepted as configured, but this is likely a misconfiguration"
+            );
         }
     }
 
     fn apply<M: ManageConnection>(self, builder: r2d2::Builder<M>) -> r2d2::Builder<M> {
         builder.max_size(self.max_size).min_idle(self.min_idle).connection_timeout(self.connect_timeout).idle_timeout(self.idle_timeout).max_lifetime(self.max_lifetime)
+    }
+}
+
+/// Never lets `max_size` exceed `ceiling` (a `ceiling <= 0` means "no
+/// real ceiling resolved yet / not applicable," left alone) — the shared
+/// half of red-team report A12's fix (`scratch/red-team-report-main-
+/// d7fae42.md`). Pulled out as its own pure function, taking `ceiling`
+/// as a plain argument rather than looking it up internally, so it's
+/// directly unit-testable without touching this process's real,
+/// cached-forever domain ceilings (`kernel::mod.rs::max_for`'s own
+/// `OnceLock` — red-team report A24's own finding is exactly why a test
+/// here can't just set an env var and expect a fresh resolution).
+/// `db.rs`'s `db_pool_config`/`http.rs`'s `http_pool_config` both call
+/// this after their own floor-to-1000 default; `plugin_provider.rs`'s
+/// `plugin_pool_config` has the identical clamp inlined already (not
+/// switched to call this, to avoid touching already-tested Phase 6
+/// code in an unrelated fix).
+pub fn clamp_max_size_to_ceiling(cfg: &mut PoolConfig, ceiling: i64) {
+    if ceiling > 0 && i64::from(cfg.max_size) > ceiling {
+        cfg.max_size = ceiling as u32;
     }
 }
 
@@ -171,7 +242,61 @@ pub struct UnpooledConnection<M: ManageConnection> {
     domain: DomainId,
 }
 
+/// Proof that [`super::acquire`] was actually called and granted for
+/// `domain` — the only way [`UnpooledConnection::new`] accepts a domain
+/// (red-team report A22, `scratch/red-team-report-main-d7fae42.md`):
+/// before this, `UnpooledConnection`'s `Drop` unconditionally released,
+/// relying entirely on every construction site remembering to
+/// `super::acquire` *first*, an implicit invariant a future call site
+/// could get wrong (construct one for an already-admitted connection
+/// without a fresh acquire, double-releasing and driving `held` negative).
+/// Minting one *is* the acquire call — there is no other way to obtain
+/// one, so "an `AdmissionGrant` exists" and "its domain's admission was
+/// actually granted" are the same fact by construction, not a separately
+/// maintained invariant. Kept separate from the actual dial (`make_manager`/
+/// `connect`) so `checkout_with_key_cap` can still fail fast on a denied
+/// domain *before* attempting an expensive network connect, not after.
+///
+/// A real RAII guard in its own right, not just a marker: `Drop`
+/// releases automatically, so a connect attempt that fails *after* a
+/// successful acquire (the `manager.connect()` `Err` branch below) needs
+/// no manual `super::release` call either — dropping the grant does it.
+struct AdmissionGrant(Option<DomainId>);
+
+impl AdmissionGrant {
+    fn acquire(domain: DomainId) -> Result<Self, String> {
+        if !super::acquire(domain) {
+            return Err("too many concurrently held connections for this domain (unpooled fallback dial)".to_string());
+        }
+        Ok(AdmissionGrant(Some(domain)))
+    }
+
+    /// Hands the domain to [`UnpooledConnection::new`] and disarms this
+    /// guard's own `Drop` — ownership of the release obligation moves to
+    /// the `UnpooledConnection` being built, which releases on *its* own
+    /// `Drop` instead. Never called anywhere else; not `pub`.
+    fn into_domain(mut self) -> DomainId {
+        self.0.take().expect("AdmissionGrant::acquire always sets Some")
+    }
+}
+
+impl Drop for AdmissionGrant {
+    fn drop(&mut self) {
+        if let Some(domain) = self.0.take() {
+            super::release(domain);
+        }
+    }
+}
+
 impl<M: ManageConnection> UnpooledConnection<M> {
+    /// Consumes `grant` — the only way to build one, and the only way to
+    /// obtain a `grant` at all is [`AdmissionGrant::acquire`] actually
+    /// succeeding, so this constructor can never run without a real,
+    /// matching `super::acquire` behind it.
+    fn new(conn: M::Connection, grant: AdmissionGrant) -> Self {
+        UnpooledConnection { conn: Some(conn), domain: grant.into_domain() }
+    }
+
     pub fn get(&self) -> &M::Connection {
         self.conn.as_ref().expect("conn is only ever None after into_inner/drop, which consume this value")
     }
@@ -219,13 +344,33 @@ impl<M: ManageConnection> PoolRegistry<M> {
     /// to come from the caller following `get_or_create` with an
     /// immediate `pool.get()` in the same call — that `.get()` is where
     /// a bad connection string actually surfaces.
+    ///
+    /// **Invariant: the registry lock is never held across `make_manager`.**
+    /// Every `make_manager` in this codebase today is a pure struct
+    /// construction, but the API contract doesn't get to assume that of
+    /// future callers — a closure that touches another lock or another
+    /// domain's admission state while this one is held would deadlock,
+    /// and a panic inside it would poison this mutex for the rest of the
+    /// process, wedging every future `get_or_create`/`checkout_with_key_cap`
+    /// call, for every key, not just this one. The lock is dropped before
+    /// calling `make_manager` and re-acquired only to insert — with a
+    /// re-check right before inserting, since another thread may have
+    /// raced this one and inserted `key` first while the lock was open;
+    /// in that case this call's own freshly-built pool is discarded (not
+    /// installed) and the winner's pool is returned instead, so two
+    /// concurrent misses on the same key never leave two live pools (and
+    /// two independent sets of physical connections) registered under
+    /// one key.
     pub fn get_or_create(&self, key: &str, config: PoolConfig, make_manager: impl FnOnce() -> Result<M, String>) -> Result<Pool<M>, String> {
-        let mut pools = self.pools.lock().unwrap();
-        if let Some(pool) = pools.get(key) {
+        if let Some(pool) = self.pools.lock().unwrap().get(key) {
             return Ok(pool.clone());
         }
         let manager = make_manager()?;
         let pool = config.apply(Pool::builder()).build(manager).map_err(|e| e.to_string())?;
+        let mut pools = self.pools.lock().unwrap();
+        if let Some(existing) = pools.get(key) {
+            return Ok(existing.clone());
+        }
         pools.insert(key.to_string(), pool.clone());
         Ok(pool)
     }
@@ -304,22 +449,19 @@ impl<M: ManageConnection> PoolRegistry<M> {
         if already_has_key || self.pool_count() < Self::max_pool_keys() {
             return self.get_or_create_within_ceiling(key, config, domain, make_manager).map(Checkout::Pooled);
         }
-        if !super::acquire(domain) {
-            return Err(format!("too many concurrently held connections for this domain (unpooled fallback dial for key {key:?})"));
-        }
-        let manager = match make_manager() {
-            Ok(m) => m,
-            Err(e) => {
-                super::release(domain);
-                return Err(e);
-            }
-        };
+        // Acquire *before* dialing (fail fast on a saturated domain,
+        // never attempt an expensive network connect just to discover
+        // admission was already denied) — `AdmissionGrant::acquire`'s
+        // own doc comment (A22 fix) has the full "why a separate proof
+        // type, not a bare bool" reasoning. If `make_manager`/`connect`
+        // fails after this succeeds, letting `grant` drop releases
+        // automatically; no manual `super::release` call needed on
+        // either failure path below.
+        let grant = AdmissionGrant::acquire(domain).map_err(|e| format!("{e} (key {key:?})"))?;
+        let manager = make_manager()?;
         match manager.connect() {
-            Ok(conn) => Ok(Checkout::Unpooled(UnpooledConnection { conn: Some(conn), domain })),
-            Err(e) => {
-                super::release(domain);
-                Err(e.to_string())
-            }
+            Ok(conn) => Ok(Checkout::Unpooled(UnpooledConnection::new(conn, grant))),
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -667,6 +809,25 @@ mod tests {
         }
     }
 
+    /// Red-team report A6: `min_idle > max_size` is structurally broken
+    /// (r2d2 refuses to build the pool at all), not merely unusual --
+    /// `from_env` must clamp it down rather than degrade into a config
+    /// that fails at first `get_or_create`.
+    #[test]
+    fn pool_config_from_env_clamps_min_idle_down_to_max_size_when_it_would_exceed_it() {
+        unsafe {
+            std::env::set_var("NIRDOSHA_TESTPFX2_POOL_MAX_SIZE", "3");
+            std::env::set_var("NIRDOSHA_TESTPFX2_POOL_MIN_IDLE", "10");
+        }
+        let cfg = PoolConfig::from_env("TESTPFX2");
+        assert_eq!(cfg.max_size, 3);
+        assert_eq!(cfg.min_idle, Some(3), "min_idle (10) exceeding max_size (3) must be clamped down to max_size, not left broken");
+        unsafe {
+            std::env::remove_var("NIRDOSHA_TESTPFX2_POOL_MAX_SIZE");
+            std::env::remove_var("NIRDOSHA_TESTPFX2_POOL_MIN_IDLE");
+        }
+    }
+
     /// RFC 0011 §5's "what the ceiling actually bounds" rule: a
     /// provider's `PoolConfig::max_size` must be ≤ its domain's own
     /// admission ceiling, checked at registration time (here,
@@ -763,5 +924,87 @@ mod tests {
         assert_eq!(held_after, 0, "dropping every UnpooledConnection guard must release its admission back to zero");
 
         unsafe { std::env::remove_var("NIRDOSHA_KERNEL_POOL_MAX_KEYS") };
+    }
+
+    /// The red-team-reported hazard: `get_or_create` used to hold
+    /// `self.pools`'s lock across the whole `make_manager` call, which
+    /// also meant two concurrent misses on the *same* key were fully
+    /// serialized by that lock rather than racing safely. This proves
+    /// the fixed version (lock dropped around `make_manager`, re-checked
+    /// before insert) is actually race-safe: many threads all missing
+    /// the same key concurrently must still converge on exactly one live
+    /// pool for that key, never two.
+    #[test]
+    fn concurrent_get_or_create_misses_on_the_same_key_converge_on_one_pool_not_two() {
+        let registry: std::sync::Arc<PoolRegistry<CountingManager>> = std::sync::Arc::new(PoolRegistry::new());
+        let cfg = PoolConfig::default();
+        // A distinct connection id per manager *instance* built -- if
+        // two managers were ever both installed as live pools, threads
+        // would observe more than one distinct id family; with the fix,
+        // every thread must observe pool_count() == 1 and, if it also
+        // performs a checkout, one of only the ids the eventual winning
+        // manager produced.
+        let manager_instances_built = std::sync::Arc::new(AtomicU32::new(0));
+
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let registry = std::sync::Arc::clone(&registry);
+                let manager_instances_built = std::sync::Arc::clone(&manager_instances_built);
+                std::thread::spawn(move || {
+                    registry
+                        .get_or_create("race-key", cfg, || {
+                            // Widen the race window: every thread reaches
+                            // `make_manager` at roughly the same time and
+                            // sleeps here, well past the point where the
+                            // lock (if still held across this call, the
+                            // pre-fix behavior) would have serialized
+                            // every other thread behind it instead.
+                            manager_instances_built.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            Ok(manager())
+                        })
+                        .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(registry.pool_count(), 1, "16 concurrent misses on the same key must converge on exactly one live pool, never two");
+        assert!(
+            manager_instances_built.load(Ordering::SeqCst) >= 1,
+            "sanity: make_manager must actually have run (this also confirms the lock was NOT held across it -- \
+             the old, lock-holding implementation would have fully serialized these 16 threads through one \
+             global mutex instead of letting them race make_manager concurrently)"
+        );
+    }
+
+    /// Red-team report A12: `clamp_max_size_to_ceiling` must clamp
+    /// *down* when `max_size` exceeds a real ceiling.
+    #[test]
+    fn clamp_max_size_to_ceiling_clamps_down_when_max_size_exceeds_it() {
+        let mut cfg = PoolConfig { max_size: 1000, ..PoolConfig::default() };
+        clamp_max_size_to_ceiling(&mut cfg, 50);
+        assert_eq!(cfg.max_size, 50, "max_size (1000) exceeding a real ceiling (50) must be clamped down to it");
+    }
+
+    /// The other direction: a ceiling above `max_size` must not raise it.
+    #[test]
+    fn clamp_max_size_to_ceiling_leaves_max_size_alone_when_already_under_the_ceiling() {
+        let mut cfg = PoolConfig { max_size: 50, ..PoolConfig::default() };
+        clamp_max_size_to_ceiling(&mut cfg, 10_000);
+        assert_eq!(cfg.max_size, 50, "a ceiling above max_size must not raise it");
+    }
+
+    /// A non-positive ceiling means "no real ceiling resolved" and must
+    /// never be treated as an actual cap of 0.
+    #[test]
+    fn clamp_max_size_to_ceiling_is_a_no_op_for_a_non_positive_ceiling() {
+        let mut cfg = PoolConfig { max_size: 1000, ..PoolConfig::default() };
+        clamp_max_size_to_ceiling(&mut cfg, 0);
+        assert_eq!(cfg.max_size, 1000, "ceiling <= 0 must be a no-op, not clamp max_size down to 0");
+        clamp_max_size_to_ceiling(&mut cfg, -1);
+        assert_eq!(cfg.max_size, 1000, "a negative ceiling must also be a no-op");
     }
 }

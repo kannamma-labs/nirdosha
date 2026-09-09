@@ -2356,6 +2356,26 @@ fn row12_remaining_identity_builtins_compile_and_run_for_real() {
             let cookie: str = session_cookie(session)
             print(cookie)
 
+            // verify_session: a real server-side lookup (red-team report
+            // A2) -- the session minted above round-trips the same
+            // subject/issuer it was created with, and an unknown session
+            // id is a clean Err, not a panic or a false positive.
+            let looked_up_subject: str = match verify_session(session.session_id) {
+                Ok(v) => v.subject,
+                Err(e) => e,
+            }
+            print(looked_up_subject)
+            let looked_up_issuer: str = match verify_session(session.session_id) {
+                Ok(v) => v.issuer,
+                Err(e) => e,
+            }
+            print(looked_up_issuer)
+            let unknown_session_ok: bool = match verify_session("not-a-real-session-id") {
+                Ok(v) => true,
+                Err(e) => false,
+            }
+            print(unknown_session_ok)
+
             // new_refresh_token / exchange_refresh_token, including real
             // single-use enforcement server-side (not just the affine
             // box field's own compile-time single-use guarantee).
@@ -2390,10 +2410,13 @@ fn row12_remaining_identity_builtins_compile_and_run_for_real() {
     assert_eq!(lines[4], "alice", "session.identity_subject must copy the identity's own subject");
     assert_eq!(lines[5], "28800", "a fresh session's real 8-hour lifetime");
     assert!(lines[6].contains("HttpOnly") && lines[6].contains("Max-Age=28800"), "session_cookie: {}", lines[6]);
-    assert_eq!(lines[7], "alice", "exchange_refresh_token should reissue the same subject");
-    assert_eq!(lines[8], "42", "exchange_refresh_token should carry the new issued_at through");
-    assert_eq!(lines[9], "1", "the correct api key must validate");
-    assert_eq!(lines[10], "0", "the wrong api key must not validate");
+    assert_eq!(lines[7], "alice", "verify_session must look up the same subject the session was created with");
+    assert_eq!(lines[8], "https://example.com", "verify_session must look up the same issuer the session was created with");
+    assert_eq!(lines[9], "0", "verify_session against an unknown session id must be a clean Err, not a false positive");
+    assert_eq!(lines[10], "alice", "exchange_refresh_token should reissue the same subject");
+    assert_eq!(lines[11], "42", "exchange_refresh_token should carry the new issued_at through");
+    assert_eq!(lines[12], "1", "the correct api key must validate");
+    assert_eq!(lines[13], "0", "the wrong api key must not validate");
 }
 
 /// `nfr(...)`'s per-call instrumentation (registration global, the
@@ -3697,4 +3720,209 @@ fn workflow_link_marked_transitions_are_explicitly_rejected_not_silently_dropped
     out_path.push(format!("nirdosha_test_{}_{}", std::process::id(), unique_suffix()));
     let err = codegen::build(&program, &report, &out_path, codegen::OptLevel::O2).expect_err("a `link`-marked transition's `*_via_link` fn should be rejected");
     assert!(err.contains("magic-link") || err.contains("__workflow_link_advance"), "unexpected error message: {err}");
+}
+
+/// Regression: a real `nirdosha hi`-generated program (captured live —
+/// see a `nirdosha_hi_*.log`/`.nir` pair from a real session) panicked
+/// `codegen.rs`'s own `declare_named_type` with `internal error: entered
+/// unreachable code: ... decl_name="Ok" args=[]`, crashing the whole
+/// process rather than reporting an ordinary diagnostic. Root cause:
+/// `local_ty_of`'s `Expr::Match` arm assumed the first arm's body always
+/// represents the whole match's type, which breaks specifically when
+/// that body is a bare `Ok(..)`/`Err(..)` reconstruction of `Result`
+/// (`Ok(r)`'s own payload only ever pins down `T`, never `E` -- see
+/// `match_result_ty`'s own doc comment) -- an entirely ordinary "pass a
+/// Result value straight through" pattern, not a contrived one:
+/// `emit_ui.rs`'s own tests already used this exact shape (`match
+/// json_parse(..) { Ok(v) => Ok(v), Err(e) => Err(0) }`) without ever
+/// tripping this, only because those tests never call `codegen::build`
+/// at all -- typeck alone never had this bug. This test does call it,
+/// at `-O2`, and actually runs the result, so it would have caught the
+/// crash directly.
+#[test]
+fn match_arm_reconstructing_a_bare_ok_err_result_does_not_panic_codegen() {
+    let src = r#"
+        fn parse_it() -> Result(json, i64) requires(public) {
+            let parsed: Result(json, i64) = match json_parse("[1, 2, 3]") {
+                Ok(v) => Ok(v),
+                Err(e) => Err(0),
+            }
+            return parsed
+        }
+
+        fn main() requires(public) {
+            let r: Result(json, i64) = parse_it()
+            match r {
+                Ok(_) => print("ok"),
+                Err(e) => print(e),
+            }
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+/// Regression: a second, real captured crash after the fix above --
+/// same `unreachable!` (`decl_name="Err"` this time), same
+/// `match_result_ty`, but for the *other* shape a bare reconstruction
+/// arm takes: `Err(e) => Err(SomeVariant(e))`, wrapping the bound
+/// payload in another constructor rather than passing it through
+/// unchanged. The overwhelmingly common real pattern this shape comes
+/// from: converting a builtin's own raw error type into a user error
+/// enum's own variant, exactly like every `db_execute`/`db_query` call
+/// in a real generated CRUD app does (`Err(e) => Err(DbError(e))`).
+#[test]
+fn match_arm_wrapping_a_bound_payload_in_another_constructor_does_not_panic_codegen() {
+    let src = r#"
+        enum ErrorCode {
+            DbError(str),
+        }
+
+        fn parse_it() -> Result(json, ErrorCode) requires(public) {
+            let parsed: Result(json, ErrorCode) = match json_parse("[1, 2, 3]") {
+                Ok(v) => Ok(v),
+                Err(e) => Err(DbError(e)),
+            }
+            return parsed
+        }
+
+        fn main() requires(public) {
+            let r: Result(json, ErrorCode) = parse_it()
+            match r {
+                Ok(_) => print("ok"),
+                Err(e) => print("err"),
+            }
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
+}
+
+/// Regression: the real root cause behind all three crashes above --
+/// not fixed by any of those individual patches, only by the actual
+/// architectural gap they were symptoms of. Captured directly from a
+/// real `nirdosha hi` session's login/auth function (unmodified in
+/// shape, just given a `:memory:` db so this test needs no fixture
+/// file): an `if`/`else` whose `else` branch is a `match`, whose own
+/// `Ok` arm's body is *another* `match`, whose own `Ok` arm's body is
+/// an `if`/`else` reconstructing a bare `Ok`/`Err` `Result` three
+/// levels deep. Every prior fix (`match_result_ty`'s sibling-combining,
+/// `if_result_ty`'s sibling-preferring) is a heuristic that re-derives
+/// a branch's type with *no* context; this one has a real context two
+/// frames up (the outer `let`'s declared type) that was simply being
+/// dropped by `expr_ptr_expected` the moment a nested expression wasn't
+/// a *direct* constructor call. Threading `expected` all the way down
+/// (this function's own real fix) resolves every level correctly on
+/// its own, without needing any of those heuristics at this depth.
+#[test]
+fn expected_type_threads_through_deeply_nested_if_match_reconstructions() {
+    let src = r#"
+        enum ErrorCode {
+            DbError(str),
+            NotFound(),
+        }
+
+        struct Creds {
+            username: str,
+            password: str,
+        }
+
+        fn authenticate_inner(conn: db, creds: Creds) -> Result(json, ErrorCode) requires(public) {
+            let fk: i64 = match db_execute(conn, "PRAGMA foreign_keys = ON") {
+                Ok(n) => n,
+                Err(e) => -1,
+            }
+            let setup: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS user (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, password TEXT)") {
+                Ok(n) => n,
+                Err(e) => -1,
+            }
+            let result: Result(json, ErrorCode) = if fk < 0 || setup < 0 {
+                Err(DbError("failed to setup user table"))
+            } else {
+                match db_query(conn, "SELECT id FROM user WHERE username = ? AND password = ?", creds.username, creds.password) {
+                    Ok(rows) => match json_array_len(rows) {
+                        Ok(n) => if n > 0 {
+                            match json_array_get(rows, 0) {
+                                Ok(row) => Ok(row),
+                                Err(e) => Err(DbError(e)),
+                            }
+                        } else {
+                            Err(NotFound())
+                        },
+                        Err(e) => Err(DbError(e)),
+                    },
+                    Err(e) => Err(DbError(e)),
+                }
+            }
+            stop(conn)
+            return result
+        }
+
+        fn authenticate(creds: Creds) -> Result(json, ErrorCode) requires(public) {
+            return match db_connect(":memory:") {
+                Ok(conn) => authenticate_inner(conn, creds),
+                Err(e) => Err(DbError(e)),
+            }
+        }
+
+        fn main() requires(public) {
+            let creds: Creds = Creds("nobody", "wrong-password")
+            match authenticate(creds) {
+                Ok(_) => print("found"),
+                Err(e) => match e {
+                    NotFound() => print("not found"),
+                    DbError(msg) => print(msg),
+                },
+            }
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "not found");
+}
+
+/// Regression: a *third* real captured crash (same `unreachable!`,
+/// `decl_name="Err"`) after the two fixes above -- this time the bare
+/// `Err(..)` reconstruction wasn't in a `match` arm at all, it was one
+/// branch of an `if`/`else` *expression* used as a `let`'s RHS, with
+/// the other branch a nested `match` that itself resolves cleanly
+/// (`if cond { Err(DbError(msg)) } else { match ... { ... } }`) -- a
+/// real generated shape (a schema-setup guard clause before a query).
+/// `if_expr` had its own, never-fixed copy of the exact same "only the
+/// representative branch's type is checked" assumption `match_expr`
+/// already had fixed for it -- this is the whack-a-mole outcome that
+/// motivated `if_result_ty`/`is_unresolved_ok_err_placeholder` being
+/// shared, principled functions instead of another one-off patch.
+#[test]
+fn if_else_branch_reconstructing_a_bare_err_result_does_not_panic_codegen() {
+    let src = r#"
+        enum ErrorCode {
+            DbError(str),
+        }
+
+        fn compute(bad: bool) -> Result(json, ErrorCode) requires(public) {
+            let result: Result(json, ErrorCode) = if bad {
+                Err(DbError("setup failed"))
+            } else {
+                match json_parse("[1, 2, 3]") {
+                    Ok(v) => Ok(v),
+                    Err(e) => Err(DbError(e)),
+                }
+            }
+            return result
+        }
+
+        fn main() requires(public) {
+            let r: Result(json, ErrorCode) = compute(false)
+            match r {
+                Ok(_) => print("ok"),
+                Err(e) => print("err"),
+            }
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "ok");
 }

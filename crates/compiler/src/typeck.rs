@@ -1333,7 +1333,7 @@ fn is_reachable_with_no_token(f: &FnDecl) -> bool {
     !f.params.iter().any(|p| is_verified_identity(&p.ty) || is_optional_verified_identity(&p.ty) || matches!(p.ty, Ty::Db | Ty::Mq))
 }
 
-fn is_verified_identity(ty: &Ty) -> bool {
+pub(crate) fn is_verified_identity(ty: &Ty) -> bool {
     matches!(ty, Ty::Named(n, args) if n == "VerifiedIdentity" && args.is_empty())
 }
 
@@ -1341,7 +1341,7 @@ fn is_verified_identity(ty: &Ty) -> bool {
 /// dispatch` injects `Some(id)`/`None` for, never a 401 either way (see
 /// that module's doc comment and `docs/WORKFLOW.md`'s "who submitted this"
 /// section, the feature that motivated it).
-fn is_optional_verified_identity(ty: &Ty) -> bool {
+pub(crate) fn is_optional_verified_identity(ty: &Ty) -> bool {
     matches!(ty, Ty::Named(n, args) if n == "Option" && args.len() == 1 && is_verified_identity(&args[0]))
 }
 
@@ -1380,7 +1380,7 @@ pub fn workflow_owner_warnings(program: &Program) -> Vec<TypeWarning> {
 /// (a real, disclosed scope limit, not an oversight) — anything not
 /// covered here still reaches compiled `serve` only via an explicit
 /// `serve { expose ... }` entry.
-fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
+pub(crate) fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     for screen in &program.screens {
         for (key, value) in &screen.entries {
@@ -1389,6 +1389,21 @@ fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<S
                     set.insert(name.clone());
                 }
             }
+        }
+        // Red-team report A15 (`scratch/red-team-report-main-d7fae42.md`):
+        // a `screen` `action` handler is reachable from the compiled UI
+        // (a button click) exactly the same way `list`/`create`/`update`/
+        // `delete` are, but was missing from this set -- a user who built
+        // a screen with a button-driven action and forgot the matching
+        // `serve { expose ... }` entry got a silent "the button does
+        // nothing" failure once compiled `serve` wired it up, with no
+        // signal at compile time. Additive only, strictly more
+        // permissive than before (widens what's implicitly reachable,
+        // never narrows it) -- `workspace` panels/actions and `visual`s
+        // are a real, separate gap the report also names, not covered
+        // by this fix; still explicitly required in `serve { expose }`.
+        for action in &screen.actions {
+            set.insert(action.target_fn.clone());
         }
     }
     if let Some(dash) = &program.dashboard {
@@ -1405,7 +1420,7 @@ fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<S
 /// deny-by-default error) and `exposed_public_read_warnings` below (the
 /// softer confidentiality warning) so the two checks can never
 /// disagree about what's actually reachable.
-fn exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
+pub(crate) fn exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
     let mut set = implicitly_exposed_fn_names(program);
     if let Some(sc) = &program.serve_config {
         set.extend(sc.expose.iter().map(|(name, _)| name.clone()));
@@ -4569,6 +4584,10 @@ impl<'a> Checker<'a> {
                 self.check(&args[0], &Ty::Named("ApplicationSession".to_string(), vec![]), expected_ret, scopes);
                 Ty::Str
             }
+            ("verify_session", 1) => {
+                self.check(&args[0], &Ty::Str, expected_ret, scopes);
+                result_of(Ty::Named("VerifiedIdentity".to_string(), vec![]))
+            }
             ("new_refresh_token", 1) => {
                 self.check(&args[0], &Ty::I64, expected_ret, scopes);
                 Ty::Named("RefreshTokenHandle".to_string(), vec![])
@@ -4648,6 +4667,23 @@ impl<'a> Checker<'a> {
             // real (runtime) gate on that, same "some proven away
             // statically, some at runtime" split every Tier-2 check here
             // already makes (`docs/LANGUAGE.md` §8).
+            //
+            // **Disclosed gap, not silently missing**: a non-empty bind
+            // array against a *plugin-routed* connection (rfcs/0011's
+            // `db_connect` scheme-dispatch fallback) is a real, named
+            // `Err` at request time (`kernel::plugin_provider::op`'s own
+            // `binds_present` check), not caught here at typecheck time.
+            // This checker has no way to trace which `db_connect(...)`
+            // call produced a given `Ty::Db` value (built-in vs.
+            // plugin-routed is a runtime property of the connection
+            // string, not part of `Ty::Db` itself), so a static diagnostic
+            // isn't available without either a refined handle type or a
+            // dataflow pass this checker doesn't have — see rfcs/0011
+            // §2's own disclosure of this exact limitation for the full
+            // reasoning, including why it's a "surprises late" gap and
+            // not a SQL-injection exposure (`str` has no concatenation at
+            // all in this language, so binds are the only parameterization
+            // route to begin with, plugin-routed or not).
             ("db_query", n) if (2..=10).contains(&n) => {
                 self.check(&args[0], &Ty::Db, expected_ret, scopes);
                 self.check(&args[1], &Ty::Str, expected_ret, scopes); // sql

@@ -136,26 +136,135 @@ fn now_unix_secs() -> i64 {
 /// as the recovered interpreter-era design.
 const SESSION_LIFETIME_SECS: i64 = 8 * 60 * 60;
 
+/// A real, server-side session record — the store `verify_session`
+/// looks up against. Before this existed, `create_application_session`
+/// minted a real, unpredictable session id and formatted a real
+/// `Set-Cookie` header, but nothing durable backed that id: there was
+/// no way, given a cookie value, to answer "is this session valid, and
+/// whose identity does it carry" — sessions were an id and a cookie
+/// with no server-side backing at all (red-team report finding A2).
+/// `expires_at` here is the *session's* own lifetime
+/// (`SESSION_LIFETIME_SECS` from mint time), not the original identity
+/// token's own `expires_at` — a session is meant to outlive whatever
+/// short-lived OIDC token created it, the same reason
+/// `exchange_refresh_token` re-issues a fresh `expires_at` rather than
+/// reusing the pre-refresh one.
+struct SessionRecord {
+    subject: String,
+    issuer: String,
+    audience: String,
+    claims_json: String,
+    created_at: i64,
+    expires_at: i64,
+}
+
+fn session_table() -> &'static Mutex<std::collections::HashMap<String, SessionRecord>> {
+    static TABLE: OnceLock<Mutex<std::collections::HashMap<String, SessionRecord>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nir_create_application_session(out_session_id: *mut crate::NirStrOut, out_created_at: *mut i64, out_expires_at: *mut i64, out_last_accessed_at: *mut i64) {
+pub unsafe extern "C" fn nir_create_application_session(
+    subject_ptr: *const u8,
+    subject_len: i64,
+    issuer_ptr: *const u8,
+    issuer_len: i64,
+    audience_ptr: *const u8,
+    audience_len: i64,
+    claims_json_ptr: *const u8,
+    claims_json_len: i64,
+    out_session_id: *mut crate::NirStrOut,
+    out_created_at: *mut i64,
+    out_expires_at: *mut i64,
+    out_last_accessed_at: *mut i64,
+) {
+    let subject = unsafe { crate::str_from_raw(subject_ptr, subject_len) }.unwrap_or("").to_string();
+    let issuer = unsafe { crate::str_from_raw(issuer_ptr, issuer_len) }.unwrap_or("").to_string();
+    let audience = unsafe { crate::str_from_raw(audience_ptr, audience_len) }.unwrap_or("").to_string();
+    let claims_json = unsafe { crate::str_from_raw(claims_json_ptr, claims_json_len) }.unwrap_or("").to_string();
     let now = now_unix_secs();
+    let session_id = new_session_id();
+    let expires_at = now + SESSION_LIFETIME_SECS;
+    session_table()
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), SessionRecord { subject, issuer, audience, claims_json, created_at: now, expires_at });
     unsafe {
-        crate::write_str_out(out_session_id, new_session_id());
+        crate::write_str_out(out_session_id, session_id);
         *out_created_at = now;
-        *out_expires_at = now + SESSION_LIFETIME_SECS;
+        *out_expires_at = expires_at;
         *out_last_accessed_at = now;
     }
+}
+
+/// `verify_session(session_id) -> Result(VerifiedIdentity, str)` — the
+/// lookup half of the session store `nir_create_application_session`
+/// (above) writes into. `Err` for an unknown or expired session id,
+/// never a panic; on success the returned `VerifiedIdentity`'s
+/// `issued_at` is the session's own `created_at` (when this identity
+/// was captured into the session), and `expires_at` is the *session's*
+/// own expiry (what actually matters to a caller asking "is this
+/// session still good"), not the original OIDC token's expiry, which
+/// may be long gone by the time a long-lived session is still valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_verify_session(
+    session_id_ptr: *const u8,
+    session_id_len: i64,
+    out_subject: *mut crate::NirStrOut,
+    out_issuer: *mut crate::NirStrOut,
+    out_audience: *mut crate::NirStrOut,
+    out_expires_at: *mut i64,
+    out_issued_at: *mut i64,
+    out_claims_json: *mut crate::NirStrOut,
+    out_err: *mut crate::NirStrOut,
+) -> i32 {
+    let Some(session_id) = (unsafe { crate::str_from_raw(session_id_ptr, session_id_len) }) else {
+        unsafe { crate::write_str_out(out_err, "session id is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    let table = session_table().lock().unwrap();
+    let Some(record) = table.get(session_id) else {
+        unsafe { crate::write_str_out(out_err, "session not found".to_string()) };
+        return 0;
+    };
+    if record.expires_at <= now_unix_secs() {
+        unsafe { crate::write_str_out(out_err, "session expired".to_string()) };
+        return 0;
+    }
+    unsafe {
+        crate::write_str_out(out_subject, record.subject.clone());
+        crate::write_str_out(out_issuer, record.issuer.clone());
+        crate::write_str_out(out_audience, record.audience.clone());
+        *out_expires_at = record.expires_at;
+        *out_issued_at = record.created_at;
+        crate::write_str_out(out_claims_json, record.claims_json.clone());
+    }
+    1
 }
 
 /// `session_cookie(session) -> str` — infallible, a plain formatted
 /// string. `Max-Age` is the session's own real remaining lifetime
 /// (`expires_at - created_at`), not a hardcoded constant repeated here
 /// independently of `create_application_session`'s own lifetime.
+///
+/// **This is the single source of truth for every `Set-Cookie` attribute**
+/// (red team finding A5, `scratch/red-team-report-main-d7fae42.md`) — a
+/// downstream host crate (`compiled-serve`'s `write_response`) writes
+/// this string out to the wire verbatim and must never append its own
+/// `HttpOnly`/`Secure`/`SameSite`/`Path` on top; two layers each adding
+/// attributes produced a real bug (two disagreeing `SameSite` values in
+/// one header — `compiled-serve` used to append `SameSite=Lax` after
+/// this function's own `SameSite=Strict`, and browsers take the first
+/// occurrence, so the client silently got `Strict` while the server's
+/// own code thought it sent `Lax`). `SameSite=Strict` (not `Lax`) is the
+/// deliberate choice here, matching `docs/LANGUAGE.md`'s own documented
+/// `session_cookie` contract — the more conservative default for a
+/// first-party session cookie.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_session_cookie(session_id_ptr: *const u8, session_id_len: i64, created_at: i64, expires_at: i64, out_cookie: *mut crate::NirStrOut) {
     let session_id = unsafe { crate::str_from_raw(session_id_ptr, session_id_len) }.unwrap_or("");
     let max_age = (expires_at - created_at).max(0);
-    let cookie = format!("session={session_id}; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}");
+    let cookie = format!("session={session_id}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age}");
     unsafe { crate::write_str_out(out_cookie, cookie) };
 }
 
@@ -374,26 +483,134 @@ mod tests {
 
     // ---- sessions ------------------------------------------------------------
 
-    #[test]
-    fn create_application_session_sets_a_real_8_hour_lifetime() {
+    /// `nir_create_application_session`'s test-only calling convention:
+    /// subject/issuer/audience/claims_json as raw `(ptr, len)` pairs,
+    /// same as every other `str`-taking kernel extern in this module's
+    /// own tests (`check_role_path_finds_a_role_at_a_nested_path`, etc.).
+    fn create_session(subject: &[u8], issuer: &[u8], audience: &[u8], claims_json: &[u8]) -> (String, i64, i64, i64) {
         let mut session_id = empty_strout();
         let mut created_at = 0i64;
         let mut expires_at = 0i64;
         let mut last_accessed_at = 0i64;
-        unsafe { nir_create_application_session(&mut session_id, &mut created_at, &mut expires_at, &mut last_accessed_at) };
+        unsafe {
+            nir_create_application_session(
+                subject.as_ptr(),
+                subject.len() as i64,
+                issuer.as_ptr(),
+                issuer.len() as i64,
+                audience.as_ptr(),
+                audience.len() as i64,
+                claims_json.as_ptr(),
+                claims_json.len() as i64,
+                &mut session_id,
+                &mut created_at,
+                &mut expires_at,
+                &mut last_accessed_at,
+            )
+        };
+        (unsafe { strout_to_string(&session_id) }, created_at, expires_at, last_accessed_at)
+    }
+
+    #[test]
+    fn create_application_session_sets_a_real_8_hour_lifetime() {
+        let (session_id, created_at, expires_at, last_accessed_at) = create_session(b"alice", b"https://example.com", b"my-app", b"{}");
         assert_eq!(expires_at - created_at, SESSION_LIFETIME_SECS);
         assert_eq!(created_at, last_accessed_at);
-        assert!(!unsafe { strout_to_string(&session_id) }.is_empty());
+        assert!(!session_id.is_empty());
     }
 
     #[test]
     fn two_sessions_get_different_unpredictable_ids() {
-        let mut s1 = empty_strout();
-        let mut s2 = empty_strout();
-        let (mut a, mut b, mut c) = (0i64, 0i64, 0i64);
-        unsafe { nir_create_application_session(&mut s1, &mut a, &mut b, &mut c) };
-        unsafe { nir_create_application_session(&mut s2, &mut a, &mut b, &mut c) };
-        assert_ne!(unsafe { strout_to_string(&s1) }, unsafe { strout_to_string(&s2) });
+        let (s1, ..) = create_session(b"alice", b"https://example.com", b"my-app", b"{}");
+        let (s2, ..) = create_session(b"alice", b"https://example.com", b"my-app", b"{}");
+        assert_ne!(s1, s2);
+    }
+
+    /// The whole point of A2's fix: a session id minted by
+    /// `create_application_session` is real, durable, server-side state
+    /// `verify_session` can look up — not just an id and a cookie with
+    /// nothing behind them.
+    #[test]
+    fn verify_session_round_trips_the_identity_a_session_was_created_with() {
+        let (session_id, created_at, expires_at, _) =
+            create_session(b"alice", b"https://example.com", b"my-app", br#"{"roles":["admin"]}"#);
+        let mut out_subject = empty_strout();
+        let mut out_issuer = empty_strout();
+        let mut out_audience = empty_strout();
+        let mut out_expires_at = 0i64;
+        let mut out_issued_at = 0i64;
+        let mut out_claims_json = empty_strout();
+        let mut out_err = empty_strout();
+        let ok = unsafe {
+            nir_verify_session(
+                session_id.as_ptr(),
+                session_id.len() as i64,
+                &mut out_subject,
+                &mut out_issuer,
+                &mut out_audience,
+                &mut out_expires_at,
+                &mut out_issued_at,
+                &mut out_claims_json,
+                &mut out_err,
+            )
+        };
+        assert_eq!(ok, 1);
+        assert_eq!(unsafe { strout_to_string(&out_subject) }, "alice");
+        assert_eq!(unsafe { strout_to_string(&out_issuer) }, "https://example.com");
+        assert_eq!(unsafe { strout_to_string(&out_audience) }, "my-app");
+        assert_eq!(unsafe { strout_to_string(&out_claims_json) }, r#"{"roles":["admin"]}"#);
+        assert_eq!(out_expires_at, expires_at, "verify_session must report the session's own expiry, not the original token's");
+        assert_eq!(out_issued_at, created_at, "verify_session's issued_at is when the session itself was minted");
+    }
+
+    #[test]
+    fn verify_session_against_an_unknown_id_is_a_named_err_not_a_panic() {
+        let session_id = b"not-a-real-session-id";
+        let (mut out_subject, mut out_issuer, mut out_audience, mut out_claims_json, mut out_err) =
+            (empty_strout(), empty_strout(), empty_strout(), empty_strout(), empty_strout());
+        let (mut out_expires_at, mut out_issued_at) = (0i64, 0i64);
+        let ok = unsafe {
+            nir_verify_session(
+                session_id.as_ptr(),
+                session_id.len() as i64,
+                &mut out_subject,
+                &mut out_issuer,
+                &mut out_audience,
+                &mut out_expires_at,
+                &mut out_issued_at,
+                &mut out_claims_json,
+                &mut out_err,
+            )
+        };
+        assert_eq!(ok, 0);
+        assert_eq!(unsafe { strout_to_string(&out_err) }, "session not found");
+    }
+
+    #[test]
+    fn verify_session_against_an_expired_session_is_a_named_err() {
+        let (session_id, ..) = create_session(b"alice", b"https://example.com", b"my-app", b"{}");
+        // Directly age the record past its own expiry -- this is exactly
+        // what a real 8-hour wait would produce, done instantly for the
+        // test.
+        session_table().lock().unwrap().get_mut(&session_id).unwrap().expires_at = now_unix_secs() - 1;
+        let (mut out_subject, mut out_issuer, mut out_audience, mut out_claims_json, mut out_err) =
+            (empty_strout(), empty_strout(), empty_strout(), empty_strout(), empty_strout());
+        let (mut out_expires_at, mut out_issued_at) = (0i64, 0i64);
+        let ok = unsafe {
+            nir_verify_session(
+                session_id.as_ptr(),
+                session_id.len() as i64,
+                &mut out_subject,
+                &mut out_issuer,
+                &mut out_audience,
+                &mut out_expires_at,
+                &mut out_issued_at,
+                &mut out_claims_json,
+                &mut out_err,
+            )
+        };
+        assert_eq!(ok, 0);
+        assert_eq!(unsafe { strout_to_string(&out_err) }, "session expired");
     }
 
     #[test]
@@ -406,6 +623,7 @@ mod tests {
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Path=/"), "this crate is the single source of truth for every Set-Cookie attribute (A5) -- Path=/ must be here, not appended downstream");
         assert!(cookie.contains("Max-Age=28800"));
     }
 

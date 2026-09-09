@@ -2577,6 +2577,13 @@ pub const BUILTIN_NAMES: &[&str] = &[
     // and an API-key adapter.
     "create_application_session",
     "session_cookie",
+    // Real server-side lookup for a session id minted by
+    // `create_application_session` (red-team report finding A2: before
+    // this existed, a session id/cookie was real but nothing durable
+    // backed it -- there was no way to answer "is this session valid,
+    // whose identity does it carry"). `Err` for an unknown or expired
+    // session id.
+    "verify_session",
     "new_refresh_token",
     "exchange_refresh_token",
     "check_revocation",
