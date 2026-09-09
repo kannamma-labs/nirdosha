@@ -22,6 +22,7 @@ fn main() -> ExitCode {
         "emit-ui" => cmd_emit_ui(args),
         "emit-catalog" => cmd_emit_catalog(args),
         "hi" => cmd_hi(args),
+        "realm" => cmd_realm(args),
         other => {
             eprintln!("unknown subcommand `{other}` -- nirdosha has no interpreter/`run`/`serve` mode anymore; use `build` or `emit-llvm`.");
             print_usage();
@@ -56,6 +57,16 @@ fn print_usage() {
     eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
     eprintln!("  nirdosha hi                          interactive LLM console (rfcs/0012) -- gated on");
     eprintln!("                                      NIRDOSHA_LLM_PROVIDER_KEY+_MODEL or OPENAI_API_KEY");
+    eprintln!("                                      (also auto-scaffolds/syncs .nir/ -- rfcs/0013,");
+    eprintln!("                                      NIRDOSHA_REALM_DISABLE=1 to skip)");
+    eprintln!("  nirdosha realm ingest <doc.md>       content-address, chunk, and FTS-index a requirement/");
+    eprintln!("                                      decision/design doc into .nir/realm.db (rfcs/0013)");
+    eprintln!("  nirdosha realm sync [<file.nir> ...] re-run the code-hash walk hi already runs on startup;");
+    eprintln!("                                      with no files, walks every .nir file under the cwd");
+    eprintln!("  nirdosha realm link <req-id> <fn|struct|enum|screen:name>");
+    eprintln!("                                      record a manual IMPLEMENTS/IMPLEMENTED_BY edge");
+    eprintln!("  nirdosha realm impact <target>       bounded impact report (a requirement/decision id, or a");
+    eprintln!("                                      code-unit name/kind:name) -- CI-friendly, non-interactive");
 }
 
 /// Load (resolving any `use "..."` — `docs/ROADMAP.md` Track F, F2 piece 3)
@@ -411,6 +422,104 @@ fn cmd_hi(_args: impl Iterator<Item = String>) -> ExitCode {
     };
     nirdosha::hi::run_console(activation);
     ExitCode::SUCCESS
+}
+
+/// `nirdosha realm <ingest|sync|link|impact> ...` (rfcs/0013) --
+/// standalone access to the same `.nir/realm.db` `hi` auto-scaffolds
+/// and auto-syncs on its own startup (`hi::open_realm_or_warn`).
+/// Exists mainly for CI/non-interactive use (`realm sync && realm
+/// impact <target>` with no LLM credentials needed at all) and for
+/// `ingest`/`link`, which `hi`'s own startup never runs itself -- see
+/// the RFC's "Physical layout, and when it gets created."
+fn cmd_realm(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(sub) = args.next() else {
+        eprintln!("usage: nirdosha realm <ingest|sync|link|impact> ...");
+        return ExitCode::FAILURE;
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error resolving the current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let conn = match nirdosha::realm::open(&cwd) {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match sub.as_str() {
+        "ingest" => {
+            let Some(doc) = args.next() else {
+                eprintln!("usage: nirdosha realm ingest <doc.md>");
+                return ExitCode::FAILURE;
+            };
+            match nirdosha::realm::ingest_document(&conn, std::path::Path::new(&doc)) {
+                Ok(n) => {
+                    println!("ingested {n} new chunk(s) from {doc}");
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "sync" => {
+            let files: Vec<String> = args.collect();
+            match nirdosha::realm::sync(&conn, &cwd, &files) {
+                Ok(r) => {
+                    println!(
+                        "synced {} file(s): {} unit(s) seen, {} added, {} changed, {} edge(s) flagged possibly_stale",
+                        r.files_scanned, r.units_seen, r.units_added, r.units_changed, r.edges_flagged
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "link" => {
+            let (Some(req_id), Some(target)) = (args.next(), args.next()) else {
+                eprintln!("usage: nirdosha realm link <requirement-id> <fn|struct|enum|screen:name>");
+                return ExitCode::FAILURE;
+            };
+            match nirdosha::realm::link(&conn, &req_id, &target) {
+                Ok(()) => {
+                    println!("linked {req_id} <-> {target}");
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "impact" => {
+            let Some(target) = args.next() else {
+                eprintln!("usage: nirdosha realm impact <target>");
+                return ExitCode::FAILURE;
+            };
+            match nirdosha::realm::impact(&conn, &target) {
+                Ok(report) => {
+                    print!("{}", nirdosha::hi::format_impact_report(&target, &report));
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!("unknown `realm` subcommand `{other}` -- usage: nirdosha realm <ingest|sync|link|impact> ...");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn cmd_emit_llvm(mut args: impl Iterator<Item = String>) -> ExitCode {

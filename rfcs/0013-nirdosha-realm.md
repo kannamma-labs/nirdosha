@@ -1,5 +1,44 @@
 # RFC 0013: Nirdosha Realm — a local-first project knowledge graph with bidirectional `.nir` traceability
 
+> **Status.** v1 slice **`[DONE]`**: schema (`nodes`/`edges`/
+> `provenance`/`chunks`+FTS5) and auto-scaffold under `.nir/`
+> (`realm::open`); per-item code hashing reusing the same lex/parse
+> primitives `emit-ast` is built from (`realm::code_units_in_file`,
+> deliberately *not* `loader::load_program` — see that function's own
+> doc comment for why); bounded bidirectional impact queries
+> (`realm::impact`, depth/node-capped, `partial: true` on exhaustion);
+> manual `realm link`; a minimal `realm ingest`/`:ask` FTS5 path; the
+> `nirdosha realm <ingest|sync|link|impact>` CLI surface
+> (`main.rs::cmd_realm`); and `hi`'s own auto-scaffold-on-startup
+> (`hi::open_realm_or_warn`, gated on `NIRDOSHA_REALM_DISABLE`) plus its
+> two new console verbs, `:ask`/`:impact`. All covered by real,
+> passing unit tests (`realm.rs`'s own `#[cfg(test)]` module) and
+> exercised end-to-end by hand against a real `.nir` file (`nirdosha
+> hi` piped a `:ask`/`:impact` session, `nirdosha realm sync`/`link`/
+> `impact`/`ingest` run standalone) — not just compiled.
+>
+> One correction the implementation surfaced against this RFC's own
+> earlier text: the "Adding `rusqlite`'s `fts5` feature" open question
+> below was wrong as stated — `rusqlite 0.31` has no such cargo feature
+> at all, and doesn't need one. `libsqlite3-sys`'s own bundled build
+> script passes `-DSQLITE_ENABLE_FTS5` unconditionally, so the
+> `"bundled"` feature this workspace already had was sufficient by
+> itself. `Cargo.toml` is unchanged from before this RFC — genuinely
+> zero new dependencies, confirmed rather than assumed.
+>
+> **Still `[OPEN]`, deliberately not built in v1**: the vector-search
+> plugin boundary, the in-source annotation (v2 code↔knowledge link),
+> the full adaptive resource governor, and a confirmed
+> committed-vs-per-checkout answer for `.nir/realm.db` — see Open
+> Questions below, each one unchanged by the implementation pass.
+> `CodeUnit` qualified-name collision handling across multiple files
+> (an open question below) is a real, still-unaddressed gap: the
+> current implementation scopes each file's own declarations
+> independently (no cross-file `use` merging, precisely to avoid
+> double-counting shared imports — see the `realm.rs` module doc
+> comment), but two *different* files each declaring an `fn` with the
+> same name collide on the same `CodeUnit` node today, silently.
+
 ## Motivation
 
 `nirdosha hi` (RFC 0012) ships NL-to-`.nir` generation, a compiler-
@@ -128,15 +167,13 @@ LLM client (RFC 0012's "Provider-client fork point"), not a pooled
 service connection, so RFC 0011's `PoolRegistry`/reaper machinery
 (built for the *compiled program's* runtime, in the separate
 `runtime-kernels` workspace) does not apply here for the same
-cross-workspace reason `hi` itself couldn't reuse it. One real, confirmed gap: `Cargo.lock` pins `libsqlite3-sys 0.28.0`
-via the workspace's existing `rusqlite = { version = "0.31", features
-= ["bundled"] }`, and `"bundled"` alone does not compile SQLite with
-`SQLITE_ENABLE_FTS5` — that needs `rusqlite`'s separate `"fts5"`
-cargo feature, not currently enabled anywhere in this workspace. Not
-a blocker (adding a feature flag to an already-vendored dependency is
-cheap and adds no new dependency), but real work this RFC's own
-estimate above ("zero new dependencies") should not be read to
-include for free — tracked as an open question below.
+cross-workspace reason `hi` itself couldn't reuse it. Confirmed against
+the actual vendored build (`libsqlite3-sys 0.28.0`, per `Cargo.lock`,
+via the workspace's existing `rusqlite = { version = "0.31", features =
+["bundled"] }`): its bundled build script passes
+`-DSQLITE_ENABLE_FTS5` unconditionally, so `"bundled"` alone is
+already enough — no separate `rusqlite` cargo feature exists at this
+version to add. `Cargo.toml` needed no change for FTS5 at all.
 
 ### Schema (v1 — deliberately small)
 
@@ -431,11 +468,9 @@ be named, not assumed harmless.
 
 ## Open questions
 
-- Adding `rusqlite`'s `"fts5"` feature to `crates/compiler/Cargo.toml`
-  (confirmed needed, not just possibly needed — see "Physical layout"
-  above) — whether it goes on the existing `rusqlite` dependency
-  workspace-wide or is scoped to wherever Realm's crate/module ends up
-  living.
+- ~~Adding `rusqlite`'s `"fts5"` feature.~~ **Resolved: not needed.**
+  See the status block at the top — the bundled build already compiles
+  FTS5 in unconditionally.
 - Exact `CodeUnit` qualified-name scheme across multiple `.nir` files/
   modules once `use "..."` (loader-resolved imports,
   `crates/compiler/src/main.rs:455`'s own comment on `loader::

@@ -67,6 +67,14 @@ pub(crate) enum LogEvent {
 pub(crate) enum Command<'a> {
     Quit,
     Explain,
+    /// `:ask <question>` -- FTS-backed Q&A over `.nir/realm.db`'s
+    /// ingested requirements/decisions/code (rfcs/0013, closes RFC
+    /// 0012 capability 5). Purely local -- no model call.
+    Ask(&'a str),
+    /// `:impact <target>` -- the same bounded bidirectional report
+    /// `nirdosha realm impact` prints, inline (rfcs/0013). Purely
+    /// local -- no model call.
+    Impact(&'a str),
     Unknown(&'a str),
     /// `serve` is only ever `true` via the explicit `:build --serve
     /// <description>` spelling -- a plain-text request (no `:build` at
@@ -81,6 +89,14 @@ pub(crate) fn parse_line(line: &str) -> Command<'_> {
     match line {
         ":quit" | ":exit" => Command::Quit,
         ":explain" => Command::Explain,
+        other if other == ":ask" || other.starts_with(":ask ") => match other[":ask".len()..].trim() {
+            "" => Command::Unknown(":ask (usage: `:ask <question>`)"),
+            question => Command::Ask(question),
+        },
+        other if other == ":impact" || other.starts_with(":impact ") => match other[":impact".len()..].trim() {
+            "" => Command::Unknown(":impact (usage: `:impact <target>` -- a requirement/decision id, or a code-unit name/kind:name)"),
+            target => Command::Impact(target),
+        },
         // `:build <description>` is just an explicit spelling of the
         // plain-text request below -- both end up as the exact same
         // `Command::Request` -- for anyone who'd rather type a `:`
@@ -493,6 +509,46 @@ impl LlmClient {
 /// looping silently forever against the same stuck failure.
 const MAX_SELF_REPAIR_ATTEMPTS: u32 = 3;
 
+/// rfcs/0013-nirdosha-realm.md's auto-scaffold: creates/opens
+/// `.nir/realm.db` and re-runs the code-hash sync, only ever called
+/// from `run_console` (i.e. only after RFC 0012's activation contract
+/// already resolved credentials -- a failed activation should never
+/// leave a stray `.nir/` behind for someone who was only checking
+/// whether `hi` was configured). Never fails the console over this:
+/// same "a diagnostic aid must never be the thing that breaks the
+/// console" posture `SessionLog::open`/`FailureCounters` already
+/// follow -- a Realm problem degrades to a logged warning and `:ask`/
+/// `:impact` reporting "nothing ingested yet" rather than refusing to
+/// start.
+fn open_realm_or_warn(log: &SessionLog) -> Option<rusqlite::Connection> {
+    if crate::realm::is_disabled(&|k| std::env::var(k).ok()) {
+        return None;
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            log.log(format!("realm: couldn't resolve the current directory, continuing without it: {e}"));
+            return None;
+        }
+    };
+    match crate::realm::open(&cwd) {
+        Ok(conn) => {
+            match crate::realm::sync(&conn, &cwd, &[]) {
+                Ok(r) => log.log(format!(
+                    "realm sync: {} file(s), {} unit(s) seen, {} added, {} changed, {} edge(s) flagged possibly_stale",
+                    r.files_scanned, r.units_seen, r.units_added, r.units_changed, r.edges_flagged
+                )),
+                Err(e) => log.log(format!("realm sync failed, continuing with a possibly-stale graph: {e}")),
+            }
+            Some(conn)
+        }
+        Err(e) => {
+            log.log(format!("realm: couldn't open .nir/realm.db, continuing without it ({}=1 to silence this): {e}", crate::realm::REALM_DISABLE_VAR));
+            None
+        }
+    }
+}
+
 /// Entry point `main.rs::cmd_hi` calls -- picks the front end at
 /// runtime rather than at compile time so the same binary stays
 /// scriptable (piped stdin, or output redirected to a file/CI log) even
@@ -503,13 +559,14 @@ pub fn run_console(activation: Activation) {
     let log = SessionLog::open();
     install_panic_hook(log.clone());
     log.log(format!("session start -- model={} base_url={} key={}", activation.model, activation.base_url, activation.redacted_key()));
+    let realm = open_realm_or_warn(&log);
     if io::stdout().is_terminal() && io::stdin().is_terminal() {
-        if let Err(e) = tui::run(activation, log.clone()) {
+        if let Err(e) = tui::run(activation, log.clone(), realm) {
             log.log(format!("terminal UI error: {e}"));
             eprintln!("nirdosha hi: terminal UI error: {e}");
         }
     } else {
-        run_console_plain(activation, log);
+        run_console_plain(activation, log, realm);
     }
 }
 
@@ -517,12 +574,14 @@ pub fn run_console(activation: Activation) {
 /// non-interactive case above -- same prompts, same output, just
 /// routed through `parse_line`/`LogEvent` now instead of matching on
 /// raw strings and printing inline, so this and `tui` can't drift.
-fn run_console_plain(activation: Activation, log: SessionLog) {
+fn run_console_plain(activation: Activation, log: SessionLog, realm: Option<rusqlite::Connection>) {
     println!("Nirdosha Agentic Console -- model: {}, key: {}", activation.model, activation.redacted_key());
     if let Some(path) = log.path() {
         println!("session log: {}", path.display());
     }
-    println!("Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, or `:quit` to exit.");
+    println!(
+        "Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, `:ask <question>`/`:impact <target>` to query the project's realm graph, or `:quit` to exit."
+    );
     print_failure_counters();
     let client = LlmClient::new(activation);
     let stdin = io::stdin();
@@ -557,7 +616,21 @@ fn run_console_plain(activation: Activation, log: SessionLog) {
                 }
                 print_token_usage(&client);
             }
-            Command::Unknown(other) => println!("unrecognized command `{other}` -- try `:explain` or `:quit`."),
+            Command::Ask(question) => match &realm {
+                Some(conn) => match crate::realm::ask(conn, question) {
+                    Ok(hits) => print!("{}", format_ask_hits(question, &hits)),
+                    Err(e) => eprintln!("{e}"),
+                },
+                None => println!("the realm graph isn't available this session (see the session log for why) -- try `nirdosha realm ingest`/`sync` from a shell instead."),
+            },
+            Command::Impact(target) => match &realm {
+                Some(conn) => match crate::realm::impact(conn, target) {
+                    Ok(report) => print!("{}", format_impact_report(target, &report)),
+                    Err(e) => eprintln!("{e}"),
+                },
+                None => println!("the realm graph isn't available this session (see the session log for why) -- try `nirdosha realm impact` from a shell instead."),
+            },
+            Command::Unknown(other) => println!("unrecognized command `{other}` -- try `:explain`, `:ask`, `:impact`, or `:quit`."),
             Command::Request { description, serve } => {
                 last_diagnostic = generate_and_build(&client, description, serve, &|event| {
                     log.log(match &event {
@@ -593,6 +666,35 @@ fn print_token_usage(client: &LlmClient) {
 fn print_failure_counters() {
     let counters = failure_counters();
     println!("compile failures (all-time): self-repair retries {}  compiler panics {}", counters.self_repair_retries, counters.compiler_panics);
+}
+
+/// Shared by both `hi` front ends and `main.rs::cmd_realm`'s standalone
+/// `realm impact` -- one rendering of a bounded impact walk
+/// (rfcs/0013), flagged nodes listed first (`realm::impact` already
+/// sorts them that way).
+pub fn format_impact_report(target: &str, report: &crate::realm::ImpactReport) -> String {
+    if report.hits.is_empty() {
+        return format!("no reachable nodes from `{target}` -- try `nirdosha realm link` or `nirdosha realm sync` first.\n");
+    }
+    let mut out = format!("impact of `{target}` ({} node(s){}):\n", report.hits.len(), if report.partial { ", partial -- bound reached" } else { "" });
+    for h in &report.hits {
+        let flag = h.flag.as_deref().map(|f| format!("  [{f}]")).unwrap_or_default();
+        out.push_str(&format!("  depth {} {} {} `{}`{flag}\n", h.depth, h.kind, h.edge_kind, h.title.as_deref().unwrap_or(&h.node_id)));
+    }
+    out
+}
+
+/// Shared by both `hi` front ends: one rendering of an FTS `:ask`/
+/// `realm ask` result set.
+pub fn format_ask_hits(query: &str, hits: &[crate::realm::AskHit]) -> String {
+    if hits.is_empty() {
+        return format!("no ingested chunks match `{query}` -- try `nirdosha realm ingest <doc.md>` first.\n");
+    }
+    let mut out = format!("{} match(es) for `{query}`:\n", hits.len());
+    for h in hits {
+        out.push_str(&format!("  [{}] {}\n", h.doc_id, h.content));
+    }
+    out
 }
 
 /// Shared by both front ends: turn a failed build's diagnostic into a
@@ -902,6 +1004,34 @@ mod tests {
     #[test]
     fn plain_request_never_infers_serve_from_its_own_wording() {
         assert!(matches!(parse_line("build me a servable web app"), Command::Request { serve: false, .. }));
+    }
+
+    #[test]
+    fn ask_command_carries_its_question() {
+        assert!(matches!(parse_line(":ask what does R17 say?"), Command::Ask("what does R17 say?")));
+    }
+
+    #[test]
+    fn ask_command_without_a_question_is_reported_not_silently_dropped() {
+        assert!(matches!(parse_line(":ask"), Command::Unknown(_)));
+        assert!(matches!(parse_line(":ask   "), Command::Unknown(_)));
+    }
+
+    #[test]
+    fn ask_prefixed_word_that_is_not_the_ask_command_stays_unknown() {
+        assert!(matches!(parse_line(":askew"), Command::Unknown(":askew")));
+    }
+
+    #[test]
+    fn impact_command_carries_its_target() {
+        assert!(matches!(parse_line(":impact R17"), Command::Impact("R17")));
+        assert!(matches!(parse_line(":impact fn:transfer_funds"), Command::Impact("fn:transfer_funds")));
+    }
+
+    #[test]
+    fn impact_command_without_a_target_is_reported_not_silently_dropped() {
+        assert!(matches!(parse_line(":impact"), Command::Unknown(_)));
+        assert!(matches!(parse_line(":impact   "), Command::Unknown(_)));
     }
 
     /// A private per-test path, not `failure_counts_path()`'s shared

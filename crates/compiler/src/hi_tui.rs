@@ -32,8 +32,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use rusqlite::Connection;
 
-use super::{explain_diagnostic, failure_counters, generate_and_build, parse_line, Activation, Command, FailureCounters, LlmClient, LogEvent, SessionLog, TokenUsage};
+use super::{explain_diagnostic, failure_counters, format_ask_hits, format_impact_report, generate_and_build, parse_line, Activation, Command, FailureCounters, LlmClient, LogEvent, SessionLog, TokenUsage};
 
 /// The one-time full-screen intro played by [`run`] before the console
 /// proper starts -- see that fn's own comment for why it's a distinct
@@ -251,6 +252,11 @@ struct App {
     /// in this process is the sole writer of it (a compiler panic that
     /// kills a *different* `nirdosha hi` process still shows up here).
     failures: FailureCounters,
+    /// `.nir/realm.db` (rfcs/0013), opened once by `super::
+    /// open_realm_or_warn` before either front end starts -- `None`
+    /// when Realm is disabled or couldn't be opened, in which case
+    /// `:ask`/`:impact` say so instead of panicking.
+    realm: Option<Connection>,
 }
 
 impl App {
@@ -260,7 +266,7 @@ impl App {
     }
 }
 
-pub(super) fn run(activation: Activation, log: SessionLog) -> io::Result<()> {
+pub(super) fn run(activation: Activation, log: SessionLog, realm: Option<Connection>) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     // Deliberately *not* `EnableMouseCapture`: this app has no mouse
@@ -276,7 +282,7 @@ pub(super) fn run(activation: Activation, log: SessionLog) -> io::Result<()> {
     let splash_result = show_splash(&mut terminal);
     terminal.show_cursor()?;
 
-    let result = splash_result.and_then(|()| run_app(&mut terminal, activation, log));
+    let result = splash_result.and_then(|()| run_app(&mut terminal, activation, log, realm));
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -315,7 +321,7 @@ fn show_splash(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Res
     }
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, activation: Activation, log: SessionLog) -> io::Result<()> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, activation: Activation, log: SessionLog, realm: Option<Connection>) -> io::Result<()> {
     let model = activation.model.clone();
     let key_redacted = activation.redacted_key();
     let client = Arc::new(LlmClient::new(activation));
@@ -332,8 +338,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, activation: Ac
         should_quit: false,
         usage: TokenUsage::default(),
         failures: failure_counters(),
+        realm,
     };
-    app.push(EntryKind::Notice, "Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, or `:quit` to exit.");
+    app.push(EntryKind::Notice, "Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, `:ask <question>`/`:impact <target>` to query the project's realm graph, or `:quit` to exit.");
     if let Some(path) = log.path() {
         app.push(EntryKind::Notice, format!("session log: {}", path.display()));
     }
@@ -449,9 +456,29 @@ fn submit(app: &mut App, client: &Arc<LlmClient>, tx: &Sender<WorkerEvent>, log:
                 None => app.push(EntryKind::Notice, "no build has failed yet in this session -- nothing to explain."),
             }
         }
+        Command::Ask(question) => {
+            app.push(EntryKind::UserInput, format!(":ask {question}"));
+            match &app.realm {
+                Some(conn) => match crate::realm::ask(conn, question) {
+                    Ok(hits) => app.push(EntryKind::Notice, format_ask_hits(question, &hits)),
+                    Err(e) => app.push(EntryKind::Notice, e),
+                },
+                None => app.push(EntryKind::Notice, "the realm graph isn't available this session -- try `nirdosha realm ingest`/`sync` from a shell instead."),
+            }
+        }
+        Command::Impact(target) => {
+            app.push(EntryKind::UserInput, format!(":impact {target}"));
+            match &app.realm {
+                Some(conn) => match crate::realm::impact(conn, target) {
+                    Ok(report) => app.push(EntryKind::Notice, format_impact_report(target, &report)),
+                    Err(e) => app.push(EntryKind::Notice, e),
+                },
+                None => app.push(EntryKind::Notice, "the realm graph isn't available this session -- try `nirdosha realm impact` from a shell instead."),
+            }
+        }
         Command::Unknown(other) => {
             app.push(EntryKind::UserInput, other.to_string());
-            app.push(EntryKind::Notice, format!("unrecognized command `{other}` -- try `:explain` or `:quit`."));
+            app.push(EntryKind::Notice, format!("unrecognized command `{other}` -- try `:explain`, `:ask`, `:impact`, or `:quit`."));
         }
         Command::Request { description, serve } => {
             app.push(EntryKind::UserInput, description.to_string());
