@@ -143,6 +143,33 @@ fn main() {
         }
         rustflags.push_str("-C target-feature=+crt-static");
         cmd.env("RUSTFLAGS", rustflags);
+        // `+crt-static` above only fixes the *Rust*-compiled half of this
+        // nested build (rustc's own generated code, and `std` itself both
+        // correctly switch to `libcmt.lib`) -- it does NOT reach
+        // `libsqlite3-sys`'s `cc`-crate-driven compilation of `bundled`
+        // SQLite's C source, root-caused for real this time (not another
+        // guess): `cc` decides `/MT` vs `/MD` by checking
+        // `CARGO_CFG_TARGET_FEATURE` for `"crt-static"`, and Cargo
+        // populates that env var for a build script from the *target's
+        // own default* feature set (confirmed by instrumenting this exact
+        // build on real Windows CI: `cmpxchg16b,fxsr,sse,sse2,sse3`, no
+        // `crt-static` -- see this commit's own diagnostic run) --
+        // extra `-C target-feature=+X` flags supplied only via `RUSTFLAGS`
+        // for an implicit host==target build are never folded into that
+        // computation, with or without a `--target` flag. No amount of
+        // rustflags tinkering on *this* side of the link can change what
+        // `CARGO_CFG_TARGET_FEATURE` a build script sees -- a documented,
+        // known Cargo limitation, not something this project's flag
+        // plumbing got wrong. `CFLAGS`/`CFLAGS_<target>` is the actual
+        // lever: `cc` always appends whatever's there to its compiler
+        // invocation, *after* its own `/MD` default, and MSVC's `cl.exe`
+        // takes the last `/MT`/`/MD` flag on the line (a `D9025`
+        // "overriding" warning, not an error) -- so this reliably forces
+        // the static CRT regardless of `cc`'s own (mis-)detection. Scoped
+        // to the specific target triple's env-var name, not bare
+        // `CFLAGS`, so it can never leak into some other target's build
+        // if this nested workspace ever grows one.
+        cmd.env("CFLAGS_x86_64_pc_windows_msvc", "/MT");
     }
     let output = cmd
         .output()
