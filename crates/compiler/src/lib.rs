@@ -11,6 +11,7 @@ pub mod migrate;
 pub mod ownership;
 pub mod parser;
 pub mod plugin;
+pub mod realm;
 pub mod rqlite;
 pub mod refine;
 pub mod smt;
