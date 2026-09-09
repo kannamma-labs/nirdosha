@@ -286,6 +286,91 @@ fn main() {
     extra_libs_rs.push_str("];\n");
     std::fs::write(out_dir.join("extra_native_libs.rs"), extra_libs_rs)
         .expect("writing extra_native_libs.rs into OUT_DIR");
+
+    build_compiled_serve(&out_dir);
+}
+
+/// Builds `../compiled-serve` (ROADMAP B8, `rfcs/0010-landing-and-
+/// serve-exposure.md`) into a second staticlib, the same `cargo rustc`-
+/// on-a-real-sub-crate mechanism the `runtime-kernels` build above
+/// already established — `docs/adr/0010-runtime-kernels-rlib-for-
+/// compiled-serve.md`'s own "will eventually need the same embedding
+/// treatment" note, now done. Only linked into a binary when
+/// `nirdosha build --serve` is actually used (`codegen.rs::build_serve`),
+/// but built here unconditionally, same "the mechanism is a fixed
+/// compiler-build-time cost, not a per-`.nir`-program one" precedent
+/// `runtime-kernels` itself already set (every `nirdosha build` embeds
+/// that staticlib regardless of whether a given program touches `db`/
+/// `mq`/`tcp` at all).
+///
+/// **Deliberately does not redo `extra_native_libs.rs`'s own native-
+/// static-libs discovery.** `crates/compiled-serve/Cargo.toml`'s own
+/// dependencies beyond `nirdosha-runtime-kernels` itself (`serde_json`,
+/// `base64`) are pure Rust with no native library of their own — every
+/// native dependency a linked `nirdosha_compiled_serve.a` could
+/// possibly need is already a strict subset of what `runtime-kernels`'
+/// own build just discovered and wrote to `extra_native_libs.rs`/
+/// `native_static_libs.txt` above, since `compiled-serve` pulls
+/// `runtime-kernels` in as an ordinary dependency and adds nothing new
+/// of that kind on top. If that assumption ever stops holding (a future
+/// `compiled-serve` dependency needs its own native library), the
+/// symptom will be a real, loud link failure in `codegen.rs::build_serve`
+/// — caught directly by that path's own tests, not silently wrong.
+fn build_compiled_serve(out_dir: &std::path::Path) {
+    let serve_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../compiled-serve");
+    let serve_manifest = serve_dir.join("Cargo.toml");
+    let serve_target_dir = out_dir.join("compiled_serve_target");
+
+    fn watch_dir_recursive(dir: &std::path::Path) {
+        println!("cargo::rerun-if-changed={}", dir.display());
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                watch_dir_recursive(&path);
+            } else {
+                println!("cargo::rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    watch_dir_recursive(&serve_dir.join("src"));
+    println!("cargo::rerun-if-changed={}", serve_manifest.display());
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut cmd = Command::new(&cargo);
+    cmd.arg("rustc")
+        .arg("--release")
+        .arg("--manifest-path")
+        .arg(&serve_manifest)
+        .arg("--target-dir")
+        .arg(&serve_target_dir)
+        // Overrides the crate-type for just this one invocation, rather
+        // than a permanent `crate-type = ["staticlib"]` in
+        // `compiled-serve`'s own `Cargo.toml` — unlike `runtime-kernels`
+        // (which genuinely needs to produce *both* a staticlib for this
+        // embedding and an `rlib` for `compiled-serve`'s own ordinary
+        // Cargo dependency on it, in two different builds), nothing
+        // else ever consumes `compiled-serve` as an `rlib`, so there's
+        // no reason to widen its permanent crate-type for a need only
+        // this one build script has.
+        .arg("--crate-type")
+        .arg("staticlib");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C target-feature=+crt-static");
+        cmd.env("RUSTFLAGS", rustflags);
+    }
+    let output = cmd.output().expect("failed to invoke `cargo rustc` to build ../compiled-serve");
+    assert!(output.status.success(), "cargo rustc failed to build ../compiled-serve into a staticlib:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let built_lib_name = if target_env == "msvc" { "nirdosha_compiled_serve.lib".to_string() } else { "libnirdosha_compiled_serve.a".to_string() };
+    let built_lib = serve_target_dir.join("release").join(&built_lib_name);
+    let out_lib = out_dir.join("libnirdosha_compiled_serve.a");
+    std::fs::copy(&built_lib, &out_lib).unwrap_or_else(|e| panic!("expected cargo rustc to produce {} -- copy failed: {e}", built_lib.display()));
 }
 
 /// Parses every `cargo:rustc-link-search=...` line out of `-vv`'s

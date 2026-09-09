@@ -1333,7 +1333,7 @@ fn is_reachable_with_no_token(f: &FnDecl) -> bool {
     !f.params.iter().any(|p| is_verified_identity(&p.ty) || is_optional_verified_identity(&p.ty) || matches!(p.ty, Ty::Db | Ty::Mq))
 }
 
-fn is_verified_identity(ty: &Ty) -> bool {
+pub(crate) fn is_verified_identity(ty: &Ty) -> bool {
     matches!(ty, Ty::Named(n, args) if n == "VerifiedIdentity" && args.is_empty())
 }
 
@@ -1341,7 +1341,7 @@ fn is_verified_identity(ty: &Ty) -> bool {
 /// dispatch` injects `Some(id)`/`None` for, never a 401 either way (see
 /// that module's doc comment and `docs/WORKFLOW.md`'s "who submitted this"
 /// section, the feature that motivated it).
-fn is_optional_verified_identity(ty: &Ty) -> bool {
+pub(crate) fn is_optional_verified_identity(ty: &Ty) -> bool {
     matches!(ty, Ty::Named(n, args) if n == "Option" && args.len() == 1 && is_verified_identity(&args[0]))
 }
 
@@ -1380,7 +1380,7 @@ pub fn workflow_owner_warnings(program: &Program) -> Vec<TypeWarning> {
 /// (a real, disclosed scope limit, not an oversight) — anything not
 /// covered here still reaches compiled `serve` only via an explicit
 /// `serve { expose ... }` entry.
-fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
+pub(crate) fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     for screen in &program.screens {
         for (key, value) in &screen.entries {
@@ -1405,7 +1405,7 @@ fn implicitly_exposed_fn_names(program: &Program) -> std::collections::HashSet<S
 /// deny-by-default error) and `exposed_public_read_warnings` below (the
 /// softer confidentiality warning) so the two checks can never
 /// disagree about what's actually reachable.
-fn exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
+pub(crate) fn exposed_fn_names(program: &Program) -> std::collections::HashSet<String> {
     let mut set = implicitly_exposed_fn_names(program);
     if let Some(sc) = &program.serve_config {
         set.extend(sc.expose.iter().map(|(name, _)| name.clone()));

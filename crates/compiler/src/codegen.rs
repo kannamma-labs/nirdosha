@@ -74,6 +74,7 @@ use crate::ast::*;
 use crate::ownership::{self, FreeMap};
 use crate::smt::SmtReport;
 use crate::token::Span;
+use crate::typeck::{is_optional_verified_identity, is_verified_identity};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodegenError {
@@ -686,6 +687,22 @@ fn llvm_ty(ty: &Ty, registry: &TypeRegistry) -> Result<String, CodegenError> {
 /// the string without an illegal embedded sigil) — callers that need the
 /// real LLVM identifier prepend `%` themselves (`llvm_ty`'s `Ty::Named`
 /// arm, `declare_named_type`).
+/// True exactly for the broken placeholder `local_ty_of`'s own
+/// constructor-call fallback invents when `ctor_ty` can't fully resolve
+/// a *standalone* `Ok(..)`/`Err(..)` call (see that arm's own comment
+/// for why it structurally never can: `Ok`'s payload only ever pins
+/// down `Result`'s `T`, `Err`'s only ever pins down `E`, so without
+/// either an enclosing expected type or a sibling branch supplying the
+/// other one, one type parameter is always missing). `"Ok"`/`"Err"` are
+/// never real registered struct/enum names, so a `Ty::Named` under
+/// either literal name with no type arguments is never a genuine
+/// resolved type — it's this specific failure signal, checked here
+/// (not trusted blindly) so `match_result_ty`/`if_result_ty` can prefer
+/// a sibling branch that *does* fully resolve instead.
+fn is_unresolved_ok_err_placeholder(ty: &Ty) -> bool {
+    matches!(ty, Ty::Named(name, args) if args.is_empty() && (name == "Ok" || name == "Err"))
+}
+
 fn mangle_ty(ty: &Ty) -> String {
     match ty {
         Ty::I8 => "i8".to_string(),
@@ -1552,7 +1569,25 @@ struct Codegen<'a> {
 }
 
 pub fn emit_llvm_ir<'a>(program: &'a Program, smt_report: &'a SmtReport) -> Result<String, CodegenError> {
-    emit_llvm_ir_impl(program, smt_report, &[], &HashSet::new())
+    emit_llvm_ir_impl(program, smt_report, &[], &HashSet::new(), None)
+}
+
+/// Reviving compiled `nirdosha serve` (`rfcs/0010-landing-and-serve-
+/// exposure.md`) — `port` to bind, and `ui_html` the caller already
+/// generated at compile time (`ui_gen::generate`, `main.rs::cmd_build`)
+/// to bake into the binary, since a compiled process has no `Program`
+/// AST left at runtime to generate it from. Native plugins aren't
+/// supported together with `--serve` yet (`emit_c_main_serve`'s own
+/// doc comment has the full disclosure), so this always passes an
+/// empty plugin roster to `emit_llvm_ir_impl`, unlike
+/// `emit_llvm_ir_with_native_plugins`.
+pub struct ServeCodegenOptions {
+    pub port: u16,
+    pub ui_html: Vec<u8>,
+}
+
+pub fn emit_llvm_ir_for_serve<'a>(program: &'a Program, smt_report: &'a SmtReport, serve: &ServeCodegenOptions) -> Result<String, CodegenError> {
+    emit_llvm_ir_impl(program, smt_report, &[], &HashSet::new(), Some(serve))
 }
 
 /// rfcs/0005-plugin-boundary-safety-and-performance.md §3: the compiled-
@@ -1581,7 +1616,7 @@ pub fn emit_llvm_ir_with_native_plugins<'a>(
     if let Err(msg) = crate::plugin::validate_plugin_roster(native_plugins) {
         return unsupported(msg);
     }
-    emit_llvm_ir_impl(program, smt_report, native_plugins, reject_plugin_names)
+    emit_llvm_ir_impl(program, smt_report, native_plugins, reject_plugin_names, None)
 }
 
 fn emit_llvm_ir_impl<'a>(
@@ -1589,6 +1624,7 @@ fn emit_llvm_ir_impl<'a>(
     smt_report: &'a SmtReport,
     native_plugins: &[crate::plugin::NativePluginBuiltin],
     reject_plugin_names: &HashSet<String>,
+    serve: Option<&ServeCodegenOptions>,
 ) -> Result<String, CodegenError> {
     check_supported_with_plugins(program, reject_plugin_names)?;
     let registry = TypeRegistry::build(program);
@@ -1810,6 +1846,32 @@ fn emit_llvm_ir_impl<'a>(
     writeln!(cg.out, "declare i32 @nir_json_get_f64(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_json_get_bool(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
     writeln!(cg.out, "declare i32 @nir_json_set_str(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    // `emit_encode_value_json`/`emit_decode_value_json`'s own runtime
+    // half (this file's doc comment above those functions has the full
+    // design) — the generic `Ty`<->JSON walk Stage 1 of reviving
+    // compiled `serve` needs, none of which the request-shaped
+    // `nir_json_get_*`/`_set_str` builtins above cover: encoding/
+    // decoding one *bare* scalar (not keyed inside an object) and
+    // folding an already-encoded JSON fragment into an object under a
+    // given key. The four encoders are infallible (`void`, no `out_err`)
+    // — see their own doc comments in `runtime-kernels/src/lib.rs`.
+    writeln!(cg.out, "declare void @nir_json_encode_i64(i64, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_json_encode_f64(double, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_json_encode_bool(i32, ptr)").unwrap();
+    writeln!(cg.out, "declare void @nir_json_encode_str(ptr, i64, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_decode_i64(ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_decode_f64(ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_decode_bool(ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_decode_str(ptr, i64, ptr, ptr)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_json_set_raw(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    // `nirdosha_compiled_serve`'s own C-ABI bridge (`crates/compiled-
+    // serve/src/lib.rs::nir_compiled_serve_run`) — only ever actually
+    // `call`ed from `emit_c_main_serve`'s generated `main`, itself only
+    // emitted when `build_serve` (not plain `build`) is used, but
+    // declared unconditionally here anyway, same "an unused `declare`
+    // is inert" convention every other kernel declare in this preamble
+    // already follows.
+    writeln!(cg.out, "declare i32 @nir_compiled_serve_run(ptr, i64, ptr, i64, i64)").unwrap();
     // `env` (`ENV_BUILTINS`'s own doc comment, RFC 0011 §1) — reads a
     // process environment variable. Not resource-gated (no `Domain`, no
     // handle) — same reason `nir_json_get_str` isn't either.
@@ -1948,7 +2010,28 @@ fn emit_llvm_ir_impl<'a>(
         cg.function(f)?;
     }
 
-    cg.emit_c_main(program, native_plugins)?;
+    match serve {
+        Some(opts) => {
+            let exposed = crate::typeck::exposed_fn_names(program);
+            let mut route_entries = Vec::with_capacity(exposed.len());
+            // Sorted, not iteration order over a `HashSet` — an
+            // unstable route-table order would make the emitted `.ll`
+            // (and so the final binary) non-deterministic run to run
+            // for the exact same source, same "deterministic output"
+            // bar every other pass in this file already holds itself
+            // to (`declare_named_type`'s own dependency-order comment
+            // makes the same point for a different reason).
+            let mut names: Vec<&String> = exposed.iter().collect();
+            names.sort();
+            for name in names {
+                let f = program.fns.iter().find(|f| &f.name == name).expect("typeck.rs already proved every exposed name resolves to a real fn");
+                let wrapper_symbol = cg.emit_serve_route_wrapper(f)?;
+                route_entries.push((format!("/api/{name}"), wrapper_symbol));
+            }
+            cg.emit_c_main_serve(program, &route_entries, &opts.ui_html, opts.port)?;
+        }
+        None => cg.emit_c_main(program, native_plugins)?,
+    }
     // See `string_globals`'s own doc — every `str` literal's backing
     // global constant, collected during function codegen since it can't
     // be written mid-function-body, appended here once at the end.
@@ -2388,6 +2471,24 @@ impl Codegen<'_> {
             && (self.registry.is_struct(name) || self.registry.find_variant(name).is_some())
         {
             return self.construct(name, args, expected, *span, scopes);
+        }
+        // A real captured crash (`nirdosha_hi_*.log`/`.nir`) had a bare
+        // `Ok`/`Err` reconstruction nested two `if`/`match` levels deep
+        // inside an arm/branch whose own enclosing `let`/`return` *did*
+        // have a concrete `expected` in hand -- but that `expected` was
+        // dropped the moment this function fell through to plain
+        // `expr_ptr` below for anything that wasn't a *direct*
+        // constructor call, so a nested `if`/`match` re-derived its own
+        // result type from scratch via `if_result_ty`/`match_result_ty`'s
+        // own (necessarily weaker, no-context) inference instead of
+        // just being told the answer it already had one call frame up.
+        // Threading `expected` through here closes that gap at its
+        // actual source, recursively, at any nesting depth -- not
+        // another sibling-branch heuristic layered on top of it.
+        match e {
+            Expr::If { cond, then_block, else_block, span } => return self.if_expr(cond, then_block, else_block.as_deref(), *span, Some(expected), scopes),
+            Expr::Match { scrutinee, arms, span } => return self.match_expr(scrutinee, arms, *span, Some(expected), scopes),
+            _ => {}
         }
         self.expr_ptr(e, scopes)
     }
@@ -2935,12 +3036,128 @@ impl Codegen<'_> {
             },
             // Aggregate-result `if`/`match`: typeck already proved every
             // branch/arm body has the same type, so the first one is
-            // representative. This is only needed so that nested
-            // aggregate control flow (e.g. an `if` inside an `if` branch)
-            // can resolve its own result type.
-            Expr::If { then_block, .. } => self.block_trailing_ty(then_block, scopes),
-            Expr::Match { arms, .. } => self.local_ty_of(&arms[0].body, scopes),
+            // usually representative -- `if_result_ty`/`match_result_ty`
+            // handle the cases where it isn't (see their own comments).
+            // This is only needed so that nested aggregate control flow
+            // (e.g. an `if` inside an `if` branch) can resolve its own
+            // result type.
+            Expr::If { then_block, else_block, .. } => self.if_result_ty(then_block, else_block.as_deref(), scopes),
+            // "The first arm is representative" breaks for exactly one
+            // shape: an arm body that's itself a bare `Ok(..)`/`Err(..)`
+            // reconstruction of the `Result` prelude type (`match
+            // <result> { Ok(r) => Ok(r), Err(e) => Err(e) }` -- an
+            // entirely ordinary "pass a Result through" pattern). Neither
+            // variant's own payload determines the *other* type
+            // parameter (`Ok(r)`'s payload only ever pins down `T`, never
+            // `E`), so `ctor_ty` (via the `Expr::Call` arm below) can't
+            // resolve one standalone and used to fall through to its own
+            // `Ty::Named("Ok", [])`/`Ty::Named("Err", [])` placeholder --
+            // registered under neither name, so `declare_named_type`'s
+            // `unreachable!` fired on it the moment this match's result
+            // type was needed. See `match_result_ty` for the fix.
+            Expr::Match { scrutinee, arms, .. } => self.match_result_ty(&self.local_ty_of(scrutinee, scopes), arms, scopes),
             _ => Ty::I64,
+        }
+    }
+
+    /// `local_ty_of`'s `Expr::Match` case: `arms[0].body`'s type
+    /// represents the whole match, *unless* it's a bare `Ok`/`Err`
+    /// reconstruction whose missing type parameter only a sibling arm
+    /// can supply -- see the call site's own comment for the failure
+    /// this fixes. Looks at every arm together specifically to catch
+    /// that case; falls back to the first arm alone (the previous,
+    /// still-correct-for-every-other-shape behavior) otherwise.
+    fn match_result_ty(&self, scrutinee_ty: &Ty, arms: &[MatchArm], scopes: &Scopes) -> Ty {
+        // The scrutinee being a `Result(t, e)` is ground truth for what
+        // `Ok`/`Err` mean in any arm matching it -- consulted below
+        // whenever an arm's own pattern binding (`v` in `Ok(v) => ...`)
+        // isn't in `scopes` yet at this point: real per-arm codegen (and
+        // its `scopes.push()` of that binding) happens *after* this
+        // return type is already needed, further down in `match_expr`.
+        let result_args = match scrutinee_ty {
+            Ty::Named(name, args) if name == "Result" && args.len() == 2 => Some((&args[0], &args[1])),
+            _ => None,
+        };
+        // The overwhelmingly common shape a bare reconstruction arm
+        // has: `Ok(v) => Ok(v)`/`Err(e) => Err(e)`, the payload
+        // expression is exactly the arm's own pattern binding,
+        // unchanged. **This proves only the one type parameter that
+        // variant's payload actually touches** (`Ok`'s only ever `T`,
+        // `Err`'s only ever `E`) -- it is *not* license to assume the
+        // *other* parameter also matches the scrutinee's, which a
+        // sibling arm changing it (`Err(e) => Err(0)` turning a `str`
+        // scrutinee-error into an `i64` one, an ordinary "normalize the
+        // error type" pattern) makes outright false. So this returns
+        // just the one proven component, `(is_ok, component)`, for the
+        // combine step below to use -- never a whole `Result(T, E)` on
+        // a single passthrough arm's say-so alone.
+        let passthrough_component = |arm: &MatchArm| -> Option<(bool, Ty)> {
+            if let Expr::Call(name, args, _) = arm.body.as_ref() {
+                if (name == "Ok" || name == "Err") && args.len() == 1 {
+                    if let (Expr::Ident(id, _), Some(bound), Some((t, e))) = (&args[0], arm.bindings.first(), result_args) {
+                        if id == bound {
+                            return Some((name == "Ok", if name == "Ok" { t.clone() } else { e.clone() }));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // Phase 1: any arm whose body is *not* this passthrough shape
+        // might still fully self-resolve via plain `local_ty_of` --
+        // e.g. a nested `if`/`match` that itself bottoms out in
+        // something concrete (recursing into this same function, whose
+        // own combine step may resolve it). A bare `Ok(x)`/`Err(y)`
+        // wrapping something other than its own binding (`Err(DbError
+        // (e))`) is *not* skipped here but never actually resolves this
+        // way either (`ctor_ty` structurally can't bind `Ok`/`Err`'s
+        // *other* type parameter from any single call, passthrough or
+        // not) -- it always falls through to phase 2's `args[0]`-only
+        // extraction below, which sidesteps that limitation entirely by
+        // never asking `ctor_ty` about the outer `Ok`/`Err` call at all.
+        // Every arm is tried, not just the first, because typeck already
+        // proved they all agree; which one (if any) is resolvable this
+        // way varies per arm.
+        for arm in arms {
+            if passthrough_component(arm).is_some() {
+                continue;
+            }
+            let ty = self.local_ty_of(&arm.body, scopes);
+            if !is_unresolved_ok_err_placeholder(&ty) {
+                return ty;
+            }
+        }
+        // Phase 2: every arm was either the passthrough shape or
+        // independently unresolvable alone. The remaining case this can
+        // still recover, and the one every real crash this fixed
+        // actually hit: an `Ok`-shaped arm supplies `T` (whether via
+        // scrutinee substitution for a passthrough, or `local_ty_of` on
+        // its own payload expression for anything else), a *different*
+        // `Err`-shaped arm supplies `E`, and combining the two (which
+        // neither alone could) is fully correct, not a guess — typeck
+        // already proved this match produces exactly one `Result(T, E)`.
+        let mut ok_ty = None;
+        let mut err_ty = None;
+        for arm in arms {
+            if let Some((is_ok, component)) = passthrough_component(arm) {
+                if is_ok {
+                    ok_ty.get_or_insert(component);
+                } else {
+                    err_ty.get_or_insert(component);
+                }
+                continue;
+            }
+            if let Expr::Call(name, args, _) = arm.body.as_ref() {
+                if name == "Ok" && args.len() == 1 {
+                    ok_ty.get_or_insert_with(|| self.local_ty_of(&args[0], scopes));
+                } else if name == "Err" && args.len() == 1 {
+                    err_ty.get_or_insert_with(|| self.local_ty_of(&args[0], scopes));
+                }
+            }
+        }
+        match (ok_ty, err_ty) {
+            (Some(t), Some(e)) => Ty::Named("Result".to_string(), vec![t, e]),
+            _ => self.local_ty_of(&arms[0].body, scopes),
         }
     }
 
@@ -3800,7 +4017,7 @@ impl Codegen<'_> {
             }
             Expr::Binary(op, lhs, rhs, span) => self.binary(*op, lhs, rhs, *span, scopes),
             Expr::Call(name, args, _) => self.call(name, args, scopes),
-            Expr::If { cond, then_block, else_block, span } => self.if_expr(cond, then_block, else_block.as_deref(), *span, scopes),
+            Expr::If { cond, then_block, else_block, span } => self.if_expr(cond, then_block, else_block.as_deref(), *span, None, scopes),
             Expr::Assign(name, rhs, span) => {
                 let (ty, ptr) = scopes.get(name).expect("typeck.rs already proved this resolves");
                 if ty.is_aggregate() {
@@ -3933,7 +4150,7 @@ impl Codegen<'_> {
             // own `_ => unsupported(...)` already covers for `if` — it
             // fails cleanly via `expr_ptr_expected`'s `expr_ptr` fallback
             // rather than being silently absent.
-            Expr::Match { scrutinee, arms, span } => self.match_expr(scrutinee, arms, *span, scopes),
+            Expr::Match { scrutinee, arms, span } => self.match_expr(scrutinee, arms, *span, None, scopes),
             // `box e` — heap-allocate `e`'s type's own byte size
             // (`ty_byte_size`, covers every `Ty` a `box` can wrap, not
             // just aggregates), copy `e`'s value in, return the heap
@@ -5495,9 +5712,9 @@ impl Codegen<'_> {
             // type, so `if_expr`/`match_expr` will allocate a slot and
             // return its pointer.
             Expr::If { cond, then_block, else_block, span } => {
-                self.if_expr(cond, then_block, else_block.as_deref(), *span, scopes)
+                self.if_expr(cond, then_block, else_block.as_deref(), *span, None, scopes)
             }
-            Expr::Match { scrutinee, arms, span } => self.match_expr(scrutinee, arms, *span, scopes),
+            Expr::Match { scrutinee, arms, span } => self.match_expr(scrutinee, arms, *span, None, scopes),
             // `acquire name(proof)` — always aggregate-valued
             // (`Result(Ty::Fn(..), str)`), so it belongs here, not in
             // `expr()`.
@@ -7223,6 +7440,1085 @@ impl Codegen<'_> {
             }
         }
         Ok(operands)
+    }
+
+    /// Generic `Ty`<->JSON for one compiled value — the foundation a
+    /// compiled `serve` route wrapper (`rfcs/0010-landing-and-serve-
+    /// exposure.md`'s exposure set, not yet wired to codegen — this is
+    /// standalone plumbing, not called from anywhere real yet) will
+    /// decode a request body and encode a response body with. Deliberately
+    /// *not* a generalization of `nir_transact_decode_args`/
+    /// `emit_replay_decode_operands` just above: that path's flat
+    /// `NirBindValue` array is a real, separate design for durability-log
+    /// compactness (`is_transact_scalar`'s own doc comment), scoped to
+    /// exactly 4 scalar shapes on purpose — conflating it with a struct-
+    /// capable, real-JSON-text wire format would misrepresent both. This
+    /// reuses the *pattern* (walk a static `Ty`, GEP one field pointer at
+    /// a time) against the real `nir_json_*` kernels instead.
+    ///
+    /// **Wire shape is not invented here — it's recovered.** The deleted
+    /// tree-walking interpreter's `nirdosha serve` had exactly this
+    /// (`decode_value`/`encode_value`, `git show
+    /// 05a747c~1:crates/compiler/src/serve.rs`), and `ui_gen_template.html`'s
+    /// generated client-side `callFn` already hard-codes the result: a
+    /// struct is a plain `{"field": ...}` object keyed by declared field
+    /// name, and `Ty::Named("Result", [_, _])` is `{"ok": ...}`/
+    /// `{"err": ...}` — matched exactly, not re-derived, so a future
+    /// served app's generated frontend needs no changes to talk to
+    /// whatever calls these.
+    ///
+    /// **Scope for this pass**: `bool`/every integer width/`f64`/`str`
+    /// (the same leaf shapes `emit_replay_decode_operands` already
+    /// handles), plus structs (every field, including a nested struct
+    /// field) and `Result(T, E)`. `Option`/enum/`Vector`/`Matrix`/`json`/
+    /// `dec128` are real cases the old `decode_value`/`encode_value` also
+    /// had — disclosed, separate follow-up for whichever later stage's
+    /// route shapes actually need them, not silently assumed covered.
+    ///
+    /// Pointer-based for *every* `ty`, including scalars — a struct/
+    /// `Result` field naturally produces a pointer via `getelementptr`,
+    /// and one uniform calling convention here means the recursive walk
+    /// never has to branch on "do I have a value or a pointer" on top of
+    /// already branching on `ty`'s own shape. `ptr` must already point at
+    /// a live slot holding one value of `ty` (a scalar's own `alloca`d
+    /// temp is fine — see the round-trip tests in `tests/codegen.rs` for
+    /// the exact pattern a caller uses).
+    fn emit_encode_value_json(&mut self, ty: &Ty, ptr: &str) -> Result<String, CodegenError> {
+        match ty {
+            Ty::Bool => {
+                let v = self.fresh_reg("encode_json_bool_val");
+                writeln!(self.out, "  {v} = load i1, ptr {ptr}").unwrap();
+                let v32 = self.fresh_reg("encode_json_bool_i32");
+                writeln!(self.out, "  {v32} = zext i1 {v} to i32").unwrap();
+                Ok(self.emit_infallible_json_encode("nir_json_encode_bool", &[format!("i32 {v32}")], "encode_json_bool"))
+            }
+            other if other.is_integer() => {
+                let llty = self.llvm_ty(other)?;
+                let v = self.fresh_reg("encode_json_int_val");
+                writeln!(self.out, "  {v} = load {llty}, ptr {ptr}").unwrap();
+                let widened = self.widen_to_i64(&v, other);
+                Ok(self.emit_infallible_json_encode("nir_json_encode_i64", &[format!("i64 {widened}")], "encode_json_int"))
+            }
+            Ty::F64 => {
+                let v = self.fresh_reg("encode_json_f64_val");
+                writeln!(self.out, "  {v} = load double, ptr {ptr}").unwrap();
+                Ok(self.emit_infallible_json_encode("nir_json_encode_f64", &[format!("double {v}")], "encode_json_f64"))
+            }
+            Ty::Str => {
+                let v = self.fresh_reg("encode_json_str_val");
+                writeln!(self.out, "  {v} = load {{ptr, i64}}, ptr {ptr}").unwrap();
+                let sptr = self.fresh_reg("encode_json_str_ptr");
+                writeln!(self.out, "  {sptr} = extractvalue {{ptr, i64}} {v}, 0").unwrap();
+                let slen = self.fresh_reg("encode_json_str_len");
+                writeln!(self.out, "  {slen} = extractvalue {{ptr, i64}} {v}, 1").unwrap();
+                Ok(self.emit_infallible_json_encode("nir_json_encode_str", &[format!("ptr {sptr}"), format!("i64 {slen}")], "encode_json_str"))
+            }
+            Ty::Named(name, args) if name == "Result" && args.len() == 2 => self.emit_encode_result_json(&args[0], &args[1], ptr),
+            Ty::Named(name, _) if self.registry.is_struct(name) => self.emit_encode_struct_json(ty, ptr),
+            other => unsupported(format!("encoding a `{}` to JSON isn't supported yet (compiled `serve` Stage 1's scope: scalars, structs, `Result`)", other.name())),
+        }
+    }
+
+    /// The infallible leaf call every scalar encoder above shares: call
+    /// `fn_name(<operands>, ptr out)`, load the `{ptr, i64}` JSON text it
+    /// wrote, return it. No status/error branch — see
+    /// `nir_json_encode_i64`'s own doc comment (`runtime-kernels/src/
+    /// lib.rs`) for why these four specifically can't fail.
+    fn emit_infallible_json_encode(&mut self, fn_name: &str, operands: &[String], label_prefix: &str) -> String {
+        let out = self.fresh_reg(&format!("{label_prefix}_out_scratch"));
+        self.emit_alloca(&out, "{ptr, i64}");
+        let joined = operands.join(", ");
+        writeln!(self.out, "  call void @{fn_name}({joined}, ptr {out})").unwrap();
+        let val = self.fresh_reg(&format!("{label_prefix}_out"));
+        writeln!(self.out, "  {val} = load {{ptr, i64}}, ptr {out}").unwrap();
+        val
+    }
+
+    /// The struct half of `emit_encode_value_json`: fold `nir_json_set_raw`
+    /// over every declared field in order, starting from the empty object
+    /// `"{}"` — each field's own value is encoded first (recursing through
+    /// `emit_encode_value_json`, so a nested struct field just works,
+    /// built bottom-up the same way `construct_struct` builds a struct
+    /// top-down), then spliced in under its declared name. Field
+    /// *order* doesn't matter to the wire format (a JSON object is
+    /// unordered) but iterating `struct_fields`' own declaration order
+    /// keeps the emitted IR deterministic run to run.
+    fn emit_encode_struct_json(&mut self, ty: &Ty, ptr: &str) -> Result<String, CodegenError> {
+        let Ty::Named(name, _) = ty else { unreachable!("caller already matched Ty::Named") };
+        let struct_llty = self.llvm_ty(ty)?;
+        let fields = self.registry.struct_fields(name).expect("caller already confirmed this is a struct").to_vec();
+        let empty_obj = self.fresh_global("encode_json_struct_empty");
+        writeln!(self.string_globals, "{empty_obj} = private unnamed_addr constant [2 x i8] c\"{{}}\"").unwrap();
+        let mut doc_ptr = self.fresh_reg("encode_json_struct_doc_ptr0");
+        writeln!(self.out, "  {doc_ptr} = insertvalue {{ptr, i64}} undef, ptr {empty_obj}, 0").unwrap();
+        let doc0 = self.fresh_reg("encode_json_struct_doc0");
+        writeln!(self.out, "  {doc0} = insertvalue {{ptr, i64}} {doc_ptr}, i64 2, 1").unwrap();
+        doc_ptr = doc0;
+        for (i, field) in fields.iter().enumerate() {
+            let (idx, field_ty) = self.field_index_and_ty(ty, &field.name).expect("field came from this same struct's own field list");
+            let field_ptr = self.fresh_reg(&format!("encode_json_struct_field{i}_ptr"));
+            writeln!(self.out, "  {field_ptr} = getelementptr inbounds {struct_llty}, ptr {ptr}, i32 0, i32 {idx}").unwrap();
+            let field_json = self.emit_encode_value_json(&field_ty, &field_ptr)?;
+            let field_json_ptr = self.fresh_reg(&format!("encode_json_struct_field{i}_jptr"));
+            writeln!(self.out, "  {field_json_ptr} = extractvalue {{ptr, i64}} {field_json}, 0").unwrap();
+            let field_json_len = self.fresh_reg(&format!("encode_json_struct_field{i}_jlen"));
+            writeln!(self.out, "  {field_json_len} = extractvalue {{ptr, i64}} {field_json}, 1").unwrap();
+            let doc_ptr_word = self.fresh_reg(&format!("encode_json_struct_doc{}_ptr", i + 1));
+            writeln!(self.out, "  {doc_ptr_word} = extractvalue {{ptr, i64}} {doc_ptr}, 0").unwrap();
+            let doc_len_word = self.fresh_reg(&format!("encode_json_struct_doc{}_len", i + 1));
+            writeln!(self.out, "  {doc_len_word} = extractvalue {{ptr, i64}} {doc_ptr}, 1").unwrap();
+            let key_global = self.fresh_global(&format!("encode_json_struct_key{i}"));
+            writeln!(self.string_globals, "{key_global} = private unnamed_addr constant [{} x i8] c\"{}\"", field.name.len(), llvm_escape_bytes(field.name.as_bytes())).unwrap();
+            let out_scratch = self.fresh_reg(&format!("encode_json_struct_out{}_scratch", i + 1));
+            self.emit_alloca(&out_scratch, "{ptr, i64}");
+            let err_scratch = self.fresh_reg(&format!("encode_json_struct_err{}_scratch", i + 1));
+            self.emit_alloca(&err_scratch, "{ptr, i64}");
+            writeln!(
+                self.out,
+                "  call i32 @nir_json_set_raw(ptr {doc_ptr_word}, i64 {doc_len_word}, ptr {key_global}, i64 {}, ptr {field_json_ptr}, i64 {field_json_len}, ptr {out_scratch}, ptr {err_scratch})",
+                field.name.len()
+            )
+            .unwrap();
+            // `set_raw` only fails on a malformed `doc`/`raw` — both are
+            // this same walk's own always-well-formed output (`"{}"` the
+            // first time, a previous `set_raw`'s own JSON text after),
+            // so there's nothing for a caller to meaningfully recover
+            // from here; asserting via the loaded value itself (never
+            // branching on the status) keeps this fold a straight line,
+            // matching `construct_struct`'s own unconditional field-store
+            // loop.
+            let next_doc = self.fresh_reg(&format!("encode_json_struct_doc{}", i + 1));
+            writeln!(self.out, "  {next_doc} = load {{ptr, i64}}, ptr {out_scratch}").unwrap();
+            doc_ptr = next_doc;
+        }
+        Ok(doc_ptr)
+    }
+
+    /// The `Result(T, E)` half: reads the already-computed value's real
+    /// tag (`0` = `Ok`, `1` = `Err`, `ast::prelude_enums`' own `Result`
+    /// declaration order — the same convention `emit_check_role`/
+    /// `emit_result_merge` construct *into*, read back out here), encodes
+    /// whichever payload is live, and wraps it as `{"ok": ...}`/
+    /// `{"err": ...}` via the same `nir_json_set_raw` fold
+    /// `emit_encode_struct_json` uses for its own single-field case —
+    /// there's no flatter representation for a two-variant enum to fall
+    /// back to.
+    fn emit_encode_result_json(&mut self, ok_ty: &Ty, err_ty: &Ty, ptr: &str) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![ok_ty.clone(), err_ty.clone()]);
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let tag_ptr = self.fresh_reg("encode_json_result_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {ptr}, i32 0, i32 0").unwrap();
+        let tag = self.fresh_reg("encode_json_result_tag");
+        writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+        let payload_ptr = self.fresh_reg("encode_json_result_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {ptr}, i32 0, i32 1").unwrap();
+        let is_ok = self.icmp("eq", "i64", &tag, "0")?;
+
+        let ok_label = self.fresh_label("encode_json_result_ok");
+        let err_label = self.fresh_label("encode_json_result_err");
+        let merge_label = self.fresh_label("encode_json_result_merge");
+        let dest = self.fresh_reg("encode_json_result_dest");
+        self.emit_alloca(&dest, "{ptr, i64}");
+        writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+        writeln!(self.out, "{ok_label}:").unwrap();
+        let ok_json = self.emit_encode_value_json(ok_ty, &payload_ptr)?;
+        let ok_wrapped = self.emit_wrap_json_field("ok", &ok_json, "encode_json_result_ok_wrap")?;
+        writeln!(self.out, "  store {{ptr, i64}} {ok_wrapped}, ptr {dest}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_label}:").unwrap();
+        let err_json = self.emit_encode_value_json(err_ty, &payload_ptr)?;
+        let err_wrapped = self.emit_wrap_json_field("err", &err_json, "encode_json_result_err_wrap")?;
+        writeln!(self.out, "  store {{ptr, i64}} {err_wrapped}, ptr {dest}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        let result = self.fresh_reg("encode_json_result_val");
+        writeln!(self.out, "  {result} = load {{ptr, i64}}, ptr {dest}").unwrap();
+        Ok(result)
+    }
+
+    /// `nir_json_set_raw("{}", key, value_json)` — wraps one already-
+    /// encoded JSON value as a single-field object, `{"<key>": <value>}`.
+    /// Shared by `emit_encode_result_json`'s `ok`/`err` branches.
+    fn emit_wrap_json_field(&mut self, key: &str, value_json: &str, label_prefix: &str) -> Result<String, CodegenError> {
+        let empty_obj = self.fresh_global(&format!("{label_prefix}_empty"));
+        writeln!(self.string_globals, "{empty_obj} = private unnamed_addr constant [2 x i8] c\"{{}}\"").unwrap();
+        let key_global = self.fresh_global(&format!("{label_prefix}_key"));
+        writeln!(self.string_globals, "{key_global} = private unnamed_addr constant [{} x i8] c\"{}\"", key.len(), llvm_escape_bytes(key.as_bytes())).unwrap();
+        let value_ptr = self.fresh_reg(&format!("{label_prefix}_value_ptr"));
+        writeln!(self.out, "  {value_ptr} = extractvalue {{ptr, i64}} {value_json}, 0").unwrap();
+        let value_len = self.fresh_reg(&format!("{label_prefix}_value_len"));
+        writeln!(self.out, "  {value_len} = extractvalue {{ptr, i64}} {value_json}, 1").unwrap();
+        let out_scratch = self.fresh_reg(&format!("{label_prefix}_out_scratch"));
+        self.emit_alloca(&out_scratch, "{ptr, i64}");
+        let err_scratch = self.fresh_reg(&format!("{label_prefix}_err_scratch"));
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        writeln!(
+            self.out,
+            "  call i32 @nir_json_set_raw(ptr {empty_obj}, i64 2, ptr {key_global}, i64 {}, ptr {value_ptr}, i64 {value_len}, ptr {out_scratch}, ptr {err_scratch})",
+            key.len()
+        )
+        .unwrap();
+        let wrapped = self.fresh_reg(&format!("{label_prefix}_wrapped"));
+        writeln!(self.out, "  {wrapped} = load {{ptr, i64}}, ptr {out_scratch}").unwrap();
+        Ok(wrapped)
+    }
+
+    /// The decode direction: parses `json` (a `{ptr, i64}` *value* — the
+    /// raw JSON text for one whole value, e.g. `nir_json_array_get`'s own
+    /// output for one request-body argument) as `ty`, returning a
+    /// pointer to a real `Result(ty, str)` — malformed/missing/wrong-
+    /// shaped input is a real `Err` with a human-readable message, never
+    /// a trap, the same contract every `nir_json_get_*` builtin already
+    /// gives `.nir` source. Struct decode short-circuits on the first
+    /// field failure (sequential checks, not a fan-in `phi`) — simpler to
+    /// emit correctly than merging N independent failure messages, and a
+    /// request body with more than one malformed field is going to be
+    /// re-read by a human either way.
+    fn emit_decode_value_json(&mut self, ty: &Ty, json: &str) -> Result<String, CodegenError> {
+        match ty {
+            Ty::Bool => {
+                let (json_ptr, json_len) = self.split_str_word(json);
+                let value_scratch = self.fresh_reg("decode_json_bool_value_scratch");
+                self.emit_alloca(&value_scratch, "i32");
+                let err_scratch = self.fresh_reg("decode_json_bool_err_scratch");
+                self.emit_alloca(&err_scratch, "{ptr, i64}");
+                let found = self.fresh_reg("decode_json_bool_found");
+                writeln!(self.out, "  {found} = call i32 @nir_json_decode_bool(ptr {json_ptr}, i64 {json_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+                let is_ok = self.icmp("ne", "i32", &found, "0")?;
+                let raw = self.fresh_reg("decode_json_bool_raw");
+                writeln!(self.out, "  {raw} = load i32, ptr {value_scratch}").unwrap();
+                let value = self.icmp("ne", "i32", &raw, "0")?;
+                let err_val = self.fresh_reg("decode_json_bool_err_val");
+                writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+                self.emit_result_merge(&Ty::Named("Result".to_string(), vec![Ty::Bool, Ty::Str]), &is_ok, "i1", &value, &err_val, "decode_json_bool")
+            }
+            other if other.is_integer() => {
+                let (json_ptr, json_len) = self.split_str_word(json);
+                let value_scratch = self.fresh_reg("decode_json_int_value_scratch");
+                self.emit_alloca(&value_scratch, "i64");
+                let err_scratch = self.fresh_reg("decode_json_int_err_scratch");
+                self.emit_alloca(&err_scratch, "{ptr, i64}");
+                let found = self.fresh_reg("decode_json_int_found");
+                writeln!(self.out, "  {found} = call i32 @nir_json_decode_i64(ptr {json_ptr}, i64 {json_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+                let is_ok = self.icmp("ne", "i32", &found, "0")?;
+                let wide = self.fresh_reg("decode_json_int_wide");
+                writeln!(self.out, "  {wide} = load i64, ptr {value_scratch}").unwrap();
+                let narrowed = self.narrow_from_i64(&wide, other)?;
+                let llty = self.llvm_ty(other)?;
+                let err_val = self.fresh_reg("decode_json_int_err_val");
+                writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+                self.emit_result_merge(&Ty::Named("Result".to_string(), vec![other.clone(), Ty::Str]), &is_ok, &llty, &narrowed, &err_val, "decode_json_int")
+            }
+            Ty::F64 => {
+                let (json_ptr, json_len) = self.split_str_word(json);
+                let value_scratch = self.fresh_reg("decode_json_f64_value_scratch");
+                self.emit_alloca(&value_scratch, "double");
+                let err_scratch = self.fresh_reg("decode_json_f64_err_scratch");
+                self.emit_alloca(&err_scratch, "{ptr, i64}");
+                let found = self.fresh_reg("decode_json_f64_found");
+                writeln!(self.out, "  {found} = call i32 @nir_json_decode_f64(ptr {json_ptr}, i64 {json_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+                let is_ok = self.icmp("ne", "i32", &found, "0")?;
+                let value = self.fresh_reg("decode_json_f64_value");
+                writeln!(self.out, "  {value} = load double, ptr {value_scratch}").unwrap();
+                let err_val = self.fresh_reg("decode_json_f64_err_val");
+                writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+                self.emit_result_merge(&Ty::Named("Result".to_string(), vec![Ty::F64, Ty::Str]), &is_ok, "double", &value, &err_val, "decode_json_f64")
+            }
+            Ty::Str => {
+                let (json_ptr, json_len) = self.split_str_word(json);
+                let value_scratch = self.fresh_reg("decode_json_str_value_scratch");
+                self.emit_alloca(&value_scratch, "{ptr, i64}");
+                let err_scratch = self.fresh_reg("decode_json_str_err_scratch");
+                self.emit_alloca(&err_scratch, "{ptr, i64}");
+                let found = self.fresh_reg("decode_json_str_found");
+                writeln!(self.out, "  {found} = call i32 @nir_json_decode_str(ptr {json_ptr}, i64 {json_len}, ptr {value_scratch}, ptr {err_scratch})").unwrap();
+                let is_ok = self.icmp("ne", "i32", &found, "0")?;
+                let value = self.fresh_reg("decode_json_str_value");
+                writeln!(self.out, "  {value} = load {{ptr, i64}}, ptr {value_scratch}").unwrap();
+                let err_val = self.fresh_reg("decode_json_str_err_val");
+                writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+                self.emit_result_merge(&Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]), &is_ok, "{ptr, i64}", &value, &err_val, "decode_json_str")
+            }
+            Ty::Named(name, args) if name == "Result" && args.len() == 2 => self.emit_decode_result_json(&args[0], &args[1], json),
+            Ty::Named(name, _) if self.registry.is_struct(name) => self.emit_decode_struct_json(ty, json),
+            other => unsupported(format!("decoding a `{}` from JSON isn't supported yet (compiled `serve` Stage 1's scope: scalars, structs, `Result`)", other.name())),
+        }
+    }
+
+    /// Splits an already-computed `{ptr, i64}` SSA value into its two
+    /// words — the same `extractvalue` pair every decode leaf above
+    /// needs on its `json` argument, factored out since none of them can
+    /// use `str_parts` (that helper re-evaluates an `Expr`; every caller
+    /// here already has the value, often itself the output of a previous
+    /// kernel call with no corresponding `Expr` to re-evaluate).
+    fn split_str_word(&mut self, value: &str) -> (String, String) {
+        let ptr = self.fresh_reg("str_word_ptr");
+        writeln!(self.out, "  {ptr} = extractvalue {{ptr, i64}} {value}, 0").unwrap();
+        let len = self.fresh_reg("str_word_len");
+        writeln!(self.out, "  {len} = extractvalue {{ptr, i64}} {value}, 1").unwrap();
+        (ptr, len)
+    }
+
+    /// The struct half of `emit_decode_value_json`: looks up each
+    /// declared field by name (`nir_json_get`, the same keyed-lookup
+    /// builtin `.nir` source itself uses via `json_get`), recursing
+    /// through `emit_decode_value_json` for the field's own `Ty` — a
+    /// nested struct field just works, since `nir_json_get`'s own output
+    /// is itself a bare JSON value ready to hand straight back into this
+    /// same function. Stores each successfully-decoded field directly
+    /// into its slot in a fresh struct-shaped scratch alloca
+    /// (`construct_struct`'s own field-by-field style), then loads the
+    /// whole thing as one aggregate value to hand to `emit_result_merge`
+    /// once every field has succeeded.
+    fn emit_decode_struct_json(&mut self, ty: &Ty, json: &str) -> Result<String, CodegenError> {
+        let Ty::Named(name, _) = ty else { unreachable!("caller already matched Ty::Named") };
+        let struct_llty = self.llvm_ty(ty)?;
+        let fields = self.registry.struct_fields(name).expect("caller already confirmed this is a struct").to_vec();
+        let result_ty = Ty::Named("Result".to_string(), vec![ty.clone(), Ty::Str]);
+        let (json_ptr, json_len) = self.split_str_word(json);
+
+        let scratch = self.fresh_reg("decode_json_struct_scratch");
+        self.emit_alloca(&scratch, &struct_llty);
+        let fail_label = self.fresh_label("decode_json_struct_fail");
+        let err_scratch = self.fresh_reg("decode_json_struct_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+
+        for (i, field) in fields.iter().enumerate() {
+            let (idx, field_ty) = self.field_index_and_ty(ty, &field.name).expect("field came from this same struct's own field list");
+            let key_global = self.fresh_global(&format!("decode_json_struct_key{i}"));
+            writeln!(self.string_globals, "{key_global} = private unnamed_addr constant [{} x i8] c\"{}\"", field.name.len(), llvm_escape_bytes(field.name.as_bytes())).unwrap();
+            let field_json_scratch = self.fresh_reg(&format!("decode_json_struct_field{i}_json_scratch"));
+            self.emit_alloca(&field_json_scratch, "{ptr, i64}");
+            let field_get_err = self.fresh_reg(&format!("decode_json_struct_field{i}_get_err"));
+            self.emit_alloca(&field_get_err, "{ptr, i64}");
+            let field_found = self.fresh_reg(&format!("decode_json_struct_field{i}_found"));
+            writeln!(
+                self.out,
+                "  {field_found} = call i32 @nir_json_get(ptr {json_ptr}, i64 {json_len}, ptr {key_global}, i64 {}, ptr {field_json_scratch}, ptr {field_get_err})",
+                field.name.len()
+            )
+            .unwrap();
+            let field_is_found = self.icmp("ne", "i32", &field_found, "0")?;
+            let has_field_label = self.fresh_label(&format!("decode_json_struct_field{i}_has"));
+            let missing_field_label = self.fresh_label(&format!("decode_json_struct_field{i}_missing"));
+            writeln!(self.out, "  br i1 {field_is_found}, label %{has_field_label}, label %{missing_field_label}").unwrap();
+
+            writeln!(self.out, "{missing_field_label}:").unwrap();
+            let missing_err = self.fresh_reg(&format!("decode_json_struct_field{i}_missing_err"));
+            writeln!(self.out, "  {missing_err} = load {{ptr, i64}}, ptr {field_get_err}").unwrap();
+            writeln!(self.out, "  store {{ptr, i64}} {missing_err}, ptr {err_scratch}").unwrap();
+            writeln!(self.out, "  br label %{fail_label}").unwrap();
+
+            writeln!(self.out, "{has_field_label}:").unwrap();
+            let field_json = self.fresh_reg(&format!("decode_json_struct_field{i}_json"));
+            writeln!(self.out, "  {field_json} = load {{ptr, i64}}, ptr {field_json_scratch}").unwrap();
+            let field_result = self.emit_decode_value_json(&field_ty, &field_json)?;
+            let field_result_llty = self.llvm_ty(&Ty::Named("Result".to_string(), vec![field_ty.clone(), Ty::Str]))?;
+            let field_tag_ptr = self.fresh_reg(&format!("decode_json_struct_field{i}_tag_ptr"));
+            writeln!(self.out, "  {field_tag_ptr} = getelementptr inbounds {field_result_llty}, ptr {field_result}, i32 0, i32 0").unwrap();
+            let field_tag = self.fresh_reg(&format!("decode_json_struct_field{i}_tag"));
+            writeln!(self.out, "  {field_tag} = load i64, ptr {field_tag_ptr}").unwrap();
+            let field_payload_ptr = self.fresh_reg(&format!("decode_json_struct_field{i}_payload_ptr"));
+            writeln!(self.out, "  {field_payload_ptr} = getelementptr inbounds {field_result_llty}, ptr {field_result}, i32 0, i32 1").unwrap();
+            let field_is_ok = self.icmp("eq", "i64", &field_tag, "0")?;
+            let field_ok_label = self.fresh_label(&format!("decode_json_struct_field{i}_ok"));
+            let field_err_label = self.fresh_label(&format!("decode_json_struct_field{i}_err"));
+            writeln!(self.out, "  br i1 {field_is_ok}, label %{field_ok_label}, label %{field_err_label}").unwrap();
+
+            writeln!(self.out, "{field_err_label}:").unwrap();
+            let field_err_val = self.fresh_reg(&format!("decode_json_struct_field{i}_err_val"));
+            writeln!(self.out, "  {field_err_val} = load {{ptr, i64}}, ptr {field_payload_ptr}").unwrap();
+            writeln!(self.out, "  store {{ptr, i64}} {field_err_val}, ptr {err_scratch}").unwrap();
+            writeln!(self.out, "  br label %{fail_label}").unwrap();
+
+            writeln!(self.out, "{field_ok_label}:").unwrap();
+            let field_llty = self.llvm_ty(&field_ty)?;
+            let field_val = self.fresh_reg(&format!("decode_json_struct_field{i}_val"));
+            writeln!(self.out, "  {field_val} = load {field_llty}, ptr {field_payload_ptr}").unwrap();
+            let dest_field_ptr = self.fresh_reg(&format!("decode_json_struct_field{i}_dest_ptr"));
+            writeln!(self.out, "  {dest_field_ptr} = getelementptr inbounds {struct_llty}, ptr {scratch}, i32 0, i32 {idx}").unwrap();
+            writeln!(self.out, "  store {field_llty} {field_val}, ptr {dest_field_ptr}").unwrap();
+        }
+        // Every field succeeded (no `br` to `fail_label` was taken) —
+        // falls straight through from the last field's own `_ok` block.
+        let loaded_struct = self.fresh_reg("decode_json_struct_val");
+        writeln!(self.out, "  {loaded_struct} = load {struct_llty}, ptr {scratch}").unwrap();
+        let success_label = self.fresh_label("decode_json_struct_success");
+        let merge_label = self.fresh_label("decode_json_struct_merge");
+        writeln!(self.out, "  br label %{success_label}").unwrap();
+
+        writeln!(self.out, "{success_label}:").unwrap();
+        let dest = self.fresh_reg("decode_json_struct_dest");
+        let result_llty = self.llvm_ty(&result_ty)?;
+        self.emit_alloca(&dest, &result_llty);
+        let tag_ptr = self.fresh_reg("decode_json_struct_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+        let payload_ptr = self.fresh_reg("decode_json_struct_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+        writeln!(self.out, "  store {struct_llty} {loaded_struct}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{fail_label}:").unwrap();
+        let fail_err = self.fresh_reg("decode_json_struct_fail_err");
+        writeln!(self.out, "  {fail_err} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        let fail_dest = self.fresh_reg("decode_json_struct_fail_dest");
+        self.emit_alloca(&fail_dest, &result_llty);
+        let fail_tag_ptr = self.fresh_reg("decode_json_struct_fail_tag_ptr");
+        writeln!(self.out, "  {fail_tag_ptr} = getelementptr inbounds {result_llty}, ptr {fail_dest}, i32 0, i32 0").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {fail_tag_ptr}").unwrap();
+        let fail_payload_ptr = self.fresh_reg("decode_json_struct_fail_payload_ptr");
+        writeln!(self.out, "  {fail_payload_ptr} = getelementptr inbounds {result_llty}, ptr {fail_dest}, i32 0, i32 1").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {fail_err}, ptr {fail_payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        let final_dest = self.fresh_reg("decode_json_struct_final_dest");
+        writeln!(self.out, "  {final_dest} = phi ptr [ {dest}, %{success_label} ], [ {fail_dest}, %{fail_label} ]").unwrap();
+        Ok(final_dest)
+    }
+
+    /// The `Result(T, E)` half of `emit_decode_value_json`: `{"ok": v}`
+    /// decodes as `Ok(v: T)`, `{"err": v}` as `Err(v: E)` — the exact
+    /// inverse of `emit_encode_result_json`'s own wrapping, checked via
+    /// `nir_json_get`'s own presence check (`"ok"` present is enough to
+    /// commit to the `Ok` branch, matching the old interpreter's own
+    /// `decode_value` having no third shape for this type). Anything
+    /// else (neither key present, `T`/`E`'s own decode failing, or a
+    /// whole-value shape that isn't even an object) is a real top-level
+    /// `Err`, not a trap. Returns a pointer to `Result(Result(T,E), str)`
+    /// — one more layer of `Result` than `emit_decode_struct_json`
+    /// because *this* function's own decode can fail for two independent
+    /// reasons (malformed wrapper, or a bad inner payload) that both
+    /// still need to report as "decoding the whole thing failed",
+    /// distinct from the inner `Result(T,E)` value itself succeeding
+    /// with a real `Err(e)` payload once decoded.
+    fn emit_decode_result_json(&mut self, ok_ty: &Ty, err_ty: &Ty, json: &str) -> Result<String, CodegenError> {
+        let inner_result_ty = Ty::Named("Result".to_string(), vec![ok_ty.clone(), err_ty.clone()]);
+        let inner_result_llty = self.llvm_ty(&inner_result_ty)?;
+        let outer_result_ty = Ty::Named("Result".to_string(), vec![inner_result_ty.clone(), Ty::Str]);
+        let outer_result_llty = self.llvm_ty(&outer_result_ty)?;
+        let (json_ptr, json_len) = self.split_str_word(json);
+
+        // Builds one `Ok(<inner Result(T,E) tagged as `variant_tag`,
+        // payload `payload_llty`/`payload_val`>)` outcome for the outer
+        // `Result` — shared by the "`ok` key decoded fine" and "`err`
+        // key decoded fine" cases below, which differ only in which
+        // inner tag/payload type they carry.
+        let emit_outer_ok = |cg: &mut Self, variant_tag: i64, payload_llty: &str, payload_val: &str, label_prefix: &str| -> String {
+            let inner_dest = cg.fresh_reg(&format!("{label_prefix}_inner_dest"));
+            cg.emit_alloca(&inner_dest, &inner_result_llty);
+            let inner_tag_ptr = cg.fresh_reg(&format!("{label_prefix}_inner_tag_ptr"));
+            writeln!(cg.out, "  {inner_tag_ptr} = getelementptr inbounds {inner_result_llty}, ptr {inner_dest}, i32 0, i32 0").unwrap();
+            writeln!(cg.out, "  store i64 {variant_tag}, ptr {inner_tag_ptr}").unwrap();
+            let inner_payload_ptr = cg.fresh_reg(&format!("{label_prefix}_inner_payload_ptr"));
+            writeln!(cg.out, "  {inner_payload_ptr} = getelementptr inbounds {inner_result_llty}, ptr {inner_dest}, i32 0, i32 1").unwrap();
+            writeln!(cg.out, "  store {payload_llty} {payload_val}, ptr {inner_payload_ptr}").unwrap();
+            let loaded_inner = cg.fresh_reg(&format!("{label_prefix}_inner_loaded"));
+            writeln!(cg.out, "  {loaded_inner} = load {inner_result_llty}, ptr {inner_dest}").unwrap();
+            let outer_dest = cg.fresh_reg(&format!("{label_prefix}_outer_dest"));
+            cg.emit_alloca(&outer_dest, &outer_result_llty);
+            let outer_tag_ptr = cg.fresh_reg(&format!("{label_prefix}_outer_tag_ptr"));
+            writeln!(cg.out, "  {outer_tag_ptr} = getelementptr inbounds {outer_result_llty}, ptr {outer_dest}, i32 0, i32 0").unwrap();
+            writeln!(cg.out, "  store i64 0, ptr {outer_tag_ptr}").unwrap();
+            let outer_payload_ptr = cg.fresh_reg(&format!("{label_prefix}_outer_payload_ptr"));
+            writeln!(cg.out, "  {outer_payload_ptr} = getelementptr inbounds {outer_result_llty}, ptr {outer_dest}, i32 0, i32 1").unwrap();
+            writeln!(cg.out, "  store {inner_result_llty} {loaded_inner}, ptr {outer_payload_ptr}").unwrap();
+            outer_dest
+        };
+        // Builds the outer `Err(message)` outcome — shared by every
+        // failure path (malformed wrapper, bad `ok`/`err` payload).
+        let emit_outer_err = |cg: &mut Self, message: &str, label_prefix: &str| -> String {
+            let outer_dest = cg.fresh_reg(&format!("{label_prefix}_outer_dest"));
+            cg.emit_alloca(&outer_dest, &outer_result_llty);
+            let outer_tag_ptr = cg.fresh_reg(&format!("{label_prefix}_outer_tag_ptr"));
+            writeln!(cg.out, "  {outer_tag_ptr} = getelementptr inbounds {outer_result_llty}, ptr {outer_dest}, i32 0, i32 0").unwrap();
+            writeln!(cg.out, "  store i64 1, ptr {outer_tag_ptr}").unwrap();
+            let outer_payload_ptr = cg.fresh_reg(&format!("{label_prefix}_outer_payload_ptr"));
+            writeln!(cg.out, "  {outer_payload_ptr} = getelementptr inbounds {outer_result_llty}, ptr {outer_dest}, i32 0, i32 1").unwrap();
+            writeln!(cg.out, "  store {{ptr, i64}} {message}, ptr {outer_payload_ptr}").unwrap();
+            outer_dest
+        };
+
+        let ok_key = self.fresh_global("decode_json_result_ok_key");
+        writeln!(self.string_globals, "{ok_key} = private unnamed_addr constant [2 x i8] c\"ok\"").unwrap();
+        let ok_scratch = self.fresh_reg("decode_json_result_ok_scratch");
+        self.emit_alloca(&ok_scratch, "{ptr, i64}");
+        let ok_get_err = self.fresh_reg("decode_json_result_ok_get_err");
+        self.emit_alloca(&ok_get_err, "{ptr, i64}");
+        let has_ok = self.fresh_reg("decode_json_result_has_ok");
+        writeln!(self.out, "  {has_ok} = call i32 @nir_json_get(ptr {json_ptr}, i64 {json_len}, ptr {ok_key}, i64 2, ptr {ok_scratch}, ptr {ok_get_err})").unwrap();
+        let has_ok_bool = self.icmp("ne", "i32", &has_ok, "0")?;
+        let is_ok_branch_label = self.fresh_label("decode_json_result_is_ok_branch");
+        let check_err_label = self.fresh_label("decode_json_result_check_err");
+        writeln!(self.out, "  br i1 {has_ok_bool}, label %{is_ok_branch_label}, label %{check_err_label}").unwrap();
+
+        // `{"ok": v}` — decode `v` as `T`; a decode failure here is a
+        // real top-level failure (bubbled up as the outer `Err`), not a
+        // successfully-decoded `Err(...)` payload — the wire never says
+        // "the `ok` field itself failed to parse" any other way.
+        writeln!(self.out, "{is_ok_branch_label}:").unwrap();
+        let ok_json = self.fresh_reg("decode_json_result_ok_json");
+        writeln!(self.out, "  {ok_json} = load {{ptr, i64}}, ptr {ok_scratch}").unwrap();
+        let ok_field_result = self.emit_decode_value_json(ok_ty, &ok_json)?;
+        let ok_ty_result_llty = self.llvm_ty(&Ty::Named("Result".to_string(), vec![ok_ty.clone(), Ty::Str]))?;
+        let ok_field_tag_ptr = self.fresh_reg("decode_json_result_ok_field_tag_ptr");
+        writeln!(self.out, "  {ok_field_tag_ptr} = getelementptr inbounds {ok_ty_result_llty}, ptr {ok_field_result}, i32 0, i32 0").unwrap();
+        let ok_field_tag = self.fresh_reg("decode_json_result_ok_field_tag");
+        writeln!(self.out, "  {ok_field_tag} = load i64, ptr {ok_field_tag_ptr}").unwrap();
+        let ok_field_payload_ptr = self.fresh_reg("decode_json_result_ok_field_payload_ptr");
+        writeln!(self.out, "  {ok_field_payload_ptr} = getelementptr inbounds {ok_ty_result_llty}, ptr {ok_field_result}, i32 0, i32 1").unwrap();
+        let ok_field_is_ok = self.icmp("eq", "i64", &ok_field_tag, "0")?;
+        let ok_payload_good_label = self.fresh_label("decode_json_result_ok_payload_good");
+        let ok_payload_bad_label = self.fresh_label("decode_json_result_ok_payload_bad");
+        writeln!(self.out, "  br i1 {ok_field_is_ok}, label %{ok_payload_good_label}, label %{ok_payload_bad_label}").unwrap();
+
+        writeln!(self.out, "{ok_payload_good_label}:").unwrap();
+        let ok_llty = self.llvm_ty(ok_ty)?;
+        let ok_payload_val = self.fresh_reg("decode_json_result_ok_payload_val");
+        writeln!(self.out, "  {ok_payload_val} = load {ok_llty}, ptr {ok_field_payload_ptr}").unwrap();
+        let dest_ok_good = emit_outer_ok(self, 0, &ok_llty, &ok_payload_val, "decode_json_result_ok_good");
+        let merge_label = self.fresh_label("decode_json_result_merge");
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{ok_payload_bad_label}:").unwrap();
+        let ok_payload_err = self.fresh_reg("decode_json_result_ok_payload_err");
+        writeln!(self.out, "  {ok_payload_err} = load {{ptr, i64}}, ptr {ok_field_payload_ptr}").unwrap();
+        let dest_ok_bad = emit_outer_err(self, &ok_payload_err, "decode_json_result_ok_bad");
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        // `{"err": v}`, or neither key — the `err` half mirrors `ok`
+        // exactly (variant tag `1` instead of `0`); neither key present
+        // is its own distinct top-level failure message.
+        writeln!(self.out, "{check_err_label}:").unwrap();
+        let err_key = self.fresh_global("decode_json_result_err_key");
+        writeln!(self.string_globals, "{err_key} = private unnamed_addr constant [3 x i8] c\"err\"").unwrap();
+        let err_scratch = self.fresh_reg("decode_json_result_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let err_get_err = self.fresh_reg("decode_json_result_err_get_err");
+        self.emit_alloca(&err_get_err, "{ptr, i64}");
+        let has_err = self.fresh_reg("decode_json_result_has_err");
+        writeln!(self.out, "  {has_err} = call i32 @nir_json_get(ptr {json_ptr}, i64 {json_len}, ptr {err_key}, i64 3, ptr {err_scratch}, ptr {err_get_err})").unwrap();
+        let has_err_bool = self.icmp("ne", "i32", &has_err, "0")?;
+        let is_err_branch_label = self.fresh_label("decode_json_result_is_err_branch");
+        let neither_label = self.fresh_label("decode_json_result_neither");
+        writeln!(self.out, "  br i1 {has_err_bool}, label %{is_err_branch_label}, label %{neither_label}").unwrap();
+
+        writeln!(self.out, "{is_err_branch_label}:").unwrap();
+        let err_json = self.fresh_reg("decode_json_result_err_json");
+        writeln!(self.out, "  {err_json} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        let err_field_result = self.emit_decode_value_json(err_ty, &err_json)?;
+        let err_ty_result_llty = self.llvm_ty(&Ty::Named("Result".to_string(), vec![err_ty.clone(), Ty::Str]))?;
+        let err_field_tag_ptr = self.fresh_reg("decode_json_result_err_field_tag_ptr");
+        writeln!(self.out, "  {err_field_tag_ptr} = getelementptr inbounds {err_ty_result_llty}, ptr {err_field_result}, i32 0, i32 0").unwrap();
+        let err_field_tag = self.fresh_reg("decode_json_result_err_field_tag");
+        writeln!(self.out, "  {err_field_tag} = load i64, ptr {err_field_tag_ptr}").unwrap();
+        let err_field_payload_ptr = self.fresh_reg("decode_json_result_err_field_payload_ptr");
+        writeln!(self.out, "  {err_field_payload_ptr} = getelementptr inbounds {err_ty_result_llty}, ptr {err_field_result}, i32 0, i32 1").unwrap();
+        let err_field_is_ok = self.icmp("eq", "i64", &err_field_tag, "0")?;
+        let err_payload_good_label = self.fresh_label("decode_json_result_err_payload_good");
+        let err_payload_bad_label = self.fresh_label("decode_json_result_err_payload_bad");
+        writeln!(self.out, "  br i1 {err_field_is_ok}, label %{err_payload_good_label}, label %{err_payload_bad_label}").unwrap();
+
+        writeln!(self.out, "{err_payload_good_label}:").unwrap();
+        let err_llty = self.llvm_ty(err_ty)?;
+        let err_payload_val = self.fresh_reg("decode_json_result_err_payload_val");
+        writeln!(self.out, "  {err_payload_val} = load {err_llty}, ptr {err_field_payload_ptr}").unwrap();
+        let dest_err_good = emit_outer_ok(self, 1, &err_llty, &err_payload_val, "decode_json_result_err_good");
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{err_payload_bad_label}:").unwrap();
+        let err_payload_err = self.fresh_reg("decode_json_result_err_payload_err");
+        writeln!(self.out, "  {err_payload_err} = load {{ptr, i64}}, ptr {err_field_payload_ptr}").unwrap();
+        let dest_err_bad = emit_outer_err(self, &err_payload_err, "decode_json_result_err_bad");
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{neither_label}:").unwrap();
+        let neither_msg = self.fresh_global("decode_json_result_neither_msg");
+        const NEITHER_MSG: &str = "expected an object with an `ok` or `err` field";
+        writeln!(self.string_globals, "{neither_msg} = private unnamed_addr constant [{} x i8] c\"{}\"", NEITHER_MSG.len(), llvm_escape_bytes(NEITHER_MSG.as_bytes())).unwrap();
+        let neither_msg_partial = self.fresh_reg("decode_json_result_neither_msg_partial");
+        writeln!(self.out, "  {neither_msg_partial} = insertvalue {{ptr, i64}} undef, ptr {neither_msg}, 0").unwrap();
+        let neither_msg_full = self.fresh_reg("decode_json_result_neither_msg_full");
+        writeln!(self.out, "  {neither_msg_full} = insertvalue {{ptr, i64}} {neither_msg_partial}, i64 {}, 1", NEITHER_MSG.len()).unwrap();
+        let dest_neither = emit_outer_err(self, &neither_msg_full, "decode_json_result_neither");
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        let final_dest = self.fresh_reg("decode_json_result_final_dest");
+        writeln!(
+            self.out,
+            "  {final_dest} = phi ptr [ {dest_ok_good}, %{ok_payload_good_label} ], [ {dest_ok_bad}, %{ok_payload_bad_label} ], [ {dest_err_good}, %{err_payload_good_label} ], [ {dest_err_bad}, %{err_payload_bad_label} ], [ {dest_neither}, %{neither_label} ]"
+        )
+        .unwrap();
+        Ok(final_dest)
+    }
+
+    // ==== Reviving compiled `serve` (rfcs/0010), Stage 3: per-route ====
+    // ==== wrapper codegen, dispatch table, `requires` enforcement.  ====
+
+    /// Given a value's own `Ty` and a pointer to it, produces the
+    /// operand string `emit_call_known_fn` needs for that argument —
+    /// `call_args`'s exact scalar-vs-pointer convention
+    /// (`Ty::is_aggregate()`), just driven by an already-materialized
+    /// pointer instead of an `Expr` to evaluate (a `--serve` route
+    /// wrapper's arguments come from JSON-decoding, not source syntax).
+    fn serve_call_operand(&mut self, ty: &Ty, ptr: &str) -> Result<String, CodegenError> {
+        if ty.is_aggregate() {
+            return Ok(format!("ptr {ptr}"));
+        }
+        let llty = self.llvm_ty(ty)?;
+        let v = self.fresh_reg("serve_call_arg");
+        writeln!(self.out, "  {v} = load {llty}, ptr {ptr}").unwrap();
+        Ok(format!("{llty} {v}"))
+    }
+
+    /// Calls a statically-known top-level `fn` (resolved via `self.sigs`
+    /// the same way `call`/`call_ptr` already do) given already-
+    /// formatted operand strings — the one piece `call`/`call_ptr`
+    /// can't be reused for directly, since both evaluate their own
+    /// arguments from `&[Expr]`. Mirrors their exact aggregate-vs-scalar
+    /// return convention (sret out-pointer vs. a plain typed return
+    /// value) — see `call_ptr`'s own generic fallback (`codegen.rs`
+    /// ~5862-5872) and `call`'s (~4759-4767), which this is a byte-for-
+    /// byte match of, minus the `&[Expr]` evaluation neither needs here.
+    fn emit_call_known_fn(&mut self, fn_name: &str, arg_operands: &[String], sig_ret: &Ty) -> Result<String, CodegenError> {
+        if sig_ret.is_aggregate() {
+            let agg_llty = self.llvm_ty(sig_ret)?;
+            let dest = self.fresh_reg("serve_call_result_addr");
+            self.emit_alloca(&dest, &agg_llty);
+            let mut all_args = vec![format!("ptr {dest}")];
+            all_args.extend(arg_operands.iter().cloned());
+            writeln!(self.out, "  call void @{fn_name}({})", all_args.join(", ")).unwrap();
+            Ok(dest)
+        } else {
+            let ret_llty = self.llvm_ty(sig_ret)?;
+            if ret_llty == "void" {
+                writeln!(self.out, "  call void @{fn_name}({})", arg_operands.join(", ")).unwrap();
+                Ok("0".to_string())
+            } else {
+                let r = self.fresh_reg("serve_call_result");
+                writeln!(self.out, "  {r} = call {ret_llty} @{fn_name}({})", arg_operands.join(", ")).unwrap();
+                Ok(r)
+            }
+        }
+    }
+
+    /// Writes a real `Option(VerifiedIdentity)` value into the
+    /// already-allocated slot `dest` — `Some` (tag `0`, the payload's
+    /// first word holding a copy of the already-decoded
+    /// `VerifiedIdentity` at `some_ptr`) or `None` (tag `1`, payload
+    /// left unwritten), matching `ast::prelude_enums`' own `Option`
+    /// variant order and `construct_variant`'s tag/payload-buffer
+    /// layout. Writes into a *given* slot rather than allocating and
+    /// returning a fresh one — the caller's two branches (identity
+    /// present/absent) both funnel into one shared `dest` and jump
+    /// unconditionally to a merge block that just reads it back,
+    /// deliberately avoiding a `phi` whose predecessor-block name would
+    /// otherwise have to track whichever *inner* label a nested decode
+    /// call last opened, not the literal branch-arm label — the same
+    /// "output slot instead of phi" shape used throughout this section
+    /// for exactly that reason.
+    fn emit_store_option_verified_identity(&mut self, dest: &str, some_ptr: Option<&str>) -> Result<(), CodegenError> {
+        let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+        let option_ty = Ty::Named("Option".to_string(), vec![identity_ty.clone()]);
+        let option_llty = self.llvm_ty(&option_ty)?;
+        let tag_ptr = self.fresh_reg("serve_option_identity_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {option_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+        match some_ptr {
+            Some(identity_ptr) => {
+                writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+                let payload_ptr = self.fresh_reg("serve_option_identity_payload_ptr");
+                writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {option_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+                let bytes = agg_byte_size_operand(&identity_ty, &self.registry);
+                writeln!(self.out, "  call void @llvm.memcpy.p0.p0.i64(ptr {payload_ptr}, ptr {identity_ptr}, i64 {bytes}, i1 false)").unwrap();
+            }
+            None => {
+                writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+            }
+        }
+        Ok(())
+    }
+
+    /// `out_body_ptr`/`out_body_len` = `message_json` (a `{ptr,i64}` SSA
+    /// value already holding the *whole* JSON body to write — usually
+    /// `emit_wrap_json_field("err", ...)`'s own output), then
+    /// `ret i32 1` — `RouteHandler`'s own documented "business-level
+    /// error" shape: a malformed/missing request argument and an
+    /// ordinary `Err(...)` returned by `f` itself both end up here, by
+    /// design (from the HTTP caller's point of view, both are just "the
+    /// request didn't succeed, here's why").
+    fn emit_serve_return_business_error(&mut self, message_json: &str) {
+        let ptr_reg = self.fresh_reg("serve_err_body_ptr");
+        writeln!(self.out, "  {ptr_reg} = extractvalue {{ptr, i64}} {message_json}, 0").unwrap();
+        let len_reg = self.fresh_reg("serve_err_body_len");
+        writeln!(self.out, "  {len_reg} = extractvalue {{ptr, i64}} {message_json}, 1").unwrap();
+        writeln!(self.out, "  store ptr {ptr_reg}, ptr %out_body_ptr").unwrap();
+        writeln!(self.out, "  store i64 {len_reg}, ptr %out_body_len").unwrap();
+        writeln!(self.out, "  ret i32 1").unwrap();
+    }
+
+    /// `RouteHandler`'s documented `2` (unauthorized/forbidden) —
+    /// `out_body` ignored per that same doc comment, so this writes a
+    /// null/zero body rather than a real error message (the crate
+    /// answering the HTTP request writes a bare `401`/`403` itself,
+    /// `compiled_serve::call_route`'s own status mapping).
+    fn emit_serve_return_unauthorized(&mut self) {
+        writeln!(self.out, "  store ptr null, ptr %out_body_ptr").unwrap();
+        writeln!(self.out, "  store i64 0, ptr %out_body_len").unwrap();
+        writeln!(self.out, "  ret i32 2").unwrap();
+    }
+
+    /// Branches on `found_i32 != 0`; on failure, JSON-wraps
+    /// `err_message` (a `{ptr,i64}` SSA value) as `{"err": ...}` and
+    /// returns business-error code `1` (`emit_serve_return_business_error`)
+    /// — a real `ret`, so nothing after this call in the *fail* arm
+    /// ever executes. On success, this simply opens a fresh block and
+    /// returns — the caller keeps emitting there, exactly the "terminate
+    /// the fail arm, keep building on the pass arm" shape `emit_c_main`'s
+    /// own transact-log-init failure check already uses.
+    fn serve_require_ok_or_business_error(&mut self, found_i32: &str, err_message: &str, label_prefix: &str) -> Result<(), CodegenError> {
+        let ok = self.icmp("ne", "i32", found_i32, "0")?;
+        let pass_label = self.fresh_label(&format!("{label_prefix}_pass"));
+        let fail_label = self.fresh_label(&format!("{label_prefix}_fail"));
+        writeln!(self.out, "  br i1 {ok}, label %{pass_label}, label %{fail_label}").unwrap();
+        writeln!(self.out, "{fail_label}:").unwrap();
+        let wrapped = self.emit_wrap_json_field("err", err_message, &format!("{label_prefix}_wrap"))?;
+        self.emit_serve_return_business_error(&wrapped);
+        writeln!(self.out, "{pass_label}:").unwrap();
+        Ok(())
+    }
+
+    /// Unwraps a `Result(ty, str)` pointer (`emit_decode_value_json`'s
+    /// own return shape): on `Err`, JSON-wraps the message and returns
+    /// business-error `1` (same helper as above); on `Ok`, returns a
+    /// pointer to the payload *in place* (a GEP into `result_ptr`'s own
+    /// field 1, not a copy) — valid to hand straight to
+    /// `serve_call_operand`/`emit_encode_value_json` the same way any
+    /// other addressable storage would be, since the callee (or the
+    /// encoder) only ever reads through it or copies out of it.
+    fn emit_decode_or_business_error(&mut self, ty: &Ty, result_ptr: &str, label_prefix: &str) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![ty.clone(), Ty::Str]);
+        let result_llty = self.llvm_ty(&result_ty)?;
+        let tag_ptr = self.fresh_reg(&format!("{label_prefix}_tag_ptr"));
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {result_ptr}, i32 0, i32 0").unwrap();
+        let tag = self.fresh_reg(&format!("{label_prefix}_tag"));
+        writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+        let payload_ptr = self.fresh_reg(&format!("{label_prefix}_payload_ptr"));
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {result_ptr}, i32 0, i32 1").unwrap();
+        let is_ok = self.icmp("eq", "i64", &tag, "0")?;
+        let pass_label = self.fresh_label(&format!("{label_prefix}_pass"));
+        let fail_label = self.fresh_label(&format!("{label_prefix}_fail"));
+        writeln!(self.out, "  br i1 {is_ok}, label %{pass_label}, label %{fail_label}").unwrap();
+        writeln!(self.out, "{fail_label}:").unwrap();
+        let err_val = self.fresh_reg(&format!("{label_prefix}_err_val"));
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {payload_ptr}").unwrap();
+        let wrapped = self.emit_wrap_json_field("err", &err_val, &format!("{label_prefix}_wrap"))?;
+        self.emit_serve_return_business_error(&wrapped);
+        writeln!(self.out, "{pass_label}:").unwrap();
+        Ok(payload_ptr)
+    }
+
+    /// Builds the `{ptr, i64}` SSA value for `%identity_json_ptr`/
+    /// `%identity_json_len` (the wrapper's own function parameters) —
+    /// shared by every place that needs to decode the whole identity
+    /// blob as a `str`-shaped value (`emit_decode_value_json` takes a
+    /// `{ptr,i64}` value, never split pointer/length parameters).
+    fn serve_identity_json_value(&mut self) -> String {
+        let v0 = self.fresh_reg("serve_identity_json_v0");
+        writeln!(self.out, "  {v0} = insertvalue {{ptr, i64}} undef, ptr %identity_json_ptr, 0").unwrap();
+        let v1 = self.fresh_reg("serve_identity_json_v1");
+        writeln!(self.out, "  {v1} = insertvalue {{ptr, i64}} {v0}, i64 %identity_json_len, 1").unwrap();
+        v1
+    }
+
+    /// Emits one route wrapper for `f` (already confirmed to be in the
+    /// program's HTTP exposure set — `typeck::exposed_fn_names`,
+    /// `rfcs/0010-landing-and-serve-exposure.md`) matching
+    /// `compiled_serve::RouteHandler`'s exact ABI. Three things happen
+    /// here that never happen inside `f`'s own compiled body:
+    ///
+    /// - `f.requires` is enforced *at this call boundary* — the
+    ///   deleted interpreted `serve.rs`'s own module doc explains why a
+    ///   `requires`-gated function's own body can't do this itself
+    ///   (the gate is structural, checked wherever `acquire` happens to
+    ///   be written in `.nir` source, not tied to how the function was
+    ///   *reached*) — so this wrapper does the equivalent check itself,
+    ///   independently, reusing the exact same compiled
+    ///   `nir_check_role`/`nir_extract_claim` kernels `acquire`'s own
+    ///   codegen (`emit_check_role`/`emit_extract_claim`) already calls.
+    /// - `args_json`'s positional elements are decoded into `f`'s real
+    ///   parameter types (Stage 1's `emit_decode_value_json`) —
+    ///   *skipping* any `VerifiedIdentity`/`Option(VerifiedIdentity)`
+    ///   parameter, which is filled from `identity_json` instead, never
+    ///   from the request body (`typeck::is_verified_identity`/
+    ///   `is_optional_verified_identity`, the same predicates
+    ///   `is_reachable_with_no_token` already uses for this exact
+    ///   distinction).
+    /// - `f`'s return value is JSON-encoded back out (Stage 1's
+    ///   `emit_encode_value_json`), `Result(_, _)`'s own tag driving
+    ///   the `0`/`1` status `compiled_serve::call_route` already
+    ///   expects — a plain (non-`Result`) return is always `0`.
+    fn emit_serve_route_wrapper(&mut self, f: &FnDecl) -> Result<String, CodegenError> {
+        let wrapper_name = format!("__serve_route_{}", f.name);
+        writeln!(
+            self.out,
+            "define i32 @{wrapper_name}(ptr %args_json_ptr, i64 %args_json_len, ptr %identity_json_ptr, i64 %identity_json_len, ptr %out_body_ptr, ptr %out_body_len, ptr %out_cookie_ptr, ptr %out_cookie_len) {{"
+        )
+        .unwrap();
+        writeln!(self.out, "entry:").unwrap();
+        let alloca_splice_pos = self.out.len();
+        self.entry_allocas.clear();
+        self.terminated = false;
+
+        // No route wrapper in this pass ever sets a session cookie
+        // (`ApplicationSession`/`session_cookie` is a separate, real
+        // follow-up feature) — always null/zero, matching
+        // `RouteHandler`'s own "null/zero-length for no Set-Cookie"
+        // contract.
+        writeln!(self.out, "  store ptr null, ptr %out_cookie_ptr").unwrap();
+        writeln!(self.out, "  store i64 0, ptr %out_cookie_len").unwrap();
+
+        let identity_present = self.icmp("sgt", "i64", "%identity_json_len", "0")?;
+
+        // ---- `f.requires` enforcement, independent of whether `f`
+        // itself declares a `VerifiedIdentity`/`Option(VerifiedIdentity)`
+        // parameter at all. ----
+        if let Some(req) = &f.requires {
+            let has_token_label = self.fresh_label("serve_requires_has_token");
+            let no_token_label = self.fresh_label("serve_requires_no_token");
+            writeln!(self.out, "  br i1 {identity_present}, label %{has_token_label}, label %{no_token_label}").unwrap();
+            writeln!(self.out, "{no_token_label}:").unwrap();
+            self.emit_serve_return_unauthorized();
+            writeln!(self.out, "{has_token_label}:").unwrap();
+
+            // `identity_json`'s own `claims_json` field (a JSON *string*
+            // — `compiled_serve::identity::identity_json`'s own doc
+            // comment) is exactly the raw claims text
+            // `nir_check_role`/`nir_extract_claim` already expect —
+            // `nir_json_get_str` reads it out directly, no full struct
+            // decode needed just for this one field.
+            let key = "claims_json";
+            let key_global = self.fresh_global("serve_requires_claims_key");
+            writeln!(self.string_globals, "{key_global} = private unnamed_addr constant [{} x i8] c\"{key}\"", key.len()).unwrap();
+            let value_scratch = self.fresh_reg("serve_requires_claims_scratch");
+            self.emit_alloca(&value_scratch, "{ptr, i64}");
+            let err_scratch = self.fresh_reg("serve_requires_claims_err_scratch");
+            self.emit_alloca(&err_scratch, "{ptr, i64}");
+            writeln!(
+                self.out,
+                "  call i32 @nir_json_get_str(ptr %identity_json_ptr, i64 %identity_json_len, ptr {key_global}, i64 {}, ptr {value_scratch}, ptr {err_scratch})",
+                key.len()
+            )
+            .unwrap();
+            let claims_val = self.fresh_reg("serve_requires_claims_val");
+            writeln!(self.out, "  {claims_val} = load {{ptr, i64}}, ptr {value_scratch}").unwrap();
+            let claims_ptr_reg = self.fresh_reg("serve_requires_claims_ptr");
+            writeln!(self.out, "  {claims_ptr_reg} = extractvalue {{ptr, i64}} {claims_val}, 0").unwrap();
+            let claims_len_reg = self.fresh_reg("serve_requires_claims_len");
+            writeln!(self.out, "  {claims_len_reg} = extractvalue {{ptr, i64}} {claims_val}, 1").unwrap();
+
+            match req {
+                Requirement::Role(role) => {
+                    let role_global = self.fresh_global("serve_requires_role");
+                    writeln!(self.string_globals, "{role_global} = private unnamed_addr constant [{} x i8] c\"{}\"", role.len(), llvm_escape_bytes(role.as_bytes())).unwrap();
+                    let found = self.fresh_reg("serve_requires_role_found");
+                    writeln!(
+                        self.out,
+                        "  {found} = call i32 @nir_check_role(ptr {claims_ptr_reg}, i64 {claims_len_reg}, ptr {role_global}, i64 {})",
+                        role.len()
+                    )
+                    .unwrap();
+                    let ok = self.icmp("ne", "i32", &found, "0")?;
+                    let pass_label = self.fresh_label("serve_requires_role_pass");
+                    let fail_label = self.fresh_label("serve_requires_role_fail");
+                    writeln!(self.out, "  br i1 {ok}, label %{pass_label}, label %{fail_label}").unwrap();
+                    writeln!(self.out, "{fail_label}:").unwrap();
+                    self.emit_serve_return_unauthorized();
+                    writeln!(self.out, "{pass_label}:").unwrap();
+                }
+                Requirement::Claim(key, expected_value) => {
+                    let key_global = self.fresh_global("serve_requires_claim_key");
+                    writeln!(self.string_globals, "{key_global} = private unnamed_addr constant [{} x i8] c\"{}\"", key.len(), llvm_escape_bytes(key.as_bytes())).unwrap();
+                    let value_scratch2 = self.fresh_reg("serve_requires_claim_value_scratch");
+                    self.emit_alloca(&value_scratch2, "{ptr, i64}");
+                    let found = self.fresh_reg("serve_requires_claim_found");
+                    writeln!(
+                        self.out,
+                        "  {found} = call i32 @nir_extract_claim(ptr {claims_ptr_reg}, i64 {claims_len_reg}, ptr {key_global}, i64 {}, ptr {value_scratch2})",
+                        key.len()
+                    )
+                    .unwrap();
+                    let has_claim = self.icmp("ne", "i32", &found, "0")?;
+                    let check_value_label = self.fresh_label("serve_requires_claim_check_value");
+                    let fail_label = self.fresh_label("serve_requires_claim_fail");
+                    writeln!(self.out, "  br i1 {has_claim}, label %{check_value_label}, label %{fail_label}").unwrap();
+
+                    writeln!(self.out, "{check_value_label}:").unwrap();
+                    let actual_val = self.fresh_reg("serve_requires_claim_actual");
+                    writeln!(self.out, "  {actual_val} = load {{ptr, i64}}, ptr {value_scratch2}").unwrap();
+                    let actual_ptr = self.fresh_reg("serve_requires_claim_actual_ptr");
+                    writeln!(self.out, "  {actual_ptr} = extractvalue {{ptr, i64}} {actual_val}, 0").unwrap();
+                    let actual_len = self.fresh_reg("serve_requires_claim_actual_len");
+                    writeln!(self.out, "  {actual_len} = extractvalue {{ptr, i64}} {actual_val}, 1").unwrap();
+                    let expected_global = self.fresh_global("serve_requires_claim_expected");
+                    writeln!(
+                        self.string_globals,
+                        "{expected_global} = private unnamed_addr constant [{} x i8] c\"{}\"",
+                        expected_value.len(),
+                        llvm_escape_bytes(expected_value.as_bytes())
+                    )
+                    .unwrap();
+                    let eq = self.fresh_reg("serve_requires_claim_eq");
+                    writeln!(
+                        self.out,
+                        "  {eq} = call i32 @nir_str_eq(ptr {actual_ptr}, i64 {actual_len}, ptr {expected_global}, i64 {})",
+                        expected_value.len()
+                    )
+                    .unwrap();
+                    let matches = self.icmp("ne", "i32", &eq, "0")?;
+                    let pass_label = self.fresh_label("serve_requires_claim_pass");
+                    writeln!(self.out, "  br i1 {matches}, label %{pass_label}, label %{fail_label}").unwrap();
+                    writeln!(self.out, "{fail_label}:").unwrap();
+                    self.emit_serve_return_unauthorized();
+                    writeln!(self.out, "{pass_label}:").unwrap();
+                }
+            }
+        }
+
+        // ---- decode `f`'s real parameters ----
+        let mut call_operands: Vec<String> = Vec::new();
+        let mut json_idx: i64 = 0;
+        for p in &f.params {
+            if is_verified_identity(&p.ty) {
+                let fail_label = self.fresh_label("serve_identity_required_fail");
+                let ok_label = self.fresh_label("serve_identity_required_ok");
+                writeln!(self.out, "  br i1 {identity_present}, label %{ok_label}, label %{fail_label}").unwrap();
+                writeln!(self.out, "{fail_label}:").unwrap();
+                self.emit_serve_return_unauthorized();
+                writeln!(self.out, "{ok_label}:").unwrap();
+                let identity_json_val = self.serve_identity_json_value();
+                let decoded = self.emit_decode_value_json(&p.ty, &identity_json_val)?;
+                let payload_ptr = self.emit_decode_or_business_error(&p.ty, &decoded, &format!("serve_identity_req{json_idx}"))?;
+                call_operands.push(self.serve_call_operand(&p.ty, &payload_ptr)?);
+            } else if is_optional_verified_identity(&p.ty) {
+                let identity_ty = Ty::Named("VerifiedIdentity".to_string(), vec![]);
+                let option_ty = Ty::Named("Option".to_string(), vec![identity_ty.clone()]);
+                let option_llty = self.llvm_ty(&option_ty)?;
+                let out_slot = self.fresh_reg("serve_identity_opt_slot");
+                self.emit_alloca(&out_slot, &option_llty);
+                let some_label = self.fresh_label("serve_identity_opt_some");
+                let none_label = self.fresh_label("serve_identity_opt_none");
+                let merge_label = self.fresh_label("serve_identity_opt_merge");
+                writeln!(self.out, "  br i1 {identity_present}, label %{some_label}, label %{none_label}").unwrap();
+
+                writeln!(self.out, "{some_label}:").unwrap();
+                let identity_json_val = self.serve_identity_json_value();
+                let decoded = self.emit_decode_value_json(&identity_ty, &identity_json_val)?;
+                let identity_payload_ptr = self.emit_decode_or_business_error(&identity_ty, &decoded, &format!("serve_identity_opt{json_idx}"))?;
+                self.emit_store_option_verified_identity(&out_slot, Some(&identity_payload_ptr))?;
+                writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+                writeln!(self.out, "{none_label}:").unwrap();
+                self.emit_store_option_verified_identity(&out_slot, None)?;
+                writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+                writeln!(self.out, "{merge_label}:").unwrap();
+                call_operands.push(format!("ptr {out_slot}"));
+            } else {
+                let json_scratch = self.fresh_reg("serve_arg_json_scratch");
+                self.emit_alloca(&json_scratch, "{ptr, i64}");
+                let err_scratch = self.fresh_reg("serve_arg_err_scratch");
+                self.emit_alloca(&err_scratch, "{ptr, i64}");
+                let found = self.fresh_reg("serve_arg_found");
+                writeln!(
+                    self.out,
+                    "  {found} = call i32 @nir_json_array_get(ptr %args_json_ptr, i64 %args_json_len, i64 {json_idx}, ptr {json_scratch}, ptr {err_scratch})"
+                )
+                .unwrap();
+                let err_val = self.fresh_reg("serve_arg_err_val");
+                writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+                self.serve_require_ok_or_business_error(&found, &err_val, &format!("serve_arg{json_idx}"))?;
+                let element_json = self.fresh_reg("serve_arg_element_json");
+                writeln!(self.out, "  {element_json} = load {{ptr, i64}}, ptr {json_scratch}").unwrap();
+                let decoded = self.emit_decode_value_json(&p.ty, &element_json)?;
+                let payload_ptr = self.emit_decode_or_business_error(&p.ty, &decoded, &format!("serve_arg{json_idx}_decode"))?;
+                call_operands.push(self.serve_call_operand(&p.ty, &payload_ptr)?);
+                json_idx += 1;
+            }
+        }
+
+        // ---- call `f`, encode its result back out ----
+        let result = self.emit_call_known_fn(&f.name, &call_operands, &f.ret)?;
+        if let Ty::Named(name, args) = &f.ret
+            && name == "Result"
+            && args.len() == 2
+        {
+            let ok_ty = &args[0];
+            let err_ty = &args[1];
+            let result_llty = self.llvm_ty(&f.ret)?;
+            let tag_ptr = self.fresh_reg("serve_ret_tag_ptr");
+            writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {result}, i32 0, i32 0").unwrap();
+            let tag = self.fresh_reg("serve_ret_tag");
+            writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+            let payload_ptr = self.fresh_reg("serve_ret_payload_ptr");
+            writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {result}, i32 0, i32 1").unwrap();
+            let is_ok = self.icmp("eq", "i64", &tag, "0")?;
+            let ok_label = self.fresh_label("serve_ret_ok");
+            let err_label = self.fresh_label("serve_ret_err");
+            writeln!(self.out, "  br i1 {is_ok}, label %{ok_label}, label %{err_label}").unwrap();
+
+            writeln!(self.out, "{ok_label}:").unwrap();
+            let ok_json = self.emit_encode_value_json(ok_ty, &payload_ptr)?;
+            let ok_wrapped = self.emit_wrap_json_field("ok", &ok_json, "serve_ret_ok_wrap")?;
+            let ok_ptr = self.fresh_reg("serve_ret_ok_body_ptr");
+            writeln!(self.out, "  {ok_ptr} = extractvalue {{ptr, i64}} {ok_wrapped}, 0").unwrap();
+            let ok_len = self.fresh_reg("serve_ret_ok_body_len");
+            writeln!(self.out, "  {ok_len} = extractvalue {{ptr, i64}} {ok_wrapped}, 1").unwrap();
+            writeln!(self.out, "  store ptr {ok_ptr}, ptr %out_body_ptr").unwrap();
+            writeln!(self.out, "  store i64 {ok_len}, ptr %out_body_len").unwrap();
+            writeln!(self.out, "  ret i32 0").unwrap();
+
+            writeln!(self.out, "{err_label}:").unwrap();
+            let err_json = self.emit_encode_value_json(err_ty, &payload_ptr)?;
+            let err_wrapped = self.emit_wrap_json_field("err", &err_json, "serve_ret_err_wrap")?;
+            self.emit_serve_return_business_error(&err_wrapped);
+        } else if f.ret == Ty::Unit {
+            let null_body = self.fresh_global("serve_ret_unit_body");
+            writeln!(self.string_globals, "{null_body} = private unnamed_addr constant [4 x i8] c\"null\"").unwrap();
+            writeln!(self.out, "  store ptr {null_body}, ptr %out_body_ptr").unwrap();
+            writeln!(self.out, "  store i64 4, ptr %out_body_len").unwrap();
+            writeln!(self.out, "  ret i32 0").unwrap();
+        } else {
+            // A plain (non-`Result`, non-`unit`) return: `emit_call_known_fn`
+            // handed back a pointer for an aggregate return, or a bare
+            // value for a scalar one — the encoder always wants a
+            // pointer, so a scalar gets one temp slot of its own first.
+            let value_ptr = if f.ret.is_aggregate() {
+                result
+            } else {
+                let llty = self.llvm_ty(&f.ret)?;
+                let slot = self.fresh_reg("serve_ret_scalar_slot");
+                self.emit_alloca(&slot, &llty);
+                writeln!(self.out, "  store {llty} {result}, ptr {slot}").unwrap();
+                slot
+            };
+            let body_json = self.emit_encode_value_json(&f.ret, &value_ptr)?;
+            let body_ptr = self.fresh_reg("serve_ret_body_ptr");
+            writeln!(self.out, "  {body_ptr} = extractvalue {{ptr, i64}} {body_json}, 0").unwrap();
+            let body_len = self.fresh_reg("serve_ret_body_len");
+            writeln!(self.out, "  {body_len} = extractvalue {{ptr, i64}} {body_json}, 1").unwrap();
+            writeln!(self.out, "  store ptr {body_ptr}, ptr %out_body_ptr").unwrap();
+            writeln!(self.out, "  store i64 {body_len}, ptr %out_body_len").unwrap();
+            writeln!(self.out, "  ret i32 0").unwrap();
+        }
+
+        self.out.insert_str(alloca_splice_pos, &self.entry_allocas.clone());
+        writeln!(self.out, "}}").unwrap();
+        Ok(wrapper_name)
     }
 
     /// Generates one top-level replay trampoline for a single `transact`
@@ -9165,14 +10461,72 @@ impl Codegen<'_> {
     /// `i64` result slot, wrong for a genuinely `bool`-valued `if` whose
     /// branches both fall through). `typeck::check_if` already proved
     /// both branches agree in type at any real value-position use, so
-    /// inspecting only the `then` branch's trailing type is sound: if
-    /// the program passed type checking, the `else` branch's trailing
-    /// type is guaranteed to match.
+    /// inspecting only the `then` branch's trailing type is sound *in
+    /// principle* — except `local_ty_of` can independently fail to
+    /// resolve one specific branch's own trailing type even when the
+    /// branches truly do agree (a bare `Ok`/`Err` reconstruction; see
+    /// `is_unresolved_ok_err_placeholder`), which is exactly why this is
+    /// a thin wrapper `if_result_ty` (below) actually calls, not the
+    /// whole story by itself anymore.
     fn block_trailing_ty(&self, block: &Block, scopes: &Scopes) -> Ty {
         match block.stmts.last() {
             Some(Stmt::Expr(e)) => self.local_ty_of(e, scopes),
             _ => Ty::Unit,
         }
+    }
+
+    /// `if_expr`'s own `result_ty` — `block_trailing_ty(then_block)`
+    /// when that resolves to a genuine type, but tries the `else`
+    /// branch (and, failing that, combines a bare `Ok`/`Err` on one
+    /// side with the other's) before giving up, exactly mirroring
+    /// `match_result_ty`'s own three-tier fallback and for the identical
+    /// reason: a real captured crash (`nirdosha_hi_*.log`/`.nir`) had
+    /// `if cond { Err(DbError(msg)) } else { match ... }` as a `let`'s
+    /// RHS — `then`'s own trailing type alone is the unresolvable
+    /// placeholder, while `else`'s (a nested `match`, itself already
+    /// correctly resolved via `match_result_ty`) is not. `ElseBranch::If`
+    /// (an `else if` chain) isn't given the same sibling-combining
+    /// treatment — a real, disclosed, narrower gap than the one this
+    /// fixes, not a regression: `then`'s own type is still tried first,
+    /// so this is never worse than `block_trailing_ty` alone was.
+    fn if_result_ty(&self, then_block: &Block, else_block: Option<&ElseBranch>, scopes: &Scopes) -> Ty {
+        let then_ty = self.block_trailing_ty(then_block, scopes);
+        if !is_unresolved_ok_err_placeholder(&then_ty) {
+            return then_ty;
+        }
+        let else_block_body = match else_block {
+            Some(ElseBranch::Block(b)) => b.stmts.last().and_then(|s| match s {
+                Stmt::Expr(e) => Some(e),
+                _ => None,
+            }),
+            _ => None,
+        };
+        if let Some(else_body) = else_block_body {
+            let else_ty = self.local_ty_of(else_body, scopes);
+            if !is_unresolved_ok_err_placeholder(&else_ty) {
+                return else_ty;
+            }
+            // Both sides independently unresolvable alone -- the same
+            // last-resort combine `match_result_ty` falls back to:
+            // correct, not a guess, since typeck already proved both
+            // branches produce the same `Result(T, E)`.
+            let then_body = match then_block.stmts.last() {
+                Some(Stmt::Expr(e)) => Some(e),
+                _ => None,
+            };
+            let bare_payload = |e: Option<&Expr>, variant: &str| -> Option<Ty> {
+                match e {
+                    Some(Expr::Call(name, args, _)) if name == variant && args.len() == 1 => Some(self.local_ty_of(&args[0], scopes)),
+                    _ => None,
+                }
+            };
+            let ok_ty = bare_payload(then_body, "Ok").or_else(|| bare_payload(Some(else_body), "Ok"));
+            let err_ty = bare_payload(then_body, "Err").or_else(|| bare_payload(Some(else_body), "Err"));
+            if let (Some(t), Some(e)) = (ok_ty, err_ty) {
+                return Ty::Named("Result".to_string(), vec![t, e]);
+            }
+        }
+        then_ty
     }
 
     fn if_expr(
@@ -9181,6 +10535,7 @@ impl Codegen<'_> {
         then_block: &Block,
         else_block: Option<&ElseBranch>,
         span: Span,
+        expected: Option<&Ty>,
         scopes: &mut Scopes,
     ) -> Result<String, CodegenError> {
         let c = self.expr(cond, scopes)?;
@@ -9188,7 +10543,14 @@ impl Codegen<'_> {
         let else_label = self.fresh_label("if_else");
         let merge_label = self.fresh_label("if_merge");
 
-        let result_ty = self.block_trailing_ty(then_block, scopes);
+        // `expected` -- when a caller one frame up (`expr_ptr_expected`)
+        // already has a concrete type in hand -- is authoritative and
+        // used directly, no inference needed at all; `if_result_ty`'s
+        // own (necessarily weaker, no-context) sibling-branch inference
+        // is only a fallback for when this `if` is reached with no such
+        // context (a bare statement, or nested inside a scalar `expr()`
+        // dispatch).
+        let result_ty = expected.cloned().unwrap_or_else(|| self.if_result_ty(then_block, else_block, scopes));
         // `unit` has no LLVM value to hold at all (`alloca void` isn't
         // legal IR) — a `unit`-valued if is only ever run for its
         // branches' side effects, so there's no slot to allocate, only
@@ -9352,14 +10714,17 @@ impl Codegen<'_> {
         scrutinee: &Expr,
         arms: &[MatchArm],
         span: Span,
+        expected: Option<&Ty>,
         scopes: &mut Scopes,
     ) -> Result<String, CodegenError> {
         let scrutinee_ty = self.local_ty_of(scrutinee, scopes);
-        // All arm bodies share one result type (typeck already proved
-        // they agree); `local_ty_of` of the first arm's body is the
-        // match's own result type, the same way `if_expr` uses
-        // `block_trailing_ty` of the `then` block.
-        let result_ty = self.local_ty_of(&arms[0].body, scopes);
+        // `expected` -- when a caller one frame up (`expr_ptr_expected`)
+        // already has a concrete type in hand -- is authoritative and
+        // used directly, no inference needed at all; `match_result_ty`
+        // (see its own doc comment) is only a fallback for when this
+        // `match` is reached with no such context (a bare statement, or
+        // nested inside a scalar `expr()` dispatch).
+        let result_ty = expected.cloned().unwrap_or_else(|| self.match_result_ty(&scrutinee_ty, arms, scopes));
         let merge_label = self.fresh_label("match_merge");
         let slot = if result_ty == Ty::Unit {
             None
@@ -9776,7 +11141,20 @@ impl Codegen<'_> {
                 match last {
                     Stmt::Expr(e) => {
                         if result_ty.is_aggregate() {
-                            let src = self.expr_ptr(e, scopes)?;
+                            // `expr_ptr_expected`, not plain `expr_ptr` --
+                            // mirrors `match_enum`'s own per-arm body
+                            // compilation (see its own comment): this
+                            // branch's trailing expression already has a
+                            // real, concrete expected type in hand
+                            // (`result_ty`), so a bare `Err(SomeVariant
+                            // (...))`-shaped branch value (which `ctor_ty`'s
+                            // own no-context inference can't disambiguate)
+                            // resolves correctly instead of hitting that
+                            // ambiguity error -- `match_enum` already
+                            // needed this exact fix for its own arms; `if`/
+                            // `else` branches (this function) share the
+                            // identical shape and had been missed.
+                            let src = self.expr_ptr_expected(e, result_ty, scopes)?;
                             let bytes = agg_byte_size_operand(result_ty, &self.registry);
                             writeln!(
                                 self.out,
@@ -10026,6 +11404,123 @@ impl Codegen<'_> {
         writeln!(self.out, "}}").unwrap();
         Ok(())
     }
+
+    /// The compiled `--serve` binary's real entry point — reviving
+    /// compiled `nirdosha serve` (`rfcs/0010-landing-and-serve-exposure.md`,
+    /// Stage 3/4 of that revival). Runs the *same* domain/reaper/
+    /// transact-replay/`nfr` bootstrap `emit_c_main` itself runs, but
+    /// instead of ever calling the program's own `nir_main()`, builds
+    /// the real `&[CRoute]` dispatch table (`route_entries`'s own
+    /// `(http_path, wrapper_symbol)` pairs — the caller resolves the
+    /// exposure set and calls `emit_serve_route_wrapper` per entry
+    /// *before* this runs, so this function only assembles what
+    /// already exists) and hands it, plus the compile-time-baked UI
+    /// HTML (`ui_gen::generate`'s output — a compiled binary has no
+    /// `Program` AST left at runtime to generate it from, unlike the
+    /// deleted interpreted `serve.rs`), to
+    /// `compiled_serve::nir_compiled_serve_run` — this crate's own
+    /// C-ABI bridge into the real HTTP engine (`crates/compiled-serve`).
+    /// Never returns under normal operation.
+    ///
+    /// **Native plugins are not supported in `--serve` mode yet** — a
+    /// real, disclosed narrowing, not an oversight: `emit_c_main`'s own
+    /// per-provider domain/dispatch-table registration is simply
+    /// omitted here, since `build_serve` (`codegen.rs`'s own public
+    /// entry point for this mode) has no native-plugin roster to give
+    /// it in the first place.
+    fn emit_c_main_serve(&mut self, program: &Program, route_entries: &[(String, String)], ui_html: &[u8], port: u16) -> Result<(), CodegenError> {
+        writeln!(self.out, "define i32 @main() {{").unwrap();
+        writeln!(self.out, "entry:").unwrap();
+
+        writeln!(self.out, "  call void @nir_kernel_register_builtin_domains()").unwrap();
+        writeln!(self.out, "  call void @nir_kernel_start_reaper()").unwrap();
+
+        // Durability log init + crash replay — identical ordering and
+        // reasoning to `emit_c_main`'s own copy of this block (see its
+        // comment): strictly before any route can possibly run, strictly
+        // after every `transact` site's replay trampoline is registered.
+        if !self.transact_sites.is_empty() {
+            let log_ok = self.fresh_reg("transact_log_init_ok");
+            writeln!(self.out, "  {log_ok} = call i32 @nir_transact_log_init()").unwrap();
+            let log_ok_b = self.fresh_reg("transact_log_init_ok_b");
+            writeln!(self.out, "  {log_ok_b} = icmp ne i32 {log_ok}, 0").unwrap();
+            let log_init_ok_label = self.fresh_label("transact_log_init_ok");
+            let log_init_fail_label = self.fresh_label("transact_log_init_fail");
+            writeln!(self.out, "  br i1 {log_ok_b}, label %{log_init_ok_label}, label %{log_init_fail_label}").unwrap();
+            writeln!(self.out, "{log_init_fail_label}:").unwrap();
+            writeln!(self.out, "  call void @abort()").unwrap();
+            writeln!(self.out, "  unreachable").unwrap();
+            writeln!(self.out, "{log_init_ok_label}:").unwrap();
+            for (site_id, tramp_name) in self.transact_sites.clone() {
+                writeln!(self.out, "  call void @nir_transact_register_replay_site(i64 {site_id}, ptr {tramp_name})").unwrap();
+            }
+            writeln!(self.out, "  call void @nir_transact_replay_all()").unwrap();
+        }
+
+        // `nfr(...)` registration — before the listener ever starts
+        // accepting, same as `emit_c_main`'s copy, so every exposed
+        // route's own `nir_nfr_call_begin`/`_end` (inside its real
+        // compiled body) already has a real id to look up.
+        for f in &program.fns {
+            let Some(nfr) = &f.nfr else { continue };
+            let name_bytes = f.name.as_bytes();
+            let name_global = self.fresh_global("nfr_name");
+            let escaped = llvm_escape_bytes(name_bytes);
+            writeln!(self.string_globals, "{name_global} = private unnamed_addr constant [{} x i8] c\"{escaped}\"", name_bytes.len()).unwrap();
+            let latency = nfr.latency_ms.unwrap_or(-1);
+            let error_rate = llvm_f64_literal(nfr.error_rate_max.unwrap_or(-1.0));
+            let throughput = nfr.throughput_min_per_sec.unwrap_or(-1);
+            let concurrency = nfr.concurrency_max.unwrap_or(-1);
+            let id_reg = self.fresh_reg("nfr_registered_id");
+            writeln!(
+                self.out,
+                "  {id_reg} = call i64 @nir_nfr_register(ptr {name_global}, i64 {}, i64 {latency}, double {error_rate}, i64 {throughput}, i64 {concurrency})",
+                name_bytes.len()
+            )
+            .unwrap();
+            writeln!(self.out, "  store i64 {id_reg}, ptr @nfr_id.{}", f.name).unwrap();
+        }
+
+        // ---- the dispatch table: one `CRoute { path_ptr, path_len,
+        // handler }` per exposed fn (`compiled_serve::CRoute`'s own
+        // exact `#[repr(C)]` field order/types) ----
+        let mut route_elems = Vec::with_capacity(route_entries.len());
+        for (path, wrapper_symbol) in route_entries {
+            let path_global = self.fresh_global("serve_route_path");
+            writeln!(self.string_globals, "{path_global} = private unnamed_addr constant [{} x i8] c\"{}\"", path.len(), llvm_escape_bytes(path.as_bytes())).unwrap();
+            route_elems.push(format!("{{ ptr, i64, ptr }} {{ ptr {path_global}, i64 {}, ptr @{wrapper_symbol} }}", path.len()));
+        }
+        let routes_global = self.fresh_global("serve_routes");
+        writeln!(
+            self.string_globals,
+            "{routes_global} = private unnamed_addr constant [{} x {{ ptr, i64, ptr }}] [{}]",
+            route_entries.len(),
+            route_elems.join(", ")
+        )
+        .unwrap();
+
+        // The UI HTML — baked in as a plain byte-string global, empty
+        // meaning "no UI" (`compiled_serve::ServeConfig::ui_html`'s own
+        // "GET / 404s" contract for that case).
+        let (ui_ptr_operand, ui_len) = if ui_html.is_empty() {
+            ("null".to_string(), 0usize)
+        } else {
+            let ui_global = self.fresh_global("serve_ui_html");
+            writeln!(self.string_globals, "{ui_global} = private unnamed_addr constant [{} x i8] c\"{}\"", ui_html.len(), llvm_escape_bytes(ui_html)).unwrap();
+            (ui_global, ui_html.len())
+        };
+
+        let code = self.fresh_reg("serve_run_code");
+        writeln!(
+            self.out,
+            "  {code} = call i32 @nir_compiled_serve_run(ptr {routes_global}, i64 {}, ptr {ui_ptr_operand}, i64 {ui_len}, i64 {port})",
+            route_entries.len()
+        )
+        .unwrap();
+        writeln!(self.out, "  ret i32 {code}").unwrap();
+        writeln!(self.out, "}}").unwrap();
+        Ok(())
+    }
 }
 
 /// Full pipeline from a well-typed, ownership-checked `Program` to a real
@@ -10071,6 +11566,15 @@ impl OptLevel {
 /// dependency on this compiler's installation.
 static RUNTIME_KERNELS_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libnirdosha_runtime.a"));
 
+/// `crates/compiled-serve`, built once at `nirdosha`'s own build time
+/// by `build.rs::build_compiled_serve` — the same "embed a staticlib,
+/// link it only when the feature it backs is actually used" shape
+/// `RUNTIME_KERNELS_LIB` already established, just conditional
+/// (`build_impl` only writes/links this when `serve.is_some()`) rather
+/// than unconditional, since most `nirdosha build` invocations never
+/// use `--serve` at all.
+static COMPILED_SERVE_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libnirdosha_compiled_serve.a"));
+
 /// The OS-level system libraries `RUNTIME_KERNELS_LIB`'s own code (now
 /// including the `nir_tcp_*` kernels' `std::net` calls) needs at final
 /// link time — captured by `build.rs` via `rustc --print=native-static-
@@ -10102,7 +11606,7 @@ pub fn build(
     output_path: &std::path::Path,
     opt: OptLevel,
 ) -> Result<(), String> {
-    build_impl(program, smt_report, output_path, opt, &[], &HashSet::new())
+    build_impl(program, smt_report, output_path, opt, &[], &HashSet::new(), None)
 }
 
 /// The compiled-path counterpart to `build()`, for a project entrypoint
@@ -10118,7 +11622,20 @@ pub fn build_with_native_plugins(
     native_plugins: &[crate::plugin::NativePluginBuiltin],
     reject_plugin_names: &HashSet<String>,
 ) -> Result<(), String> {
-    build_impl(program, smt_report, output_path, opt, native_plugins, reject_plugin_names)
+    build_impl(program, smt_report, output_path, opt, native_plugins, reject_plugin_names, None)
+}
+
+/// `nirdosha build --serve` (reviving compiled `nirdosha serve`,
+/// `rfcs/0010-landing-and-serve-exposure.md`) — same pipeline as
+/// `build()`, except the generated binary's real `main` dispatches
+/// HTTP requests to the program's exposure set instead of ever calling
+/// its own `nir_main()` (`emit_llvm_ir_for_serve`/`emit_c_main_serve`),
+/// and the final link additionally embeds `nirdosha-compiled-serve`'s
+/// own staticlib (`build.rs::build_compiled_serve`). Native plugins
+/// aren't supported together with `--serve` yet — always `&[]`/empty,
+/// unlike `build_with_native_plugins`.
+pub fn build_serve(program: &Program, smt_report: &SmtReport, output_path: &std::path::Path, opt: OptLevel, serve: &ServeCodegenOptions) -> Result<(), String> {
+    build_impl(program, smt_report, output_path, opt, &[], &HashSet::new(), Some(serve))
 }
 
 fn build_impl(
@@ -10128,8 +11645,12 @@ fn build_impl(
     opt: OptLevel,
     native_plugins: &[crate::plugin::NativePluginBuiltin],
     reject_plugin_names: &HashSet<String>,
+    serve: Option<&ServeCodegenOptions>,
 ) -> Result<(), String> {
-    let ir = emit_llvm_ir_with_native_plugins(program, smt_report, native_plugins, reject_plugin_names).map_err(|e| e.to_string())?;
+    let ir = match serve {
+        Some(opts) => emit_llvm_ir_for_serve(program, smt_report, opts).map_err(|e| e.to_string())?,
+        None => emit_llvm_ir_with_native_plugins(program, smt_report, native_plugins, reject_plugin_names).map_err(|e| e.to_string())?,
+    };
 
     // `process::id()` alone is **not** unique enough: it's identical
     // across every thread inside one process, so two concurrent `build`
@@ -10165,8 +11686,27 @@ fn build_impl(
         native_plugin_lib_paths.push(p);
     }
 
+    // Only written/linked for a `--serve` build — `runtime_lib_path`
+    // first, so the (rare, harmless — see `COMPILED_SERVE_LIB`'s own
+    // doc comment) symbol overlap between the two staticlibs
+    // (`compiled-serve` bundles its own copy of `runtime-kernels`
+    // transitively) resolves from the plain kernels archive first,
+    // same "first satisfied wins" archive-linking behavior every other
+    // duplicate-capable link in this function already relies on.
+    let compiled_serve_lib_path = if serve.is_some() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nirdosha_compiled_serve_{}_{n}.a", std::process::id()));
+        std::fs::write(&p, COMPILED_SERVE_LIB).map_err(|e| format!("writing {}: {e}", p.display()))?;
+        Some(p)
+    } else {
+        None
+    };
+
     let mut clang_cmd = std::process::Command::new("clang");
     clang_cmd.arg(&ll_path).arg(&runtime_lib_path).arg(opt.clang_flag());
+    if let Some(p) = &compiled_serve_lib_path {
+        clang_cmd.arg(p);
+    }
     for p in &native_plugin_lib_paths {
         clang_cmd.arg(p);
     }
@@ -10308,6 +11848,9 @@ fn build_impl(
     let result = clang_cmd.arg("-o").arg(output_path).output();
     let _ = std::fs::remove_file(&ll_path); // best-effort cleanup either way
     let _ = std::fs::remove_file(&runtime_lib_path);
+    if let Some(p) = &compiled_serve_lib_path {
+        let _ = std::fs::remove_file(p);
+    }
     for p in &native_plugin_lib_paths {
         let _ = std::fs::remove_file(p);
     }
@@ -10324,5 +11867,723 @@ fn build_impl(
             String::from_utf8_lossy(&output.stderr)
         )),
         Err(e) => Err(format!("could not run `clang`: {e} (is it installed and on PATH?)")),
+    }
+}
+
+/// Real-execution round-trip tests for `emit_encode_value_json`/
+/// `emit_decode_value_json` (Stage 1 of reviving compiled `serve` — see
+/// the plan this session recovered `05a747c~1:crates/compiler/src/
+/// serve.rs`'s `decode_value`/`encode_value` from for the exact wire
+/// shape). Necessarily an *internal* `#[cfg(test)]` module, not a
+/// `tests/codegen.rs` integration test: those two functions are private
+/// `Codegen` methods with no `Expr`/builtin-name hook reachable from real
+/// `.nir` source yet (that's a later stage's job — RFC 0010's route
+/// dispatch), and `tests/codegen.rs` links against this crate as an
+/// ordinary external dependency, so it can't reach a private method
+/// regardless. `codegen_for`/`new_codegen` below are a direct copy of
+/// `emit_llvm_ir_impl`'s own `Codegen` construction (same file, same
+/// private fields — kept intentionally in lockstep, not a parallel
+/// "test-only" simplification that could drift from what a real
+/// `Codegen` actually looks like); `run_module` duplicates only the
+/// essential subset of `build_impl`'s own clang-linking (skipping the
+/// platform-specific TLS-framework/Windows extras real programs
+/// sometimes need, since these tests never call anything that needs
+/// them) rather than refactoring that function to accept raw IR text,
+/// which nothing else needs and would be a wider, riskier change for a
+/// test-only benefit.
+#[cfg(test)]
+mod json_roundtrip_tests {
+    use super::*;
+    use crate::ownership;
+    use crate::parser::Parser;
+    use crate::smt;
+    use crate::token::Lexer;
+    use crate::typeck;
+
+    fn build_program(src: &str) -> (Program, SmtReport) {
+        let toks = Lexer::new(src).tokenize().expect("lex should succeed");
+        let program = Parser::new(toks).parse_program().expect("parse should succeed");
+        typeck::typecheck(&program).expect("should typecheck cleanly");
+        ownership::check_ownership(&program).expect("should ownership-check cleanly");
+        let report = smt::analyze(&program);
+        (program, report)
+    }
+
+    fn new_codegen<'a>(program: &'a Program, report: &'a SmtReport) -> Codegen<'a> {
+        let registry = TypeRegistry::build(program);
+        let sigs: HashMap<String, FnSig> =
+            program.fns.iter().map(|f| (f.name.clone(), FnSig { params: f.params.iter().map(|p| p.ty.clone()).collect(), ret: f.ret.clone(), requires: f.requires.clone() })).collect();
+        let free_map = ownership::compute_free_map(program);
+        Codegen {
+            out: String::new(),
+            entry_allocas: String::new(),
+            string_globals: String::new(),
+            trampolines: String::new(),
+            transact_sites: Vec::new(),
+            tmp: 0,
+            label: 0,
+            smt_report: report,
+            free_map,
+            sigs,
+            current_fn_ret: Ty::Unit,
+            current_fn_name: "json_roundtrip_test_main".to_string(),
+            current_fn_sret: None,
+            current_fn_nfr: None,
+            current_fn_nfr_regs: None,
+            current_fn_role_view_param: None,
+            current_fn_claim_view_param: None,
+            terminated: false,
+            audited: false,
+            registry,
+            declared_named_types: HashSet::new(),
+            named_type_decls: String::new(),
+            workflows: &program.workflows,
+        }
+    }
+
+    /// Every `nir_json_*` declare `emit_encode_value_json`/
+    /// `emit_decode_value_json` can possibly call, plus `write` (this
+    /// module's own print-a-`{ptr,i64}`-value-to-stdout observability
+    /// primitive — the raw POSIX syscall, not `printf`, since a Nirdosha
+    /// `str` value is a `{ptr, i64}` slice with no null terminator to
+    /// format around). A fixed, always-declared list, not "only what
+    /// this specific test calls" — harmless (an unused `declare` is
+    /// inert) and simpler than threading a per-test subset through.
+    fn write_preamble(cg: &mut Codegen) {
+        writeln!(cg.out, "declare i64 @write(i32, ptr, i64)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_i64(i64, ptr)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_f64(double, ptr)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_bool(i32, ptr)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_str(ptr, i64, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_i64(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_f64(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_bool(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_str(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_get(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_set_raw(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+    }
+
+    /// Emits `call i64 @write(1, <ptr>, <len>)` on the `{ptr, i64}` SSA
+    /// value `str_val`, followed by a literal newline byte — so a test
+    /// that prints two values (the freshly-encoded JSON, then the same
+    /// value decoded and re-encoded) gets them back as two distinct
+    /// stdout lines to compare against.
+    fn emit_print_str(cg: &mut Codegen, str_val: &str) {
+        let ptr = cg.fresh_reg("print_ptr");
+        writeln!(cg.out, "  {ptr} = extractvalue {{ptr, i64}} {str_val}, 0").unwrap();
+        let len = cg.fresh_reg("print_len");
+        writeln!(cg.out, "  {len} = extractvalue {{ptr, i64}} {str_val}, 1").unwrap();
+        writeln!(cg.out, "  call i64 @write(i32 1, ptr {ptr}, i64 {len})").unwrap();
+        let nl = cg.fresh_global("print_nl");
+        writeln!(cg.string_globals, "{nl} = private unnamed_addr constant [1 x i8] c\"\\0A\"").unwrap();
+        writeln!(cg.out, "  call i64 @write(i32 1, ptr {nl}, i64 1)").unwrap();
+    }
+
+    /// Assembles `cg.out`/`cg.entry_allocas`/`cg.string_globals`/
+    /// `cg.named_type_decls` into one real module (the exact splice
+    /// order `emit_llvm_ir_impl`/`function` themselves use — see their
+    /// own comments), links it against the real `nir_json_*`
+    /// implementations (this crate's own embedded `RUNTIME_KERNELS_LIB`,
+    /// the same staticlib every real compiled binary links), runs it,
+    /// and returns its stdout split into lines. Panics on any failure
+    /// (lex/parse/typecheck are `expect()`ed elsewhere; a link/run
+    /// failure here means the test's own generated IR was wrong, which
+    /// should fail loudly, not be swallowed).
+    fn run_module(mut cg: Codegen, alloca_splice_pos: usize) -> Vec<String> {
+        writeln!(cg.out, "  ret i32 0").unwrap();
+        writeln!(cg.out, "}}").unwrap();
+        cg.out.insert_str(alloca_splice_pos, &cg.entry_allocas.clone());
+        cg.out.push_str(&cg.string_globals);
+        cg.out.push_str(&cg.trampolines);
+        cg.out.insert_str(0, &cg.named_type_decls);
+
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut ll_path = std::env::temp_dir();
+        ll_path.push(format!("nirdosha_json_roundtrip_test_{}_{n}.ll", std::process::id()));
+        std::fs::write(&ll_path, &cg.out).expect("writing test .ll");
+
+        let mut runtime_lib_path = std::env::temp_dir();
+        runtime_lib_path.push(format!("nirdosha_json_roundtrip_test_runtime_{}_{n}.a", std::process::id()));
+        std::fs::write(&runtime_lib_path, RUNTIME_KERNELS_LIB).expect("writing test runtime lib");
+
+        let mut bin_path = std::env::temp_dir();
+        bin_path.push(format!("nirdosha_json_roundtrip_test_bin_{}_{n}", std::process::id()));
+
+        let mut clang_cmd = std::process::Command::new("clang");
+        clang_cmd.arg(&ll_path).arg(&runtime_lib_path).arg(OptLevel::O0.clang_flag());
+        #[cfg(unix)]
+        clang_cmd.arg("-lm");
+        let link_result = clang_cmd.arg("-o").arg(&bin_path).output().expect("running clang");
+        let _ = std::fs::remove_file(&ll_path);
+        let _ = std::fs::remove_file(&runtime_lib_path);
+        assert!(link_result.status.success(), "clang failed:\nstdout:\n{}\nstderr:\n{}", String::from_utf8_lossy(&link_result.stdout), String::from_utf8_lossy(&link_result.stderr));
+
+        let run_result = std::process::Command::new(&bin_path).output().expect("running compiled test binary");
+        let _ = std::fs::remove_file(&bin_path);
+        assert!(run_result.status.success(), "test binary exited non-zero: {:?}\nstdout:\n{}\nstderr:\n{}", run_result.status, String::from_utf8_lossy(&run_result.stdout), String::from_utf8_lossy(&run_result.stderr));
+        String::from_utf8(run_result.stdout).expect("test binary stdout should be UTF-8").lines().map(|l| l.to_string()).collect()
+    }
+
+    /// Starts `main`'s own IR (declares + `define i32 @main() {\nentry:\n`)
+    /// and returns the position `run_module` should later splice
+    /// `entry_allocas` into — the same `alloca_splice_pos` bookkeeping
+    /// `function()` itself does, exposed here since this module drives
+    /// `cg.out` directly instead of going through `function()`.
+    fn start_main(cg: &mut Codegen) -> usize {
+        write_preamble(cg);
+        writeln!(cg.out, "define i32 @main() {{").unwrap();
+        writeln!(cg.out, "entry:").unwrap();
+        cg.out.len()
+    }
+
+    #[test]
+    fn i64_round_trips_through_encode_then_decode() {
+        let (program, report) = build_program("fn main() requires(public) { }");
+        let mut cg = new_codegen(&program, &report);
+        let splice = start_main(&mut cg);
+
+        let slot = cg.fresh_reg("x");
+        cg.emit_alloca(&slot, "i64");
+        writeln!(cg.out, "  store i64 42, ptr {slot}").unwrap();
+        let json1 = cg.emit_encode_value_json(&Ty::I64, &slot).expect("encode i64");
+        emit_print_str(&mut cg, &json1);
+
+        let result_ptr = cg.emit_decode_value_json(&Ty::I64, &json1).expect("decode i64");
+        let result_llty = cg.llvm_ty(&Ty::Named("Result".to_string(), vec![Ty::I64, Ty::Str])).unwrap();
+        let payload_ptr = cg.fresh_reg("payload_ptr");
+        writeln!(cg.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {result_ptr}, i32 0, i32 1").unwrap();
+        let json2 = cg.emit_encode_value_json(&Ty::I64, &payload_ptr).expect("re-encode decoded i64");
+        emit_print_str(&mut cg, &json2);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines, vec!["42".to_string(), "42".to_string()]);
+    }
+
+    #[test]
+    fn bool_and_str_round_trip() {
+        let (program, report) = build_program("fn main() requires(public) { }");
+        let mut cg = new_codegen(&program, &report);
+        let splice = start_main(&mut cg);
+
+        let bslot = cg.fresh_reg("b");
+        cg.emit_alloca(&bslot, "i1");
+        writeln!(cg.out, "  store i1 true, ptr {bslot}").unwrap();
+        let bjson = cg.emit_encode_value_json(&Ty::Bool, &bslot).unwrap();
+        emit_print_str(&mut cg, &bjson);
+
+        let sslot = cg.fresh_reg("s");
+        cg.emit_alloca(&sslot, "{ptr, i64}");
+        let lit = cg.fresh_global("lit");
+        writeln!(cg.string_globals, "{lit} = private unnamed_addr constant [5 x i8] c\"ada\\22x\"").unwrap();
+        let partial = cg.fresh_reg("s_partial");
+        writeln!(cg.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr {lit}, 0").unwrap();
+        let full = cg.fresh_reg("s_full");
+        writeln!(cg.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 5, 1").unwrap();
+        writeln!(cg.out, "  store {{ptr, i64}} {full}, ptr {sslot}").unwrap();
+        let sjson = cg.emit_encode_value_json(&Ty::Str, &sslot).unwrap();
+        emit_print_str(&mut cg, &sjson);
+
+        let bdecoded = cg.emit_decode_value_json(&Ty::Bool, &bjson).unwrap();
+        let bool_result_llty = cg.llvm_ty(&Ty::Named("Result".to_string(), vec![Ty::Bool, Ty::Str])).unwrap();
+        let bpayload = cg.fresh_reg("bpayload");
+        writeln!(cg.out, "  {bpayload} = getelementptr inbounds {bool_result_llty}, ptr {bdecoded}, i32 0, i32 1").unwrap();
+        let bjson2 = cg.emit_encode_value_json(&Ty::Bool, &bpayload).unwrap();
+        emit_print_str(&mut cg, &bjson2);
+
+        let sdecoded = cg.emit_decode_value_json(&Ty::Str, &sjson).unwrap();
+        let str_result_llty = cg.llvm_ty(&Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str])).unwrap();
+        let spayload = cg.fresh_reg("spayload");
+        writeln!(cg.out, "  {spayload} = getelementptr inbounds {str_result_llty}, ptr {sdecoded}, i32 0, i32 1").unwrap();
+        let sjson2 = cg.emit_encode_value_json(&Ty::Str, &spayload).unwrap();
+        emit_print_str(&mut cg, &sjson2);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines, vec!["true".to_string(), "\"ada\\\"x\"".to_string(), "true".to_string(), "\"ada\\\"x\"".to_string()]);
+    }
+
+    #[test]
+    fn struct_with_a_nested_struct_field_round_trips() {
+        let (program, report) = build_program(
+            "struct Inner { n: i64 }\n\
+             struct Outer { id: i64, active: bool, inner: Inner }\n\
+             fn main() requires(public) { }",
+        );
+        let mut cg = new_codegen(&program, &report);
+        let outer_ty = Ty::Named("Outer".to_string(), vec![]);
+        let inner_ty = Ty::Named("Inner".to_string(), vec![]);
+        let splice = start_main(&mut cg);
+
+        let outer_llty = cg.llvm_ty(&outer_ty).unwrap();
+        let inner_llty = cg.llvm_ty(&inner_ty).unwrap();
+        let scratch = cg.fresh_reg("outer");
+        cg.emit_alloca(&scratch, &outer_llty);
+        let (id_idx, _) = cg.field_index_and_ty(&outer_ty, "id").unwrap();
+        let id_ptr = cg.fresh_reg("id_ptr");
+        writeln!(cg.out, "  {id_ptr} = getelementptr inbounds {outer_llty}, ptr {scratch}, i32 0, i32 {id_idx}").unwrap();
+        writeln!(cg.out, "  store i64 7, ptr {id_ptr}").unwrap();
+        let (active_idx, _) = cg.field_index_and_ty(&outer_ty, "active").unwrap();
+        let active_ptr = cg.fresh_reg("active_ptr");
+        writeln!(cg.out, "  {active_ptr} = getelementptr inbounds {outer_llty}, ptr {scratch}, i32 0, i32 {active_idx}").unwrap();
+        writeln!(cg.out, "  store i1 false, ptr {active_ptr}").unwrap();
+        let (inner_idx, _) = cg.field_index_and_ty(&outer_ty, "inner").unwrap();
+        let inner_field_ptr = cg.fresh_reg("inner_field_ptr");
+        writeln!(cg.out, "  {inner_field_ptr} = getelementptr inbounds {outer_llty}, ptr {scratch}, i32 0, i32 {inner_idx}").unwrap();
+        let (n_idx, _) = cg.field_index_and_ty(&inner_ty, "n").unwrap();
+        let n_ptr = cg.fresh_reg("n_ptr");
+        writeln!(cg.out, "  {n_ptr} = getelementptr inbounds {inner_llty}, ptr {inner_field_ptr}, i32 0, i32 {n_idx}").unwrap();
+        writeln!(cg.out, "  store i64 99, ptr {n_ptr}").unwrap();
+
+        let json1 = cg.emit_encode_value_json(&outer_ty, &scratch).unwrap();
+        emit_print_str(&mut cg, &json1);
+
+        let decoded = cg.emit_decode_value_json(&outer_ty, &json1).unwrap();
+        let result_llty = cg.llvm_ty(&Ty::Named("Result".to_string(), vec![outer_ty.clone(), Ty::Str])).unwrap();
+        let payload_ptr = cg.fresh_reg("outer_payload_ptr");
+        writeln!(cg.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {decoded}, i32 0, i32 1").unwrap();
+        let json2 = cg.emit_encode_value_json(&outer_ty, &payload_ptr).unwrap();
+        emit_print_str(&mut cg, &json2);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], lines[1], "decode-then-re-encode should reproduce the original JSON byte-for-byte");
+        let parsed: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(parsed["id"], 7);
+        assert_eq!(parsed["active"], false);
+        assert_eq!(parsed["inner"]["n"], 99);
+    }
+
+    #[test]
+    fn result_ok_and_err_both_round_trip() {
+        let (program, report) = build_program("struct Item { id: i64 }\nfn main() requires(public) { }");
+        let mut cg = new_codegen(&program, &report);
+        let item_ty = Ty::Named("Item".to_string(), vec![]);
+        let result_ty = Ty::Named("Result".to_string(), vec![item_ty.clone(), Ty::Str]);
+        let splice = start_main(&mut cg);
+
+        let result_llty = cg.llvm_ty(&result_ty).unwrap();
+        let item_llty = cg.llvm_ty(&item_ty).unwrap();
+
+        // `Ok(Item(5))`.
+        let ok_scratch = cg.fresh_reg("ok_result");
+        cg.emit_alloca(&ok_scratch, &result_llty);
+        let ok_tag_ptr = cg.fresh_reg("ok_tag_ptr");
+        writeln!(cg.out, "  {ok_tag_ptr} = getelementptr inbounds {result_llty}, ptr {ok_scratch}, i32 0, i32 0").unwrap();
+        writeln!(cg.out, "  store i64 0, ptr {ok_tag_ptr}").unwrap();
+        let ok_payload_ptr = cg.fresh_reg("ok_payload_ptr");
+        writeln!(cg.out, "  {ok_payload_ptr} = getelementptr inbounds {result_llty}, ptr {ok_scratch}, i32 0, i32 1").unwrap();
+        let (id_idx, _) = cg.field_index_and_ty(&item_ty, "id").unwrap();
+        let item_scratch = cg.fresh_reg("item");
+        cg.emit_alloca(&item_scratch, &item_llty);
+        let item_id_ptr = cg.fresh_reg("item_id_ptr");
+        writeln!(cg.out, "  {item_id_ptr} = getelementptr inbounds {item_llty}, ptr {item_scratch}, i32 0, i32 {id_idx}").unwrap();
+        writeln!(cg.out, "  store i64 5, ptr {item_id_ptr}").unwrap();
+        let item_loaded = cg.fresh_reg("item_loaded");
+        writeln!(cg.out, "  {item_loaded} = load {item_llty}, ptr {item_scratch}").unwrap();
+        writeln!(cg.out, "  store {item_llty} {item_loaded}, ptr {ok_payload_ptr}").unwrap();
+        let ok_json = cg.emit_encode_value_json(&result_ty, &ok_scratch).unwrap();
+        emit_print_str(&mut cg, &ok_json);
+
+        // `Err("bad")`.
+        let err_scratch = cg.fresh_reg("err_result");
+        cg.emit_alloca(&err_scratch, &result_llty);
+        let err_tag_ptr = cg.fresh_reg("err_tag_ptr");
+        writeln!(cg.out, "  {err_tag_ptr} = getelementptr inbounds {result_llty}, ptr {err_scratch}, i32 0, i32 0").unwrap();
+        writeln!(cg.out, "  store i64 1, ptr {err_tag_ptr}").unwrap();
+        let err_payload_ptr = cg.fresh_reg("err_payload_ptr");
+        writeln!(cg.out, "  {err_payload_ptr} = getelementptr inbounds {result_llty}, ptr {err_scratch}, i32 0, i32 1").unwrap();
+        let err_lit = cg.fresh_global("err_lit");
+        writeln!(cg.string_globals, "{err_lit} = private unnamed_addr constant [3 x i8] c\"bad\"").unwrap();
+        let err_partial = cg.fresh_reg("err_partial");
+        writeln!(cg.out, "  {err_partial} = insertvalue {{ptr, i64}} undef, ptr {err_lit}, 0").unwrap();
+        let err_full = cg.fresh_reg("err_full");
+        writeln!(cg.out, "  {err_full} = insertvalue {{ptr, i64}} {err_partial}, i64 3, 1").unwrap();
+        writeln!(cg.out, "  store {{ptr, i64}} {err_full}, ptr {err_payload_ptr}").unwrap();
+        let err_json = cg.emit_encode_value_json(&result_ty, &err_scratch).unwrap();
+        emit_print_str(&mut cg, &err_json);
+
+        // Decode both back and re-encode, to prove `emit_decode_result_json`
+        // too, not just `emit_encode_result_json`.
+        let ok_decoded = cg.emit_decode_value_json(&result_ty, &ok_json).unwrap();
+        let outer_llty = cg.llvm_ty(&Ty::Named("Result".to_string(), vec![result_ty.clone(), Ty::Str])).unwrap();
+        let ok_outer_tag_ptr = cg.fresh_reg("ok_outer_tag_ptr");
+        writeln!(cg.out, "  {ok_outer_tag_ptr} = getelementptr inbounds {outer_llty}, ptr {ok_decoded}, i32 0, i32 0").unwrap();
+        let ok_outer_tag = cg.fresh_reg("ok_outer_tag");
+        writeln!(cg.out, "  {ok_outer_tag} = load i64, ptr {ok_outer_tag_ptr}").unwrap();
+        let ok_outer_payload_ptr = cg.fresh_reg("ok_outer_payload_ptr");
+        writeln!(cg.out, "  {ok_outer_payload_ptr} = getelementptr inbounds {outer_llty}, ptr {ok_decoded}, i32 0, i32 1").unwrap();
+        let ok_rejson = cg.emit_encode_value_json(&result_ty, &ok_outer_payload_ptr).unwrap();
+        emit_print_str(&mut cg, &ok_rejson);
+        let ok_outer_tag_slot = cg.fresh_reg("ok_outer_tag_slot");
+        cg.emit_alloca(&ok_outer_tag_slot, "i64");
+        writeln!(cg.out, "  store i64 {ok_outer_tag}, ptr {ok_outer_tag_slot}").unwrap();
+        let ok_outer_tag_json = cg.emit_encode_value_json(&Ty::I64, &ok_outer_tag_slot).unwrap();
+        emit_print_str(&mut cg, &ok_outer_tag_json);
+
+        let err_decoded = cg.emit_decode_value_json(&result_ty, &err_json).unwrap();
+        let err_outer_payload_ptr = cg.fresh_reg("err_outer_payload_ptr");
+        writeln!(cg.out, "  {err_outer_payload_ptr} = getelementptr inbounds {outer_llty}, ptr {err_decoded}, i32 0, i32 1").unwrap();
+        let err_rejson = cg.emit_encode_value_json(&result_ty, &err_outer_payload_ptr).unwrap();
+        emit_print_str(&mut cg, &err_rejson);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines.len(), 5);
+        let ok_val: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(ok_val["ok"]["id"], 5);
+        let err_val: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(err_val["err"], "bad");
+        assert_eq!(lines[2], lines[0], "decode(Ok)-then-re-encode should reproduce the original JSON");
+        assert_eq!(lines[3], "0", "decoding an `{{\"ok\":...}}` payload should land in the outer Result's Ok branch (tag 0)");
+        assert_eq!(lines[4], lines[1], "decode(Err)-then-re-encode should reproduce the original JSON");
+    }
+}
+
+/// Real, execution-based tests of `emit_serve_route_wrapper` itself —
+/// the highest-risk new code in this section (hand-emitted IR with
+/// real control flow, not just a straight-line encode/decode). Same
+/// harness shape as `json_roundtrip_tests` (a real `Codegen`, real
+/// `clang` link against the real embedded runtime, real process run),
+/// duplicated rather than shared across the two private test modules —
+/// not worth the `pub(super)` noise for a handful of small helpers.
+#[cfg(test)]
+mod serve_wrapper_tests {
+    use super::*;
+    use crate::ownership;
+    use crate::parser::Parser;
+    use crate::smt;
+    use crate::token::Lexer;
+    use crate::typeck;
+
+    fn build_program(src: &str) -> (Program, SmtReport) {
+        let toks = Lexer::new(src).tokenize().expect("lex should succeed");
+        let program = Parser::new(toks).parse_program().expect("parse should succeed");
+        typeck::typecheck(&program).expect("should typecheck cleanly");
+        ownership::check_ownership(&program).expect("should ownership-check cleanly");
+        let report = smt::analyze(&program);
+        (program, report)
+    }
+
+    fn new_codegen<'a>(program: &'a Program, report: &'a SmtReport) -> Codegen<'a> {
+        let registry = TypeRegistry::build(program);
+        let sigs: HashMap<String, FnSig> =
+            program.fns.iter().map(|f| (f.name.clone(), FnSig { params: f.params.iter().map(|p| p.ty.clone()).collect(), ret: f.ret.clone(), requires: f.requires.clone() })).collect();
+        let free_map = ownership::compute_free_map(program);
+        Codegen {
+            out: String::new(),
+            entry_allocas: String::new(),
+            string_globals: String::new(),
+            trampolines: String::new(),
+            transact_sites: Vec::new(),
+            tmp: 0,
+            label: 0,
+            smt_report: report,
+            free_map,
+            sigs,
+            current_fn_ret: Ty::Unit,
+            current_fn_name: "serve_wrapper_test_main".to_string(),
+            current_fn_sret: None,
+            current_fn_nfr: None,
+            current_fn_nfr_regs: None,
+            current_fn_role_view_param: None,
+            current_fn_claim_view_param: None,
+            terminated: false,
+            audited: false,
+            registry,
+            declared_named_types: HashSet::new(),
+            named_type_decls: String::new(),
+            workflows: &program.workflows,
+        }
+    }
+
+    /// Every `nir_*` builtin a route wrapper can possibly call, plus
+    /// `write` for observability — same "fixed, always-declared list"
+    /// convention `json_roundtrip_tests::write_preamble` already uses.
+    fn write_preamble(cg: &mut Codegen) {
+        writeln!(cg.out, "declare i64 @write(i32, ptr, i64)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_i64(i64, ptr)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_f64(double, ptr)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_bool(i32, ptr)").unwrap();
+        writeln!(cg.out, "declare void @nir_json_encode_str(ptr, i64, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_i64(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_f64(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_bool(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_decode_str(ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_get(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_get_str(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_set_raw(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_array_get(ptr, i64, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_check_role(ptr, i64, ptr, i64)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_extract_claim(ptr, i64, ptr, i64, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_str_eq(ptr, i64, ptr, i64)").unwrap();
+    }
+
+    fn emit_print_str(cg: &mut Codegen, str_val: &str) {
+        let ptr = cg.fresh_reg("print_ptr");
+        writeln!(cg.out, "  {ptr} = extractvalue {{ptr, i64}} {str_val}, 0").unwrap();
+        let len = cg.fresh_reg("print_len");
+        writeln!(cg.out, "  {len} = extractvalue {{ptr, i64}} {str_val}, 1").unwrap();
+        writeln!(cg.out, "  call i64 @write(i32 1, ptr {ptr}, i64 {len})").unwrap();
+        let nl = cg.fresh_global("print_nl");
+        writeln!(cg.string_globals, "{nl} = private unnamed_addr constant [1 x i8] c\"\\0A\"").unwrap();
+        writeln!(cg.out, "  call i64 @write(i32 1, ptr {nl}, i64 1)").unwrap();
+    }
+
+    fn emit_print_i32(cg: &mut Codegen, val: &str) {
+        let wide = cg.fresh_reg("print_i32_wide");
+        writeln!(cg.out, "  {wide} = sext i32 {val} to i64").unwrap();
+        let scratch = cg.fresh_reg("print_i32_json_scratch");
+        cg.emit_alloca(&scratch, "{ptr, i64}");
+        writeln!(cg.out, "  call void @nir_json_encode_i64(i64 {wide}, ptr {scratch})").unwrap();
+        let loaded = cg.fresh_reg("print_i32_json");
+        writeln!(cg.out, "  {loaded} = load {{ptr, i64}}, ptr {scratch}").unwrap();
+        emit_print_str(cg, &loaded);
+    }
+
+    /// Builds a `{ptr, i64}` SSA value for the literal string `s`, as a
+    /// fresh `private unnamed_addr constant` global — the same "hand a
+    /// route wrapper its input as a real global, not a value computed
+    /// at runtime" shape a real `nir_json_array_get`/bearer-token-
+    /// derived call site would produce.
+    fn str_literal(cg: &mut Codegen, prefix: &str, s: &str) -> String {
+        let g = cg.fresh_global(prefix);
+        writeln!(cg.string_globals, "{g} = private unnamed_addr constant [{} x i8] c\"{}\"", s.len(), llvm_escape_bytes(s.as_bytes())).unwrap();
+        let v0 = cg.fresh_reg(&format!("{prefix}_v0"));
+        writeln!(cg.out, "  {v0} = insertvalue {{ptr, i64}} undef, ptr {g}, 0").unwrap();
+        let v1 = cg.fresh_reg(&format!("{prefix}_v1"));
+        writeln!(cg.out, "  {v1} = insertvalue {{ptr, i64}} {v0}, i64 {}, 1", s.len()).unwrap();
+        v1
+    }
+
+    fn run_module(mut cg: Codegen, alloca_splice_pos: usize) -> Vec<String> {
+        writeln!(cg.out, "  ret i32 0").unwrap();
+        writeln!(cg.out, "}}").unwrap();
+        cg.out.insert_str(alloca_splice_pos, &cg.entry_allocas.clone());
+        cg.out.push_str(&cg.string_globals);
+        cg.out.push_str(&cg.trampolines);
+        cg.out.insert_str(0, &cg.named_type_decls);
+
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut ll_path = std::env::temp_dir();
+        ll_path.push(format!("nirdosha_serve_wrapper_test_{}_{n}.ll", std::process::id()));
+        std::fs::write(&ll_path, &cg.out).expect("writing test .ll");
+
+        let mut runtime_lib_path = std::env::temp_dir();
+        runtime_lib_path.push(format!("nirdosha_serve_wrapper_test_runtime_{}_{n}.a", std::process::id()));
+        std::fs::write(&runtime_lib_path, RUNTIME_KERNELS_LIB).expect("writing test runtime lib");
+
+        let mut bin_path = std::env::temp_dir();
+        bin_path.push(format!("nirdosha_serve_wrapper_test_bin_{}_{n}", std::process::id()));
+
+        let mut clang_cmd = std::process::Command::new("clang");
+        clang_cmd.arg(&ll_path).arg(&runtime_lib_path).arg(OptLevel::O0.clang_flag());
+        #[cfg(unix)]
+        clang_cmd.arg("-lm");
+        let link_result = clang_cmd.arg("-o").arg(&bin_path).output().expect("running clang");
+        let _ = std::fs::remove_file(&ll_path);
+        let _ = std::fs::remove_file(&runtime_lib_path);
+        assert!(link_result.status.success(), "clang failed:\nstdout:\n{}\nstderr:\n{}", String::from_utf8_lossy(&link_result.stdout), String::from_utf8_lossy(&link_result.stderr));
+
+        let run_result = std::process::Command::new(&bin_path).output().expect("running compiled test binary");
+        let _ = std::fs::remove_file(&bin_path);
+        assert!(run_result.status.success(), "test binary exited non-zero: {:?}\nstdout:\n{}\nstderr:\n{}", run_result.status, String::from_utf8_lossy(&run_result.stdout), String::from_utf8_lossy(&run_result.stderr));
+        String::from_utf8(run_result.stdout).expect("test binary stdout should be UTF-8").lines().map(|l| l.to_string()).collect()
+    }
+
+    /// Starts `main`'s own IR *after* every route wrapper under test has
+    /// already been fully emitted (each is a self-contained `define...{
+    /// ... }`, its own `entry_allocas` cleared-then-spliced internally
+    /// by `emit_serve_route_wrapper`) — the explicit `clear()` here
+    /// matters precisely because this module, unlike
+    /// `json_roundtrip_tests`, never has `main` be the *first* function
+    /// in the module: without it, `main`'s own allocas would be spliced
+    /// in on top of whatever the last route wrapper already consumed
+    /// and left behind in the same shared `entry_allocas` buffer.
+    fn start_main(cg: &mut Codegen) -> usize {
+        write_preamble(cg);
+        cg.entry_allocas.clear();
+        writeln!(cg.out, "define i32 @main() {{").unwrap();
+        writeln!(cg.out, "entry:").unwrap();
+        cg.out.len()
+    }
+
+    /// Declares an `out_*` scratch pair (`ptr`/`i64` for body or
+    /// cookie) a wrapper call needs, returning the two `alloca`d
+    /// addresses to pass as its `out_*_ptr` arguments.
+    fn out_scratch(cg: &mut Codegen, prefix: &str) -> (String, String) {
+        let ptr_slot = cg.fresh_reg(&format!("{prefix}_ptr_slot"));
+        cg.emit_alloca(&ptr_slot, "ptr");
+        let len_slot = cg.fresh_reg(&format!("{prefix}_len_slot"));
+        cg.emit_alloca(&len_slot, "i64");
+        (ptr_slot, len_slot)
+    }
+
+    #[test]
+    fn a_public_route_decodes_args_calls_the_fn_and_encodes_the_result() {
+        let src = r#"
+            struct Product {
+                name: str,
+                price: i64,
+            }
+            fn create_product(p: Product) -> Result(Product, i64) requires(public) {
+                return Ok(p)
+            }
+            fn main() requires(public) { }
+        "#;
+        let (program, report) = build_program(src);
+        let mut cg = new_codegen(&program, &report);
+        for fdecl in &program.fns {
+            cg.function(fdecl).expect("fn codegen should succeed");
+        }
+        let f = program.fns.iter().find(|f| f.name == "create_product").expect("fn exists");
+        cg.emit_serve_route_wrapper(f).expect("wrapper codegen should succeed");
+
+        let splice = start_main(&mut cg);
+        let args_json = str_literal(&mut cg, "args", r#"[{"name":"widget","price":100}]"#);
+        let args_ptr = cg.fresh_reg("args_ptr");
+        writeln!(cg.out, "  {args_ptr} = extractvalue {{ptr, i64}} {args_json}, 0").unwrap();
+        let args_len = cg.fresh_reg("args_len");
+        writeln!(cg.out, "  {args_len} = extractvalue {{ptr, i64}} {args_json}, 1").unwrap();
+        let (body_ptr_slot, body_len_slot) = out_scratch(&mut cg, "body");
+        let (cookie_ptr_slot, cookie_len_slot) = out_scratch(&mut cg, "cookie");
+        let code = cg.fresh_reg("code");
+        writeln!(
+            cg.out,
+            "  {code} = call i32 @__serve_route_create_product(ptr {args_ptr}, i64 {args_len}, ptr null, i64 0, ptr {body_ptr_slot}, ptr {body_len_slot}, ptr {cookie_ptr_slot}, ptr {cookie_len_slot})"
+        )
+        .unwrap();
+        emit_print_i32(&mut cg, &code);
+        let body_ptr = cg.fresh_reg("final_body_ptr");
+        writeln!(cg.out, "  {body_ptr} = load ptr, ptr {body_ptr_slot}").unwrap();
+        let body_len = cg.fresh_reg("final_body_len");
+        writeln!(cg.out, "  {body_len} = load i64, ptr {body_len_slot}").unwrap();
+        let body_val = cg.fresh_reg("final_body_val");
+        writeln!(cg.out, "  {body_val} = insertvalue {{ptr, i64}} undef, ptr {body_ptr}, 0").unwrap();
+        let body_val2 = cg.fresh_reg("final_body_val2");
+        writeln!(cg.out, "  {body_val2} = insertvalue {{ptr, i64}} {body_val}, i64 {body_len}, 1").unwrap();
+        emit_print_str(&mut cg, &body_val2);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines.len(), 2, "lines: {lines:?}");
+        assert_eq!(lines[0], "0", "a successful Ok(...) return should map to code 0");
+        let body: serde_json::Value = serde_json::from_str(&lines[1]).expect("body should be real JSON");
+        assert_eq!(body["ok"]["name"], "widget");
+        assert_eq!(body["ok"]["price"], 100);
+    }
+
+    #[test]
+    fn a_missing_required_argument_is_a_business_error_not_a_crash() {
+        let src = r#"
+            fn double_it(x: i64) -> Result(i64, i64) requires(public) {
+                return Ok(x * 2)
+            }
+            fn main() requires(public) { }
+        "#;
+        let (program, report) = build_program(src);
+        let mut cg = new_codegen(&program, &report);
+        for fdecl in &program.fns {
+            cg.function(fdecl).expect("fn codegen should succeed");
+        }
+        let f = program.fns.iter().find(|f| f.name == "double_it").expect("fn exists");
+        cg.emit_serve_route_wrapper(f).expect("wrapper codegen should succeed");
+
+        let splice = start_main(&mut cg);
+        // An empty args array -- `double_it` needs one argument, so
+        // `nir_json_array_get` at index 0 must fail, and the wrapper
+        // must turn that into a real `1` (business error) response,
+        // never a crash/trap.
+        let args_json = str_literal(&mut cg, "args", "[]");
+        let args_ptr = cg.fresh_reg("args_ptr");
+        writeln!(cg.out, "  {args_ptr} = extractvalue {{ptr, i64}} {args_json}, 0").unwrap();
+        let args_len = cg.fresh_reg("args_len");
+        writeln!(cg.out, "  {args_len} = extractvalue {{ptr, i64}} {args_json}, 1").unwrap();
+        let (body_ptr_slot, body_len_slot) = out_scratch(&mut cg, "body");
+        let (cookie_ptr_slot, cookie_len_slot) = out_scratch(&mut cg, "cookie");
+        let code = cg.fresh_reg("code");
+        writeln!(
+            cg.out,
+            "  {code} = call i32 @__serve_route_double_it(ptr {args_ptr}, i64 {args_len}, ptr null, i64 0, ptr {body_ptr_slot}, ptr {body_len_slot}, ptr {cookie_ptr_slot}, ptr {cookie_len_slot})"
+        )
+        .unwrap();
+        emit_print_i32(&mut cg, &code);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines, vec!["1".to_string()], "a missing argument should be business-error code 1, not a crash");
+    }
+
+    #[test]
+    fn a_role_gated_route_rejects_no_token_and_the_wrong_role_then_accepts_the_right_one() {
+        let src = r#"
+            fn admin_only() -> Result(i64, i64) requires(role: "admin") {
+                return Ok(1)
+            }
+            fn main() requires(public) { }
+        "#;
+        let (program, report) = build_program(src);
+        let mut cg = new_codegen(&program, &report);
+        for fdecl in &program.fns {
+            cg.function(fdecl).expect("fn codegen should succeed");
+        }
+        let f = program.fns.iter().find(|f| f.name == "admin_only").expect("fn exists");
+        cg.emit_serve_route_wrapper(f).expect("wrapper codegen should succeed");
+
+        let splice = start_main(&mut cg);
+        let args_json = str_literal(&mut cg, "args", "[]");
+        let args_ptr = cg.fresh_reg("args_ptr");
+        writeln!(cg.out, "  {args_ptr} = extractvalue {{ptr, i64}} {args_json}, 0").unwrap();
+        let args_len = cg.fresh_reg("args_len");
+        writeln!(cg.out, "  {args_len} = extractvalue {{ptr, i64}} {args_json}, 1").unwrap();
+
+        // Call 1: no token at all.
+        {
+            let (body_ptr_slot, body_len_slot) = out_scratch(&mut cg, "body1");
+            let (cookie_ptr_slot, cookie_len_slot) = out_scratch(&mut cg, "cookie1");
+            let code = cg.fresh_reg("code1");
+            writeln!(
+                cg.out,
+                "  {code} = call i32 @__serve_route_admin_only(ptr {args_ptr}, i64 {args_len}, ptr null, i64 0, ptr {body_ptr_slot}, ptr {body_len_slot}, ptr {cookie_ptr_slot}, ptr {cookie_len_slot})"
+            )
+            .unwrap();
+            emit_print_i32(&mut cg, &code);
+        }
+
+        // Call 2: a token, but the wrong role.
+        {
+            let identity_json = str_literal(&mut cg, "identity_wrong_role", r#"{"claims_json":"{\"roles\":[\"user\"]}"}"#);
+            let id_ptr = cg.fresh_reg("id_ptr2");
+            writeln!(cg.out, "  {id_ptr} = extractvalue {{ptr, i64}} {identity_json}, 0").unwrap();
+            let id_len = cg.fresh_reg("id_len2");
+            writeln!(cg.out, "  {id_len} = extractvalue {{ptr, i64}} {identity_json}, 1").unwrap();
+            let (body_ptr_slot, body_len_slot) = out_scratch(&mut cg, "body2");
+            let (cookie_ptr_slot, cookie_len_slot) = out_scratch(&mut cg, "cookie2");
+            let code = cg.fresh_reg("code2");
+            writeln!(
+                cg.out,
+                "  {code} = call i32 @__serve_route_admin_only(ptr {args_ptr}, i64 {args_len}, ptr {id_ptr}, i64 {id_len}, ptr {body_ptr_slot}, ptr {body_len_slot}, ptr {cookie_ptr_slot}, ptr {cookie_len_slot})"
+            )
+            .unwrap();
+            emit_print_i32(&mut cg, &code);
+        }
+
+        // Call 3: a token with the right role.
+        {
+            let identity_json = str_literal(&mut cg, "identity_right_role", r#"{"claims_json":"{\"roles\":[\"admin\"]}"}"#);
+            let id_ptr = cg.fresh_reg("id_ptr3");
+            writeln!(cg.out, "  {id_ptr} = extractvalue {{ptr, i64}} {identity_json}, 0").unwrap();
+            let id_len = cg.fresh_reg("id_len3");
+            writeln!(cg.out, "  {id_len} = extractvalue {{ptr, i64}} {identity_json}, 1").unwrap();
+            let (body_ptr_slot, body_len_slot) = out_scratch(&mut cg, "body3");
+            let (cookie_ptr_slot, cookie_len_slot) = out_scratch(&mut cg, "cookie3");
+            let code = cg.fresh_reg("code3");
+            writeln!(
+                cg.out,
+                "  {code} = call i32 @__serve_route_admin_only(ptr {args_ptr}, i64 {args_len}, ptr {id_ptr}, i64 {id_len}, ptr {body_ptr_slot}, ptr {body_len_slot}, ptr {cookie_ptr_slot}, ptr {cookie_len_slot})"
+            )
+            .unwrap();
+            emit_print_i32(&mut cg, &code);
+        }
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines, vec!["2".to_string(), "2".to_string(), "0".to_string()], "no-token and wrong-role should both be 2 (unauthorized); the right role should succeed");
     }
 }
