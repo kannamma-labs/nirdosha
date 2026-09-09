@@ -12073,6 +12073,17 @@ mod json_roundtrip_tests {
     /// this specific test calls" — harmless (an unused `declare` is
     /// inert) and simpler than threading a per-test subset through.
     fn write_preamble(cg: &mut Codegen) {
+        // Real production programs get this from `emit_llvm_ir_impl`'s
+        // own unconditional preamble (codegen.rs:1692) — needed here too
+        // the moment any test calls `cg.function()` on a `.nir` fn whose
+        // own codegen emits an aggregate `sret`/field copy (`Stmt::Return`
+        // constructing a `Result`, e.g.), which `llvm.memcpy.p0.p0.i64`
+        // backs. Missing this happened to keep working locally (this
+        // toolchain's `clang` apparently tolerates an undeclared
+        // well-known intrinsic) but failed for real on CI's macOS
+        // runner with a genuine `use of undefined value` parse error —
+        // found by that CI failure, not anticipated in advance.
+        writeln!(cg.out, "declare void @llvm.memcpy.p0.p0.i64(ptr noalias writeonly, ptr noalias readonly, i64, i1 immarg)").unwrap();
         writeln!(cg.out, "declare i64 @write(i32, ptr, i64)").unwrap();
         writeln!(cg.out, "declare void @nir_json_encode_i64(i64, ptr)").unwrap();
         writeln!(cg.out, "declare void @nir_json_encode_f64(double, ptr)").unwrap();
@@ -12442,6 +12453,17 @@ mod serve_wrapper_tests {
     /// `write` for observability — same "fixed, always-declared list"
     /// convention `json_roundtrip_tests::write_preamble` already uses.
     fn write_preamble(cg: &mut Codegen) {
+        // Real production programs get this from `emit_llvm_ir_impl`'s
+        // own unconditional preamble (codegen.rs:1692) — needed here too
+        // the moment any test calls `cg.function()` on a `.nir` fn whose
+        // own codegen emits an aggregate `sret`/field copy (`Stmt::Return`
+        // constructing a `Result`, e.g.), which `llvm.memcpy.p0.p0.i64`
+        // backs. Missing this happened to keep working locally (this
+        // toolchain's `clang` apparently tolerates an undeclared
+        // well-known intrinsic) but failed for real on CI's macOS
+        // runner with a genuine `use of undefined value` parse error —
+        // found by that CI failure, not anticipated in advance.
+        writeln!(cg.out, "declare void @llvm.memcpy.p0.p0.i64(ptr noalias writeonly, ptr noalias readonly, i64, i1 immarg)").unwrap();
         writeln!(cg.out, "declare i64 @write(i32, ptr, i64)").unwrap();
         writeln!(cg.out, "declare void @nir_json_encode_i64(i64, ptr)").unwrap();
         writeln!(cg.out, "declare void @nir_json_encode_f64(double, ptr)").unwrap();
