@@ -29,3 +29,8 @@ name = "nirdosha_compiled_serve"
 # a linkable `rlib` before that decision).
 nirdosha-runtime-kernels = { path = "../runtime-kernels" }
 serde_json = "1"
+# Same version `runtime-kernels` (this same workspace) already pins for
+# `nir_oidc_validate_token`/`nir_mock_issue_token`'s own JWKS parsing —
+# `identity.rs` needs it too, only for encoding `AuthConfig::demo()`'s
+# random secret as the base64url a JWK's `k` member requires.
+base64 = "0.22"

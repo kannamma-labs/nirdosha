@@ -41,21 +41,6 @@ impl Request {
         !self.header("connection").map(|v| v.eq_ignore_ascii_case("close")).unwrap_or(false)
     }
 
-    /// Decodes `Authorization: Bearer <token>` into the verified-identity
-    /// JSON a [`crate::RouteHandler`] receives — **not implemented as
-    /// real JWT verification in this first cut**, disclosed rather than
-    /// silently stubbed: real verification (`nir_oidc_validate_token`)
-    /// lives in `kernel::identity`, callable from here once the
-    /// `codegen.rs` wiring (a separate, real follow-up — this crate's
-    /// own module doc) lands. Today, a present bearer token round-trips
-    /// as `{"token": "<raw>"}` — enough for a hand-written test route to
-    /// exercise the identity-plumbing *shape* end to end without this
-    /// crate pretending to verify anything it doesn't yet.
-    pub fn bearer_identity_json(&self) -> Option<String> {
-        let auth = self.header("authorization")?;
-        let token = auth.strip_prefix("Bearer ")?;
-        Some(format!("{{\"token\":{}}}", serde_json::to_string(token).ok()?))
-    }
 }
 
 pub enum ReadError {
@@ -82,10 +67,25 @@ pub fn read_request(stream: &mut TcpStream, body_timeout: Duration) -> Result<Op
     let method = parts.next().ok_or(ReadError::Malformed)?.to_string();
     let path = parts.next().ok_or(ReadError::Malformed)?.to_string();
 
+    // Red-team report A25 (`scratch/red-team-report-main-d7fae42.md`):
+    // `MAX_HEADER_BYTES` caps the whole header *block*, but a client
+    // could still spend that entire budget on one mega-header line (or
+    // many small ones) -- each `String` allocated per header, times
+    // every connection. A header-count cap and a per-line length cap
+    // catch both shapes without changing the overall block cap's own
+    // purpose.
+    const MAX_HEADER_COUNT: usize = 64;
+    const MAX_HEADER_LINE_BYTES: usize = 4 * 1024;
     let mut headers = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
+        }
+        if line.len() > MAX_HEADER_LINE_BYTES {
+            return Err(ReadError::TooLarge);
+        }
+        if headers.len() >= MAX_HEADER_COUNT {
+            return Err(ReadError::TooLarge);
         }
         if let Some((k, v)) = line.split_once(':') {
             headers.push((k.trim().to_string(), v.trim().to_string()));
@@ -102,7 +102,16 @@ pub fn read_request(stream: &mut TcpStream, body_timeout: Duration) -> Result<Op
     }
 
     let already_read = buf.len() - (header_end + 4);
-    let mut body = buf[header_end + 4..].to_vec();
+    // Red-team report A28 (`scratch/red-team-report-main-d7fae42.md`):
+    // for the common case (a small body that arrived in the same
+    // `read()` call as the headers), `buf[header_end+4..].to_vec()`
+    // allocated and copied bytes that were already sitting in `buf`,
+    // for no reason -- `drain` removes the header block *in place*
+    // (a memmove within `buf`'s own existing allocation, not a fresh
+    // one) and `buf` itself becomes the body, reused directly rather
+    // than copied into a second `Vec`.
+    buf.drain(..header_end + 4);
+    let mut body = buf;
     if content_length > already_read {
         let _ = stream.set_read_timeout(Some(body_timeout));
         let mut remaining = vec![0u8; content_length - already_read];
@@ -145,6 +154,16 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 
 pub struct Response {
     pub status: u16,
+    /// Was hardcoded to `application/json` at the one call site that
+    /// actually writes a response (`lib.rs::handle_connection`) —
+    /// harmless sloppiness for every route this crate served before
+    /// (JSON API responses, and plain-text `/healthz`/`/readyz`/
+    /// `/metrics` bodies browsers/`curl` don't care about the label
+    /// on), but a real bug for `GET /`'s HTML page (Stage 3 of
+    /// reviving compiled `serve`): a browser served real HTML labeled
+    /// `application/json` may refuse to render it as a page at all.
+    /// Real per-response content type, not a second hardcoded guess.
+    pub content_type: &'static str,
     pub body: Vec<u8>,
     pub headers: Vec<(String, String)>,
     pub cookie: Option<String>,
@@ -152,11 +171,14 @@ pub struct Response {
 
 impl Response {
     pub fn ok_text(status: u16, text: &str) -> Response {
-        Response { status, body: text.as_bytes().to_vec(), headers: Vec::new(), cookie: None }
+        Response { status, content_type: "text/plain", body: text.as_bytes().to_vec(), headers: Vec::new(), cookie: None }
+    }
+    pub fn ok_html(status: u16, html: &[u8]) -> Response {
+        Response { status, content_type: "text/html; charset=utf-8", body: html.to_vec(), headers: Vec::new(), cookie: None }
     }
     pub fn error(status: u16, message: &str) -> Response {
         let body = serde_json::json!({"err": message});
-        Response { status, body: serde_json::to_vec(&body).unwrap_or_default(), headers: Vec::new(), cookie: None }
+        Response { status, content_type: "application/json", body: serde_json::to_vec(&body).unwrap_or_default(), headers: Vec::new(), cookie: None }
     }
 }
 
@@ -175,17 +197,25 @@ fn status_text(status: u16) -> &'static str {
     }
 }
 
-/// Writes one real HTTP/1.1 response, `Set-Cookie` (`HttpOnly; Secure;
-/// SameSite=Lax; Path=/` unconditionally, `rfcs/0010`'s own "Set-Cookie
-/// gets actually wired" requirement) included whenever `cookie` is
-/// `Some`.
+/// Writes one real HTTP/1.1 response, `Set-Cookie: {cookie}` included
+/// verbatim whenever `cookie` is `Some` — `cookie` must already be a
+/// complete, fully-attributed cookie string (`HttpOnly`/`Secure`/
+/// `SameSite`/`Path`/`Max-Age` all included by whoever built it, e.g.
+/// `kernel::identity::nir_session_cookie`). This function does **not**
+/// append any attributes of its own (red team finding A5,
+/// `scratch/red-team-report-main-d7fae42.md`): it used to unconditionally
+/// append `HttpOnly; Secure; SameSite=Lax; Path=/` on top of whatever the
+/// caller already supplied, which — for the one real caller, the kernel's
+/// own `SameSite=Strict` session cookie — produced a single header with
+/// two disagreeing `SameSite` values. One layer owns the full attribute
+/// string now; this one just writes it out.
 pub fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8], extra_headers: &[(String, String)], cookie: Option<&str>) -> std::io::Result<()> {
     let mut out = format!("HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n", status_text(status), body.len());
     for (k, v) in extra_headers {
         out.push_str(&format!("{k}: {v}\r\n"));
     }
     if let Some(cookie) = cookie {
-        out.push_str(&format!("Set-Cookie: {cookie}; HttpOnly; Secure; SameSite=Lax; Path=/\r\n"));
+        out.push_str(&format!("Set-Cookie: {cookie}\r\n"));
     }
     out.push_str("\r\n");
     stream.write_all(out.as_bytes())?;

@@ -2,6 +2,12 @@
 name = "nirdosha"
 version = "0.1.0"
 edition = "2024"
+description = "A systems language designed for LLMs to write: an LL(1) grammar constrained-decodable to GBNF, no GC/data races/deadlocks/overflow, OS-process sandboxing as a language primitive."
+license = "MIT"
+repository = "https://github.com/kannamma-labs/nirdosha"
+homepage = "https://github.com/kannamma-labs/nirdosha"
+keywords = ["compiler", "llm", "ai-agents", "language", "sandboxing"]
+categories = ["compilers", "command-line-utilities"]
 
 [build-dependencies]
 # `build.rs`'s own `cargo metadata` parsing (locating where a dependency
@@ -13,6 +19,12 @@ serde_json = "1"
 
 [dependencies]
 z3 = "0.20.2"
+# `nirdosha hi` (rfcs/0012-nirdosha-hi-agentic-console.md)'s host-side LLM
+# client -- blocking (this CLI has no async runtime), `rustls-tls` (no
+# new system TLS dependency). Same crate+version `crates/presence-
+# gateway/Cargo.toml` already pins, so this is feature-additive to an
+# already-resolved workspace dependency, not a new one to the tree.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 native-tls = "0.2"
@@ -40,6 +52,8 @@ r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24", default-features = false, features = ["bundled"] }
 r2d2_postgres = "0.18"
 signal-hook = { version = "0.4", default-features = false }
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 # `dist`: statically vendors Z3 (compiles it from source via `z3-src`)
 # instead of dynamically linking the system `libz3` — same pattern as

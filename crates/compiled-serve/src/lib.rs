@@ -20,9 +20,11 @@
 //! for the exact contract a codegen-generated (or, for now, hand-
 //! written test) handler must honor.
 //!
-//! **Not yet wired to `codegen.rs`.** This first cut proves the real
-//! HTTP engine (admission, timeouts, dispatch, sessions, CORS, rate
-//! limiting) against hand-written `extern "C"` test routes — the
+//! **Identity is real; route dispatch is not wired to `codegen.rs`
+//! yet.** `identity`'s bearer-token verification (demo mode's
+//! self-minted, ephemeral-but-genuinely-signed tokens, and production
+//! mode's real IdP JWKS) is real, exercised end to end by this crate's
+//! own tests, against hand-written `extern "C"` test routes — the
 //! matching `codegen.rs` work to emit real per-route wrapper functions
 //! from a compiled program's own exposure set (RFC 0010) and a
 //! `nirdosha build --serve` CLI flag to link this crate in is real,
@@ -36,11 +38,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nirdosha_runtime_kernels::kernel::{self, domain};
+use nirdosha_runtime_kernels::constant_time_eq;
 
 mod http;
+mod identity;
 mod ratelimit;
 
 pub use http::MAX_BODY_BYTES;
+pub use identity::{AuthConfig, VerifiedClaims};
 
 /// One exposed route's real dispatch target — a plain function pointer,
 /// never a name string (`rfcs/0010-landing-and-serve-exposure.md`'s own
@@ -56,18 +61,43 @@ pub use http::MAX_BODY_BYTES;
 ///   real per-route decode is `codegen.rs`'s job once wired, not this
 ///   crate's).
 /// - `identity_json_{ptr,len}`: `""`/zero-length when the request
-///   carried no valid bearer token, otherwise a JSON object this
-///   crate's own request pipeline already resolved and verified
-///   upstream (`{"sub":...,"roles":[...],"claims":{...},"exp":...}`) —
-///   a handler never re-parses a raw `Authorization` header itself.
+///   carried no `Authorization` header at all, otherwise a JSON object
+///   this crate's own request pipeline already resolved and *really*
+///   verified upstream (`identity::validate_token`, real JWT/JWKS
+///   signature + expiry checking — see that module) — a handler never
+///   re-parses a raw `Authorization` header itself. Shape:
+///   `{"subject":...,"issuer":...,"audience":...,"expires_at":...,
+///   "issued_at":...,"claims_json":"..."}` — `VerifiedIdentity`'s own
+///   real field names, not OIDC-standard abbreviations, and
+///   `claims_json` embedded as an escaped JSON *string* (not a nested
+///   object) — both deliberate, so a route wrapper can decode this
+///   straight into a real `VerifiedIdentity` with the exact same
+///   generic struct-JSON decoder it already uses for any other
+///   struct-typed argument (`identity.rs::identity_json`'s own doc
+///   comment has the full reasoning). A
+///   request carrying an `Authorization` header that fails to verify
+///   (malformed, wrong issuer/audience, bad signature, expired) never
+///   reaches a handler at all — this crate answers `401` itself before
+///   dispatch, the same "an invalid bearer token is a hard failure, not
+///   silently treated as anonymous" behavior the deleted interpreted
+///   `serve.rs::resolve_identity` already established.
 /// - `out_body_{ptr,len}`: the handler writes a heap-allocated (leaked,
 ///   same disclosed-not-hidden convention `nir_transact_decode_args`'s
 ///   own string output already uses) UTF-8 JSON response body here.
 /// - `out_cookie_{ptr,len}`: `null`/zero-length for "no `Set-Cookie`
-///   this response", otherwise a heap-allocated (leaked) cookie
-///   *value* string (e.g. `nirdosha_session=<id>`) — this crate attaches
-///   the real `HttpOnly; Secure; SameSite=Lax; Path=/` attributes and
-///   writes the header; a handler never builds the header line itself.
+///   this response", otherwise a heap-allocated (leaked) **complete,
+///   fully-attributed** cookie string (e.g.
+///   `session=<id>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=<n>`,
+///   `kernel::identity::nir_session_cookie`'s own output) — `http::
+///   write_response` writes whatever is handed here to the wire
+///   verbatim and does **not** append `HttpOnly`/`Secure`/`SameSite`/
+///   `Path` of its own (red team finding A5,
+///   `scratch/red-team-report-main-d7fae42.md`: two layers each adding
+///   attributes produced one `Set-Cookie` header with two disagreeing
+///   `SameSite` values). A handler that hands back a bare
+///   `name=value` here with no attributes will ship an insecure cookie
+///   with no `HttpOnly`/`Secure`/`SameSite` at all — this crate no
+///   longer fixes that up.
 /// - Return: `0` = success (`out_body` is the real JSON result, HTTP
 ///   200), `1` = business-level error (`out_body` is still a real JSON
 ///   error payload, HTTP 200 — matching this project's existing
@@ -121,12 +151,49 @@ pub struct ServeConfig {
     /// — empty by default (rate-limit on the direct peer only). Never
     /// trust `X-Forwarded-For` from an untrusted peer: that's trivially
     /// spoofable by any client.
+    ///
+    /// `ServeConfig::default()` seeds this from
+    /// `NIRDOSHA_SERVE_TRUSTED_PROXIES` (a comma-separated list of plain
+    /// IPs, e.g. `10.0.0.1,10.0.0.2`) if set — red-team report A16
+    /// (`scratch/red-team-report-main-d7fae42.md`): without this, adding
+    /// a trusted proxy (a new ingress, say) required a rebuild. **CIDR
+    /// ranges are not supported here** (the report's own text
+    /// acknowledges this is real, separate follow-up work, not a small
+    /// fix) — every entry must be a single, literal `IpAddr`; an invalid
+    /// entry in the env var is skipped with a loud `eprintln!`, not a
+    /// silent drop, matching this crate's own degrade-to-default-not-fail
+    /// posture for config parsing elsewhere.
     pub trusted_proxies: Vec<IpAddr>,
     /// A bearer token `/metrics` requires — `None` means `/metrics`
     /// answers unauthenticated, which is fine only when the listener
     /// itself is bound to localhost; `Some` requires
     /// `Authorization: Bearer <token>` to match exactly.
     pub metrics_token: Option<String>,
+    /// The JWKS/issuer/audience every bearer token on this server is
+    /// checked against. Every server has one — there is no "identity
+    /// checking is off" mode — the only choice is *whose*:
+    /// [`AuthConfig::demo()`] (this struct's own `Default`, when
+    /// whoever starts the binary supplied no real `--jwks-file`/
+    /// `--issuer`/`--audience`) or a real IdP's own trio.
+    pub auth: AuthConfig,
+    /// `true` exactly when `auth` is [`AuthConfig::demo()`] — gates
+    /// whether `/api/_demo_login` exists at all (real production
+    /// identity has no self-service login; a caller gets a token from
+    /// the org's actual IdP). Tracked as its own flag rather than
+    /// inferred from `auth`'s contents, so the "which mode" decision
+    /// stays a single, explicit fact set once at startup, not a
+    /// heuristic re-derived from a JWKS/issuer string shape.
+    pub demo_mode: bool,
+    /// `GET /`'s response body — the program's own `emit-ui`-derived
+    /// UI, generated once at *compile* time (`ui_gen::generate`,
+    /// `codegen.rs`'s Stage 3) and baked into the binary as a plain
+    /// byte string, never regenerated at runtime — unlike the deleted
+    /// interpreted `serve.rs`, a compiled binary has no `Program` AST
+    /// left to call `ui_gen::generate` against once it's running.
+    /// Empty means no UI to serve (`GET /` 404s) — `nirdosha build
+    /// --serve` always sets this; only a hand-rolled `ServeConfig` (this
+    /// crate's own tests) leaves it empty.
+    pub ui_html: Vec<u8>,
 }
 
 impl Default for ServeConfig {
@@ -140,10 +207,35 @@ impl Default for ServeConfig {
             rate_limited_paths: Vec::new(),
             rate_limit_max_per_window: 20,
             rate_limit_window: Duration::from_secs(60),
-            trusted_proxies: Vec::new(),
+            trusted_proxies: trusted_proxies_from_env(),
             metrics_token: None,
+            auth: AuthConfig::demo(),
+            demo_mode: true,
+            ui_html: Vec::new(),
         }
     }
+}
+
+/// See [`ServeConfig::trusted_proxies`]'s own doc comment for the format
+/// and rationale (A16). Reads `NIRDOSHA_SERVE_TRUSTED_PROXIES` once, at
+/// `ServeConfig::default()` construction time -- not cached across calls
+/// the way `kernel`'s own domain ceilings are (A24's own finding is
+/// exactly why this crate doesn't repeat that mistake for a value an
+/// operator might reasonably expect to change between deployments of a
+/// freshly-constructed config, e.g. in a test).
+fn trusted_proxies_from_env() -> Vec<IpAddr> {
+    let Ok(raw) = std::env::var("NIRDOSHA_SERVE_TRUSTED_PROXIES") else { return Vec::new() };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.parse::<IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                eprintln!("nirdosha compiled-serve: NIRDOSHA_SERVE_TRUSTED_PROXIES entry {s:?} is not a valid IP address -- skipped");
+                None
+            }
+        })
+        .collect()
 }
 
 /// A bound-but-not-yet-accepting listener — the bind-before-replay
@@ -192,13 +284,42 @@ impl Readiness {
 }
 
 impl Listener {
-    /// Runs the accept loop forever (or until the process exits) —
-    /// spawns a thread per accepted connection, unconditionally; the
-    /// **thread**, not this accept loop, checks `domain::serve_http()`
-    /// admission and fails fast with a real `503` if denied, so a
-    /// saturated ceiling never makes the accept loop itself stall or
-    /// queue (`rfcs/0010`'s own "admission failure is a fast, visible
-    /// 503, not a silent stall" design).
+    /// Runs the accept loop forever (or until the process exits).
+    ///
+    /// **`kernel::acquire(domain::serve_http())` is checked here, in the
+    /// accept loop itself, before any thread is spawned** — red-team
+    /// report A11/A23 (`scratch/red-team-report-main-d7fae42.md`): the
+    /// old design span thread per connection unconditionally and only
+    /// checked admission *inside* that thread, so a connection flood
+    /// exhausted the OS thread ceiling long before `domain::serve_http()`'s
+    /// own admission ceiling was ever consulted — the kernel's ceiling
+    /// was real but never actually the bottleneck it claimed to be. This
+    /// is safe to do here specifically because `kernel::acquire` is
+    /// non-blocking, lock-free CAS (`kernel::mod.rs`'s own doc comment) —
+    /// checking it costs nothing this loop couldn't already afford.
+    ///
+    /// **A denied connection is dropped immediately, not spawned into a
+    /// thread to write a `503`** — a real, disclosed behavior change
+    /// from the old design (which wrote a graceful `503 Service
+    /// Unavailable` body before closing). Spawning *any* thread per
+    /// denied connection — even a minimal one that only writes a
+    /// response — reintroduces the exact unbounded-thread-creation
+    /// problem this fix exists to close, since under a genuine
+    /// saturation attack the volume of *denied* connections is the
+    /// dominant cost, not the admitted ones. Writing the `503` directly
+    /// in this loop, synchronously, is not a safe alternative either: a
+    /// slow or malicious peer that accepts the TCP handshake and then
+    /// never reads its receive buffer would block this loop's `write`
+    /// call indefinitely (a classic slow-loris vector), stalling accept
+    /// for every other connection, admitted or not. Dropping the
+    /// `TcpStream` outright (its `Drop` impl closes the fd without
+    /// waiting for any unsent data — `SO_LINGER` is not set, so this
+    /// does not block) is the one response that's both cheap and safe
+    /// under adversarial input: the client sees a connection reset
+    /// instead of a graceful error body once truly at capacity, which
+    /// matches how a production load balancer or reverse proxy already
+    /// behaves at overload (fail fast and cheap, don't spend a thread or
+    /// a blocking write explaining why).
     pub fn run(self, routes: &'static [Route], config: ServeConfig, readiness: Readiness) -> std::io::Result<()> {
         let config = Arc::new(config);
         let limiter = Arc::new(ratelimit::RateLimiter::new());
@@ -207,12 +328,98 @@ impl Listener {
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            if !kernel::acquire(domain::serve_http()) {
+                // Dropped without a response -- see this fn's own doc
+                // comment for why neither a synchronous write nor a
+                // spawned thread is safe here.
+                continue;
+            }
             let config = Arc::clone(&config);
             let limiter = Arc::clone(&limiter);
             let readiness = readiness.clone();
             std::thread::spawn(move || handle_connection(stream, routes, &config, &limiter, &readiness));
         }
         Ok(())
+    }
+}
+
+/// One exposed route, as `codegen.rs`'s generated `main` (Stage 3 of
+/// reviving compiled `serve`) actually has it to give: raw pointer
+/// parts, not a real `&'static str` — LLVM IR has no notion of a Rust
+/// lifetime, only a global string constant's address. [`nir_compiled_serve_run`]
+/// converts every entry to a real, leaked `'static` [`Route`] once, at
+/// startup, before handing the whole table to [`Listener::run`].
+#[repr(C)]
+pub struct CRoute {
+    pub path_ptr: *const u8,
+    pub path_len: i64,
+    pub handler: RouteHandler,
+}
+
+/// The real OS-level entry point a `--serve` binary's generated `main`
+/// calls instead of the ordinary `nir_main()` — this crate's own
+/// C-ABI bridge, since LLVM-emitted IR can only ever call a plain
+/// `extern "C" fn`, never a generic Rust API like [`Listener::run`]
+/// directly. Never returns under normal operation ([`Listener::run`]'s
+/// own accept loop runs forever); a bind failure returns `1` instead
+/// of panicking, so the generated `main` can report it and exit
+/// cleanly rather than aborting.
+///
+/// Demo mode only, deliberately, for this first cut — `ServeConfig::default()`'s
+/// own `AuthConfig::demo()` plus `demo_mode: true`. Real production
+/// identity (a `--jwks-file`/`--issuer`/`--audience` trio threaded
+/// through `nirdosha build --serve` itself) is real, disclosed
+/// follow-up work: hosting a `nirdosha hi`-generated demo app (this
+/// revival's own actual goal, Stage 5) needs demo mode, not a real IdP.
+///
+/// # Safety
+/// `routes_ptr` must point to `routes_count` valid [`CRoute`]s, each
+/// with a `path_ptr`/`path_len` naming a valid UTF-8 byte range that
+/// stays readable for the length of this call (codegen emits these as
+/// `private unnamed_addr constant` globals, which live for the whole
+/// process). `ui_html_ptr`/`ui_html_len` (zero/null for "no UI") must
+/// meet the same contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_compiled_serve_run(routes_ptr: *const CRoute, routes_count: i64, ui_html_ptr: *const u8, ui_html_len: i64, port: i64) -> i32 {
+    let c_routes = unsafe { std::slice::from_raw_parts(routes_ptr, routes_count as usize) };
+    let mut routes = Vec::with_capacity(c_routes.len());
+    for r in c_routes {
+        let path_bytes = unsafe { std::slice::from_raw_parts(r.path_ptr, r.path_len as usize) }.to_vec();
+        let path: &'static str = match String::from_utf8(path_bytes) {
+            Ok(s) => Box::leak(s.into_boxed_str()),
+            Err(_) => {
+                eprintln!("nirdosha serve: a route path was not valid UTF-8 -- refusing to start");
+                return 1;
+            }
+        };
+        routes.push(Route { path, handler: r.handler });
+    }
+    let routes: &'static [Route] = Box::leak(routes.into_boxed_slice());
+
+    let ui_html = if ui_html_ptr.is_null() || ui_html_len <= 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(ui_html_ptr, ui_html_len as usize) }.to_vec() };
+
+    let addr = format!("0.0.0.0:{port}");
+    let listener = match bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("nirdosha serve: failed to bind {addr}: {e}");
+            return 1;
+        }
+    };
+    eprintln!("nirdosha serve: listening on http://{addr} (demo mode)");
+    let readiness = Readiness::new();
+    // `nir_transact_replay_all` already ran in the generated `main`
+    // before this call (`docs/adr/0009`'s own bind-before-replay
+    // ordering — bind happens above, replay happened earlier still, in
+    // the caller) — this is "ready" the instant the listener is up.
+    readiness.mark_ready();
+    let config = ServeConfig { ui_html, ..ServeConfig::default() };
+    match listener.run(routes, config, readiness) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("nirdosha serve: {e}");
+            1
+        }
     }
 }
 
@@ -247,10 +454,11 @@ impl Drop for ServeHttpLease {
 }
 
 fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, readiness: &Readiness) {
-    if !kernel::acquire(domain::serve_http()) {
-        let _ = http::write_response(&mut stream, 503, "text/plain", b"503 Service Unavailable -- server at capacity", &[], None);
-        return;
-    }
+    // `Listener::run` already called `kernel::acquire(domain::serve_http())`
+    // for this connection before spawning the thread that's now running
+    // this function (A11/A23 fix, see `run`'s own doc comment) — this
+    // function's job is only to hold that lease for the connection's
+    // whole lifetime and release it exactly once, on drop.
     let _lease = ServeHttpLease;
     let peer = stream.peer_addr().ok();
 
@@ -270,7 +478,7 @@ fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConf
         let keep_alive = req.wants_keep_alive() && request_index + 1 < config.max_requests_per_connection;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, routes, config, limiter, peer, readiness)));
         let response = result.unwrap_or_else(|_| http::Response::error(500, "internal error"));
-        let done = http::write_response(&mut stream, response.status, "application/json", &response.body, &response.headers, response.cookie.as_deref());
+        let done = http::write_response(&mut stream, response.status, response.content_type, &response.body, &response.headers, response.cookie.as_deref());
         if done.is_err() || !keep_alive {
             break;
         }
@@ -280,6 +488,9 @@ fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConf
 fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, peer: Option<SocketAddr>, readiness: &Readiness) -> http::Response {
     if req.method == "OPTIONS" {
         return cors_preflight_response(req, config);
+    }
+    if req.path == "/" && req.method == "GET" {
+        return if config.ui_html.is_empty() { http::Response::error(404, "not found") } else { http::Response::ok_html(200, &config.ui_html) };
     }
     if req.path == "/healthz" {
         // Deliberately independent of `readiness` -- a bound, accepting
@@ -296,6 +507,12 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
     if req.path == "/metrics" {
         return metrics_response(req, config);
     }
+    if req.path == "/api/_demo_login" {
+        return with_cors(demo_login_response(req, config), req, config);
+    }
+    if req.path == "/api/_whoami" {
+        return with_cors(whoami_response(req, config), req, config);
+    }
     if config.rate_limited_paths.iter().any(|p| *p == req.path) {
         let key = client_ip_for_rate_limit(req, peer, config);
         if let Some(key) = key {
@@ -304,14 +521,82 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
             }
         }
     }
+    let identity_json = match resolve_identity(req, config) {
+        Ok(json) => json,
+        Err(resp) => return with_cors(resp, req, config),
+    };
     let Some(route) = routes.iter().find(|r| r.path == req.path) else {
         return with_cors(http::Response::error(404, "not found"), req, config);
     };
-    let identity_json = req.bearer_identity_json();
     let (status, body, cookie) = call_route(route.handler, &req.body, identity_json.as_deref());
-    let mut resp = http::Response { status, body, headers: Vec::new(), cookie };
+    let mut resp = http::Response { status, content_type: "application/json", body, headers: Vec::new(), cookie };
     resp = with_cors(resp, req, config);
     resp
+}
+
+/// `Authorization` header → this request's `identity_json` (`Ok(None)`
+/// for "no header at all," `Ok(Some(json))` for a real, verified
+/// identity) — or the actual `401` response to send back immediately
+/// when a header is present but doesn't verify. Checked once, ahead of
+/// route lookup, so an invalid token 401s the same way regardless of
+/// whether the path even exists — mirrors the deleted interpreted
+/// `serve.rs::resolve_identity`'s own "present but invalid is always a
+/// hard failure, never silently anonymous" behavior.
+fn resolve_identity(req: &http::Request, config: &ServeConfig) -> Result<Option<String>, http::Response> {
+    let Some(auth_header) = req.header("authorization") else { return Ok(None) };
+    let Some(token) = auth_header.strip_prefix("Bearer ").or_else(|| auth_header.strip_prefix("bearer ")) else {
+        return Err(http::Response::error(401, "Authorization header must be `Bearer <token>`"));
+    };
+    match identity::validate_token(token, &config.auth) {
+        Ok(claims) => Ok(Some(identity::identity_json(&claims))),
+        Err(e) => Err(http::Response::error(401, &format!("invalid token: {e}"))),
+    }
+}
+
+/// `POST /api/_demo_login` — demo mode only (`config.demo_mode`); `404`
+/// on a real-identity server, the same way the deleted interpreted
+/// `serve.rs` never registered this route at all outside demo mode.
+/// Body: `{"subject": "...", "roles": [...], "claims": {...}}`, all
+/// optional (default subject `"demo"`, empty roles/claims) — recovered
+/// verbatim from `05a747c~1:crates/compiler/src/serve.rs`'s own
+/// `handle_demo_login` as this port's ground truth.
+fn demo_login_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    if !config.demo_mode {
+        return http::Response::error(404, "not found");
+    }
+    let body: serde_json::Value = if req.body.is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        match serde_json::from_slice(&req.body) {
+            Ok(v) => v,
+            Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+        }
+    };
+    let subject = body.get("subject").and_then(serde_json::Value::as_str).unwrap_or("demo").to_string();
+    let roles: Vec<String> = body.get("roles").and_then(serde_json::Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let claims: Vec<(String, String)> = body
+        .get("claims")
+        .and_then(serde_json::Value::as_object)
+        .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+        .unwrap_or_default();
+    match identity::mock_issue_token(&subject, &config.auth, &roles, &claims) {
+        Ok(token) => http::Response::ok_text(200, &serde_json::json!({"token": token}).to_string()),
+        Err(e) => http::Response::error(500, &format!("failed to mint demo token: {e}")),
+    }
+}
+
+/// `GET /api/_whoami` — always present, every mode: confirms a bearer
+/// token is still valid against *this* running process, so a generated
+/// UI can catch a `localStorage`-cached identity from a previous,
+/// since-restarted demo-mode process whose ephemeral signing key no
+/// longer matches (`ui_gen.rs`'s own doc comment on why this route
+/// exists).
+fn whoami_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    match resolve_identity(req, config) {
+        Ok(Some(json)) => http::Response { status: 200, content_type: "application/json", body: json.into_bytes(), headers: Vec::new(), cookie: None },
+        Ok(None) => http::Response::error(401, "no Authorization header"),
+        Err(resp) => resp,
+    }
 }
 
 /// The one `unsafe` boundary in this crate — calling a real function
@@ -369,9 +654,43 @@ fn call_route(handler: RouteHandler, args_json: &[u8], identity_json: Option<&st
 /// CSRF hole a custom-header requirement on mutating routes (real,
 /// separate follow-up on the client-bundle side — `ui_gen.rs`'s own
 /// fetch wrapper contract, not this crate) exists to close.
+/// `(scheme, host, port)`, with an *implicit* default port
+/// (`https` → 443, `http` → 80, anything else → `None`, treated as
+/// "always distinct from any explicit port") filled in when the origin
+/// string carries none — red-team report A21
+/// (`scratch/red-team-report-main-d7fae42.md`): a browser normalizes
+/// `https://app.example.com:443` and `https://app.example.com` to the
+/// *same* origin for CORS purposes, but a bare `==` string comparison
+/// (this function's old shape) treated them as different, so a
+/// configured `allowed_origins` entry without an explicit port could
+/// silently fail to match a request that carried one (or vice versa) —
+/// a CORS failure for what both sides consider the same origin.
+fn parse_origin(origin: &str) -> Option<(&str, &str, u16)> {
+    let (scheme, rest) = origin.split_once("://")?;
+    let default_port = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => 0, // no sensible default; an explicit port is required to match at all
+    };
+    match rest.rsplit_once(':') {
+        Some((host, port_str)) => match port_str.parse::<u16>() {
+            Ok(port) => Some((scheme, host, port)),
+            Err(_) => Some((scheme, rest, default_port)), // not a real port (e.g. an IPv6 host's own ':') -- treat the whole thing as host
+        },
+        None => Some((scheme, rest, default_port)),
+    }
+}
+
+fn origins_match(a: &str, b: &str) -> bool {
+    match (parse_origin(a), parse_origin(b)) {
+        (Some(pa), Some(pb)) => pa == pb,
+        _ => a == b, // either side failed to parse -- fall back to the old literal comparison rather than silently matching nothing
+    }
+}
+
 fn cors_headers_for(req: &http::Request, config: &ServeConfig) -> Vec<(String, String)> {
     let Some(origin) = req.header("origin") else { return Vec::new() };
-    if !config.allowed_origins.iter().any(|o| o == origin) {
+    if !config.allowed_origins.iter().any(|o| origins_match(o, origin)) {
         return Vec::new();
     }
     vec![
@@ -392,13 +711,19 @@ fn cors_preflight_response(req: &http::Request, config: &ServeConfig) -> http::R
         headers.push(("Access-Control-Allow-Methods".to_string(), "GET, POST, OPTIONS".to_string()));
         headers.push(("Access-Control-Allow-Headers".to_string(), "Content-Type, Authorization, X-Requested-With".to_string()));
     }
-    http::Response { status: 204, body: Vec::new(), headers, cookie: None }
+    http::Response { status: 204, content_type: "text/plain", body: Vec::new(), headers, cookie: None }
 }
 
 fn metrics_response(req: &http::Request, config: &ServeConfig) -> http::Response {
     match &config.metrics_token {
         Some(token) => {
-            let ok = req.header("authorization").map(|h| h == format!("Bearer {token}")).unwrap_or(false);
+            // Red-team report A20: plain `==` on the full `Bearer <token>`
+            // string is a real timing oracle against `/metrics` for a
+            // short or guessable token -- `constant_time_eq` is the same
+            // function `kernel::identity`'s own API-key validation
+            // already uses for exactly this reason.
+            let expected = format!("Bearer {token}");
+            let ok = req.header("authorization").map(|h| constant_time_eq(h.as_bytes(), expected.as_bytes())).unwrap_or(false);
             if !ok {
                 return http::Response::error(401, "unauthorized");
             }

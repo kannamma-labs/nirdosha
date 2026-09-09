@@ -34,6 +34,15 @@ A report that a *documented, disclosed* limitation is exploitable is
 still useful — please file it — but it's triaged differently from a
 violation of a claim the project actually makes.
 
+Three specific things the project does **not** currently claim, named
+here so a report against them is triaged as a known gap rather than a
+new finding: `&` references have no `&mut`-style liveness/exclusivity
+enforcement beyond "the referent isn't already moved" (only `box`'s
+affine tracking is fully enforced — see `ownership.rs`'s own doc
+comment); there is no built-in audit-trail feature; and the built-in
+crypto (`hmac`/`sha2`/`ring`) is standard RustCrypto, not a NIST
+CMVP-validated module, so FIPS 140-3 is not met.
+
 **2026-09 — there is no compiled serving mode.** The interpreter and
 `serve.rs` were deleted entirely (`docs/API_TRUST_MODEL.md` §4a); there
 is no `nirdosha serve` subcommand. `db`/`json`/`mq`/`transact`/`sandbox`

@@ -5,14 +5,15 @@
   No GC. No data races. No deadlocks. No buffer overflow. <i>Proven at build time — not promised, not tested.</i>
 </p>
 
-<p align="center">
-  <a href="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml"><img src="https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml/badge.svg" alt="build"/></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"/></a>
-  <a href="https://github.com/kannamma-labs/nirdosha/wiki"><img src="https://img.shields.io/badge/docs-wiki-blue" alt="Wiki"/></a>
-  <a href="./docs/PUBLIC_ROADMAP.md"><img src="https://img.shields.io/badge/ROADMAP-view-purple" alt="Roadmap"/></a>
-  <a href="./MAINTAINERS.md"><img src="https://img.shields.io/badge/maintainers-5-green" alt="Maintainers"/></a>
-  <a href="https://github.com/sponsors/arunsoman"><img src="https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa" alt="Sponsor"/></a>
-</p>
+[![build](https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml/badge.svg)](https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Wiki](https://img.shields.io/badge/docs-wiki-blue)](https://github.com/kannamma-labs/nirdosha/wiki)
+[![Contributing](https://img.shields.io/badge/CONTRIBUTING-read-blue)](./CONTRIBUTING.md)
+[![Governance](https://img.shields.io/badge/GOVERNANCE-read-blue)](./GOVERNANCE.md)
+[![Roadmap](https://img.shields.io/badge/ROADMAP-view-purple)](./docs/PUBLIC_ROADMAP.md)
+[![Maintainers](https://img.shields.io/badge/maintainers-5-green)](./MAINTAINERS.md)
+[![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/arunsoman)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)
 
 ![A themed dashboard with live SQLite data, a sortable/searchable table, and a role-gated approval action — the same screen under a lower-privileged identity, with a field dropped and an action disabled](./demo.gif)
 
@@ -80,6 +81,8 @@ The result: an HR staffer who isn't also an admin can call the function and get 
 
 `effect(pure)` is checked against what the function *actually does* — annotate a function that performs I/O as `pure` and `nirdosha build` rejects it, naming the real effect it found. `nfr(latency_ms: 50, concurrency_max: 1000)` wires real per-call tracking into the APM kernel with zero code at any call site, and escalates to `NIRDOSHA_OBSERVABILITY_URL` automatically if one is configured. The full file also carries a `validate` block with a genuine Z3-proven post-condition — `tenure_bonus_pct`'s `result` provably stays in `[0, 20]` for *every* possible input, not just the ones a test tries. Flip that bound to something false and `nirdosha build` fails outright, naming a real counterexample. Full runnable source: [`examples/features/50_field_masking_and_check_role.nir`](./examples/features/50_field_masking_and_check_role.nir).
 
+**What these guarantees do *not* cover:** `&` references are typechecked but have no `&mut`-style liveness/exclusivity enforcement beyond "the referent isn't already moved" — a Rust-style borrow checker doesn't exist yet (only `box`'s affine tracking is fully enforced). There's no built-in audit-trail feature (PCI DSS requirement 10 would need one built at the application layer). And the built-in crypto (`hmac`/`sha2`/`ring`) is standard RustCrypto, not a NIST CMVP-validated module, so FIPS 140-3 compliance is not a claim this project makes.
+
 </details>
 
 <details>
@@ -137,7 +140,30 @@ Full comparison in the [wiki](https://github.com/kannamma-labs/nirdosha/wiki/Nir
 <details>
 <summary><b>📦 Install (binaries, from source, or Codespaces)</b></summary>
 
-Prebuilt binaries for **Linux, Windows, and Apple Silicon macOS** on every [release](https://github.com/kannamma-labs/nirdosha/releases):
+**No local toolchain at all?** Click
+[**Open in GitHub Codespaces**](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)
+— it builds the compiler for you (system Z3, ~1 min) and drops you into a
+VS Code shell in the browser with everything already checked out. From
+there:
+
+```sh
+cd crates/compiler
+cargo run -- ../../examples/syntax/hello_nir.nir
+cargo run -- serve ../../examples/syntax/06_identity_and_declarative_ui.nir --port 8080   # open via the Ports tab
+```
+
+**Don't want to learn the syntax first?** Paste
+[`agent-skills/nirdosha/paste-anywhere-prompt.md`](./agent-skills/nirdosha/paste-anywhere-prompt.md)
+into any LLM chat and describe what you want in plain English — it writes
+the `.nir` code for you. This prompt has already been used, unmodified, to
+generate a working e-commerce store, a food-delivery platform, a telecom
+revenue-assurance system, and an online trading platform, each hundreds of
+lines, each by an LLM with no prior Nirdosha exposure. See
+[LLM Integration](https://github.com/kannamma-labs/nirdosha/wiki/LLM-Integration)
+for the full mechanism and evidence.
+
+**Install and run it yourself — no compiler needed, prebuilt binaries are
+published on every [release](https://github.com/kannamma-labs/nirdosha/releases):**
 
 ```sh
 # macOS / Linux — installer script, auto-detects your platform

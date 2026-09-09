@@ -238,6 +238,17 @@ fn db_pool_config() -> PoolConfig {
     if cfg.max_size < 1000 {
         cfg.max_size = 1000;
     }
+    // Red-team report A12 (`scratch/red-team-report-main-d7fae42.md`):
+    // the unconditional floor-to-1000 above ignored an operator's own
+    // smaller `NIRDOSHA_KERNEL_MAX_DB` -- `plugin_pool_config`
+    // (`plugin_provider.rs`) already clamps *down* to a provider's
+    // ceiling; this floor-to-1000 clamped back *up* past it, so a
+    // deliberately small `db` ceiling silently stopped being "the
+    // choke point" (the RFC's own claim) the moment the pool itself
+    // became the tighter constraint instead. Never let `max_size`
+    // exceed the domain's own resolved ceiling, regardless of the
+    // 1000-floor above.
+    pool::clamp_max_size_to_ceiling(&mut cfg, super::ceiling_for(super::domain::db()));
     cfg
 }
 
@@ -248,18 +259,21 @@ fn db_pool_config() -> PoolConfig {
 /// review): the default budget now covers connect *plus* the mandatory
 /// `SELECT 1` above, not connect alone.
 ///
-/// **This function itself never calls `kernel::acquire`/`release`** —
-/// don't mistake that for the `db` domain's ceiling being unenforced.
-/// The admission gate lives one layer up, around this function's only
-/// two callers: `lib.rs`'s `nir_db_connect` (`kernel::acquire(domain::db())`
-/// before calling this, released on error) and `nir_db_stop`
-/// (`kernel::release(domain::db())` on handle close) — the
-/// connect-to-stop session lifecycle is bracketed there, not here,
-/// because the affine `db` handle (and thus the session's true end) is
-/// a `HandleTable` concept `lib.rs` owns, not something this module
-/// tracks. A grep of this file alone for `acquire` will find nothing;
-/// check `lib.rs`'s `nir_db_connect`/`nir_db_stop` before concluding the
-/// ceiling is decorative.
+/// **This function itself calls `kernel::acquire(domain::db())` at its
+/// own start** (red-team report A8, `scratch/red-team-report-main-d7fae42.md`
+/// — a future third caller of this function could otherwise forget to
+/// bracket admission itself; making `connect` self-contained closes
+/// that hazard structurally instead of relying on every caller to
+/// remember). A successful `Ok(_)` return here holds exactly one
+/// `domain::db()` admission slot that the caller now owns and must
+/// release exactly once, when this connection's session ends — `lib.rs`'s
+/// `nir_db_stop` (`kernel::release(domain::db())` on handle close) is
+/// that release point today; the connect-to-stop *session* lifecycle
+/// still lives at the caller's own `HandleTable`, since the affine `db`
+/// handle (and thus the session's true end) is a concept `lib.rs` owns,
+/// not something this module tracks. Every `Err(_)` return path below
+/// releases its own admission before returning — a failed connect
+/// attempt is fully self-contained, nothing for the caller to release.
 /// RFC 0011 §2 step 1: "check built-in schemes first... if none match,"
 /// fall through to the plugin provider table. `lib.rs`'s `nir_db_connect`
 /// needs this *before* it can decide which domain to
@@ -274,6 +288,19 @@ pub fn is_builtin_scheme(conn_str: &str) -> bool {
 }
 
 pub fn connect(conn_str: &str) -> Result<DbConn, String> {
+    if !super::acquire(super::domain::db()) {
+        return Err("too many open db connections".to_string());
+    }
+    match connect_inner(conn_str) {
+        Ok(conn) => Ok(conn),
+        Err(e) => {
+            super::release(super::domain::db());
+            Err(e)
+        }
+    }
+}
+
+fn connect_inner(conn_str: &str) -> Result<DbConn, String> {
     if conn_str.starts_with("postgres://") || conn_str.starts_with("postgresql://") {
         let pool = postgres_pool_registry().get_or_create(conn_str, db_pool_config(), || build_postgres_manager(conn_str))?;
         let conn = pool.get().map_err(|e| e.to_string())?;
@@ -375,24 +402,65 @@ impl postgres::types::ToSql for PgBindValue {
     /// 8-byte `int8` wire value against an `INTEGER` (`int4`) column is
     /// a real wire-format mismatch, not a hypothetical one -- this is
     /// exactly the failure this match was added to fix.
+    /// Red-team report A18 (`scratch/red-team-report-main-d7fae42.md`):
+    /// the old `_ => v.to_sql(ty, out)` fallback branches called the
+    /// inner `i64`/`f64` value's own `to_sql` directly (not
+    /// `to_sql_checked`, which is the only place `postgres-types`
+    /// itself would have run an `accepts` check) — for a column type
+    /// this match doesn't explicitly recognize (`NUMERIC`, `MONEY`,
+    /// `DATE`, ...), that meant unconditionally writing `i64`/`f64`'s
+    /// own wire encoding (a fixed-width binary integer/float) against a
+    /// column whose real wire format is completely different (`NUMERIC`
+    /// is a variable-length base-10000-digit structure, nothing like a
+    /// raw `i64`) — not a hypothetical mismatch, a real wrong-bytes-on-
+    /// the-wire risk. Every arm below is now an explicit, individually
+    /// verified match; anything not recognized is a clean, named `Err`
+    /// instead of a best-effort encode into a format that might not
+    /// even be validated server-side before being stored.
     fn to_sql(&self, ty: &postgres::types::Type, out: &mut postgres::types::private::BytesMut) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
         match self {
             PgBindValue::I64(v) => match *ty {
                 postgres::types::Type::INT2 => (*v as i16).to_sql(ty, out),
                 postgres::types::Type::INT4 => (*v as i32).to_sql(ty, out),
-                _ => v.to_sql(ty, out),
+                postgres::types::Type::INT8 => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind an i64 value against Postgres column type {ty} -- only int2/int4/int8 are supported").into()),
             },
             PgBindValue::F64(v) => match *ty {
                 postgres::types::Type::FLOAT4 => (*v as f32).to_sql(ty, out),
-                _ => v.to_sql(ty, out),
+                postgres::types::Type::FLOAT8 => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind an f64 value against Postgres column type {ty} -- only float4/float8 are supported").into()),
             },
-            PgBindValue::Str(v) => v.to_sql(ty, out),
-            PgBindValue::Bool(v) => v.to_sql(ty, out),
+            PgBindValue::Str(v) => match *ty {
+                postgres::types::Type::TEXT | postgres::types::Type::VARCHAR | postgres::types::Type::BPCHAR | postgres::types::Type::NAME => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind a str value against Postgres column type {ty} -- only text/varchar/bpchar/name are supported").into()),
+            },
+            PgBindValue::Bool(v) => match *ty {
+                postgres::types::Type::BOOL => v.to_sql(ty, out),
+                _ => Err(format!("nirdosha: cannot bind a bool value against Postgres column type {ty} -- only bool is supported").into()),
+            },
         }
     }
 
-    fn accepts(_ty: &postgres::types::Type) -> bool {
-        true
+    /// Every type each `to_sql` arm above actually accepts, matched
+    /// exactly — `to_sql_checked!()` below calls this *before* `to_sql`,
+    /// so an unsupported type is now rejected at that earlier check too,
+    /// not just inside `to_sql`'s own fallback arms (defense in depth:
+    /// the two must stay in sync, which is exactly what makes this a
+    /// visible, testable invariant rather than an implicit one).
+    fn accepts(ty: &postgres::types::Type) -> bool {
+        matches!(
+            *ty,
+            postgres::types::Type::INT2
+                | postgres::types::Type::INT4
+                | postgres::types::Type::INT8
+                | postgres::types::Type::FLOAT4
+                | postgres::types::Type::FLOAT8
+                | postgres::types::Type::TEXT
+                | postgres::types::Type::VARCHAR
+                | postgres::types::Type::BPCHAR
+                | postgres::types::Type::NAME
+                | postgres::types::Type::BOOL
+        )
     }
 
     postgres::types::to_sql_checked!();
@@ -435,6 +503,49 @@ pub fn pg_row_to_json(row: &postgres::Row) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Red-team report A18: `PgBindValue::accepts` must recognize every
+    /// type each `to_sql` arm actually handles (INT2/INT4/INT8,
+    /// FLOAT4/FLOAT8, TEXT/VARCHAR/BPCHAR/NAME, BOOL) and reject
+    /// anything else, including plausible-looking numeric types this
+    /// codebase deliberately does not claim to support yet (NUMERIC,
+    /// MONEY) -- a pure function, no live Postgres connection needed.
+    #[test]
+    fn pg_bind_value_accepts_only_the_explicitly_supported_types() {
+        use postgres::types::{ToSql, Type};
+        assert!(PgBindValue::accepts(&Type::INT2));
+        assert!(PgBindValue::accepts(&Type::INT4));
+        assert!(PgBindValue::accepts(&Type::INT8));
+        assert!(PgBindValue::accepts(&Type::FLOAT4));
+        assert!(PgBindValue::accepts(&Type::FLOAT8));
+        assert!(PgBindValue::accepts(&Type::TEXT));
+        assert!(PgBindValue::accepts(&Type::VARCHAR));
+        assert!(PgBindValue::accepts(&Type::BPCHAR));
+        assert!(PgBindValue::accepts(&Type::NAME));
+        assert!(PgBindValue::accepts(&Type::BOOL));
+
+        assert!(!PgBindValue::accepts(&Type::NUMERIC), "NUMERIC's wire format is nothing like a raw i64/f64 -- must not be silently accepted");
+        assert!(!PgBindValue::accepts(&Type::MONEY));
+        assert!(!PgBindValue::accepts(&Type::DATE));
+        assert!(!PgBindValue::accepts(&Type::TIMESTAMP));
+        assert!(!PgBindValue::accepts(&Type::JSON));
+    }
+
+    /// The other half of A18: an explicitly-unsupported type must fail
+    /// with a clean, named `Err` from `to_sql` itself too, not just from
+    /// `accepts` -- both are checked separately by design (this file's
+    /// own doc comment on `accepts`).
+    #[test]
+    fn pg_bind_value_to_sql_rejects_an_unsupported_type_with_a_named_error() {
+        use postgres::types::{ToSql, Type};
+        let mut out = postgres::types::private::BytesMut::new();
+        let result = PgBindValue::I64(42).to_sql(&Type::NUMERIC, &mut out);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("binding an i64 against NUMERIC must be a clean Err, not a wrong-bytes-on-the-wire encode"),
+        };
+        assert!(err.to_string().contains("numeric"), "error should name the offending type: {err}");
+    }
 
     #[test]
     fn rewrite_placeholders_counts_positionally() {

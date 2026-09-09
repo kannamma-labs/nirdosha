@@ -358,13 +358,34 @@ struct DomainCounters {
     /// just stays honestly zero" posture `held`/`grants`/`denials`
     /// already have for a domain that never denies anything.
     stale_rehydrated: AtomicU64,
+    /// Unix seconds of the most recent [`record_stale_rehydrated`] call
+    /// for this domain, `0` meaning "never" — red-team report A13
+    /// (`scratch/red-team-report-main-d7fae42.md`): `stale_rehydrated`
+    /// alone can't distinguish "the pool is healthy, one connection went
+    /// stale a month ago" from "every connection just went stale at
+    /// once" (e.g. a server restart, a network partition) — both look
+    /// identical as a raw incrementing count. A last-seen timestamp,
+    /// surfaced alongside the count in [`dump_report`], answers *when*,
+    /// not just *how many*.
+    last_stale_rehydrated_at: AtomicI64,
     max: OnceLock<i64>,
 }
 
 impl DomainCounters {
     const fn new() -> Self {
-        DomainCounters { held: AtomicI64::new(0), grants: AtomicU64::new(0), denials: AtomicU64::new(0), stale_rehydrated: AtomicU64::new(0), max: OnceLock::new() }
+        DomainCounters {
+            held: AtomicI64::new(0),
+            grants: AtomicU64::new(0),
+            denials: AtomicU64::new(0),
+            stale_rehydrated: AtomicU64::new(0),
+            last_stale_rehydrated_at: AtomicI64::new(0),
+            max: OnceLock::new(),
+        }
     }
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Records one pooled checkout that had to evict a stale connection and
@@ -374,7 +395,16 @@ impl DomainCounters {
 /// is a pool-level event, not an admission decision — a rehydrated
 /// checkout still went through a real `acquire` either way.
 pub fn record_stale_rehydrated(domain: DomainId) {
-    counters_for(domain).stale_rehydrated.fetch_add(1, Ordering::Relaxed);
+    let counters = counters_for(domain);
+    counters.stale_rehydrated.fetch_add(1, Ordering::Relaxed);
+    counters.last_stale_rehydrated_at.store(now_unix_secs(), Ordering::Relaxed);
+}
+
+/// `0` if [`record_stale_rehydrated`] has never fired for `domain`,
+/// otherwise the unix-seconds timestamp of its most recent call — see
+/// [`DomainCounters::last_stale_rehydrated_at`]'s own doc comment.
+pub fn last_stale_rehydrated_at(domain: DomainId) -> i64 {
+    counters_for(domain).last_stale_rehydrated_at.load(Ordering::Relaxed)
 }
 
 /// Every domain's counters, indexed directly by [`DomainId`] — the open-
@@ -481,7 +511,16 @@ pub fn dump_report() -> String {
     let mut out = String::from("nirdosha kernel flight recorder:\n");
     for (id, name) in registered_domains() {
         let (held, grants, denials, stale_rehydrated) = stats(id);
-        out.push_str(&format!("  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated}\n"));
+        // `last_stale_rehydrated_at` (red-team report A13) appended
+        // after `stale_rehydrated`, not replacing it — existing
+        // consumers asserting on `held=...`/`grants=...`/`denials=...`/
+        // `stale_rehydrated=...` substrings (this module's own
+        // regression tests, `nirdosha_ops_console.rs`) match a prefix of
+        // this line, unaffected by trailing fields.
+        let last_stale = last_stale_rehydrated_at(id);
+        out.push_str(&format!(
+            "  {name}: held={held} grants={grants} denials={denials} stale_rehydrated={stale_rehydrated} last_stale_rehydrated_at={last_stale}\n"
+        ));
     }
     // RFC 0011 §5: "a broken reaper is a visible number going up, not a
     // silent absence" — appended as a trailing line, not folded into the
@@ -490,6 +529,13 @@ pub fn dump_report() -> String {
     // module's own regression tests, `nirdosha_ops_console.rs`) are
     // unaffected by this new line's presence.
     out.push_str(&format!("  reaper_panics={}\n", reaper::reaper_panics()));
+    // Red-team report A9: the reaper's actually-in-effect interval
+    // (post floor/soft-ceiling resolution), so a misconfiguration that
+    // used to be visible only via a stderr `eprintln!` at startup is
+    // queryable post-incident too. `0` means the reaper hasn't started
+    // in this process yet (see `reaper::reaper_configured_interval_secs`'s
+    // own doc comment).
+    out.push_str(&format!("  reaper_interval_secs={}\n", reaper::reaper_configured_interval_secs()));
     out
 }
 
@@ -716,10 +762,41 @@ fn register_wait_and_check_stall() -> (bool, usize) {
 /// `codegen.rs`'s `guard_io_ok`/`guard_recv_ok`), extended here to a
 /// failure kind only this runtime kernel, not generated LLVM IR, can
 /// actually observe.
+/// Guards the print-and-abort sequence below against a real, observed
+/// race (a CI failure on `build-macos`, not a hypothetical): `STALL`'s
+/// lock is only held for the `blocked >= live` check itself
+/// (`register_wait_and_check_stall`), released well before this
+/// function's `eprintln!`/`process::abort()` actually run. If a thread's
+/// wait ends (`concurrency_wait_end`) and it immediately begins a *new*
+/// one before the first detector's `abort()` has actually taken effect
+/// — `eprintln!`, a real syscall, is not instantaneous — that second
+/// `concurrency_wait_begin` call can independently cross the same
+/// `blocked >= live` threshold a second time and race this same branch,
+/// printing its own, by-then-stale snapshot of `waiting_registry`
+/// (observed on CI: the same thread id reported against two different
+/// channel handles across two separate printed reports, since its wait
+/// target had already changed between them) before the *first* thread's
+/// `abort()` actually terminates the process. Only the thread that wins
+/// this compare-exchange gets to print and abort; a losing thread parks
+/// briefly instead of racing to print a second, possibly-inconsistent
+/// report — the winner's `abort()` will end the process very shortly
+/// either way, so there's nothing else useful for the loser to do.
+static DEADLOCK_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn concurrency_wait_begin(target: WaitTarget) {
     waiting_registry().lock().unwrap().insert(std::thread::current().id(), target);
     let (deadlocked, live) = register_wait_and_check_stall();
     if deadlocked {
+        if DEADLOCK_REPORTED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            // Another thread already won the race to report and abort —
+            // park here rather than exit this function normally (which
+            // would let generated code proceed as if nothing were
+            // wrong); the winner's `abort()` ends the whole process
+            // imminently.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
         let mut lines: Vec<String> =
             waiting_registry().lock().unwrap().iter().map(|(tid, target)| format!("  {tid:?} is blocked in {target}")).collect();
         lines.sort();

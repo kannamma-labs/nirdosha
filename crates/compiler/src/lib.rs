@@ -4,6 +4,7 @@ pub mod contract_check;
 pub mod crud_gen;
 pub mod effects;
 pub mod extraction_schema;
+pub mod hi;
 pub mod init;
 pub mod loader;
 pub mod migrate;

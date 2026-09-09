@@ -492,6 +492,31 @@ registering `<shape>_provider_<scheme>_connect` without matching `_op`/
 `_close`/`_is_valid` (§5) for the same prefix fails the build
 immediately, naming the missing function — not a runtime surprise.
 
+**`_op`'s bind-value narrowing is a runtime error today, not a
+compile-time one — disclosed here, not silently left as a gap someone
+has to rediscover.** `db_query`/`db_execute` against a plugin-routed
+connection reject any non-empty bind-value array (`kernel::
+plugin_provider::op`'s own `binds_present` check) with a named error at
+request time, since `_op`'s pinned ABI (§5) is a single `str` in, `str`
+out — there is no bind-value channel across the plugin boundary for
+this phase to route through. A genuine static (typeck-time) diagnostic
+for this would need either a refined `db` handle type distinguishing
+plugin-routed handles from built-in ones (a real type-system addition,
+out of scope here), or a narrower dataflow check tracing a `Ty::Db`
+value back to the specific `db_connect(...)` call that produced it
+(machinery `typeck.rs` doesn't have today) — both bigger than this
+phase's scope, so the check stays runtime-only for now. **The blast
+radius is smaller than it might look**: `docs/LANGUAGE.md` §2's `str`
+has no concatenation, slicing beyond `str_slice`'s fixed bounds
+primitive, or interpolation of any kind — there is no way to build a
+dynamic SQL string in `.nir` source by splicing a runtime value into it
+at all, with or without this restriction, which is precisely why binds
+are "the *only* way to parameterize a query" in the first place (§5's
+`_op` doc comment, `typeck.rs`'s own `db_query` entry). So a plugin
+provider that rejects binds doesn't newly expose a concatenation-based
+injection path — a caller who wants to react to it defensively today
+still gets a clean, named `Err`, not a silent drop or a trap.
+
 **The `call` shape's contract was incoherent in the previous draft, and
 it's the shape most exposed to abuse — fixed, not just patched.** The
 previous draft gave `call` three functions (`_request`/`_is_valid`/
@@ -788,7 +813,14 @@ second call site.
 ### 5. Proactive rehydration: a bounded sweep that never touches the hot path
 
 Every registered domain that's pool-backed also registers a
-`PoolRegistry<M>` (§ `pool.rs`, unchanged) keyed by provider. A new
+`PoolRegistry<M>` (§ `pool.rs`, unchanged) keyed by provider —
+**lazily, on that pool's first real use, not eagerly at every domain's
+registration time** (red-team report A29, `scratch/red-team-report-
+main-d7fae42.md`: this sentence's own phrasing read as implying eager
+registration; `pool::register_for_reaping`'s own `Once`-guarded call
+site, next to each pool's own accessor function, is what actually makes
+it lazy — an idle compiled program that never opens a `db`/`http`/
+plugin connection registers zero pools with the reaper). A new
 `kernel::reaper` module realizes its periodic wake using
 `kernel::thread_pool::ThreadPool` **as it actually exists**, verified
 against the real API (`submit(self: &Arc<Self>, job: Job) ->
