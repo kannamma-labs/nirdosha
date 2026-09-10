@@ -264,12 +264,17 @@ layer before the next:
 
 ## Locked design 2: file I/O
 
-**Status: Layer 1 shipped (21 Aug 2026).** `open`/`send`/`recv`/`stop` on
-`file` are real, tested (`crates/compiler/tests/file_io.rs`), and interpreter-only
-per the layering below — `"r"`/`"w"`/`"a"` modes, no `mmap`, no
-directories, no `read_line()` yet. `examples/file_io.nir` is the
-worked example. Everything from "Rollout layers" layer 2 onward is still
-future work.
+**Status: Layer 1 shipped (21 Aug 2026, interpreter-only at first),
+compiled backend shipped 2026-09-05.** `open`/`send`/`recv`/`stop` on
+`file` are real, tested, and now real *native code* too —
+`nir_file_open`/`_write`/`_read`/`_stop` (the same "declare + link a
+staticlib" pattern `tcp` already established) — `"r"`/`"w"`/`"a"`
+modes, no `mmap`, no directories, no `read_line()` yet.
+`examples/features/24_file_io.nir` is the worked example, verified end
+to end as a real compiled binary (write, append, read-to-EOF).
+Everything from "Rollout layers" layer 2 through 4 below is still
+future work; layer 5 (compiled backend) is done, not future work —
+see that layer's own note below.
 
 ### What it brings to the table
 
@@ -368,10 +373,16 @@ named here so it isn't lost.
    need `fsync` control.
 4. **Directories, temp files** (`std_io` §3.4, §3.6) — their own layer,
    after plain files are proven, same discipline as everything above.
-5. **Compiled backend is out of scope until the interpreter version is
-   proven** — `file` joins `box`/`thread`/`chan`/`sandbox`/`tcp` on the
-   "interpreter-only, rejected not mis-compiled" list (`docs/LANGUAGE.md` §10),
-   not an exception to it.
+5. **Compiled backend: done, 2026-09-05**, once the interpreter version
+   had been proven per this layer's own original sequencing — `file`
+   joined `box`/`thread`/`chan`/`tcp` on the real-native-codegen list
+   (`docs/LANGUAGE.md` §10), the same "declare + link a staticlib"
+   pattern `tcp` already used (`nir_file_open`/`_write`/`_read`/
+   `_stop`). `sandbox` is the one item from that original list still
+   interpreter-only in spirit and, with the interpreter itself now
+   deleted, not runnable in any form — explicitly descoped from v1
+   (`docs/PUBLIC_ROADMAP.md` Track B), a separate decision from `file`'s
+   own status here.
 
 ---
 

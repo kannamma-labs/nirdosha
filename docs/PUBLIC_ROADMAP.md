@@ -104,33 +104,54 @@ compiled, no interpreter involved at any point)
   distinct compiled functions by a plain `.nir` `if`/`else if` chain, no
   new language construct. GET-only, no `Content-Length`/POST body
   support — see `examples/features/51_compiled_serve.nir`, real-`curl`-
-  verified.
+  verified. This was the first cut, kept as a worked example, not the
+  final word: a full production HTTP engine (real `POST`/body parsing,
+  CORS, keep-alive, rate limiting) landed as a 2026-09 follow-up behind
+  `nirdosha build --serve` — see B8 under "In progress / next" below.
 
 **Backend/services**
-- [PARTIAL] `db` (SQLite) + `json` — 2026-09: real, both compiled —
-  `db_connect`/`db_query`/`db_execute` (`rusqlite`, bundled) and all 9
-  `json_*` accessors, `examples/features/27_database.nir` verified
-  end to end against a real SQLite database. Postgres (layer 2) and a
-  zero-payload `enum` bind value aren't compiled yet.
+- [PARTIAL] `db` (SQLite + Postgres) + `json` — 2026-09: real, both
+  compiled — `db_connect`/`db_query`/`db_execute` and all 9 `json_*`
+  accessors, `examples/features/27_database.nir` verified end to end
+  against a real SQLite database. Postgres landed as a 2026-09
+  follow-up too — real, pooled (`kernel::pool::PoolRegistry`, `:memory:`
+  deliberately unpooled), vendored-TLS connections (`docs/adr/0005`).
+  Still open: a zero-payload `enum` bind value isn't compiled yet, and
+  `BLOB` columns come back as JSON `null` (no `bytes` type to carry
+  them).
 - [DONE] `http`/`https` + `mq` (Redis) — 2026-09: real, both compiled —
   `http_get`/`http_post`/`https_get`/`https_post` (vendored OpenSSL,
-  chunked-transfer-encoding decoding) and `mq_connect`/`mq_publish`/
-  `mq_consume`, both verified end to end against real servers.
-- [PARTIAL] Identity — 2026-09: OIDC/JWT validation (`oidc_validate_token`)
-  and claim extraction (`extract_claim`) are now real too — real
-  `jsonwebtoken`-backed signature verification against a static JWKS
-  (live rotation/refresh still open), same `check_role` +
-  `requires(role/claim:...)`/`acquire` machinery already compiled — see
-  the identity section above. Still [NOT RUNNABLE]: dotted-path claim
-  lookup, an admin-editable role-mapping cache (IdP role names → app
-  role names), sessions/refresh tokens/revocation/API-key validation.
-- [PARTIAL] `transact` — 2026-09: Layer 1 real and compiled
+  chunked-transfer-encoding decoding, real keep-alive + pooling,
+  `docs/adr/0006`) and `mq_connect`/`mq_publish`/`mq_consume`, both
+  verified end to end against real servers.
+- [DONE] Identity — 2026-09: OIDC/JWT validation (`oidc_validate_token`)
+  and claim extraction (`extract_claim`) are real — `jsonwebtoken`-
+  backed signature verification against a static JWKS (live
+  rotation/refresh still open), same `check_role` +
+  `requires(role/claim:...)`/`acquire` machinery already compiled. The
+  rest of Row 12 shipped as a 2026-09 follow-up (`docs/adr/0007`): real
+  dotted-path claim lookup (`check_role_path`/`extract_claim_path`),
+  real unpredictable session ids, real server-side single-use
+  refresh-token redemption, fail-open revocation, and constant-time
+  API-key validation — see the identity section above. Still open: an
+  admin-editable role-mapping cache (IdP role names → app role names).
+- [DONE] `transact` — 2026-09: Layer 1 real and compiled
   (`precheck?/network/verify/commit/compensate?/log?`, a real `bool`
-  result). `network`'s `retry`/`timeout` are an architectural gap in the
-  compiled trap model, not a deferred nicety (a compiled trap is an
-  unconditional abort — see the identity section's own note on why
-  compiled traps can't be caught). Still [NOT RUNNABLE]: the durability
-  log (WAL), crash replay, `commit`/`compensate`'s own retry-with-backoff.
+  result), plus a real fsync'd WAL-mode SQLite durability log, compiler-
+  synthesized crash replay dispatched from generated `main`'s own
+  prologue, and bounded retry-with-backoff for `commit`/`compensate`
+  when their return type is `Result(_, _)` — verified against real
+  compiled binaries, including running the same binary twice as two
+  separate OS processes sharing one durability log to prove replay
+  actually recovers a row a prior process left `commit_pending` after
+  exhausting its own retry budget (`docs/adr/0009`). `network`'s own
+  `retry`/`timeout` stay a real architectural gap in the compiled trap
+  model, not a deferred nicety (a compiled trap is an unconditional
+  abort — see the identity section's own note on why compiled traps
+  can't be caught). Two disclosed, deliberate narrowings, not silent
+  gaps: replay dispatch has no build-version fingerprint guard yet, and
+  the durability log is local-SQLite only, unsafe under this repo's own
+  multi-replica deployment overlay.
 - [PARTIAL] `workflow` — 2026-09: Layer 1 real and compiled — durable
   state machines (`start_*`/`advance_*`, `on_entry`/`on_exit`, ordinary
   transitions, `terminal` states), `send_email`/`send_sms`/`send_push`/
@@ -210,10 +231,18 @@ runs behind it.
 **Track A — Production readiness** (2026-09: this track's own "gates
 building critical apps on the interpreted path" framing is moot — the
 interpreter is gone, so there's no interpreted path left to gate
-anything on. Kept for now as a record of open production-hardening
-work that would matter again if/when a compiled `serve` (Track B8)
-exists to need it.)
-- [OPEN] `transact` durability under real kill-mid-transaction conditions
+anything on. A compiled `serve` (Track B8) now exists, so the items
+below are live production-hardening work again, not a record kept for
+a hypothetical future.)
+- [DONE] `transact` durability under a real crash-shaped condition —
+  `crates/compiler/tests/codegen.rs`'s
+  `transact_replay_finishes_a_commit_pending_row_left_by_a_prior_process`
+  runs the same compiled binary twice as two separate OS processes
+  sharing one durability log: the first exhausts its retry budget and
+  leaves a row `commit_pending`, the second's own `main` prologue
+  replays and finishes it before that second process's own body ever
+  runs (`docs/adr/0009`). Not a literal `SIGKILL` mid-write — a real,
+  disclosed narrower verification, not overclaimed as one.
 - [OPEN] A deployment story for a *compiled* `serve` (containerization,
   secrets/JWKS handling) — `nirdosha serve` itself no longer exists
 - [PARTIAL] Observability — a local OTel-shaped tracer exists; wiring
@@ -230,22 +259,31 @@ exists to need it.)
   upstream incompatibility); revisit once a fixed `z3`/`z3-src` release
   ships
 
-**Track B — Full compilation** (`http`/`mq`/`transact`/sandboxing/the
-rest of identity have no codegen yet and, with the interpreter gone,
-don't run in any form; native codegen covers the numeric/control-flow
-subset, `tcp`/`tcp_listener`, `file`, scalar-only native plugin calls,
-`dec128` arithmetic, basic concurrency — `thread`/`spawn`/`join`,
-`chan`/`send`/`recv`, `froze` — and, as of 2026-09, `check_role`,
-field- and function-level `requires(...)`/`acquire`, `nfr(...)`, a
-minimal compiled `serve` mode, three new string primitives
+**Track B — Full compilation** (sandboxing (B6) is the one item left
+with no codegen at all, and with the interpreter gone doesn't run in
+any form — everything else this track originally scoped now has real
+codegen: the numeric/control-flow subset, `tcp`/`tcp_listener`, `file`,
+scalar-only native plugin calls, `dec128` arithmetic, basic concurrency
+— `thread`/`spawn`/`join`, `chan`/`send`/`recv`, `froze` — `check_role`,
+field- and function-level `requires(...)`/`acquire`, `nfr(...)`, a real
+compiled `serve` engine (RFC 0010's route-exposure model wired to a
+full HTTP server, not just the minimal hand-rolled one), the three
+string primitives that minimal server first needed
 (`str_index_of`/`str_slice`, `len(str)`), real JWT/OIDC identity
-verification, and `db`(SQLite)/`json` — see the identity section under
-"Shipped" above and B2/B8 below)
+verification plus the rest of Row 12 (sessions/refresh/revocation/API
+keys), `db` (SQLite + Postgres)/`json`, `mq`, `http`/`https`, and
+`transact` including its durability log and crash replay — see the
+identity section under "Shipped" above and B1/B2/B3/B5/B8 below)
 - [DONE] `file` (`open`/`send`/`recv`/`stop`) — linked `nir_file_*`
   kernels, the same "declare + link a staticlib" pattern `tcp` already
-  used; `examples/file_io.nir` compiles and runs as a native binary
-  unchanged, verified against the interpreter's own output
-  (`crates/compiler/tests/codegen.rs`)
+  used; `examples/features/24_file_io.nir` compiles and runs as a real
+  native binary (real writes, real append, real read-to-EOF). Shipped
+  2026-09-05 with no automated regression test at all — closed this
+  session: `crates/compiler/tests/codegen.rs`'s
+  `compiled_file_open_write_append_read_round_trips_real_bytes_on_disk`
+  compiles and runs the same program, then reads the file back off disk
+  independently to confirm the compiled binary actually wrote it, not
+  just that it exited `0`.
 - [DONE] Basic concurrency — `thread`/`spawn`/`join`, `chan`/`send`/
   `recv` (2026-09), plus RFC 0006 Pillar 1's `froze`. Contrary to this
   section's own earlier framing below ("not a kernel to link"), it
@@ -283,14 +321,21 @@ verification, and `db`(SQLite)/`json` — see the identity section under
   codebase's other fallible builtins, present failure a different way)
   — a real, deliberately deferred design question, not a shortcut;
   cleanly rejected in the meantime.
-- `[PARTIAL]` **B1. `transact` codegen** (2026-09) — Layer 1 real:
+- `[DONE]` **B1. `transact` codegen** (2026-09) — Layer 1 real:
   `precheck?/network/verify/commit/compensate?/log?`, a real `bool`
   result, `examples/features/36_transact.nir` unmodified and verified.
   `network`'s `retry`/`timeout` are architecturally blocked in the
   compiled trap model (a compiled trap is an unconditional abort, and
   `network`'s return type can never be `Result(_, _)`) — rejected
-  explicitly. Durability log, crash replay, `commit`/`compensate`
-  retry-with-backoff remain open.
+  explicitly. A real fsync'd WAL-mode SQLite durability log, compiler-
+  synthesized crash replay from generated `main`'s own prologue, and
+  bounded retry-with-backoff for `commit`/`compensate` when their
+  return type is `Result(_, _)` shipped as a 2026-09 follow-up
+  (`docs/adr/0009`) — see the "Shipped" section's own `transact` entry
+  above for the verification detail. Two disclosed, deliberate
+  narrowings, not silent gaps: no build-version fingerprint guard on
+  replay dispatch yet, and the durability log is local-SQLite only,
+  unsafe under this repo's own multi-replica deployment overlay.
 - `[DONE]` **B9. `sleep_ms` codegen** (2026-09) — a real wall-clock
   sleep; needed for `transact`'s own future backoff work.
 - `[DONE]` **B3. `mq` codegen** (2026-09) — `mq_connect`/`mq_publish`/
@@ -308,20 +353,47 @@ verification, and `db`(SQLite)/`json` — see the identity section under
   update, a filtered `SELECT`, a connection failure as a real `Err`).
   `Ty::Json` compiles as raw text, re-parsed by each accessor — this
   item's own design note ("`str` + shims, not a new runtime value type")
-  landed as planned. Named gaps: Postgres (layer 2, `dbconn.rs` — gone
-  along with the interpreter) not yet compiled; a zero-payload `enum`
-  bind value not yet compiled; `BLOB` columns represented as JSON
-  `null` (no `bytes` type to carry them).
-- [PARTIAL] **B8. Compiled `serve` mode** (2026-09) — this was never
+  landed as planned. Postgres landed as a real 2026-09 follow-up too —
+  pooled (`kernel::pool::PoolRegistry`), vendored-TLS (`postgres`/
+  `postgres-native-tls`, verify-by-default off-`localhost`,
+  `docs/adr/0005`). Named gaps still open: a zero-payload `enum` bind
+  value not yet compiled; `BLOB` columns represented as JSON `null` (no
+  `bytes` type to carry them).
+- [DONE] **B8. Compiled `serve` mode** (2026-09) — this was never
   actually gated on the rest of Track B (that was a sequencing choice,
-  not a technical one). What's real: `/api/<fn>` routing over a real
-  `tcp_listener`/`accept` loop, request-line parsing via three new
-  string primitives (`str_index_of`/`str_slice`, `len(str)`), routing to
-  distinct compiled functions via a plain `.nir` `if`/`else if` chain —
-  no new language construct. Real-`curl`-verified
-  (`examples/features/51_compiled_serve.nir`). Named gaps: GET-only, no
-  `Content-Length`/POST body parsing, sequential (no per-connection
-  `spawn`), no string concatenation.
+  not a technical one), and shipped in two real layers, both still
+  present and both real, not one superseding the other:
+  - The original minimal layer: `/api/<fn>` routing over a real
+    `tcp_listener`/`accept` loop, request-line parsing via three new
+    string primitives (`str_index_of`/`str_slice`, `len(str)`), routing
+    to distinct compiled functions via a plain `.nir` `if`/`else if`
+    chain — no new language construct, real-`curl`-verified
+    (`examples/features/51_compiled_serve.nir`). Still GET-only,
+    sequential, no string concatenation — a deliberately-kept
+    primitives-first worked example, not the production path.
+  - The production path, `nirdosha build --serve`: RFC 0010's
+    `serve { expose ... }` exposure model (deny-by-default on an
+    ungated mutating route, `typeck::exposed_fn_names`) wired to a real
+    HTTP engine (`crates/compiled-serve`) — real `POST`/`Content-Length`
+    body parsing, CORS (never a wildcard on a credentialed response),
+    keep-alive with a `max_requests_per_connection` policy, a per-IP
+    rate limiter, a `413` body-size cap, `Domain::ServeHttp` admission
+    (fail-fast `503`, never a silent stall), and a real `Set-Cookie` —
+    the exact gaps the minimal layer above named are closed here, not
+    fixed in place. `transact` durability log init and crash replay run
+    from this mode's own generated `main` before the listener ever
+    binds, ahead of any request. Doesn't own RBAC/JWT verification
+    itself — each route's `requires(...)` check runs inside the
+    compiled function it dispatches to, same as everywhere else.
+    Verified end to end (real `nirdosha build --serve`, a real `GET`
+    and a real `POST` carrying a `Content-Length` body both reaching
+    the same exposed `fn`, an unexposed path real-404ing):
+    `crates/compiler/tests/codegen.rs`'s
+    `compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_body`
+    — added this session; before it, only the minimal layer above had
+    automated coverage (`compiled_serve_routes_by_path_to_two_compiled_functions`,
+    which exercises `51_compiled_serve.nir`'s own hand-rolled style, not
+    this production path).
 - [PARTIAL] **B10. `workflow` codegen** (2026-09) — Layer 1 real:
   `start_*`/`advance_*`, `on_entry`/`on_exit`, ordinary transitions,
   `terminal` states; `send_email`/`send_sms`/`send_push`/`notify` (real
@@ -334,13 +406,15 @@ verification, and `db`(SQLite)/`json` — see the identity section under
   this Layer 1 runtime); `pending_for_me`/`submitted_by_me`/`history`
   compile but are always a real `Err` (same gap); `owner:` state
   ownership isn't enforced at runtime.
-- [OPEN] Identity's own remainder (dotted-path claim lookup, sessions/
-  refresh/revocation/API-key validation) and `transact`'s own still-open
-  remainder (durability log, crash replay, `commit`/`compensate`
-  retry-with-backoff) — no required order between them; `db`/`json`
-  (B2), compiled `serve` (B8), `transact` Layer 1 (B1), `mq` (B3),
-  `http`/`https` (B5), and `workflow` Layer 1 (B10) all turned out not
-  to need the sequencing this note originally proposed at all.
+- [DONE] Identity's own remainder (dotted-path claim lookup, sessions/
+  refresh/revocation/API-key validation, `docs/adr/0007`) and
+  `transact`'s own durability remainder (durability log, crash replay,
+  `commit`/`compensate` retry-with-backoff, `docs/adr/0009`) — this
+  note originally flagged them as unordered, open work; both shipped in
+  2026-09, and neither needed the sequencing this note originally
+  proposed, same as `db`/`json` (B2), compiled `serve` (B8), `transact`
+  Layer 1 (B1), `mq` (B3), `http`/`https` (B5), and `workflow` Layer 1
+  (B10) before them.
 - [OPEN, DESCOPED FROM v1] `sandbox` (a real, separate OS *process*, not
   a thread) — 2026-09 decision: explicitly out of scope for the first
   production release, not merely unstarted. It remains a materially
