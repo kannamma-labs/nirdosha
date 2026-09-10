@@ -54,6 +54,8 @@ r2d2_postgres = "0.18"
 signal-hook = { version = "0.4", default-features = false }
 ratatui = "0.30.2"
 crossterm = "0.29.0"
+wry = "0.57.0"
+tao = "0.37.0"
 
 # `dist`: statically vendors Z3 (compiles it from source via `z3-src`)
 # instead of dynamically linking the system `libz3` — same pattern as
