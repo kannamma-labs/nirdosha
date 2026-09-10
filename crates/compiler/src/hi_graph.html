@@ -757,11 +757,21 @@
     if (line === ':ask' || line.startsWith(':ask ')) {
       const q = line.slice(':ask'.length).trim();
       if (!q) { logLine('error', 'usage: :ask <question>'); return; }
-      fetch('/api/ask?q=' + encodeURIComponent(q))
-        .then(r => r.json())
-        .then(hits => {
-          if (!hits.length) { logLine('', '(no matches)'); return; }
-          hits.forEach(h => logLine('', h.doc_id + ': ' + h.content));
+      // Wrapped in withBusy: local keyword search is instant, but a
+      // question that falls through to hi_llm::answer_question (see
+      // hi_api.rs::handle_ask) is a real, potentially slow model call.
+      withBusy(fetch('/api/ask?q=' + encodeURIComponent(q)).then(r => r.json()))
+        .then(result => {
+          const hits = result.hits || [];
+          if (hits.length) {
+            hits.forEach(h => logLine('', h.doc_id + ': ' + h.content));
+          } else if (result.answer) {
+            logLine('', result.answer);
+          } else if (result.error) {
+            logLine('error', result.error);
+          } else {
+            logLine('', '(no matches -- set an LLM provider, e.g. OPENAI_API_KEY, for a real answer when local search finds nothing)');
+          }
         })
         .catch(err => { logLine('error', String(err)); reportError('console :ask', err); });
       return;

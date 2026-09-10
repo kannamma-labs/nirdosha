@@ -633,6 +633,32 @@ pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
     Ok(hits)
 }
 
+/// A bounded plain-text summary of the whole graph's `CodeUnit`
+/// content (name: driving text, or source location when there's no
+/// driving text) -- context for a project-level question `ask`'s own
+/// local keyword search can't answer at all ("what is this project
+/// about" matches no single node's name or text, because it isn't
+/// really about any one node). See `hi_llm::answer_question`, the only
+/// caller: this function itself stays network-free, same as everything
+/// else in this module. Capped at `PROJECT_CONTEXT_MAX_UNITS`, not the
+/// entire graph verbatim -- this module's own "every expensive
+/// operation is bounded" principle, applied here so a very large
+/// project can't blow an LLM prompt past a reasonable size.
+const PROJECT_CONTEXT_MAX_UNITS: u32 = 200;
+
+pub fn project_context(conn: &Connection) -> Result<String, String> {
+    let mut stmt = conn.prepare("SELECT id, title, driving_text, source_ref FROM nodes WHERE kind = 'CodeUnit' ORDER BY id LIMIT ?1").map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
+        stmt.query_map([PROJECT_CONTEXT_MAX_UNITS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let mut out = String::new();
+    for (id, title, driving_text, source_ref) in rows {
+        let name = title.unwrap_or(id);
+        let desc = driving_text.filter(|d| !d.is_empty()).or(source_ref).unwrap_or_else(|| "(no description)".to_string());
+        out.push_str(&format!("- {name}: {desc}\n"));
+    }
+    Ok(out)
+}
+
 // ---- Build/Generate mode (rfcs/0014) -- the write surface over the
 // same `CodeUnit` nodes `sync` populates from real code. Deliberately
 // kept network/LLM-free, same as everything else in this module: the

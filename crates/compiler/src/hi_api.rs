@@ -139,10 +139,7 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
             None => ApiResponse::error(400, "missing required query param `target`"),
         },
         "/api/ask" => match query_param(query, "q") {
-            Some(q) => match crate::hi_graph::ask(&conn, &q) {
-                Ok(hits) => ApiResponse::json(&hits),
-                Err(e) => ApiResponse::error(500, &e),
-            },
+            Some(q) => handle_ask(&conn, &q),
             None => ApiResponse::error(400, "missing required query param `q`"),
         },
         "/api/prompt" => handle_prompt(root, &conn, body),
@@ -169,6 +166,38 @@ fn ok_response() -> ApiResponse {
 fn require_llm_client() -> Result<crate::hi_llm::LlmClient, String> {
     let activation = crate::hi_llm::resolve_activation(&|k| std::env::var(k).ok())?;
     Ok(crate::hi_llm::LlmClient::new(activation))
+}
+
+/// `hi_graph::ask`'s local keyword search first, always -- fast, free,
+/// no network call, and it's the right answer for "what does tick do"-
+/// shaped questions naming something real in the graph. Only when that
+/// finds *nothing at all*, and only when an LLM is already configured
+/// (`require_llm_client` failing here just means "no matches," the
+/// same result an unconfigured session already gave before this
+/// fallback existed -- never a hard error), does this fall through to
+/// `hi_llm::answer_question` for a real answer to a question that was
+/// never about any one node ("what is this project about"). See that
+/// function's own doc comment for why this doesn't violate RFC 0014's
+/// "semantic search stays opt-in" posture.
+fn handle_ask(conn: &Connection, q: &str) -> ApiResponse {
+    let hits = match crate::hi_graph::ask(conn, q) {
+        Ok(h) => h,
+        Err(e) => return ApiResponse::error(500, &e),
+    };
+    if !hits.is_empty() {
+        return ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": null }));
+    }
+    let Ok(client) = require_llm_client() else {
+        return ApiResponse::json(&serde_json::json!({ "hits": [], "answer": null }));
+    };
+    let context = match crate::hi_graph::project_context(conn) {
+        Ok(c) => c,
+        Err(e) => return ApiResponse::error(500, &e),
+    };
+    match crate::hi_llm::answer_question(&client, q, &context) {
+        Ok(answer) => ApiResponse::json(&serde_json::json!({ "hits": [], "answer": answer })),
+        Err(e) => ApiResponse::json(&serde_json::json!({ "hits": [], "answer": null, "error": e })),
+    }
 }
 
 /// Prompt mode's own write path (rfcs/0014's "1. Prompt mode"): calls
@@ -659,5 +688,31 @@ mod tests {
         let resp = handle(&dir, "GET", "/api/nodes", "", b"");
         let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
         assert!(nodes.iter().all(|n| n["confirmed"] == 1), "every candidate should now be confirmed");
+    }
+
+    #[test]
+    fn ask_finds_a_local_keyword_hit_without_ever_needing_an_llm() {
+        let dir = scratch_dir("ask_local_hit");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_graph::add_candidate(&conn, "fn", "tick", "advances the game clock", "llm-prompt-mode").expect("add_candidate");
+        drop(conn);
+
+        let resp = handle(&dir, "GET", "/api/ask", "q=tick", b"");
+        assert_eq!(resp.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
+        assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+        assert!(body["answer"].is_null(), "a real local hit should never also carry an LLM answer");
+    }
+
+    #[test]
+    fn ask_degrades_to_no_matches_rather_than_erroring_when_nothing_local_and_no_llm_configured() {
+        let dir = scratch_dir("ask_no_local_no_llm");
+        crate::hi_graph::open(&dir).expect("open");
+
+        let resp = handle(&dir, "GET", "/api/ask", "q=this+project+about", b"");
+        assert_eq!(resp.status, 200, "an unconfigured LLM must degrade, not error: {}", String::from_utf8_lossy(&resp.body));
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
+        assert!(body["hits"].as_array().unwrap().is_empty());
+        assert!(body["answer"].is_null());
     }
 }
