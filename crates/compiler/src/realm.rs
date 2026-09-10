@@ -77,7 +77,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             title TEXT,
             status TEXT,
             content_hash TEXT,
-            source_ref TEXT
+            source_ref TEXT,
+            line INTEGER,
+            col INTEGER
         );
         CREATE TABLE IF NOT EXISTS edges (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,7 +108,30 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         ",
     )
-    .map_err(|e| format!("migrating .nir/realm.db schema: {e}"))
+    .map_err(|e| format!("migrating .nir/realm.db schema: {e}"))?;
+    // `CREATE TABLE IF NOT EXISTS` above never widens an already-existing
+    // `nodes` table -- a `.nir/realm.db` created before `line`/`col`
+    // existed needs them added explicitly, once, idempotently. Real gap
+    // this closes: `source_ref` (the file path) was captured from v1 but
+    // never surfaced anywhere a human could see it (rfcs/0013's own
+    // Open Questions record this); `line`/`col` finish that half-done
+    // fix by giving `:impact`/`realm impact` an actual place in the file
+    // to point at, not just which file.
+    add_column_if_missing(conn, "nodes", "line", "INTEGER")?;
+    add_column_if_missing(conn, "nodes", "col", "INTEGER")?;
+    Ok(())
+}
+
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<(), String> {
+    let exists: bool = conn
+        .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))
+        .and_then(|mut stmt| stmt.exists([column]))
+        .map_err(|e| format!("checking whether {table}.{column} already exists: {e}"))?;
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {sql_type}"), [])
+            .map_err(|e| format!("adding {table}.{column}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// One `fn`/`struct`/`enum`/`screen` top-level item, identity =
@@ -118,6 +143,8 @@ struct CodeUnit {
     qualified_name: String,
     kind: &'static str,
     content_hash: String,
+    line: usize,
+    col: usize,
 }
 
 fn hash_item<T: serde::Serialize>(item: &T) -> Result<String, String> {
@@ -146,21 +173,42 @@ fn code_units_in_file(path: &Path) -> Result<Vec<CodeUnit>, String> {
     // own declarations -- language-level vocabulary, not this project's
     // code, so it must never show up as a `CodeUnit` (every file would
     // otherwise report the same ~15 "units" on its very first sync).
-    let prelude_struct_names: HashSet<String> = crate::ast::prelude_structs().into_iter().map(|s| s.name).collect();
-    let prelude_enum_names: HashSet<String> = crate::ast::prelude_enums().into_iter().map(|e| e.name).collect();
+    // Filtered by (name, content_hash) together, not name alone: a
+    // user-defined type that legitimately shadows a prelude name (their
+    // own `struct Money` with different fields, say) has a different
+    // hash than the real prelude `Money` and must survive filtering --
+    // name-only filtering silently dropped it before this fix.
+    let mut prelude_struct_hashes: HashSet<(String, String)> = HashSet::new();
+    for s in crate::ast::prelude_structs() {
+        let hash = hash_item(&s)?;
+        prelude_struct_hashes.insert((s.name, hash));
+    }
+    let mut prelude_enum_hashes: HashSet<(String, String)> = HashSet::new();
+    for e in crate::ast::prelude_enums() {
+        let hash = hash_item(&e)?;
+        prelude_enum_hashes.insert((e.name, hash));
+    }
 
     let mut units = Vec::with_capacity(program.fns.len() + program.structs.len() + program.enums.len() + program.screens.len());
     for f in &program.fns {
-        units.push(CodeUnit { qualified_name: f.name.clone(), kind: "fn", content_hash: hash_item(f)? });
+        units.push(CodeUnit { qualified_name: f.name.clone(), kind: "fn", content_hash: hash_item(f)?, line: f.span.line, col: f.span.col });
     }
-    for s in program.structs.iter().filter(|s| !prelude_struct_names.contains(&s.name)) {
-        units.push(CodeUnit { qualified_name: s.name.clone(), kind: "struct", content_hash: hash_item(s)? });
+    for s in &program.structs {
+        let hash = hash_item(s)?;
+        if prelude_struct_hashes.contains(&(s.name.clone(), hash.clone())) {
+            continue;
+        }
+        units.push(CodeUnit { qualified_name: s.name.clone(), kind: "struct", content_hash: hash, line: s.span.line, col: s.span.col });
     }
-    for e in program.enums.iter().filter(|e| !prelude_enum_names.contains(&e.name)) {
-        units.push(CodeUnit { qualified_name: e.name.clone(), kind: "enum", content_hash: hash_item(e)? });
+    for e in &program.enums {
+        let hash = hash_item(e)?;
+        if prelude_enum_hashes.contains(&(e.name.clone(), hash.clone())) {
+            continue;
+        }
+        units.push(CodeUnit { qualified_name: e.name.clone(), kind: "enum", content_hash: hash, line: e.span.line, col: e.span.col });
     }
     for sc in &program.screens {
-        units.push(CodeUnit { qualified_name: sc.struct_name.clone(), kind: "screen", content_hash: hash_item(sc)? });
+        units.push(CodeUnit { qualified_name: sc.struct_name.clone(), kind: "screen", content_hash: hash_item(sc)?, line: sc.span.line, col: sc.span.col });
     }
     Ok(units)
 }
@@ -213,10 +261,10 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
         }
 
         conn.execute(
-            "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref)
-             VALUES (?1, 'CodeUnit', ?2, NULL, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, source_ref = excluded.source_ref",
-            params![id, u.qualified_name, u.content_hash, source_ref],
+            "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, line, col)
+             VALUES (?1, 'CodeUnit', ?2, NULL, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, source_ref = excluded.source_ref, line = excluded.line, col = excluded.col",
+            params![id, u.qualified_name, u.content_hash, source_ref, u.line as i64, u.col as i64],
         )
         .map_err(|e| format!("upserting node {id}: {e}"))?;
 
@@ -382,6 +430,16 @@ pub struct ImpactHit {
     pub flag: Option<String>,
     pub flag_reason: Option<String>,
     pub depth: u32,
+    /// The file this `CodeUnit` node was parsed from (`nodes.source_ref`)
+    /// -- `None` for a `Requirement`/`Document`/`Chunk` node, which has
+    /// no `.nir` file to point at. Previously captured but never
+    /// surfaced anywhere a human could see it (rfcs/0013's own Open
+    /// Questions recorded this); this finishes that fix.
+    pub source_ref: Option<String>,
+    /// 1-based line/col within `source_ref`, from the declaration's own
+    /// AST span -- `None` on the same terms as `source_ref`.
+    pub line: Option<i64>,
+    pub col: Option<i64>,
 }
 
 pub struct ImpactReport {
@@ -423,10 +481,12 @@ pub fn impact(conn: &Connection, target: &str) -> Result<ImpactReport, String> {
                 partial = true;
                 break 'walk;
             }
-            let (kind, title): (String, Option<String>) = conn
-                .query_row("SELECT kind, title FROM nodes WHERE id = ?1", [&neighbor_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            let (kind, title, source_ref, line, col): (String, Option<String>, Option<String>, Option<i64>, Option<i64>) = conn
+                .query_row("SELECT kind, title, source_ref, line, col FROM nodes WHERE id = ?1", [&neighbor_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
                 .map_err(|e| format!("reading node {neighbor_id}: {e}"))?;
-            hits.push(ImpactHit { node_id: neighbor_id.clone(), kind, title, edge_kind, flag, flag_reason, depth: depth + 1 });
+            hits.push(ImpactHit { node_id: neighbor_id.clone(), kind, title, edge_kind, flag, flag_reason, depth: depth + 1, source_ref, line, col });
             queue.push_back((neighbor_id, depth + 1));
         }
     }
@@ -613,5 +673,70 @@ mod tests {
         assert!(is_disabled(&on));
         assert!(!is_disabled(&off));
         assert!(!is_disabled(&unset));
+    }
+
+    #[test]
+    fn a_struct_shadowing_a_prelude_name_with_different_fields_survives_filtering() {
+        let dir = scratch_dir("prelude_shadow");
+        // "Money" is a real prelude struct name (`ast::prelude_structs`)
+        // -- redeclaring it with different fields must NOT be silently
+        // dropped by prelude filtering, only the real, unmodified
+        // prelude Money should ever be.
+        write_nir(&dir, "a.nir", "struct Money { cents: i64 }\n");
+        let conn = open(&dir).expect("open");
+        let report = sync(&conn, &dir, &[]).expect("sync");
+        assert_eq!(report.units_added, 1, "a user-defined Money with different fields than the real prelude Money must survive prelude filtering");
+    }
+
+    #[test]
+    fn code_units_parse_path_matches_loader_for_an_import_free_file() {
+        // `code_units_in_file` deliberately bypasses `loader::
+        // load_program` (see this module's own doc comment) -- for a
+        // file with no `use` directives, the two parse paths must still
+        // agree item-for-item, or Realm's view of a project has quietly
+        // diverged from what the compiler itself sees.
+        let dir = scratch_dir("parse_path_parity");
+        let path = write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n");
+        let path_str = path.to_str().expect("utf8 path");
+
+        let (loader_program, _src) = crate::loader::load_program(path_str).expect("loader parse");
+        let prelude_s: HashSet<String> = crate::ast::prelude_structs().into_iter().map(|s| s.name).collect();
+        let prelude_e: HashSet<String> = crate::ast::prelude_enums().into_iter().map(|e| e.name).collect();
+        let mut expected: Vec<(&str, String)> = Vec::new();
+        for f in &loader_program.fns {
+            expected.push(("fn", f.name.clone()));
+        }
+        for s in &loader_program.structs {
+            if !prelude_s.contains(&s.name) {
+                expected.push(("struct", s.name.clone()));
+            }
+        }
+        for e in &loader_program.enums {
+            if !prelude_e.contains(&e.name) {
+                expected.push(("enum", e.name.clone()));
+            }
+        }
+
+        let units = code_units_in_file(&path).expect("code_units_in_file parse");
+        let actual: Vec<(&str, String)> = units.iter().map(|u| (u.kind, u.qualified_name.clone())).collect();
+
+        assert_eq!(actual.len(), expected.len(), "expected {expected:?}, got {actual:?}");
+        for item in &expected {
+            assert!(actual.contains(item), "missing {item:?} in {actual:?}");
+        }
+    }
+
+    #[test]
+    fn code_unit_span_is_captured_and_surfaced_through_impact() {
+        let dir = scratch_dir("span_capture");
+        write_nir(&dir, "a.nir", "fn first() -> i64 { return 1 }\nfn second() -> i64 { return 2 }\n");
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+        link(&conn, "R1", "fn:second").expect("link");
+
+        let report = impact(&conn, "R1").expect("impact");
+        let hit = report.hits.iter().find(|h| h.node_id == "code:fn:second").expect("second should be reachable");
+        assert_eq!(hit.line, Some(2), "fn second is declared on line 2");
+        assert!(hit.source_ref.as_deref().unwrap_or("").ends_with("a.nir"));
     }
 }

@@ -679,7 +679,15 @@ pub fn format_impact_report(target: &str, report: &crate::realm::ImpactReport) -
     let mut out = format!("impact of `{target}` ({} node(s){}):\n", report.hits.len(), if report.partial { ", partial -- bound reached" } else { "" });
     for h in &report.hits {
         let flag = h.flag.as_deref().map(|f| format!("  [{f}]")).unwrap_or_default();
-        out.push_str(&format!("  depth {} {} {} `{}`{flag}\n", h.depth, h.kind, h.edge_kind, h.title.as_deref().unwrap_or(&h.node_id)));
+        // `source_ref`/`line`/`col` are only ever set on a `CodeUnit`
+        // node (`Requirement`/`Document`/`Chunk` have nothing to point
+        // at) -- printed only when present, same "NULL means nothing to
+        // show" convention the rest of this report already follows.
+        let location = match (&h.source_ref, h.line, h.col) {
+            (Some(path), Some(line), Some(col)) => format!("  ({path}:{line}:{col})"),
+            _ => String::new(),
+        };
+        out.push_str(&format!("  depth {} {} {} `{}`{location}{flag}\n", h.depth, h.kind, h.edge_kind, h.title.as_deref().unwrap_or(&h.node_id)));
     }
     out
 }
