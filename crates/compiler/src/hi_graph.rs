@@ -650,6 +650,19 @@ pub fn confirm_node(conn: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The bulk form of `confirm_node`: "everything is to be compiled" --
+/// confirms every still-unconfirmed, non-waived `CodeUnit` in one call,
+/// returning the ids it actually confirmed. An already-confirmed node
+/// isn't touched; neither is a waived one -- waiving stays its own
+/// explicit, separate decision (rfcs/0014's own definition), not
+/// something a blanket confirm silently overrides.
+pub fn confirm_all(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0").map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    conn.execute("UPDATE nodes SET confirmed = 1 WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0", []).map_err(|e| format!("confirming all: {e}"))?;
+    Ok(ids)
+}
+
 /// Build mode's delete action -- removes a candidate (and every edge
 /// touching it) outright, for content that's simply wrong, not worth
 /// confirming.
@@ -994,6 +1007,25 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].kind, "fn");
         assert_eq!(units[0].name, "transfer_funds");
+    }
+
+    #[test]
+    fn confirm_all_confirms_every_unconfirmed_candidate_but_not_a_waived_one() {
+        let dir = scratch_dir("confirm_all");
+        let conn = open(&dir).expect("open");
+        let a = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add a");
+        let b = add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add b");
+        let c = add_candidate(&conn, "fn", "risky", "does something risky", "llm-prompt-mode").expect("add c");
+        confirm_node(&conn, &a).expect("pre-confirm a"); // already confirmed -- confirm_all must not choke on it
+        waive_node(&conn, &c, "not needed").expect("waive c");
+
+        let confirmed = confirm_all(&conn).expect("confirm_all");
+        assert_eq!(confirmed, vec![b.clone()], "only the genuinely unconfirmed, non-waived candidate should be reported");
+
+        let generatable: Vec<String> = generatable_units(&conn, None).expect("generatable_units").into_iter().map(|u| u.id).collect();
+        assert!(generatable.contains(&a));
+        assert!(generatable.contains(&b));
+        assert!(!generatable.contains(&c), "a waived node must stay out of scope even after confirm_all");
     }
 
     #[test]
