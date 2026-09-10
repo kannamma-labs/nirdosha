@@ -2043,6 +2043,7 @@ impl Parser {
             let op = match self.peek().tok {
                 Tok::Star => BinOp::Mul,
                 Tok::Slash => BinOp::Div,
+                Tok::Percent => BinOp::Rem,
                 Tok::DotStar => BinOp::ElemMul,
                 Tok::DotSlash => BinOp::ElemDiv,
                 _ => break,

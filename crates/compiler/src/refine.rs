@@ -546,12 +546,15 @@ impl Refiner {
             BinOp::Add => l.add(r),
             BinOp::Sub => l.sub(r),
             BinOp::Mul => l.mul(r),
-            BinOp::Div => {
+            BinOp::Div | BinOp::Rem => {
                 if r.excludes_zero() {
                     self.report.proven_nonzero_divisor.insert(span);
                 }
                 // Result interval deliberately not computed — see module
-                // doc's "two proofs only" note.
+                // doc's "two proofs only" note. Same nonzero-divisor
+                // proof serves `%` as well as `/` -- `codegen.rs::
+                // guard_nonzero_divisor` keys off the expression's own
+                // span either way.
                 Interval::unknown()
             }
             BinOp::Eq

@@ -24,6 +24,8 @@ this list.
 | [0010](./0010-landing-and-serve-exposure.md) | Per-role/claim `landing` screens, and the compiled-`serve` route-exposure model (deny-by-default on mutating exposure) |
 | [0011](./0011-uniform-service-provider-model.md) | A uniform service-provider model — open admission domains, revived plugin dispatch, and proactive rehydration for any future backend |
 | [0012](./0012-nirdosha-hi-agentic-console.md) | `nirdosha hi` — a native LLM console gated on provider credentials |
+| [0013](./0013-nirdosha-realm.md) | Nirdosha Realm — a local-first project knowledge graph with bidirectional `.nir` traceability |
+| [0014](./0014-generative-build-console.md) | The generative build console — prompt → build → generate → publish, over an interactive Realm graph (speculative, nothing built) |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a

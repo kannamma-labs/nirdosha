@@ -1329,6 +1329,16 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `%` — truncating (C/Rust-style) remainder, same precedence as
+    /// `*`/`/`. `i64 % i64` (LLVM `srem`) and `f64 % f64` (`frem`) only
+    /// -- no `Dec128` remainder exists (see `typeck.rs`'s own
+    /// `BinOp::Rem` arm for why that's a deliberate scope limit, not an
+    /// oversight). A genuine gap until this variant existed: nothing
+    /// else in the language could express "wrap an index into a fixed-
+    /// size board/grid," "get a value's day-of-week," or any other
+    /// ordinary remainder computation — see this variant's own git
+    /// history for the real generation failure that surfaced the gap.
+    Rem,
     Eq,
     NotEq,
     Lt,

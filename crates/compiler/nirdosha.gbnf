@@ -281,7 +281,7 @@ logic-and   ::= equality (ws "&&" ws equality)*
 equality    ::= comparison (ws ("==" | "!=") ws comparison)*
 comparison  ::= additive (ws ("<=" | ">=" | "<" | ">") ws additive)*
 additive    ::= multiplicative (ws ("+" | "-") ws multiplicative)*
-multiplicative ::= unary (ws (".*" | "./" | "*" | "/") ws unary)*
+multiplicative ::= unary (ws (".*" | "./" | "*" | "/" | "%") ws unary)*
 
 unary       ::= (
                   ("!" | "-" | "*" | "box" | "froze" | "&") ws unary

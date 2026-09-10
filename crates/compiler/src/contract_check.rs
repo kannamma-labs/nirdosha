@@ -786,6 +786,7 @@ impl Eval<'_> {
             Expr::Binary(BinOp::Div, _, _, _) => {
                 Err("Tier 1 doesn't model division's result (integer-truncation semantics, same conservative choice smt.rs makes)".to_string())
             }
+            Expr::Binary(BinOp::Rem, _, _, _) => Err("Tier 1 doesn't model remainder's result (same conservative choice smt.rs/refine.rs make for `%`)".to_string()),
             Expr::If { cond, then_block, else_block, .. } => {
                 let cond_term = self.bool_expr(cond, scopes)?;
                 self.solver.push();

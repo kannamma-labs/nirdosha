@@ -19,11 +19,12 @@ serde_json = "1"
 
 [dependencies]
 z3 = "0.20.2"
-# `nirdosha hi` (rfcs/0012-nirdosha-hi-agentic-console.md)'s host-side LLM
-# client -- blocking (this CLI has no async runtime), `rustls-tls` (no
-# new system TLS dependency). Same crate+version `crates/presence-
-# gateway/Cargo.toml` already pins, so this is feature-additive to an
-# already-resolved workspace dependency, not a new one to the tree.
+# Used by `hi_server.rs`'s own test suite to make real HTTP requests
+# against its `tiny_http` server (blocking -- this CLI has no async
+# runtime; `rustls-tls` needs no new system TLS dependency). Same
+# crate+version `crates/presence-gateway/Cargo.toml` already pins, so
+# this is feature-additive to an already-resolved workspace dependency,
+# not a new one to the tree.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,8 +53,18 @@ r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24", default-features = false, features = ["bundled"] }
 r2d2_postgres = "0.18"
 signal-hook = { version = "0.4", default-features = false }
-ratatui = "0.30.2"
-crossterm = "0.29.0"
+# `linux-body`: on Linux (WebKitGTK), `wry`'s custom-protocol handler
+# silently reads an *empty* body for every POST request unless this
+# feature is on (`webkit2gtk`'s `v2_40` API is what actually exposes
+# reading a URI-scheme request's HTTP body) -- confirmed by a real
+# failure, not a guess: `hi_api.rs`'s POST routes (rfcs/0014's Build/
+# Generate/Publish write surface) all reported "missing required body
+# param" from inside the real build-mode window, even though the
+# page's own `fetch(..., {method:'POST', body:...})` calls were sending
+# one. macOS (WKWebView)/Windows (WebView2) read the body unconditionally
+# already -- this feature only changes the Linux backend's behavior.
+wry = { version = "0.57.0", features = ["linux-body"] }
+tao = "0.37.0"
 
 # `dist`: statically vendors Z3 (compiles it from source via `z3-src`)
 # instead of dynamically linking the system `libz3` — same pattern as

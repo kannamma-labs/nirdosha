@@ -1,0 +1,1084 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Nirdosha Hi</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin:0; padding:0; width:100%; height:100%; background:#0b0b12; color:#e8e8f0; font-family: ui-monospace, monospace; overflow:hidden; }
+
+  /* ---- header: brand mark (top-left) + live status ---- */
+  #header { position:absolute; top:0; left:0; right:0; height:64px; box-sizing:border-box; padding:0 18px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:14px; align-items:center; }
+  #header .logo { width:36px; height:36px; display:block; transition:filter 0.3s; }
+  #header .wordmark { font-weight:bold; font-size:20px; letter-spacing:0.06em; color:#564cbe; }
+  #header .sep { width:1px; height:28px; background:#26263a; }
+  #status { display:flex; gap:8px; align-items:center; font-size:15px; }
+  #status .dot { width:10px; height:10px; border-radius:50%; background:#3ddc84; display:inline-block; }
+
+  /* ---- graph surface, between header and console ---- */
+  #graph { position:absolute; top:64px; left:0; right:0; bottom:96px; }
+  #fallback-canvas { position:absolute; top:64px; left:0; right:0; bottom:96px; display:none; }
+
+  #panel { position:absolute; top:64px; right:0; bottom:96px; width:320px; overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:14px; line-height:1.5; display:none; }
+  #panel h2 { margin:0 0 6px; font-size:17px; color:#ef9f30; word-break:break-all; }
+  #panel .row { margin:4px 0; }
+  #panel .label { opacity:0.6; margin-right:6px; }
+  #panel ul { margin:6px 0 0; padding-left:16px; }
+  #panel .section-title { margin:14px 0 6px; font-size:12px; letter-spacing:0.06em; text-transform:uppercase; opacity:0.6; }
+  #panel .attr-list { margin:0 0 8px; padding-left:16px; }
+  #panel .attr-list li { word-break:break-all; }
+  #panel select, #panel input[type="text"] { width:100%; box-sizing:border-box; background:#0b0b12; border:1px solid #3a3a52; border-radius:4px; color:#e8e8f0; font:13px ui-monospace, monospace; padding:6px 8px; margin:4px 0; }
+  #panel select:focus, #panel input[type="text"]:focus { outline:none; border-color:#564cbe; }
+  #panel button { background:#564cbe; color:#fff; border:none; border-radius:4px; padding:7px 12px; font:12px ui-monospace, monospace; font-weight:bold; cursor:pointer; margin:4px 4px 4px 0; }
+  #panel button.secondary { background:#26263a; }
+  #panel button:disabled { opacity:0.5; cursor:default; }
+  #panel .form-status { font-size:12px; color:#a9a9bd; min-height:16px; }
+
+  #legend { position:absolute; bottom:104px; left:8px; font-size:13px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
+  #legend .item { display:flex; align-items:center; gap:6px; margin:2px 0; }
+  #legend .swatch { width:10px; height:10px; border-radius:50%; display:inline-block; }
+
+  /* ---- console: transcript + bottom text entry ---- */
+  #console { position:absolute; left:0; right:0; bottom:0; height:96px; box-sizing:border-box; background:rgba(11,11,18,0.92); border-top:1px solid #26263a; z-index:5; display:flex; flex-direction:column; }
+  #transcript { flex:1; overflow-y:auto; padding:6px 12px; font-size:13px; line-height:1.5; color:#a9a9bd; }
+  #transcript .line { white-space:pre-wrap; word-break:break-word; }
+  #transcript .line.user { color:#e8e8f0; }
+  #transcript .line.error { color:#ff6b6b; }
+  #inputbar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-top:1px solid #1c1c28; }
+  /* min-width holds steady between "hi>" and a single spinner frame -- otherwise the input box jitters sideways on every busy-spinner tick */
+  #prompt-caret { display:inline-block; min-width:1.8em; color:#564cbe; font-size:14px; white-space:nowrap; }
+  #console-input { flex:1; background:transparent; border:none; outline:none; color:#e8e8f0; font:14px ui-monospace, monospace; }
+  #console-input::placeholder { color:#4a4a5e; }
+
+  /* ---- splash: reveal -> type -> subtitle, matching hi_tui's own logo_anim timing/colors ---- */
+  #splash { position:fixed; inset:0; z-index:50; background:#0b0b12; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:opacity 0.3s ease; }
+  #splash.hidden { opacity:0; pointer-events:none; }
+  #splash-inner { display:flex; flex-direction:column; align-items:center; gap:14px; }
+  #splash-logo-wrap { position:relative; width:128px; height:128px; }
+  #splash-logo { width:128px; height:128px; clip-path:polygon(0 0, 0 0, 0 0); filter:brightness(1); animation: splash-reveal 0.95s ease forwards, splash-shimmer 0.3s ease-out 0.8s 1; }
+  #splash-word { display:flex; gap:2px; font-size:26px; font-weight:bold; letter-spacing:0.12em; }
+  #splash-word span { color:#564cbe; opacity:0; }
+  #splash-word span.lit { animation: splash-letter 0.12s ease-out; }
+  #splash-sub { font-size:12px; letter-spacing:0.18em; color:#78768e; opacity:0; transition:opacity 0.55s ease; }
+  #splash-sub.visible { opacity:1; }
+  @keyframes splash-reveal {
+    0%   { clip-path:polygon(0 0, 0 0, 0 0, 0 0); }
+    100% { clip-path:polygon(0 0, 100% 0, 100% 100%, 0 100%); }
+  }
+  @keyframes splash-shimmer {
+    0%   { filter:brightness(1); }
+    40%  { filter:brightness(1.9); }
+    100% { filter:brightness(1); }
+  }
+  @keyframes splash-letter {
+    0%   { color:#ffffff; }
+    100% { color:#564cbe; }
+  }
+
+  /* idle breathe, applied to the header logo once the splash is done -- same brand-glow-forever touch as hi_tui's own idle phase */
+  .idle-breathe { animation: idle-breathe 2.6s ease-in-out infinite; }
+  @keyframes idle-breathe {
+    0%, 100% { filter:brightness(1); }
+    50%      { filter:brightness(1.35) drop-shadow(0 0 4px rgba(255,214,140,0.6)); }
+  }
+
+  /* ---- prompt-screen: rfcs/0014's mode 1, the default-on-entry landing surface (see this element's own HTML comment for exactly when it shows/hides) ---- */
+  #prompt-screen { position:fixed; inset:0; z-index:20; background:#0b0b12; display:none; align-items:center; justify-content:center; }
+  /* JS flips this to `flex` -- default `none` so a project that already
+     has prompt history never shows even a one-frame flash of this
+     screen while the mode-decision fetch is still in flight (the splash
+     above it, z-index:50, would hide it either way during that window,
+     but this also covers the post-splash instant on a slow fetch). */
+  #prompt-screen.visible { display:flex; }
+  #prompt-screen-inner { width:min(560px, 86vw); display:flex; flex-direction:column; gap:14px; }
+  #prompt-screen-title { font-size:22px; font-weight:bold; color:#e8e8f0; text-align:center; }
+  #prompt-screen-input { width:100%; box-sizing:border-box; background:#15151f; border:1px solid #3a3a52; border-radius:6px; color:#e8e8f0; font:14px ui-monospace, monospace; padding:12px; resize:vertical; }
+  #prompt-screen-input:focus { outline:none; border-color:#564cbe; }
+  #prompt-screen-input:disabled { opacity:0.6; }
+  #prompt-screen-submit { align-self:center; background:#564cbe; color:#fff; border:none; border-radius:6px; padding:10px 26px; font:14px ui-monospace, monospace; font-weight:bold; cursor:pointer; }
+  #prompt-screen-submit:disabled { opacity:0.5; cursor:default; }
+  #prompt-screen-status { text-align:center; font-size:13px; color:#a9a9bd; min-height:18px; }
+</style>
+</head>
+<body>
+<div id="splash">
+  <div id="splash-inner">
+    <div id="splash-logo-wrap"><img id="splash-logo" src="__NIRDOSHA_LOGO__" alt=""></div>
+    <div id="splash-word"></div>
+    <div id="splash-sub">PROGRAMMING LANGUAGE</div>
+  </div>
+</div>
+
+<!-- rfcs/0014 "1. Prompt mode": the default mode on entry, shown only
+     while this project's graph has never had a prompt populate it
+     (checked against a fresh /api/nodes fetch on every load -- so
+     closing and reopening `hi` after a successful :prompt reopens
+     straight into build mode below, never back here). Once shown, it
+     stays hidden for the rest of this session the moment population
+     succeeds -- "the mode ... change[s] to build mode the first time a
+     prompt is consumed," not a toggle the user flips back and forth. -->
+<div id="prompt-screen">
+  <div id="prompt-screen-inner">
+    <div id="prompt-screen-title">What do you want to build?</div>
+    <textarea id="prompt-screen-input" rows="4" placeholder="Describe the program you want -- e.g. &quot;a tetris game&quot;, or &quot;a task tracker with due dates and a completed filter&quot;. Ctrl+Enter to submit."></textarea>
+    <button id="prompt-screen-submit" type="button">Populate the graph</button>
+    <div id="prompt-screen-status"></div>
+  </div>
+</div>
+
+<div id="header">
+  <img class="logo" id="header-logo" src="__NIRDOSHA_LOGO__" alt="">
+  <span class="wordmark">NIRDOSHA</span>
+  <span class="sep"></span>
+  <span id="status"><span class="dot"></span><span id="status-text">loading…</span></span>
+</div>
+<div id="graph"></div>
+<canvas id="fallback-canvas"></canvas>
+<div id="panel"></div>
+<div id="legend"></div>
+
+<div id="console">
+  <div id="transcript"></div>
+  <div id="inputbar">
+    <span id="prompt-caret">hi&gt;</span>
+    <input id="console-input" type="text" autocomplete="off" spellcheck="false" placeholder=":prompt &lt;description&gt;  |  :confirm/:generate/:publish  |  :ask/:impact">
+  </div>
+</div>
+
+<script src="/assets/3d-force-graph.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const KIND_COLORS = {
+    fn: '#5b9dff',
+    struct: '#3ddc84',
+    enum: '#c67bff',
+    screen: '#ef9f30',
+    Requirement: '#ff6b6b',
+    default: '#e8e8f0',
+  };
+
+  function subKind(node) {
+    if (node.kind === 'CodeUnit') {
+      const parts = String(node.id).split(':');
+      return parts.length >= 2 ? parts[1] : 'CodeUnit';
+    }
+    return node.kind || 'default';
+  }
+
+  function colorFor(node) {
+    return KIND_COLORS[subKind(node)] || KIND_COLORS.default;
+  }
+
+  function setStatus(text) {
+    document.getElementById('status-text').textContent = text;
+  }
+
+  // Every error and rejection is also handed to `wry`'s own IPC
+  // channel (window.ipc.postMessage), so the host process can log it
+  // even though there's no devtools/console attached to this window in
+  // normal use -- see hi_window.rs's `with_ipc_handler`.
+  function reportError(context, err) {
+    const message = context + ': ' + (err instanceof Error ? err.message : String(err));
+    setStatus('error: ' + message);
+    try { if (window.ipc) window.ipc.postMessage('hi-window-error: ' + message); } catch (_) {}
+  }
+
+  window.addEventListener('error', e => reportError('window.onerror', e.error || e.message));
+  window.addEventListener('unhandledrejection', e => reportError('unhandledrejection', e.reason));
+
+  // ---- splash: reveal -> type "NIRDOSHA" -> subtitle fade, same
+  // phases/timing/colors as `hi_logo_anim.rs`'s ratatui version, ported
+  // to CSS animations/timeouts instead of a per-frame buffer paint.
+  // Ends on the same intro-complete timer OR immediately on any
+  // keypress/click, exactly like the terminal splash does.
+  function runSplash() {
+    const WORD = 'NIRDOSHA';
+    const TYPE_PER_CHAR = 45; // ms, matches TYPE_PER_CHAR = 0.045s
+    const WORD_START = 950;   // ms, matches REVEAL_SECS = 0.95s
+    const WORD_TO_SUB_GAP = 220;
+    const SUB_FADE = 550;
+    const INTRO_DONE_AT = WORD_START + WORD.length * TYPE_PER_CHAR + WORD_TO_SUB_GAP + SUB_FADE;
+
+    const wordEl = document.getElementById('splash-word');
+    WORD.split('').forEach(ch => {
+      const span = document.createElement('span');
+      span.textContent = ch;
+      wordEl.appendChild(span);
+    });
+    const letters = wordEl.querySelectorAll('span');
+    letters.forEach((span, i) => {
+      setTimeout(() => {
+        span.style.opacity = '1';
+        span.classList.add('lit');
+      }, WORD_START + i * TYPE_PER_CHAR);
+    });
+    setTimeout(() => {
+      document.getElementById('splash-sub').classList.add('visible');
+    }, WORD_START + WORD.length * TYPE_PER_CHAR + WORD_TO_SUB_GAP);
+
+    let dismissed = false;
+    function dismiss() {
+      if (dismissed) return;
+      dismissed = true;
+      const splash = document.getElementById('splash');
+      splash.classList.add('hidden');
+      document.getElementById('header-logo').classList.add('idle-breathe');
+      setTimeout(() => { splash.style.display = 'none'; }, 320);
+      document.removeEventListener('keydown', dismiss);
+      splash.removeEventListener('click', dismiss);
+      document.getElementById('console-input').focus();
+    }
+    setTimeout(dismiss, INTRO_DONE_AT);
+    document.addEventListener('keydown', dismiss);
+    document.getElementById('splash').addEventListener('click', dismiss);
+  }
+
+  function hasWebGL() {
+    try {
+      const canvas = document.createElement('canvas');
+      return !!(window.WebGLRenderingContext && (canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl')));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Returned as a real HTMLElement, never a string -- 3d-force-graph's
+  // own tooltip accepts either, but a string goes through the
+  // library's internal `innerHTML =` assignment. Node titles are
+  // untrusted input (rfcs/0014's own "Stored XSS is a real risk"
+  // warning); building the DOM ourselves with textContent sidesteps
+  // that assignment entirely rather than trying to sanitize around it.
+  function buildTooltip(node) {
+    const div = document.createElement('div');
+    div.style.cssText = 'font:12px ui-monospace,monospace;color:#e8e8f0;background:#15151f;border:1px solid #3a3a52;border-radius:4px;padding:6px 10px;max-width:280px;';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:bold;color:#ef9f30;word-break:break-all;';
+    title.textContent = node.title || node.id;
+    div.appendChild(title);
+    const kind = document.createElement('div');
+    kind.style.opacity = '0.7';
+    kind.textContent = subKind(node) + (node.status ? ' · ' + node.status : '');
+    div.appendChild(kind);
+    return div;
+  }
+
+  function row(panel, label, value) {
+    if (value === undefined || value === null || value === '') return;
+    const r = document.createElement('div');
+    r.className = 'row';
+    const l = document.createElement('span');
+    l.className = 'label';
+    l.textContent = label + ':';
+    r.appendChild(l);
+    r.appendChild(document.createTextNode(String(value)));
+    panel.appendChild(r);
+  }
+
+  // Build mode's attribute editor (rfcs/0014's "Attach attributes --
+  // only the ones legal for that node's own kind"). **v1 scope cut,
+  // disclosed:** these templates cover the language's real annotation
+  // surface named in that RFC section, but nothing here parses or
+  // validates the built string against the actual `.nir` grammar --
+  // `hi_graph::attach_attribute` stores it as opaque text either way
+  // (see that function's own doc comment); Generate mode's real compile
+  // step is what actually proves an attribute is legal, by rejecting a
+  // generated program that misuses one. "Custom" exists precisely for
+  // whatever this fixed template list doesn't cover.
+  const ATTR_TEMPLATES = {
+    requires_role: { label: 'requires(role: ...)', build: v => 'requires(role: ' + v + ')', placeholder: 'admin' },
+    requires_claim: { label: 'requires(claim: ...)', build: v => 'requires(claim: ' + v + ')', placeholder: 'org:acme' },
+    effect: { label: 'effect(...)', build: v => 'effect(' + v + ')', placeholder: 'network' },
+    nfr_latency: { label: 'nfr(latency_ms: ...)', build: v => 'nfr(latency_ms: ' + v + ')', placeholder: '200' },
+    nfr_error_rate: { label: 'nfr(error_rate_max: ...)', build: v => 'nfr(error_rate_max: ' + v + ')', placeholder: '0.01' },
+    nfr_throughput: { label: 'nfr(throughput_min_per_sec: ...)', build: v => 'nfr(throughput_min_per_sec: ' + v + ')', placeholder: '50' },
+    nfr_concurrency: { label: 'nfr(concurrency_max: ...)', build: v => 'nfr(concurrency_max: ' + v + ')', placeholder: '10' },
+    validate: { label: 'validate { pre:/post: ... }', build: v => 'validate { ' + v + ' }', placeholder: 'pre: amount > 0 post: result.ok' },
+    custom: { label: 'custom (raw attribute text)', build: v => v, placeholder: 'requires(role: admin)' },
+  };
+
+  // Re-fetches this one node's current row and re-renders the panel
+  // from it -- cheaper than a full `reloadGraph()` for something that
+  // only changed one node's own attributes/confirmed state, though
+  // callers that also need the 3D view to reflect a confirm still call
+  // `reloadGraph()` themselves alongside this.
+  function refreshPanelForNode(nodeId) {
+    fetch('/api/nodes')
+      .then(r => r.json())
+      .then(nodes => {
+        const fresh = nodes.find(n => n.id === nodeId);
+        if (fresh) onNodeSelected(fresh);
+      })
+      .catch(err => reportError('refreshing node panel', err));
+  }
+
+  function buildAttributeForm(panel, node) {
+    const title = document.createElement('div');
+    title.className = 'section-title';
+    title.textContent = 'attributes';
+    panel.appendChild(title);
+
+    if (node.attributes) {
+      const ul = document.createElement('ul');
+      ul.className = 'attr-list';
+      node.attributes.split('\n').filter(Boolean).forEach(a => {
+        const li = document.createElement('li');
+        li.textContent = a;
+        ul.appendChild(li);
+      });
+      panel.appendChild(ul);
+    }
+
+    const select = document.createElement('select');
+    Object.keys(ATTR_TEMPLATES).forEach(key => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = ATTR_TEMPLATES[key].label;
+      select.appendChild(opt);
+    });
+    panel.appendChild(select);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    panel.appendChild(input);
+
+    const syncPlaceholder = () => { input.placeholder = ATTR_TEMPLATES[select.value].placeholder; };
+    select.addEventListener('change', syncPlaceholder);
+    syncPlaceholder();
+
+    const status = document.createElement('div');
+    status.className = 'form-status';
+
+    const attachBtn = document.createElement('button');
+    attachBtn.type = 'button';
+    attachBtn.textContent = 'Attach';
+    attachBtn.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) {
+        status.textContent = 'enter a value first.';
+        return;
+      }
+      const attr = ATTR_TEMPLATES[select.value].build(value);
+      attachBtn.disabled = true;
+      postForm('/api/attach', { node: node.id, attr })
+        .then(({ status: httpStatus, body }) => {
+          attachBtn.disabled = false;
+          if (httpStatus !== 200) {
+            status.textContent = body.error || 'request failed: ' + httpStatus;
+            return;
+          }
+          logLine('', 'attached to ' + node.id + ': ' + attr);
+          refreshPanelForNode(node.id);
+        })
+        .catch(err => {
+          attachBtn.disabled = false;
+          status.textContent = String(err);
+          reportError('panel attach', err);
+        });
+    });
+    panel.appendChild(attachBtn);
+
+    // Attributes only ever reach Generate mode for a *confirmed*
+    // candidate (`hi_graph::confirmed_units`'s own gate) -- surfaced
+    // here too, not just in the console, so attaching one and reviewing
+    // it can both happen from the same click without switching back to
+    // the console for the second half.
+    if (!node.confirmed && node.driving_text) {
+      const confirmBtn = document.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.className = 'secondary';
+      confirmBtn.textContent = 'Confirm';
+      confirmBtn.addEventListener('click', () => {
+        confirmBtn.disabled = true;
+        postForm('/api/confirm', { node: node.id })
+          .then(({ status: httpStatus, body }) => {
+            if (httpStatus !== 200) {
+              status.textContent = body.error || 'request failed: ' + httpStatus;
+              confirmBtn.disabled = false;
+              return;
+            }
+            logLine('', 'confirmed ' + node.id);
+            refreshPanelForNode(node.id);
+            if (reloadGraph) reloadGraph();
+          })
+          .catch(err => {
+            confirmBtn.disabled = false;
+            status.textContent = String(err);
+            reportError('panel confirm', err);
+          });
+      });
+      panel.appendChild(confirmBtn);
+    }
+
+    panel.appendChild(status);
+  }
+
+  // `impactHits` is `null` while the /api/impact fetch this node click
+  // kicked off is still in flight -- called twice per click, once to
+  // show the node's own fields immediately and once to fill in impact
+  // once it resolves.
+  function showPanel(node, impactHits) {
+    const panel = document.getElementById('panel');
+    panel.replaceChildren();
+    const h2 = document.createElement('h2');
+    h2.textContent = node.title || node.id;
+    panel.appendChild(h2);
+
+    row(panel, 'id', node.id);
+    row(panel, 'kind', subKind(node));
+    row(panel, 'status', node.status);
+    if (node.source_ref) {
+      row(panel, 'source', node.source_ref + (node.line ? ':' + node.line + (node.col ? ':' + node.col : '') : ''));
+    }
+    // rfcs/0014's Build/Generate/Publish state -- see `hi_api.rs`'s own
+    // `NodeRow` doc comment for what each field means. Shown as plain
+    // rows rather than a distinct visual node style in the 3D view
+    // itself (a disclosed v1 cut -- see `hi_llm.rs`'s own doc comments
+    // for the others).
+    if (node.created_by) {
+      row(panel, 'created_by', node.created_by);
+    }
+    if (node.created_by || node.confirmed || node.driving_text) {
+      row(panel, 'confirmed', node.confirmed ? 'yes' : 'no');
+      row(panel, 'locked', node.locked ? 'yes' : 'no');
+      row(panel, 'waived', node.waived ? 'yes (' + node.waive_reason + ')' : 'no');
+      if (node.driving_text) {
+        row(panel, 'driving text', node.driving_text);
+      }
+    }
+    // The attribute editor (requires/effect/nfr/validate -- "a typical
+    // .nir function['s]" annotation surface) is offered for any
+    // CodeUnit, not just prompt-mode candidates: `hi_graph::
+    // attach_attribute` works on either, even though only a candidate
+    // with `driving_text` actually feeds Generate mode's own prompt
+    // (`hi_graph::confirmed_units`'s own filter).
+    if (node.kind === 'CodeUnit') {
+      buildAttributeForm(panel, node);
+    }
+
+    const impactHeading = document.createElement('div');
+    impactHeading.className = 'row';
+    impactHeading.style.marginTop = '10px';
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = 'impact:';
+    impactHeading.appendChild(label);
+    panel.appendChild(impactHeading);
+
+    if (!impactHits) {
+      const loading = document.createElement('div');
+      loading.style.opacity = '0.6';
+      loading.textContent = 'loading…';
+      panel.appendChild(loading);
+    } else if (impactHits.length === 0) {
+      const none = document.createElement('div');
+      none.style.opacity = '0.6';
+      none.textContent = '(none)';
+      panel.appendChild(none);
+    } else {
+      const ul = document.createElement('ul');
+      impactHits.forEach(hit => {
+        const li = document.createElement('li');
+        li.textContent = hit.edge_kind + ' -> ' + (hit.title || hit.node_id) + (hit.flag ? ' [' + hit.flag + ']' : '');
+        ul.appendChild(li);
+      });
+      panel.appendChild(ul);
+    }
+    panel.style.display = 'block';
+  }
+
+  function buildLegend() {
+    const legend = document.getElementById('legend');
+    legend.replaceChildren();
+    Object.keys(KIND_COLORS).filter(k => k !== 'default').forEach(kind => {
+      const item = document.createElement('div');
+      item.className = 'item';
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = KIND_COLORS[kind];
+      item.appendChild(swatch);
+      const text = document.createElement('span');
+      text.textContent = kind;
+      item.appendChild(text);
+      legend.appendChild(item);
+    });
+  }
+
+  // Set by whichever of `run3D`/`run2D` actually ran, so a mutating
+  // console command (`:confirm`, `:generate`, ...) can refresh the
+  // rendered graph after the database changes underneath it -- without
+  // this, a newly-added or newly-locked node would only ever appear
+  // after the whole window was closed and reopened.
+  let reloadGraph = null;
+
+  function fetchGraphData() {
+    return Promise.all([fetch('/api/nodes').then(r => r.json()), fetch('/api/edges').then(r => r.json())]).then(([nodes, edges]) => prepareGraphData(nodes, edges));
+  }
+
+  function prepareGraphData(nodes, edges) {
+    const nodeIds = new Set(nodes.map(n => n.id));
+    // `link()` (hi_graph.rs) always records both directions of one
+    // relationship (IMPLEMENTS / IMPLEMENTED_BY) so `impact`'s BFS can
+    // walk either way -- render only the forward direction so the same
+    // relationship isn't drawn twice.
+    const links = edges
+      .filter(e => nodeIds.has(e.src) && nodeIds.has(e.dst) && !e.kind.endsWith('_BY'))
+      .map(e => ({ source: e.src, target: e.dst, kind: e.kind, flag: e.flag }));
+    return { nodes, links };
+  }
+
+  function onNodeSelected(node) {
+    showPanel(node, null);
+    fetch('/api/impact?target=' + encodeURIComponent(node.id))
+      .then(r => r.json())
+      .then(report => showPanel(node, report.hits || []))
+      .catch(err => reportError('fetch /api/impact', err));
+  }
+
+  function run3D(data) {
+    // Tracked separately from whatever `data`/`fresh` a given call was
+    // built from -- `onEngineStop` fires again after every later
+    // `graphData()` update too (a reload reheats the simulation, not
+    // just the initial load), so it needs the *current* counts, not the
+    // ones captured in this function's own initial closure.
+    let current = data;
+    const Graph = new ForceGraph3D(document.getElementById('graph'))
+      .backgroundColor('#0b0b12')
+      .graphData(data)
+      .nodeColor(colorFor)
+      .nodeLabel(buildTooltip)
+      .nodeRelSize(4)
+      .linkColor(() => '#3a3a52')
+      .linkOpacity(0.5)
+      .linkDirectionalArrowLength(3)
+      .linkDirectionalArrowRelPos(1)
+      .d3VelocityDecay(0.5)
+      .onNodeClick(onNodeSelected)
+      .onEngineStop(() => {
+        setStatus(current.nodes.length + ' node(s), ' + current.links.length + ' edge(s)');
+        // `graphData()` never re-frames the camera on its own -- without
+        // this, a reload that adds nodes to a previously near-empty (or
+        // empty) graph leaves them rendered outside the camera's current
+        // view, indistinguishable from "the graph didn't update."
+        Graph.zoomToFit(400, 60);
+      });
+    setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s) · settling…');
+    reloadGraph = () =>
+      fetchGraphData()
+        .then(fresh => {
+          current = fresh;
+          Graph.graphData(fresh);
+        })
+        .catch(err => reportError('reloading graph data', err));
+  }
+
+  // A small, real (not stubbed) 2D fallback for when WebGL isn't
+  // available in the webview -- rfcs/0014's own requirement: "the
+  // failure mode without a fallback is a blank window, not just slow
+  // frames." Same node/edge data and the same click/panel interaction,
+  // just a plain hand-rolled spring layout on a 2D canvas instead of
+  // `3d-force-graph`, which hard-requires WebGL.
+  function run2D(data) {
+    const canvas = document.getElementById('fallback-canvas');
+    document.getElementById('graph').style.display = 'none';
+    canvas.style.display = 'block';
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    let nodes = [];
+    let links = [];
+    function applyData(fresh) {
+      const prevById = new Map(nodes.map(n => [n.id, n]));
+      nodes = fresh.nodes.map(n => {
+        const prev = prevById.get(n.id);
+        return Object.assign({}, n, prev ? { x: prev.x, y: prev.y, vx: prev.vx, vy: prev.vy } : { x: (Math.random() - 0.5) * 400, y: (Math.random() - 0.5) * 400, vx: 0, vy: 0 });
+      });
+      const byId = new Map(nodes.map(n => [n.id, n]));
+      links = fresh.links.map(l => ({ source: byId.get(l.source), target: byId.get(l.target) })).filter(l => l.source && l.target);
+    }
+    applyData(data);
+    reloadGraph = () => fetchGraphData().then(applyData).catch(err => reportError('reloading graph data', err));
+
+    canvas.addEventListener('click', e => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left - canvas.width / 2;
+      const y = e.clientY - rect.top - canvas.height / 2;
+      let closest = null, closestDist = 14;
+      nodes.forEach(n => {
+        const d = Math.hypot(n.x - x, n.y - y);
+        if (d < closestDist) { closest = n; closestDist = d; }
+      });
+      if (closest) onNodeSelected(closest);
+    });
+
+    function tick() {
+      const repulsion = 1800;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          let dx = a.x - b.x, dy = a.y - b.y;
+          const dist2 = dx * dx + dy * dy || 0.01;
+          const force = repulsion / dist2;
+          const dist = Math.sqrt(dist2);
+          dx /= dist; dy /= dist;
+          a.vx += dx * force; a.vy += dy * force;
+          b.vx -= dx * force; b.vy -= dy * force;
+        }
+        // gentle pull to center so the graph doesn't drift off-screen
+        nodes[i].vx -= nodes[i].x * 0.002;
+        nodes[i].vy -= nodes[i].y * 0.002;
+      }
+      links.forEach(l => {
+        let dx = l.target.x - l.source.x, dy = l.target.y - l.source.y;
+        const dist = Math.hypot(dx, dy) || 0.01;
+        const targetLen = 60;
+        const force = (dist - targetLen) * 0.02;
+        dx /= dist; dy /= dist;
+        l.source.vx += dx * force; l.source.vy += dy * force;
+        l.target.vx -= dx * force; l.target.vy -= dy * force;
+      });
+      nodes.forEach(nd => {
+        nd.vx *= 0.85; nd.vy *= 0.85;
+        nd.x += nd.vx; nd.y += nd.vy;
+      });
+    }
+
+    function draw() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#0b0b12';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.strokeStyle = '#3a3a52';
+      ctx.lineWidth = 1;
+      links.forEach(l => {
+        ctx.beginPath();
+        ctx.moveTo(l.source.x, l.source.y);
+        ctx.lineTo(l.target.x, l.target.y);
+        ctx.stroke();
+      });
+      nodes.forEach(n => {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = colorFor(n);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+
+    let frames = 0;
+    const maxSettleFrames = 400;
+    function loop() {
+      if (frames < maxSettleFrames) { tick(); frames++; }
+      draw();
+      requestAnimationFrame(loop);
+    }
+    setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s) · 2D fallback (no WebGL)');
+    loop();
+  }
+
+  // ---- console: bottom text entry -- rfcs/0014's whole prompt/build/
+  // generate/publish pipeline, driven from the one text box every other
+  // command here already used, over the POST routes `hi_api.rs`/
+  // `hi_llm.rs` implement. See `MUTATING_PATHS`'s own doc comment
+  // (hi_api.rs) for why every one of these is a real POST, never a GET.
+  function logLine(kind, text) {
+    const transcript = document.getElementById('transcript');
+    const line = document.createElement('div');
+    line.className = 'line' + (kind ? ' ' + kind : '');
+    line.textContent = text;
+    transcript.appendChild(line);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function encodeForm(params) {
+    return Object.keys(params).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k])).join('&');
+  }
+
+  function postForm(path, params) {
+    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: encodeForm(params) }).then(r => r.json().then(body => ({ status: r.status, body })));
+  }
+
+  // Busy state disables the input while a `:prompt`/`:generate`/
+  // `:publish` call (each a real, potentially slow LLM call or compile)
+  // is in flight -- mirrors the now-deleted `hi_tui.rs`'s own
+  // one-request-at-a-time console, over `fetch` instead of a channel to
+  // a background thread.
+  // The caret itself is the busy indicator -- `:prompt`/`:generate`/
+  // `:publish` are real, potentially slow calls (an LLM round trip, a
+  // bounded self-repair loop, a real compile), and a console that just
+  // sits there with no visible change while one runs is
+  // indistinguishable from a hang.
+  const PROMPT_CARET_IDLE = 'hi>';
+  const SPINNER_FRAMES = ['|', '/', '-', '\\'];
+  let busySpinnerTimer = null;
+  function startBusySpinner() {
+    const caret = document.getElementById('prompt-caret');
+    let i = 0;
+    busySpinnerTimer = setInterval(() => {
+      caret.textContent = SPINNER_FRAMES[i % SPINNER_FRAMES.length];
+      i++;
+    }, 120);
+  }
+  function stopBusySpinner() {
+    if (busySpinnerTimer) {
+      clearInterval(busySpinnerTimer);
+      busySpinnerTimer = null;
+    }
+    document.getElementById('prompt-caret').textContent = PROMPT_CARET_IDLE;
+  }
+
+  let busy = false;
+  function withBusy(promise) {
+    busy = true;
+    document.getElementById('console-input').disabled = true;
+    startBusySpinner();
+    return promise.finally(() => {
+      busy = false;
+      stopBusySpinner();
+      const input = document.getElementById('console-input');
+      input.disabled = false;
+      input.focus();
+    });
+  }
+
+  function handleConsoleSubmit(raw) {
+    const line = raw.trim();
+    if (!line || busy) return;
+    logLine('user', '> ' + line);
+
+    if (line === ':ask' || line.startsWith(':ask ')) {
+      const q = line.slice(':ask'.length).trim();
+      if (!q) { logLine('error', 'usage: :ask <question>'); return; }
+      // Wrapped in withBusy: local keyword search is instant, but a
+      // question that falls through to hi_llm::answer_question (see
+      // hi_api.rs::handle_ask) is a real, potentially slow model call.
+      withBusy(fetch('/api/ask?q=' + encodeURIComponent(q)).then(r => r.json()))
+        .then(result => {
+          const hits = result.hits || [];
+          if (hits.length) {
+            hits.forEach(h => logLine('', h.doc_id + ': ' + h.content));
+          } else if (result.answer) {
+            logLine('', result.answer);
+          } else if (result.error) {
+            logLine('error', result.error);
+          } else {
+            logLine('', '(no matches -- set an LLM provider, e.g. OPENAI_API_KEY, for a real answer when local search finds nothing)');
+          }
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :ask', err); });
+      return;
+    }
+    if (line === ':impact' || line.startsWith(':impact ')) {
+      const target = line.slice(':impact'.length).trim();
+      if (!target) { logLine('error', 'usage: :impact <target>'); return; }
+      fetch('/api/impact?target=' + encodeURIComponent(target))
+        .then(r => r.json())
+        .then(report => {
+          const hits = report.hits || [];
+          if (!hits.length) { logLine('', '(no impact found for ' + target + ')'); return; }
+          hits.forEach(h => logLine('', h.edge_kind + ' -> ' + (h.title || h.node_id) + (h.flag ? ' [' + h.flag + ']' : '')));
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :impact', err); });
+      return;
+    }
+    // rfcs/0014 "1. Prompt mode": the LLM populates candidate
+    // fn/struct/enum/screen nodes from a free-text description --
+    // every one lands unconfirmed (`hi_graph::add_candidate`'s own
+    // default), so nothing here reaches Generate mode without
+    // `:confirm` first.
+    if (line === ':prompt' || line.startsWith(':prompt ')) {
+      const text = line.slice(':prompt'.length).trim();
+      if (!text) { logLine('error', 'usage: :prompt <description>'); return; }
+      logLine('', 'populating the graph from this prompt (this calls the model, and can take a while)…');
+      withBusy(postForm('/api/prompt', { text }))
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'added ' + body.nodes_added + ' candidate(s), ' + body.edges_added + ' relation(s) -- review with the click panel, then :confirm <node-id>.');
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :prompt', err); });
+      return;
+    }
+    if (line === ':confirm' || line.startsWith(':confirm ')) {
+      const node = line.slice(':confirm'.length).trim();
+      // No argument at all means "everything is to be compiled" --
+      // confirms every still-unconfirmed, non-waived candidate in one
+      // call, not just the one node an id would name.
+      postForm('/api/confirm', node ? { node } : {})
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          if (node) {
+            logLine('', 'confirmed ' + node);
+          } else if (body.confirmed.length === 0) {
+            logLine('', 'nothing left to confirm.');
+          } else {
+            logLine('', 'confirmed ' + body.confirmed.length + ' candidate(s): ' + body.confirmed.join(', '));
+          }
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :confirm', err); });
+      return;
+    }
+    if (line === ':delete' || line.startsWith(':delete ')) {
+      const node = line.slice(':delete'.length).trim();
+      if (!node) { logLine('error', 'usage: :delete <node-id>'); return; }
+      postForm('/api/delete', { node })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'deleted ' + node);
+          document.getElementById('panel').style.display = 'none';
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :delete', err); });
+      return;
+    }
+    if (line === ':edit' || line.startsWith(':edit ')) {
+      const rest = line.slice(':edit'.length).trim();
+      const sp = rest.indexOf(' ');
+      if (sp < 0) { logLine('error', 'usage: :edit <node-id> <new driving text>'); return; }
+      const node = rest.slice(0, sp), text = rest.slice(sp + 1).trim();
+      if (!text) { logLine('error', 'usage: :edit <node-id> <new driving text>'); return; }
+      postForm('/api/edit', { node, text })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'edited ' + node + ' (unlocked if it had already generated)');
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :edit', err); });
+      return;
+    }
+    if (line === ':attach' || line.startsWith(':attach ')) {
+      const rest = line.slice(':attach'.length).trim();
+      const sp = rest.indexOf(' ');
+      if (sp < 0) { logLine('error', 'usage: :attach <node-id> <attribute, e.g. requires(role: admin)>'); return; }
+      const node = rest.slice(0, sp), attr = rest.slice(sp + 1).trim();
+      if (!attr) { logLine('error', 'usage: :attach <node-id> <attribute>'); return; }
+      postForm('/api/attach', { node, attr })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'attached to ' + node + ': ' + attr);
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :attach', err); });
+      return;
+    }
+    if (line === ':waive' || line.startsWith(':waive ')) {
+      const rest = line.slice(':waive'.length).trim();
+      const sp = rest.indexOf(' ');
+      if (sp < 0) { logLine('error', 'usage: :waive <node-id> <reason>'); return; }
+      const node = rest.slice(0, sp), reason = rest.slice(sp + 1).trim();
+      if (!reason) { logLine('error', 'usage: :waive <node-id> <reason> -- a reason is required'); return; }
+      postForm('/api/waive', { node, reason })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'waived ' + node + ': ' + reason);
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :waive', err); });
+      return;
+    }
+    if (line === ':unwaive' || line.startsWith(':unwaive ')) {
+      const node = line.slice(':unwaive'.length).trim();
+      if (!node) { logLine('error', 'usage: :unwaive <node-id>'); return; }
+      postForm('/api/unwaive', { node })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'unwaived ' + node);
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :unwaive', err); });
+      return;
+    }
+    // rfcs/0014 "3. Generate mode": materializes every confirmed
+    // candidate into one real, compiled `.nir` program (see
+    // `hi_llm.rs`'s own "v1 scope cut" doc comment for why this is one
+    // combined file, not per-unit files) and locks whichever units it
+    // actually declared.
+    if (line === ':generate') {
+      logLine('', 'generating from every confirmed candidate (this calls the model, with a bounded self-repair loop, and can take a while)…');
+      withBusy(postForm('/api/generate', {}))
+        .then(({ status, body }) => {
+          (body.log || []).forEach(l => logLine('', l));
+          if (!body.ok) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'locked ' + body.locked.length + ' unit(s) -> ' + body.path + (body.not_declared && body.not_declared.length ? '; not declared by the generated program: ' + body.not_declared.join(', ') : ''));
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :generate', err); });
+      return;
+    }
+    // rfcs/0014 "4. Publish mode" -- see `hi_api.rs::handle_publish`'s
+    // own doc comment for this v1's real, disclosed scope cut: a local
+    // compiled binary, not a real `deployment_provider` deploy (that
+    // abstraction and its credential storage are undecided in the RFC
+    // itself).
+    if (line === ':publish') {
+      logLine('', 'building the whole generated program…');
+      withBusy(postForm('/api/publish', {}))
+        .then(({ status, body }) => {
+          if (!body.ok) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'published -> ' + body.binary);
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :publish', err); });
+      return;
+    }
+    logLine('error', "unrecognized command -- try :prompt <description>, :confirm [<node-id>] (no id = confirm everything), :delete/:edit/:attach/:waive/:unwaive <node-id> ..., :generate, :publish, :ask <question>, or :impact <target>.");
+  }
+
+  function initConsole() {
+    const input = document.getElementById('console-input');
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !input.disabled) {
+        const value = input.value;
+        input.value = '';
+        handleConsoleSubmit(value);
+      }
+    });
+    logLine('', 'connected -- :prompt <description> to populate the graph, :confirm <node-id> (or bare :confirm for everything) to review, :generate to compile, :publish to build the final binary, :ask <question> / :impact <target> to query.');
+  }
+
+  // ---- UI zoom: Ctrl/Cmd +/- and Ctrl/Cmd 0, same as every other
+  // desktop app -- this window has no browser chrome of its own to
+  // supply that (an embedded webview, unlike a real browser tab, does
+  // not bind these by default), so it's implemented here. `zoom` (not
+  // `transform: scale()`) is deliberate: it reflows the whole box model
+  // at the new scale -- the fixed px layout throughout this page
+  // (#header/#console/#legend/#panel) stays correctly positioned at any
+  // zoom level, not just visually stretched.
+  //
+  // Applied per-element (every real UI chrome piece a person reads or
+  // types into), NOT to `<body>` as a whole -- `#graph`/`#fallback-
+  // canvas` are deliberately excluded. Confirmed by a real regression:
+  // zooming `<body>` (which contains the WebGL canvas `run3D` sizes via
+  // the container's own `getBoundingClientRect()`) left the 3D scene
+  // rendered squashed into the bottom of the window instead of filling
+  // `#graph`'s own box -- WebKitGTK's canvas backing-buffer sizing and
+  // the CSS `zoom` property don't stay in sync with each other even at
+  // `zoom:1`. The graph's own contents were never what "bigger text"
+  // was asking for anyway -- that's a camera-level concern, not a CSS
+  // one, and stays untouched here.
+  const ZOOM_TARGETS = '#header, #console, #panel, #legend, #prompt-screen';
+  let uiZoom = 1;
+  const ZOOM_MIN = 0.6, ZOOM_MAX = 2.2, ZOOM_STEP = 0.1;
+  function applyZoom() {
+    document.querySelectorAll(ZOOM_TARGETS).forEach(el => { el.style.zoom = uiZoom.toFixed(2); });
+    try { localStorage.setItem('hi-ui-zoom', String(uiZoom)); } catch (_) {}
+  }
+  function loadZoom() {
+    try {
+      const saved = parseFloat(localStorage.getItem('hi-ui-zoom'));
+      if (!isNaN(saved) && saved >= ZOOM_MIN && saved <= ZOOM_MAX) uiZoom = saved;
+    } catch (_) {}
+    applyZoom();
+  }
+  document.addEventListener('keydown', e => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    // `=` (not just `+`) so the un-shifted key most keyboards actually
+    // send for Ctrl+= is honored too, matching every browser's own
+    // zoom-in binding.
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      uiZoom = Math.min(ZOOM_MAX, +(uiZoom + ZOOM_STEP).toFixed(2));
+      applyZoom();
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      uiZoom = Math.max(ZOOM_MIN, +(uiZoom - ZOOM_STEP).toFixed(2));
+      applyZoom();
+    } else if (e.key === '0') {
+      e.preventDefault();
+      uiZoom = 1;
+      applyZoom();
+    }
+  });
+  loadZoom();
+
+  // ---- rfcs/0014 mode: prompt (default on entry) -> build (once a
+  // prompt has ever populated this project's graph). See
+  // `#prompt-screen`'s own HTML comment for the exact persistence rule.
+  function hasPromptHistory(nodes) {
+    return nodes.some(n => n.created_by === 'llm-prompt-mode');
+  }
+
+  function enterBuildMode() {
+    document.getElementById('prompt-screen').classList.remove('visible');
+  }
+
+  function submitPromptScreen() {
+    const input = document.getElementById('prompt-screen-input');
+    const btn = document.getElementById('prompt-screen-submit');
+    const statusEl = document.getElementById('prompt-screen-status');
+    const text = input.value.trim();
+    if (!text) {
+      statusEl.textContent = 'describe what you want to build first.';
+      return;
+    }
+    input.disabled = true;
+    btn.disabled = true;
+    statusEl.textContent = 'populating the graph from this prompt (this calls the model, and can take a while)…';
+    postForm('/api/prompt', { text })
+      .then(({ status, body }) => {
+        if (status !== 200) {
+          statusEl.textContent = body.error || ('request failed: ' + status);
+          input.disabled = false;
+          btn.disabled = false;
+          return;
+        }
+        logLine('', 'populated the graph from the prompt: ' + body.nodes_added + ' candidate(s), ' + body.edges_added + ' relation(s) -- review with the click panel, then :confirm <node-id>.');
+        // "the mode should also change to build mode the first time a
+        // prompt is consumed" -- this is that transition; reopening
+        // `hi` later skips straight past this screen (`hasPromptHistory`
+        // above, checked fresh against the database on every load).
+        enterBuildMode();
+        if (reloadGraph) reloadGraph();
+      })
+      .catch(err => {
+        statusEl.textContent = String(err);
+        input.disabled = false;
+        btn.disabled = false;
+        reportError('prompt-screen submit', err);
+      });
+  }
+
+  function initPromptScreen() {
+    document.getElementById('prompt-screen-submit').addEventListener('click', submitPromptScreen);
+    document.getElementById('prompt-screen-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitPromptScreen();
+      }
+    });
+  }
+
+  runSplash();
+  initConsole();
+  initPromptScreen();
+  buildLegend();
+  Promise.all([
+    fetch('/api/nodes').then(r => r.json()),
+    fetch('/api/edges').then(r => r.json()),
+  ])
+    .then(([nodes, edges]) => {
+      const data = prepareGraphData(nodes, edges);
+      if (hasWebGL() && typeof ForceGraph3D === 'function') {
+        run3D(data);
+      } else {
+        run2D(data);
+      }
+      if (hasPromptHistory(nodes)) {
+        enterBuildMode();
+      } else {
+        document.getElementById('prompt-screen').classList.add('visible');
+        document.getElementById('prompt-screen-input').focus();
+      }
+    })
+    .catch(err => reportError('loading graph data', err));
+})();
+</script>
+</body>
+</html>

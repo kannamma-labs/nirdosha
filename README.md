@@ -216,7 +216,9 @@ Full rationale: [`AGENTS.md`](./AGENTS.md).
 - **UI engine (static)** — `nirdosha emit-ui` derives a Material-styled page from `struct`/`screen`/`dashboard` conventions; `render: "chart"` adds a bounded grammar-of-graphics config, and a Rust crate can contribute a custom `layout` widget — hand-assembled or auto-discovered from the app's own `Cargo.toml` — with no runtime code-execution hole ([`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md)).
 - **Cross-platform CI** — Linux, macOS, and Windows all build and run their full test suite on every push, not just at release time.
 
-**Not currently running in any form** — designed, documented, and (for most of these) previously interpreter-backed, but the interpreter is removed and native codegen doesn't reach them yet: `db`, `json`, `http`/`https`, `mq`, `transact`, `workflow`, `sandbox`, and the live (server-backed) half of the UI engine. This is the deliberate, disclosed trade the interpreter removal made — see [Track B](./docs/PUBLIC_ROADMAP.md) for what's landed since and what's next; treat the roadmap's older entries with the same caution, since large parts of it still describe the pre-removal world.
+**Also real, compiled, and running — landed after the interpreter was removed, not blocked by it:** `db` (SQLite + Postgres, pooled), `json`, `http`/`https` (a real client with keep-alive/pooling, and a real compiled `serve` mode — `nirdosha build --serve` — dispatching `POST`/`GET` requests with real bodies to compiled functions per a `serve { expose ... }` exposure set), `mq` (Redis), `transact` (including a real crash-durable log and replay), and `workflow` (Layer 1: durable state machines, real notification sends, SLA detection). The generated UI's `fetch()` calls against `/api/<fn>` are real once served this way, closing the basic CRUD/dashboard case of the "live, server-backed UI" gap this section used to name in full.
+
+**Not currently running in any form:** `sandbox` (a real, separate OS *process*, not a thread — explicitly descoped from v1, a materially larger design question than the concurrency work above) and a handful of specific UI-engine widgets that need more than basic route serving (`workspace`/`panel` composite screens, `visual`/`render` beyond the existing bar chart, a live SLA countdown chip, an action's "show result" preview, a workflow stage stepper) — see [Track B](./docs/PUBLIC_ROADMAP.md) for the exact, current list; treat the roadmap's older entries with caution, since some still describe the pre-removal world.
 </details>
 
 <details>
@@ -228,7 +230,7 @@ Small team — high-context contributions matter more than volume. See [`MAINTAI
 | --- | --- |
 | Ownership/concurrency, PL theory | A `Track B` codegen gap, or an SMT/typeck edge case |
 | Constrained decoding, agent repair loops | `crates/bench/`'s pass@1 harness — the scaffold's real, it just hasn't been pointed at a live model yet |
-| Real backends, CRUD, sandboxing | A `Track B` codegen gap for `db`/`json`/`http`/`mq`/`sandbox` — none of them run today in any form |
+| Real backends, CRUD, sandboxing | `db`/`json`/`http`/`mq` are real and compiled already — `sandbox` is the one still-unstarted `Track B` gap, plus the specific live-UI widgets named above |
 | Docs / DX | Error-message clarity, Getting Started walkthroughs, missing examples |
 
 [`AREAS.md`](./AREAS.md) lists subsystem owners; cross-cutting or breaking changes go through the [RFC process](./rfcs/README.md) first — see [`GOVERNANCE.md`](./GOVERNANCE.md) and [`CONTRIBUTING.md`](./CONTRIBUTING.md).
@@ -255,7 +257,7 @@ This README is the pitch and the five-minute quick start. Everything else lives 
 <details>
 <summary><b>❓ FAQ (short version)</b></summary>
 
-**Is it production-ready?** No — it's pre-1.0 and moving fast. The compiled path covers a real, growing subset; most backend-service capabilities (`db`/`json`/`http`/`mq`/`transact`/`workflow`) don't run in any form right now. See the [Public Roadmap](./docs/PUBLIC_ROADMAP.md).
+**Is it production-ready?** No — it's pre-1.0 and moving fast. The compiled path covers a real, growing subset, and the core backend-service capabilities (`db`/`json`/`http`/`mq`/`transact`/`workflow`) are real and compiled today; what's still missing is `sandbox` and a handful of specific live-UI widgets, plus the general pre-1.0 hardening (deployment story, real Windows verification, and more). See the [Public Roadmap](./docs/PUBLIC_ROADMAP.md).
 
 **Why not just use Rust?** Rust already solves memory safety for teams that can invest in its learning curve. Nirdosha targets a narrower problem — AI agents writing backend code unsupervised. [Full answer](https://github.com/kannamma-labs/nirdosha/wiki/Nirdosha-vs-Alternatives).
 

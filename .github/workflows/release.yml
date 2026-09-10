@@ -68,6 +68,15 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install z3
 
+      # Same GTK/WebKitGTK dev-headers requirement `build.yml`'s Linux
+      # job needs (see that workflow's own comment) -- `wry`'s Linux
+      # backend, new as of the `hi` build-mode window, embeds WebKitGTK.
+      # macOS/Windows need nothing extra here (WKWebView/WebView2 are
+      # system frameworks already present on those runners).
+      - name: Install system dependencies (gtk/webkit2gtk for the hi build-mode window — Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
       - name: Build (Z3 vendored, no system libz3 dependency)
         if: runner.os != 'macOS'
         working-directory: crates/compiler

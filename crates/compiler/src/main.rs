@@ -54,8 +54,20 @@ fn print_usage() {
     eprintln!("  nirdosha emit-catalog [-o out.json]");
     eprintln!("                                      print the std UI catalog (rfcs/0009 Phase 0) -- the closed");
     eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
-    eprintln!("  nirdosha hi                          interactive LLM console (rfcs/0012) -- gated on");
-    eprintln!("                                      NIRDOSHA_LLM_PROVIDER_KEY+_MODEL or OPENAI_API_KEY");
+    eprintln!("  nirdosha hi                          open the native build-mode window: a live 3D graph over");
+    eprintln!("                                      .nir/hi.db (rfcs/0013/0014) -- auto-scaffolds/syncs .nir/");
+    eprintln!("                                      first (NIRDOSHA_HI_DISABLE=1 to skip). This *is* `hi` --");
+    eprintln!("                                      not a separate tool alongside it.");
+    eprintln!("  nirdosha hi ingest <doc.md>          content-address, chunk, and FTS-index a requirement/");
+    eprintln!("                                      decision/design doc into .nir/hi.db (rfcs/0013)");
+    eprintln!("  nirdosha hi sync [<file.nir> ...]    re-run the code-hash walk bare `hi` already runs on");
+    eprintln!("                                      startup; with no files, walks every .nir file under the cwd");
+    eprintln!("  nirdosha hi link <req-id> <fn|struct|enum|screen:name>");
+    eprintln!("                                      record a manual IMPLEMENTS/IMPLEMENTED_BY edge");
+    eprintln!("  nirdosha hi impact <target>          bounded impact report (a requirement/decision id, or a");
+    eprintln!("                                      code-unit name/kind:name) -- CI-friendly, non-interactive");
+    eprintln!("  nirdosha hi serve                    headless HTTP fallback for the same .nir/hi.db graph");
+    eprintln!("                                      (rfcs/0014) -- scripting/CI use, never the default");
 }
 
 /// Load (resolving any `use "..."` — `docs/ROADMAP.md` Track F, F2 piece 3)
@@ -394,23 +406,178 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-/// `nirdosha hi` (rfcs/0012-nirdosha-hi-agentic-console.md) -- thin on
-/// purpose: the activation contract and the console loop itself both
-/// live in `nirdosha::hi` (the library half), so they're unit-testable
-/// and so a future second caller (an editor extension, say) doesn't
-/// have to re-shell out to this binary just to reuse them. No flags
-/// today -- the console's own `:`-prefixed commands are where its
-/// interaction surface actually lives, not CLI args.
-fn cmd_hi(_args: impl Iterator<Item = String>) -> ExitCode {
-    let activation = match nirdosha::hi::resolve_activation(&|k| std::env::var(k).ok()) {
-        Ok(a) => a,
+/// `nirdosha hi` -- one command, one app (rfcs/0013-nirdosha-realm.md,
+/// rfcs/0014-generative-build-console.md). Bare `hi`, no subcommand,
+/// opens the native build-mode window directly: a live 3D graph over
+/// `.nir/hi.db`, with its own bottom-of-window `:ask`/`:impact` console
+/// baked into the page itself (`hi_graph.html`) -- there is no separate
+/// terminal front end to launch first and hand off from. The named
+/// subcommands below are `.nir/hi.db`'s standalone CLI surface, for
+/// CI/scripting use that never needs a window at all: `ingest`/`link`
+/// aren't things the window's own startup runs on its own, and
+/// `sync`/`impact` are exactly what bare `hi` already does/shows, just
+/// callable without opening anything.
+fn cmd_hi(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error resolving the current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(sub) = args.next() else {
+        return cmd_hi_window(&cwd);
+    };
+    let conn = match nirdosha::hi_graph::open(&cwd) {
+        Ok(c) => c,
         Err(msg) => {
             eprintln!("{msg}");
             return ExitCode::FAILURE;
         }
     };
-    nirdosha::hi::run_console(activation);
-    ExitCode::SUCCESS
+    match sub.as_str() {
+        "ingest" => {
+            let Some(doc) = args.next() else {
+                eprintln!("usage: nirdosha hi ingest <doc.md>");
+                return ExitCode::FAILURE;
+            };
+            match nirdosha::hi_graph::ingest_document(&conn, std::path::Path::new(&doc)) {
+                Ok(n) => {
+                    println!("ingested {n} new chunk(s) from {doc}");
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "sync" => {
+            let files: Vec<String> = args.collect();
+            match nirdosha::hi_graph::sync(&conn, &cwd, &files) {
+                Ok(r) => {
+                    println!(
+                        "synced {} file(s): {} unit(s) seen, {} added, {} changed, {} edge(s) flagged possibly_stale",
+                        r.files_scanned, r.units_seen, r.units_added, r.units_changed, r.edges_flagged
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "link" => {
+            let (Some(req_id), Some(target)) = (args.next(), args.next()) else {
+                eprintln!("usage: nirdosha hi link <requirement-id> <fn|struct|enum|screen:name>");
+                return ExitCode::FAILURE;
+            };
+            match nirdosha::hi_graph::link(&conn, &req_id, &target) {
+                Ok(()) => {
+                    println!("linked {req_id} <-> {target}");
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "impact" => {
+            let Some(target) = args.next() else {
+                eprintln!("usage: nirdosha hi impact <target>");
+                return ExitCode::FAILURE;
+            };
+            match nirdosha::hi_graph::impact(&conn, &target) {
+                Ok(report) => {
+                    print!("{}", format_impact_report(&target, &report));
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "serve" => {
+            // The headless/network-reachable fallback rfcs/0014's own
+            // "no network port at all" section documents -- not the
+            // default build-mode transport (that's the wry custom-
+            // protocol handler bare `hi` opens), but a real surface for
+            // scripting/CI/remote-dev-box use. Drop this validating
+            // connection before handing the directory to the server,
+            // which opens its own per-request connections (see
+            // hi_server.rs's own doc comment on why:
+            // rusqlite::Connection isn't Sync).
+            drop(conn);
+            match nirdosha::hi_server::serve(&cwd) {
+                Ok(handle) => {
+                    println!("hi API listening on http://127.0.0.1:{} (Ctrl+C to stop)", handle.port);
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!("unknown `hi` subcommand `{other}` -- usage: nirdosha hi [ingest|sync|link|impact|serve] ...");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Bare `nirdosha hi`: auto-scaffolds/syncs `.nir/hi.db` (best-effort --
+/// a sync problem degrades to a logged warning, never blocks the window
+/// from opening, same "must never be the thing that crashes" posture
+/// `hi_graph.rs`'s own doc comment describes), then opens the native
+/// build-mode window and blocks until it's closed. `NIRDOSHA_HI_DISABLE=1`
+/// skips the scaffold/sync step entirely (the window still opens, just
+/// against whatever `.nir/hi.db` already has, or none at all).
+fn cmd_hi_window(cwd: &std::path::Path) -> ExitCode {
+    if !nirdosha::hi_graph::is_disabled(&|k| std::env::var(k).ok()) {
+        match nirdosha::hi_graph::open(cwd) {
+            Ok(conn) => {
+                if let Err(e) = nirdosha::hi_graph::sync(&conn, cwd, &[]) {
+                    eprintln!("hi: sync failed, continuing with a possibly-stale graph: {e}");
+                }
+            }
+            Err(e) => eprintln!("hi: couldn't open .nir/hi.db, continuing without it ({}=1 to silence this): {e}", nirdosha::hi_graph::HI_DISABLE_VAR),
+        }
+    }
+    match nirdosha::hi_window::open(cwd) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("{msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// One rendering of a bounded impact walk (rfcs/0013), flagged nodes
+/// listed first (`hi_graph::impact` already sorts them that way).
+fn format_impact_report(target: &str, report: &nirdosha::hi_graph::ImpactReport) -> String {
+    if report.hits.is_empty() {
+        return format!("no reachable nodes from `{target}` -- try `nirdosha hi link` or `nirdosha hi sync` first.\n");
+    }
+    let mut out = format!("impact of `{target}` ({} node(s){}):\n", report.hits.len(), if report.partial { ", partial -- bound reached" } else { "" });
+    for h in &report.hits {
+        let flag = h.flag.as_deref().map(|f| format!("  [{f}]")).unwrap_or_default();
+        // `source_ref`/`line`/`col` are only ever set on a `CodeUnit`
+        // node (`Requirement`/`Document`/`Chunk` have nothing to point
+        // at) -- printed only when present, same "NULL means nothing to
+        // show" convention the rest of this report already follows.
+        let location = match (&h.source_ref, h.line, h.col) {
+            (Some(path), Some(line), Some(col)) => format!("  ({path}:{line}:{col})"),
+            _ => String::new(),
+        };
+        out.push_str(&format!("  depth {} {} {} `{}`{location}{flag}\n", h.depth, h.kind, h.edge_kind, h.title.as_deref().unwrap_or(&h.node_id)));
+    }
+    out
 }
 
 fn cmd_emit_llvm(mut args: impl Iterator<Item = String>) -> ExitCode {
