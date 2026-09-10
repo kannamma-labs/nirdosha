@@ -565,7 +565,7 @@ pub fn ingest_document(conn: &Connection, path: &Path) -> Result<usize, String> 
     Ok(new_chunks)
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug)]
 pub struct AskHit {
     pub doc_id: String,
     pub content: String,
@@ -575,13 +575,61 @@ const DEFAULT_ASK_LIMIT: u32 = 10;
 
 /// FTS5-only retrieval -- rfcs/0013's "v1 floor": no vector search, no
 /// embeddings, no LLM call, must still answer "what does R17 say."
+/// FTS5 over ingested documents, plus (rfcs/0014) a plain per-term
+/// substring search over every `CodeUnit`'s own name and driving text
+/// -- "what does tick do" finds a `fn tick` that FTS5's strict,
+/// implicit-AND-of-every-term matching against short driving text
+/// almost never would, and finds it whether or not that unit's own
+/// prose ever literally says "tick": the qualified name is searched
+/// too, not just `driving_text`.
+///
+/// Deliberately *not* folded into `chunks_fts` alongside ingested
+/// documents: that table is content-addressed (`chunks.id` = a hash of
+/// the text), a fit for near-immutable document chunks, not a
+/// candidate's `driving_text`, which `hi_graph::edit_driving_text`
+/// expects to change often -- indexing it there would leave a stale
+/// chunk behind on every edit, with nothing to ever clean it up. A
+/// live query against the current column has no such staleness
+/// problem, at the cost of FTS5's own ranking/tokenization.
 pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
-    let mut stmt = conn.prepare("SELECT doc_id, content FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2").map_err(|e| format!("preparing FTS query: {e}"))?;
-    let hits = stmt
+    let mut hits: Vec<AskHit> = Vec::new();
+
+    let mut doc_stmt = conn.prepare("SELECT doc_id, content FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2").map_err(|e| format!("preparing FTS query: {e}"))?;
+    let doc_hits = doc_stmt
         .query_map(params![query, DEFAULT_ASK_LIMIT], |r| Ok(AskHit { doc_id: r.get(0)?, content: r.get(1)? }))
         .map_err(|e| format!("running FTS query `{query}`: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+        .filter_map(Result::ok);
+    hits.extend(doc_hits);
+
+    // Words under 3 characters ("do", "a", "of", ...) are almost always
+    // noise for a substring match this loose -- dropped rather than
+    // matched against everything.
+    let terms: Vec<String> = query.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| w.len() >= 3).collect();
+    if !terms.is_empty() && hits.len() < DEFAULT_ASK_LIMIT as usize {
+        let mut code_stmt = conn.prepare("SELECT id, title, driving_text, source_ref, line FROM nodes WHERE kind = 'CodeUnit'").map_err(|e| format!("preparing CodeUnit search: {e}"))?;
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>, Option<i64>)> =
+            code_stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(|e| format!("listing CodeUnit content: {e}"))?.filter_map(Result::ok).collect();
+        for (id, title, driving_text, source_ref, line) in rows {
+            let name = title.unwrap_or_default();
+            let haystack = format!("{name} {}", driving_text.as_deref().unwrap_or("")).to_lowercase();
+            if !terms.iter().any(|t| haystack.contains(t.as_str())) {
+                continue;
+            }
+            let content = match driving_text.filter(|dt| !dt.is_empty()) {
+                Some(dt) => dt,
+                None => match (source_ref, line) {
+                    (Some(sref), Some(l)) => format!("(no driving text yet -- see {sref}:{l})"),
+                    (Some(sref), None) => format!("(no driving text yet -- see {sref})"),
+                    _ => "(no description available yet)".to_string(),
+                },
+            };
+            hits.push(AskHit { doc_id: id, content });
+            if hits.len() >= DEFAULT_ASK_LIMIT as usize {
+                break;
+            }
+        }
+    }
+
     Ok(hits)
 }
 
@@ -907,6 +955,40 @@ mod tests {
 
         let hits = ask(&conn, "ledger").expect("ask");
         assert!(hits.iter().any(|h| h.content.contains("ledger")));
+    }
+
+    #[test]
+    fn ask_finds_a_code_unit_by_name_even_when_the_question_is_natural_language() {
+        let dir = scratch_dir("ask_code_unit");
+        let conn = open(&dir).expect("open");
+        add_candidate(&conn, "fn", "tick", "advances the game clock by one frame", "llm-prompt-mode").expect("add_candidate");
+
+        let hits = ask(&conn, "what does tick do ?").expect("ask");
+        assert!(hits.iter().any(|h| h.doc_id == "code:fn:tick"), "expected code:fn:tick among hits, got: {hits:?}");
+    }
+
+    #[test]
+    fn ask_finds_a_synced_code_unit_with_no_driving_text_at_all() {
+        let dir = scratch_dir("ask_synced_no_text");
+        write_nir(&dir, "a.nir", "fn transfer_funds(amount: i64) -> i64 { return amount }\n");
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+
+        let hits = ask(&conn, "what does transfer_funds do").expect("ask");
+        let hit = hits.iter().find(|h| h.doc_id == "code:fn:transfer_funds").expect("expected a hit for transfer_funds");
+        assert!(hit.content.contains("a.nir"), "should point at the source file when there's no driving text, got: {}", hit.content);
+    }
+
+    #[test]
+    fn ask_ignores_short_common_words() {
+        let dir = scratch_dir("ask_short_words");
+        let conn = open(&dir).expect("open");
+        add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+
+        // "do" is 2 characters and should be dropped rather than
+        // matching every CodeUnit's driving text indiscriminately.
+        let hits = ask(&conn, "do").expect("ask");
+        assert!(hits.is_empty(), "a bare short word should match nothing, got: {hits:?}");
     }
 
     #[test]
