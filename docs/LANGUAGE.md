@@ -30,6 +30,7 @@ performance.
 
 ```sh
 nirdosha build <file.nir> -o <out> [--opt0]   # compile to a native binary (LLVM, -O2 by default)
+nirdosha verify <file.nir>            # JSON verdict + exit 0/1, no LLVM/clang needed (see below)
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -48,6 +49,20 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   deserialize back. There is no `--format=json` flag anymore (it was
   interpreter/`run`-only); a `build`/`emit-llvm`/`emit-ui` failure
   prints a plain-text diagnostic only.
+- **`verify`** (2026-09) — runs the same gates `build` already runs
+  before it ever touches LLVM (typecheck, ownership, `validate`
+  contract-check), plus `smt::analyze`'s Tier-1 proof-obligation counts,
+  and prints one JSON verdict to stdout with a real exit code (`0` every
+  gate passed, `1` otherwise) — no clang/LLVM toolchain needed, and it
+  never produces a binary. Exists so CI and an agent's own repair loop
+  can ask "does this pass?" as a single machine-readable call instead of
+  parsing `build`'s stderr text; see `crates/compiler/src/main.rs`'s
+  `cmd_verify`/`VerifyVerdict` for the exact schema. Unlike `build`, does
+  not require `fn main()` — a tool/library fragment an agent emits under
+  a constrained grammar typechecks and verifies the same as a runnable
+  program. Each stage that never ran because an earlier one failed is
+  reported `"skipped"`, not silently `"passed"` — the verdict never
+  claims to have checked something it didn't actually run.
 
 ---
 

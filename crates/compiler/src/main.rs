@@ -17,6 +17,7 @@ fn main() -> ExitCode {
         "init" => cmd_init(args),
         "gen-crud" => cmd_gen_crud(args),
         "build" => cmd_build(args),
+        "verify" => cmd_verify(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
@@ -44,6 +45,8 @@ fn print_usage() {
     eprintln!("                                      real db_connect/db_execute/db_query bodies, no LLM");
     eprintln!("  nirdosha build <file.nir> -o <out> [--opt0]");
     eprintln!("                                      compile to a native binary (LLVM, -O2 by default)");
+    eprintln!("  nirdosha verify <file.nir>          typecheck/ownership/contract-check only, no LLVM/clang");
+    eprintln!("                                      needed -- JSON verdict on stdout, exit 0/1 (CI/agent use)");
     eprintln!("  nirdosha emit-llvm <file.nir>       print the generated LLVM IR");
     eprintln!("  nirdosha emit-ast <file.nir>        print the parsed AST as JSON (docs/goal.md row 9)");
     eprintln!("  nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]");
@@ -602,6 +605,237 @@ fn cmd_emit_llvm(mut args: impl Iterator<Item = String>) -> ExitCode {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct VerifyDiagnostic {
+    line: usize,
+    col: usize,
+    message: String,
+}
+
+#[derive(serde::Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum StageStatus {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+#[derive(serde::Serialize)]
+struct StageResult {
+    status: StageStatus,
+    errors: Vec<VerifyDiagnostic>,
+}
+
+impl StageResult {
+    fn skipped() -> Self {
+        StageResult { status: StageStatus::Skipped, errors: vec![] }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ContractObligation {
+    fn_name: String,
+    status: &'static str,
+    detail: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ContractsResult {
+    status: StageStatus,
+    proved: usize,
+    unsupported: usize,
+    failed: usize,
+    obligations: Vec<ContractObligation>,
+}
+
+/// `smt::analyze`'s per-span proof counts (Tier 1: overflow/division/
+/// array-bounds obligations `codegen.rs` elides a runtime trap for once
+/// proven) -- informational, not a pass/fail gate on its own. A span
+/// missing from these counts isn't a defect: it's still enforced, just
+/// at runtime instead (the same "proved vs. still-safely-checked"
+/// distinction `contract_check.rs`'s `Unsupported` already draws for
+/// `validate` blocks).
+#[derive(serde::Serialize)]
+struct ProofObligations {
+    proven_in_range: usize,
+    proven_nonzero_divisor: usize,
+    proven_index_bounds: usize,
+}
+
+#[derive(serde::Serialize)]
+struct VerifyVerdict {
+    source: String,
+    status: StageStatus,
+    load: StageResult,
+    typecheck: StageResult,
+    ownership: StageResult,
+    contracts: ContractsResult,
+    proof_obligations: ProofObligations,
+}
+
+/// `nirdosha verify <file.nir>` -- a standalone, machine-readable
+/// verdict over the same gates `build`/`emit-llvm` already run
+/// (`typecheck_and_own_impl`'s own pipeline: typecheck, ownership,
+/// `validate` contracts), plus `smt::analyze`'s Tier-1 proof-obligation
+/// counts, without requiring a working LLVM/clang toolchain and without
+/// ever producing a binary. Exists so CI and an agent's own repair loop
+/// can ask "does this pass?" as one call with a real exit code (0 ==
+/// every hard gate passed, 1 otherwise) and a JSON verdict on stdout,
+/// instead of parsing `build`'s stderr text.
+///
+/// Unlike `build`, does not require `fn main()`
+/// (`typecheck_optional_main`, not `typecheck` --
+/// `typecheck_and_own_optional_main_with_ui_components`'s own
+/// `require_main` parameter already draws exactly this line for
+/// `emit-ui`): most of what an agent emits under a constrained grammar
+/// is a tool/library fragment meant to be `use`d, not a runnable
+/// program on its own, and every check here applies just as soundly
+/// either way.
+///
+/// Stages run in the same dependency order `typecheck_and_own_impl`
+/// enforces (each one assumes the previous succeeded) and stop at the
+/// first failure -- a later stage stays `Skipped`, not silently
+/// `Passed`, so the verdict never claims to have checked something it
+/// never actually ran.
+fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(path) = args.next() else {
+        eprintln!("usage: nirdosha verify <file.nir>");
+        return ExitCode::FAILURE;
+    };
+
+    let mut load = StageResult { status: StageStatus::Passed, errors: vec![] };
+    let mut typecheck = StageResult::skipped();
+    let mut ownership = StageResult::skipped();
+    let mut contracts =
+        ContractsResult { status: StageStatus::Skipped, proved: 0, unsupported: 0, failed: 0, obligations: vec![] };
+    let mut proof_obligations = ProofObligations { proven_in_range: 0, proven_nonzero_divisor: 0, proven_index_bounds: 0 };
+
+    let program = match nirdosha::loader::load_program(&path) {
+        Ok((program, _src)) => Some(program),
+        Err(msg) => {
+            load.status = StageStatus::Failed;
+            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg });
+            None
+        }
+    };
+
+    let program = program.and_then(|program| match nirdosha::typeck::typecheck_optional_main(&program) {
+        Ok(()) => {
+            typecheck.status = StageStatus::Passed;
+            Some(program)
+        }
+        Err(errs) => {
+            typecheck.status = StageStatus::Failed;
+            typecheck.errors =
+                errs.iter().map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string() }).collect();
+            None
+        }
+    });
+
+    let program = program.and_then(|program| match nirdosha::ownership::check_ownership(&program) {
+        Ok(()) => {
+            ownership.status = StageStatus::Passed;
+            Some(program)
+        }
+        Err(errs) => {
+            ownership.status = StageStatus::Failed;
+            ownership.errors =
+                errs.iter().map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string() }).collect();
+            None
+        }
+    });
+
+    if let Some(program) = &program {
+        contracts.status = StageStatus::Passed;
+        for outcome in nirdosha::contract_check::run_program_validates(program) {
+            use nirdosha::contract_check::ContractCheckResult;
+            match outcome.result {
+                ContractCheckResult::Proved => {
+                    contracts.proved += 1;
+                    contracts.obligations.push(ContractObligation { fn_name: outcome.fn_name, status: "proved", detail: None });
+                }
+                ContractCheckResult::Unsupported(msg) => {
+                    contracts.unsupported += 1;
+                    contracts.obligations.push(ContractObligation {
+                        fn_name: outcome.fn_name,
+                        status: "unsupported",
+                        detail: Some(msg),
+                    });
+                }
+                ContractCheckResult::Counterexample { violated_predicate, bindings, result } => {
+                    contracts.failed += 1;
+                    contracts.status = StageStatus::Failed;
+                    let bindings_str = bindings.iter().map(|(n, v)| format!("{n} = {v}")).collect::<Vec<_>>().join(", ");
+                    let detail = format!(
+                        "`{violated_predicate}` is violated when {bindings_str} (fn returns {})",
+                        result.map(|r| r.to_string()).unwrap_or_else(|| "<uncomputed>".to_string())
+                    );
+                    contracts.obligations.push(ContractObligation {
+                        fn_name: outcome.fn_name,
+                        status: "counterexample",
+                        detail: Some(detail),
+                    });
+                }
+                ContractCheckResult::UnboundIdentifier(name) => {
+                    contracts.failed += 1;
+                    contracts.status = StageStatus::Failed;
+                    contracts.obligations.push(ContractObligation {
+                        fn_name: outcome.fn_name,
+                        status: "unbound_identifier",
+                        detail: Some(name),
+                    });
+                }
+                ContractCheckResult::NoSuchFunction(name) => {
+                    contracts.failed += 1;
+                    contracts.status = StageStatus::Failed;
+                    contracts.obligations.push(ContractObligation {
+                        fn_name: outcome.fn_name,
+                        status: "no_such_function",
+                        detail: Some(name),
+                    });
+                }
+                ContractCheckResult::PredicateParseError(msg) => {
+                    contracts.failed += 1;
+                    contracts.status = StageStatus::Failed;
+                    contracts.obligations.push(ContractObligation {
+                        fn_name: outcome.fn_name,
+                        status: "predicate_parse_error",
+                        detail: Some(msg),
+                    });
+                }
+            }
+        }
+
+        let smt_report = nirdosha::smt::analyze(program);
+        proof_obligations.proven_in_range = smt_report.proven_in_range.len();
+        proof_obligations.proven_nonzero_divisor = smt_report.proven_nonzero_divisor.len();
+        proof_obligations.proven_index_bounds = smt_report.proven_index_bounds.len();
+    }
+
+    let overall_failed = [load.status, typecheck.status, ownership.status, contracts.status]
+        .iter()
+        .any(|s| *s == StageStatus::Failed);
+
+    let verdict = VerifyVerdict {
+        source: path.clone(),
+        status: if overall_failed { StageStatus::Failed } else { StageStatus::Passed },
+        load,
+        typecheck,
+        ownership,
+        contracts,
+        proof_obligations,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&verdict).expect("VerifyVerdict always serializes"));
+    if overall_failed {
+        eprintln!("REJECTED: {path} failed verification");
+        ExitCode::FAILURE
+    } else {
+        eprintln!("PROVED: {path} passed every check");
+        ExitCode::SUCCESS
     }
 }
 

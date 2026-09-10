@@ -70,6 +70,13 @@ any form today; added 2026-09, see the callout just below).
   backstop this bullet used to describe for everything Tier-1 can't
   prove no longer exists (it lived in the now-deleted interpreter) —
   see `docs/LANGUAGE.md` §16 for the current, honest split.
+- [DONE] `nirdosha verify <file.nir>` (2026-09) — a standalone,
+  machine-readable verdict over typecheck/ownership/`validate`-contract
+  results plus Z3 Tier-1 proof-obligation counts: JSON on stdout, exit
+  `0`/`1`, no LLVM/clang toolchain and no binary produced. The first
+  concrete step of the "sell the verdict, not the syntax" trust-layer
+  direction — turns the compiler into something CI or an agent's own
+  repair loop can call directly. See `docs/LANGUAGE.md` §1.
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)
