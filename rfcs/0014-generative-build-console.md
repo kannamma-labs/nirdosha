@@ -68,6 +68,24 @@ units, edges are their relationships. Purpose: let the user catch a
 structural misunderstanding *before any `.nir` file exists*, when
 correcting it is still cheap.
 
+**Rendering surface — resolved, not open.** `hi` (the `nirdosha`
+binary) spawns a native window via `tao`, with a `wry`-embedded
+webview inside it — one process, one window, one app the user
+perceives as `hi` itself, not a browser. `wry` uses whichever
+rendering engine the OS already has installed (WebKit on macOS/Linux,
+WebView2 on Windows) — no bundled Chromium, no separate browser
+process the user ever sees or has to have running. That webview loads
+a page served by a small local HTTP server (`tiny_http`, already a
+workspace dependency — `crates/compiler/Cargo.toml`), which serves a
+generated single-page app rendering the graph via `three.js`'s
+`3d-force-graph` library against a small local JSON API backed
+directly by `.nir/realm.db`. This mirrors a pattern this codebase
+already uses, not a new one: `ui_gen.rs`/`codegen::build_serve`
+already generate and locally serve a self-contained HTML/JS app for a
+*compiled `.nir` program's own* UI (`nirdosha build --serve`); this is
+the same technique, aimed at `hi`'s own console surface instead of a
+compiled program's generated screens.
+
 Per-node interactions:
 
 - **Click a node → surface the text that produced it**, not its
@@ -149,9 +167,26 @@ so "additive" here means "doesn't change existing behavior," not
   visibility/correction/attribute-attachment/deploy pipeline described
   here has no natural home in a scrolling text transcript — it needs a
   spatial, clickable surface the existing plain and `ratatui` front
-  ends can't provide (see Open Questions — this is also the RFC's
-  single biggest unresolved feasibility question, not a settled
-  design choice).
+  ends can't provide.
+- **Opening the system's default browser at a local URL, instead of an
+  embedded webview.** Genuinely simpler (zero new dependency — just
+  shell out to `open`/`xdg-open`/`start`), and was the first cut
+  considered. Rejected: it breaks the illusion of one integrated app —
+  the user sees a browser tab with a URL bar, not `hi`. `wry`/`tao`
+  costs one real dependency pair but keeps the window, the chrome, and
+  the perceived identity of the app as `hi`'s own, not a side effect
+  of it.
+- **A fully native Rust 3D surface (`egui`+`wgpu`, or `bevy`), with no
+  embedded web-rendering engine anywhere in the process.** Not
+  rejected outright — a legitimate alternative if "zero web tech in
+  the binary" is ever a hard constraint (licensing, security posture)
+  — but not the default recommendation: it forgoes `three.js`'s
+  `3d-force-graph` library, which already solves force-directed
+  layout, click-picking, and camera controls; the native path means
+  building that interaction model from scratch on raw `wgpu`, real,
+  open-ended engineering `wry`/`tao` avoids for the cost of one
+  embedded, OS-native webview the user never actually perceives as a
+  browser.
 
 ## Open questions
 
@@ -161,16 +196,16 @@ repo's RFCs, on purpose — see the status note at the top.
 1. **Prompt-length ceiling** — what triggers "too huge to comprehend,"
    and how is it measured (tokens/bytes/a complexity heuristic)? Not
    specified.
-2. **"3D graph in a terminal" is the single biggest feasibility gap in
-   this whole design.** `hi_tui.rs` is `ratatui` — a text-cell grid.
-   Its only proven "rich visual" capability is static/animated
-   raster-image display via a detected terminal graphics protocol
-   (Kitty/iTerm2/Sixel, already used for the splash logo) — materially
-   different from an interactive, navigable, clickable 3D scene
-   (rotate/zoom/click-to-select). A real version of this likely means
-   `hi` launching a genuinely separate windowed/GPU-rendered surface,
-   not a `ratatui` widget — a different application, not an extension
-   of the existing TUI. Not designed here at all.
+2. ~~"3D graph in a terminal" feasibility.~~ **Resolved** — see
+   "Build mode"'s own "Rendering surface" note above: `wry`+`tao`
+   embedding `three.js`/`3d-force-graph`, served locally via
+   `tiny_http`, mirroring `ui_gen.rs`/`codegen::build_serve`'s existing
+   pattern. What's still genuinely open under that decision: the local
+   JSON API's own shape (what does `.nir/realm.db` need to expose for
+   the graph to render/update live), and how `hi_tui.rs`'s existing
+   `ratatui` console and this new webview-window coexist in the same
+   process/session — does entering build mode replace the terminal UI,
+   run alongside it, or hand off entirely? Not designed.
 3. **Two different generation strategies need reconciling.** RFC
    0012's `generate_and_build` treats model output as one opaque
    `.nir` blob with a whole-program self-repair loop; this RFC's
