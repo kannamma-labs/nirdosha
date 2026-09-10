@@ -433,7 +433,7 @@ fn cmd_hi(_args: impl Iterator<Item = String>) -> ExitCode {
 /// the RFC's "Physical layout, and when it gets created."
 fn cmd_realm(mut args: impl Iterator<Item = String>) -> ExitCode {
     let Some(sub) = args.next() else {
-        eprintln!("usage: nirdosha realm <ingest|sync|link|impact> ...");
+        eprintln!("usage: nirdosha realm <ingest|sync|link|impact|serve> ...");
         return ExitCode::FAILURE;
     };
     let cwd = match std::env::current_dir() {
@@ -515,8 +515,31 @@ fn cmd_realm(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
             }
         }
+        "serve" => {
+            // The headless/network-reachable fallback rfcs/0014's own
+            // "no network port at all" section documents -- not the
+            // default build-mode transport (that's the wry custom-
+            // protocol handler), but a real surface for scripting/CI/
+            // remote-dev-box use. Drop this validating connection before
+            // handing the directory to the server, which opens its own
+            // per-request connections (see realm_server.rs's own doc
+            // comment on why: rusqlite::Connection isn't Sync).
+            drop(conn);
+            match nirdosha::realm_server::serve(&cwd) {
+                Ok(handle) => {
+                    println!("Realm API listening on http://127.0.0.1:{} (Ctrl+C to stop)", handle.port);
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         other => {
-            eprintln!("unknown `realm` subcommand `{other}` -- usage: nirdosha realm <ingest|sync|link|impact> ...");
+            eprintln!("unknown `realm` subcommand `{other}` -- usage: nirdosha realm <ingest|sync|link|impact|serve> ...");
             ExitCode::FAILURE
         }
     }
