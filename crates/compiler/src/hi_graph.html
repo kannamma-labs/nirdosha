@@ -45,7 +45,8 @@
   #transcript .line.user { color:#e8e8f0; }
   #transcript .line.error { color:#ff6b6b; }
   #inputbar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-top:1px solid #1c1c28; }
-  #prompt-caret { color:#564cbe; font-size:14px; white-space:nowrap; }
+  /* min-width holds steady between "hi>" and a single spinner frame -- otherwise the input box jitters sideways on every busy-spinner tick */
+  #prompt-caret { display:inline-block; min-width:1.8em; color:#564cbe; font-size:14px; white-space:nowrap; }
   #console-input { flex:1; background:transparent; border:none; outline:none; color:#e8e8f0; font:14px ui-monospace, monospace; }
   #console-input::placeholder { color:#4a4a5e; }
 
@@ -710,12 +711,38 @@
   // is in flight -- mirrors the now-deleted `hi_tui.rs`'s own
   // one-request-at-a-time console, over `fetch` instead of a channel to
   // a background thread.
+  // The caret itself is the busy indicator -- `:prompt`/`:generate`/
+  // `:publish` are real, potentially slow calls (an LLM round trip, a
+  // bounded self-repair loop, a real compile), and a console that just
+  // sits there with no visible change while one runs is
+  // indistinguishable from a hang.
+  const PROMPT_CARET_IDLE = 'hi>';
+  const SPINNER_FRAMES = ['|', '/', '-', '\\'];
+  let busySpinnerTimer = null;
+  function startBusySpinner() {
+    const caret = document.getElementById('prompt-caret');
+    let i = 0;
+    busySpinnerTimer = setInterval(() => {
+      caret.textContent = SPINNER_FRAMES[i % SPINNER_FRAMES.length];
+      i++;
+    }, 120);
+  }
+  function stopBusySpinner() {
+    if (busySpinnerTimer) {
+      clearInterval(busySpinnerTimer);
+      busySpinnerTimer = null;
+    }
+    document.getElementById('prompt-caret').textContent = PROMPT_CARET_IDLE;
+  }
+
   let busy = false;
   function withBusy(promise) {
     busy = true;
     document.getElementById('console-input').disabled = true;
+    startBusySpinner();
     return promise.finally(() => {
       busy = false;
+      stopBusySpinner();
       const input = document.getElementById('console-input');
       input.disabled = false;
       input.focus();
