@@ -523,6 +523,71 @@ fn division_by_zero_traps_at_runtime() {
     assert_ne!(code, 0, "division by zero must not exit 0");
 }
 
+// `%` (`BinOp::Rem`) -- added specifically because it was missing
+// entirely: no operator, no builtin, nothing in the language could
+// express an ordinary remainder computation at all. Surfaced by a real
+// `nirdosha hi` :generate failure ("unexpected character `%`") on a
+// prompt whose obvious implementation (board-position wraparound in a
+// Tetris-shaped game) needed exactly this and had no way to get it.
+#[test]
+fn remainder_matches_truncating_c_style_semantics_for_positive_and_negative_operands() {
+    let src = r#"
+        fn main() {
+            print(7 % 3)
+            print(-7 % 3)
+            print(7 % -3)
+            print(-7 % -3)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    // Truncating (LLVM `srem`, matching C/Rust's `%`) -- the result's
+    // sign follows the dividend, not the divisor: -1, 1, -1.
+    assert_eq!(stdout, "1\n-1\n1\n-1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn float_remainder_matches_ieee_fmod_semantics() {
+    let src = r#"
+        fn main() {
+            print(5.5 % 2.0)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(stdout, "1.500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn remainder_by_zero_traps_at_runtime_same_as_division() {
+    let src = r#"
+        fn main() -> i64 {
+            let z: i64 = 0
+            let x: i64 = 10 % z
+            return 0
+        }
+    "#;
+    let (_, code) = compile_and_run(src);
+    assert_ne!(code, 0, "remainder by zero must not exit 0");
+}
+
+#[test]
+fn remainder_is_not_supported_for_dec128() {
+    let src = r#"
+        fn main() {
+            let a: dec128 = dec_from_i64(100, 0)
+            let b: dec128 = dec_from_i64(30, 0)
+            let c: dec128 = a % b
+            print(dec_to_str(c))
+        }
+    "#;
+    let toks = nirdosha::token::Lexer::new(src).tokenize().expect("lex should succeed");
+    let program = nirdosha::parser::Parser::new(toks).parse_program().expect("parse should succeed");
+    let err = nirdosha::typeck::typecheck(&program).expect_err("dec128 has no remainder operation");
+    let msg = err.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+    assert!(msg.contains("dec128") && msg.contains('%'), "error should name both the operator and the unsupported type, got: {msg}");
+}
+
 // ---- Phase 2: `sha256_hex`/`constant_time_str_eq` (linked native calls
 // into a from-scratch SHA-256 in `runtime_kernels.rs`, since that crate
 // has no access to the `sha2` crate `interpreter.rs` uses) -------------

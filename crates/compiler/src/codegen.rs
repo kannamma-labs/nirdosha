@@ -9841,6 +9841,25 @@ impl Codegen<'_> {
                 writeln!(self.out, "  {out} = sdiv i64 {l}, {r}").unwrap();
                 Ok(out)
             }
+            // `%` -- truncating remainder, same is_float split as `Div`
+            // just above (typeck.rs's own `BinOp::Rem` arm already
+            // rejected `Dec128` before codegen ever sees one, so there's
+            // no third dispatch to handle here the way the dec128 block
+            // at the top of this function has for `Add`/`Sub`/`Mul`/`Div`).
+            BinOp::Rem => {
+                if is_float {
+                    // Same "no guard, saturates to NaN" reasoning `Div`'s
+                    // float arm already gives: IEEE 754 `frem`-by-zero is
+                    // NaN, never a trap.
+                    let out = self.fresh_reg("frem");
+                    writeln!(self.out, "  {out} = frem double {l}, {r}").unwrap();
+                    return Ok(out);
+                }
+                self.guard_nonzero_divisor(&r, span);
+                let out = self.fresh_reg("srem");
+                writeln!(self.out, "  {out} = srem i64 {l}, {r}").unwrap();
+                Ok(out)
+            }
             // `==`/`!=` are the one pair typeck.rs allows on `bool`
             // operands too — pick i1/i64/double based on the *operand's*
             // declared type.

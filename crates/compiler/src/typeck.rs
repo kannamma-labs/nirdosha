@@ -76,6 +76,18 @@ pub enum TypeErrorKind {
     TypeMismatch { expected: Ty, found: Ty },
     ExpectedBool { found: Ty },
     ExpectedNumeric { found: Ty },
+    /// `%` on `Dec128` (money) specifically — `is_numeric()` says yes
+    /// (it's `Add`/`Sub`/`Mul`/`Div`-capable, via the `nir_dec128_*`
+    /// runtime kernels), but no `nir_dec128_rem` kernel exists, so this
+    /// has to be rejected here, precisely, rather than falling through
+    /// to `ExpectedNumeric` (wrong — `Dec128` *is* numeric) or an
+    /// `unreachable!()` panic in `codegen.rs`'s own dec128 dispatch (a
+    /// real compiler bug, not a clean diagnostic, for code that got
+    /// this far specifically because it passed every other numeric
+    /// check). Scope limit, not an oversight: no known caller needs
+    /// money remainder yet, and adding it means a real new runtime
+    /// kernel, not just wiring up an existing one.
+    RemUnsupportedForDec128,
     ExpectedBoxType { found: Ty },
     CannotMoveOutOfReference { content: Ty },
     ExpectedThreadType { found: Ty },
@@ -594,6 +606,10 @@ impl std::fmt::Display for TypeError {
                 f,
                 "{line}:{col}: expected a numeric type, found `{}`",
                 found.name()
+            ),
+            TypeErrorKind::RemUnsupportedForDec128 => write!(
+                f,
+                "{line}:{col}: `%` isn't supported for `dec128` -- only `i64`/`f64` have a remainder operation"
             ),
             TypeErrorKind::ExpectedBoxType { found } => write!(
                 f,
@@ -5047,6 +5063,25 @@ impl<'a> Checker<'a> {
             BinOp::Div => {
                 let t = self.unify_operands(lhs, rhs, expected_ret, scopes, span);
                 if t != Ty::Error && !t.is_numeric() {
+                    self.error(TypeErrorKind::ExpectedNumeric { found: t }, span);
+                    return Ty::Error;
+                }
+                t
+            }
+            // Same shape as `Div` above, except `Dec128` -- no
+            // `nir_dec128_rem` runtime kernel exists (see
+            // `TypeErrorKind::RemUnsupportedForDec128`'s own doc
+            // comment for why that's a scope limit, not an oversight).
+            BinOp::Rem => {
+                let t = self.unify_operands(lhs, rhs, expected_ret, scopes, span);
+                if t == Ty::Error {
+                    return t;
+                }
+                if t == Ty::Dec128 {
+                    self.error(TypeErrorKind::RemUnsupportedForDec128, span);
+                    return Ty::Error;
+                }
+                if !t.is_numeric() {
                     self.error(TypeErrorKind::ExpectedNumeric { found: t }, span);
                     return Ty::Error;
                 }
