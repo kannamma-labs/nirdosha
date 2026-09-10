@@ -813,7 +813,19 @@ sandboxed process as a real cross-process transport (a Unix domain
 socket under the hood — interpreter-only, since `sandbox` itself is;
 see §10). Race-freedom for concurrent code comes entirely from the
 ownership checker — an affine value moved into `spawn`/`send` can never
-be touched by the sender again.
+be touched by the sender again. This guarantee is scoped to
+`chan`/`spawn`'s own in-memory primitives — it does not extend to `db`:
+nothing in the language today stops a program from writing a naive,
+unsynchronized concurrent read-sleep-write against a database and
+actually running it under `spawn`, and it will corrupt exactly the way
+the same naive code corrupts in any other language. Measured, not just
+asserted: `examples/killer_demo/RESULTS.md` races the identical naive
+transfer logic under Nirdosha's own `spawn`/`thread` and under Python's
+`threading`, back to back on the same SQLite file — both corrupt on
+every run, disclosing the real boundary of the guarantee above rather
+than letting it be read as broader than it is. (What that file does
+show, honestly: ~18x faster than Python on the identical naive,
+unsynchronized workload — a real runtime difference, not a safety one.)
 
 **`spawn`/`join`/`chan`/`send`/`recv` compile now (§10), backed by a
 real admission-controlled kernel, not just interpreted.** `spawn` runs
