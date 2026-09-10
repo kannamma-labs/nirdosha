@@ -8,13 +8,20 @@
 //! at all. `realm_server.rs`'s `tiny_http` socket is the RFC's own
 //! documented fallback for headless use, not this path.
 //!
-//! Foundation slice only: proves the window → custom-protocol → SQLite
-//! pipeline works end to end by serving the same read-only route table
-//! `realm_api::handle` already gives `realm_server.rs`. The full 3D
-//! graph page — `three.js`/`3d-force-graph` vendored in, instanced
-//! rendering, delta updates, the WebGL-fallback-to-2D path, the
-//! `wry` IPC channel for live state — is this RFC's next slice, not
-//! this one; `realm_api::PLACEHOLDER_HTML` stands in for it here.
+//! Serves the same read-only route table `realm_api::handle` also gives
+//! `realm_server.rs`, including the real 3D graph page
+//! (`realm_api`'s `BUILD_MODE_HTML`/`realm_graph.html`) — a live,
+//! navigable `3d-force-graph` view over `.nir/realm.db`'s nodes and
+//! edges, click-to-inspect via `/api/impact`, and a WebGL-feature-detect
+//! 2D canvas fallback. `with_ipc_handler` below gives that page's own
+//! `window.ipc.postMessage` error reporting somewhere to go, since this
+//! window has no devtools console attached in normal use.
+//!
+//! Still not RFC 0014's full build mode: no live updates (the graph is
+//! fetched once, not delta-updated as the underlying graph changes),
+//! no true GPU-instanced node rendering, no in-page editing. Those stay
+//! open follow-on work, disclosed in the RFC's own status box rather
+//! than silently assumed done.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +47,9 @@ pub fn open(root: &Path) -> Result<(), String> {
 
     let builder = WebViewBuilder::new()
         .with_custom_protocol(SCHEME.into(), move |_id, request| handle(&root, request))
+        .with_ipc_handler(|request: Request<String>| {
+            eprintln!("[realm-window] {}", request.body());
+        })
         .with_url(format!("{SCHEME}://localhost"));
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "ios", target_os = "android"))]

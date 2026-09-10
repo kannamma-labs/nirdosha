@@ -1,0 +1,339 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Nirdosha Realm</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin:0; padding:0; width:100%; height:100%; background:#0b0b12; color:#e8e8f0; font-family: ui-monospace, monospace; overflow:hidden; }
+  #graph { position:absolute; inset:0; }
+  #status { position:absolute; top:0; left:0; right:0; padding:6px 12px; font-size:12px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:10px; align-items:center; }
+  #status .dot { width:8px; height:8px; border-radius:50%; background:#3ddc84; display:inline-block; }
+  #panel { position:absolute; top:40px; right:0; width:320px; max-height:calc(100% - 40px); overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:12px; line-height:1.5; display:none; }
+  #panel h2 { margin:0 0 6px; font-size:14px; color:#ef9f30; word-break:break-all; }
+  #panel .row { margin:4px 0; }
+  #panel .label { opacity:0.6; margin-right:6px; }
+  #panel ul { margin:6px 0 0; padding-left:16px; }
+  #legend { position:absolute; bottom:8px; left:8px; font-size:11px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
+  #legend .item { display:flex; align-items:center; gap:6px; margin:2px 0; }
+  #legend .swatch { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  #fallback-canvas { position:absolute; inset:0; display:none; }
+</style>
+</head>
+<body>
+<div id="status"><span class="dot"></span><span id="status-text">loading…</span></div>
+<div id="graph"></div>
+<canvas id="fallback-canvas"></canvas>
+<div id="panel"></div>
+<div id="legend"></div>
+<script src="/assets/3d-force-graph.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const KIND_COLORS = {
+    fn: '#5b9dff',
+    struct: '#3ddc84',
+    enum: '#c67bff',
+    screen: '#ef9f30',
+    Requirement: '#ff6b6b',
+    default: '#e8e8f0',
+  };
+
+  function subKind(node) {
+    if (node.kind === 'CodeUnit') {
+      const parts = String(node.id).split(':');
+      return parts.length >= 2 ? parts[1] : 'CodeUnit';
+    }
+    return node.kind || 'default';
+  }
+
+  function colorFor(node) {
+    return KIND_COLORS[subKind(node)] || KIND_COLORS.default;
+  }
+
+  function setStatus(text) {
+    document.getElementById('status-text').textContent = text;
+  }
+
+  // Every error and rejection is also handed to `wry`'s own IPC
+  // channel (window.ipc.postMessage), so the host process can log it
+  // even though there's no devtools/console attached to this window in
+  // normal use -- see realm_window.rs's `with_ipc_handler`.
+  function reportError(context, err) {
+    const message = context + ': ' + (err instanceof Error ? err.message : String(err));
+    setStatus('error: ' + message);
+    try { if (window.ipc) window.ipc.postMessage('realm-window-error: ' + message); } catch (_) {}
+  }
+
+  window.addEventListener('error', e => reportError('window.onerror', e.error || e.message));
+  window.addEventListener('unhandledrejection', e => reportError('unhandledrejection', e.reason));
+
+  function hasWebGL() {
+    try {
+      const canvas = document.createElement('canvas');
+      return !!(window.WebGLRenderingContext && (canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl')));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Returned as a real HTMLElement, never a string -- 3d-force-graph's
+  // own tooltip accepts either, but a string goes through the
+  // library's internal `innerHTML =` assignment. Node titles are
+  // untrusted input (rfcs/0014's own "Stored XSS is a real risk"
+  // warning); building the DOM ourselves with textContent sidesteps
+  // that assignment entirely rather than trying to sanitize around it.
+  function buildTooltip(node) {
+    const div = document.createElement('div');
+    div.style.cssText = 'font:12px ui-monospace,monospace;color:#e8e8f0;background:#15151f;border:1px solid #3a3a52;border-radius:4px;padding:6px 10px;max-width:280px;';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:bold;color:#ef9f30;word-break:break-all;';
+    title.textContent = node.title || node.id;
+    div.appendChild(title);
+    const kind = document.createElement('div');
+    kind.style.opacity = '0.7';
+    kind.textContent = subKind(node) + (node.status ? ' · ' + node.status : '');
+    div.appendChild(kind);
+    return div;
+  }
+
+  function row(panel, label, value) {
+    if (value === undefined || value === null || value === '') return;
+    const r = document.createElement('div');
+    r.className = 'row';
+    const l = document.createElement('span');
+    l.className = 'label';
+    l.textContent = label + ':';
+    r.appendChild(l);
+    r.appendChild(document.createTextNode(String(value)));
+    panel.appendChild(r);
+  }
+
+  // `impactHits` is `null` while the /api/impact fetch this node click
+  // kicked off is still in flight -- called twice per click, once to
+  // show the node's own fields immediately and once to fill in impact
+  // once it resolves.
+  function showPanel(node, impactHits) {
+    const panel = document.getElementById('panel');
+    panel.replaceChildren();
+    const h2 = document.createElement('h2');
+    h2.textContent = node.title || node.id;
+    panel.appendChild(h2);
+
+    row(panel, 'id', node.id);
+    row(panel, 'kind', subKind(node));
+    row(panel, 'status', node.status);
+    if (node.source_ref) {
+      row(panel, 'source', node.source_ref + (node.line ? ':' + node.line + (node.col ? ':' + node.col : '') : ''));
+    }
+
+    const impactHeading = document.createElement('div');
+    impactHeading.className = 'row';
+    impactHeading.style.marginTop = '10px';
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = 'impact:';
+    impactHeading.appendChild(label);
+    panel.appendChild(impactHeading);
+
+    if (!impactHits) {
+      const loading = document.createElement('div');
+      loading.style.opacity = '0.6';
+      loading.textContent = 'loading…';
+      panel.appendChild(loading);
+    } else if (impactHits.length === 0) {
+      const none = document.createElement('div');
+      none.style.opacity = '0.6';
+      none.textContent = '(none)';
+      panel.appendChild(none);
+    } else {
+      const ul = document.createElement('ul');
+      impactHits.forEach(hit => {
+        const li = document.createElement('li');
+        li.textContent = hit.edge_kind + ' -> ' + (hit.title || hit.node_id) + (hit.flag ? ' [' + hit.flag + ']' : '');
+        ul.appendChild(li);
+      });
+      panel.appendChild(ul);
+    }
+    panel.style.display = 'block';
+  }
+
+  function buildLegend() {
+    const legend = document.getElementById('legend');
+    legend.replaceChildren();
+    Object.keys(KIND_COLORS).filter(k => k !== 'default').forEach(kind => {
+      const item = document.createElement('div');
+      item.className = 'item';
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = KIND_COLORS[kind];
+      item.appendChild(swatch);
+      const text = document.createElement('span');
+      text.textContent = kind;
+      item.appendChild(text);
+      legend.appendChild(item);
+    });
+  }
+
+  function prepareGraphData(nodes, edges) {
+    const nodeIds = new Set(nodes.map(n => n.id));
+    // `link()` (realm.rs) always records both directions of one
+    // relationship (IMPLEMENTS / IMPLEMENTED_BY) so `impact`'s BFS can
+    // walk either way -- render only the forward direction so the same
+    // relationship isn't drawn twice.
+    const links = edges
+      .filter(e => nodeIds.has(e.src) && nodeIds.has(e.dst) && !e.kind.endsWith('_BY'))
+      .map(e => ({ source: e.src, target: e.dst, kind: e.kind, flag: e.flag }));
+    return { nodes, links };
+  }
+
+  function onNodeSelected(node) {
+    showPanel(node, null);
+    fetch('/api/impact?target=' + encodeURIComponent(node.id))
+      .then(r => r.json())
+      .then(report => showPanel(node, report.hits || []))
+      .catch(err => reportError('fetch /api/impact', err));
+  }
+
+  function run3D(data) {
+    const Graph = new ForceGraph3D(document.getElementById('graph'))
+      .backgroundColor('#0b0b12')
+      .graphData(data)
+      .nodeColor(colorFor)
+      .nodeLabel(buildTooltip)
+      .nodeRelSize(4)
+      .linkColor(() => '#3a3a52')
+      .linkOpacity(0.5)
+      .linkDirectionalArrowLength(3)
+      .linkDirectionalArrowRelPos(1)
+      .d3VelocityDecay(0.5)
+      .onNodeClick(onNodeSelected)
+      .onEngineStop(() => setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s)'));
+    setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s) · settling…');
+  }
+
+  // A small, real (not stubbed) 2D fallback for when WebGL isn't
+  // available in the webview -- rfcs/0014's own requirement: "the
+  // failure mode without a fallback is a blank window, not just slow
+  // frames." Same node/edge data and the same click/panel interaction,
+  // just a plain hand-rolled spring layout on a 2D canvas instead of
+  // `3d-force-graph`, which hard-requires WebGL.
+  function run2D(data) {
+    const canvas = document.getElementById('fallback-canvas');
+    document.getElementById('graph').style.display = 'none';
+    canvas.style.display = 'block';
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    const nodes = data.nodes.map(n => Object.assign({}, n, {
+      x: (Math.random() - 0.5) * 400,
+      y: (Math.random() - 0.5) * 400,
+      vx: 0,
+      vy: 0,
+    }));
+    const byId = new Map(nodes.map(n => [n.id, n]));
+    const links = data.links.map(l => ({ source: byId.get(l.source), target: byId.get(l.target) })).filter(l => l.source && l.target);
+
+    canvas.addEventListener('click', e => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left - canvas.width / 2;
+      const y = e.clientY - rect.top - canvas.height / 2;
+      let closest = null, closestDist = 14;
+      nodes.forEach(n => {
+        const d = Math.hypot(n.x - x, n.y - y);
+        if (d < closestDist) { closest = n; closestDist = d; }
+      });
+      if (closest) onNodeSelected(closest);
+    });
+
+    function tick() {
+      const repulsion = 1800;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          let dx = a.x - b.x, dy = a.y - b.y;
+          const dist2 = dx * dx + dy * dy || 0.01;
+          const force = repulsion / dist2;
+          const dist = Math.sqrt(dist2);
+          dx /= dist; dy /= dist;
+          a.vx += dx * force; a.vy += dy * force;
+          b.vx -= dx * force; b.vy -= dy * force;
+        }
+        // gentle pull to center so the graph doesn't drift off-screen
+        nodes[i].vx -= nodes[i].x * 0.002;
+        nodes[i].vy -= nodes[i].y * 0.002;
+      }
+      links.forEach(l => {
+        let dx = l.target.x - l.source.x, dy = l.target.y - l.source.y;
+        const dist = Math.hypot(dx, dy) || 0.01;
+        const targetLen = 60;
+        const force = (dist - targetLen) * 0.02;
+        dx /= dist; dy /= dist;
+        l.source.vx += dx * force; l.source.vy += dy * force;
+        l.target.vx -= dx * force; l.target.vy -= dy * force;
+      });
+      nodes.forEach(nd => {
+        nd.vx *= 0.85; nd.vy *= 0.85;
+        nd.x += nd.vx; nd.y += nd.vy;
+      });
+    }
+
+    function draw() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#0b0b12';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.strokeStyle = '#3a3a52';
+      ctx.lineWidth = 1;
+      links.forEach(l => {
+        ctx.beginPath();
+        ctx.moveTo(l.source.x, l.source.y);
+        ctx.lineTo(l.target.x, l.target.y);
+        ctx.stroke();
+      });
+      nodes.forEach(n => {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = colorFor(n);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+
+    let frames = 0;
+    const maxSettleFrames = 400;
+    function loop() {
+      if (frames < maxSettleFrames) { tick(); frames++; }
+      draw();
+      requestAnimationFrame(loop);
+    }
+    setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s) · 2D fallback (no WebGL)');
+    loop();
+  }
+
+  buildLegend();
+  Promise.all([
+    fetch('/api/nodes').then(r => r.json()),
+    fetch('/api/edges').then(r => r.json()),
+  ])
+    .then(([nodes, edges]) => {
+      const data = prepareGraphData(nodes, edges);
+      if (hasWebGL() && typeof ForceGraph3D === 'function') {
+        run3D(data);
+      } else {
+        run2D(data);
+      }
+    })
+    .catch(err => reportError('loading graph data', err));
+})();
+</script>
+</body>
+</html>
