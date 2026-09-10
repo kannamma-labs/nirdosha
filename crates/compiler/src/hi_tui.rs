@@ -257,6 +257,12 @@ struct App {
     /// when Realm is disabled or couldn't be opened, in which case
     /// `:ask`/`:impact` say so instead of panicking.
     realm: Option<Connection>,
+    /// Set by `:realm` (`submit`'s `Command::Realm` arm) and consumed
+    /// by `run_app`'s own loop right after -- `submit`/`handle_key`
+    /// don't have the `Terminal` handle needed to leave/re-enter the
+    /// alternate screen, so the actual excursion happens one level up,
+    /// where `terminal` is in scope.
+    realm_excursion_requested: bool,
 }
 
 impl App {
@@ -339,8 +345,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, activation: Ac
         usage: TokenUsage::default(),
         failures: failure_counters(),
         realm,
+        realm_excursion_requested: false,
     };
-    app.push(EntryKind::Notice, "Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, `:ask <question>`/`:impact <target>` to query the project's realm graph, or `:quit` to exit.");
+    app.push(EntryKind::Notice, "Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, `:ask <question>`/`:impact <target>` to query the project's realm graph, `:realm` to open the interactive 3D graph view, or `:quit` to exit.");
     if let Some(path) = log.path() {
         app.push(EntryKind::Notice, format!("session log: {}", path.display()));
     }
@@ -376,6 +383,36 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, activation: Ac
                 if key.kind == KeyEventKind::Press {
                     handle_key(&mut app, &client, &tx, &log, key.code, key.modifiers);
                 }
+            }
+        }
+
+        // `:realm` (`submit`'s `Command::Realm` arm) only sets a flag --
+        // `terminal` isn't in scope down there. Leave the alternate
+        // screen exactly the way `run()` does on exit, run the native
+        // window to completion (blocks until it closes -- see
+        // `realm_window::open`'s own doc comment on why `run_return`
+        // makes that a return, not a process exit), then re-enter
+        // exactly the way `run()` does on entry. This *is* rfcs/0014's
+        // "closing the webview window... control returns to the base
+        // console immediately" -- `app`'s transcript/session state
+        // never left this stack frame, so nothing needs re-deriving.
+        if app.realm_excursion_requested {
+            app.realm_excursion_requested = false;
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            terminal.show_cursor()?;
+
+            let result = std::env::current_dir().map_err(|e| format!("resolving the current directory: {e}")).and_then(|cwd| crate::realm_window::open(&cwd));
+
+            enable_raw_mode()?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            terminal.hide_cursor()?;
+            terminal.clear()?;
+            icon_sent = false; // the header icon (sent as a raw escape sequence) needs resending after the alternate-screen round trip
+
+            match result {
+                Ok(()) => app.push(EntryKind::Notice, "back from the realm graph view."),
+                Err(e) => app.push(EntryKind::Error, format!("couldn't open the realm graph view: {e}")),
             }
         }
 
@@ -476,9 +513,13 @@ fn submit(app: &mut App, client: &Arc<LlmClient>, tx: &Sender<WorkerEvent>, log:
                 None => app.push(EntryKind::Notice, "the realm graph isn't available this session -- try `nirdosha realm impact` from a shell instead."),
             }
         }
+        Command::Realm => {
+            app.push(EntryKind::UserInput, ":realm");
+            app.realm_excursion_requested = true;
+        }
         Command::Unknown(other) => {
             app.push(EntryKind::UserInput, other.to_string());
-            app.push(EntryKind::Notice, format!("unrecognized command `{other}` -- try `:explain`, `:ask`, `:impact`, or `:quit`."));
+            app.push(EntryKind::Notice, format!("unrecognized command `{other}` -- try `:explain`, `:ask`, `:impact`, `:realm`, or `:quit`."));
         }
         Command::Request { description, serve } => {
             app.push(EntryKind::UserInput, description.to_string());

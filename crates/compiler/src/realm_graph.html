@@ -6,26 +6,101 @@
 <style>
   :root { color-scheme: dark; }
   html, body { margin:0; padding:0; width:100%; height:100%; background:#0b0b12; color:#e8e8f0; font-family: ui-monospace, monospace; overflow:hidden; }
-  #graph { position:absolute; inset:0; }
-  #status { position:absolute; top:0; left:0; right:0; padding:6px 12px; font-size:12px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:10px; align-items:center; }
+
+  /* ---- header: brand mark (top-left) + live status ---- */
+  #header { position:absolute; top:0; left:0; right:0; height:40px; box-sizing:border-box; padding:0 12px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:10px; align-items:center; }
+  #header .logo { width:24px; height:24px; display:block; transition:filter 0.3s; }
+  #header .wordmark { font-weight:bold; font-size:13px; letter-spacing:0.06em; color:#564cbe; }
+  #header .sep { width:1px; height:18px; background:#26263a; }
+  #status { display:flex; gap:8px; align-items:center; font-size:12px; }
   #status .dot { width:8px; height:8px; border-radius:50%; background:#3ddc84; display:inline-block; }
-  #panel { position:absolute; top:40px; right:0; width:320px; max-height:calc(100% - 40px); overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:12px; line-height:1.5; display:none; }
+
+  /* ---- graph surface, between header and console ---- */
+  #graph { position:absolute; top:40px; left:0; right:0; bottom:96px; }
+  #fallback-canvas { position:absolute; top:40px; left:0; right:0; bottom:96px; display:none; }
+
+  #panel { position:absolute; top:40px; right:0; bottom:96px; width:320px; overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:12px; line-height:1.5; display:none; }
   #panel h2 { margin:0 0 6px; font-size:14px; color:#ef9f30; word-break:break-all; }
   #panel .row { margin:4px 0; }
   #panel .label { opacity:0.6; margin-right:6px; }
   #panel ul { margin:6px 0 0; padding-left:16px; }
-  #legend { position:absolute; bottom:8px; left:8px; font-size:11px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
+
+  #legend { position:absolute; bottom:104px; left:8px; font-size:11px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
   #legend .item { display:flex; align-items:center; gap:6px; margin:2px 0; }
   #legend .swatch { width:10px; height:10px; border-radius:50%; display:inline-block; }
-  #fallback-canvas { position:absolute; inset:0; display:none; }
+
+  /* ---- console: transcript + bottom text entry ---- */
+  #console { position:absolute; left:0; right:0; bottom:0; height:96px; box-sizing:border-box; background:rgba(11,11,18,0.92); border-top:1px solid #26263a; z-index:5; display:flex; flex-direction:column; }
+  #transcript { flex:1; overflow-y:auto; padding:6px 12px; font-size:11px; line-height:1.5; color:#a9a9bd; }
+  #transcript .line { white-space:pre-wrap; word-break:break-word; }
+  #transcript .line.user { color:#e8e8f0; }
+  #transcript .line.error { color:#ff6b6b; }
+  #inputbar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-top:1px solid #1c1c28; }
+  #prompt-caret { color:#564cbe; font-size:12px; white-space:nowrap; }
+  #console-input { flex:1; background:transparent; border:none; outline:none; color:#e8e8f0; font:12px ui-monospace, monospace; }
+  #console-input::placeholder { color:#4a4a5e; }
+
+  /* ---- splash: reveal -> type -> subtitle, matching hi_tui's own logo_anim timing/colors ---- */
+  #splash { position:fixed; inset:0; z-index:50; background:#0b0b12; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:opacity 0.3s ease; }
+  #splash.hidden { opacity:0; pointer-events:none; }
+  #splash-inner { display:flex; flex-direction:column; align-items:center; gap:14px; }
+  #splash-logo-wrap { position:relative; width:128px; height:128px; }
+  #splash-logo { width:128px; height:128px; clip-path:polygon(0 0, 0 0, 0 0); filter:brightness(1); animation: splash-reveal 0.95s ease forwards, splash-shimmer 0.3s ease-out 0.8s 1; }
+  #splash-word { display:flex; gap:2px; font-size:26px; font-weight:bold; letter-spacing:0.12em; }
+  #splash-word span { color:#564cbe; opacity:0; }
+  #splash-word span.lit { animation: splash-letter 0.12s ease-out; }
+  #splash-sub { font-size:12px; letter-spacing:0.18em; color:#78768e; opacity:0; transition:opacity 0.55s ease; }
+  #splash-sub.visible { opacity:1; }
+  @keyframes splash-reveal {
+    0%   { clip-path:polygon(0 0, 0 0, 0 0, 0 0); }
+    100% { clip-path:polygon(0 0, 100% 0, 100% 100%, 0 100%); }
+  }
+  @keyframes splash-shimmer {
+    0%   { filter:brightness(1); }
+    40%  { filter:brightness(1.9); }
+    100% { filter:brightness(1); }
+  }
+  @keyframes splash-letter {
+    0%   { color:#ffffff; }
+    100% { color:#564cbe; }
+  }
+
+  /* idle breathe, applied to the header logo once the splash is done -- same brand-glow-forever touch as hi_tui's own idle phase */
+  .idle-breathe { animation: idle-breathe 2.6s ease-in-out infinite; }
+  @keyframes idle-breathe {
+    0%, 100% { filter:brightness(1); }
+    50%      { filter:brightness(1.35) drop-shadow(0 0 4px rgba(255,214,140,0.6)); }
+  }
 </style>
 </head>
 <body>
-<div id="status"><span class="dot"></span><span id="status-text">loading…</span></div>
+<div id="splash">
+  <div id="splash-inner">
+    <div id="splash-logo-wrap"><img id="splash-logo" src="__NIRDOSHA_LOGO__" alt=""></div>
+    <div id="splash-word"></div>
+    <div id="splash-sub">PROGRAMMING LANGUAGE</div>
+  </div>
+</div>
+
+<div id="header">
+  <img class="logo" id="header-logo" src="__NIRDOSHA_LOGO__" alt="">
+  <span class="wordmark">NIRDOSHA</span>
+  <span class="sep"></span>
+  <span id="status"><span class="dot"></span><span id="status-text">loading…</span></span>
+</div>
 <div id="graph"></div>
 <canvas id="fallback-canvas"></canvas>
 <div id="panel"></div>
 <div id="legend"></div>
+
+<div id="console">
+  <div id="transcript"></div>
+  <div id="inputbar">
+    <span id="prompt-caret">realm&gt;</span>
+    <input id="console-input" type="text" autocomplete="off" spellcheck="false" placeholder=":ask &lt;question&gt;  |  :impact &lt;target&gt;">
+  </div>
+</div>
+
 <script src="/assets/3d-force-graph.min.js"></script>
 <script>
 (function () {
@@ -68,6 +143,53 @@
 
   window.addEventListener('error', e => reportError('window.onerror', e.error || e.message));
   window.addEventListener('unhandledrejection', e => reportError('unhandledrejection', e.reason));
+
+  // ---- splash: reveal -> type "NIRDOSHA" -> subtitle fade, same
+  // phases/timing/colors as `hi_logo_anim.rs`'s ratatui version, ported
+  // to CSS animations/timeouts instead of a per-frame buffer paint.
+  // Ends on the same intro-complete timer OR immediately on any
+  // keypress/click, exactly like the terminal splash does.
+  function runSplash() {
+    const WORD = 'NIRDOSHA';
+    const TYPE_PER_CHAR = 45; // ms, matches TYPE_PER_CHAR = 0.045s
+    const WORD_START = 950;   // ms, matches REVEAL_SECS = 0.95s
+    const WORD_TO_SUB_GAP = 220;
+    const SUB_FADE = 550;
+    const INTRO_DONE_AT = WORD_START + WORD.length * TYPE_PER_CHAR + WORD_TO_SUB_GAP + SUB_FADE;
+
+    const wordEl = document.getElementById('splash-word');
+    WORD.split('').forEach(ch => {
+      const span = document.createElement('span');
+      span.textContent = ch;
+      wordEl.appendChild(span);
+    });
+    const letters = wordEl.querySelectorAll('span');
+    letters.forEach((span, i) => {
+      setTimeout(() => {
+        span.style.opacity = '1';
+        span.classList.add('lit');
+      }, WORD_START + i * TYPE_PER_CHAR);
+    });
+    setTimeout(() => {
+      document.getElementById('splash-sub').classList.add('visible');
+    }, WORD_START + WORD.length * TYPE_PER_CHAR + WORD_TO_SUB_GAP);
+
+    let dismissed = false;
+    function dismiss() {
+      if (dismissed) return;
+      dismissed = true;
+      const splash = document.getElementById('splash');
+      splash.classList.add('hidden');
+      document.getElementById('header-logo').classList.add('idle-breathe');
+      setTimeout(() => { splash.style.display = 'none'; }, 320);
+      document.removeEventListener('keydown', dismiss);
+      splash.removeEventListener('click', dismiss);
+      document.getElementById('console-input').focus();
+    }
+    setTimeout(dismiss, INTRO_DONE_AT);
+    document.addEventListener('keydown', dismiss);
+    document.getElementById('splash').addEventListener('click', dismiss);
+  }
 
   function hasWebGL() {
     try {
@@ -226,8 +348,8 @@
     const ctx = canvas.getContext('2d');
 
     function resize() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
     }
     resize();
     window.addEventListener('resize', resize);
@@ -319,6 +441,67 @@
     loop();
   }
 
+  // ---- console: bottom text entry, mirroring `hi`'s own `:ask`/
+  // `:impact` verbs (both real, backed by the same /api/* routes the
+  // graph itself uses) client-side. Prompt-mode's LLM population pass
+  // (rfcs/0014's mode 1) isn't wired into this webview yet -- anything
+  // else typed here says so honestly rather than silently doing
+  // nothing or pretending to generate something.
+  function logLine(kind, text) {
+    const transcript = document.getElementById('transcript');
+    const line = document.createElement('div');
+    line.className = 'line' + (kind ? ' ' + kind : '');
+    line.textContent = text;
+    transcript.appendChild(line);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function handleConsoleSubmit(raw) {
+    const line = raw.trim();
+    if (!line) return;
+    logLine('user', '> ' + line);
+    if (line === ':ask' || line.startsWith(':ask ')) {
+      const q = line.slice(':ask'.length).trim();
+      if (!q) { logLine('error', 'usage: :ask <question>'); return; }
+      fetch('/api/ask?q=' + encodeURIComponent(q))
+        .then(r => r.json())
+        .then(hits => {
+          if (!hits.length) { logLine('', '(no matches)'); return; }
+          hits.forEach(h => logLine('', h.doc_id + ': ' + h.content));
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :ask', err); });
+      return;
+    }
+    if (line === ':impact' || line.startsWith(':impact ')) {
+      const target = line.slice(':impact'.length).trim();
+      if (!target) { logLine('error', 'usage: :impact <target>'); return; }
+      fetch('/api/impact?target=' + encodeURIComponent(target))
+        .then(r => r.json())
+        .then(report => {
+          const hits = report.hits || [];
+          if (!hits.length) { logLine('', '(no impact found for ' + target + ')'); return; }
+          hits.forEach(h => logLine('', h.edge_kind + ' -> ' + (h.title || h.node_id) + (h.flag ? ' [' + h.flag + ']' : '')));
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :impact', err); });
+      return;
+    }
+    logLine('error', "prompt-mode generation isn't wired into this graph view yet -- use nirdosha hi's own console for that, or :ask <question> / :impact <target> here.");
+  }
+
+  function initConsole() {
+    const input = document.getElementById('console-input');
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const value = input.value;
+        input.value = '';
+        handleConsoleSubmit(value);
+      }
+    });
+    logLine('', 'connected -- type :ask <question> or :impact <target>.');
+  }
+
+  runSplash();
+  initConsole();
   buildLegend();
   Promise.all([
     fetch('/api/nodes').then(r => r.json()),

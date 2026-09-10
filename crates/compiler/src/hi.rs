@@ -75,6 +75,14 @@ pub(crate) enum Command<'a> {
     /// `nirdosha realm impact` prints, inline (rfcs/0013). Purely
     /// local -- no model call.
     Impact(&'a str),
+    /// `:realm` -- rfcs/0014's build-mode excursion: the ratatui/plain
+    /// console hands off to `realm_window::open`'s native 3D graph
+    /// view over the same `.nir/realm.db`, then control returns here
+    /// when the window closes. Same process, same session -- the RFC's
+    /// own "replaces it, not alongside" resolution for how the webview
+    /// and the terminal console relate, not a separate `nirdosha`
+    /// invocation.
+    Realm,
     Unknown(&'a str),
     /// `serve` is only ever `true` via the explicit `:build --serve
     /// <description>` spelling -- a plain-text request (no `:build` at
@@ -97,6 +105,7 @@ pub(crate) fn parse_line(line: &str) -> Command<'_> {
             "" => Command::Unknown(":impact (usage: `:impact <target>` -- a requirement/decision id, or a code-unit name/kind:name)"),
             target => Command::Impact(target),
         },
+        ":realm" => Command::Realm,
         // `:build <description>` is just an explicit spelling of the
         // plain-text request below -- both end up as the exact same
         // `Command::Request` -- for anyone who'd rather type a `:`
@@ -580,7 +589,7 @@ fn run_console_plain(activation: Activation, log: SessionLog, realm: Option<rusq
         println!("session log: {}", path.display());
     }
     println!(
-        "Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, `:ask <question>`/`:impact <target>` to query the project's realm graph, or `:quit` to exit."
+        "Type a description of the program you want (or `:build <description>`), `:explain` to explain the last build error, `:ask <question>`/`:impact <target>` to query the project's realm graph, `:realm` to open the interactive 3D graph view, or `:quit` to exit."
     );
     print_failure_counters();
     let client = LlmClient::new(activation);
@@ -630,7 +639,14 @@ fn run_console_plain(activation: Activation, log: SessionLog, realm: Option<rusq
                 },
                 None => println!("the realm graph isn't available this session (see the session log for why) -- try `nirdosha realm impact` from a shell instead."),
             },
-            Command::Unknown(other) => println!("unrecognized command `{other}` -- try `:explain`, `:ask`, `:impact`, or `:quit`."),
+            Command::Realm => match std::env::current_dir() {
+                Ok(cwd) => match crate::realm_window::open(&cwd) {
+                    Ok(()) => println!("back from the realm graph view."),
+                    Err(e) => eprintln!("couldn't open the realm graph view: {e}"),
+                },
+                Err(e) => eprintln!("couldn't resolve the current directory: {e}"),
+            },
+            Command::Unknown(other) => println!("unrecognized command `{other}` -- try `:explain`, `:ask`, `:impact`, `:realm`, or `:quit`."),
             Command::Request { description, serve } => {
                 last_diagnostic = generate_and_build(&client, description, serve, &|event| {
                     log.log(match &event {
@@ -1040,6 +1056,15 @@ mod tests {
     fn impact_command_without_a_target_is_reported_not_silently_dropped() {
         assert!(matches!(parse_line(":impact"), Command::Unknown(_)));
         assert!(matches!(parse_line(":impact   "), Command::Unknown(_)));
+    }
+
+    #[test]
+    fn realm_command_takes_no_argument() {
+        assert!(matches!(parse_line(":realm"), Command::Realm));
+        // Unlike `:ask`/`:impact`, `:realm` takes no argument -- any
+        // trailing text makes it a different, unrecognized command
+        // rather than a `:realm` with an (ignored) argument.
+        assert!(matches!(parse_line(":realm now"), Command::Unknown(":realm now")));
     }
 
     /// A private per-test path, not `failure_counts_path()`'s shared

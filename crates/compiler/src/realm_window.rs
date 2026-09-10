@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
+use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::window::WindowBuilder;
 use wry::http::header::CONTENT_TYPE;
 use wry::http::{Request, Response};
@@ -36,13 +37,20 @@ use crate::realm_api;
 
 const SCHEME: &str = "hi";
 
-/// Opens the native build-mode window and runs its event loop. Blocks
-/// for the life of the window (`tao::EventLoop::run` never returns);
-/// `root` is the project directory whose `.nir/realm.db` backs every
-/// `hi://` request the webview makes.
+/// Opens the native build-mode window and runs its event loop until the
+/// window closes, then returns — `hi`'s own excursion into build mode
+/// (`hi_tui.rs`'s `:realm` handling, `hi.rs`'s plain-console
+/// equivalent), not a separate process. Uses `run_return`
+/// (`tao::platform::run_return`) rather than `EventLoop::run`
+/// specifically so control comes back to the caller instead of the
+/// process exiting when the window closes — the RFC's own "closing the
+/// webview window mid-excursion is treated as backing out; control
+/// returns to the base console immediately," not to the OS. `root` is
+/// the project directory whose `.nir/realm.db` backs every `hi://`
+/// request the webview makes.
 pub fn open(root: &Path) -> Result<(), String> {
     let root: PathBuf = root.to_path_buf();
-    let event_loop = EventLoop::new();
+    let mut event_loop = EventLoop::new();
     let window = WindowBuilder::new().with_title("Nirdosha Realm").build(&event_loop).map_err(|e| format!("creating the build-mode window: {e}"))?;
 
     let builder = WebViewBuilder::new()
@@ -62,12 +70,13 @@ pub fn open(root: &Path) -> Result<(), String> {
         builder.build_gtk(vbox).map_err(|e| format!("building the webview: {e}"))?
     };
 
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run_return(|event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
             *control_flow = ControlFlow::Exit;
         }
     });
+    Ok(())
 }
 
 /// Translates one `hi://` request into `realm_api::handle`'s
@@ -81,3 +90,21 @@ fn handle(root: &Path, request: Request<Vec<u8>>) -> Response<std::borrow::Cow<'
     let resp = realm_api::handle(root, request.method().as_str(), path, query);
     Response::builder().status(resp.status).header(CONTENT_TYPE, resp.content_type).body(resp.body).expect("a status/content-type built from realm_api::ApiResponse is always a valid HTTP response").map(Into::into)
 }
+
+// No `#[cfg(test)]` module here: `tao`'s GTK backend hard-asserts that
+// an `EventLoop` is only ever created on the process's literal main
+// thread (`assert_is_main_thread` in `platform_impl/linux/event_loop.
+// rs`), and `cargo test` always runs test bodies on a spawned worker
+// thread, even with `--test-threads=1` -- so a `#[test]` that
+// constructs an `EventLoop` at all panics unconditionally here,
+// independent of anything this module does. Verified the mechanism
+// `open()`'s `hi`-integration fix actually depends on -- that
+// `run_return` (`tao::platform::run_return`) really does hand control
+// back to the caller instead of the process exiting the way plain
+// `EventLoop::run` does -- by hand instead, with a throwaway
+// `cargo run --example` binary (an example's `fn main` *is* the real
+// main thread) that opened an `EventLoop`, proxied a `UserEvent` from a
+// background thread after 300ms standing in for a close-button click,
+// and set `ControlFlow::Exit` on receiving it: `run_return` returned
+// immediately afterward and printed confirmation, exactly as
+// `open()` relies on.

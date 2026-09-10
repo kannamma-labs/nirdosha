@@ -15,6 +15,8 @@
 
 use std::path::Path;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -30,6 +32,17 @@ const MAX_ROWS: u32 = 2000;
 /// the WebGL-feature-detect 2D fallback, and the tooltip's
 /// DOM-not-innerHTML XSS mitigation.
 const BUILD_MODE_HTML: &str = include_str!("realm_graph.html");
+
+/// Same brand mark `ui_gen.rs`'s own `logo_data_uri()` bakes into every
+/// compiled program's generated UI (`nirdosha-app-bar-icon.png`,
+/// already vendored alongside this file) — reused as-is here so the
+/// splash/header in `realm_graph.html` matches `hi`'s own branding
+/// exactly, not a second logo asset to keep in sync. Substituted into
+/// `BUILD_MODE_HTML`'s `__NIRDOSHA_LOGO__` placeholder at request time.
+fn logo_data_uri() -> String {
+    const LOGO_PNG: &[u8] = include_bytes!("nirdosha-app-bar-icon.png");
+    format!("data:image/png;base64,{}", BASE64_STANDARD.encode(LOGO_PNG))
+}
 
 /// Vendored per rfcs/0014's own rule ("`three.js`/`3d-force-graph` ship
 /// vendored into the generated page, never loaded from a CDN") —
@@ -81,7 +94,7 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str) -> ApiResponse
     // a connection so a DB problem can never take the page/script down
     // with it (the page's own fetches to /api/* report that separately).
     match path {
-        "/" => return ApiResponse::html(BUILD_MODE_HTML),
+        "/" => return ApiResponse::html(&BUILD_MODE_HTML.replace("__NIRDOSHA_LOGO__", &logo_data_uri())),
         "/assets/3d-force-graph.min.js" => return ApiResponse::javascript(FORCE_GRAPH_JS),
         _ => {}
     }
@@ -240,6 +253,10 @@ mod tests {
         let body = String::from_utf8_lossy(&resp.body);
         assert!(body.contains("Nirdosha Realm"));
         assert!(body.contains("/assets/3d-force-graph.min.js"), "page should load the vendored graph library");
+        assert!(!body.contains("__NIRDOSHA_LOGO__"), "the logo placeholder must be substituted, not leaked verbatim");
+        assert!(body.contains("data:image/png;base64,"), "the brand logo should be inlined as a data: URI");
+        assert!(body.contains("id=\"console-input\""), "build mode should have a bottom text-entry console, matching hi's own front ends");
+        assert!(body.contains("id=\"splash\""), "build mode should open with the same logo splash hi's other front ends show");
     }
 
     /// The static-asset routes are served without ever opening
