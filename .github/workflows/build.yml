@@ -29,8 +29,17 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - name: Install system dependencies (clang, z3)
-        run: sudo apt-get update && sudo apt-get install -y clang libz3-dev
+      # `libgtk-3-dev`/`libwebkit2gtk-4.1-dev` are new as of the `hi`
+      # build-mode window (`tao`+`wry`, rfcs/0014): `wry`'s Linux backend
+      # embeds WebKitGTK, which needs its own dev headers (and pulls in
+      # glib/gdk/cairo/pango/atk/soup3/javascriptcoregtk transitively via
+      # apt's own dependency resolution -- no need to list each of those
+      # separately). Found missing by a real CI failure ("Package
+      # glib-2.0 was not found in the pkg-config search path"), not
+      # anticipated in advance -- `ubuntu-latest` has none of this
+      # preinstalled.
+      - name: Install system dependencies (clang, z3, gtk/webkit2gtk for the hi build-mode window)
+        run: sudo apt-get update && sudo apt-get install -y clang libz3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
         with:

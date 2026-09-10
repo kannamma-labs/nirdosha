@@ -692,6 +692,51 @@
     logLine('', 'connected -- :prompt <description> to populate the graph, :confirm <node-id> to review a candidate, :generate to compile, :publish to build the final binary, :ask <question> / :impact <target> to query.');
   }
 
+  // ---- UI zoom: Ctrl/Cmd +/- and Ctrl/Cmd 0, same as every other
+  // desktop app -- this window has no browser chrome of its own to
+  // supply that (an embedded webview, unlike a real browser tab, does
+  // not bind these by default), so it's implemented here. `zoom` (not
+  // `transform: scale()`) is deliberate: it reflows the whole box model
+  // at the new scale -- the fixed px layout throughout this page
+  // (#header/#console/#legend/#panel) stays correctly positioned at any
+  // zoom level, not just visually stretched. Supported by every engine
+  // `wry` actually embeds (WebKitGTK, WebView2/Chromium, WKWebView);
+  // not standard CSS, but standardness only matters for engines this
+  // app never runs in.
+  let uiZoom = 1;
+  const ZOOM_MIN = 0.6, ZOOM_MAX = 2.2, ZOOM_STEP = 0.1;
+  function applyZoom() {
+    document.body.style.zoom = uiZoom.toFixed(2);
+    try { localStorage.setItem('hi-ui-zoom', String(uiZoom)); } catch (_) {}
+  }
+  function loadZoom() {
+    try {
+      const saved = parseFloat(localStorage.getItem('hi-ui-zoom'));
+      if (!isNaN(saved) && saved >= ZOOM_MIN && saved <= ZOOM_MAX) uiZoom = saved;
+    } catch (_) {}
+    applyZoom();
+  }
+  document.addEventListener('keydown', e => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    // `=` (not just `+`) so the un-shifted key most keyboards actually
+    // send for Ctrl+= is honored too, matching every browser's own
+    // zoom-in binding.
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      uiZoom = Math.min(ZOOM_MAX, +(uiZoom + ZOOM_STEP).toFixed(2));
+      applyZoom();
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      uiZoom = Math.max(ZOOM_MIN, +(uiZoom - ZOOM_STEP).toFixed(2));
+      applyZoom();
+    } else if (e.key === '0') {
+      e.preventDefault();
+      uiZoom = 1;
+      applyZoom();
+    }
+  });
+  loadZoom();
+
   runSplash();
   initConsole();
   buildLegend();

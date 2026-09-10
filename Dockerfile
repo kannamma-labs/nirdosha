@@ -24,9 +24,16 @@ FROM rust:1-slim-trixie AS build
 # cmake + a C++ toolchain + python3 are what `z3-src`'s vendored build
 # (the `dist` feature) needs to compile Z3 from source, matching
 # `release.yml`'s own Linux leg (`cargo build --release --features dist`,
-# no system libz3 dependency).
+# no system libz3 dependency). libgtk-3-dev/libwebkit2gtk-4.1-dev are
+# needed to *compile* `nirdosha` at all now that it links `wry`/`tao`
+# (the `hi` build-mode window, rfcs/0014) — this image never actually
+# opens that window (it's a headless server runtime), but the binary
+# still links against WebKitGTK, so its dev headers must be present at
+# build time regardless. Same requirement `build.yml`'s Linux job and
+# `release.yml`'s Linux leg both needed adding, for the same reason.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake python3 pkg-config ca-certificates git libssl-dev \
+        libgtk-3-dev libwebkit2gtk-4.1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/compiler
