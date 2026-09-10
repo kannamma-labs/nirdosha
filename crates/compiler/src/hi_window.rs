@@ -5,13 +5,13 @@
 //! The local API is answered through `wry`'s custom `hi://` protocol
 //! handler, never a real socket: no CSRF target, no DNS-rebinding
 //! bypass, no port-squatting race, because there is no network origin
-//! at all. `realm_server.rs`'s `tiny_http` socket is the RFC's own
+//! at all. `hi_server.rs`'s `tiny_http` socket is the RFC's own
 //! documented fallback for headless use, not this path.
 //!
-//! Serves the same read-only route table `realm_api::handle` also gives
-//! `realm_server.rs`, including the real 3D graph page
-//! (`realm_api`'s `BUILD_MODE_HTML`/`realm_graph.html`) — a live,
-//! navigable `3d-force-graph` view over `.nir/realm.db`'s nodes and
+//! Serves the same read-only route table `hi_api::handle` also gives
+//! `hi_server.rs`, including the real 3D graph page
+//! (`hi_api`'s `BUILD_MODE_HTML`/`hi_graph.html`) — a live,
+//! navigable `3d-force-graph` view over `.nir/hi.db`'s nodes and
 //! edges, click-to-inspect via `/api/impact`, and a WebGL-feature-detect
 //! 2D canvas fallback. `with_ipc_handler` below gives that page's own
 //! `window.ipc.postMessage` error reporting somewhere to go, since this
@@ -33,30 +33,29 @@ use wry::http::header::CONTENT_TYPE;
 use wry::http::{Request, Response};
 use wry::WebViewBuilder;
 
-use crate::realm_api;
+use crate::hi_api;
 
 const SCHEME: &str = "hi";
 
 /// Opens the native build-mode window and runs its event loop until the
-/// window closes, then returns — `hi`'s own excursion into build mode
-/// (`hi_tui.rs`'s `:realm` handling, `hi.rs`'s plain-console
-/// equivalent), not a separate process. Uses `run_return`
+/// window closes, then returns. This *is* `nirdosha hi` now
+/// (`main.rs::cmd_hi`'s own bare-`hi` arm) — not an excursion from some
+/// other console, and not a separate process/binary: one command, one
+/// window, the app the user perceives as `hi` itself. Uses `run_return`
 /// (`tao::platform::run_return`) rather than `EventLoop::run`
-/// specifically so control comes back to the caller instead of the
-/// process exiting when the window closes — the RFC's own "closing the
-/// webview window mid-excursion is treated as backing out; control
-/// returns to the base console immediately," not to the OS. `root` is
-/// the project directory whose `.nir/realm.db` backs every `hi://`
-/// request the webview makes.
+/// specifically so control comes back to the caller (`cmd_hi`, to
+/// report a clean exit code) instead of the process exiting out from
+/// under it when the window closes. `root` is the project directory
+/// whose `.nir/hi.db` backs every `hi://` request the webview makes.
 pub fn open(root: &Path) -> Result<(), String> {
     let root: PathBuf = root.to_path_buf();
     let mut event_loop = EventLoop::new();
-    let window = WindowBuilder::new().with_title("Nirdosha Realm").build(&event_loop).map_err(|e| format!("creating the build-mode window: {e}"))?;
+    let window = WindowBuilder::new().with_title("Nirdosha Hi").build(&event_loop).map_err(|e| format!("creating the build-mode window: {e}"))?;
 
     let builder = WebViewBuilder::new()
         .with_custom_protocol(SCHEME.into(), move |_id, request| handle(&root, request))
         .with_ipc_handler(|request: Request<String>| {
-            eprintln!("[realm-window] {}", request.body());
+            eprintln!("[hi-window] {}", request.body());
         })
         .with_url(format!("{SCHEME}://localhost"));
 
@@ -79,16 +78,20 @@ pub fn open(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Translates one `hi://` request into `realm_api::handle`'s
+/// Translates one `hi://` request into `hi_api::handle`'s
 /// transport-neutral response and back. `request.uri().path()`/
-/// `.query()` give exactly the `(path, query)` shape `realm_api::handle`
-/// already takes for `realm_server.rs` — no per-transport parsing logic
-/// to duplicate or drift between the two.
+/// `.query()` give exactly the `(path, query)` shape `hi_api::handle`
+/// already takes for `hi_server.rs` — no per-transport parsing logic
+/// to duplicate or drift between the two. `request.body()` carries the
+/// mutating routes' (rfcs/0014 Build/Generate/Publish) form-encoded
+/// payload straight through -- `wry`'s custom-protocol handler gets a
+/// real body on a `fetch(..., {method:'POST', body:...})` call the same
+/// way an ordinary HTTP server would.
 fn handle(root: &Path, request: Request<Vec<u8>>) -> Response<std::borrow::Cow<'static, [u8]>> {
     let path = request.uri().path();
     let query = request.uri().query().unwrap_or("");
-    let resp = realm_api::handle(root, request.method().as_str(), path, query);
-    Response::builder().status(resp.status).header(CONTENT_TYPE, resp.content_type).body(resp.body).expect("a status/content-type built from realm_api::ApiResponse is always a valid HTTP response").map(Into::into)
+    let resp = hi_api::handle(root, request.method().as_str(), path, query, request.body());
+    Response::builder().status(resp.status).header(CONTENT_TYPE, resp.content_type).body(resp.body).expect("a status/content-type built from hi_api::ApiResponse is always a valid HTTP response").map(Into::into)
 }
 
 // No `#[cfg(test)]` module here: `tao`'s GTK backend hard-asserts that

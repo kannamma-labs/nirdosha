@@ -2,42 +2,42 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Nirdosha Realm</title>
+<title>Nirdosha Hi</title>
 <style>
   :root { color-scheme: dark; }
   html, body { margin:0; padding:0; width:100%; height:100%; background:#0b0b12; color:#e8e8f0; font-family: ui-monospace, monospace; overflow:hidden; }
 
   /* ---- header: brand mark (top-left) + live status ---- */
-  #header { position:absolute; top:0; left:0; right:0; height:40px; box-sizing:border-box; padding:0 12px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:10px; align-items:center; }
-  #header .logo { width:24px; height:24px; display:block; transition:filter 0.3s; }
-  #header .wordmark { font-weight:bold; font-size:13px; letter-spacing:0.06em; color:#564cbe; }
-  #header .sep { width:1px; height:18px; background:#26263a; }
-  #status { display:flex; gap:8px; align-items:center; font-size:12px; }
-  #status .dot { width:8px; height:8px; border-radius:50%; background:#3ddc84; display:inline-block; }
+  #header { position:absolute; top:0; left:0; right:0; height:64px; box-sizing:border-box; padding:0 18px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:14px; align-items:center; }
+  #header .logo { width:36px; height:36px; display:block; transition:filter 0.3s; }
+  #header .wordmark { font-weight:bold; font-size:20px; letter-spacing:0.06em; color:#564cbe; }
+  #header .sep { width:1px; height:28px; background:#26263a; }
+  #status { display:flex; gap:8px; align-items:center; font-size:15px; }
+  #status .dot { width:10px; height:10px; border-radius:50%; background:#3ddc84; display:inline-block; }
 
   /* ---- graph surface, between header and console ---- */
-  #graph { position:absolute; top:40px; left:0; right:0; bottom:96px; }
-  #fallback-canvas { position:absolute; top:40px; left:0; right:0; bottom:96px; display:none; }
+  #graph { position:absolute; top:64px; left:0; right:0; bottom:96px; }
+  #fallback-canvas { position:absolute; top:64px; left:0; right:0; bottom:96px; display:none; }
 
-  #panel { position:absolute; top:40px; right:0; bottom:96px; width:320px; overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:12px; line-height:1.5; display:none; }
-  #panel h2 { margin:0 0 6px; font-size:14px; color:#ef9f30; word-break:break-all; }
+  #panel { position:absolute; top:64px; right:0; bottom:96px; width:320px; overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:14px; line-height:1.5; display:none; }
+  #panel h2 { margin:0 0 6px; font-size:17px; color:#ef9f30; word-break:break-all; }
   #panel .row { margin:4px 0; }
   #panel .label { opacity:0.6; margin-right:6px; }
   #panel ul { margin:6px 0 0; padding-left:16px; }
 
-  #legend { position:absolute; bottom:104px; left:8px; font-size:11px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
+  #legend { position:absolute; bottom:104px; left:8px; font-size:13px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
   #legend .item { display:flex; align-items:center; gap:6px; margin:2px 0; }
   #legend .swatch { width:10px; height:10px; border-radius:50%; display:inline-block; }
 
   /* ---- console: transcript + bottom text entry ---- */
   #console { position:absolute; left:0; right:0; bottom:0; height:96px; box-sizing:border-box; background:rgba(11,11,18,0.92); border-top:1px solid #26263a; z-index:5; display:flex; flex-direction:column; }
-  #transcript { flex:1; overflow-y:auto; padding:6px 12px; font-size:11px; line-height:1.5; color:#a9a9bd; }
+  #transcript { flex:1; overflow-y:auto; padding:6px 12px; font-size:13px; line-height:1.5; color:#a9a9bd; }
   #transcript .line { white-space:pre-wrap; word-break:break-word; }
   #transcript .line.user { color:#e8e8f0; }
   #transcript .line.error { color:#ff6b6b; }
   #inputbar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-top:1px solid #1c1c28; }
-  #prompt-caret { color:#564cbe; font-size:12px; white-space:nowrap; }
-  #console-input { flex:1; background:transparent; border:none; outline:none; color:#e8e8f0; font:12px ui-monospace, monospace; }
+  #prompt-caret { color:#564cbe; font-size:14px; white-space:nowrap; }
+  #console-input { flex:1; background:transparent; border:none; outline:none; color:#e8e8f0; font:14px ui-monospace, monospace; }
   #console-input::placeholder { color:#4a4a5e; }
 
   /* ---- splash: reveal -> type -> subtitle, matching hi_tui's own logo_anim timing/colors ---- */
@@ -96,8 +96,8 @@
 <div id="console">
   <div id="transcript"></div>
   <div id="inputbar">
-    <span id="prompt-caret">realm&gt;</span>
-    <input id="console-input" type="text" autocomplete="off" spellcheck="false" placeholder=":ask &lt;question&gt;  |  :impact &lt;target&gt;">
+    <span id="prompt-caret">hi&gt;</span>
+    <input id="console-input" type="text" autocomplete="off" spellcheck="false" placeholder=":prompt &lt;description&gt;  |  :confirm/:generate/:publish  |  :ask/:impact">
   </div>
 </div>
 
@@ -134,11 +134,11 @@
   // Every error and rejection is also handed to `wry`'s own IPC
   // channel (window.ipc.postMessage), so the host process can log it
   // even though there's no devtools/console attached to this window in
-  // normal use -- see realm_window.rs's `with_ipc_handler`.
+  // normal use -- see hi_window.rs's `with_ipc_handler`.
   function reportError(context, err) {
     const message = context + ': ' + (err instanceof Error ? err.message : String(err));
     setStatus('error: ' + message);
-    try { if (window.ipc) window.ipc.postMessage('realm-window-error: ' + message); } catch (_) {}
+    try { if (window.ipc) window.ipc.postMessage('hi-window-error: ' + message); } catch (_) {}
   }
 
   window.addEventListener('error', e => reportError('window.onerror', e.error || e.message));
@@ -249,6 +249,25 @@
     if (node.source_ref) {
       row(panel, 'source', node.source_ref + (node.line ? ':' + node.line + (node.col ? ':' + node.col : '') : ''));
     }
+    // rfcs/0014's Build/Generate/Publish state -- see `hi_api.rs`'s own
+    // `NodeRow` doc comment for what each field means. Shown as plain
+    // rows rather than a distinct visual node style in the 3D view
+    // itself (a disclosed v1 cut -- see `hi_llm.rs`'s own doc comments
+    // for the others).
+    if (node.created_by) {
+      row(panel, 'created_by', node.created_by);
+    }
+    if (node.created_by || node.confirmed || node.driving_text) {
+      row(panel, 'confirmed', node.confirmed ? 'yes' : 'no');
+      row(panel, 'locked', node.locked ? 'yes' : 'no');
+      row(panel, 'waived', node.waived ? 'yes (' + node.waive_reason + ')' : 'no');
+      if (node.driving_text) {
+        row(panel, 'driving text', node.driving_text);
+      }
+      if (node.attributes) {
+        row(panel, 'attributes', node.attributes);
+      }
+    }
 
     const impactHeading = document.createElement('div');
     impactHeading.className = 'row';
@@ -298,9 +317,20 @@
     });
   }
 
+  // Set by whichever of `run3D`/`run2D` actually ran, so a mutating
+  // console command (`:confirm`, `:generate`, ...) can refresh the
+  // rendered graph after the database changes underneath it -- without
+  // this, a newly-added or newly-locked node would only ever appear
+  // after the whole window was closed and reopened.
+  let reloadGraph = null;
+
+  function fetchGraphData() {
+    return Promise.all([fetch('/api/nodes').then(r => r.json()), fetch('/api/edges').then(r => r.json())]).then(([nodes, edges]) => prepareGraphData(nodes, edges));
+  }
+
   function prepareGraphData(nodes, edges) {
     const nodeIds = new Set(nodes.map(n => n.id));
-    // `link()` (realm.rs) always records both directions of one
+    // `link()` (hi_graph.rs) always records both directions of one
     // relationship (IMPLEMENTS / IMPLEMENTED_BY) so `impact`'s BFS can
     // walk either way -- render only the forward direction so the same
     // relationship isn't drawn twice.
@@ -333,6 +363,7 @@
       .onNodeClick(onNodeSelected)
       .onEngineStop(() => setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s)'));
     setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s) · settling…');
+    reloadGraph = () => fetchGraphData().then(fresh => Graph.graphData(fresh)).catch(err => reportError('reloading graph data', err));
   }
 
   // A small, real (not stubbed) 2D fallback for when WebGL isn't
@@ -354,14 +385,19 @@
     resize();
     window.addEventListener('resize', resize);
 
-    const nodes = data.nodes.map(n => Object.assign({}, n, {
-      x: (Math.random() - 0.5) * 400,
-      y: (Math.random() - 0.5) * 400,
-      vx: 0,
-      vy: 0,
-    }));
-    const byId = new Map(nodes.map(n => [n.id, n]));
-    const links = data.links.map(l => ({ source: byId.get(l.source), target: byId.get(l.target) })).filter(l => l.source && l.target);
+    let nodes = [];
+    let links = [];
+    function applyData(fresh) {
+      const prevById = new Map(nodes.map(n => [n.id, n]));
+      nodes = fresh.nodes.map(n => {
+        const prev = prevById.get(n.id);
+        return Object.assign({}, n, prev ? { x: prev.x, y: prev.y, vx: prev.vx, vy: prev.vy } : { x: (Math.random() - 0.5) * 400, y: (Math.random() - 0.5) * 400, vx: 0, vy: 0 });
+      });
+      const byId = new Map(nodes.map(n => [n.id, n]));
+      links = fresh.links.map(l => ({ source: byId.get(l.source), target: byId.get(l.target) })).filter(l => l.source && l.target);
+    }
+    applyData(data);
+    reloadGraph = () => fetchGraphData().then(applyData).catch(err => reportError('reloading graph data', err));
 
     canvas.addEventListener('click', e => {
       const rect = canvas.getBoundingClientRect();
@@ -441,12 +477,11 @@
     loop();
   }
 
-  // ---- console: bottom text entry, mirroring `hi`'s own `:ask`/
-  // `:impact` verbs (both real, backed by the same /api/* routes the
-  // graph itself uses) client-side. Prompt-mode's LLM population pass
-  // (rfcs/0014's mode 1) isn't wired into this webview yet -- anything
-  // else typed here says so honestly rather than silently doing
-  // nothing or pretending to generate something.
+  // ---- console: bottom text entry -- rfcs/0014's whole prompt/build/
+  // generate/publish pipeline, driven from the one text box every other
+  // command here already used, over the POST routes `hi_api.rs`/
+  // `hi_llm.rs` implement. See `MUTATING_PATHS`'s own doc comment
+  // (hi_api.rs) for why every one of these is a real POST, never a GET.
   function logLine(kind, text) {
     const transcript = document.getElementById('transcript');
     const line = document.createElement('div');
@@ -456,10 +491,36 @@
     transcript.scrollTop = transcript.scrollHeight;
   }
 
+  function encodeForm(params) {
+    return Object.keys(params).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k])).join('&');
+  }
+
+  function postForm(path, params) {
+    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: encodeForm(params) }).then(r => r.json().then(body => ({ status: r.status, body })));
+  }
+
+  // Busy state disables the input while a `:prompt`/`:generate`/
+  // `:publish` call (each a real, potentially slow LLM call or compile)
+  // is in flight -- mirrors the now-deleted `hi_tui.rs`'s own
+  // one-request-at-a-time console, over `fetch` instead of a channel to
+  // a background thread.
+  let busy = false;
+  function withBusy(promise) {
+    busy = true;
+    document.getElementById('console-input').disabled = true;
+    return promise.finally(() => {
+      busy = false;
+      const input = document.getElementById('console-input');
+      input.disabled = false;
+      input.focus();
+    });
+  }
+
   function handleConsoleSubmit(raw) {
     const line = raw.trim();
-    if (!line) return;
+    if (!line || busy) return;
     logLine('user', '> ' + line);
+
     if (line === ':ask' || line.startsWith(':ask ')) {
       const q = line.slice(':ask'.length).trim();
       if (!q) { logLine('error', 'usage: :ask <question>'); return; }
@@ -485,19 +546,150 @@
         .catch(err => { logLine('error', String(err)); reportError('console :impact', err); });
       return;
     }
-    logLine('error', "prompt-mode generation isn't wired into this graph view yet -- use nirdosha hi's own console for that, or :ask <question> / :impact <target> here.");
+    // rfcs/0014 "1. Prompt mode": the LLM populates candidate
+    // fn/struct/enum/screen nodes from a free-text description --
+    // every one lands unconfirmed (`hi_graph::add_candidate`'s own
+    // default), so nothing here reaches Generate mode without
+    // `:confirm` first.
+    if (line === ':prompt' || line.startsWith(':prompt ')) {
+      const text = line.slice(':prompt'.length).trim();
+      if (!text) { logLine('error', 'usage: :prompt <description>'); return; }
+      logLine('', 'populating the graph from this prompt (this calls the model, and can take a while)…');
+      withBusy(postForm('/api/prompt', { text }))
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'added ' + body.nodes_added + ' candidate(s), ' + body.edges_added + ' relation(s) -- review with the click panel, then :confirm <node-id>.');
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :prompt', err); });
+      return;
+    }
+    if (line === ':confirm' || line.startsWith(':confirm ')) {
+      const node = line.slice(':confirm'.length).trim();
+      if (!node) { logLine('error', 'usage: :confirm <node-id>'); return; }
+      postForm('/api/confirm', { node })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'confirmed ' + node);
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :confirm', err); });
+      return;
+    }
+    if (line === ':delete' || line.startsWith(':delete ')) {
+      const node = line.slice(':delete'.length).trim();
+      if (!node) { logLine('error', 'usage: :delete <node-id>'); return; }
+      postForm('/api/delete', { node })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'deleted ' + node);
+          document.getElementById('panel').style.display = 'none';
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :delete', err); });
+      return;
+    }
+    if (line === ':edit' || line.startsWith(':edit ')) {
+      const rest = line.slice(':edit'.length).trim();
+      const sp = rest.indexOf(' ');
+      if (sp < 0) { logLine('error', 'usage: :edit <node-id> <new driving text>'); return; }
+      const node = rest.slice(0, sp), text = rest.slice(sp + 1).trim();
+      if (!text) { logLine('error', 'usage: :edit <node-id> <new driving text>'); return; }
+      postForm('/api/edit', { node, text })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'edited ' + node + ' (unlocked if it had already generated)');
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :edit', err); });
+      return;
+    }
+    if (line === ':attach' || line.startsWith(':attach ')) {
+      const rest = line.slice(':attach'.length).trim();
+      const sp = rest.indexOf(' ');
+      if (sp < 0) { logLine('error', 'usage: :attach <node-id> <attribute, e.g. requires(role: admin)>'); return; }
+      const node = rest.slice(0, sp), attr = rest.slice(sp + 1).trim();
+      if (!attr) { logLine('error', 'usage: :attach <node-id> <attribute>'); return; }
+      postForm('/api/attach', { node, attr })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'attached to ' + node + ': ' + attr);
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :attach', err); });
+      return;
+    }
+    if (line === ':waive' || line.startsWith(':waive ')) {
+      const rest = line.slice(':waive'.length).trim();
+      const sp = rest.indexOf(' ');
+      if (sp < 0) { logLine('error', 'usage: :waive <node-id> <reason>'); return; }
+      const node = rest.slice(0, sp), reason = rest.slice(sp + 1).trim();
+      if (!reason) { logLine('error', 'usage: :waive <node-id> <reason> -- a reason is required'); return; }
+      postForm('/api/waive', { node, reason })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'waived ' + node + ': ' + reason);
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :waive', err); });
+      return;
+    }
+    if (line === ':unwaive' || line.startsWith(':unwaive ')) {
+      const node = line.slice(':unwaive'.length).trim();
+      if (!node) { logLine('error', 'usage: :unwaive <node-id>'); return; }
+      postForm('/api/unwaive', { node })
+        .then(({ status, body }) => {
+          if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'unwaived ' + node);
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :unwaive', err); });
+      return;
+    }
+    // rfcs/0014 "3. Generate mode": materializes every confirmed
+    // candidate into one real, compiled `.nir` program (see
+    // `hi_llm.rs`'s own "v1 scope cut" doc comment for why this is one
+    // combined file, not per-unit files) and locks whichever units it
+    // actually declared.
+    if (line === ':generate') {
+      logLine('', 'generating from every confirmed candidate (this calls the model, with a bounded self-repair loop, and can take a while)…');
+      withBusy(postForm('/api/generate', {}))
+        .then(({ status, body }) => {
+          (body.log || []).forEach(l => logLine('', l));
+          if (!body.ok) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'locked ' + body.locked.length + ' unit(s) -> ' + body.path + (body.not_declared && body.not_declared.length ? '; not declared by the generated program: ' + body.not_declared.join(', ') : ''));
+          return reloadGraph && reloadGraph();
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :generate', err); });
+      return;
+    }
+    // rfcs/0014 "4. Publish mode" -- see `hi_api.rs::handle_publish`'s
+    // own doc comment for this v1's real, disclosed scope cut: a local
+    // compiled binary, not a real `deployment_provider` deploy (that
+    // abstraction and its credential storage are undecided in the RFC
+    // itself).
+    if (line === ':publish') {
+      logLine('', 'building the whole generated program…');
+      withBusy(postForm('/api/publish', {}))
+        .then(({ status, body }) => {
+          if (!body.ok) { logLine('error', body.error || ('request failed: ' + status)); return; }
+          logLine('', 'published -> ' + body.binary);
+        })
+        .catch(err => { logLine('error', String(err)); reportError('console :publish', err); });
+      return;
+    }
+    logLine('error', "unrecognized command -- try :prompt <description>, :confirm/:delete/:edit/:attach/:waive/:unwaive <node-id> ..., :generate, :publish, :ask <question>, or :impact <target>.");
   }
 
   function initConsole() {
     const input = document.getElementById('console-input');
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !input.disabled) {
         const value = input.value;
         input.value = '';
         handleConsoleSubmit(value);
       }
     });
-    logLine('', 'connected -- type :ask <question> or :impact <target>.');
+    logLine('', 'connected -- :prompt <description> to populate the graph, :confirm <node-id> to review a candidate, :generate to compile, :publish to build the final binary, :ask <question> / :impact <target> to query.');
   }
 
   runSplash();

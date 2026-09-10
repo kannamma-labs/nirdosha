@@ -1,15 +1,15 @@
-//! Headless local HTTP fallback for Realm build mode
+//! Headless local HTTP fallback for Hi build mode
 //! (rfcs/0014-generative-build-console.md). The RFC's own resolved
-//! default transport is `realm_window.rs`'s `wry` custom-protocol
+//! default transport is `hi_window.rs`'s `wry` custom-protocol
 //! handler — "no network port at all" — because it closes CSRF/DNS-
 //! rebinding/port-squatting risk classes a real socket can't avoid.
 //! This module *is* that real socket: the RFC's own documented
-//! fallback for headless/scripting/CI use (`nirdosha realm serve`),
+//! fallback for headless/scripting/CI use (`nirdosha hi serve`),
 //! never the default a user hits by opening build mode normally. Both
-//! transports share one route table (`realm_api::handle`) and differ
+//! transports share one route table (`hi_api::handle`) and differ
 //! only in how they translate their native request/response types at
 //! the edge, plus the hardening this module's own real network
-//! exposure requires and `realm_window.rs`'s doesn't (see
+//! exposure requires and `hi_window.rs`'s doesn't (see
 //! `has_browser_origin` below).
 //!
 //! `tiny_http` is already a workspace dependency
@@ -22,7 +22,7 @@ use std::thread;
 
 use tiny_http::{Header, Response, Server};
 
-use crate::realm_api::{self, ApiResponse};
+use crate::hi_api::{self, ApiResponse};
 
 pub struct ServerHandle {
     pub port: u16,
@@ -34,18 +34,18 @@ pub struct ServerHandle {
 /// this increment's "prove the pipeline" scope, not the full session
 /// lifecycle RFC 0014 describes (still an open question there).
 pub fn serve(root: &Path) -> Result<ServerHandle, String> {
-    let server = Server::http("127.0.0.1:0").map_err(|e| format!("binding local Realm server: {e}"))?;
-    let port = server.server_addr().to_ip().map(|a| a.port()).ok_or_else(|| "local Realm server has no bound IP address".to_string())?;
+    let server = Server::http("127.0.0.1:0").map_err(|e| format!("binding local hi server: {e}"))?;
+    let port = server.server_addr().to_ip().map(|a| a.port()).ok_or_else(|| "local hi server has no bound IP address".to_string())?;
     let root: PathBuf = root.to_path_buf();
     thread::Builder::new()
-        .name("nirdosha-realm-server".to_string())
+        .name("nirdosha-hi-server".to_string())
         .spawn(move || {
-            for request in server.incoming_requests() {
-                let response = respond(&root, &request);
+            for mut request in server.incoming_requests() {
+                let response = respond(&root, &mut request);
                 let _ = request.respond(response);
             }
         })
-        .map_err(|e| format!("spawning the local Realm server thread: {e}"))?;
+        .map_err(|e| format!("spawning the local hi server thread: {e}"))?;
     Ok(ServerHandle { port })
 }
 
@@ -61,13 +61,17 @@ fn has_browser_origin(request: &tiny_http::Request) -> bool {
     request.headers().iter().any(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin"))
 }
 
-fn respond(root: &Path, request: &tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
+fn respond(root: &Path, request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
     if has_browser_origin(request) {
         return to_tiny_http(ApiResponse::error(403, "this local API does not accept browser-originated requests"));
     }
-    let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
-    let method = request.method().as_str();
-    to_tiny_http(realm_api::handle(root, method, path, query))
+    let (path, query) = request.url().split_once('?').map(|(p, q)| (p.to_string(), q.to_string())).unwrap_or_else(|| (request.url().to_string(), String::new()));
+    let method = request.method().as_str().to_string();
+    let mut body = Vec::new();
+    if let Err(e) = request.as_reader().read_to_end(&mut body) {
+        return to_tiny_http(ApiResponse::error(400, &format!("reading request body: {e}")));
+    }
+    to_tiny_http(hi_api::handle(root, &method, &path, &query, &body))
 }
 
 fn to_tiny_http(resp: ApiResponse) -> Response<Cursor<Vec<u8>>> {
@@ -81,7 +85,7 @@ mod tests {
 
     fn scratch_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("nirdosha_realm_server_test_{name}_{}", std::process::id()));
+        path.push(format!("nirdosha_hi_server_test_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -89,13 +93,13 @@ mod tests {
 
     /// Real end-to-end: start the server, make a real HTTP request over
     /// loopback, parse the real JSON response — not just unit-testing
-    /// the route function in isolation (that's `realm_api`'s own tests).
+    /// the route function in isolation (that's `hi_api`'s own tests).
     #[test]
     fn serve_answers_api_nodes_over_a_real_http_request() {
         let dir = scratch_dir("nodes_http");
         std::fs::write(dir.join("a.nir"), "fn add(a: i64, b: i64) -> i64 { return a + b }\n").unwrap();
-        let conn = crate::realm::open(&dir).expect("open");
-        crate::realm::sync(&conn, &dir, &[]).expect("sync");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_graph::sync(&conn, &dir, &[]).expect("sync");
         drop(conn); // release the file lock before the server thread opens its own connection
 
         let handle = serve(&dir).expect("serve");
@@ -108,20 +112,20 @@ mod tests {
     #[test]
     fn serve_answers_the_build_mode_graph_page_at_root() {
         let dir = scratch_dir("root_http");
-        let conn = crate::realm::open(&dir).expect("open");
+        let conn = crate::hi_graph::open(&dir).expect("open");
         drop(conn);
         let handle = serve(&dir).expect("serve");
         let body = reqwest::blocking::get(format!("http://127.0.0.1:{}/", handle.port)).expect("request should succeed").text().expect("response body");
-        assert!(body.contains("Nirdosha Realm"));
+        assert!(body.contains("Nirdosha Hi"));
     }
 
     #[test]
     fn serve_answers_api_impact_for_a_linked_requirement() {
         let dir = scratch_dir("impact_http");
         std::fs::write(dir.join("a.nir"), "fn transfer_funds(amount: i64) -> i64 { return amount }\n").unwrap();
-        let conn = crate::realm::open(&dir).expect("open");
-        crate::realm::sync(&conn, &dir, &[]).expect("sync");
-        crate::realm::link(&conn, "R17", "fn:transfer_funds").expect("link");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_graph::sync(&conn, &dir, &[]).expect("sync");
+        crate::hi_graph::link(&conn, "R17", "fn:transfer_funds").expect("link");
         drop(conn);
 
         let handle = serve(&dir).expect("serve");
@@ -137,7 +141,7 @@ mod tests {
     #[test]
     fn serve_rejects_a_request_carrying_a_browser_origin_header() {
         let dir = scratch_dir("origin_http");
-        let conn = crate::realm::open(&dir).expect("open");
+        let conn = crate::hi_graph::open(&dir).expect("open");
         drop(conn);
         let handle = serve(&dir).expect("serve");
         let client = reqwest::blocking::Client::new();
@@ -152,7 +156,7 @@ mod tests {
     #[test]
     fn serve_reports_a_missing_query_param_as_a_client_error() {
         let dir = scratch_dir("missing_param_http");
-        let conn = crate::realm::open(&dir).expect("open");
+        let conn = crate::hi_graph::open(&dir).expect("open");
         drop(conn);
         let handle = serve(&dir).expect("serve");
         let resp = reqwest::blocking::get(format!("http://127.0.0.1:{}/api/impact", handle.port)).expect("request should succeed");

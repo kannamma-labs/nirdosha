@@ -1,4 +1,4 @@
-# RFC 0014: The generative build console — prompt → build → generate → publish, over an interactive Realm graph
+# RFC 0014: The generative build console — prompt → build → generate → publish, over an interactive Hi graph
 
 > **Status: mostly speculative design capture; one real foundation
 > slice shipped 2026-09-10.** This RFC transcribes a design
@@ -12,17 +12,19 @@
 > questions are answered directly in Design, where the answer actually
 > belongs; what's left there is what's genuinely still undecided.
 >
-> **What's actually real so far** (`nirdosha realm window`): the
-> "Rendering surface" resolved-decision below is built and verified —
-> a `tao` native window with a `wry`-embedded webview, answered through
-> a custom `hi://` protocol handler with no network port at all
-> (`crates/compiler/src/realm_window.rs`), calling the same read-only
-> route table (`crates/compiler/src/realm_api.rs`: `/api/nodes`,
+> **What's actually real so far, and it now goes further than this RFC
+> originally shipped:** bare `nirdosha hi` (no subcommand) opens the
+> native build-mode window directly — the "Rendering surface"
+> resolved-decision below is built and verified: a `tao` native window
+> with a `wry`-embedded webview, answered through a custom `hi://`
+> protocol handler with no network port at all
+> (`crates/compiler/src/hi_window.rs`), calling the same read-only
+> route table (`crates/compiler/src/hi_api.rs`: `/api/nodes`,
 > `/api/edges`, `/api/impact`, `/api/ask`) that also backs
-> `nirdosha realm serve`, the documented headless/network fallback
-> (`crates/compiler/src/realm_server.rs`) this section calls for. The
-> window shows a real, live `3d-force-graph` view of `.nir/realm.db`
-> (`crates/compiler/src/realm_graph.html`, vendored library under
+> `nirdosha hi serve`, the documented headless/network fallback
+> (`crates/compiler/src/hi_server.rs`) this section calls for. The
+> window shows a real, live `3d-force-graph` view of `.nir/hi.db`
+> (`crates/compiler/src/hi_graph.html`, vendored library under
 > `crates/compiler/src/vendor/`) — nodes colored by kind, click-to-
 > inspect against `/api/impact`, a WebGL-feature-detect 2D canvas
 > fallback, tooltips built as real DOM elements rather than strings (so
@@ -30,26 +32,77 @@
 > tooltip path) — verified end to end against a populated graph
 > (functions, a struct, an enum, a linked requirement) with zero
 > JS-side errors reported over `wry`'s IPC channel across an 8-second
-> run. Deliberately not yet built, even for this surface: true
-> GPU-instanced node rendering (the default per-node-mesh path is used
-> instead — fine at this slice's test scale, not yet meeting the
-> RFC's stated "hundreds of draw calls, not thousands" budget at the
-> full 300–1500-node target), delta updates (the graph is fetched once
-> per window open, not live-reheated as `.nir/realm.db` changes
-> underneath it), and in-page editing. Everything else in this RFC
-> (prompt mode's population pass, generate mode, publish mode, the
-> capability/funnel gates) is unbuilt design, not running code.
+> run. **The `ratatui`/plain terminal console this RFC originally
+> described as the "base" the webview excurses from and returns to no
+> longer exists at all** — it was deleted outright (`hi_tui.rs`,
+> `hi_logo_anim.rs`, `hi_logo_pixels.rs`, and RFC 0012's LLM-console
+> half of the old `hi.rs`), not kept alongside the window. `hi` *is*
+> the window now; there is no other front end to hand off from or back
+> to, no "session continuity across the swap" to preserve (see
+> "Session continuity" below, itself now historical), and the
+> `:ask`/`:impact` console verbs live entirely inside the webview's own
+> bottom-of-window text console (`hi_graph.html`'s `#console`), calling
+> `/api/ask`/`/api/impact`, not a terminal `Command` enum. Deliberately
+> not yet built, even for the window surface: true GPU-instanced node
+> rendering (the default per-node-mesh path is used instead — fine at
+> this slice's test scale, not yet meeting the RFC's stated "hundreds
+> of draw calls, not thousands" budget at the full 300–1500-node
+> target), delta updates (the graph is fetched once per window open,
+> not live-reheated as `.nir/hi.db` changes underneath it), and
+> in-page editing.
+>
+> **Prompt/Build/Generate/Publish are now real too (2026-09-10, same
+> day), at a deliberately narrowed scope -- disclosed per-mode, not
+> silently assumed to match this RFC's own fuller design:**
+>
+> - **Prompt mode** (`hi_llm::populate_candidates`, `POST /api/prompt`):
+>   one LLM call turns a free-text description into `CodeUnit`
+>   candidates + `RELATES_TO` edges, written via `hi_graph::
+>   add_candidate`/`add_relation`. **Cut:** no Tier-0 deterministic
+>   funnel, no rejection ceiling/floor -- LLM-only, Tier 2 alone. The
+>   funnel's actual purpose still holds regardless: every candidate
+>   lands `confirmed = 0` and reaches nothing further without a human
+>   reviewing it.
+> - **Build mode**'s write surface is real (`hi_graph.rs`'s
+>   `confirm_node`/`delete_node`/`edit_driving_text`/`attach_attribute`/
+>   `waive_node`/`unwaive_node`, each a `POST /api/*` route, each
+>   reachable from the webview's own console as `:confirm`/`:delete`/
+>   `:edit`/`:attach`/`:waive`/`:unwaive <node-id> ...`). **Cut:** no
+>   point-and-click editing UI (console-driven only), no edge confirm/
+>   delete (edges stay display-only), no attribute-legality-per-kind
+>   checking (Open Question 5, still open), no semantic search.
+> - **Generate mode** (`hi_llm::generate_program`, `POST /api/generate`,
+>   `:generate`): sends every confirmed, non-waived candidate through
+>   RFC 0012's exact bounded self-repair loop, and on a real typecheck+
+>   ownership-check+build success, locks every unit the program actually
+>   declared (`hi_graph::lock_units_after_sync`). **Cut, the largest
+>   one:** one combined `.nir` file for the whole confirmed set
+>   (`.nir/generated/hi_build.nir`), regenerated in full each pass --
+>   not RFC 0014's own per-unit generation/composition (real, unbuilt
+>   compiler work this slice doesn't attempt). Locking is therefore
+>   file-granularity, not per-unit; the capability-signal confirmation
+>   gate is collapsed to "unconfirmed nodes are never generatable, full
+>   stop," not the RFC's finer two-tier version; `graph-edit-post-lock`
+>   is collapsed to an outright unlock on edit, not the RFC's own
+>   flag-without-unlocking nuance.
+> - **Publish mode** (`hi_api.rs::handle_publish`, `POST /api/publish`,
+>   `:publish`): one real whole-program build of the generated file,
+>   producing a runnable binary under `.nir/generated/`. **Cut:** no
+>   `deployment_provider` abstraction, no deploy, no credentials -- the
+>   RFC's own Open Questions call that abstraction and its credential
+>   storage undecided, so this publishes to *local disk only*, not
+>   anywhere.
+>
+> Every cut above is a real, load-bearing simplification, not an
+> oversight -- each is called out again at its own section below, next
+> to the fuller design it stands in for.
 >
 > **Scope.** This RFC covers every way a human sees or interacts with
-> the Realm graph via `hi`, not only the 3D webview below. `hi`'s
-> `:ask`/`:impact` console verbs (`hi.rs`'s `Command::Ask`/
-> `Command::Impact`) are this RFC's already-shipped baseline UI — the
-> same `realm::ask`/`realm::impact` query functions the graph exposes,
-> rendered as flat text rather than a graph. RFC 0013 owns the graph
-> itself and the programmatic, CI-facing `nirdosha realm ...` CLI;
-> this RFC owns everything downstream of that, from the plain console
-> verbs already running today to the speculative 3D view described
-> below.
+> the Hi graph via `hi`, not only the 3D webview below. RFC 0013 owns
+> the graph itself and the programmatic, CI-facing
+> `nirdosha hi <ingest|sync|link|impact|serve>` CLI; this RFC owns
+> everything downstream of that, from `:ask`/`:impact` to the now-real-
+> but-narrowed prompt/build/generate/publish pipeline described below.
 
 ## Motivation
 
@@ -58,7 +111,7 @@ compiler-feedback self-repair loop — but it's a black box: one prompt
 in, one pass/fail build out, no visibility into *what* got created
 along the way, and no way to correct structure short of regenerating
 from scratch. RFC 0013 gave `hi` a local knowledge graph
-(`.nir/realm.db`) with bidirectional code↔requirement traceability —
+(`.nir/hi.db`) with bidirectional code↔requirement traceability —
 but the only way to see it is `:ask`/`:impact` printing a flat text
 list into the console transcript.
 
@@ -69,7 +122,7 @@ annotations (`requires`, `nfr`, `validate`, screen field masking)
 without dropping into hand-written `.nir`, or get from "generated" to
 "running somewhere"** without leaving the console entirely. This RFC
 sketches a four-mode workflow — **prompt → build → generate →
-publish** — with an interactive graph view of the Realm `CodeUnit`
+publish** — with an interactive graph view of the Hi `CodeUnit`
 graph as the build-mode surface, aimed at closing that gap end to end.
 
 ## Design
@@ -77,22 +130,22 @@ graph as the build-mode surface, aimed at closing that gap end to end.
 ### State machine overview
 
 ```
-prompt --(populate the Realm graph)--> build --(materialize .nir)--> generate --(deploy)--> publish
+prompt --(populate the Hi graph)--> build --(materialize .nir)--> generate --(deploy)--> publish
 ```
 
 Entered automatically on `nirdosha hi` startup, after RFC 0013's
-existing auto-scaffold (`hi::open_realm_or_warn`) — this RFC doesn't
+existing auto-scaffold (`main.rs::cmd_hi_window`) — this RFC doesn't
 change that step, it adds what happens after the console is up.
 
 ### What's authoritative, when
 
 Every other decision in this RFC depends on answering one question
 first, so it goes first: **at each point in the state machine, is the
-Realm graph or the `.nir` source the thing the user should trust?**
+Hi graph or the `.nir` source the thing the user should trust?**
 
 - **Prompt → build:** the graph is authoritative. No `.nir` file
   exists yet; everything the user is correcting — structure,
-  attributes, gates — lives only in `.nir/realm.db`.
+  attributes, gates — lives only in `.nir/hi.db`.
 - **Build → generate:** the graph stays authoritative going in —
   generate mode's job is to make the `.nir` files match the graph, not
   the reverse. A unit whose generated source doesn't actually satisfy
@@ -126,14 +179,14 @@ output — because a human hand-edited it, not because the graph
 changed — is not the same case as ordinary regeneration, and generate
 mode must not treat it the same way.** This needs its own evidence,
 not RFC 0013's existing `content_hash` — that column is the file's
-*current* hash, re-synced on every `realm sync`, so it can never
+*current* hash, re-synced on every `hi sync`, so it can never
 answer "does this file still match what generate mode last wrote";
 it only ever answers "did the file change since the last sync,"
-which a hand-edit followed by an ordinary `realm sync` (a habit, or a
+which a hand-edit followed by an ordinary `hi sync` (a habit, or a
 CI step) silently satisfies, erasing the very divergence this gate
 needs to catch. Generate mode therefore writes its own record —
 `last_materialized_hash` per CodeUnit, set at the moment a unit
-locks, untouched by `realm sync` — and it's *that* value, not
+locks, untouched by `hi sync` — and it's *that* value, not
 `content_hash`, that a re-generate compares the current file against.
 Regenerating a unit whose `.nir` no longer matches its own
 `last_materialized_hash` requires an explicit human confirmation
@@ -160,7 +213,7 @@ from the graph. Build mode's own edits (see "Build mode" below) and
 the hand-edit case just above now also set the same flag for other
 directions — the graph side moving away from locked code, an edit
 landing mid-generate, or a human's hand-edit diverging from what
-generate mode last produced — and a bare `realm sync` or an unrelated
+generate mode last produced — and a bare `hi sync` or an unrelated
 regenerate pass could clear one meaning without recording which one it
 resolved. `flag_reason` (already a column on `edges`) records which
 one triggered the flag — `code-drift`, `graph-edit-post-lock`,
@@ -204,7 +257,7 @@ three categories are in scope:
   See "Build mode"'s "Rendering surface" below for why this RFC
   avoids opening a network port at all rather than trying to harden
   one.
-- **Local artifact and credential hygiene.** `.nir/realm.db` now holds
+- **Local artifact and credential hygiene.** `.nir/hi.db` now holds
   LLM-generated candidate code and requirement text that weren't
   stored anywhere before this RFC's write surface existed, and
   `deployment_provider` implies a real credential. See "Publish mode"
@@ -222,7 +275,7 @@ Problem B from this project's own document-structure-discovery work,
 just at prompt scale instead of PRD scale** (the
 `nirdosha_realm_v2_design_backlog` project memory has the full
 formulation) — so it gets the same cheap → expensive funnel every
-other Realm feature already uses, not a single unbounded LLM call:
+other Hi-graph feature already uses, not a single unbounded LLM call:
 
 1. **Deterministic candidate extraction first (Tier 0, no LLM).**
    Regex/schema-guided probes over the prompt text for the same kind
@@ -302,7 +355,7 @@ but the 3D view opens with a visible "population incomplete — token
 budget reached" banner rather than presenting a partial graph as if it
 were the whole structure the prompt described.
 
-### 2. Build mode — the interactive Realm graph
+### 2. Build mode — the interactive Hi graph
 
 The central new surface: a live, navigable **3D graph** over the
 `CodeUnit`s the prompt-mode pass just populated — nodes are code
@@ -387,7 +440,7 @@ not an accident of whichever demo code ships first:
 
 **Two more constraints worth stating explicitly rather than assuming
 whoever implements this gets them right by default:** every query
-against `.nir/realm.db` from this surface uses parameterized
+against `.nir/hi.db` from this surface uses parameterized
 statements, never string-concatenated SQL — a "small local API"
 framing invites shortcuts a bigger design wouldn't. And `three.js`/
 `3d-force-graph` ship vendored into the generated page, never loaded
@@ -406,14 +459,13 @@ local API as the user. Rule, stated now rather than found later:
 page, and sanitize before storage as well as before render.
 
 **Concurrency — still genuinely open, not resolved by the schema being
-shared.** "One graph, two UIs" (below) settles that there's a single
-source of truth; it doesn't settle what happens when the `ratatui`/
-plain console, the webview's local API, and a `nirdosha realm` CLI
-invocation all hold a connection to `.nir/realm.db` at once. SQLite's
+shared.** It doesn't settle what happens when the webview's local API
+and a `nirdosha hi` CLI invocation both hold a connection to
+`.nir/hi.db` at once. SQLite's
 WAL mode (available in the bundled build already in use) gets
 concurrent readers and a single writer without blocking each other,
 but doesn't answer the real question: who wins when the user edits a
-node's text in the webview at the same moment a `realm sync` is
+node's text in the webview at the same moment a `hi sync` is
 running from a shell. Not designed — see Open Questions.
 
 The more likely version of this race is entirely intra-process, not
@@ -545,7 +597,7 @@ audit-trail entries, distinct from LLM-originated content.
 **"13 as the base" means the data model, not just the entry point.**
 RFC 0014 introduces no new or parallel data structure. The webview's
 local API is a pure read/write projection over the exact same
-`.nir/realm.db` schema RFC 0013 already defines — the same `nodes`/
+`.nir/hi.db` schema RFC 0013 already defines — the same `nodes`/
 `edges`/`provenance` tables, the same `CodeUnit`/`Requirement` identity
 and `content_hash`/`possibly_stale` semantics. The `ratatui` console
 and the webview are two UIs over one graph, not one graph each — a
@@ -765,10 +817,10 @@ blocks). Written now so the next one gets caught here instead.
 | **locked-but-neighbors-drifted** | A neighbor of an already-locked unit regenerates or changes after this unit locked | Publish's own whole-program build succeeding with this unit included (implicit re-lock), or an explicit generate re-run for this unit specifically | Nothing on its own (a visual-only state) — what it prevents is a stale lock symbol reading as fresh |
 | **waived** | An explicit human waive action on a specific *unlocked* unit, with a required free-text reason recorded in the audit trail | An explicit unwaive action, returning to ordinary unlocked | Nothing directly — it's how a unit becomes out-of-scope mid-flight (see below), not a state that blocks on its own |
 | **out-of-scope** | The user's own publish-scope decision (never reachable from a shipped `screen`/handler, or explicitly deferred), or the by-definition consequence of waiving a unit | Widening scope to include the unit again (and unwaiving it first, if it was waived) | Nothing by itself — but scope is a reference-closure, not an independent per-unit checklist: an in-scope unit whose code still calls an out-of-scope one fails the whole-program build, and *that* failure is real |
-| **possibly_stale**, `flag_reason: code-drift` | RFC 0013 sync: a `.nir` file's `content_hash` no longer matches its last-synced value | An ordinary `realm sync` reconciling the edge | RFC 0013's own existing behavior — this RFC doesn't change it |
+| **possibly_stale**, `flag_reason: code-drift` | RFC 0013 sync: a `.nir` file's `content_hash` no longer matches its last-synced value | An ordinary `hi sync` reconciling the edge | RFC 0013's own existing behavior — this RFC doesn't change it |
 | **possibly_stale**, `flag_reason: graph-edit-post-lock` | A graph edit to a unit that had already locked | Generate mode re-running for that unit and it re-locking | That unit's "confirmed fresh" claim in the 3D view, until regenerated |
 | **possibly_stale**, `flag_reason: graph-edit-during-generation` | A graph edit landing while generate mode is already mid-flight on that same unit (the in-flight pass itself is unaffected) | The *next* generate pass for that unit | Same as `graph-edit-post-lock`, one pass later |
-| **possibly_stale**, `flag_reason: hand-edit-post-generate` | A `.nir` file's content diverging from its own `last_materialized_hash` (generate mode's own record of what it last wrote — deliberately not the ordinary `content_hash` a `realm sync` would silently update) | An explicit human confirmation to overwrite (which snapshots the diverged file into the audit trail first, making the confirmation reversible), or hand-editing the graph text to match the file instead | Regeneration of that unit — the hard stop "What's authoritative, when" defines |
+| **possibly_stale**, `flag_reason: hand-edit-post-generate` | A `.nir` file's content diverging from its own `last_materialized_hash` (generate mode's own record of what it last wrote — deliberately not the ordinary `content_hash` a `hi sync` would silently update) | An explicit human confirmation to overwrite (which snapshots the diverged file into the audit trail first, making the confirmation reversible), or hand-editing the graph text to match the file instead | Regeneration of that unit — the hard stop "What's authoritative, when" defines |
 
 ## Effect on the permission model
 
@@ -786,7 +838,7 @@ annotations get written, not what they do once compiled.
 Additive over RFC 0012's existing console and RFC 0013's existing
 schema/CLI — the plain-text `Command::Request`/`:ask`/`:impact` path
 is untouched; prompt/build/generate/publish is a new, parallel
-interaction surface over the same LLM client, Realm graph, and
+interaction surface over the same LLM client, Hi graph, and
 compiler pipeline. One honest caveat: unlike 0013's CLI-verb additions
 (genuinely small diffs), this RFC implies a materially larger surface
 — a new rendering technology (§ above), not just new console verbs —
@@ -851,7 +903,7 @@ implementation spike, a benchmark — not just that it's open.
 2. ~~Prompt mode bypassing the cheap → expensive funnel.~~
    **Resolved** — see "1. Prompt mode"'s own design: deterministic
    candidate extraction first, LLM only for the residue, the same
-   funnel every other Realm feature already uses. **Still open under
+   funnel every other Hi-graph feature already uses. **Still open under
    that:** the concrete rejection-ceiling thresholds (candidate-entity
    count, relationship density, token budget) — *resolves via a
    benchmark*, not a design session; there's no principled number
@@ -864,12 +916,12 @@ implementation spike, a benchmark — not just that it's open.
    console as the base entry point and session state (transcript,
    scrollback) surviving the swap — see "Build mode"'s full text.
    **Still open:** the exact message/query shape over that IPC channel
-   beyond what's already in use (`realm::ask`/`realm::impact`) —
+   beyond what's already in use (`hi_graph::ask`/`hi_graph::impact`) —
    *resolves via an implementation spike*, this is faster to prototype
    than to keep speculating about.
 4. **API concurrency** — three potential writers (the base console,
-   the webview's local API, `nirdosha realm` CLI) on one
-   `.nir/realm.db`. WAL mode (see "Build mode"'s own concurrency note)
+   the webview's local API, `nirdosha hi` CLI) on one
+   `.nir/hi.db`. WAL mode (see "Build mode"'s own concurrency note)
    gets non-blocking concurrent reads; conflicting concurrent writes
    to the same node still need an actual policy (last-writer-wins?
    optimistic concurrency with a version check and a surfaced
@@ -983,8 +1035,8 @@ implementation spike, a benchmark — not just that it's open.
     `nirdosha_realm_v2_design_backlog` project memory) — this RFC
     doesn't re-derive those fixes, it names why they matter more here
     than they did before.
-12. **`.nir/realm.db` and VCS.** Not this RFC's own implementation
-    surface (it's RFC 0013's scaffold, `hi::open_realm_or_warn`, that
+12. **`.nir/hi.db` and VCS.** Not this RFC's own implementation
+    surface (it's RFC 0013's scaffold, `main.rs::cmd_hi_window`, that
     would need to default `.nir/` into `.gitignore`), but flagged here
     because this RFC is what raises the stakes of what that directory
     holds — LLM-populated candidate code and requirement text, not
@@ -1001,17 +1053,26 @@ implementation spike, a benchmark — not just that it's open.
     whole-program build of every in-scope locked unit as its actual
     gate, with per-unit locks making that build likely to succeed
     rather than guaranteeing it.
-14. **Schema additions "State transitions" now depends on, and one
-    transition that table left open rather than guessed at.** This RFC
-    requires `last_materialized_hash` (a new per-CodeUnit value, RFC
-    0013's schema has nothing like it today) and a widened
-    `flag_reason` vocabulary (`graph-edit-during-generation` alongside
-    the two this RFC already introduced) — real, small RFC 0013
-    follow-up work, same category as Open Question 12's `.gitignore`
-    item, not new design. Separately: whether a later LLM-driven
-    re-population re-provisions a node the user already confirmed is
-    genuinely undecided — confirming should mean something durable, but
-    a stale confirmation on content that's since been silently
-    replaced underneath it is its own real risk. *Resolves via a design
-    session*, since both answers have a real cost and neither is
-    obviously safer by default.
+14. ~~Schema additions "State transitions" now depends on.~~ **Partly
+    resolved (2026-09-10):** `last_materialized_hash` is real
+    (`hi_graph.rs`'s migration adds it, plus `driving_text`/
+    `created_by`/`confirmed`/`locked`/`waived`/`waive_reason`/
+    `attributes` -- the full node-side state this slice's Build/
+    Generate/Publish write surface needs), and `hi_graph::
+    lock_units_after_sync` sets it precisely as designed above (copied
+    from the fresh `content_hash` an ordinary `sync` just computed,
+    right after Generate mode writes real code). **Still open:** the
+    widened `flag_reason` vocabulary this v1 slice does *not* add --
+    `graph-edit-post-lock`/`graph-edit-during-generation` stay
+    undesigned in the schema itself; editing a locked candidate's text
+    unlocks it outright instead (a disclosed simplification, see
+    `hi_graph::edit_driving_text`'s own doc comment), so the flag-not-
+    unlock nuance those two `flag_reason` values exist for was never
+    actually needed by this implementation. Separately, and still
+    fully open: whether a later LLM-driven re-population re-provisions
+    a node the user already confirmed (this v1's `add_candidate`
+    always refines text without ever clearing `confirmed` -- a real,
+    un-agonized-over default, not a considered answer to the RFC's own
+    question here) — *resolves via a design session*, since both
+    answers have a real cost and neither is obviously safer by
+    default.

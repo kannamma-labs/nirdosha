@@ -1,19 +1,30 @@
-# RFC 0013: Nirdosha Realm — a local-first project knowledge graph with bidirectional `.nir` traceability
+# RFC 0013: Nirdosha Hi's knowledge graph — a local-first project knowledge graph with bidirectional `.nir` traceability
+
+> **Naming note.** This RFC and its filename still say "Realm" — its
+> original name when written. The feature itself has since been
+> renamed: the module is `hi_graph.rs` (not `realm.rs`), the database
+> file is `.nir/hi.db` (not `.nir/realm.db`), the CLI surface is
+> `nirdosha hi <ingest|sync|link|impact|serve>` (not `nirdosha realm
+> ...`), and there is no separate `nirdosha realm` subcommand anymore —
+> `hi` with no arguments opens the build-mode window directly (see RFC
+> 0014's own status box). The RFC number and filename are left as-is
+> per this repo's convention of not renumbering/renaming historical
+> RFCs after the fact; read "Realm"/`realm` below as this graph.
 
 > **Status.** v1 slice **`[DONE]`**: schema (`nodes`/`edges`/
 > `provenance`/`chunks`+FTS5) and auto-scaffold under `.nir/`
-> (`realm::open`); per-item code hashing reusing the same lex/parse
-> primitives `emit-ast` is built from (`realm::code_units_in_file`,
+> (`hi_graph::open`); per-item code hashing reusing the same lex/parse
+> primitives `emit-ast` is built from (`hi_graph::code_units_in_file`,
 > deliberately *not* `loader::load_program` — see that function's own
 > doc comment for why); bounded bidirectional impact queries
-> (`realm::impact`, depth/node-capped, `partial: true` on exhaustion);
-> manual `realm link`; a minimal `realm ingest`/FTS5 path; the
-> `nirdosha realm <ingest|sync|link|impact>` CLI surface
-> (`main.rs::cmd_realm`); and `hi`'s own auto-scaffold-on-startup
-> (`hi::open_realm_or_warn`, gated on `NIRDOSHA_REALM_DISABLE`). All
-> covered by real, passing unit tests (`realm.rs`'s own `#[cfg(test)]`
+> (`hi_graph::impact`, depth/node-capped, `partial: true` on exhaustion);
+> manual `hi link`; a minimal `hi ingest`/FTS5 path; the
+> `nirdosha hi <ingest|sync|link|impact>` CLI surface
+> (`main.rs::cmd_hi`); and `hi`'s own auto-scaffold-on-startup
+> (`main.rs::cmd_hi_window`, gated on `NIRDOSHA_HI_DISABLE`). All
+> covered by real, passing unit tests (`hi_graph.rs`'s own `#[cfg(test)]`
 > module) and exercised end-to-end by hand against a real `.nir` file
-> (`nirdosha realm sync`/`link`/`impact`/`ingest` run standalone) — not
+> (`nirdosha hi sync`/`link`/`impact`/`ingest` run standalone) — not
 > just compiled. `hi`'s interactive console verbs, `:ask`/`:impact`
 > (`hi.rs`'s `Command::Ask`/`Command::Impact`), were shipped in this
 > same v1 pass and call the query functions this RFC owns directly —
@@ -34,13 +45,13 @@
 > **Still `[OPEN]`, deliberately not built in v1**: the vector-search
 > plugin boundary, the in-source annotation (v2 code↔knowledge link),
 > the full adaptive resource governor, and a confirmed
-> committed-vs-per-checkout answer for `.nir/realm.db` — see Open
+> committed-vs-per-checkout answer for `.nir/hi.db` — see Open
 > Questions below, each one unchanged by the implementation pass.
 > `CodeUnit` qualified-name collision handling across multiple files
 > (an open question below) is a real, still-unaddressed gap: the
 > current implementation scopes each file's own declarations
 > independently (no cross-file `use` merging, precisely to avoid
-> double-counting shared imports — see the `realm.rs` module doc
+> double-counting shared imports — see the `hi_graph.rs` module doc
 > comment), but two *different* files each declaring an `fn` with the
 > same name collide on the same `CodeUnit` node today, silently.
 
@@ -80,7 +91,7 @@ sides change. `docs/nirdosha-agent-api.md` already specs the
 content-addressing half of this (`source_hash`/`ast_hash`, E1)
 without a consumer; `nirdosha emit-ast` already produces the
 structured AST such a system would parse (`crates/compiler/src/
-main.rs:450`, shipped). Nirdosha Realm is the piece that connects
+main.rs:450`, shipped). Nirdosha Hi's knowledge graph is the piece that connects
 them: a bounded, local-first knowledge graph, keyed by content hash,
 with `.nir` code units as first-class nodes in the same graph as
 requirements and decisions — not a bolt-on RAG index over raw text.
@@ -93,7 +104,7 @@ Every design choice below follows from one constraint this project
 already enforces everywhere else it touches external resources
 (RFC 0007's admission kernel, RFC 0011's pooling/reaper, RFC 0012's
 "same 'no dependency this repo doesn't already need elsewhere'
-posture," `crates/presence-gateway/src/main.rs:1-8`): **Realm must run
+posture," `crates/presence-gateway/src/main.rs:1-8`): **this graph must run
 on an ordinary developer laptop with zero mandatory external
 services, and every expensive operation must be bounded.** No
 Neo4j, no Elasticsearch, no Kafka, no vector database, no embedding
@@ -109,10 +120,10 @@ Five non-negotiable principles, referenced by name throughout:
 2. **The graph is the knowledge backbone.** FTS and (later, optional)
    vector search are indexes *into* the graph, not a parallel source
    of truth.
-3. **Explicit and inferred knowledge stay separate.** Something Realm
+3. **Explicit and inferred knowledge stay separate.** Something this graph
    infers (a `possibly_stale` flag, a suggested link) is tagged as
    inferred and never silently promoted to authoritative. This is
-   also why Realm never auto-edits `.nir` source or requirement text
+   also why the graph never auto-edits `.nir` source or requirement text
    on a detected drift (see Rejected alternatives) — it flags, a
    human or an explicit `hi` action decides.
 4. **Every expensive operation is bounded.** Graph traversal, FTS
@@ -126,7 +137,7 @@ Five non-negotiable principles, referenced by name throughout:
 ```text
 my-project/
 ├── .nir/
-│   ├── realm.db           # SQLite (rusqlite, "bundled" feature —
+│   ├── hi.db           # SQLite (rusqlite, "bundled" feature —
 │   │                       # already a workspace dependency:
 │   │                       # crates/compiler/Cargo.toml:35,
 │   │                       # crates/runtime-kernels/Cargo.toml:111)
@@ -145,8 +156,8 @@ someone who was only checking whether `hi` was configured) does, in
 order:
 
 1. If `.nir/` doesn't exist under the current working directory,
-   create it (`.nir/realm.db`, `.nir/content/`).
-2. Run the code half of `realm sync` (below) over every `.nir` file
+   create it (`.nir/hi.db`, `.nir/content/`).
+2. Run the code half of `hi sync` (below) over every `.nir` file
    in the project, incrementally — content-addressing means a
    second, third, hundredth invocation with no code changes touches
    zero rows and costs a stat + hash comparison per file, not a
@@ -158,7 +169,7 @@ question or a generation request can be asked, with no separate
 "remember to sync" step — the same "don't make the user remember to
 maintain it" property that made the "recorded by the tool" choice
 right for code↔knowledge links (below). Document ingestion
-(`realm ingest`) stays explicit and out of this auto-scaffold: `hi`
+(`hi ingest`) stays explicit and out of this auto-scaffold: `hi`
 has no way to guess which of a project's Markdown files are
 requirements/decisions worth chunking and indexing versus a README or
 a changelog, so that step is opt-in, never inferred from file
@@ -166,7 +177,7 @@ presence alone.
 
 Zero new dependencies for the local default: `rusqlite` (bundled) is
 already vendored and linked into `crates/compiler`. This is a strictly
-smaller ask than RFC 0011's HTTP client story — Realm's SQLite handle
+smaller ask than RFC 0011's HTTP client story — this graph's SQLite handle
 is in-process, host-side tooling exactly like `nirdosha hi`'s bespoke
 LLM client (RFC 0012's "Provider-client fork point"), not a pooled
 service connection, so RFC 0011's `PoolRegistry`/reaper machinery
@@ -195,7 +206,7 @@ Nodes carry only small scalar fields (`id`, `kind`, `title`, `status`,
 node. Provenance (`created_by`, `model`, `prompt`, `confidence`,
 `timestamp`) lives in a separate `provenance` table keyed by edge id,
 fetched only when asked, not carried on every edge. This keeps
-`realm.db` itself small even on a large project — the actual document
+`hi.db` itself small even on a large project — the actual document
 and code bytes never live in SQLite rows.
 
 ### What's ingested, and how each side gets a content hash
@@ -213,7 +224,7 @@ never re-parsed, re-extracted, or re-embedded — only the diff is.
 a new grammar production. It reuses `nirdosha emit-ast` verbatim
 (`crates/compiler/src/main.rs:450`, shipped, unchanged):
 
-1. `realm sync` calls the same AST-serialization path `emit-ast`
+1. `hi sync` calls the same AST-serialization path `emit-ast`
    already exposes (as a library call, not a subprocess — `cmd_emit_ast`
    already separates "load the AST" from "print it").
 2. Walk the JSON AST's top-level items (`Function`, `Struct`, `Enum`,
@@ -233,7 +244,7 @@ a new grammar production. It reuses `nirdosha emit-ast` verbatim
    `ast_hash`) is the *version* of that identity, stored as history,
    not the identity itself.
 
-This means the entire code-ingestion half of Realm is new glue code
+This means the entire code-ingestion half of this feature is new glue code
 around an existing, shipped compiler entry point — no compiler-side
 work, no grammar change, no new parsing surface to keep correct.
 
@@ -253,7 +264,7 @@ picks the lowest-risk of two options:
   prompt, timestamp — the same fields RFC 0012's `hi::Activation`
   already redacts carefully in `Debug`). No grammar change, no new
   `.nir` syntax, zero compatibility risk — purely additive metadata
-  that lives in `.nir/realm.db`, never in the `.nir` *source* file
+  that lives in `.nir/hi.db`, never in the `.nir` *source* file
   itself.
 - **v2 (explicitly deferred, not designed here): an in-source
   annotation** (a doc-comment convention or a new attribute
@@ -266,9 +277,9 @@ picks the lowest-risk of two options:
   hand-waved" — it deserves its own RFC once the metadata-only
   approach in v1 has real usage to learn from, not a grammar addition
   speculatively bundled into this one.
-- A manual link (`nirdosha realm link R17 ledger::transfer_funds`) is
+- A manual link (`nirdosha hi link R17 ledger::transfer_funds`) is
   in scope for v1 regardless of generation path, for code that
-  predates Realm or was written by hand — see CLI surface below.
+  predates this graph or was written by hand — see CLI surface below.
 
 ### Bidirectional impact, concretely
 
@@ -276,9 +287,9 @@ Both directions are the same bounded graph walk, just starting from a
 different node kind, and both only ever *flag*, never rewrite (per
 principle 3 above):
 
-**Code → knowledge** (`realm sync`'s code half — run automatically on
+**Code → knowledge** (`hi sync`'s code half — run automatically on
 every `hi` startup per "Physical layout" above, or standalone via
-`nirdosha realm sync` for CI/non-interactive use):
+`nirdosha hi sync` for CI/non-interactive use):
 
 1. Re-run the per-item `ast_hash` walk above for changed files.
 2. For each `CodeUnit` whose `ast_hash` no longer matches the hash
@@ -287,7 +298,7 @@ every `hi` startup per "Physical layout" above, or standalone via
    `possibly_stale = true` on the node (a flag with a `reason` and the
    old/new hash, not a deletion or a rewrite).
 3. `nirdosha hi :impact ledger::transfer_funds` (or
-   `nirdosha realm impact ledger::transfer_funds` non-interactively,
+   `nirdosha hi impact ledger::transfer_funds` non-interactively,
    for CI) prints every Requirement/Decision/Test reachable from that
    `CodeUnit`, bounded (`max_depth`, default 5; `max_nodes`, default
    500 — principle 4), with `possibly_stale` nodes called out first.
@@ -305,13 +316,13 @@ changed document — new chunk `content_hash` under the same
    end: every `CodeUnit`/`Test` this requirement change touches.
 
 Both directions are read-only with respect to `.nir` source and
-requirement text — they only ever write flags into `.nir/realm.db`.
+requirement text — they only ever write flags into `.nir/hi.db`.
 Fixing
 the drift (editing code, editing the requirement, or explicitly
 clearing the flag once reviewed) stays a human or an explicit,
 separate `hi` action, never something `sync`/`impact` does on its own.
 This is the direct, load-bearing application of principle 3 — a
-`possibly_stale` flag is Realm's inference; the requirement text and
+`possibly_stale` flag is the graph's inference; the requirement text and
 the code stay exactly as a human or a prior `hi` generation left them
 until someone acts on the flag.
 
@@ -338,44 +349,44 @@ possible by not baking FTS-only assumptions into the graph schema.
 ### CLI surface
 
 ```text
-nirdosha realm ingest <doc.md>        content-address, chunk, FTS-index
+nirdosha hi ingest <doc.md>        content-address, chunk, FTS-index
                                         a requirement/decision/design doc
-nirdosha realm sync [<file.nir> ...]   the same code-sync step `hi` runs
+nirdosha hi sync [<file.nir> ...]   the same code-sync step `hi` runs
                                         automatically on startup, exposed
                                         standalone (CI/non-interactive;
                                         does NOT scaffold .nir/ document
                                         ingestion, only the code half)
-nirdosha realm link <req-id> <qualified-name>
+nirdosha hi link <req-id> <qualified-name>
                                         record a manual IMPLEMENTS edge
-nirdosha realm impact <target>         non-interactive impact report
+nirdosha hi impact <target>         non-interactive impact report
                                         (CI-friendly; target is a
                                         requirement/decision id or a
                                         qualified CodeUnit name)
 ```
 
 This is the whole of this RFC's own UI surface — a scriptable,
-non-interactive CLI, deliberately: Realm's remit is the graph itself
+non-interactive CLI, deliberately: its remit is the graph itself
 and a programmatic way to query it, not how a human ends up looking at
 the results. `hi`'s own interactive console verbs (`:ask`/`:impact`,
 `hi.rs`'s `Command::Ask`/`Command::Impact`) call the exact same
-`realm::ask`/`realm::impact` functions this CLI does — but describing
+`hi_graph::ask`/`hi_graph::impact` functions this CLI does — but describing
 that console surface, and every richer way of viewing the same query
 results (RFC 0014's 3D view included), belongs to RFC 0014.
 
-`realm sync`/`realm impact` are ordinary batch subcommands, following
+`hi sync`/`hi impact` are ordinary batch subcommands, following
 the same per-command arg-loop dispatch style as `init`/`build`
 (`crates/compiler/src/main.rs`'s `match first.as_str()`) — no new CLI
 framework, consistent with RFC 0012's explicit choice not to introduce
-one. `nirdosha realm sync` as a standalone subcommand exists mainly
-for CI (a merge/PR check can run `nirdosha realm sync && nirdosha
-realm impact <target>` without ever entering the interactive console)
+one. `nirdosha hi sync` as a standalone subcommand exists mainly
+for CI (a merge/PR check can run `nirdosha hi sync && nirdosha
+hi impact <target>` without ever entering the interactive console)
 — for everyday use the point of "Physical layout"'s auto-scaffold is
-that a person never needs to type `realm sync` themselves.
+that a person never needs to type `hi sync` themselves.
 
 One escape hatch, following the project's existing `NIRDOSHA_`-
 prefixed, `.ok()`-based env-var convention (`crates/runtime-kernels/
 src/kernel/nfr.rs:183`, `pool.rs:101`, and RFC 0012's own trio):
-`NIRDOSHA_REALM_DISABLE=1` skips both the auto-scaffold and the
+`NIRDOSHA_HI_DISABLE=1` skips both the auto-scaffold and the
 auto-sync step on `hi` startup entirely — for a project that never
 wants a `.nir/` directory materializing on disk, or a CI image running
 `hi` read-only.
@@ -400,15 +411,15 @@ None to the compiled `.nir` program's permission model —
 `requires(role/claim: ...)`, `acquire`, a `screen`'s view/edit gates,
 and `serve.rs`'s server-side enforcement are all unaffected, exactly
 as RFC 0012 states for `hi` itself: this is host-tooling, and
-`realm sync`/`impact`/`:ask` touch nothing a compiled program's
+`hi sync`/`impact`/`:ask` touch nothing a compiled program's
 runtime checks.
 
-One nuance worth naming rather than omitting: Realm's `CodeUnit`
+One nuance worth naming rather than omitting: the graph's `CodeUnit`
 ingestion reads `requires(role: ...)`/`requires(claim: ...)`
 annotations already present in `.nir` source as *data* — e.g. to
 populate `Actor`/`Capability` nodes and `CONSTRAINS` edges so a
 question like "what implements the admin-only ledger correction
-capability" is answerable — but Realm never adds, removes, or
+capability" is answerable — but the graph never adds, removes, or
 reinterprets what those annotations enforce at runtime. Reading a
 `requires(role: "admin")` clause into the graph is not the same as
 checking it; `serve.rs` and the codegen'd enforcement path remain the
@@ -429,7 +440,7 @@ rather than filing under "purely additive."** Before this RFC, running
 `nirdosha hi` had no filesystem side effect beyond the console session
 itself. After this RFC, a successful activation now creates `.nir/` on
 disk the first time it runs in a project — a real, visible change to
-what invoking `hi` does, gated only by the `NIRDOSHA_REALM_DISABLE`
+what invoking `hi` does, gated only by the `NIRDOSHA_HI_DISABLE`
 escape hatch above. This is called out explicitly rather than folded
 into "purely additive" language, because a new default write-on-
 startup is exactly the kind of thing RFC 0012's own template bar
@@ -441,7 +452,7 @@ be named, not assumed harmless.
 - **Any mandatory external service** (Neo4j, Elasticsearch, Kafka,
   Redis, a vector DB, a mandatory embedding model or LLM call). Every
   one of these was considered and rejected for the same reason this
-  RFC opens with: they'd make Realm unusable on an ordinary laptop and
+  RFC opens with: they'd make this graph unusable on an ordinary laptop and
   contradict the "no dependency this repo doesn't already need"
   posture RFC 0012 already committed to for `hi`. Each stays available
   later as an optional plugin behind a provider boundary shaped like
@@ -464,7 +475,7 @@ be named, not assumed harmless.
   more than one conservative default profile — premature to build
   ahead of a concrete case that hits the current bounds. Left as a
   named follow-up, not silently dropped.
-- **Event-sourcing the entire Realm** (every state transition as an
+- **Event-sourcing the entire graph** (every state transition as an
   append-only event, full CQRS). Considered for the provenance layer
   specifically and adopted there in a narrow form (supersession is
   append-only, per principle 1); rejected as the *general* storage
@@ -480,7 +491,7 @@ be named, not assumed harmless.
   modules once `use "..."` (loader-resolved imports,
   `crates/compiler/src/main.rs:455`'s own comment on `loader::
   load_program`) is in play — collision handling isn't designed here.
-- Whether `.nir/realm.db` is meant to be committed to version
+- Whether `.nir/hi.db` is meant to be committed to version
   control (so a team shares one traceability graph) or is per-checkout
   local state (so every clone re-ingests) — this changes whether
   `content/` blobs need dedup-friendly `.gitattributes` handling.
@@ -489,7 +500,7 @@ be named, not assumed harmless.
 - Concrete default values for `max_depth`/`max_nodes`/`max_time_ms` —
   the numbers above are placeholders pending a real project exercising
   them, not benchmarked.
-- Whether `realm link`/the `hi`-recorded `IMPLEMENTS` edge needs its
+- Whether `hi link`/the `hi`-recorded `IMPLEMENTS` edge needs its
   own confirmation step before being treated as authoritative (echoing
   RFC 0012's still-open host-level-trust-boundary question for
   capability 4 — "dispatch to subcommands chosen by the model") — an

@@ -1,17 +1,15 @@
-//! Nirdosha Realm (rfcs/0013-nirdosha-realm.md) -- a local-first,
-//! bounded knowledge graph auto-scaffolded under `.nir/` on every
-//! successful `nirdosha hi` startup (`hi::run_console`'s own
-//! `open_realm_or_warn`). v1 slice: SQLite schema (`nodes`/`edges`/
-//! `provenance`/`chunks`+FTS5), per-item code hashing reusing the same
-//! lex/parse primitives `emit-ast`/`loader::load_program` are built
-//! from, bounded bidirectional impact queries, manual requirement<->
-//! code links, and a minimal document ingest/ask path. Never mandatory:
-//! every entry point here degrades to "log a warning, keep going" for
-//! its caller rather than ever being the thing that breaks `hi` itself
-//! (the RFC's own "must run on an ordinary laptop, must never be the
-//! thing that crashes" posture -- the same one `hi.rs`'s own
-//! `SessionLog`/`FailureCounters` already follow for their own
-//! diagnostics).
+//! Nirdosha Hi's own knowledge graph (originally "Realm",
+//! rfcs/0013-nirdosha-realm.md) -- a local-first, bounded knowledge
+//! graph auto-scaffolded under `.nir/` on every `nirdosha hi` startup
+//! (`main.rs::cmd_hi`'s own sync-then-open-window sequence). v1 slice:
+//! SQLite schema (`nodes`/`edges`/`provenance`/`chunks`+FTS5), per-item
+//! code hashing reusing the same lex/parse primitives `emit-ast`/
+//! `loader::load_program` are built from, bounded bidirectional impact
+//! queries, manual requirement<->code links, and a minimal document
+//! ingest/ask path. Never mandatory: every entry point here degrades to
+//! "log a warning, keep going" for its caller rather than ever being
+//! the thing that breaks `hi` itself (the RFC's own "must run on an
+//! ordinary laptop, must never be the thing that crashes" posture).
 //!
 //! Deliberately reuses `token::Lexer`/`parser::Parser::parse_program`
 //! directly rather than `loader::load_program`: that function resolves
@@ -29,22 +27,22 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-/// `NIRDOSHA_REALM_DISABLE=1` skips the auto-scaffold and auto-sync
+/// `NIRDOSHA_HI_DISABLE=1` skips the auto-scaffold and auto-sync
 /// `hi` would otherwise run on startup -- same `NIRDOSHA_`-prefixed,
-/// `.ok()`-based env-var convention RFC 0012's own activation trio
-/// uses (`hi::PROVIDER_KEY_VAR` etc.).
-pub const REALM_DISABLE_VAR: &str = "NIRDOSHA_REALM_DISABLE";
+/// `.ok()`-based env-var convention this crate uses elsewhere.
+pub const HI_DISABLE_VAR: &str = "NIRDOSHA_HI_DISABLE";
 
-/// `env` is injected the same way `hi::resolve_activation` injects it
-/// -- a pure, testable check, no direct `std::env::var` call baked in.
+/// `env` is injected rather than calling `std::env::var` directly --
+/// a pure, testable check, no direct env access baked in.
 pub fn is_disabled(env: &dyn Fn(&str) -> Option<String>) -> bool {
-    env(REALM_DISABLE_VAR).as_deref() == Some("1")
+    env(HI_DISABLE_VAR).as_deref() == Some("1")
 }
 
 /// `.nir/` under `root` -- rfcs/0013's "Physical layout." Named `.nir`
-/// (not `.realm`) per that RFC's own revision; see its Open Questions
-/// for the acknowledged overlap with the `.nir` source-file extension.
-pub fn realm_dir(root: &Path) -> PathBuf {
+/// (not a feature-specific extension) per that RFC's own revision; see
+/// its Open Questions for the acknowledged overlap with the `.nir`
+/// source-file extension.
+pub fn hi_dir(root: &Path) -> PathBuf {
     root.join(".nir")
 }
 
@@ -55,14 +53,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Creates `.nir/` and `.nir/content/` if absent, opens (or creates)
-/// `.nir/realm.db`, and migrates the schema. Every migration statement
+/// `.nir/hi.db`, and migrates the schema. Every migration statement
 /// is `IF NOT EXISTS` -- safe to call on every `hi` startup, which is
 /// exactly how it's used.
 pub fn open(root: &Path) -> Result<Connection, String> {
-    let dir = realm_dir(root);
+    let dir = hi_dir(root);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     std::fs::create_dir_all(dir.join("content")).map_err(|e| format!("creating {}: {e}", dir.join("content").display()))?;
-    let db_path = dir.join("realm.db");
+    let db_path = dir.join("hi.db");
     let conn = Connection::open(&db_path).map_err(|e| format!("opening {}: {e}", db_path.display()))?;
     migrate(&conn)?;
     Ok(conn)
@@ -108,17 +106,39 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         ",
     )
-    .map_err(|e| format!("migrating .nir/realm.db schema: {e}"))?;
+    .map_err(|e| format!("migrating .nir/hi.db schema: {e}"))?;
     // `CREATE TABLE IF NOT EXISTS` above never widens an already-existing
-    // `nodes` table -- a `.nir/realm.db` created before `line`/`col`
+    // `nodes` table -- a `.nir/hi.db` created before `line`/`col`
     // existed needs them added explicitly, once, idempotently. Real gap
     // this closes: `source_ref` (the file path) was captured from v1 but
     // never surfaced anywhere a human could see it (rfcs/0013's own
     // Open Questions record this); `line`/`col` finish that half-done
-    // fix by giving `:impact`/`realm impact` an actual place in the file
+    // fix by giving `:impact`/`hi impact` an actual place in the file
     // to point at, not just which file.
     add_column_if_missing(conn, "nodes", "line", "INTEGER")?;
     add_column_if_missing(conn, "nodes", "col", "INTEGER")?;
+    // rfcs/0014's prompt/build/generate/publish pipeline: the text layer
+    // a `CodeUnit` node carries *before* any `.nir` exists
+    // (`driving_text`), who/what put it there (`created_by` --
+    // `NULL` for anything `hi sync` found in real code, `llm-prompt-
+    // mode` for a prompt-mode candidate), the human review/lock/waive
+    // state Build/Generate mode gate on, and the free-text attribute
+    // lines Build mode's attribute editor attaches. `last_materialized_
+    // hash` is deliberately separate from `content_hash`: the latter is
+    // re-synced by every `hi sync`, so it can never answer "does this
+    // file still match what Generate mode itself last wrote" -- see RFC
+    // 0014's "What's authoritative, when" for the full reasoning this
+    // column exists to satisfy. `0`/`1` integers, not a real SQLite
+    // `BOOLEAN` type (SQLite has none), matching this schema's own
+    // existing convention.
+    add_column_if_missing(conn, "nodes", "driving_text", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "created_by", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "confirmed", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "nodes", "locked", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "nodes", "waived", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "nodes", "waive_reason", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "last_materialized_hash", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "attributes", "TEXT")?;
     Ok(())
 }
 
@@ -251,8 +271,20 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
 
     for u in &units {
         let id = code_unit_node_id(u.kind, &u.qualified_name);
-        let prev_hash: Option<String> =
-            conn.query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).optional().map_err(|e| format!("reading node {id}: {e}"))?;
+        // `Option<String>` twice over, deliberately: the outer one (via
+        // `.optional()`) covers "no such node yet" (a real `.nir` file
+        // being synced for the first time); the inner one covers "the
+        // node exists but has no `content_hash` yet" -- true of a
+        // prompt-mode candidate (`hi_graph::add_candidate`) that Generate
+        // mode is only now materializing into this call's own real
+        // source. Reading column 0 as a bare `String` instead would
+        // error out on that NULL rather than treating it as "no prior
+        // hash," the same way a genuinely new node does.
+        let prev_hash: Option<String> = conn
+            .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&id], |r| r.get::<_, Option<String>>(0))
+            .optional()
+            .map_err(|e| format!("reading node {id}: {e}"))?
+            .flatten();
 
         match &prev_hash {
             None => report.units_added += 1,
@@ -321,7 +353,7 @@ fn find_nir_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-/// The code half of `realm sync` -- run automatically on every `hi`
+/// The code half of `hi sync` -- run automatically on every `hi`
 /// startup (`root`-wide, `files` empty) or standalone for CI/manual use
 /// (`files` explicit). Content-addressing means a repeat call with no
 /// code changes touches zero `nodes` rows beyond a hash comparison per
@@ -345,7 +377,7 @@ pub fn sync(conn: &Connection, root: &Path, files: &[String]) -> Result<SyncRepo
     }
 }
 
-/// Resolves a `realm link`/`realm impact` code-side target: either an
+/// Resolves a `hi link`/`hi impact` code-side target: either an
 /// explicit `kind:name` (`fn:transfer_funds`), or a bare name that must
 /// uniquely identify one `CodeUnit` -- ambiguity (e.g. a `fn` and a
 /// `struct` sharing a name) is reported, not silently guessed.
@@ -354,13 +386,13 @@ fn resolve_code_unit_id(conn: &Connection, target: &str) -> Result<String, Strin
         if ["fn", "struct", "enum", "screen"].contains(&kind) {
             let id = code_unit_node_id(kind, name);
             let exists: Option<String> = conn.query_row("SELECT id FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
-            return exists.ok_or_else(|| format!("no CodeUnit `{id}` in the realm graph -- run `nirdosha realm sync` first"));
+            return exists.ok_or_else(|| format!("no CodeUnit `{id}` in the hi graph -- run `nirdosha hi sync` first"));
         }
     }
     let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1").map_err(|e| e.to_string())?;
     let ids: Vec<String> = stmt.query_map([target], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
     match ids.len() {
-        0 => Err(format!("no CodeUnit named `{target}` in the realm graph -- run `nirdosha realm sync` first")),
+        0 => Err(format!("no CodeUnit named `{target}` in the hi graph -- run `nirdosha hi sync` first")),
         1 => Ok(ids.into_iter().next().expect("len checked above")),
         _ => Err(format!("`{target}` is ambiguous ({} matches: {}) -- disambiguate with `kind:name`, e.g. `fn:{target}`", ids.len(), ids.join(", "))),
     }
@@ -368,11 +400,11 @@ fn resolve_code_unit_id(conn: &Connection, target: &str) -> Result<String, Strin
 
 /// Records a manual `IMPLEMENTS`/`IMPLEMENTED_BY` edge pair between a
 /// requirement/decision id and a `CodeUnit` -- for code that predates
-/// Realm or was written by hand, outside `hi`'s own generation-time
+/// the hi graph or was written by hand, outside `hi`'s own generation-time
 /// auto-linking (rfcs/0013's "How a code<->knowledge link actually gets
 /// created"). Upserts a stub `Requirement` node if `requirement_id`
 /// isn't already known, so `link` works standalone before any
-/// `realm ingest` has run.
+/// `hi ingest` has run.
 pub fn link(conn: &Connection, requirement_id: &str, target: &str) -> Result<(), String> {
     let req_node_id = format!("requirement:{requirement_id}");
     conn.execute(
@@ -403,7 +435,7 @@ pub fn link(conn: &Connection, requirement_id: &str, target: &str) -> Result<(),
 fn resolve_any_node_id(conn: &Connection, target: &str) -> Result<String, String> {
     if target.starts_with("requirement:") || target.starts_with("decision:") || target.starts_with("code:") {
         let exists: Option<String> = conn.query_row("SELECT id FROM nodes WHERE id = ?1", [target], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
-        return exists.ok_or_else(|| format!("no node `{target}` in the realm graph"));
+        return exists.ok_or_else(|| format!("no node `{target}` in the hi graph"));
     }
     for prefix in ["requirement:", "decision:"] {
         let id = format!("{prefix}{target}");
@@ -553,13 +585,219 @@ pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
     Ok(hits)
 }
 
+// ---- Build/Generate mode (rfcs/0014) -- the write surface over the
+// same `CodeUnit` nodes `sync` populates from real code. Deliberately
+// kept network/LLM-free, same as everything else in this module: the
+// LLM calls that produce candidates/generated source live in
+// `hi_llm.rs`, which calls back into these functions with plain data,
+// so this module stays a pure, offline-testable graph store.
+
+const CODE_UNIT_KINDS: &[&str] = &["fn", "struct", "enum", "screen"];
+
+fn require_node_exists(conn: &Connection, id: &str) -> Result<(), String> {
+    let exists: bool = conn.prepare("SELECT 1 FROM nodes WHERE id = ?1").and_then(|mut s| s.exists([id])).map_err(|e| e.to_string())?;
+    if exists {
+        Ok(())
+    } else {
+        Err(format!("no node `{id}` in the hi graph"))
+    }
+}
+
+/// Prompt mode's own write path (rfcs/0014's "Build mode — the
+/// interactive Hi graph"): inserts (or, on a name collision with a node
+/// that already exists, refines the driving text of) one `CodeUnit`
+/// candidate. No `.nir` exists yet, so only `driving_text`/`created_by`
+/// are set here; `content_hash`/`source_ref` stay whatever they already
+/// were (`NULL` for a genuinely new candidate) until Generate mode
+/// writes real code and an ordinary `sync` picks it up under the exact
+/// same id -- the same upsert `sync_file` already does, composing for
+/// free because both write paths key off `code_unit_node_id`.
+pub fn add_candidate(conn: &Connection, kind: &str, name: &str, driving_text: &str, created_by: &str) -> Result<String, String> {
+    if !CODE_UNIT_KINDS.contains(&kind) {
+        return Err(format!("`{kind}` isn't a legal CodeUnit kind -- one of {CODE_UNIT_KINDS:?}"));
+    }
+    let id = code_unit_node_id(kind, name);
+    conn.execute(
+        "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, driving_text, created_by)
+         VALUES (?1, 'CodeUnit', ?2, NULL, NULL, NULL, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET driving_text = excluded.driving_text, created_by = excluded.created_by",
+        params![id, name, driving_text, created_by],
+    )
+    .map_err(|e| format!("upserting candidate node {id}: {e}"))?;
+    Ok(id)
+}
+
+/// A structural relationship between two prompt-mode candidates --
+/// deliberately a plain, undirected-in-spirit `RELATES_TO`, not
+/// `IMPLEMENTS`/`IMPLEMENTED_BY` (RFC 0013's requirement<->code link
+/// kind, a different relationship entirely). Silently a no-op on a
+/// duplicate -- population re-running over a refined prompt shouldn't
+/// error on an edge it already recorded.
+pub fn add_relation(conn: &Connection, src: &str, dst: &str) -> Result<(), String> {
+    conn.execute("INSERT INTO edges (src, dst, kind, hash_at_link, flag, flag_reason) VALUES (?1, ?2, 'RELATES_TO', NULL, NULL, NULL) ON CONFLICT(src, dst, kind) DO NOTHING", params![src, dst])
+        .map_err(|e| format!("recording a RELATES_TO edge {src} -> {dst}: {e}"))?;
+    Ok(())
+}
+
+/// Build mode's confirm action (rfcs/0014's "confirmation is an
+/// explicit, dedicated action, never a side effect of anything else in
+/// this list") -- the one-way promotion Generate mode's gate below
+/// requires before a candidate's driving text is trusted enough to
+/// reach the LLM again as something to compile.
+pub fn confirm_node(conn: &Connection, id: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    conn.execute("UPDATE nodes SET confirmed = 1 WHERE id = ?1", [id]).map_err(|e| format!("confirming {id}: {e}"))?;
+    Ok(())
+}
+
+/// Build mode's delete action -- removes a candidate (and every edge
+/// touching it) outright, for content that's simply wrong, not worth
+/// confirming.
+pub fn delete_node(conn: &Connection, id: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    conn.execute("DELETE FROM edges WHERE src = ?1 OR dst = ?1", [id]).map_err(|e| format!("deleting edges touching {id}: {e}"))?;
+    conn.execute("DELETE FROM nodes WHERE id = ?1", [id]).map_err(|e| format!("deleting node {id}: {e}"))?;
+    Ok(())
+}
+
+/// Edits a candidate's driving text. If the unit had already locked (an
+/// earlier Generate pass materialized real `.nir` from it), this v1
+/// slice unlocks it outright rather than RFC 0014's own finer-grained
+/// `graph-edit-post-lock` edge flag (which would leave the last-known-
+/// good `.nir` runnable while flagging the disagreement) -- a real,
+/// disclosed simplification: the unit just needs regenerating before it
+/// can publish again, same as any other unlocked unit.
+pub fn edit_driving_text(conn: &Connection, id: &str, text: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    conn.execute("UPDATE nodes SET driving_text = ?2, locked = 0 WHERE id = ?1", params![id, text]).map_err(|e| format!("editing {id}: {e}"))?;
+    Ok(())
+}
+
+/// Build mode's attribute editor -- appends one free-text attribute
+/// line (e.g. `requires(role: admin)`, `nfr(latency_ms: 200)`) to a
+/// node's running list. Deliberately not parsed/validated against the
+/// language's real annotation grammar here (RFC 0014's own Open
+/// Question 5, "attribute-legality-per-kind," is disclosed as real,
+/// unbuilt work) -- Generate mode's own compile step is what actually
+/// proves an attribute is legal, by rejecting a generated program that
+/// misuses one.
+pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    let existing: Option<String> = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [id], |r| r.get(0)).map_err(|e| format!("reading {id}: {e}"))?;
+    let merged = match existing {
+        Some(s) if !s.is_empty() => format!("{s}\n{attr}"),
+        _ => attr.to_string(),
+    };
+    conn.execute("UPDATE nodes SET attributes = ?2 WHERE id = ?1", params![id, merged]).map_err(|e| format!("attaching an attribute to {id}: {e}"))?;
+    Ok(())
+}
+
+/// Generate mode's escape hatch for a unit that genuinely cannot lock
+/// (rfcs/0014's "Generate mode"): marks it out-of-scope for this
+/// publish with a required, audit-visible reason -- distinct from
+/// deleting the requirement or hand-authoring `.nir` around it.
+pub fn waive_node(conn: &Connection, id: &str, reason: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    if reason.trim().is_empty() {
+        return Err("a waive reason is required".to_string());
+    }
+    conn.execute("UPDATE nodes SET waived = 1, waive_reason = ?2 WHERE id = ?1", params![id, reason]).map_err(|e| format!("waiving {id}: {e}"))?;
+    Ok(())
+}
+
+pub fn unwaive_node(conn: &Connection, id: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    conn.execute("UPDATE nodes SET waived = 0, waive_reason = NULL WHERE id = ?1", [id]).map_err(|e| format!("unwaiving {id}: {e}"))?;
+    Ok(())
+}
+
+/// One `CodeUnit` candidate, as Generate mode needs it: enough to build
+/// a prompt from (`driving_text`/`attributes`) and enough to know which
+/// real `fn`/`struct`/`enum`/`screen` declaration it should end up
+/// matching (`kind`/`name`, parsed back out of the node id).
+#[derive(Debug, Clone)]
+pub struct CandidateUnit {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub driving_text: String,
+    pub attributes: Vec<String>,
+}
+
+fn parse_code_unit_id(id: &str) -> Option<(String, String)> {
+    let rest = id.strip_prefix("code:")?;
+    let (kind, name) = rest.split_once(':')?;
+    Some((kind.to_string(), name.to_string()))
+}
+
+/// Generate mode's own input set: every `CodeUnit` that's passed Build
+/// mode's review gate (`confirmed = 1` -- rfcs/0014's own "a provisional
+/// unit requires explicit human confirmation before it's eligible to
+/// generate at all") and hasn't already locked or been waived out of
+/// scope. `target` narrows to one specific node id; `None` means every
+/// eligible node. A node `hi sync` found in real code (no
+/// `driving_text` of its own) is never generatable, confirmed or not --
+/// there's nothing here for the LLM to write from.
+fn query_confirmed_units(conn: &Connection, where_extra: &str, target: Option<&str>) -> Result<Vec<CandidateUnit>, String> {
+    let sql = format!("SELECT id, title, driving_text, attributes FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 1 AND waived = 0 AND {where_extra} AND (?1 IS NULL OR id = ?1)");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
+        stmt.query_map(params![target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let mut units = Vec::new();
+    for (id, title, driving_text, attributes) in rows {
+        let Some((kind, name_from_id)) = parse_code_unit_id(&id) else { continue };
+        let driving_text = driving_text.unwrap_or_default();
+        if driving_text.trim().is_empty() {
+            continue;
+        }
+        let name = title.unwrap_or(name_from_id);
+        let attrs = attributes.map(|a| a.lines().map(str::to_string).collect()).unwrap_or_default();
+        units.push(CandidateUnit { id, kind, name, driving_text, attributes: attrs });
+    }
+    Ok(units)
+}
+
+pub fn generatable_units(conn: &Connection, target: Option<&str>) -> Result<Vec<CandidateUnit>, String> {
+    query_confirmed_units(conn, "locked = 0", target)
+}
+
+/// Every confirmed, in-scope `CodeUnit` regardless of lock state --
+/// what a regenerate pass needs to send the LLM so an already-locked
+/// unit's code stays represented in the one combined file this v1
+/// slice regenerates each time (see `hi_llm::generate_program`'s own
+/// "v1 scope cut" doc comment: one file for the whole confirmed set,
+/// not incremental per-unit files), not just the newly-eligible subset
+/// `generatable_units` reports.
+pub fn confirmed_units(conn: &Connection, target: Option<&str>) -> Result<Vec<CandidateUnit>, String> {
+    query_confirmed_units(conn, "1=1", target)
+}
+
+/// Marks a unit locked after Generate mode's whole-composed-program
+/// build actually succeeds, recording the exact per-unit hash `sync`
+/// just computed for it (called right after `sync`, so `content_hash`
+/// already reflects the fresh AST) as `last_materialized_hash`. A
+/// target the generated program didn't actually declare (the LLM
+/// omitted it) has no post-sync `content_hash` to copy and is skipped,
+/// not locked -- left for the caller to report.
+pub fn lock_units_after_sync(conn: &Connection, ids: &[String]) -> Result<Vec<String>, String> {
+    let mut locked = Vec::new();
+    for id in ids {
+        let hash: Option<String> = conn.query_row("SELECT content_hash FROM nodes WHERE id = ?1", [id], |r| r.get(0)).map_err(|e| format!("reading {id}: {e}"))?;
+        if let Some(h) = hash {
+            conn.execute("UPDATE nodes SET locked = 1, last_materialized_hash = ?2 WHERE id = ?1", params![id, h]).map_err(|e| format!("locking {id}: {e}"))?;
+            locked.push(id.clone());
+        }
+    }
+    Ok(locked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn scratch_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("nirdosha_realm_test_{name}_{}", std::process::id()));
+        path.push(format!("nirdosha_hi_graph_test_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -578,8 +816,8 @@ mod tests {
         drop(conn1);
         let conn2 = open(&dir).expect("second open, same dir");
         drop(conn2);
-        assert!(realm_dir(&dir).join("realm.db").is_file());
-        assert!(realm_dir(&dir).join("content").is_dir());
+        assert!(hi_dir(&dir).join("hi.db").is_file());
+        assert!(hi_dir(&dir).join("content").is_dir());
     }
 
     #[test]
@@ -641,7 +879,7 @@ mod tests {
         let dir = scratch_dir("link_missing");
         let conn = open(&dir).expect("open");
         let err = link(&conn, "R1", "fn:nope").unwrap_err();
-        assert!(err.contains("realm sync"), "error should point at the fix, got: {err}");
+        assert!(err.contains("hi sync"), "error should point at the fix, got: {err}");
     }
 
     #[test]
@@ -696,7 +934,7 @@ mod tests {
         // `code_units_in_file` deliberately bypasses `loader::
         // load_program` (see this module's own doc comment) -- for a
         // file with no `use` directives, the two parse paths must still
-        // agree item-for-item, or Realm's view of a project has quietly
+        // agree item-for-item, or the hi graph's view of a project has quietly
         // diverged from what the compiler itself sees.
         let dir = scratch_dir("parse_path_parity");
         let path = write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n");
@@ -741,5 +979,142 @@ mod tests {
         let hit = report.hits.iter().find(|h| h.node_id == "code:fn:second").expect("second should be reachable");
         assert_eq!(hit.line, Some(2), "fn second is declared on line 2");
         assert!(hit.source_ref.as_deref().unwrap_or("").ends_with("a.nir"));
+    }
+
+    #[test]
+    fn a_candidate_is_unconfirmed_and_ungeneratable_until_confirmed() {
+        let dir = scratch_dir("candidate_confirm");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "transfer_funds", "moves money between two accounts", "llm-prompt-mode").expect("add_candidate");
+        assert_eq!(id, "code:fn:transfer_funds");
+        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "an unconfirmed candidate must not be generatable");
+
+        confirm_node(&conn, &id).expect("confirm_node");
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].kind, "fn");
+        assert_eq!(units[0].name, "transfer_funds");
+    }
+
+    #[test]
+    fn add_candidate_rejects_an_unknown_kind() {
+        let dir = scratch_dir("candidate_bad_kind");
+        let conn = open(&dir).expect("open");
+        let err = add_candidate(&conn, "trait", "Foo", "text", "llm-prompt-mode").unwrap_err();
+        assert!(err.contains("trait"), "error should name the bad kind, got: {err}");
+    }
+
+    #[test]
+    fn re_adding_a_candidate_refines_text_without_resetting_review_state() {
+        let dir = scratch_dir("candidate_refine");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+
+        add_candidate(&conn, "fn", "add", "adds two i64 numbers and returns the sum", "llm-prompt-mode").expect("re-add");
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(units.len(), 1, "confirming must survive a refined re-population of the same candidate");
+        assert_eq!(units[0].driving_text, "adds two i64 numbers and returns the sum");
+    }
+
+    #[test]
+    fn waiving_requires_a_reason_and_removes_a_unit_from_the_generatable_set() {
+        let dir = scratch_dir("candidate_waive");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "risky", "does something risky", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+
+        let err = waive_node(&conn, &id, "").unwrap_err();
+        assert!(err.contains("reason"));
+
+        waive_node(&conn, &id, "not needed for this publish").expect("waive");
+        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty());
+
+        unwaive_node(&conn, &id).expect("unwaive");
+        assert_eq!(generatable_units(&conn, None).expect("generatable_units").len(), 1);
+    }
+
+    #[test]
+    fn editing_a_locked_unit_unlocks_it() {
+        let dir = scratch_dir("candidate_edit_unlocks");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+        // Simulate a successful Generate pass without a real compiler run.
+        write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\n");
+        sync(&conn, &dir, &[]).expect("sync");
+        lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
+        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "a locked unit isn't generatable");
+
+        edit_driving_text(&conn, &id, "adds two numbers, but faster").expect("edit");
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(units.len(), 1, "editing a locked unit's text must unlock it for regeneration");
+    }
+
+    #[test]
+    fn confirmed_units_includes_locked_ones_but_generatable_units_does_not() {
+        let dir = scratch_dir("candidate_confirmed_vs_generatable");
+        let conn = open(&dir).expect("open");
+        let locked_id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        let fresh_id = add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &locked_id).expect("confirm");
+        confirm_node(&conn, &fresh_id).expect("confirm");
+        write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\n");
+        sync(&conn, &dir, &[]).expect("sync");
+        lock_units_after_sync(&conn, &[locked_id.clone()]).expect("lock");
+
+        let confirmed: Vec<String> = confirmed_units(&conn, None).expect("confirmed_units").into_iter().map(|u| u.id).collect();
+        assert_eq!(confirmed.len(), 2, "confirmed_units must include the already-locked unit too");
+        assert!(confirmed.contains(&locked_id));
+        assert!(confirmed.contains(&fresh_id));
+
+        let generatable: Vec<String> = generatable_units(&conn, None).expect("generatable_units").into_iter().map(|u| u.id).collect();
+        assert_eq!(generatable, vec![fresh_id], "generatable_units must exclude the already-locked unit");
+    }
+
+    #[test]
+    fn locking_only_covers_units_the_generated_program_actually_declared() {
+        let dir = scratch_dir("candidate_partial_lock");
+        let conn = open(&dir).expect("open");
+        let declared = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        let omitted = add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &declared).expect("confirm");
+        confirm_node(&conn, &omitted).expect("confirm");
+
+        // The LLM's generated program only actually declared `add`.
+        write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\n");
+        sync(&conn, &dir, &[]).expect("sync");
+        let locked = lock_units_after_sync(&conn, &[declared.clone(), omitted.clone()]).expect("lock");
+
+        assert_eq!(locked, vec![declared]);
+        let still_generatable: Vec<String> = generatable_units(&conn, None).expect("generatable_units").into_iter().map(|u| u.id).collect();
+        assert_eq!(still_generatable, vec![omitted]);
+    }
+
+    #[test]
+    fn attach_attribute_appends_rather_than_overwrites() {
+        let dir = scratch_dir("candidate_attach");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 1");
+        attach_attribute(&conn, &id, "nfr(latency_ms: 200)").expect("attach 2");
+
+        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
+        assert_eq!(attrs, "requires(role: admin)\nnfr(latency_ms: 200)");
+    }
+
+    #[test]
+    fn delete_node_removes_it_and_its_edges() {
+        let dir = scratch_dir("candidate_delete");
+        let conn = open(&dir).expect("open");
+        let a = add_candidate(&conn, "fn", "a", "does a", "llm-prompt-mode").expect("add a");
+        let b = add_candidate(&conn, "fn", "b", "does b", "llm-prompt-mode").expect("add b");
+        add_relation(&conn, &a, &b).expect("relate");
+
+        delete_node(&conn, &a).expect("delete");
+        let err = confirm_node(&conn, &a).unwrap_err();
+        assert!(err.contains("no node"));
+        let edge_count: i64 = conn.query_row("SELECT COUNT(*) FROM edges WHERE src = ?1 OR dst = ?1", [&a], |r| r.get(0)).expect("count edges");
+        assert_eq!(edge_count, 0, "deleting a node must also delete edges touching it");
     }
 }

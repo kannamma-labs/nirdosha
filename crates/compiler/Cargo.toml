@@ -19,11 +19,12 @@ serde_json = "1"
 
 [dependencies]
 z3 = "0.20.2"
-# `nirdosha hi` (rfcs/0012-nirdosha-hi-agentic-console.md)'s host-side LLM
-# client -- blocking (this CLI has no async runtime), `rustls-tls` (no
-# new system TLS dependency). Same crate+version `crates/presence-
-# gateway/Cargo.toml` already pins, so this is feature-additive to an
-# already-resolved workspace dependency, not a new one to the tree.
+# Used by `hi_server.rs`'s own test suite to make real HTTP requests
+# against its `tiny_http` server (blocking -- this CLI has no async
+# runtime; `rustls-tls` needs no new system TLS dependency). Same
+# crate+version `crates/presence-gateway/Cargo.toml` already pins, so
+# this is feature-additive to an already-resolved workspace dependency,
+# not a new one to the tree.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,8 +53,6 @@ r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24", default-features = false, features = ["bundled"] }
 r2d2_postgres = "0.18"
 signal-hook = { version = "0.4", default-features = false }
-ratatui = "0.30.2"
-crossterm = "0.29.0"
 wry = "0.57.0"
 tao = "0.37.0"
 
