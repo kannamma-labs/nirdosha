@@ -20,13 +20,24 @@
 > route table (`crates/compiler/src/realm_api.rs`: `/api/nodes`,
 > `/api/edges`, `/api/impact`, `/api/ask`) that also backs
 > `nirdosha realm serve`, the documented headless/network fallback
-> (`crates/compiler/src/realm_server.rs`) this section calls for. What
-> that window actually shows is still `realm_api::PLACEHOLDER_HTML`,
-> not the 3D graph — the vendored `three.js`/`3d-force-graph` page,
-> instanced rendering, delta updates, the WebGL-fallback-to-2D path,
-> and the `wry` IPC channel for live state are all still unbuilt.
-> Everything else in this RFC (prompt mode's population pass, build
-> mode's actual graph interactions, generate mode, publish mode, the
+> (`crates/compiler/src/realm_server.rs`) this section calls for. The
+> window shows a real, live `3d-force-graph` view of `.nir/realm.db`
+> (`crates/compiler/src/realm_graph.html`, vendored library under
+> `crates/compiler/src/vendor/`) — nodes colored by kind, click-to-
+> inspect against `/api/impact`, a WebGL-feature-detect 2D canvas
+> fallback, tooltips built as real DOM elements rather than strings (so
+> untrusted node text never reaches the library's own `innerHTML`
+> tooltip path) — verified end to end against a populated graph
+> (functions, a struct, an enum, a linked requirement) with zero
+> JS-side errors reported over `wry`'s IPC channel across an 8-second
+> run. Deliberately not yet built, even for this surface: true
+> GPU-instanced node rendering (the default per-node-mesh path is used
+> instead — fine at this slice's test scale, not yet meeting the
+> RFC's stated "hundreds of draw calls, not thousands" budget at the
+> full 300–1500-node target), delta updates (the graph is fetched once
+> per window open, not live-reheated as `.nir/realm.db` changes
+> underneath it), and in-page editing. Everything else in this RFC
+> (prompt mode's population pass, generate mode, publish mode, the
 > capability/funnel gates) is unbuilt design, not running code.
 >
 > **Scope.** This RFC covers every way a human sees or interacts with

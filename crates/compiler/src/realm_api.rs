@@ -23,32 +23,21 @@ use serde::Serialize;
 /// applied here to an HTTP response instead of a graph traversal.
 const MAX_ROWS: u32 = 2000;
 
-pub const PLACEHOLDER_HTML: &str = r#"<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Nirdosha Realm</title>
-<style>
-  body { font-family: ui-monospace, monospace; background: #0b0b12; color: #e8e8f0; padding: 2rem; }
-  h1 { color: #ef9f30; }
-  pre { background: #15151f; padding: 1rem; border-radius: 6px; overflow: auto; max-height: 70vh; }
-</style>
-</head>
-<body>
-<h1>Nirdosha Realm</h1>
-<p id="status">connecting…</p>
-<pre id="nodes"></pre>
-<script>
-fetch('/api/nodes').then(r => r.json()).then(data => {
-  document.getElementById('status').textContent = data.length + ' node(s) in .nir/realm.db';
-  document.getElementById('nodes').textContent = JSON.stringify(data, null, 2);
-}).catch(e => {
-  document.getElementById('status').textContent = 'error: ' + e;
-});
-</script>
-</body>
-</html>
-"#;
+/// The build-mode page: a live 3D graph over `.nir/realm.db`'s nodes
+/// and edges (rfcs/0014's "Build mode — the interactive Realm graph").
+/// Fetches `/api/nodes`/`/api/edges` itself once loaded — see
+/// `realm_graph.html`'s own header comment for the rendering approach,
+/// the WebGL-feature-detect 2D fallback, and the tooltip's
+/// DOM-not-innerHTML XSS mitigation.
+const BUILD_MODE_HTML: &str = include_str!("realm_graph.html");
+
+/// Vendored per rfcs/0014's own rule ("`three.js`/`3d-force-graph` ship
+/// vendored into the generated page, never loaded from a CDN") —
+/// `crates/compiler/src/vendor/3d-force-graph.LICENSE` carries its MIT
+/// license. This one file is genuinely self-contained: `3d-force-graph`
+/// bundles `three.js` (WebGLRenderer, OrbitControls, etc.) internally
+/// via its own UMD build, so nothing else needs vendoring alongside it.
+const FORCE_GRAPH_JS: &str = include_str!("vendor/3d-force-graph.min.js");
 
 /// A transport-neutral HTTP-shaped response. Each transport module
 /// converts this to its own native response type at the edge.
@@ -61,6 +50,10 @@ pub struct ApiResponse {
 impl ApiResponse {
     fn html(body: &str) -> Self {
         ApiResponse { status: 200, content_type: "text/html; charset=utf-8", body: body.as_bytes().to_vec() }
+    }
+
+    fn javascript(body: &str) -> Self {
+        ApiResponse { status: 200, content_type: "application/javascript; charset=utf-8", body: body.as_bytes().to_vec() }
     }
 
     fn json<T: Serialize>(value: &T) -> Self {
@@ -84,12 +77,19 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str) -> ApiResponse
     if method != "GET" {
         return ApiResponse::error(405, "only GET is supported");
     }
+    // Static assets never touch `.nir/realm.db` -- served before opening
+    // a connection so a DB problem can never take the page/script down
+    // with it (the page's own fetches to /api/* report that separately).
+    match path {
+        "/" => return ApiResponse::html(BUILD_MODE_HTML),
+        "/assets/3d-force-graph.min.js" => return ApiResponse::javascript(FORCE_GRAPH_JS),
+        _ => {}
+    }
     let conn = match crate::realm::open(root) {
         Ok(conn) => conn,
         Err(e) => return ApiResponse::error(500, &e),
     };
     match path {
-        "/" => ApiResponse::html(PLACEHOLDER_HTML),
         "/api/nodes" => match list_nodes(&conn) {
             Ok(rows) => ApiResponse::json(&rows),
             Err(e) => ApiResponse::error(500, &e),
@@ -233,11 +233,30 @@ mod tests {
     }
 
     #[test]
-    fn handle_serves_the_placeholder_page_at_root() {
+    fn handle_serves_the_build_mode_graph_page_at_root() {
         let dir = scratch_dir("root");
         let resp = handle(&dir, "GET", "/", "");
         assert_eq!(resp.status, 200);
-        assert!(String::from_utf8_lossy(&resp.body).contains("Nirdosha Realm"));
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("Nirdosha Realm"));
+        assert!(body.contains("/assets/3d-force-graph.min.js"), "page should load the vendored graph library");
+    }
+
+    /// The static-asset routes are served without ever opening
+    /// `.nir/realm.db` -- exercised here against a directory that was
+    /// never scaffolded at all, unlike every other test in this file.
+    #[test]
+    fn handle_serves_the_vendored_graph_library_without_touching_the_db() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("nirdosha_realm_api_test_unscaffolded_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let resp = handle(&dir, "GET", "/assets/3d-force-graph.min.js", "");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.content_type, "application/javascript; charset=utf-8");
+        assert!(String::from_utf8_lossy(&resp.body).contains("ForceGraph3D"));
+        assert!(!dir.join(".nir").exists(), "static assets must not scaffold .nir/");
     }
 
     #[test]

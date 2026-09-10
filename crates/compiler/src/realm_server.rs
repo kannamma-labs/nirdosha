@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_answers_the_placeholder_page_at_root() {
+    fn serve_answers_the_build_mode_graph_page_at_root() {
         let dir = scratch_dir("root_http");
         let conn = crate::realm::open(&dir).expect("open");
         drop(conn);
