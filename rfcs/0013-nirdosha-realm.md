@@ -14,12 +14,13 @@
 > covered by real, passing unit tests (`realm.rs`'s own `#[cfg(test)]`
 > module) and exercised end-to-end by hand against a real `.nir` file
 > (`nirdosha realm sync`/`link`/`impact`/`ingest` run standalone) — not
-> just compiled. `hi`'s interactive console verbs, `:ask`/`:impact`,
-> were also shipped as part of this same v1 pass (`hi.rs`'s
-> `Command::Ask`/`Command::Impact`, calling the query functions below)
-> — that code is real and unchanged, but its RFC-level home moved to
-> RFC 0014 in a later revision of this document: this RFC now owns the
-> graph and its query functions, not how a human sees the results.
+> just compiled. `hi`'s interactive console verbs, `:ask`/`:impact`
+> (`hi.rs`'s `Command::Ask`/`Command::Impact`), were shipped in this
+> same v1 pass and call the query functions this RFC owns directly —
+> but they, and every other way a human ends up looking at the graph,
+> are RFC 0014's surface to describe, not this one's: this RFC's own
+> scope is the graph itself and a programmatic way to query it, full
+> stop.
 >
 > One correction the implementation surfaced against this RFC's own
 > earlier text: the "Adding `rusqlite`'s `fts5` feature" open question
@@ -353,18 +354,13 @@ nirdosha realm impact <target>         non-interactive impact report
 ```
 
 This is the whole of this RFC's own UI surface — a scriptable,
-non-interactive CLI, deliberately. `hi`'s own interactive console
-verbs (`:ask`/`:impact`) were built as part of this RFC's shipped v1
-(real, committed code — `hi.rs`'s `Command::Ask`/`Command::Impact`)
-and that history doesn't change; but their *description* and further
-evolution now belong to RFC 0014, not here — Realm's own remit is "the
-graph and a programmatic way to query it," the same "data model, not
-the UI built on top of it" split RFC 0014 itself settled on. `hi`'s
-console verbs, and any richer rendering of the same query results
-(RFC 0014's 3D view included), all call the exact same `realm::ask`/
-`realm::impact` functions this RFC owns — this RFC owns the query
-functions; RFC 0014 owns every way a human ends up looking at their
-results, text console included.
+non-interactive CLI, deliberately: Realm's remit is the graph itself
+and a programmatic way to query it, not how a human ends up looking at
+the results. `hi`'s own interactive console verbs (`:ask`/`:impact`,
+`hi.rs`'s `Command::Ask`/`Command::Impact`) call the exact same
+`realm::ask`/`realm::impact` functions this CLI does — but describing
+that console surface, and every richer way of viewing the same query
+results (RFC 0014's 3D view included), belongs to RFC 0014.
 
 `realm sync`/`realm impact` are ordinary batch subcommands, following
 the same per-command arg-loop dispatch style as `init`/`build`

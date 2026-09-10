@@ -12,16 +12,16 @@
 > and this RFC says so explicitly rather than presenting them as solved
 > details.
 >
-> **Scope note, added in a later revision.** This RFC now owns every
-> way a human sees or interacts with the Realm graph via `hi` — not
-> just the new 3D webview. `hi`'s existing `:ask`/`:impact` console
-> verbs (RFC 0013's own shipped v1, real and unchanged — `hi.rs`'s
-> `Command::Ask`/`Command::Impact`) are this RFC's already-built
-> baseline UI: the same `realm::ask`/`realm::impact` query functions,
-> rendered as flat text instead of a graph. RFC 0013 kept the graph
-> itself and the programmatic/CI-facing `nirdosha realm ...` CLI; this
-> RFC is everything downstream of that, from the plain console verbs
-> already shipped to the speculative 3D view below.
+> **Scope.** This RFC covers every way a human sees or interacts with
+> the Realm graph via `hi`, not only the 3D webview below. `hi`'s
+> `:ask`/`:impact` console verbs (`hi.rs`'s `Command::Ask`/
+> `Command::Impact`) are this RFC's already-shipped baseline UI — the
+> same `realm::ask`/`realm::impact` query functions the graph exposes,
+> rendered as flat text rather than a graph. RFC 0013 owns the graph
+> itself and the programmatic, CI-facing `nirdosha realm ...` CLI;
+> this RFC owns everything downstream of that, from the plain console
+> verbs already running today to the speculative 3D view described
+> below.
 
 ## Motivation
 
