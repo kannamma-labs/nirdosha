@@ -80,9 +80,10 @@ Realm graph or the `.nir` source the thing the user should trust?**
   graph node that produced it. A locked unit's graph node and its
   `.nir` are meant to agree by construction; if the user edits the
   graph again after locking, RFC 0013's own mechanism already answers
-  this without new design: the edit flags the relevant edges/nodes
-  `possibly_stale`, generate mode re-runs for that unit, and it
-  re-locks once it agrees again.
+  this without new design: the edit flags the relevant edges
+  `possibly_stale` (see the discriminator note below for exactly which
+  `flag_reason`), generate mode re-runs for that unit, and it re-locks
+  once it agrees again.
 
 This is deliberately the same answer RFC 0013 already gives for
 human-authored code drifting from an approved requirement, applied to
@@ -95,31 +96,58 @@ overrides what the graph says was approved.
 explicitly: a `.nir` file that diverges from generate mode's own last
 output — because a human hand-edited it, not because the graph
 changed — is not the same case as ordinary regeneration, and generate
-mode must not treat it the same way.** RFC 0013's sync already detects
-this divergence (the file's `content_hash` no longer matches what
-generate mode itself last wrote) and flags it; that flag becomes a
-hard stop here, not just a display artifact. Regenerating a unit whose
-`.nir` is hand-edited-and-diverged requires an explicit human
-confirmation before the new generation overwrites it — the same kind
-of confirmation gate generate mode already applies to risky
-capabilities (see "Generate mode" below). Without that stop, "flag,
-never silently overwrite" would hold for code drifting from the graph
-but not for the graph silently overwriting code; both directions need
-the same discipline, not just the same sentence.
+mode must not treat it the same way.** This needs its own evidence,
+not RFC 0013's existing `content_hash` — that column is the file's
+*current* hash, re-synced on every `realm sync`, so it can never
+answer "does this file still match what generate mode last wrote";
+it only ever answers "did the file change since the last sync,"
+which a hand-edit followed by an ordinary `realm sync` (a habit, or a
+CI step) silently satisfies, erasing the very divergence this gate
+needs to catch. Generate mode therefore writes its own record —
+`last_materialized_hash` per CodeUnit, set at the moment a unit
+locks, untouched by `realm sync` — and it's *that* value, not
+`content_hash`, that a re-generate compares the current file against.
+Regenerating a unit whose `.nir` no longer matches its own
+`last_materialized_hash` requires an explicit human confirmation
+before the new generation overwrites it — the same kind of
+confirmation gate generate mode already applies to risky capabilities
+(see "Generate mode" below) — and that confirmation gets a real
+surface, not just a gate definition: a distinct node visual state in
+the 3D view ("hand-edited, diverged") with its own confirm-overwrite
+action attached, the same kind of dedicated affordance Build mode's
+confirm/delete actions already get, not a passive error message the
+user has to go find in a log. Confirming overwrites, and it's
+destructive by default unless this RFC says otherwise, so it does:
+the diverged file's content is snapshotted into the audit trail
+*before* it's overwritten, so the confirmation is reversible — the
+hand-edit is never truly lost, only superseded. Without any of this,
+"flag, never silently overwrite" would hold for code drifting from
+the graph but not for the graph silently overwriting code; both
+directions need the same discipline, not just the same sentence.
 
-**One column, two meanings, need to not collide once both directions
-are real.** RFC 0013's `possibly_stale` flag already means "code drifted
-from what was last synced" — the code side moving away from the graph.
-Build mode's own edits (see "Build mode" below) and the hand-edit case
-just above now also set the same flag for the opposite direction — the
-graph side, or a human's hand-edit, moving away from what generate mode
-last produced — and a bare `realm sync` or an unrelated regenerate pass
-could clear either meaning without recording which one it resolved.
-`flag_reason` (already a column on `edges`) records which direction
-triggered the flag — `code-drift` vs. `graph-edit-post-lock` vs.
-`hand-edit-post-generate` — so clearing one can never be mistaken for,
-or accidentally clear, an unresolved flag of a different kind on the
-same edge.
+**One column, several meanings, need to not collide once every
+direction is real.** RFC 0013's `possibly_stale` flag already means
+"code drifted from what was last synced" — the code side moving away
+from the graph. Build mode's own edits (see "Build mode" below) and
+the hand-edit case just above now also set the same flag for other
+directions — the graph side moving away from locked code, an edit
+landing mid-generate, or a human's hand-edit diverging from what
+generate mode last produced — and a bare `realm sync` or an unrelated
+regenerate pass could clear one meaning without recording which one it
+resolved. `flag_reason` (already a column on `edges`) records which
+one triggered the flag — `code-drift`, `graph-edit-post-lock`,
+`graph-edit-during-generation` (see "Build mode"'s concurrency note for
+this one specifically), or `hand-edit-post-generate` (checked against
+`last_materialized_hash`, not `content_hash`, per the paragraph above)
+— so clearing one can never be mistaken for, or accidentally clear, an
+unresolved flag of a different kind on the same edge. **This flag lives
+on edges only, never on nodes** — RFC 0013's schema never gave `nodes`
+its own `flag`/`flag_reason` columns, and this RFC doesn't add them: a
+node's own staleness is only ever visible through its edges, which
+means a CodeUnit with no edges at all (an isolated node, no
+`REQUIRES`/`IMPLEMENTS` relationship to anything) has no staleness
+signal to carry in the first place — a real, disclosed limitation
+inherited from 0013's own schema, not introduced here.
 
 **Build order this implies:** authority semantics (above) → prompt
 mode's funnel → build mode → generate mode → publish. Each stage's
@@ -209,15 +237,31 @@ pass finds (candidate-entity count, relationship density), not raw
 token/byte count. **Still open:** the concrete thresholds — see Open
 Questions; this needs a benchmark, not a guess.
 
-**The same gate needs a floor, not only a ceiling.** A vision-statement
+**The same gate needs a floor, not only a ceiling — but only for
+document-shaped input, not every short prompt.** A vision-statement
 prompt that Tier 0's probe pass finds *zero* candidates in passes the
 ceiling check trivially and hands Tier 2 nothing to ground against —
-precisely the unbounded-cold-population case the funnel exists to
-prevent, just reached from the empty end instead of the crowded one.
-The gate triggers on either extreme: too many Tier-0 candidates to
-populate reliably, or too few to ground the LLM pass at all — the
-latter case rejecting with a message asking for more specific detail,
-never silently falling back to an ungrounded cold generation.
+the unbounded-cold-population case the funnel exists to prevent,
+reached from the empty end instead of the crowded one. But an ordinary
+short generative prompt — "build me a todo app" — also finds
+near-zero Tier-0 candidates: no noun-phrase structs, no numbered
+thresholds, just a one-line request, and RFC 0012's own baseline
+already handles exactly this case by cold generation. A floor that
+rejects on candidate count alone would reject that prompt too,
+contradicting behavior this project has already shipped and proven
+works at short-prompt scale. So the floor is scoped to *document-shaped*
+input specifically — prompt length past a threshold, or prose that
+reads as structured spec-like text rather than a one-line ask (the
+same distinction Tier 0's own probe pass is already positioned to make,
+not a separate classifier) — not to short prompts in general. A long,
+structured-looking prompt that still yields zero candidates is the
+real danger case this floor exists for; a short one yielding zero is
+simply RFC 0012's existing cold-generation path, and stays ungated.
+Rejection, when it does trigger, asks for more specific detail rather
+than silently falling back to an ungrounded cold population over a
+document-scale prompt. **Still open:** the exact document-shaped
+threshold — same benchmark-not-guess resolution as the ceiling's own
+thresholds above, not a separate design question.
 
 **The same ceiling is also a cost/availability guard, not only a UX
 one.** An unattended session fed a pathological document is a
@@ -351,9 +395,11 @@ action. At minimum, an edit to a unit currently generating is accepted
 into the graph but doesn't affect the in-flight generation pass — that
 pass completes (locking or failing) against the text it started with,
 and the new edit's effect is visible on the *next* generate pass,
-flagged `possibly_stale` (`graph-edit-post-lock`, per the discriminator
-above) in the meantime like any other post-lock edit. A placeholder,
-not a full answer — see Open Questions.
+flagged `possibly_stale` (`graph-edit-during-generation`, its own
+discriminator value, not `graph-edit-post-lock` — the unit hasn't
+locked yet when this edit lands, so that name wouldn't even be
+accurate; see the discriminator paragraph above) in the meantime. A
+placeholder, not a full answer — see Open Questions.
 
 **Session continuity across the `ratatui` ↔ webview swap.** Entering
 build mode closes the terminal UI — but *which surface wins* was never
@@ -491,14 +537,24 @@ unlocked units exist on disk at that moment — not compiled in
 isolation. Composing correctly against neighbors that haven't locked
 yet is a real per-unit build, not a syntax check.
 
-**A provisional unit carrying `effect(...)`, network access, or a file
-write anywhere in its subtree requires explicit human confirmation
-before it's eligible to generate at all** — the same provisional/
-confirmed distinction Build mode marks visually, made load-bearing
-here rather than decorative. This is the cheapest real defense against
-the indirect-prompt-injection threat named above: the riskiest
-capability class never reaches generate mode without a human having
-looked at it first.
+**A provisional unit requires explicit human confirmation before it's
+eligible to generate at all, if it carries a capability signal** —
+and "carries" needs a precise, pre-code definition, since no `.nir`
+exists yet at generate-eligibility time for a construct to literally
+appear in: either (a) an attached `effect(...)` attribute naming a
+non-`pure` effect (per Build mode's attribute-attachment bullet
+above), or (b) a capability assertion in the unit's own driving text
+that Tier 0's probe pass or Tier 2's LLM population tagged as it
+extracted the unit — a verb phrase implying network/file/external
+access, the same kind of signal Tier 0 already extracts for `fn`/`nfr`
+candidates (see "1. Prompt mode" above), extended to capability words
+specifically. Both are real signals available before any code exists;
+neither requires guessing at what the eventual `.nir` will contain.
+This is the same provisional/confirmed distinction Build mode marks
+visually, made load-bearing here rather than decorative, and it's the
+cheapest real defense against the indirect-prompt-injection threat
+named above: the riskiest capability class never reaches generate mode
+without a human having looked at it first.
 
 **That confirmation covers the driving text, not the code the LLM
 actually writes from it — and the code layer is intentionally
@@ -512,8 +568,11 @@ writes, FFI — the same AST walk that already computes `content_hash`
 for RFC 0013's sync, so this is a pass over data already in hand, not
 a new parse. Any capability the scan finds that the confirmed text
 didn't already flag blocks lock and surfaces the specific construct
-for a fresh confirmation — the human ends up confirming what the code
-actually does, not only what the prompt claimed it would do.
+for a fresh confirmation — construct kind plus its target literal (an
+endpoint path, a file path), not merely "network: yes/no," enough for
+a human to judge without being shown code — so the human ends up
+confirming what the code actually does, not only what the prompt
+claimed it would do.
 
 **Lock, defined precisely: a CodeUnit locks when its generated `.nir`
 both exists and builds successfully** — typechecks and compiles, not
@@ -556,7 +615,13 @@ renders as **locked-but-neighbors-drifted**, a distinct visual state,
 until generate re-runs for it and it re-locks against the new context.
 This is the same "flag, never silently claim more than is true"
 discipline the rest of this RFC applies everywhere else, extended to
-the lock symbol itself.
+the lock symbol itself. **It resolves the same way it's raised, not
+through a separate mechanism**: publish's own whole-program build
+(below) is the real re-verification step regardless, and if a drifted
+unit still compiles cleanly as part of that final build, it implicitly
+re-locks — the visual state clears without needing its own standalone
+generate pass first. Only a real failure in that whole-program build
+sends the unit back to plain unlocked.
 
 **Whole-program composition is checked once more, for real, at publish
 time — not assumed from a pile of per-unit locks.** Publish mode
@@ -571,9 +636,13 @@ compiler diagnostic names which units are involved, and those units
 return to unlocked so the user's next generate pass has something
 concrete to fix. This also settles publish's own completion gating:
 publish considers a unit ready once it's locked and in scope; a unit
-left unlocked, or explicitly waived, is excluded from that publish's
-scope, not a blocker for the rest — see "Publish mode" for what
-"scope" means precisely.
+that's simply *out of scope* — either never included, or explicitly
+waived, which makes a unit out-of-scope by definition — is excluded
+from that publish, not a blocker for the rest. An *in-scope* unit left
+unlocked is a different case entirely: it blocks publish outright,
+same as any other build failure — see "Publish mode" for what "scope"
+means precisely, and why waiving isn't automatically
+consequence-free either.
 
 ### 4. Publish mode
 
@@ -586,9 +655,22 @@ is *scope*, decided before generate mode even runs, not discovered
 afterward. A CodeUnit the user has deliberately left out of scope for
 this publish (not reachable from any `screen`/handler the user intends
 to ship, or explicitly deferred) is simply not part of the program
-publish compiles; a CodeUnit that *is* in scope but fails to lock, or
-gets waived, blocks publish for that binary outright, because the
-single artifact can't be produced without it.
+publish compiles. **Waiving a unit (see "Generate mode" above) is the
+same move made mid-flight, not a third state alongside "in scope" and
+"out of scope":** a waived unit becomes out-of-scope by definition,
+exactly like one that was never included — it does not itself block
+publish. What still can is an ordinary in-scope unit that fails to
+lock; that's a real build failure, and blocks publish outright because
+the single artifact can't be produced without it. **Scope is a
+reference-closure, not an independent per-unit checklist** — so
+waiving isn't automatically consequence-free either: if some other
+in-scope unit's generated code still calls a unit the user just
+waived, that call has no target, and the whole-program build (below)
+fails and names exactly that missing reference, the same ordinary
+build-failure path any other broken composition takes, not a
+waive-specific gate. The fix is the same either way a normal build
+failure gets fixed: widen the waive to cover the caller too, or
+unwaive the callee.
 
 Gated on generate completing — meaning every in-scope CodeUnit has
 locked (see "Generate mode"'s own lock and waive definitions) — and
@@ -636,6 +718,29 @@ doesn't leave the 3D view open waiting for the user to close it
 themselves; a completed publish is a return-to-console event exactly
 like a cancelled one, just with a different outcome recorded in the
 transcript.
+
+### State transitions
+
+Every tag, flag, and visual state this RFC introduces, in one place —
+the artifact that should have existed before the per-section prose
+above, not after it, since most of the corrections that prose has
+absorbed turned out to be orphaned transitions (a guard whose evidence
+could vanish, a state with two incompatible definitions of what it
+blocks). Written now so the next one gets caught here instead.
+
+| State | Set by | Cleared by | Blocks what |
+|---|---|---|---|
+| **provisional** (node or edge) | Prompt mode population — `created_by: "llm-prompt-mode"` (Tier 2) or `"prompt-tier0-probe"` (Tier 0) | An explicit confirm action in Build mode (never implied by editing, attribute/gate attachment, or anything else) | Generate mode's capability gate, if the unit also carries a capability signal (below); Publish mode's zero-unreviewed-units gate |
+| **confirmed** (node or edge) | An explicit confirm action in Build mode | Nothing in this RFC — a one-way promotion. **Open, not decided here:** whether a later LLM-driven re-population of an already-confirmed node re-provisions it; see Open Questions |
+| **capability signal present** | An attached `effect(...)` naming a non-`pure` effect, or a Tier-0/Tier-2-tagged capability assertion in the driving text (per "Generate mode"'s own precise definition) | N/A — this isn't a flag, it's a static property of the node's current attributes/text, re-evaluated each time the gate below checks it | Generate mode's confirmation gate, *if* the unit is also still provisional |
+| **locked** | Generate mode: `.nir` exists, builds successfully, and Tier-1-provable attached gates pass | A `possibly_stale` flag reaching this unit (any `flag_reason`) triggers regenerate, which must re-lock; a neighbor changing instead flips it to locked-but-neighbors-drifted | Nothing directly once reached — publish's whole-program build is still the real final gate regardless |
+| **locked-but-neighbors-drifted** | A neighbor of an already-locked unit regenerates or changes after this unit locked | Publish's own whole-program build succeeding with this unit included (implicit re-lock), or an explicit generate re-run for this unit specifically | Nothing on its own (a visual-only state) — what it prevents is a stale lock symbol reading as fresh |
+| **waived** | An explicit human waive action on a specific *unlocked* unit, with a required free-text reason recorded in the audit trail | An explicit unwaive action, returning to ordinary unlocked | Nothing directly — it's how a unit becomes out-of-scope mid-flight (see below), not a state that blocks on its own |
+| **out-of-scope** | The user's own publish-scope decision (never reachable from a shipped `screen`/handler, or explicitly deferred), or the by-definition consequence of waiving a unit | Widening scope to include the unit again (and unwaiving it first, if it was waived) | Nothing by itself — but scope is a reference-closure, not an independent per-unit checklist: an in-scope unit whose code still calls an out-of-scope one fails the whole-program build, and *that* failure is real |
+| **possibly_stale**, `flag_reason: code-drift` | RFC 0013 sync: a `.nir` file's `content_hash` no longer matches its last-synced value | An ordinary `realm sync` reconciling the edge | RFC 0013's own existing behavior — this RFC doesn't change it |
+| **possibly_stale**, `flag_reason: graph-edit-post-lock` | A graph edit to a unit that had already locked | Generate mode re-running for that unit and it re-locking | That unit's "confirmed fresh" claim in the 3D view, until regenerated |
+| **possibly_stale**, `flag_reason: graph-edit-during-generation` | A graph edit landing while generate mode is already mid-flight on that same unit (the in-flight pass itself is unaffected) | The *next* generate pass for that unit | Same as `graph-edit-post-lock`, one pass later |
+| **possibly_stale**, `flag_reason: hand-edit-post-generate` | A `.nir` file's content diverging from its own `last_materialized_hash` (generate mode's own record of what it last wrote — deliberately not the ordinary `content_hash` a `realm sync` would silently update) | An explicit human confirmation to overwrite (which snapshots the diverged file into the audit trail first, making the confirmation reversible), or hand-editing the graph text to match the file instead | Regeneration of that unit — the hard stop "What's authoritative, when" defines |
 
 ## Effect on the permission model
 
@@ -785,11 +890,16 @@ implementation spike, a benchmark — not just that it's open.
    lock definition and "Publish mode"'s own text: publish ships once
    every *in-scope* unit has locked (built successfully) and been
    reviewed; a unit deliberately left out of scope is simply not part
-   of the single binary being compiled, while an in-scope unit that's
-   unlocked, waived, or unreviewed blocks that binary outright — there
-   is no partial publish of a single artifact. Pinning down the lock
-   symbol's precise meaning, and what "scope" means, was the
-   prerequisite this question actually depended on.
+   of the single binary being compiled, and an in-scope unit that's
+   unlocked or unreviewed blocks that binary outright — there is no
+   partial publish of a single artifact. Waiving is how a unit becomes
+   out-of-scope mid-flight, not a third state that blocks publish on
+   its own; if a still-in-scope unit's own code still calls a waived
+   one, that surfaces as an ordinary whole-program build failure
+   (below), not a special waive-specific gate. Pinning down the lock
+   symbol's precise meaning, and what "scope" means (a reference-closure,
+   not an independent per-unit checklist), was the prerequisite this
+   question actually depended on.
 10. **Audit-trail tamper-evidence.** Build mode appends human edits
     distinct from LLM-originated content (per the provisional-tagging
     discussion throughout), but `created_by` is presently just a
@@ -863,3 +973,17 @@ implementation spike, a benchmark — not just that it's open.
     whole-program build of every in-scope locked unit as its actual
     gate, with per-unit locks making that build likely to succeed
     rather than guaranteeing it.
+14. **Schema additions "State transitions" now depends on, and one
+    transition that table left open rather than guessed at.** This RFC
+    requires `last_materialized_hash` (a new per-CodeUnit value, RFC
+    0013's schema has nothing like it today) and a widened
+    `flag_reason` vocabulary (`graph-edit-during-generation` alongside
+    the two this RFC already introduced) — real, small RFC 0013
+    follow-up work, same category as Open Question 12's `.gitignore`
+    item, not new design. Separately: whether a later LLM-driven
+    re-population re-provisions a node the user already confirmed is
+    genuinely undecided — confirming should mean something durable, but
+    a stale confirmation on content that's since been silently
+    replaced underneath it is its own real risk. *Resolves via a design
+    session*, since both answers have a real cost and neither is
+    obviously safer by default.
