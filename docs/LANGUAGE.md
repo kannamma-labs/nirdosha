@@ -910,12 +910,17 @@ builtin set).
 ## 10. What's compiled vs. interpreter-only
 
 **Verify against `codegen::check_supported` directly before trusting
-this table** — it drifted stale once already (22 Aug 2026: `box`/`&`/
+this table** — it drifted stale twice already: 22 Aug 2026 (`box`/`&`/
 `*`, `str`, and `tcp`/`tcp_listener`/`connect`/`listen`/`accept` sat
 mislabeled interpreter-only here for a while after they'd already
-gained real codegen, caught only by testing real compiled binaries —
+gained real codegen), and again 2026-09 (`file`/`open` sat marked `No`
+here for several days after real codegen landed, and compiled `serve`'s
+own row described only its first, minimal layer for a while after a
+full production HTTP engine shipped behind it). Both times caught only
+by testing real compiled binaries and reading `codegen.rs` directly —
 box round-tripping through a function param, `str` branching on `==`,
-a live TCP round trip — not by re-reading this section's own prose).
+a live TCP round trip, a real file write/append/read-to-EOF cycle —
+never by re-reading this section's own prose.
 
 | Construct | Compiled? | Key caveat |
 |---|---|---|
@@ -928,7 +933,8 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `str` | Yes | Literals, `==`/`!=`, `if`-condition, `print`, fn params/returns — `main() -> str` compiles directly. |
 | `tcp`/`tcp_listener` | Yes | `connect`/`listen`/`accept`/`send`/`recv`/`stop` over real sockets. `send`'s payload is `str` **or** `json` (2026-09, widened from `str`-only while building `examples/features/56_nirdosha_ops_console_server.nir`'s real primitives-based server — `json` shares `str`'s exact `{ptr, i64}` representation, and this language has no string-concatenation/JSON-array-building primitive a hand-written route could otherwise use to compose a multi-row response with; `recv` is still always `str`, unchanged). |
 | `str_index_of`/`str_slice`, `len(str)` | Yes | 2026-09. The minimal string-parsing surface a compiled HTTP `serve` needs — `str_slice`/`len(str)` are pure pointer arithmetic on `str`'s `{ptr, i64}` representation (no kernel call); `str_index_of` is the one real byte-scan, linked to `nir_str_index_of`. No `split`/`starts_with`/`trim`/concat — a real, separate follow-up. |
-| Compiled `serve` (`/api/<fn>` routing over `tcp_listener`/`accept`) | Yes, minimal | 2026-09 (ROADMAP.md Track B8). `str_index_of`/`str_slice` hand-parse the request line; routing is a plain `.nir` `if`/`else if` chain, no new language construct. GET-only, whole request assumed to arrive in one `recv`, no `Content-Length`/POST body support — see `examples/features/51_compiled_serve.nir`. |
+| Compiled `serve`, minimal layer (`/api/<fn>` routing over `tcp_listener`/`accept`) | Yes, minimal | 2026-09 (ROADMAP.md Track B8). `str_index_of`/`str_slice` hand-parse the request line; routing is a plain `.nir` `if`/`else if` chain, no new language construct. GET-only, whole request assumed to arrive in one `recv`, no `Content-Length`/POST body support — see `examples/features/51_compiled_serve.nir`. Kept as a worked example alongside the production path below, not superseded by it. |
+| Compiled `serve`, production path (`nirdosha build --serve`) | Yes | 2026-09 (RFC 0010, `docs/adr` for `crates/compiled-serve`). `serve { expose ... }`'s exposure model (`typeck::exposed_fn_names`, deny-by-default on an ungated mutating route) generates one route-wrapper function per exposed `fn`, dispatched by a real HTTP engine (`crates/compiled-serve`, linked as its own staticlib): real `POST`/`Content-Length` body parsing, CORS, keep-alive with a request-per-connection cap, a per-IP rate limiter, a `413` body-size cap, `Domain::ServeHttp` admission (fail-fast `503`), and a real `Set-Cookie`. `transact` durability-log init and crash replay run from this mode's own `main` before the listener binds. Doesn't own RBAC/JWT itself — each route's `requires(...)` runs inside the compiled function it dispatches to. See `crates/compiler/tests/codegen.rs`'s `compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_body` (a real `GET` and a real `Content-Length`-bearing `POST` both reaching the same exposed `fn`) — the minimal layer's own row above has separate, older coverage that doesn't exercise this path at all. |
 | `sha256_hex`/`constant_time_str_eq` | Yes | Isolated from-scratch SHA-256, bit-verified. Output buffer leaks — see below. |
 | `rand_seed`/`rand_f64`/`rand_gaussian` | Yes | Same algorithm as the interpreter, process-wide state — see below. |
 | `Vector`/`Matrix`, fully | Yes | Two codegen strategies — see below. |
@@ -939,7 +945,7 @@ a live TCP round trip — not by re-reading this section's own prose).
 | `oidc_validate_token`/`extract_claim`/`identity_expired` | Yes | 2026-09. Real JWT/JWKS signature verification (`nir_oidc_validate_token`, `jsonwebtoken`-backed, same `kty`-locks-`alg` guard as `crates/presence-gateway/src/jwt.rs`) against a **static** JWKS (live rotation/refresh is a separate, deferred gap); real JSON claim extraction (`nir_extract_claim`). `identity_expired` needs no kernel — `now > identity.expires_at`, inline GEP+load+`icmp`. Deliberately **not** validating `exp` against the real wall clock inside `oidc_validate_token` itself — that stays `identity_expired`'s job with an explicit `now`, keeping the builtin a pure function of its inputs (§9). |
 | `nfr(...)` (§6f) | Yes | 2026-09. O(1) state per function — max-latency not p99, cumulative (not windowed) error-rate/throughput, exact concurrency. See §6f. |
 | `sandbox`/`stop` | No | Real, separate OS process — a larger scope than `thread`/`spawn` above, not touched by that update. |
-| `file`/`open` | No | `docs/PROTOLANG_PORT.md`'s file I/O port. |
+| `file`/`open` | Yes | 2026-09. `open(path, mode) -> file` (`"r"`/`"w"`/`"a"`), `send`/`recv`/`stop` reused verbatim from `tcp` — the same "declare + link a staticlib" pattern, `nir_file_open`/`_write`/`_read`/`_stop`. Local filesystem only, no `mmap`/directories/temp files/`read_line()` yet (`docs/PROTOLANG_PORT.md`'s later rollout layers) — see `examples/features/24_file_io.nir`, and `crates/compiler/tests/codegen.rs`'s `compiled_file_open_write_append_read_round_trips_real_bytes_on_disk` for automated coverage. |
 | `dec128` + `dec_*` builtins | No | Not yet in `Ty`/`codegen.rs`'s builtin allowlists. |
 | `db`, SQLite + Postgres (`db_connect`/`db_query`/`db_execute`) | Yes | 2026-09 (SQLite), 2026-09 (Postgres + pooling for both, `docs/adr/0005-postgres-pooling-and-tls.md`). `rusqlite` `bundled`, statically linked for SQLite; `postgres`/`postgres-native-tls` (vendored TLS, verify-by-default off-`localhost`) for Postgres. Pooled via `kernel::pool::PoolRegistry`, `:memory:` deliberately unpooled. Bind values: `i64`/`f64`/`str`/`bool`; a zero-payload `enum` variant as a bind value is not yet compiled. |
 | `json` (`json_parse`/`json_get`/`json_get_*`/`json_array_*`/`json_set_str`) | Yes | 2026-09. Compiles as raw text (`Ty::Json`'s own `llvm_ty` arm), re-parsed by each accessor — no persisted parsed-tree handle. |

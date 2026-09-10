@@ -1926,6 +1926,59 @@ fn compiled_listen_accept_serves_a_real_client() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim_end(), "client hello");
 }
 
+/// `file`/`open` codegen (`nir_file_open`/`_write`/`_read`/`_stop`) —
+/// real, shipped 2026-09-05, but until now with no automated regression
+/// test at all: `examples/features/24_file_io.nir` (the worked example
+/// `docs/LANGUAGE.md`/`docs/PROTOLANG_PORT.md` both point readers at)
+/// was only ever verified by hand. This mirrors that example directly:
+/// write, append (without truncating), read-to-content, and read-past-
+/// EOF returning `""` rather than an error, against a real file this
+/// process actually creates.
+#[test]
+fn compiled_file_open_write_append_read_round_trips_real_bytes_on_disk() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("nirdosha_test_file_io_{}_{}.txt", std::process::id(), unique_suffix()));
+    let path_str = path.to_str().unwrap();
+    let src = format!(
+        r#"
+        struct Text {{
+            value: str,
+        }}
+
+        fn main() {{
+            let path: str = "{path_str}"
+
+            let out: file = open(path, "w")
+            send(out, "first line\n")
+            stop out
+
+            let appended: file = open(path, "a")
+            send(appended, "second line\n")
+            stop appended
+
+            let inp: file = open(path, "r")
+            let content: str = recv(inp)
+            stop inp
+            let read_back: Text = Text(content)
+            print(read_back.value)
+
+            let inp2: file = open(path, "r")
+            let all: str = recv(inp2)
+            let eof: str = recv(inp2)
+            stop inp2
+            print(eof == "")
+        }}
+    "#
+    );
+    let (stdout, code) = compile_and_run(&src);
+    let on_disk = std::fs::read_to_string(&path).expect("the compiled binary should have actually written this file");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(code, 0);
+    // `print(bool)` prints `1`/`0`, not `true`/`false` (docs/LANGUAGE.md §10's own cosmetic-only note).
+    assert_eq!(stdout, "first line\nsecond line\n\n1\n");
+    assert_eq!(on_disk, "first line\nsecond line\n");
+}
+
 /// Phase 0 (compiled `serve`): a real curl-shaped request over a real
 /// socket, twice, against the *same* running compiled process, routed by
 /// path to two different compiled `fn`s -- `str_index_of`/`str_slice`/
@@ -2022,6 +2075,87 @@ fn compiled_serve_routes_by_path_to_two_compiled_functions() {
     assert!(echo_response.ends_with("hello from /api/echo"), "unexpected response: {echo_response:?}");
     assert!(missing_response.starts_with("HTTP/1.1 404 Not Found"), "unexpected response: {missing_response:?}");
     assert_ne!(hello_response, echo_response, "two different routes must produce two different bodies");
+}
+
+/// The *production* compiled-`serve` path (`nirdosha build --serve`,
+/// RFC 0010) end to end — real, but until now not covered by any
+/// automated test: `crates/compiled-serve/README.md` and this file's
+/// own `compiled_serve_routes_by_path_to_two_compiled_functions` above
+/// both cover only the older, primitives-first `tcp_listener`/`accept`
+/// style (`51_compiled_serve.nir`'s own shape, GET-only, hand-parsed).
+/// This test instead goes through `codegen::build_serve` — the same
+/// entry point `main.rs`'s `--serve` CLI flag calls — to prove
+/// `serve { expose ... }`'s exposure model (`typeck::exposed_fn_names`)
+/// really is wired to `crates/compiled-serve`'s real HTTP engine: a
+/// `GET` and a `POST` carrying a real body both reach the same exposed
+/// `fn` (proving `Content-Length`/body parsing works, the exact gap
+/// the older minimal engine still has), and an unrouted path 404s.
+#[test]
+fn compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_body() {
+    let port = free_port();
+    let src = r#"
+        struct Greeting {
+            message: str,
+        }
+
+        fn say_hello() -> Greeting requires(public) {
+            return Greeting("hello from real compiled serve")
+        }
+
+        serve {
+            expose say_hello
+        }
+
+        fn main() {
+        }
+    "#;
+
+    let program = parse_checked(src);
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_serve_{}_{}", std::process::id(), unique_suffix()));
+    let opts = codegen::ServeCodegenOptions { port, ui_html: Vec::new() };
+    codegen::build_serve(&program, &report, &out_path, codegen::OptLevel::O2, &opts).expect("codegen::build_serve should succeed");
+    let mut child = Command::new(&out_path).spawn().expect("compiled serve binary should start");
+
+    use std::io::{Read, Write};
+    let raw_request = |request: &str| -> Vec<u8> {
+        let mut attempt = 0;
+        let mut conn = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => break s,
+                Err(_) if attempt < 50 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("could not connect to the compiled serve listener: {e}"),
+            }
+        };
+        conn.write_all(request.as_bytes()).unwrap();
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut buf = Vec::new();
+        conn.read_to_end(&mut buf).unwrap();
+        buf
+    };
+
+    let get_response = String::from_utf8_lossy(&raw_request("GET /api/say_hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")).into_owned();
+    let body = "{}";
+    let post_response = String::from_utf8_lossy(&raw_request(&format!(
+        "POST /api/say_hello HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )))
+    .into_owned();
+    let missing_response = String::from_utf8_lossy(&raw_request("GET /api/no_such_route HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")).into_owned();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&out_path);
+
+    assert!(get_response.starts_with("HTTP/1.1 200"), "unexpected GET response: {get_response:?}");
+    assert!(get_response.contains("hello from real compiled serve"), "unexpected GET response: {get_response:?}");
+    assert!(post_response.starts_with("HTTP/1.1 200"), "a POST with a real Content-Length body should reach the same exposed fn: {post_response:?}");
+    assert!(post_response.contains("hello from real compiled serve"), "unexpected POST response: {post_response:?}");
+    assert!(missing_response.starts_with("HTTP/1.1 404"), "an unexposed path should 404, not silently match: {missing_response:?}");
 }
 
 #[test]

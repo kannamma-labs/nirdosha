@@ -18,12 +18,20 @@ real `Set-Cookie`. It does **not** own RBAC or JWT verification — every
 compiled Nirdosha LLVM code this crate only ever calls through a
 pointer, never reimplements.
 
-**Not yet wired to `codegen.rs`.** This crate is complete and tested on
-its own, against hand-written `extern "C"` test routes
-(`src/tests.rs`) — proving the HTTP engine for real without waiting on
-the separate, larger effort of having `codegen.rs` emit real per-route
-wrapper functions from a compiled program's own exposure set (RFC 0010)
-and a `nirdosha build --serve` CLI flag to link this crate in.
+**Wired to `codegen.rs` as of 2026-09-09.** This crate started out
+complete and tested on its own, against hand-written `extern "C"` test
+routes (`src/tests.rs`) — proving the HTTP engine for real without
+waiting on the separate, larger effort of having `codegen.rs` emit real
+per-route wrapper functions from a compiled program's own exposure set
+(RFC 0010) and a `nirdosha build --serve` CLI flag to link this crate
+in. That wiring landed the following day: `codegen::build_serve`
+(`main.rs`'s `--serve` flag) generates one route-wrapper function per
+`typeck::exposed_fn_names` entry, builds the `CRoute` dispatch table,
+and calls this crate's own `nir_compiled_serve_run` C-ABI bridge from
+generated `main` — a real `GET`/`POST` round trip against a real
+compiled binary is covered end to end by
+`crates/compiler/tests/codegen.rs`'s
+`compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_body`.
 
 Lives in `crates/runtime-kernels`'s own separate Cargo workspace, not
 the repo root's — see `docs/adr/0010-runtime-kernels-rlib-for-compiled-serve.md`
