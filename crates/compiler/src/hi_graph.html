@@ -71,6 +71,23 @@
     0%, 100% { filter:brightness(1); }
     50%      { filter:brightness(1.35) drop-shadow(0 0 4px rgba(255,214,140,0.6)); }
   }
+
+  /* ---- prompt-screen: rfcs/0014's mode 1, the default-on-entry landing surface (see this element's own HTML comment for exactly when it shows/hides) ---- */
+  #prompt-screen { position:fixed; inset:0; z-index:20; background:#0b0b12; display:none; align-items:center; justify-content:center; }
+  /* JS flips this to `flex` -- default `none` so a project that already
+     has prompt history never shows even a one-frame flash of this
+     screen while the mode-decision fetch is still in flight (the splash
+     above it, z-index:50, would hide it either way during that window,
+     but this also covers the post-splash instant on a slow fetch). */
+  #prompt-screen.visible { display:flex; }
+  #prompt-screen-inner { width:min(560px, 86vw); display:flex; flex-direction:column; gap:14px; }
+  #prompt-screen-title { font-size:22px; font-weight:bold; color:#e8e8f0; text-align:center; }
+  #prompt-screen-input { width:100%; box-sizing:border-box; background:#15151f; border:1px solid #3a3a52; border-radius:6px; color:#e8e8f0; font:14px ui-monospace, monospace; padding:12px; resize:vertical; }
+  #prompt-screen-input:focus { outline:none; border-color:#564cbe; }
+  #prompt-screen-input:disabled { opacity:0.6; }
+  #prompt-screen-submit { align-self:center; background:#564cbe; color:#fff; border:none; border-radius:6px; padding:10px 26px; font:14px ui-monospace, monospace; font-weight:bold; cursor:pointer; }
+  #prompt-screen-submit:disabled { opacity:0.5; cursor:default; }
+  #prompt-screen-status { text-align:center; font-size:13px; color:#a9a9bd; min-height:18px; }
 </style>
 </head>
 <body>
@@ -79,6 +96,23 @@
     <div id="splash-logo-wrap"><img id="splash-logo" src="__NIRDOSHA_LOGO__" alt=""></div>
     <div id="splash-word"></div>
     <div id="splash-sub">PROGRAMMING LANGUAGE</div>
+  </div>
+</div>
+
+<!-- rfcs/0014 "1. Prompt mode": the default mode on entry, shown only
+     while this project's graph has never had a prompt populate it
+     (checked against a fresh /api/nodes fetch on every load -- so
+     closing and reopening `hi` after a successful :prompt reopens
+     straight into build mode below, never back here). Once shown, it
+     stays hidden for the rest of this session the moment population
+     succeeds -- "the mode ... change[s] to build mode the first time a
+     prompt is consumed," not a toggle the user flips back and forth. -->
+<div id="prompt-screen">
+  <div id="prompt-screen-inner">
+    <div id="prompt-screen-title">What do you want to build?</div>
+    <textarea id="prompt-screen-input" rows="4" placeholder="Describe the program you want -- e.g. &quot;a tetris game&quot;, or &quot;a task tracker with due dates and a completed filter&quot;. Ctrl+Enter to submit."></textarea>
+    <button id="prompt-screen-submit" type="button">Populate the graph</button>
+    <div id="prompt-screen-status"></div>
   </div>
 </div>
 
@@ -756,8 +790,66 @@
   });
   loadZoom();
 
+  // ---- rfcs/0014 mode: prompt (default on entry) -> build (once a
+  // prompt has ever populated this project's graph). See
+  // `#prompt-screen`'s own HTML comment for the exact persistence rule.
+  function hasPromptHistory(nodes) {
+    return nodes.some(n => n.created_by === 'llm-prompt-mode');
+  }
+
+  function enterBuildMode() {
+    document.getElementById('prompt-screen').classList.remove('visible');
+  }
+
+  function submitPromptScreen() {
+    const input = document.getElementById('prompt-screen-input');
+    const btn = document.getElementById('prompt-screen-submit');
+    const statusEl = document.getElementById('prompt-screen-status');
+    const text = input.value.trim();
+    if (!text) {
+      statusEl.textContent = 'describe what you want to build first.';
+      return;
+    }
+    input.disabled = true;
+    btn.disabled = true;
+    statusEl.textContent = 'populating the graph from this prompt (this calls the model, and can take a while)…';
+    postForm('/api/prompt', { text })
+      .then(({ status, body }) => {
+        if (status !== 200) {
+          statusEl.textContent = body.error || ('request failed: ' + status);
+          input.disabled = false;
+          btn.disabled = false;
+          return;
+        }
+        logLine('', 'populated the graph from the prompt: ' + body.nodes_added + ' candidate(s), ' + body.edges_added + ' relation(s) -- review with the click panel, then :confirm <node-id>.');
+        // "the mode should also change to build mode the first time a
+        // prompt is consumed" -- this is that transition; reopening
+        // `hi` later skips straight past this screen (`hasPromptHistory`
+        // above, checked fresh against the database on every load).
+        enterBuildMode();
+        if (reloadGraph) reloadGraph();
+      })
+      .catch(err => {
+        statusEl.textContent = String(err);
+        input.disabled = false;
+        btn.disabled = false;
+        reportError('prompt-screen submit', err);
+      });
+  }
+
+  function initPromptScreen() {
+    document.getElementById('prompt-screen-submit').addEventListener('click', submitPromptScreen);
+    document.getElementById('prompt-screen-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitPromptScreen();
+      }
+    });
+  }
+
   runSplash();
   initConsole();
+  initPromptScreen();
   buildLegend();
   Promise.all([
     fetch('/api/nodes').then(r => r.json()),
@@ -769,6 +861,12 @@
         run3D(data);
       } else {
         run2D(data);
+      }
+      if (hasPromptHistory(nodes)) {
+        enterBuildMode();
+      } else {
+        document.getElementById('prompt-screen').classList.add('visible');
+        document.getElementById('prompt-screen-input').focus();
       }
     })
     .catch(err => reportError('loading graph data', err));
