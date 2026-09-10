@@ -24,6 +24,15 @@
   #panel .row { margin:4px 0; }
   #panel .label { opacity:0.6; margin-right:6px; }
   #panel ul { margin:6px 0 0; padding-left:16px; }
+  #panel .section-title { margin:14px 0 6px; font-size:12px; letter-spacing:0.06em; text-transform:uppercase; opacity:0.6; }
+  #panel .attr-list { margin:0 0 8px; padding-left:16px; }
+  #panel .attr-list li { word-break:break-all; }
+  #panel select, #panel input[type="text"] { width:100%; box-sizing:border-box; background:#0b0b12; border:1px solid #3a3a52; border-radius:4px; color:#e8e8f0; font:13px ui-monospace, monospace; padding:6px 8px; margin:4px 0; }
+  #panel select:focus, #panel input[type="text"]:focus { outline:none; border-color:#564cbe; }
+  #panel button { background:#564cbe; color:#fff; border:none; border-radius:4px; padding:7px 12px; font:12px ui-monospace, monospace; font-weight:bold; cursor:pointer; margin:4px 4px 4px 0; }
+  #panel button.secondary { background:#26263a; }
+  #panel button:disabled { opacity:0.5; cursor:default; }
+  #panel .form-status { font-size:12px; color:#a9a9bd; min-height:16px; }
 
   #legend { position:absolute; bottom:104px; left:8px; font-size:13px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
   #legend .item { display:flex; align-items:center; gap:6px; margin:2px 0; }
@@ -266,6 +275,144 @@
     panel.appendChild(r);
   }
 
+  // Build mode's attribute editor (rfcs/0014's "Attach attributes --
+  // only the ones legal for that node's own kind"). **v1 scope cut,
+  // disclosed:** these templates cover the language's real annotation
+  // surface named in that RFC section, but nothing here parses or
+  // validates the built string against the actual `.nir` grammar --
+  // `hi_graph::attach_attribute` stores it as opaque text either way
+  // (see that function's own doc comment); Generate mode's real compile
+  // step is what actually proves an attribute is legal, by rejecting a
+  // generated program that misuses one. "Custom" exists precisely for
+  // whatever this fixed template list doesn't cover.
+  const ATTR_TEMPLATES = {
+    requires_role: { label: 'requires(role: ...)', build: v => 'requires(role: ' + v + ')', placeholder: 'admin' },
+    requires_claim: { label: 'requires(claim: ...)', build: v => 'requires(claim: ' + v + ')', placeholder: 'org:acme' },
+    effect: { label: 'effect(...)', build: v => 'effect(' + v + ')', placeholder: 'network' },
+    nfr_latency: { label: 'nfr(latency_ms: ...)', build: v => 'nfr(latency_ms: ' + v + ')', placeholder: '200' },
+    nfr_error_rate: { label: 'nfr(error_rate_max: ...)', build: v => 'nfr(error_rate_max: ' + v + ')', placeholder: '0.01' },
+    nfr_throughput: { label: 'nfr(throughput_min_per_sec: ...)', build: v => 'nfr(throughput_min_per_sec: ' + v + ')', placeholder: '50' },
+    nfr_concurrency: { label: 'nfr(concurrency_max: ...)', build: v => 'nfr(concurrency_max: ' + v + ')', placeholder: '10' },
+    validate: { label: 'validate { pre:/post: ... }', build: v => 'validate { ' + v + ' }', placeholder: 'pre: amount > 0 post: result.ok' },
+    custom: { label: 'custom (raw attribute text)', build: v => v, placeholder: 'requires(role: admin)' },
+  };
+
+  // Re-fetches this one node's current row and re-renders the panel
+  // from it -- cheaper than a full `reloadGraph()` for something that
+  // only changed one node's own attributes/confirmed state, though
+  // callers that also need the 3D view to reflect a confirm still call
+  // `reloadGraph()` themselves alongside this.
+  function refreshPanelForNode(nodeId) {
+    fetch('/api/nodes')
+      .then(r => r.json())
+      .then(nodes => {
+        const fresh = nodes.find(n => n.id === nodeId);
+        if (fresh) onNodeSelected(fresh);
+      })
+      .catch(err => reportError('refreshing node panel', err));
+  }
+
+  function buildAttributeForm(panel, node) {
+    const title = document.createElement('div');
+    title.className = 'section-title';
+    title.textContent = 'attributes';
+    panel.appendChild(title);
+
+    if (node.attributes) {
+      const ul = document.createElement('ul');
+      ul.className = 'attr-list';
+      node.attributes.split('\n').filter(Boolean).forEach(a => {
+        const li = document.createElement('li');
+        li.textContent = a;
+        ul.appendChild(li);
+      });
+      panel.appendChild(ul);
+    }
+
+    const select = document.createElement('select');
+    Object.keys(ATTR_TEMPLATES).forEach(key => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = ATTR_TEMPLATES[key].label;
+      select.appendChild(opt);
+    });
+    panel.appendChild(select);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    panel.appendChild(input);
+
+    const syncPlaceholder = () => { input.placeholder = ATTR_TEMPLATES[select.value].placeholder; };
+    select.addEventListener('change', syncPlaceholder);
+    syncPlaceholder();
+
+    const status = document.createElement('div');
+    status.className = 'form-status';
+
+    const attachBtn = document.createElement('button');
+    attachBtn.type = 'button';
+    attachBtn.textContent = 'Attach';
+    attachBtn.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) {
+        status.textContent = 'enter a value first.';
+        return;
+      }
+      const attr = ATTR_TEMPLATES[select.value].build(value);
+      attachBtn.disabled = true;
+      postForm('/api/attach', { node: node.id, attr })
+        .then(({ status: httpStatus, body }) => {
+          attachBtn.disabled = false;
+          if (httpStatus !== 200) {
+            status.textContent = body.error || 'request failed: ' + httpStatus;
+            return;
+          }
+          logLine('', 'attached to ' + node.id + ': ' + attr);
+          refreshPanelForNode(node.id);
+        })
+        .catch(err => {
+          attachBtn.disabled = false;
+          status.textContent = String(err);
+          reportError('panel attach', err);
+        });
+    });
+    panel.appendChild(attachBtn);
+
+    // Attributes only ever reach Generate mode for a *confirmed*
+    // candidate (`hi_graph::confirmed_units`'s own gate) -- surfaced
+    // here too, not just in the console, so attaching one and reviewing
+    // it can both happen from the same click without switching back to
+    // the console for the second half.
+    if (!node.confirmed && node.driving_text) {
+      const confirmBtn = document.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.className = 'secondary';
+      confirmBtn.textContent = 'Confirm';
+      confirmBtn.addEventListener('click', () => {
+        confirmBtn.disabled = true;
+        postForm('/api/confirm', { node: node.id })
+          .then(({ status: httpStatus, body }) => {
+            if (httpStatus !== 200) {
+              status.textContent = body.error || 'request failed: ' + httpStatus;
+              confirmBtn.disabled = false;
+              return;
+            }
+            logLine('', 'confirmed ' + node.id);
+            refreshPanelForNode(node.id);
+            if (reloadGraph) reloadGraph();
+          })
+          .catch(err => {
+            confirmBtn.disabled = false;
+            status.textContent = String(err);
+            reportError('panel confirm', err);
+          });
+      });
+      panel.appendChild(confirmBtn);
+    }
+
+    panel.appendChild(status);
+  }
+
   // `impactHits` is `null` while the /api/impact fetch this node click
   // kicked off is still in flight -- called twice per click, once to
   // show the node's own fields immediately and once to fill in impact
@@ -298,9 +445,15 @@
       if (node.driving_text) {
         row(panel, 'driving text', node.driving_text);
       }
-      if (node.attributes) {
-        row(panel, 'attributes', node.attributes);
-      }
+    }
+    // The attribute editor (requires/effect/nfr/validate -- "a typical
+    // .nir function['s]" annotation surface) is offered for any
+    // CodeUnit, not just prompt-mode candidates: `hi_graph::
+    // attach_attribute` works on either, even though only a candidate
+    // with `driving_text` actually feeds Generate mode's own prompt
+    // (`hi_graph::confirmed_units`'s own filter).
+    if (node.kind === 'CodeUnit') {
+      buildAttributeForm(panel, node);
     }
 
     const impactHeading = document.createElement('div');
