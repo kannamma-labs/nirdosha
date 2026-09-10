@@ -215,9 +215,24 @@ repo's RFCs, on purpose — see the status note at the top.
    symbol lands "in the 3D view," which only exists if the webview is
    still open at that point) — not re-entered per mode. Control
    returns to the RFC 0013 base console once that excursion ends
-   (publish completes, or the user backs out). Still open: the local
-   JSON API's own shape — what `.nir/realm.db` needs to expose for the
-   graph to render/update live.
+   (publish completes, or the user backs out).
+
+   **"13 as the base" means the data model, not just the entry point —
+   confirmed, and worth being explicit about since it's more
+   fundamental than which mode starts where.** RFC 0014 introduces no
+   new or parallel data structure. The webview's local JSON API is a
+   pure read/write projection over the exact same `.nir/realm.db`
+   schema RFC 0013 already defines — the same `nodes`/`edges`/
+   `provenance` tables, the same `CodeUnit`/`Requirement` identity and
+   `content_hash`/`possibly_stale` semantics. The `ratatui` console and
+   the webview are two UIs over one graph, not one graph each — a
+   `:impact` run from the base console and a click in the 3D view
+   reflect the identical underlying state, always. Still open: the
+   API's exact shape (which queries it needs beyond what `realm::ask`/
+   `realm::impact` already expose, and how live updates propagate to
+   the graph while it's open) — the *that it's the same schema*
+   question is settled, the *what the API surface looks like* question
+   isn't.
 3. **Two different generation strategies need reconciling.** RFC
    0012's `generate_and_build` treats model output as one opaque
    `.nir` blob with a whole-program self-repair loop; this RFC's
