@@ -53,7 +53,17 @@ r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24", default-features = false, features = ["bundled"] }
 r2d2_postgres = "0.18"
 signal-hook = { version = "0.4", default-features = false }
-wry = "0.57.0"
+# `linux-body`: on Linux (WebKitGTK), `wry`'s custom-protocol handler
+# silently reads an *empty* body for every POST request unless this
+# feature is on (`webkit2gtk`'s `v2_40` API is what actually exposes
+# reading a URI-scheme request's HTTP body) -- confirmed by a real
+# failure, not a guess: `hi_api.rs`'s POST routes (rfcs/0014's Build/
+# Generate/Publish write surface) all reported "missing required body
+# param" from inside the real build-mode window, even though the
+# page's own `fetch(..., {method:'POST', body:...})` calls were sending
+# one. macOS (WKWebView)/Windows (WebView2) read the body unconditionally
+# already -- this feature only changes the Linux backend's behavior.
+wry = { version = "0.57.0", features = ["linux-body"] }
 tao = "0.37.0"
 
 # `dist`: statically vendors Z3 (compiles it from source via `z3-src`)
