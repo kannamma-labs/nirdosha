@@ -433,7 +433,7 @@ fn cmd_hi(_args: impl Iterator<Item = String>) -> ExitCode {
 /// the RFC's "Physical layout, and when it gets created."
 fn cmd_realm(mut args: impl Iterator<Item = String>) -> ExitCode {
     let Some(sub) = args.next() else {
-        eprintln!("usage: nirdosha realm <ingest|sync|link|impact|serve> ...");
+        eprintln!("usage: nirdosha realm <ingest|sync|link|impact|serve|window> ...");
         return ExitCode::FAILURE;
     };
     let cwd = match std::env::current_dir() {
@@ -538,8 +538,25 @@ fn cmd_realm(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
             }
         }
+        "window" => {
+            // rfcs/0014's own resolved build-mode surface: a native
+            // `tao` window with a `wry`-embedded webview, answered
+            // through a custom `hi://` protocol handler -- no network
+            // port at all (contrast `serve` above, the documented
+            // headless fallback). Drop this validating connection
+            // first, same reason `serve` does: the window's own
+            // protocol handler opens its own per-request connections.
+            drop(conn);
+            match nirdosha::realm_window::open(&cwd) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         other => {
-            eprintln!("unknown `realm` subcommand `{other}` -- usage: nirdosha realm <ingest|sync|link|impact|serve> ...");
+            eprintln!("unknown `realm` subcommand `{other}` -- usage: nirdosha realm <ingest|sync|link|impact|serve|window> ...");
             ExitCode::FAILURE
         }
     }

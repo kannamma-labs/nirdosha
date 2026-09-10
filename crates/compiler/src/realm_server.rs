@@ -1,11 +1,16 @@
-//! Local HTTP surface for Realm (rfcs/0014-generative-build-console.md)
-//! — a read-only JSON API over `.nir/realm.db`, plus a small placeholder
-//! page, for the native window shell (`realm_window.rs`) to load. This
-//! is deliberately the *foundation* slice only: proving the local-
-//! server → window pipeline works end to end, not RFC 0014's full
-//! build-mode editing surface (no write endpoints, no live updates, no
-//! filtering beyond a hard cap) — see that RFC's own Open Questions for
-//! what the API's eventual real shape still needs to answer.
+//! Headless local HTTP fallback for Realm build mode
+//! (rfcs/0014-generative-build-console.md). The RFC's own resolved
+//! default transport is `realm_window.rs`'s `wry` custom-protocol
+//! handler — "no network port at all" — because it closes CSRF/DNS-
+//! rebinding/port-squatting risk classes a real socket can't avoid.
+//! This module *is* that real socket: the RFC's own documented
+//! fallback for headless/scripting/CI use (`nirdosha realm serve`),
+//! never the default a user hits by opening build mode normally. Both
+//! transports share one route table (`realm_api::handle`) and differ
+//! only in how they translate their native request/response types at
+//! the edge, plus the hardening this module's own real network
+//! exposure requires and `realm_window.rs`'s doesn't (see
+//! `has_browser_origin` below).
 //!
 //! `tiny_http` is already a workspace dependency
 //! (`crates/compiler/Cargo.toml`, used elsewhere for `compiled-serve`-
@@ -15,41 +20,9 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use rusqlite::Connection;
-use serde::Serialize;
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Response, Server};
 
-/// Every `nodes`/`edges` listing is hard-capped, never unbounded —
-/// rfcs/0013's own "every expensive operation is bounded" principle,
-/// applied here to an HTTP response instead of a graph traversal.
-const MAX_ROWS: u32 = 2000;
-
-const PLACEHOLDER_HTML: &str = r#"<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Nirdosha Realm</title>
-<style>
-  body { font-family: ui-monospace, monospace; background: #0b0b12; color: #e8e8f0; padding: 2rem; }
-  h1 { color: #ef9f30; }
-  pre { background: #15151f; padding: 1rem; border-radius: 6px; overflow: auto; max-height: 70vh; }
-</style>
-</head>
-<body>
-<h1>Nirdosha Realm</h1>
-<p id="status">connecting…</p>
-<pre id="nodes"></pre>
-<script>
-fetch('/api/nodes').then(r => r.json()).then(data => {
-  document.getElementById('status').textContent = data.length + ' node(s) in .nir/realm.db';
-  document.getElementById('nodes').textContent = JSON.stringify(data, null, 2);
-}).catch(e => {
-  document.getElementById('status').textContent = 'error: ' + e;
-});
-</script>
-</body>
-</html>
-"#;
+use crate::realm_api::{self, ApiResponse};
 
 pub struct ServerHandle {
     pub port: u16,
@@ -68,17 +41,7 @@ pub fn serve(root: &Path) -> Result<ServerHandle, String> {
         .name("nirdosha-realm-server".to_string())
         .spawn(move || {
             for request in server.incoming_requests() {
-                // A fresh connection per request — `rusqlite::Connection`
-                // isn't `Sync`, and a request-per-connection is cheap for
-                // a local, single-user, low-QPS API like this one, not
-                // the pooled/admission-controlled model RFC 0011 built
-                // for a *compiled program's* own `db_connect` — this is
-                // host-tooling, same "no cross-workspace pooling" reason
-                // `hi`'s own LLM client already gives (RFC 0012).
-                let response = match crate::realm::open(&root) {
-                    Ok(conn) => route(&request, &conn),
-                    Err(e) => error_response(500, &e),
-                };
+                let response = respond(&root, &request);
                 let _ = request.respond(response);
             }
         })
@@ -98,148 +61,18 @@ fn has_browser_origin(request: &tiny_http::Request) -> bool {
     request.headers().iter().any(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin"))
 }
 
-fn route(request: &tiny_http::Request, conn: &Connection) -> Response<Cursor<Vec<u8>>> {
+fn respond(root: &Path, request: &tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
     if has_browser_origin(request) {
-        return error_response(403, "this local API does not accept browser-originated requests");
+        return to_tiny_http(ApiResponse::error(403, "this local API does not accept browser-originated requests"));
     }
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
-    match (request.method(), path) {
-        (Method::Get, "/") => html_response(PLACEHOLDER_HTML),
-        (Method::Get, "/api/nodes") => match list_nodes(conn) {
-            Ok(rows) => json_response(&rows),
-            Err(e) => error_response(500, &e),
-        },
-        (Method::Get, "/api/edges") => match list_edges(conn) {
-            Ok(rows) => json_response(&rows),
-            Err(e) => error_response(500, &e),
-        },
-        (Method::Get, "/api/impact") => match query_param(query, "target") {
-            Some(target) => match crate::realm::impact(conn, &target) {
-                Ok(report) => json_response(&report),
-                Err(e) => error_response(400, &e),
-            },
-            None => error_response(400, "missing required query param `target`"),
-        },
-        (Method::Get, "/api/ask") => match query_param(query, "q") {
-            Some(q) => match crate::realm::ask(conn, &q) {
-                Ok(hits) => json_response(&hits),
-                Err(e) => error_response(500, &e),
-            },
-            None => error_response(400, "missing required query param `q`"),
-        },
-        _ => error_response(404, "not found"),
-    }
+    let method = request.method().as_str();
+    to_tiny_http(realm_api::handle(root, method, path, query))
 }
 
-/// A minimal `?key=value&key2=value2` extractor with percent-decoding —
-/// deliberately hand-rolled rather than a new dependency (`url`'s
-/// `form_urlencoded` would do this, but isn't a direct dependency here
-/// and pulling it in for a ~15-line utility isn't worth it, the same
-/// "no dependency this repo doesn't already need" posture the rest of
-/// this project holds itself to).
-fn query_param(query: &str, key: &str) -> Option<String> {
-    query.split('&').find_map(|pair| {
-        let (k, v) = pair.split_once('=')?;
-        if k == key {
-            Some(percent_decode(v))
-        } else {
-            None
-        }
-    })
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    out.push(byte);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn html_response(body: &str) -> Response<Cursor<Vec<u8>>> {
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).expect("static header is always valid");
-    Response::from_string(body.to_string()).with_header(header)
-}
-
-fn json_response<T: Serialize>(value: &T) -> Response<Cursor<Vec<u8>>> {
-    match serde_json::to_string(value) {
-        Ok(body) => {
-            let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("static header is always valid");
-            Response::from_string(body).with_header(header)
-        }
-        Err(e) => error_response(500, &format!("serializing response: {e}")),
-    }
-}
-
-fn error_response(code: u32, message: &str) -> Response<Cursor<Vec<u8>>> {
-    let body = serde_json::json!({ "error": message }).to_string();
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("static header is always valid");
-    Response::from_string(body).with_status_code(tiny_http::StatusCode(code as u16)).with_header(header)
-}
-
-#[derive(Serialize)]
-struct NodeRow {
-    id: String,
-    kind: String,
-    title: Option<String>,
-    status: Option<String>,
-    content_hash: Option<String>,
-    source_ref: Option<String>,
-    line: Option<i64>,
-    col: Option<i64>,
-}
-
-fn list_nodes(conn: &Connection) -> Result<Vec<NodeRow>, String> {
-    let mut stmt = conn
-        .prepare("SELECT id, kind, title, status, content_hash, source_ref, line, col FROM nodes LIMIT ?1")
-        .map_err(|e| format!("preparing node listing: {e}"))?;
-    let rows = stmt
-        .query_map([MAX_ROWS], |r| {
-            Ok(NodeRow { id: r.get(0)?, kind: r.get(1)?, title: r.get(2)?, status: r.get(3)?, content_hash: r.get(4)?, source_ref: r.get(5)?, line: r.get(6)?, col: r.get(7)? })
-        })
-        .map_err(|e| format!("listing nodes: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("reading node row: {e}"))?;
-    Ok(rows)
-}
-
-#[derive(Serialize)]
-struct EdgeRow {
-    src: String,
-    dst: String,
-    kind: String,
-    flag: Option<String>,
-    flag_reason: Option<String>,
-}
-
-fn list_edges(conn: &Connection) -> Result<Vec<EdgeRow>, String> {
-    let mut stmt = conn.prepare("SELECT src, dst, kind, flag, flag_reason FROM edges LIMIT ?1").map_err(|e| format!("preparing edge listing: {e}"))?;
-    let rows = stmt
-        .query_map([MAX_ROWS], |r| Ok(EdgeRow { src: r.get(0)?, dst: r.get(1)?, kind: r.get(2)?, flag: r.get(3)?, flag_reason: r.get(4)? }))
-        .map_err(|e| format!("listing edges: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("reading edge row: {e}"))?;
-    Ok(rows)
+fn to_tiny_http(resp: ApiResponse) -> Response<Cursor<Vec<u8>>> {
+    let header = Header::from_bytes(&b"Content-Type"[..], resp.content_type.as_bytes()).expect("static header is always valid");
+    Response::from_data(resp.body).with_status_code(tiny_http::StatusCode(resp.status)).with_header(header)
 }
 
 #[cfg(test)]
@@ -254,23 +87,9 @@ mod tests {
         path
     }
 
-    #[test]
-    fn percent_decode_handles_plus_and_hex_escapes() {
-        assert_eq!(percent_decode("hello+world"), "hello world");
-        assert_eq!(percent_decode("a%20b%3F"), "a b?");
-        assert_eq!(percent_decode("plain"), "plain");
-    }
-
-    #[test]
-    fn query_param_finds_the_named_key_among_several() {
-        assert_eq!(query_param("a=1&b=hello+world&c=3", "b"), Some("hello world".to_string()));
-        assert_eq!(query_param("a=1", "missing"), None);
-        assert_eq!(query_param("", "a"), None);
-    }
-
     /// Real end-to-end: start the server, make a real HTTP request over
     /// loopback, parse the real JSON response — not just unit-testing
-    /// the route function in isolation.
+    /// the route function in isolation (that's `realm_api`'s own tests).
     #[test]
     fn serve_answers_api_nodes_over_a_real_http_request() {
         let dir = scratch_dir("nodes_http");

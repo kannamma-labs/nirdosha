@@ -1,16 +1,33 @@
 # RFC 0014: The generative build console — prompt → build → generate → publish, over an interactive Realm graph
 
-> **Status: speculative design capture, nothing built.** This RFC
-> transcribes a design conversation (2026-09-10) that deliberately
-> worked "alternate reality" first — lay out the whole shape of the
-> idea before checking any of it against what's actually feasible —
-> and is written down at that stage on purpose, not after a feasibility
-> pass. Treat this as a proposal to react to and cut down, not a
-> committed roadmap. Section "Open questions" below carries more real,
-> unresolved weight than usual for this repo's RFCs, on purpose — most
-> of the load-bearing questions are answered directly in Design, where
-> the answer actually belongs; what's left there is what's genuinely
-> still undecided.
+> **Status: mostly speculative design capture; one real foundation
+> slice shipped 2026-09-10.** This RFC transcribes a design
+> conversation (2026-09-10) that deliberately worked "alternate
+> reality" first — lay out the whole shape of the idea before checking
+> any of it against what's actually feasible — and is written down at
+> that stage on purpose, not after a feasibility pass. Treat this as a
+> proposal to react to and cut down, not a committed roadmap. Section
+> "Open questions" below carries more real, unresolved weight than
+> usual for this repo's RFCs, on purpose — most of the load-bearing
+> questions are answered directly in Design, where the answer actually
+> belongs; what's left there is what's genuinely still undecided.
+>
+> **What's actually real so far** (`nirdosha realm window`): the
+> "Rendering surface" resolved-decision below is built and verified —
+> a `tao` native window with a `wry`-embedded webview, answered through
+> a custom `hi://` protocol handler with no network port at all
+> (`crates/compiler/src/realm_window.rs`), calling the same read-only
+> route table (`crates/compiler/src/realm_api.rs`: `/api/nodes`,
+> `/api/edges`, `/api/impact`, `/api/ask`) that also backs
+> `nirdosha realm serve`, the documented headless/network fallback
+> (`crates/compiler/src/realm_server.rs`) this section calls for. What
+> that window actually shows is still `realm_api::PLACEHOLDER_HTML`,
+> not the 3D graph — the vendored `three.js`/`3d-force-graph` page,
+> instanced rendering, delta updates, the WebGL-fallback-to-2D path,
+> and the `wry` IPC channel for live state are all still unbuilt.
+> Everything else in this RFC (prompt mode's population pass, build
+> mode's actual graph interactions, generate mode, publish mode, the
+> capability/funnel gates) is unbuilt design, not running code.
 >
 > **Scope.** This RFC covers every way a human sees or interacts with
 > the Realm graph via `hi`, not only the 3D webview below. `hi`'s
