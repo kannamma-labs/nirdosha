@@ -349,6 +349,12 @@
   }
 
   function run3D(data) {
+    // Tracked separately from whatever `data`/`fresh` a given call was
+    // built from -- `onEngineStop` fires again after every later
+    // `graphData()` update too (a reload reheats the simulation, not
+    // just the initial load), so it needs the *current* counts, not the
+    // ones captured in this function's own initial closure.
+    let current = data;
     const Graph = new ForceGraph3D(document.getElementById('graph'))
       .backgroundColor('#0b0b12')
       .graphData(data)
@@ -361,9 +367,22 @@
       .linkDirectionalArrowRelPos(1)
       .d3VelocityDecay(0.5)
       .onNodeClick(onNodeSelected)
-      .onEngineStop(() => setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s)'));
+      .onEngineStop(() => {
+        setStatus(current.nodes.length + ' node(s), ' + current.links.length + ' edge(s)');
+        // `graphData()` never re-frames the camera on its own -- without
+        // this, a reload that adds nodes to a previously near-empty (or
+        // empty) graph leaves them rendered outside the camera's current
+        // view, indistinguishable from "the graph didn't update."
+        Graph.zoomToFit(400, 60);
+      });
     setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s) · settling…');
-    reloadGraph = () => fetchGraphData().then(fresh => Graph.graphData(fresh)).catch(err => reportError('reloading graph data', err));
+    reloadGraph = () =>
+      fetchGraphData()
+        .then(fresh => {
+          current = fresh;
+          Graph.graphData(fresh);
+        })
+        .catch(err => reportError('reloading graph data', err));
   }
 
   // A small, real (not stubbed) 2D fallback for when WebGL isn't
