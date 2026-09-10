@@ -262,8 +262,23 @@ fn extract_nir_source(raw: &str) -> String {
 const MAX_SELF_REPAIR_ATTEMPTS: u32 = 3;
 
 fn units_prompt(units: &[CandidateUnit]) -> String {
+    // A real generation failure, root-caused rather than guessed at:
+    // `populate_candidates`'s own system prompt asks for the
+    // *conceptual* components a description implies (for a game:
+    // `tick`, `move_piece`, ...) -- `main` is never one of those, so it
+    // never lands in the confirmed set this function builds a prompt
+    // from. The old wording here ("containing exactly the following
+    // components") then read, correctly, as an instruction to leave
+    // `main` out entirely -- and because that instruction sits at the
+    // *start* of the conversation, every later self-repair retry
+    // ("fix it and reply with the corrected source") inherited the same
+    // conflict without ever being told it no longer applies, so the
+    // model kept regenerating the same main()-less shape across all
+    // `MAX_SELF_REPAIR_ATTEMPTS` tries. Naming `fn main()` explicitly
+    // here, once, up front, fixes every retry at the source instead of
+    // patching each one around a standing contradiction.
     let mut out = String::from(
-        "Implement a single Nirdosha (.nir) program containing exactly the following components. Use each component's own exact name for its corresponding fn/struct/enum/screen declaration.\n\n",
+        "Implement a single Nirdosha (.nir) program. It must contain exactly the following named components, each using its own exact name below for the corresponding fn/struct/enum/screen declaration -- and it must ALSO contain a `fn main()`, even though `main` is not itself one of the named components: Nirdosha requires exactly one entry point to compile and run at all. `fn main()` should be a real body that wires the components below together and exercises the behavior they describe, not an empty stub.\n\n",
     );
     for u in units {
         out.push_str(&format!("### {} {}\n{}\n", u.kind, u.name, u.driving_text));
@@ -333,7 +348,18 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
                 }
                 on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed to compile, asking the model to fix it..."));
                 history.push(ChatMessage { role: "assistant", content: source });
-                history.push(ChatMessage { role: "user", content: format!("That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.") });
+                // Defense in depth on top of `units_prompt`'s own fix,
+                // not a substitute for it: a model that still drops
+                // `fn main()` despite the now-explicit instruction gets
+                // one more, pointed reminder rather than a generic "fix
+                // it" that repeats whatever ambiguity caused this in
+                // the first place.
+                let hint = if diagnostic.contains("no `fn main()` found") {
+                    " Add a `fn main()` -- it is required in addition to every named component from the original request, not instead of any of them."
+                } else {
+                    ""
+                };
+                history.push(ChatMessage { role: "user", content: format!("That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{hint}") });
             }
         }
     }
@@ -344,17 +370,31 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
 /// checks, *and* builds -- Generate mode's own lock definition
 /// (rfcs/0014: "a CodeUnit locks when its generated `.nir` both exists
 /// and builds successfully") means a typecheck pass alone isn't enough
-/// evidence. Runs against a throwaway PID-scoped temp file/binary
+/// evidence. Runs against a throwaway, per-call-unique temp file/binary
 /// (`loader::load_program` reads from a path, not a string) that's
 /// removed either way -- this never touches the stable generated-source
 /// path itself; only `generate_program`'s own caller, once this
 /// returns `Ok`, does that.
+///
+/// `SCRATCH_COUNTER`, not PID alone: PID is constant across every
+/// thread in this process, so two *concurrent* calls (two parallel
+/// `#[test]`s, or two real concurrent `hi_server.rs`/window requests --
+/// `hi_window.rs`'s own custom-protocol handler now spawns a thread per
+/// request specifically so slow calls like this one don't block the
+/// window) used to race on the exact same path, each one liable to
+/// overwrite the other's scratch file mid-write. A real, confirmed bug
+/// (not a defensive guess): two `#[test]`s sharing this function
+/// started flaking with exactly this symptom -- a parse error on
+/// content that was neither test's own source -- the moment a third,
+/// unrelated test made their scheduling interleave differently.
 fn typecheck_and_build_check(source: &str) -> Result<(), String> {
+    static SCRATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = SCRATCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut path = std::env::temp_dir();
-    path.push(format!("nirdosha_hi_generate_check_{}.nir", std::process::id()));
+    path.push(format!("nirdosha_hi_generate_check_{}_{unique}.nir", std::process::id()));
     std::fs::write(&path, source).map_err(|e| format!("writing a scratch file to typecheck: {e}"))?;
     let mut out_path = std::env::temp_dir();
-    out_path.push(format!("nirdosha_hi_generate_check_{}", std::process::id()));
+    out_path.push(format!("nirdosha_hi_generate_check_{}_{unique}", std::process::id()));
 
     let result = (|| -> Result<(), String> {
         let path_str = path.to_str().ok_or_else(|| format!("temp path {} is not valid UTF-8", path.display()))?;
@@ -412,6 +452,23 @@ mod tests {
         let redacted = activation.redacted_key();
         assert!(!redacted.contains("abcdefghijkl"));
         assert!(redacted.ends_with("mnop"));
+    }
+
+    #[test]
+    fn units_prompt_explicitly_requires_fn_main_even_when_no_unit_is_named_main() {
+        // Regression: a candidate set that never includes a `main`
+        // component (the ordinary case -- `populate_candidates`'s own
+        // system prompt asks for conceptual components, and `main`
+        // isn't one) used to produce a prompt read, correctly, as "do
+        // not add anything beyond these names" -- the model complied,
+        // Nirdosha requires exactly one `fn main()` to typecheck at
+        // all, and every self-repair retry inherited the same
+        // contradiction instead of ever being told it no longer
+        // applies. See units_prompt's own doc comment for the full RCA.
+        let units = vec![CandidateUnit { id: "code:fn:tick".to_string(), kind: "fn".to_string(), name: "tick".to_string(), driving_text: "advances the game clock".to_string(), attributes: vec![] }];
+        let prompt = units_prompt(&units);
+        assert!(prompt.contains("fn main()"), "the generate-mode prompt must explicitly require fn main(), got: {prompt}");
+        assert!(prompt.contains("not itself one of the named components") || prompt.contains("even though"), "the prompt should make clear main() is required in *addition* to the named components, not instead of asking for it plainly");
     }
 
     #[test]
