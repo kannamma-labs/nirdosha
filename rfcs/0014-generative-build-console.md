@@ -200,12 +200,20 @@ repo's RFCs, on purpose — see the status note at the top.
    "Build mode"'s own "Rendering surface" note above: `wry`+`tao`
    embedding `three.js`/`3d-force-graph`, served locally via
    `tiny_http`, mirroring `ui_gen.rs`/`codegen::build_serve`'s existing
-   pattern. What's still genuinely open under that decision: the local
-   JSON API's own shape (what does `.nir/realm.db` need to expose for
-   the graph to render/update live), and how `hi_tui.rs`'s existing
-   `ratatui` console and this new webview-window coexist in the same
-   process/session — does entering build mode replace the terminal UI,
-   run alongside it, or hand off entirely? Not designed.
+   pattern. ~~Coexistence with the existing `ratatui` console.~~
+   **Resolved: the webview replaces it, not runs alongside it.**
+   Entering build mode closes `hi_tui.rs`'s terminal UI outright — one
+   rendering surface active at a time, not two competing for the same
+   terminal/process, avoiding the split-UI complexity that alternative
+   would have meant. Still open under that: does the replacement
+   happen only for build mode and revert to `ratatui` afterward (e.g.
+   once generate/publish run), or does the webview stay the surface
+   for the rest of the session once entered — and does prompt mode
+   itself start in `ratatui` or already in the webview, given build
+   mode is the first point a graph is actually needed? Not specified.
+   Also still open: the local JSON API's own shape — what
+   `.nir/realm.db` needs to expose for the graph to render/update
+   live.
 3. **Two different generation strategies need reconciling.** RFC
    0012's `generate_and_build` treats model output as one opaque
    `.nir` blob with a whole-program self-repair loop; this RFC's
