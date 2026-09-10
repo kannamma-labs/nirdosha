@@ -53,7 +53,28 @@ pub fn open(root: &Path) -> Result<(), String> {
     let window = WindowBuilder::new().with_title("Nirdosha Hi").build(&event_loop).map_err(|e| format!("creating the build-mode window: {e}"))?;
 
     let builder = WebViewBuilder::new()
-        .with_custom_protocol(SCHEME.into(), move |_id, request| handle(&root, request))
+        // Asynchronous, not `with_custom_protocol` -- that synchronous
+        // variant runs `handle` inline on whatever thread wry's request
+        // dispatch uses, which on at least the GTK backend is also the
+        // thread driving the native event loop. A `:prompt`/`:generate`/
+        // `:publish`/`:ask`-fallback call can genuinely take a long time
+        // (an LLM round trip, a bounded self-repair compile loop) --
+        // running it there froze the *entire window*, not just the
+        // console, for the whole duration: no repaint, no JS timers (so
+        // the busy-spinner console caret this same session added never
+        // actually animated), no response to input, indistinguishable
+        // from a real hang. `std::thread::spawn` here keeps the native
+        // event loop pumping (repaints, the spinner's own `setInterval`)
+        // while the slow work happens off of it; `RequestAsyncResponder`
+        // (explicitly `Send`, built for exactly this) delivers the
+        // result back whenever it's ready, from whatever thread that is.
+        .with_asynchronous_custom_protocol(SCHEME.into(), move |_id, request, responder| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let response = handle(&root, request);
+                responder.respond(response);
+            });
+        })
         .with_ipc_handler(|request: Request<String>| {
             eprintln!("[hi-window] {}", request.body());
         })
