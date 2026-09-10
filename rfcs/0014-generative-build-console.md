@@ -205,15 +205,19 @@ repo's RFCs, on purpose — see the status note at the top.
    Entering build mode closes `hi_tui.rs`'s terminal UI outright — one
    rendering surface active at a time, not two competing for the same
    terminal/process, avoiding the split-UI complexity that alternative
-   would have meant. Still open under that: does the replacement
-   happen only for build mode and revert to `ratatui` afterward (e.g.
-   once generate/publish run), or does the webview stay the surface
-   for the rest of the session once entered — and does prompt mode
-   itself start in `ratatui` or already in the webview, given build
-   mode is the first point a graph is actually needed? Not specified.
-   Also still open: the local JSON API's own shape — what
-   `.nir/realm.db` needs to expose for the graph to render/update
-   live.
+   would have meant. ~~Which mode starts where.~~ **Resolved: RFC
+   0013's existing console (plain + `ratatui`, `:ask`/`:impact`/
+   `:explain`, `Command::Request`) is the base — prompt mode starts
+   there, unchanged, exactly as it does today.** Entering build mode
+   is what triggers the webview, and it stays the active surface
+   through build → generate → publish as one continuous excursion (RFC
+   0014's own generate-mode text already implies this — the lock
+   symbol lands "in the 3D view," which only exists if the webview is
+   still open at that point) — not re-entered per mode. Control
+   returns to the RFC 0013 base console once that excursion ends
+   (publish completes, or the user backs out). Still open: the local
+   JSON API's own shape — what `.nir/realm.db` needs to expose for the
+   graph to render/update live.
 3. **Two different generation strategies need reconciling.** RFC
    0012's `generate_and_build` treats model output as one opaque
    `.nir` blob with a whole-program self-repair loop; this RFC's
