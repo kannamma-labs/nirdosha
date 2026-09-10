@@ -35,6 +35,10 @@ Paste [`agent-skills/nirdosha/paste-anywhere-prompt.md`](./agent-skills/nirdosha
 
 That exact prompt has produced a working **e-commerce store**, a **food-delivery platform**, a **telecom revenue-assurance system**, and an **online trading platform** — each hundreds of lines, each from an LLM with zero prior Nirdosha exposure. Mechanism and evidence: [LLM Integration](https://github.com/kannamma-labs/nirdosha/wiki/LLM-Integration).
 
+## The part that isn't a demo — a real prompt injection, two agents
+
+[`examples/attack_demo/`](./examples/attack_demo/) puts that claim in an adversarial frame: the same indirect prompt injection, against the same HR-directory tool, built two ways. Agent A (system-prompt guardrail + JSON schema, the way most agents ship today) leaks a masked salary and lets an attacker's `<script>` tag land unescaped in a real HTML file. Agent B — the same tool, compiled with Nirdosha — receives the identical attack and can't leak it, because the masked field's value is closed to `{0}` at compile time, not guarded by a runtime check the injection could argue past. A companion file shows what happens when an agent tries to route around that anyway: a real compiler error, captured verbatim. Fully reproducible, no API key required — see the demo's own README and [`RESULTS.md`](./examples/attack_demo/RESULTS.md) for exact commands and unedited output.
+
 ## Why you won't be waiting on us
 
 > 💡 **[A Language Is Only as Good as Its Ecosystem](https://github.com/kannamma-labs/nirdosha/wiki/A-Language-Is-Only-as-Good-as-Its-Ecosystem)** — every capability a compiled `.nir` binary has is an ordinary Rust crate underneath, so Nirdosha's capability ceiling is Rust's. Databases, TLS, JWT, Redis — reachable by design, not by waiting on maintainers. *"Good artists copy, great artists steal."*
