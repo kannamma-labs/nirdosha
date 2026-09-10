@@ -772,11 +772,19 @@
     }
     if (line === ':confirm' || line.startsWith(':confirm ')) {
       const node = line.slice(':confirm'.length).trim();
-      if (!node) { logLine('error', 'usage: :confirm <node-id>'); return; }
-      postForm('/api/confirm', { node })
+      // No argument at all means "everything is to be compiled" --
+      // confirms every still-unconfirmed, non-waived candidate in one
+      // call, not just the one node an id would name.
+      postForm('/api/confirm', node ? { node } : {})
         .then(({ status, body }) => {
           if (status !== 200) { logLine('error', body.error || ('request failed: ' + status)); return; }
-          logLine('', 'confirmed ' + node);
+          if (node) {
+            logLine('', 'confirmed ' + node);
+          } else if (body.confirmed.length === 0) {
+            logLine('', 'nothing left to confirm.');
+          } else {
+            logLine('', 'confirmed ' + body.confirmed.length + ' candidate(s): ' + body.confirmed.join(', '));
+          }
           return reloadGraph && reloadGraph();
         })
         .catch(err => { logLine('error', String(err)); reportError('console :confirm', err); });
@@ -883,7 +891,7 @@
         .catch(err => { logLine('error', String(err)); reportError('console :publish', err); });
       return;
     }
-    logLine('error', "unrecognized command -- try :prompt <description>, :confirm/:delete/:edit/:attach/:waive/:unwaive <node-id> ..., :generate, :publish, :ask <question>, or :impact <target>.");
+    logLine('error', "unrecognized command -- try :prompt <description>, :confirm [<node-id>] (no id = confirm everything), :delete/:edit/:attach/:waive/:unwaive <node-id> ..., :generate, :publish, :ask <question>, or :impact <target>.");
   }
 
   function initConsole() {
@@ -895,7 +903,7 @@
         handleConsoleSubmit(value);
       }
     });
-    logLine('', 'connected -- :prompt <description> to populate the graph, :confirm <node-id> to review a candidate, :generate to compile, :publish to build the final binary, :ask <question> / :impact <target> to query.');
+    logLine('', 'connected -- :prompt <description> to populate the graph, :confirm <node-id> (or bare :confirm for everything) to review, :generate to compile, :publish to build the final binary, :ask <question> / :impact <target> to query.');
   }
 
   // ---- UI zoom: Ctrl/Cmd +/- and Ctrl/Cmd 0, same as every other

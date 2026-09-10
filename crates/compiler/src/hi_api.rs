@@ -216,13 +216,20 @@ fn handle_prompt(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
     ApiResponse::json(&serde_json::json!({ "ok": true, "nodes_added": ids.len(), "edges_added": edges_added, "nodes": ids }))
 }
 
+/// `node` omitted (no body, or a body with no `node` param) means
+/// "everything is to be compiled" -- confirms every still-unconfirmed,
+/// non-waived candidate in one call (`hi_graph::confirm_all`) rather
+/// than requiring one request per node.
 fn handle_confirm(conn: &Connection, body: &[u8]) -> ApiResponse {
-    let Some(node) = body_param(body, "node") else {
-        return ApiResponse::error(400, "missing required body param `node`");
-    };
-    match crate::hi_graph::confirm_node(conn, &node) {
-        Ok(()) => ok_response(),
-        Err(e) => ApiResponse::error(400, &e),
+    match body_param(body, "node") {
+        Some(node) => match crate::hi_graph::confirm_node(conn, &node) {
+            Ok(()) => ok_response(),
+            Err(e) => ApiResponse::error(400, &e),
+        },
+        None => match crate::hi_graph::confirm_all(conn) {
+            Ok(ids) => ApiResponse::json(&serde_json::json!({ "ok": true, "confirmed": ids })),
+            Err(e) => ApiResponse::error(500, &e),
+        },
     }
 }
 
@@ -632,5 +639,25 @@ mod tests {
         let resp = handle(&dir, "POST", "/api/publish", "", b"");
         assert_eq!(resp.status, 400);
         assert!(String::from_utf8_lossy(&resp.body).contains("nothing generated"));
+    }
+
+    #[test]
+    fn confirm_with_no_node_param_confirms_everything() {
+        let dir = scratch_dir("confirm_all_http");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let a = crate::hi_graph::add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add a");
+        let b = crate::hi_graph::add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add b");
+        drop(conn);
+
+        let resp = handle(&dir, "POST", "/api/confirm", "", b"");
+        assert_eq!(resp.status, 200, "bulk confirm should succeed: {}", String::from_utf8_lossy(&resp.body));
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
+        let confirmed: Vec<String> = body["confirmed"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(confirmed.contains(&a));
+        assert!(confirmed.contains(&b));
+
+        let resp = handle(&dir, "GET", "/api/nodes", "", b"");
+        let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
+        assert!(nodes.iter().all(|n| n["confirmed"] == 1), "every candidate should now be confirmed");
     }
 }
