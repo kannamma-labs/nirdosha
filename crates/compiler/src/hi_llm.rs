@@ -204,6 +204,29 @@ pub fn populate_candidates(client: &LlmClient, prompt: &str) -> Result<Vec<Promp
     Ok(candidates)
 }
 
+const ANSWER_QUESTION_SYSTEM_PROMPT: &str = "You answer questions about a software project for the person building it. \
+You are given a plain-text summary of the project's own components (name: description, one per line) -- use ONLY that summary, never outside knowledge about unrelated software. \
+If the summary doesn't actually contain enough information to answer, say so plainly rather than guessing or inventing detail.";
+
+/// The whole-project fallback `hi_api.rs`'s `/api/ask` route reaches
+/// for once `hi_graph::ask`'s own local keyword search comes up empty
+/// -- "what is this project about" matches no single `CodeUnit`'s name
+/// or driving text, because it was never really about any one node.
+/// **A deliberate, bounded exception to RFC 0014's "semantic search
+/// stays opt-in, not a default" posture (Open Question 8), not a
+/// silent violation of it:** that open question is about *embedding-
+/// based* similarity search running proactively over every query; this
+/// is a plain chat completion, triggered only as a fallback after local
+/// search already found nothing, and only when an LLM is already
+/// configured -- the same one `:prompt`/`:generate` already send
+/// driving text to, so this adds no new category of external exposure,
+/// just a second use of the same already-opted-into channel.
+pub fn answer_question(client: &LlmClient, question: &str, project_context: &str) -> Result<String, String> {
+    let context = if project_context.is_empty() { "(no code units in this project's graph yet)".to_string() } else { format!("Project summary (component: description):\n{project_context}") };
+    let history = [ChatMessage { role: "system", content: ANSWER_QUESTION_SYSTEM_PROMPT.to_string() }, ChatMessage { role: "user", content: format!("{context}\nQuestion: {question}") }];
+    client.complete(&history)
+}
+
 /// The model's response can (and often does) wrap the JSON array in
 /// prose or a markdown fence despite being told not to -- find the
 /// outermost `[...]` rather than requiring the response to be nothing
