@@ -7,15 +7,19 @@
 > deliberately *not* `loader::load_program` — see that function's own
 > doc comment for why); bounded bidirectional impact queries
 > (`realm::impact`, depth/node-capped, `partial: true` on exhaustion);
-> manual `realm link`; a minimal `realm ingest`/`:ask` FTS5 path; the
+> manual `realm link`; a minimal `realm ingest`/FTS5 path; the
 > `nirdosha realm <ingest|sync|link|impact>` CLI surface
 > (`main.rs::cmd_realm`); and `hi`'s own auto-scaffold-on-startup
-> (`hi::open_realm_or_warn`, gated on `NIRDOSHA_REALM_DISABLE`) plus its
-> two new console verbs, `:ask`/`:impact`. All covered by real,
-> passing unit tests (`realm.rs`'s own `#[cfg(test)]` module) and
-> exercised end-to-end by hand against a real `.nir` file (`nirdosha
-> hi` piped a `:ask`/`:impact` session, `nirdosha realm sync`/`link`/
-> `impact`/`ingest` run standalone) — not just compiled.
+> (`hi::open_realm_or_warn`, gated on `NIRDOSHA_REALM_DISABLE`). All
+> covered by real, passing unit tests (`realm.rs`'s own `#[cfg(test)]`
+> module) and exercised end-to-end by hand against a real `.nir` file
+> (`nirdosha realm sync`/`link`/`impact`/`ingest` run standalone) — not
+> just compiled. `hi`'s interactive console verbs, `:ask`/`:impact`,
+> were also shipped as part of this same v1 pass (`hi.rs`'s
+> `Command::Ask`/`Command::Impact`, calling the query functions below)
+> — that code is real and unchanged, but its RFC-level home moved to
+> RFC 0014 in a later revision of this document: this RFC now owns the
+> graph and its query functions, not how a human sees the results.
 >
 > One correction the implementation surfaced against this RFC's own
 > earlier text: the "Adding `rusqlite`'s `fts5` feature" open question
@@ -348,14 +352,19 @@ nirdosha realm impact <target>         non-interactive impact report
                                         qualified CodeUnit name)
 ```
 
-plus two new `hi` console verbs, alongside the existing `:explain`
-(RFC 0012):
-
-```text
-:ask <question>       FTS-backed Q&A over ingested requirements/
-                        decisions/code (closes RFC 0012 capability 5)
-:impact <target>       same report as `realm impact`, inline
-```
+This is the whole of this RFC's own UI surface — a scriptable,
+non-interactive CLI, deliberately. `hi`'s own interactive console
+verbs (`:ask`/`:impact`) were built as part of this RFC's shipped v1
+(real, committed code — `hi.rs`'s `Command::Ask`/`Command::Impact`)
+and that history doesn't change; but their *description* and further
+evolution now belong to RFC 0014, not here — Realm's own remit is "the
+graph and a programmatic way to query it," the same "data model, not
+the UI built on top of it" split RFC 0014 itself settled on. `hi`'s
+console verbs, and any richer rendering of the same query results
+(RFC 0014's 3D view included), all call the exact same `realm::ask`/
+`realm::impact` functions this RFC owns — this RFC owns the query
+functions; RFC 0014 owns every way a human ends up looking at their
+results, text console included.
 
 `realm sync`/`realm impact` are ordinary batch subcommands, following
 the same per-command arg-loop dispatch style as `init`/`build`
