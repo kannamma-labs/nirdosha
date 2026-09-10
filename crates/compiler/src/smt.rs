@@ -519,11 +519,15 @@ impl Checker<'_> {
                     _ => unreachable!(),
                 }
             }
-            BinOp::Div => {
+            BinOp::Div | BinOp::Rem => {
                 // Dividend is still visited (for its own nested proofs —
                 // e.g. a division inside it), just not bound to a named
-                // term: division's result is deliberately never modeled
-                // (module doc), so there's nothing to combine it with.
+                // term: division's (and remainder's) result is
+                // deliberately never modeled (module doc), so there's
+                // nothing to combine it with. `codegen.rs::
+                // guard_nonzero_divisor` keys off the same span either
+                // way -- a `%` by a provably-nonzero divisor skips its
+                // runtime trap check exactly like a `/` does.
                 self.expr(lhs, scopes);
                 let r = self.expr(rhs, scopes);
                 if prove_nonzero(self.solver, &r) {

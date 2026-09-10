@@ -267,6 +267,14 @@ generate *valid* Nirdosha on the first try.
     primary expression, and the parser never gives a call's own
     result another pass through that rule. Bind the call to a `let`
     first: `let s: Text = source_label(t.source)` then use `s.value`.
+16. **`%` is a real operator — truncating remainder, same precedence
+    as `*`/`/` — for `i64`/`f64` only.** `x % board_width`,
+    `seconds % 60` work exactly like C/Rust: the result's sign follows
+    the dividend (`-7 % 3` is `-1`, not `2`), and `n % 0` traps at
+    runtime (a real abort, same as `n / 0`) rather than ever silently
+    producing a wrong or NaN-looking `i64`. There is no `dec128`
+    (`Money`) remainder — a type error, not a runtime failure, if you
+    try `some_money % other_money`.
 
 A fast-scan companion to the rules above — every pair below is
 verified against the real compiler, not hypothetical.

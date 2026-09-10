@@ -227,6 +227,9 @@ pub enum Tok {
     Minus,
     Star,
     Slash,
+    /// `%` — truncating remainder (`ast::BinOp::Rem`), same precedence
+    /// slot as `Star`/`Slash`.
+    Percent,
     EqEq,
     NotEq,
     Lt,
@@ -516,6 +519,7 @@ impl<'a> Lexer<'a> {
                         b'-' => Tok::Minus,
                         b'*' => Tok::Star,
                         b'/' => Tok::Slash,
+                        b'%' => Tok::Percent,
                         b'<' => Tok::Lt,
                         b'>' => Tok::Gt,
                         b'!' => Tok::Bang,
