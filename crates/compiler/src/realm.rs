@@ -422,6 +422,7 @@ fn resolve_any_node_id(conn: &Connection, target: &str) -> Result<String, String
 /// every edge touching a node (either as `src` or `dst`) reaches
 /// whichever side is relevant regardless of which kind of id `target`
 /// names.
+#[derive(serde::Serialize)]
 pub struct ImpactHit {
     pub node_id: String,
     pub kind: String,
@@ -442,6 +443,7 @@ pub struct ImpactHit {
     pub col: Option<i64>,
 }
 
+#[derive(serde::Serialize)]
 pub struct ImpactReport {
     pub hits: Vec<ImpactHit>,
     pub partial: bool,
@@ -531,6 +533,7 @@ pub fn ingest_document(conn: &Connection, path: &Path) -> Result<usize, String> 
     Ok(new_chunks)
 }
 
+#[derive(serde::Serialize)]
 pub struct AskHit {
     pub doc_id: String,
     pub content: String,
