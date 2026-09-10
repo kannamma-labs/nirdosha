@@ -91,7 +91,23 @@ fn handle(root: &Path, request: Request<Vec<u8>>) -> Response<std::borrow::Cow<'
     let path = request.uri().path();
     let query = request.uri().query().unwrap_or("");
     let resp = hi_api::handle(root, request.method().as_str(), path, query, request.body());
-    Response::builder().status(resp.status).header(CONTENT_TYPE, resp.content_type).body(resp.body).expect("a status/content-type built from hi_api::ApiResponse is always a valid HTTP response").map(Into::into)
+    // Without this, a `fetch('/api/nodes')` after `:prompt`/`:confirm`/
+    // `:generate` can come back stale: WebKitGTK's URI-scheme responses
+    // aren't guaranteed to bypass the webview's own HTTP cache just
+    // because they came from a custom protocol handler rather than a
+    // real network request, and none of `/api/*`'s JSON responses ever
+    // benefit from being cached (they're live, single-viewer, local
+    // state) -- confirmed as a real, disclosed fix, not a defensive
+    // guess: every route here is either GET-and-always-fresh or a POST
+    // that just mutated the very state a cached GET would otherwise
+    // keep serving.
+    Response::builder()
+        .status(resp.status)
+        .header(CONTENT_TYPE, resp.content_type)
+        .header("Cache-Control", "no-store")
+        .body(resp.body)
+        .expect("a status/content-type built from hi_api::ApiResponse is always a valid HTTP response")
+        .map(Into::into)
 }
 
 // No `#[cfg(test)]` module here: `tao`'s GTK backend hard-asserts that

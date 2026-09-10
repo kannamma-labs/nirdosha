@@ -75,8 +75,11 @@ fn respond(root: &Path, request: &mut tiny_http::Request) -> Response<Cursor<Vec
 }
 
 fn to_tiny_http(resp: ApiResponse) -> Response<Cursor<Vec<u8>>> {
-    let header = Header::from_bytes(&b"Content-Type"[..], resp.content_type.as_bytes()).expect("static header is always valid");
-    Response::from_data(resp.body).with_status_code(tiny_http::StatusCode(resp.status)).with_header(header)
+    let content_type = Header::from_bytes(&b"Content-Type"[..], resp.content_type.as_bytes()).expect("static header is always valid");
+    // Same "never cache a live, local, single-viewer response" reason
+    // `hi_window.rs`'s own transport sets this -- see its doc comment.
+    let cache_control = Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).expect("static header is always valid");
+    Response::from_data(resp.body).with_status_code(tiny_http::StatusCode(resp.status)).with_header(content_type).with_header(cache_control)
 }
 
 #[cfg(test)]
