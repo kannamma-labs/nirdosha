@@ -752,14 +752,24 @@
   // `transform: scale()`) is deliberate: it reflows the whole box model
   // at the new scale -- the fixed px layout throughout this page
   // (#header/#console/#legend/#panel) stays correctly positioned at any
-  // zoom level, not just visually stretched. Supported by every engine
-  // `wry` actually embeds (WebKitGTK, WebView2/Chromium, WKWebView);
-  // not standard CSS, but standardness only matters for engines this
-  // app never runs in.
+  // zoom level, not just visually stretched.
+  //
+  // Applied per-element (every real UI chrome piece a person reads or
+  // types into), NOT to `<body>` as a whole -- `#graph`/`#fallback-
+  // canvas` are deliberately excluded. Confirmed by a real regression:
+  // zooming `<body>` (which contains the WebGL canvas `run3D` sizes via
+  // the container's own `getBoundingClientRect()`) left the 3D scene
+  // rendered squashed into the bottom of the window instead of filling
+  // `#graph`'s own box -- WebKitGTK's canvas backing-buffer sizing and
+  // the CSS `zoom` property don't stay in sync with each other even at
+  // `zoom:1`. The graph's own contents were never what "bigger text"
+  // was asking for anyway -- that's a camera-level concern, not a CSS
+  // one, and stays untouched here.
+  const ZOOM_TARGETS = '#header, #console, #panel, #legend, #prompt-screen';
   let uiZoom = 1;
   const ZOOM_MIN = 0.6, ZOOM_MAX = 2.2, ZOOM_STEP = 0.1;
   function applyZoom() {
-    document.body.style.zoom = uiZoom.toFixed(2);
+    document.querySelectorAll(ZOOM_TARGETS).forEach(el => { el.style.zoom = uiZoom.toFixed(2); });
     try { localStorage.setItem('hi-ui-zoom', String(uiZoom)); } catch (_) {}
   }
   function loadZoom() {
