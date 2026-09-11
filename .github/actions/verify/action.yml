@@ -1,0 +1,55 @@
+name: "Nirdosha Verify"
+description: >-
+  Runs `nirdosha verify` against every .nir file in the repo (or a
+  given list) and fails the job on any DISPROVED verdict -- a real,
+  three-valued exit code gate (PROVED/DISPROVED/UNKNOWN), never
+  collapsed to pass/fail. Parity target: Predictable, Sequent
+  (nirdosha-master-plan.md Part 3, "GitHub Action for CI/PR gating").
+author: kannamma-labs
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  nirdosha-path:
+    description: >-
+      Path to (or name on PATH of) the nirdosha binary. This action
+      does not install nirdosha itself -- a prior step in your workflow
+      must put a binary somewhere this input can find (cargo install,
+      a container step, a future setup-nirdosha action, etc.).
+    required: false
+    default: "nirdosha"
+  files:
+    description: >-
+      Space-separated list of .nir files to verify. Defaults to every
+      .nir file in the repo (excluding target/ build directories).
+    required: false
+    default: ""
+  fail-on-unknown:
+    description: >-
+      If "true", a file whose verdict is UNKNOWN (Z3 couldn't decide at
+      least one obligation) also fails the job, not just DISPROVED.
+      Defaults to "false": UNKNOWN honestly means "not proved, not
+      disproved" -- a real, disclosed gap, not a known defect -- so it
+      does not fail CI by default the same way an actual counterexample
+      does.
+    required: false
+    default: "false"
+
+outputs:
+  verdict-summary:
+    description: >-
+      JSON array of {"file": ..., "verdict": "PROVED"|"DISPROVED"|"UNKNOWN"|"ERROR"},
+      one entry per file checked.
+    value: ${{ steps.verify.outputs.verdict-summary }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: verify
+      shell: bash
+      run: "$GITHUB_ACTION_PATH/run.sh"
+      env:
+        NIRDOSHA_BIN: ${{ inputs.nirdosha-path }}
+        NIRDOSHA_ACTION_FILES: ${{ inputs.files }}
+        NIRDOSHA_ACTION_FAIL_ON_UNKNOWN: ${{ inputs.fail-on-unknown }}

@@ -358,6 +358,26 @@ runs behind it.
   had already shipped — corrected in both, with the compiled serve
   surface itself now named as one of the areas most worth a red-team
   pass.
+- [PARTIAL] GitHub Action for CI/PR gating (2026-09, master plan
+  Part 3 Nov 2026, parity target: Predictable, Sequent) —
+  `.github/actions/verify/`: a real composite action wrapping
+  `nirdosha verify`, gating on its own three-valued exit code
+  (`PROVED`/`DISPROVED`/`UNKNOWN` — no JSON parsing dependency needed
+  on the runner) rather than a re-derived pass/fail. `UNKNOWN` doesn't
+  fail the job by default (`fail-on-unknown` input to opt in) — the
+  same "don't punish honest uncertainty like a real defect" posture
+  the CLI's own exit code already draws. `[PARTIAL]`: this action does
+  not install `nirdosha` itself (no published release binary exists
+  yet, `docs/STABILITY_AND_RELEASES.md`'s cadence starts 2026-10-01) —
+  a caller's own workflow must produce a binary first; the action's
+  own README names a `setup-nirdosha`-style action or a Docker variant
+  as the natural follow-up once release artifacts exist. Tests:
+  `.github/actions/verify/tests/run_test.sh` (15 real assertions
+  against a locally-built binary — no `act`/GitHub-runner simulation
+  available in this environment, so tested as a plain shell script
+  directly, the same "test the logic, not the YAML" split as
+  everywhere else) plus a real self-test step in
+  `.github/workflows/build.yml` running inside actual GitHub Actions.
 
 ---
 

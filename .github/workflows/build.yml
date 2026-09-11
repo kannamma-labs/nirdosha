@@ -61,6 +61,20 @@ jobs:
       - name: Test
         working-directory: crates/compiler
         run: cargo test --release
+      # Self-test of .github/actions/verify against this job's own
+      # freshly-built binary -- a real GitHub Actions run, not just the
+      # local shell-only proof in
+      # .github/actions/verify/tests/run_test.sh. Uses
+      # examples/features/01_scalar_types_and_literals.nir, a real,
+      # already-shipped example with no `validate` blocks (PROVED,
+      # vacuously and honestly so -- see verify_verdict.rs's own
+      # `no_validate_blocks_at_all_is_proved_exit_0`), so this step adds
+      # no new fixture to maintain.
+      - name: Self-test the nirdosha/verify composite action
+        uses: ./.github/actions/verify
+        with:
+          nirdosha-path: ${{ github.workspace }}/target/release/nirdosha
+          files: examples/features/01_scalar_types_and_literals.nir
 
   # macOS didn't get a CI job of its own until now — it was only ever
   # actually built when a `v*` tag triggered release.yml, so a regular
