@@ -344,6 +344,20 @@ runs behind it.
   around: Tier 1 can't model a `validate` predicate built on a division
   result at all yet (`crates/bench/RESULTS.md`'s `average_no_float_confusion`
   section).
+- [DONE] Red-team invitation published (2026-09, master plan Part 3
+  Sprint 2, parity target: Certora's audit ethos) — `SECURITY.md`'s new
+  top section reframes the file from a passive reporting form into an
+  active invitation: what counts as a real finding versus a
+  already-disclosed limitation, how a report is credited, and two real
+  internal findings of the invited shape already fixed and on the
+  record (`docs/ROADMAP.md`'s "A10"/"A11" — `serve.rs`'s dispatcher
+  default-open, symmetric-only JWKS validation) as proof this isn't
+  just posture. Surfaced and fixed a real staleness bug along the way:
+  both `SECURITY.md` and `docs/API_TRUST_MODEL.md` §4a still said "no
+  compiled serving mode" after `nirdosha build --serve` (RFC 0010, B8)
+  had already shipped — corrected in both, with the compiled serve
+  surface itself now named as one of the areas most worth a red-team
+  pass.
 
 ---
 

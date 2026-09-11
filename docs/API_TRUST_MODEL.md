@@ -394,11 +394,29 @@ proposed sketch, which starts from zero.
 > end to end; one that only needs `check_role` + `requires`/`acquire` +
 > field masking now does, compiled, with no interpreter anywhere in the
 > picture.
+>
+> **2026-09, later the same cycle — the "there is no compiled serving
+> mode" sentence two paragraphs down is now also false; that gap has
+> closed.** `nirdosha build --serve` (`rfcs/0010-landing-and-serve-exposure.md`,
+> `docs/PUBLIC_ROADMAP.md`'s Track B "B8. Compiled `serve` mode `[DONE]`")
+> compiles a real HTTP server directly into the binary — deny-by-default
+> route exposure (`typeck::check_serve_exposure`/`exposed_fn_names`: a
+> function is only reachable if it's screen/dashboard-bound or named in
+> an explicit `serve { expose ... }` entry, never by default), the same
+> compiled `requires`/`acquire`/`check_role`/field-masking enforcement
+> this callout already describes, running per-request in the compiled
+> binary itself — not a second, separate mechanism from what's above,
+> the same one, now reachable over a real socket. This is genuinely new
+> surface worth a red-team pass of its own: `typeck::exposed_public_read_warnings`'s
+> own non-fatal-warning design for unauthenticated reads is a real,
+> disclosed trade-off (RFC 0010's own "Rejected alternatives"), not a
+> gap nobody noticed.
 
 Not previously covered in this document, and load-bearing for anyone
-reading `docs/LANGUAGE.md` §10's compiled-vs-interpreted split: **every
-mechanism in §3-§5 exists only on the interpreted path.**
-`nirdosha serve` builds an `Interpreter` per request
+reading `docs/LANGUAGE.md` §10's compiled-vs-interpreted split (history,
+superseded by the callout just above — kept for the record, not as a
+current claim): **every mechanism in §3-§5 exists only on the
+interpreted path.** `nirdosha serve` builds an `Interpreter` per request
 (`crates/compiler/src/serve.rs:1177-1183`); there is no compiled serving mode.
 
 The LLVM backend does not silently lose these guarantees — it refuses

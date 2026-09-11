@@ -271,7 +271,7 @@ This README is the pitch and the five-minute quick start. Everything else lives 
 
 **Why not just use Rust?** Rust already solves memory safety for teams that can invest in its learning curve. Nirdosha targets a narrower problem — AI agents writing backend code unsupervised. [Full answer](https://github.com/kannamma-labs/nirdosha/wiki/Nirdosha-vs-Alternatives).
 
-**Found a bug?** Open an issue with the `nirdosha build`/`emit-llvm` error message and the `.nir` source. Security issue? See [SECURITY.md](./SECURITY.md).
+**Found a bug?** Open an issue with the `nirdosha build`/`emit-llvm` error message and the `.nir` source. Think you found a way past a guarantee this project claims? [SECURITY.md](./SECURITY.md) is an open invitation to try, not just a reporting form — two internal findings of exactly that shape (`docs/ROADMAP.md`'s "A10"/"A11") are already fixed and on the record there.
 
 **Want to contribute?** See [CONTRIBUTING.md](./CONTRIBUTING.md). More in the [full FAQ](https://github.com/kannamma-labs/nirdosha/wiki/FAQ).
 </details>
