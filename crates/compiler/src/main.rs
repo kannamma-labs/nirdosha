@@ -19,6 +19,7 @@ fn main() -> ExitCode {
         "build" => cmd_build(args),
         "verify" => cmd_verify(args),
         "fix" => cmd_fix(args),
+        "explain" => cmd_explain(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
@@ -51,6 +52,8 @@ fn print_usage() {
     eprintln!("  nirdosha fix <file.nir> [--apply]   same checks as verify, plus a byte-offset FixPatch per");
     eprintln!("                                      obligation where one exists (auto/assisted/manual);");
     eprintln!("                                      --apply writes every `auto` patch to the file in place");
+    eprintln!("  nirdosha explain [<code>]           print the machine-learnable error index (JSON on stdout);");
+    eprintln!("                                      with no <code>, lists every NIR-code and its title");
     eprintln!("  nirdosha emit-llvm <file.nir>       print the generated LLVM IR");
     eprintln!("  nirdosha emit-ast <file.nir>        print the parsed AST as JSON (docs/goal.md row 9)");
     eprintln!("  nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]");
@@ -623,6 +626,13 @@ struct VerifyDiagnostic {
     /// correction against the names actually in scope -- see
     /// `fix_unbound_identifier`).
     fix: Option<Fix>,
+    /// `nirdosha explain <code>`'s index key (`explain::REGISTRY`) --
+    /// `None` unless this specific diagnostic's site can identify one
+    /// of the twelve `AGENTS.md`-numbered rules (or `NIR0013`,
+    /// unbound-identifier) with certainty; see `explain.rs`'s own doc
+    /// comment for exactly which sites do today and why the rest
+    /// honestly don't yet.
+    code: Option<&'static str>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, PartialEq)]
@@ -799,6 +809,34 @@ struct VerifyVerdict {
 /// file), so the naive DP form is the right amount of engineering --
 /// no need for the banded/early-exit variants a spell-checker over a
 /// large dictionary would want.
+/// Recovers `NIR0012` (reserved word used where an identifier was
+/// required) from `loader::load_program`'s already-formatted `String`
+/// error, the only signal available at this call site today --
+/// `ParseError` doesn't carry a structured code field, and threading
+/// one through would mean widening `loader::load_program`'s
+/// `Result<_, String>` across every one of its own callers
+/// (`build`/`emit-llvm`/`emit-ast`/`gen-crud`/...), a much larger
+/// change than one diagnostic's classification justifies today. Safe
+/// *because* the substring it looks for is fully deterministic: only
+/// `parser.rs`'s `expect_ident` ever produces the literal prefix
+/// `"expected identifier, found "`, and only `Display for Tok`
+/// (`token.rs`, round-trip tested) ever renders a reserved word as
+/// `"the reserved keyword `...`"`/`"the reserved type name `...`"` --
+/// so this can't false-positive on an unrelated "expected identifier"
+/// site or an unrelated reserved-word mention. A heuristic, not a
+/// guess: narrowed by construction to the one message shape that means
+/// this rule, nothing looser.
+fn classify_load_error_code(msg: &str) -> Option<&'static str> {
+    const PREFIX: &str = "expected identifier, found ";
+    let after = msg.find(PREFIX)? + PREFIX.len();
+    let found = &msg[after..];
+    if found.starts_with("the reserved keyword ") || found.starts_with("the reserved type name ") {
+        Some("NIR0012")
+    } else {
+        None
+    }
+}
+
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -971,7 +1009,8 @@ fn run_verify_pipeline(path: &str) -> VerifyVerdict {
         Ok((program, _src)) => Some(program),
         Err(msg) => {
             load.status = StageStatus::Failed;
-            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg, fix: None });
+            let code = classify_load_error_code(&msg);
+            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg, fix: None, code });
             None
         }
     };
@@ -986,13 +1025,14 @@ fn run_verify_pipeline(path: &str) -> VerifyVerdict {
             typecheck.errors = errs
                 .iter()
                 .map(|e| {
-                    let fix = match &e.kind {
+                    let (fix, code) = match &e.kind {
                         nirdosha::typeck::TypeErrorKind::UnknownVar { name, candidates } => {
-                            Some(fix_unbound_identifier(name, e.span, candidates))
+                            (Some(fix_unbound_identifier(name, e.span, candidates)), Some("NIR0013"))
                         }
-                        _ => None,
+                        nirdosha::typeck::TypeErrorKind::StrInFnSignature { .. } => (None, Some("NIR0002")),
+                        _ => (None, None),
                     };
-                    VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix }
+                    VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix, code }
                 })
                 .collect();
             None
@@ -1008,7 +1048,7 @@ fn run_verify_pipeline(path: &str) -> VerifyVerdict {
             ownership.status = StageStatus::Failed;
             ownership.errors = errs
                 .iter()
-                .map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix: None })
+                .map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix: None, code: None })
                 .collect();
             None
         }
@@ -1271,6 +1311,48 @@ fn cmd_fix(mut args: impl Iterator<Item = String>) -> ExitCode {
         ProofVerdict::Proved => ExitCode::SUCCESS,
         ProofVerdict::Disproved => ExitCode::FAILURE,
         ProofVerdict::Unknown => ExitCode::from(2),
+    }
+}
+
+/// `nirdosha explain [<code>]` -- `nirdosha-master-plan.md` Part 3
+/// Sprint 1's "machine-learnable error index" (parity target: Kōdo,
+/// Midspiral), over `explain::REGISTRY`. JSON on stdout either way
+/// (an array of every entry's `code`/`title` with no argument, one full
+/// entry object with one), matching `verify`/`fix`'s own stdout-JSON +
+/// stderr-summary convention rather than `rustc --explain`'s
+/// plain-text-only precedent -- this project's other two diagnostic
+/// commands are both machine-first, and a caller that wants to render
+/// `explanation`/`wrong`/`right` as prose can do that from the JSON
+/// trivially, while the reverse (scraping structure back out of prose)
+/// is real work this avoids imposing on every caller.
+fn cmd_explain(mut args: impl Iterator<Item = String>) -> ExitCode {
+    match args.next() {
+        None => {
+            let index: Vec<serde_json::Value> = nirdosha::explain::REGISTRY
+                .iter()
+                .map(|e| serde_json::json!({ "code": e.code, "title": e.title }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&index).expect("explain index always serializes"));
+            eprintln!("{} error code(s) -- `nirdosha explain <code>` for the full entry", index.len());
+            ExitCode::SUCCESS
+        }
+        Some(code) => match nirdosha::explain::lookup(&code) {
+            Some(entry) => {
+                let value = serde_json::json!({
+                    "code": entry.code,
+                    "title": entry.title,
+                    "explanation": entry.explanation,
+                    "wrong": entry.wrong,
+                    "right": entry.right,
+                });
+                println!("{}", serde_json::to_string_pretty(&value).expect("explain entry always serializes"));
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!("no such error code `{code}` -- run `nirdosha explain` with no argument for the full index");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 

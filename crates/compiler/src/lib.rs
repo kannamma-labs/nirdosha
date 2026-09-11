@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod contract_check;
 pub mod crud_gen;
 pub mod effects;
+pub mod explain;
 pub mod extraction_schema;
 pub mod hi_api;
 pub mod hi_graph;

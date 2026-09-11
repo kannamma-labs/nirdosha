@@ -107,6 +107,23 @@ any form today; added 2026-09, see the callout just below).
   end: an earlier revision's `--apply` only scanned
   `contracts.obligations` for `Auto` patches, silently dropping every
   one attached to a `load`/`typecheck`/`ownership` diagnostic instead).
+- [PARTIAL] `nirdosha explain [<code>]` (2026-09, master plan Part 3
+  Sprint 1) — a curated, hand-written index (`explain::REGISTRY`),
+  `NIR0001`-`NIR0012` mapped 1:1 to `agent-skills/nirdosha/AGENTS.md`'s
+  twelve numbered "rules that will break your output," plus `NIR0013`
+  for the unbound-identifier/typo case `fix` already automates. Parity
+  target: Kōdo, Midspiral. Modeled on `rustc --explain`'s real
+  precedent (a curated subset of diagnostics get long-form docs, most
+  don't) rather than a mechanical dump of every internal error variant.
+  `[PARTIAL]` because only three diagnostic sites auto-attach a `code`
+  to `verify`/`fix`'s own JSON output today — `NIR0002` (`str` in a
+  `fn` signature), `NIR0012` (reserved word as identifier, recovered
+  from `loader::load_program`'s formatted error string via a narrowly-
+  scoped substring match, since `ParseError` doesn't carry a structured
+  code field yet), `NIR0013` (unbound identifier) — every other
+  registry entry is real, browsable reference material
+  (`nirdosha explain NIR0009` works today) that nothing auto-tags onto
+  a live diagnostic yet. Tests: `crates/compiler/tests/explain_command.rs`.
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)

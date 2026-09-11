@@ -32,6 +32,7 @@ performance.
 nirdosha build <file.nir> -o <out> [--opt0]   # compile to a native binary (LLVM, -O2 by default)
 nirdosha verify <file.nir>            # 3-valued JSON verdict (PROVED/DISPROVED/UNKNOWN) + exit 0/1/2, no LLVM/clang needed (see below)
 nirdosha fix <file.nir> [--apply]     # same checks as verify, plus a byte-offset FixPatch per fixable diagnostic (see below)
+nirdosha explain [<code>]             # the machine-learnable error index -- NIR0001..NIR0013 (see below)
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -97,6 +98,26 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   rather than a fabricated class implying analysis that hasn't been
   built yet — see `docs/PUBLIC_ROADMAP.md`'s `[PARTIAL]` entry for what
   that leaves open.
+- **`explain`** (2026-09, `nirdosha-master-plan.md` Part 3 Sprint 1,
+  parity target: Kōdo, Midspiral) — a curated, hand-written error-code
+  index over `crates/compiler/src/explain.rs::REGISTRY`: `NIR0001`
+  through `NIR0012` are the twelve numbered rules in
+  `agent-skills/nirdosha/AGENTS.md`'s "rules that will break your
+  output" section (numbered to match that section exactly, so "AGENTS.md
+  rule 9" and "`NIR0009`" are always the same rule), plus `NIR0013` for
+  the unknown-identifier/typo case `fix` already has real automated-fix
+  support for. Bare `nirdosha explain` lists every code and title as a
+  JSON array; `nirdosha explain <code>` (case-insensitive) prints the
+  full entry — title, explanation, a wrong example, a right example —
+  as one JSON object, matching `verify`/`fix`'s own stdout-JSON
+  convention. `verify`/`fix`'s own JSON now includes a `code` field per
+  diagnostic where the diagnostic's own site can identify one of these
+  rules with certainty: `NIR0002` (`str` in a `fn` signature), `NIR0012`
+  (a reserved word where an identifier was required), and `NIR0013`
+  (unknown identifier). Every other diagnostic still reports `code:
+  null` — the registry entry exists and is real, but nothing auto-tags
+  it onto a live diagnostic yet (`docs/PUBLIC_ROADMAP.md`'s `[PARTIAL]`
+  entry names exactly which).
 
 ---
 
