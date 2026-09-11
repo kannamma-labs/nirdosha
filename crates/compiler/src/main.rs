@@ -623,6 +623,29 @@ enum StageStatus {
     Skipped,
 }
 
+/// The top-level verdict `nirdosha verify` reports, and the one
+/// `ContractsResult` reports for its own stage -- three-valued on
+/// purpose, never collapsed to pass/fail. `StageStatus` above answers
+/// "did this stage run and complete" (a pipeline-mechanics question,
+/// genuinely binary: typecheck either finds no error or it does); this
+/// answers "what do we actually know about the code's correctness" (an
+/// epistemic question, and not binary at all): `Unsupported` -- Z3
+/// couldn't model a predicate, not "it found no problem" -- used to be
+/// folded into an overall `Passed` verdict, which reported confidence
+/// this pipeline never earned. A caller (CI, an agent's own repair
+/// loop) needs a real, distinguishable third answer for "we don't know"
+/// so it doesn't treat unmodeled code as proved safe. Exit codes follow
+/// the same three-way split (0/1/2, `cmd_verify` below), not just this
+/// JSON field, for the same reason: a caller that only inspects `$?`
+/// must be able to see the difference too.
+#[derive(serde::Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum ProofVerdict {
+    Proved,
+    Disproved,
+    Unknown,
+}
+
 #[derive(serde::Serialize)]
 struct StageResult {
     status: StageStatus,
@@ -644,7 +667,18 @@ struct ContractObligation {
 
 #[derive(serde::Serialize)]
 struct ContractsResult {
+    /// Whether this stage ran at all -- `Skipped` only if an earlier
+    /// stage (load/typecheck/ownership) already failed, `Passed`
+    /// otherwise, even when `verdict` below is `Disproved` or
+    /// `Unknown`: this stage genuinely *ran*, it's `verdict` that says
+    /// what it found, not whether it executed. Never set to `Failed` by
+    /// this stage -- an earlier revision conflated "ran and found a
+    /// counterexample" with `StageStatus::Failed`, which left no room
+    /// for `Unsupported` to mean anything but a silent pass; `verdict`
+    /// is the fix, this field's meaning is now consistent with `load`/
+    /// `typecheck`/`ownership`'s.
     status: StageStatus,
+    verdict: ProofVerdict,
     proved: usize,
     unsupported: usize,
     failed: usize,
@@ -668,7 +702,15 @@ struct ProofObligations {
 #[derive(serde::Serialize)]
 struct VerifyVerdict {
     source: String,
-    status: StageStatus,
+    /// Three-valued, replacing what used to be a `status: StageStatus`
+    /// field here (`Passed`/`Failed` only) -- called out explicitly
+    /// per `docs/STABILITY_AND_RELEASES.md`'s rule for this exact JSON
+    /// schema, not a silent rename: the old field could not represent
+    /// "Z3 couldn't decide," so a file with an unmodeled `validate`
+    /// predicate and nothing else wrong reported the same `Passed` a
+    /// file with a fully proved contract did. `verdict` is `Unknown`
+    /// in that case instead, never folded into `Proved`.
+    verdict: ProofVerdict,
     load: StageResult,
     typecheck: StageResult,
     ownership: StageResult,
@@ -682,9 +724,12 @@ struct VerifyVerdict {
 /// `validate` contracts), plus `smt::analyze`'s Tier-1 proof-obligation
 /// counts, without requiring a working LLVM/clang toolchain and without
 /// ever producing a binary. Exists so CI and an agent's own repair loop
-/// can ask "does this pass?" as one call with a real exit code (0 ==
-/// every hard gate passed, 1 otherwise) and a JSON verdict on stdout,
-/// instead of parsing `build`'s stderr text.
+/// can ask "does this pass?" as one call with a real, three-valued exit
+/// code (`0` == `PROVED`, `1` == `DISPROVED`, `2` == `UNKNOWN` -- never
+/// collapsed to a binary pass/fail, so a caller that only checks `$?`
+/// can still tell "definitely wrong" from "couldn't be decided,"
+/// exactly like the JSON `verdict` field below) and a JSON verdict on
+/// stdout, instead of parsing `build`'s stderr text.
 ///
 /// Unlike `build`, does not require `fn main()`
 /// (`typecheck_optional_main`, not `typecheck` --
@@ -709,8 +754,14 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut load = StageResult { status: StageStatus::Passed, errors: vec![] };
     let mut typecheck = StageResult::skipped();
     let mut ownership = StageResult::skipped();
-    let mut contracts =
-        ContractsResult { status: StageStatus::Skipped, proved: 0, unsupported: 0, failed: 0, obligations: vec![] };
+    let mut contracts = ContractsResult {
+        status: StageStatus::Skipped,
+        verdict: ProofVerdict::Proved,
+        proved: 0,
+        unsupported: 0,
+        failed: 0,
+        obligations: vec![],
+    };
     let mut proof_obligations = ProofObligations { proven_in_range: 0, proven_nonzero_divisor: 0, proven_index_bounds: 0 };
 
     let program = match nirdosha::loader::load_program(&path) {
@@ -767,7 +818,6 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
                 ContractCheckResult::Counterexample { violated_predicate, bindings, result } => {
                     contracts.failed += 1;
-                    contracts.status = StageStatus::Failed;
                     let bindings_str = bindings.iter().map(|(n, v)| format!("{n} = {v}")).collect::<Vec<_>>().join(", ");
                     let detail = format!(
                         "`{violated_predicate}` is violated when {bindings_str} (fn returns {})",
@@ -781,7 +831,6 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
                 ContractCheckResult::UnboundIdentifier(name) => {
                     contracts.failed += 1;
-                    contracts.status = StageStatus::Failed;
                     contracts.obligations.push(ContractObligation {
                         fn_name: outcome.fn_name,
                         status: "unbound_identifier",
@@ -790,7 +839,6 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
                 ContractCheckResult::NoSuchFunction(name) => {
                     contracts.failed += 1;
-                    contracts.status = StageStatus::Failed;
                     contracts.obligations.push(ContractObligation {
                         fn_name: outcome.fn_name,
                         status: "no_such_function",
@@ -799,7 +847,6 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
                 ContractCheckResult::PredicateParseError(msg) => {
                     contracts.failed += 1;
-                    contracts.status = StageStatus::Failed;
                     contracts.obligations.push(ContractObligation {
                         fn_name: outcome.fn_name,
                         status: "predicate_parse_error",
@@ -809,19 +856,44 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
             }
         }
 
+        // `failed` beats `unsupported`, which beats an empty verdict of
+        // `Proved` -- a real counterexample is more informative than "Z3
+        // couldn't decide," so a file that's both definitely wrong
+        // somewhere and unmodeled somewhere else is reported as
+        // `Disproved`, not `Unknown`: an agent's repair loop has a
+        // concrete counterexample to act on either way, and hiding it
+        // behind "unknown" would be a strictly worse answer.
+        contracts.verdict = if contracts.failed > 0 {
+            ProofVerdict::Disproved
+        } else if contracts.unsupported > 0 {
+            ProofVerdict::Unknown
+        } else {
+            ProofVerdict::Proved
+        };
+
         let smt_report = nirdosha::smt::analyze(program);
         proof_obligations.proven_in_range = smt_report.proven_in_range.len();
         proof_obligations.proven_nonzero_divisor = smt_report.proven_nonzero_divisor.len();
         proof_obligations.proven_index_bounds = smt_report.proven_index_bounds.len();
     }
 
-    let overall_failed = [load.status, typecheck.status, ownership.status, contracts.status]
-        .iter()
-        .any(|s| *s == StageStatus::Failed);
+    // A hard pipeline failure (load/typecheck/ownership) is always
+    // `Disproved`, not `Unknown` -- there's no uncertainty in "this
+    // doesn't typecheck." Only `contracts.verdict` can introduce
+    // `Unknown`, and only when nothing else already disproved the file.
+    let pipeline_failed =
+        [load.status, typecheck.status, ownership.status].iter().any(|s| *s == StageStatus::Failed);
+    let verdict_value = if pipeline_failed || contracts.verdict == ProofVerdict::Disproved {
+        ProofVerdict::Disproved
+    } else if contracts.verdict == ProofVerdict::Unknown {
+        ProofVerdict::Unknown
+    } else {
+        ProofVerdict::Proved
+    };
 
     let verdict = VerifyVerdict {
         source: path.clone(),
-        status: if overall_failed { StageStatus::Failed } else { StageStatus::Passed },
+        verdict: verdict_value,
         load,
         typecheck,
         ownership,
@@ -830,12 +902,19 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
     };
 
     println!("{}", serde_json::to_string_pretty(&verdict).expect("VerifyVerdict always serializes"));
-    if overall_failed {
-        eprintln!("REJECTED: {path} failed verification");
-        ExitCode::FAILURE
-    } else {
-        eprintln!("PROVED: {path} passed every check");
-        ExitCode::SUCCESS
+    match verdict_value {
+        ProofVerdict::Proved => {
+            eprintln!("PROVED: {path} passed every check");
+            ExitCode::SUCCESS
+        }
+        ProofVerdict::Disproved => {
+            eprintln!("DISPROVED: {path} failed verification");
+            ExitCode::FAILURE
+        }
+        ProofVerdict::Unknown => {
+            eprintln!("UNKNOWN: {path} has at least one obligation Z3 couldn't decide -- not proved, not disproved");
+            ExitCode::from(2)
+        }
     }
 }
 

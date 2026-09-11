@@ -72,11 +72,21 @@ any form today; added 2026-09, see the callout just below).
   see `docs/LANGUAGE.md` §16 for the current, honest split.
 - [DONE] `nirdosha verify <file.nir>` (2026-09) — a standalone,
   machine-readable verdict over typecheck/ownership/`validate`-contract
-  results plus Z3 Tier-1 proof-obligation counts: JSON on stdout, exit
-  `0`/`1`, no LLVM/clang toolchain and no binary produced. The first
-  concrete step of the "sell the verdict, not the syntax" trust-layer
-  direction — turns the compiler into something CI or an agent's own
-  repair loop can call directly. See `docs/LANGUAGE.md` §1.
+  results plus Z3 Tier-1 proof-obligation counts: JSON on stdout, no
+  LLVM/clang toolchain and no binary produced. The first concrete step
+  of the "sell the verdict, not the syntax" trust-layer direction —
+  turns the compiler into something CI or an agent's own repair loop can
+  call directly. See `docs/LANGUAGE.md` §1.
+- [DONE] **Three-valued verdict** (2026-09, master plan Part 3 Sprint
+  0) — `verify`'s top-level `verdict` field and exit code are now
+  `PROVED`/`DISPROVED`/`UNKNOWN` (exit `0`/`1`/`2`), never a binary
+  pass/fail: a `validate` obligation Z3 can't model (a non-integer
+  parameter, today) reports `UNKNOWN`, not a silent `PROVED` the way the
+  first cut of `verify` reported it. Parity target: Velvet, C Proof.
+  Z3 counterexamples were already embedded in the verdict's
+  `contracts.obligations[].detail` from `verify`'s first cut (parity
+  target: Imandra, Theorem) — both Sprint 0 items now closed, alongside
+  the JSON verdict + exit code item above.
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)
@@ -254,8 +264,11 @@ a hypothetical future.)
   secrets/JWKS handling) — `nirdosha serve` itself no longer exists
 - [PARTIAL] Observability — a local OTel-shaped tracer exists; wiring
   to a real collector (OTLP) is open
-- [OPEN] A compatibility/versioning policy before the next breaking
-  language change
+- [DONE] A compatibility/versioning policy before the next breaking
+  language change — `docs/STABILITY_AND_RELEASES.md` (2026-09):
+  monthly tagged releases starting 2026-10-01, a named checklist for
+  what `v1.0` requires, and a breaking-change policy that already
+  covers `nirdosha verify`'s JSON verdict schema
 - [PARTIAL] Identity admin console — role-mapping cache is done;
   multi-IdP registry and a roles→functions/fields report are open
 - [OPEN] Real Windows verification — the compiled `tcp`/`tcp_listener`
