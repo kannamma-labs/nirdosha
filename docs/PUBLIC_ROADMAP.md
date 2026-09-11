@@ -87,6 +87,26 @@ any form today; added 2026-09, see the callout just below).
   `contracts.obligations[].detail` from `verify`'s first cut (parity
   target: Imandra, Theorem) — both Sprint 0 items now closed, alongside
   the JSON verdict + exit code item above.
+- [PARTIAL] `nirdosha fix` (2026-09, master plan Part 3 Sprint 1) —
+  byte-offset `FixPatch`es (`token::Span::byte`) plus three fixability
+  classes modeled on `rustc`'s own `Applicability`
+  (`auto`/`assisted`/`manual`, `main.rs`'s `Applicability` doc comment),
+  `--apply` writes every `Auto` patch to disk (highest byte offset
+  first, so earlier patches' ranges never shift under a later one) and
+  re-verifies afterward. Parity target: Kōdo. v1's one real fixability
+  analysis: unknown-identifier typo correction by edit distance
+  (`fix_unbound_identifier`) against names in scope — an unambiguous
+  single closest candidate is `auto`, a tie is `assisted` (names both,
+  picks neither), nothing close enough is `manual`. `[PARTIAL]` because
+  every other diagnostic kind (parse errors, ownership violations,
+  counterexamples, unsupported obligations) still reports `fix: null`,
+  honestly, rather than a fabricated `manual` implying analysis that
+  hasn't been built yet. Tests:
+  `crates/compiler/tests/fix_command.rs` (CLI-level, including a
+  regression test for a real bug caught by hand-running this end to
+  end: an earlier revision's `--apply` only scanned
+  `contracts.obligations` for `Auto` patches, silently dropping every
+  one attached to a `load`/`typecheck`/`ownership` diagnostic instead).
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)

@@ -31,6 +31,7 @@ performance.
 ```sh
 nirdosha build <file.nir> -o <out> [--opt0]   # compile to a native binary (LLVM, -O2 by default)
 nirdosha verify <file.nir>            # 3-valued JSON verdict (PROVED/DISPROVED/UNKNOWN) + exit 0/1/2, no LLVM/clang needed (see below)
+nirdosha fix <file.nir> [--apply]     # same checks as verify, plus a byte-offset FixPatch per fixable diagnostic (see below)
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -73,6 +74,29 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   program. Each stage that never ran because an earlier one failed is
   reported `"skipped"`, not silently `"passed"` — the verdict never
   claims to have checked something it didn't actually run.
+- **`fix`** (2026-09, `nirdosha-master-plan.md` Part 3 Sprint 1, parity
+  target: Kōdo) — runs the identical pipeline `verify` does, and adds a
+  `Fix` to any diagnostic v1's analysis covers: a byte-offset `FixPatch`
+  ([start_byte, end_byte) into the *original* source, plus a
+  replacement string) and one of three fixability classes modeled on
+  `rustc`'s own `Applicability` — `auto` (safe to apply without review),
+  `assisted` (a real fix exists but needs a judgment call), or `manual`
+  (no mechanical fix known for this diagnostic kind, today). Bare
+  `nirdosha fix <file.nir>` only *reports* — JSON on stdout, nothing
+  written to disk; `--apply` writes every `auto` patch (highest byte
+  offset first, so an earlier patch's range never shifts under a later
+  one) and re-verifies afterward, both verdicts included in the report
+  so a caller can see what changed. v1's one real fixability analysis:
+  unknown-identifier typo correction by edit distance against every
+  name actually in scope (`main.rs`'s `fix_unbound_identifier`) — an
+  unambiguous closest candidate is `auto`, a tie between candidates is
+  `assisted` (names all of them, picks none), nothing within a
+  plausible-typo distance is `manual`. Every other diagnostic kind
+  (parse errors, ownership violations, `validate` counterexamples,
+  Z3-unsupported obligations) reports `fix: null` today, honestly,
+  rather than a fabricated class implying analysis that hasn't been
+  built yet — see `docs/PUBLIC_ROADMAP.md`'s `[PARTIAL]` entry for what
+  that leaves open.
 
 ---
 

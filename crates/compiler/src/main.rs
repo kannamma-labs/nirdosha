@@ -1127,10 +1127,23 @@ fn run_verify_pipeline(path: &str) -> VerifyVerdict {
 /// *proposed* patch, applied or not): this is the record of one that
 /// really was, so `FixReport.applied` is a true audit trail, not a
 /// re-derivation of `before`'s obligations filtered by applicability.
+///
+/// `site`/`detail` are deliberately generic strings, not `fn_name`/
+/// `&'static str` (an earlier revision had both, then only ever
+/// collected `contracts.obligations`' `Auto` patches -- silently
+/// dropping every `Auto` fix attached to a `load`/`typecheck`/
+/// `ownership` `VerifyDiagnostic` instead, e.g. `fix_unbound_identifier`
+/// firing from `typeck.rs`, because `--apply`'s collector never looked
+/// there. Caught by hand-running `nirdosha fix --apply` end to end on a
+/// real typo: the JSON proposed the correct patch, `--apply` wrote
+/// zero of them). `site` is the function name for a `ContractObligation`
+/// or `"<line>:<col>"` for a `VerifyDiagnostic`; `detail` is the
+/// obligation's status tag or the diagnostic's own message -- both
+/// human-readable provenance, not data the applier itself branches on.
 #[derive(serde::Serialize)]
 struct AppliedPatch {
-    fn_name: String,
-    obligation_status: &'static str,
+    site: String,
+    detail: String,
     start_byte: usize,
     end_byte: usize,
     replacement: String,
@@ -1186,27 +1199,33 @@ fn cmd_fix(mut args: impl Iterator<Item = String>) -> ExitCode {
 
     let mut applied = Vec::new();
     if apply {
-        // Collect every `Auto` patch first, then apply in *descending*
-        // start-byte order -- applying low-to-high would shift every
-        // later patch's own byte offsets out from under it the moment
-        // an earlier one changed the file's length; high-to-low never
-        // does, since nothing after the current patch's end has been
-        // touched yet by the time it's applied.
-        let mut patches: Vec<(&ContractObligation, &FixPatch)> = before
-            .contracts
-            .obligations
-            .iter()
-            .filter_map(|ob| match &ob.fix {
-                Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) => Some((ob, p)),
-                _ => None,
-            })
-            .collect();
-        patches.sort_by(|a, b| b.1.start_byte.cmp(&a.1.start_byte));
+        // Collect every `Auto` patch from *every* stage that can carry
+        // one -- `load`/`typecheck`/`ownership`'s own `VerifyDiagnostic`s
+        // (e.g. `fix_unbound_identifier` firing out of `typeck.rs`) as
+        // well as `contracts.obligations` -- not just the latter; see
+        // `AppliedPatch`'s doc comment for the real bug this fixes. Then
+        // apply in *descending* start-byte order -- applying low-to-high
+        // would shift every later patch's own byte offsets out from
+        // under it the moment an earlier one changed the file's length;
+        // high-to-low never does, since nothing after the current
+        // patch's end has been touched yet by the time it's applied.
+        let mut patches: Vec<(String, String, &FixPatch)> = Vec::new();
+        for diag in before.load.errors.iter().chain(before.typecheck.errors.iter()).chain(before.ownership.errors.iter()) {
+            if let Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) = &diag.fix {
+                patches.push((format!("{}:{}", diag.line, diag.col), diag.message.clone(), p));
+            }
+        }
+        for ob in &before.contracts.obligations {
+            if let Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) = &ob.fix {
+                patches.push((ob.fn_name.clone(), ob.status.to_string(), p));
+            }
+        }
+        patches.sort_by(|a, b| b.2.start_byte.cmp(&a.2.start_byte));
 
         if !patches.is_empty() {
             match std::fs::read_to_string(&path) {
                 Ok(mut src) => {
-                    for (ob, patch) in &patches {
+                    for (site, detail, patch) in &patches {
                         if patch.start_byte > src.len() || patch.end_byte > src.len() || patch.start_byte > patch.end_byte {
                             // A patch computed against a stale byte range
                             // (shouldn't happen -- `before` was just read
@@ -1218,8 +1237,8 @@ fn cmd_fix(mut args: impl Iterator<Item = String>) -> ExitCode {
                         }
                         src.replace_range(patch.start_byte..patch.end_byte, &patch.replacement);
                         applied.push(AppliedPatch {
-                            fn_name: ob.fn_name.clone(),
-                            obligation_status: ob.status,
+                            site: site.clone(),
+                            detail: detail.clone(),
                             start_byte: patch.start_byte,
                             end_byte: patch.end_byte,
                             replacement: patch.replacement.clone(),
