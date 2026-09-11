@@ -395,6 +395,21 @@ proposed sketch, which starts from zero.
 > field masking now does, compiled, with no interpreter anywhere in the
 > picture.
 >
+> **2026-09-11 — the "`db`/`json`/`mq`/`transact`/`sandbox`/most Row 12
+> identity builtins... remain uncompiled and now don't run in *any*
+> form" sentence above is now also stale, and had been for a while: a
+> stale README/SECURITY.md paragraph carrying the identical claim was
+> caught and fixed the same day.** `db`/`json`/`http`/`https`/`mq`/
+> `transact`/`workflow` and the Row 12 identity builtins
+> (`oidc_validate_token`/`check_role`/`extract_claim`) all landed on
+> the compiled path since (`docs/PUBLIC_ROADMAP.md`'s Track B) and are
+> real, compiled, and running today — this session's own red-team fix
+> (`docs/ROADMAP.md` A18) exercised `db`/`check_role`/`extract_claim`
+> through a real compiled `nirdosha build --serve` binary directly.
+> **`sandbox` is the one part of the original sentence still true**: a
+> real, separate OS process (not a thread), explicitly descoped from
+> v1 — it remains uncompiled and doesn't run in any form.
+>
 > **2026-09, later the same cycle — the "there is no compiled serving
 > mode" sentence two paragraphs down is now also false; that gap has
 > closed.** `nirdosha build --serve` (`rfcs/0010-landing-and-serve-exposure.md`,

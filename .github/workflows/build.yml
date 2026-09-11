@@ -75,6 +75,16 @@ jobs:
         with:
           nirdosha-path: ${{ github.workspace }}/target/release/nirdosha
           files: examples/features/01_scalar_types_and_literals.nir
+      # Every `nirdosha build`/`emit-ui` command in README.md, run for
+      # real -- found by hand on 2026-09-11 that the very first thing a
+      # new user is told to paste (the Codespaces quickstart) had been
+      # silently broken since the interpreter was removed (a
+      # `cargo run -- serve <file> --port 8080` invocation of a
+      # subcommand that no longer exists). Docs are the spec of this
+      # project's own guarantees, not separate hygiene -- a stale
+      # command here is exactly as real a regression as a failing test.
+      - name: Verify every README command block actually runs
+        run: sh scripts/verify_readme_commands.sh
 
   # macOS didn't get a CI job of its own until now — it was only ever
   # actually built when a `v*` tag triggered release.yml, so a regular

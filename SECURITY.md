@@ -95,11 +95,16 @@ CMVP-validated module, so FIPS 140-3 is not met.
 
 **2026-09 — the interpreter and `serve.rs` were deleted entirely**
 (`docs/API_TRUST_MODEL.md` §4a); there is no `nirdosha serve`
-subcommand, and never will be again. `db`/`json`/`mq`/`transact`/
-`sandbox` and most Row 12 identity builtins (`oidc_validate_token`,
-`extract_claim`) don't run in any form today — `codegen.rs::
-check_supported` rejects them and there's no interpreter left to fall
-back to.
+subcommand, and never will be again. `db`/`json`/`http`/`https`/`mq`/
+`transact`/`workflow` and the Row 12 identity builtins
+(`oidc_validate_token`, `check_role`, `extract_claim`) landed on the
+compiled path since (`docs/PUBLIC_ROADMAP.md`'s Track B) and are real,
+running, and compiled today — `codegen.rs` has real lowering for each
+of them, verified directly, not carried forward stale from when this
+paragraph was first written. **`sandbox` is the one exception**: a
+real, separate OS *process* (not a thread), explicitly descoped from
+v1 — it does not run in any form today, and `codegen.rs::
+check_supported` rejects it with no interpreter left to fall back to.
 
 **A real compiled serving mode exists now, though, under a different
 name: `nirdosha build --serve`** (`rfcs/0010-landing-and-serve-exposure.md`,

@@ -3242,18 +3242,30 @@ sequencing in `docs/ECOSYSTEM.md`; this entry only tracks status.*
   already-cross-checked LALR(1) grammar, not hand-authored separately),
   then a minimal diagnostics-first LSP, then a VS Code extension,
   formatter last (no canonical style decided yet to format toward).
-- `[PARTIAL]` **G3. Independent LLM validation.** `crates/bench/`
-  (pass@1 + self-repair, 23 tasks) is real; `real_model::RealModel`
-  (`--mode real`) is a real `Model` against any OpenAI-compatible
-  `/chat/completions` endpoint (DeepSeek, Kimi/Moonshot, GLM/Zhipu — base
-  URL/key/model name are env vars, not hardcoded to one provider), with
-  its request-building and response-parsing covered by real unit tests.
-  Still true: it has never actually run against a live provider (no API
-  key set in this project's dev/CI environment) — the flagship "an LLM
-  can write Nirdosha" claim is still unverified by the project's own
-  evidence. What's left of `docs/ECOSYSTEM.md` §G3's ask: set a real key
-  for one of the three providers, run `--mode real` against the existing
-  23 tasks, publish real pass@1/self-repair numbers.
+- `[PARTIAL]` **G3. Independent LLM validation — now actually run
+  against two live providers, corrected from stale.** This entry
+  described `real_model::RealModel`/`--mode real` (23 tasks), which no
+  longer exists — that whole `crates/bench` was removed entirely along
+  with the interpreter, and its claim ("never actually run against a
+  live provider") had gone stale in a different, worse direction than
+  simply outdated: the flagship "an LLM can write Nirdosha" claim
+  *was*, by then, independently verified elsewhere in this repo
+  (`README.md`'s "the part that sounds fake but isn't"), just not by
+  this specific harness — this line kept asserting otherwise regardless.
+  2026-09's rebuild (master plan Part 3 Sprint 2, `nirdosha-bench`) is
+  real and has run for real, twice: `gemini-2.5-flash` (Google AI
+  Studio) and `kimi-k2.7-code:cloud` (local Ollama, no API key), 3
+  Nirdosha generate→self-repair→verify tasks each, both independently
+  hitting the same disclosed Tier-1 gap — real corroboration. A
+  TypeScript/Rust plain-LLM cross-language baseline (2026-09-11) adds a
+  third provider's worth of evidence on the same two failure classes.
+  Full detail, exact numbers, and the honest "what this is not" scope
+  boundary (still Nirdosha-only + a 2-language baseline, not the full
+  master-plan comparison matrix): `crates/bench/RESULTS.md` and
+  `docs/PUBLIC_ROADMAP.md`'s own `crates/bench/` entries — not
+  duplicated here. `[PARTIAL]`, not `[DONE]`, for that same reason:
+  LLM+XGrammar/LLM+Imandra/AlgoVeri are real, disclosed, un-attempted
+  columns of the original ask.
 - **G4. Production/ops ecosystem — no new item, stays Track A.** The
   outside critique's items here (durability, deployment, OTLP,
   versioning policy, Windows/macOS verification) map directly onto

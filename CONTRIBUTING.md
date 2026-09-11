@@ -75,10 +75,26 @@ the right design doc for whatever you're changing.
 ## Pull request process
 
 1. Fork and branch.
-2. Run the full test suite: `cargo test` in `crates/compiler/`.
+2. Run the full test suite: `cargo test` in `crates/compiler/`. If your
+   change touches a command in `README.md`, also run
+   `sh scripts/verify_readme_commands.sh` from the repo root (CI runs
+   this too, but catching it locally is faster) — every fenced ` ```sh `
+   block in the README is a claim that command actually works, checked
+   by running it, not by reading it.
 3. Update relevant docs (`docs/LANGUAGE.md`, `docs/GRAMMAR.md`, `docs/ROADMAP.md`,
    `docs/PUBLIC_ROADMAP.md`) in the *same* PR, not a follow-up — this
-   project treats docs as load-bearing, not aspirational.
+   project treats docs as load-bearing, not aspirational. For Nirdosha
+   specifically, this is not ordinary hygiene: a scope statement in
+   `README.md`/`SECURITY.md` (e.g. "no data races *between the
+   language's own concurrency primitives*") is the boundary a
+   certificate's proof is actually scoped to — an overclaim there makes
+   the proof claim something it doesn't, and a stale claim in
+   `SECURITY.md`'s "Scope" section undermines the one document this
+   project invites the world to attack it through. Prefer a doc change
+   that names *why* a claim is true now (a test name, a `docs/ROADMAP.md`
+   item letter, a file/line) over a bare assertion — the "why" is what
+   lets a later change notice it broke the claim, the same way A10/A11/
+   A18 in `docs/ROADMAP.md` each cite the exact test/line that backs them.
 4. Reference the issue your PR addresses: `Closes #123`.
 5. Keep commits small and messages descriptive.
 
