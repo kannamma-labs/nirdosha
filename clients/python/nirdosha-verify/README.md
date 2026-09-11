@@ -59,4 +59,4 @@ stdout, same exit code.
 
 ## License
 
-MIT
+Apache-2.0

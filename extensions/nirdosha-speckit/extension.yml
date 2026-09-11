@@ -7,7 +7,7 @@ extension:
   description: "Turn spec.md requirements into Nirdosha validate contracts and machine-check convergence"
   author: "kannamma-labs"
   repository: "https://github.com/kannamma-labs/nirdosha"
-  license: "MIT"
+  license: "Apache-2.0"
   homepage: "https://github.com/kannamma-labs/nirdosha"
 
 requires:
