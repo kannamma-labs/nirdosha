@@ -395,6 +395,55 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
     Err(format!("gave up after {MAX_SELF_REPAIR_ATTEMPTS} attempts -- last diagnostic:\n{last_diagnostic}"))
 }
 
+/// A bounded generate/self-repair round trip over a *plain* natural-
+/// language task prompt, rather than `generate_program`'s own
+/// `CandidateUnit`-list prompt -- the primitive `crates/bench`'s
+/// pass@1/self-repair-rate harness needs
+/// (`nirdosha-master-plan.md` Part 3 Sprint 2's "Benchmark harness
+/// v1"). Reuses every piece of `generate_program`'s already-tested
+/// retry discipline (`extract_nir_source`, `self_repair_hint`,
+/// `typecheck_and_build_check`, `MAX_SELF_REPAIR_ATTEMPTS`, the same
+/// `NIR_SYSTEM_PROMPT` a real generation call sends) rather than a
+/// second copy of it -- this and `generate_program` differ only in
+/// what the first user message is and what happens after a success
+/// (this one has no project directory to write into; the caller
+/// decides what to do with the returned source).
+///
+/// Returns `Ok((source, attempt))` on success -- `attempt` is 1-based,
+/// so `1` means it compiled on the first try (a harness's pass@1
+/// signal) and anything higher means the self-repair loop rescued it.
+/// `Err` carries the last diagnostic once every attempt is exhausted.
+pub fn generate_from_task_prompt(client: &LlmClient, task_prompt: &str, on_log: &mut dyn FnMut(&str)) -> Result<(String, u32), String> {
+    let mut history = vec![ChatMessage { role: "system", content: NIR_SYSTEM_PROMPT.to_string() }, ChatMessage { role: "user", content: task_prompt.to_string() }];
+    let mut last_diagnostic = String::new();
+    for attempt in 1..=MAX_SELF_REPAIR_ATTEMPTS {
+        let raw = client.complete(&history).map_err(|e| format!("couldn't reach the model: {e}"))?;
+        let source = extract_nir_source(&raw);
+        match typecheck_and_build_check(&source) {
+            Ok(()) => {
+                on_log(&format!("compiled on attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS}"));
+                return Ok((source, attempt));
+            }
+            Err(diagnostic) => {
+                last_diagnostic = diagnostic.clone();
+                if attempt == MAX_SELF_REPAIR_ATTEMPTS {
+                    break;
+                }
+                on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed to compile, asking the model to fix it..."));
+                history.push(ChatMessage { role: "assistant", content: source });
+                history.push(ChatMessage {
+                    role: "user",
+                    content: format!(
+                        "That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}",
+                        self_repair_hint(&diagnostic)
+                    ),
+                });
+            }
+        }
+    }
+    Err(format!("gave up after {MAX_SELF_REPAIR_ATTEMPTS} attempts -- last diagnostic:\n{last_diagnostic}"))
+}
+
 /// Verifies a candidate source string actually typechecks, ownership-
 /// checks, *and* builds -- Generate mode's own lock definition
 /// (rfcs/0014: "a CodeUnit locks when its generated `.nir` both exists

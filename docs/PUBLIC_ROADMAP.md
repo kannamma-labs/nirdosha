@@ -323,10 +323,27 @@ runs behind it.
   plain-text errors); `emit-ast`'s own JSON output, listed separately
   below, is unaffected
 - [DONE] `emit-ast`/`validate_fragment` for typed AST/fragment tooling
-- [PARTIAL] `crates/bench/` pass@1 + self-repair-rate harness — scaffold,
-  corpus, and a real `Model` (`--mode real`, any OpenAI-compatible
-  `/chat/completions` endpoint) all exist; not yet run against a live
-  provider for lack of an API key in this environment
+- [PARTIAL] `crates/bench/` pass@1 + self-repair-rate harness — this
+  entry's own earlier text (a `--mode real`/`Model` scaffold "not yet
+  run against a live provider") was stale: that crate was removed
+  entirely when the interpreter was (it scored an LLM-generated
+  program's *interpreted* result value, per the workspace `Cargo.toml`'s
+  own removal note), and nothing under this name existed in the repo
+  until 2026-09's rebuild, below (master plan Part 3 Sprint 2's
+  "Benchmark harness v1") — real this time: 3 tasks, run for real
+  against a live model (`gemini-2.5-flash`), self-repaired against real
+  compiler diagnostics (`hi_llm::generate_from_task_prompt`, reusing
+  `nirdosha hi`'s own Generate-mode loop), scored by `nirdosha certify`'s
+  real JSON verdict. `[PARTIAL]` because it covers Nirdosha only, not
+  the master plan's full comparison matrix (TypeScript/Rust/LLM+
+  XGrammar/LLM+Imandra baselines, or Kōdo's AlgoVeri/Vericoding corpus)
+  — see `crates/bench/RESULTS.md`'s own "What this is not" section for
+  exactly what's missing and why (third-party tools/corpora not present
+  in this environment, not a scope cut of convenience). A real
+  compiler gap surfaced along the way, disclosed rather than patched
+  around: Tier 1 can't model a `validate` predicate built on a division
+  result at all yet (`crates/bench/RESULTS.md`'s `average_no_float_confusion`
+  section).
 
 ---
 

@@ -1957,6 +1957,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-bench"
+version = "0.1.0"
+dependencies = [
+ "nirdosha",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nirdosha-grammar-check"
 version = "0.1.0"
 dependencies = [

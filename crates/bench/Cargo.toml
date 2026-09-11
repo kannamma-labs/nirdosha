@@ -1,0 +1,11 @@
+[package]
+name = "nirdosha-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "nirdosha-master-plan.md Part 3 Sprint 2's benchmark harness v1 -- pass@1 and self-repair-rate over a real LLM, scored by nirdosha certify's own JSON verdict."
+
+[dependencies]
+nirdosha = { path = "../compiler" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

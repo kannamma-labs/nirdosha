@@ -28,16 +28,25 @@ members = [
     # the "reads real, separately-compiled bytes" proof, mirroring the
     # two native-plugin examples above.
     "crates/ui-plugin-example-sparkline",
-    # `crates/bench`, the original six interpreter-era `plugin-example-*`
-    # crates, `plugin-support`, and `plugin-examples` stay removed: each
-    # depended entirely on the interpreter (interpreted plugin dispatch
-    # via `PluginBuiltin`/`PluginFn`, or scoring an LLM-generated
-    # program's *interpreted* result value) — a mechanism that no longer
-    # exists now that the interpreter is gone. See git history if any of
-    # this (a real MySQL/Cassandra/ActiveMQ/Neo4j/HBase plugin, ported
-    # onto the compiled-path ABI above instead of the deleted trait) is
-    # worth rebuilding — rfcs/0008 Phase 4 names this as the real
-    # remaining proof, not yet done.
+    # `crates/bench` (2026-09) -- nirdosha-master-plan.md Part 3 Sprint 2's
+    # "Benchmark harness v1", rebuilt from nothing (the original,
+    # interpreter-era `crates/bench` was removed for the same reason the
+    # six `plugin-example-*` crates below it were: it scored an
+    # LLM-generated program's *interpreted* result value, a mechanism
+    # that no longer exists). The rebuild is compiled-path-native --
+    # `nirdosha certify`'s own JSON verdict decides pass/fail, never a
+    # second, bench-local notion of "correct" -- so it carries no trace
+    # of that dependency.
+    "crates/bench",
+    # The original six interpreter-era `plugin-example-*` crates,
+    # `plugin-support`, and `plugin-examples` stay removed: each depended
+    # entirely on the interpreter (interpreted plugin dispatch via
+    # `PluginBuiltin`/`PluginFn`) -- a mechanism that no longer exists
+    # now that the interpreter is gone. See git history if any of this
+    # (a real MySQL/Cassandra/ActiveMQ/Neo4j/HBase plugin, ported onto
+    # the compiled-path ABI above instead of the deleted trait) is worth
+    # rebuilding — rfcs/0008 Phase 4 names this as the real remaining
+    # proof, not yet done.
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

@@ -43,6 +43,8 @@ Want the verdict as data instead of reading terminal output? `nirdosha verify <f
 
 And where a guarantee has a disclosed edge, this repo says so instead of letting the claim read broader than it is: [`examples/killer_demo/`](./examples/killer_demo/) races Nirdosha's own `spawn`/`thread` against Python's `threading` on the identical naive, unsynchronized database transfer — both corrupt the ledger on every run, because the race-freedom guarantee is real but scoped to `chan`/`spawn`'s in-memory primitives, not `db` (yet). What does hold up, measured on the same machine: ~18x faster than Python on the identical naive workload. See [`examples/killer_demo/RESULTS.md`](./examples/killer_demo/RESULTS.md).
 
+Same discipline applied to the benchmark harness: [`crates/bench/RESULTS.md`](./crates/bench/RESULTS.md) runs 3 real generate-then-self-repair-then-verify tasks against a live model, scored by `nirdosha certify`'s own JSON verdict — one genuinely `PROVED` by Z3, one blocked by a real, disclosed Tier-1 modeling gap, one where the self-repair loop itself fell short. It is explicitly *not* the full Nirdosha-vs-TypeScript-vs-Rust-vs-LLM+XGrammar-vs-LLM+Imandra comparison the roadmap calls for — see that file's own "what this is not" section for exactly what's missing and why.
+
 ## Why you won't be waiting on us
 
 > 💡 **[A Language Is Only as Good as Its Ecosystem](https://github.com/kannamma-labs/nirdosha/wiki/A-Language-Is-Only-as-Good-as-Its-Ecosystem)** — every capability a compiled `.nir` binary has is an ordinary Rust crate underneath, so Nirdosha's capability ceiling is Rust's. Databases, TLS, JWT, Redis — reachable by design, not by waiting on maintainers. *"Good artists copy, great artists steal."*

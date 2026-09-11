@@ -1,0 +1,49 @@
+{
+  "model": "gemini-2.5-flash",
+  "tasks_total": 3,
+  "pass_at_1": 0,
+  "self_repair_rescued": 2,
+  "gave_up": 1,
+  "certified_proved": 1,
+  "results": [
+    {
+      "id": "injection_safe_lookup",
+      "category": "injection",
+      "outcome": "gave_up",
+      "attempts": null,
+      "verdict": null,
+      "evidence_tier": null,
+      "contracts_proved": null,
+      "contracts_unsupported": null,
+      "contracts_failed": null,
+      "proven_in_range": null,
+      "error": "gave up after 3 attempts -- last diagnostic:\nparse error in /tmp/nirdosha_hi_generate_check_935677_2.nir at 23:25: expected an expression, found `{`"
+    },
+    {
+      "id": "overflow_checked_multiply",
+      "category": "overflow",
+      "outcome": "self_repair_rescued",
+      "attempts": 2,
+      "verdict": "PROVED",
+      "evidence_tier": "proved",
+      "contracts_proved": 1,
+      "contracts_unsupported": 0,
+      "contracts_failed": 0,
+      "proven_in_range": 0,
+      "error": null
+    },
+    {
+      "id": "average_no_float_confusion",
+      "category": "type_confusion",
+      "outcome": "self_repair_rescued",
+      "attempts": 3,
+      "verdict": "UNKNOWN",
+      "evidence_tier": "unknown",
+      "contracts_proved": 0,
+      "contracts_unsupported": 1,
+      "contracts_failed": 0,
+      "proven_in_range": 0,
+      "error": null
+    }
+  ]
+}

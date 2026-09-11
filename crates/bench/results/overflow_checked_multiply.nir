@@ -1,0 +1,13 @@
+fn order_total_cents(unit_price_cents: i64, quantity: i64) -> i64 requires(public) {
+    return unit_price_cents * quantity
+}
+
+validate order_total_cents {
+    pre: unit_price_cents >= 0 && quantity >= 1
+    post: result >= unit_price_cents
+}
+
+fn main() requires(public) {
+    let total: i64 = order_total_cents(250, 4)
+    print(total)
+}
