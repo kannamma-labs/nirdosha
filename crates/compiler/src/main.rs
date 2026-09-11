@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         "verify" => cmd_verify(args),
         "fix" => cmd_fix(args),
         "explain" => cmd_explain(args),
+        "certify" => cmd_certify(args),
         "mcp" => cmd_mcp(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
@@ -55,6 +56,8 @@ fn print_usage() {
     eprintln!("                                      --apply writes every `auto` patch to the file in place");
     eprintln!("  nirdosha explain [<code>]           print the machine-learnable error index (JSON on stdout);");
     eprintln!("                                      with no <code>, lists every NIR-code and its title");
+    eprintln!("  nirdosha certify <file.nir>         same checks as verify, wrapped in a deterministic, hash-pinned");
+    eprintln!("                                      Certificate v0 (source_hash/grammar_hash/evidence_tier/...)");
     eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
     eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
@@ -1365,6 +1368,144 @@ fn cmd_explain(mut args: impl Iterator<Item = String>) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Certificate v0 (`nirdosha-master-plan.md` Part 3 Sprint 1, parity
+/// target: Velvet, Kōdo) -- a deterministic, hash-pinned JSON
+/// attestation, reproducible by any third party holding the same
+/// source file and the same compiler version: no timestamp, no
+/// absolute path, no random nonce anywhere in this struct, only
+/// content hashes and counts. `#[derive(Serialize)]` on a plain struct
+/// (not a `serde_json::Map`) is itself part of that determinism --
+/// serde always serializes struct fields in declaration order, never
+/// resorted, so the same `Certificate` value always produces the same
+/// JSON bytes.
+///
+/// `evidence_tier` is the field `docs/PUBLIC_ROADMAP.md`'s master-plan
+/// notes say to ship now "so the format never breaks": all four tiers
+/// (`proved`/`checked`/`sampled`/`unknown`) are valid values in this
+/// schema from v0 onward, even though this compiler can only ever
+/// produce `proved` or `unknown` today -- `checked` (sandbox-validated
+/// behavioral evidence) and `sampled` (property-based/fuzz evidence)
+/// both require infrastructure that doesn't exist yet (the MicroVM
+/// sandbox tier, post-seed; see the master plan's "language-agnostic
+/// ladder"). A certificate a future `nirdosha check` emits can set
+/// either of those without this struct's shape ever changing.
+#[derive(serde::Serialize)]
+struct Certificate {
+    certificate_version: &'static str,
+    source_hash: String,
+    grammar_hash: String,
+    toolchain_version: &'static str,
+    /// `"proved"` | `"checked"` | `"sampled"` | `"unknown"` -- see this
+    /// struct's own doc comment for why the type is `&'static str`
+    /// (an open, forward-declared vocabulary) rather than a 2-variant
+    /// enum that would have to grow a breaking variant later.
+    evidence_tier: &'static str,
+    verdict_summary: VerdictSummary,
+    proof_obligations: ProofObligations,
+}
+
+#[derive(serde::Serialize)]
+struct VerdictSummary {
+    verdict: ProofVerdict,
+    contracts_proved: usize,
+    contracts_unsupported: usize,
+    contracts_failed: usize,
+}
+
+/// Builds a `Certificate` from a source file's raw bytes and the
+/// pipeline result already run against it -- takes `VerifyVerdict` by
+/// value and destructures it (`..` drops `load`/`typecheck`/
+/// `ownership`/`source`) rather than borrowing, since nothing after
+/// this call needs the full verdict and a certificate is deliberately
+/// a compact summary of it, not a re-export of every diagnostic
+/// `verify`'s own JSON already carries.
+fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certificate {
+    let VerifyVerdict { verdict, contracts, proof_obligations, .. } = pipeline;
+    // `Skipped` means contract-check never ran at all (a load/typecheck/
+    // ownership failure stopped the pipeline first) -- no Z3-backed
+    // evidence was ever produced, so `unknown` is the honest tier, not
+    // `proved`/`checked` implying analysis that didn't happen. Once
+    // contract-check does run, both `Proved` and `Disproved` are a
+    // *conclusive* Z3 answer -- `evidence_tier` describes the kind of
+    // evidence (formal, either way), `verdict_summary.verdict` separately
+    // describes the outcome (pass or fail). Only `Unknown` (Z3 couldn't
+    // model at least one obligation) leaves `evidence_tier` at
+    // `"unknown"` too: an inconclusive stage produced no full proof.
+    let evidence_tier = if contracts.status == StageStatus::Skipped {
+        "unknown"
+    } else {
+        match verdict {
+            ProofVerdict::Proved | ProofVerdict::Disproved => "proved",
+            ProofVerdict::Unknown => "unknown",
+        }
+    };
+    Certificate {
+        certificate_version: "0",
+        source_hash: sha256_hex(source_bytes),
+        grammar_hash: sha256_hex(NIRDOSHA_GBNF.as_bytes()),
+        toolchain_version: env!("CARGO_PKG_VERSION"),
+        evidence_tier,
+        verdict_summary: VerdictSummary {
+            verdict,
+            contracts_proved: contracts.proved,
+            contracts_unsupported: contracts.unsupported,
+            contracts_failed: contracts.failed,
+        },
+        proof_obligations,
+    }
+}
+
+/// `nirdosha certify <file.nir>` -- `nirdosha-master-plan.md` Part 3
+/// Sprint 1's Certificate v0. Runs the identical gate pipeline
+/// `verify`/`fix` both run (`run_verify_pipeline`) and wraps it in a
+/// `Certificate` instead of the full `VerifyVerdict` JSON. Issues a
+/// certificate for *every* verdict, `DISPROVED` included -- an honest
+/// "this code is proven wrong, here is the conclusive evidence" is a
+/// real, useful attestation (an audit trail, the same reason a court
+/// record documents an acquittal and a conviction alike), not
+/// something withheld until the code passes. Exit code mirrors
+/// `verify`'s own three-way split (`0`/`1`/`2` for
+/// `PROVED`/`DISPROVED`/`UNKNOWN`) so CI gating on `certify` behaves
+/// identically to gating on `verify` directly.
+fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(path) = args.next() else {
+        eprintln!("usage: nirdosha certify <file.nir>");
+        return ExitCode::FAILURE;
+    };
+    let source_bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error reading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pipeline = run_verify_pipeline(&path);
+    let verdict = pipeline.verdict;
+    let certificate = build_certificate(&source_bytes, pipeline);
+    println!("{}", serde_json::to_string_pretty(&certificate).expect("Certificate always serializes"));
+    match verdict {
+        ProofVerdict::Proved => {
+            eprintln!("PROVED: certificate issued for {path}, evidence_tier={}", certificate.evidence_tier);
+            ExitCode::SUCCESS
+        }
+        ProofVerdict::Disproved => {
+            eprintln!("DISPROVED: certificate issued for {path} recording the failure, evidence_tier={}", certificate.evidence_tier);
+            ExitCode::FAILURE
+        }
+        ProofVerdict::Unknown => {
+            eprintln!("UNKNOWN: certificate issued for {path}, evidence_tier={}", certificate.evidence_tier);
+            ExitCode::from(2)
+        }
     }
 }
 

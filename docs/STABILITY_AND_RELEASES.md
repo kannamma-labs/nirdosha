@@ -95,6 +95,14 @@ closer to stable without actually clearing this list.
   is the one thing this project is explicitly asking outside tooling to
   build against today (`docs/LANGUAGE.md` §1, `docs/PUBLIC_ROADMAP.md`'s
   "Shipped" entry for `verify`).
+- `nirdosha certify`'s Certificate v0 JSON is under the same contract,
+  from its first release (2026-09), for the same reason — it's an
+  attestation format explicitly meant to be reproduced and checked by
+  a third party, not an internal debugging aid. `evidence_tier`'s
+  value set is pre-declared as `proved`/`checked`/`sampled`/`unknown`
+  even though this compiler can only ever produce `proved`/`unknown`
+  today, specifically so a future `checked`/`sampled`-producing
+  compiler version never needs a breaking change here.
   - **Breaking change, called out here per the rule above (2026-09):**
     the top-level `status` field (`"passed"`/`"failed"`) is renamed to
     `verdict`, and its value set widened to a genuine three-valued

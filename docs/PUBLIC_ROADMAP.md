@@ -142,6 +142,22 @@ any form today; added 2026-09, see the callout just below).
   `crates/compiler/tests/mcp_server.rs` — spawns the real binary and
   speaks the stdio transport directly (initialize/tools list/tools
   call/notifications/malformed input/unknown method).
+- [DONE] `nirdosha certify <file.nir>` (2026-09, master plan Part 3
+  Sprint 1) — Certificate v0, parity target: Velvet, Kōdo. A
+  deterministic JSON attestation over the same `run_verify_pipeline`
+  result `verify`/`fix`/`mcp` share: real SHA-256 `source_hash`/
+  `grammar_hash` (reproducible by a third party, never a timestamp or
+  the caller's own file path), `toolchain_version`, an `evidence_tier`
+  field (`proved`/`checked`/`sampled`/`unknown` — only the first and
+  last are reachable today; `checked`/`sampled` are reserved so the
+  schema doesn't have to break when the CHECKED tier lands post-seed),
+  and a compact `verdict_summary`. Issues a certificate for every
+  verdict including `DISPROVED` — a conclusive counterexample is real,
+  conclusive evidence, not withheld until the code passes. Tests:
+  `crates/compiler/tests/certify_command.rs` (all three verdicts'
+  evidence tiers, real-hash verification against the shipped
+  `nirdosha.gbnf`, byte-for-byte determinism across two runs, and that
+  the caller's own file path never leaks into the certificate).
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)

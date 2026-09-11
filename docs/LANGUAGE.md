@@ -34,6 +34,7 @@ nirdosha verify <file.nir>            # 3-valued JSON verdict (PROVED/DISPROVED/
 nirdosha fix <file.nir> [--apply]     # same checks as verify, plus a byte-offset FixPatch per fixable diagnostic (see below)
 nirdosha explain [<code>]             # the machine-learnable error index -- NIR0001..NIR0013 (see below)
 nirdosha mcp                          # an MCP server on stdio: verify_code/get_grammar/fix/describe (see below)
+nirdosha certify <file.nir>            # same checks, wrapped in a deterministic Certificate v0 (see below)
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -145,6 +146,26 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   (`isError: false`) — the verdict itself carries the outcome, the same
   distinction the MCP spec draws between protocol errors and
   tool-execution errors.
+- **`certify`** (2026-09, `nirdosha-master-plan.md` Part 3 Sprint 1,
+  parity target: Velvet, Kōdo) — runs the identical `verify` pipeline
+  and wraps it in Certificate v0: a deterministic, hash-pinned JSON
+  attestation (`source_hash`/`grammar_hash`, both real SHA-256 —
+  reproducible by any third party holding the same source file and
+  compiler version, never a timestamp or a caller-local file path),
+  `toolchain_version`, an `evidence_tier` field (`"proved"`/`"checked"`/
+  `"sampled"`/`"unknown"`; today only `"proved"` and `"unknown"` are
+  ever produced — `"checked"`/`"sampled"` are reserved for the future
+  CHECKED tier's sandbox-validated/sampled evidence, so the schema
+  never has to grow a breaking field once that lands), and a compact
+  `verdict_summary` (not the full obligation-by-obligation detail
+  `verify`'s own JSON already gives). A certificate is issued for
+  every verdict, `DISPROVED` included — an honest "this code is proven
+  wrong, here's the conclusive evidence" is a real attestation, not
+  withheld until the code passes; `evidence_tier` is `"proved"` for
+  both `PROVED` and `DISPROVED` (a conclusive Z3 answer either way is
+  still formal evidence) and `"unknown"` only when contract-check never
+  ran at all, or Z3 couldn't decide something. Exit code mirrors
+  `verify`'s own `0`/`1`/`2`.
 
 ---
 
