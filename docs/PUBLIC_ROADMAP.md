@@ -158,6 +158,22 @@ any form today; added 2026-09, see the callout just below).
   evidence tiers, real-hash verification against the shipped
   `nirdosha.gbnf`, byte-for-byte determinism across two runs, and that
   the caller's own file path never leaks into the certificate).
+- [PARTIAL] PyPI thin client `nirdosha-verify` (2026-09, master plan
+  Part 3 Sprint 1, parity target: dottxt/Outlines' distribution model)
+  — `clients/python/nirdosha-verify/`: a real, tested, buildable Python
+  package (`pip install -e .` and `python -m build` both verified —
+  `pyproject.toml`/hatchling, a wheel + sdist actually built) wrapping
+  `nirdosha verify`/`fix`/`certify` as `nirdosha_verify.verify()`/
+  `fix()`/`certify()` plus a `nirdosha-verify` console-script
+  passthrough. `[PARTIAL]`, honestly: it is not yet published to PyPI
+  (a real, external, one-way action nobody has asked for yet) and does
+  not bundle/download a prebuilt binary — v0 expects `nirdosha` already
+  on `PATH` or pointed to via `NIRDOSHA_BIN`; auto-fetching a release
+  binary needs nirdosha to actually publish tagged release binaries
+  first (`docs/STABILITY_AND_RELEASES.md`'s monthly cadence). Tests:
+  `clients/python/nirdosha-verify/tests/test_verify.py`, run against
+  the real locally-built binary (9/9 passing, including the console
+  script and a real `python -m build` producing an installable wheel).
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)

@@ -1,0 +1,33 @@
+[project]
+name = "nirdosha-verify"
+version = "0.1.0"
+description = "Thin Python client for `nirdosha verify`/`fix`/`certify` -- shells out to a locally installed nirdosha compiler binary and parses its JSON output."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "kannamma-labs" }]
+keywords = ["nirdosha", "formal-verification", "ai-agents", "static-analysis"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/kannamma-labs/nirdosha"
+Repository = "https://github.com/kannamma-labs/nirdosha"
+
+[project.scripts]
+nirdosha-verify = "nirdosha_verify._cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nirdosha_verify"]
