@@ -158,8 +158,15 @@ fn certify(binary: &str, task_id: &str, source: &str) -> Result<serde_json::Valu
 /// against the numbers, the same "the demo's own files are the
 /// record" discipline `examples/killer_demo/`/`examples/attack_demo/`
 /// already establish, not a bench-only convention invented here.
-fn results_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("results")
+/// Nested under a sanitized model name so re-running against a
+/// *different* provider (this repo's own history: Gemini first, then
+/// a local Ollama-proxied cloud model once Gemini's free-tier daily
+/// quota ran out mid-session) adds a second, independently-inspectable
+/// result set rather than silently overwriting the first one's real
+/// evidence.
+fn results_dir(model: &str) -> std::path::PathBuf {
+    let safe_model: String = model.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("results").join(safe_model)
 }
 
 fn main() {
@@ -177,7 +184,7 @@ fn main() {
     let model = std::env::var("NIRDOSHA_LLM_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o-mini (OpenAI default)".to_string());
     let client = hi_llm::LlmClient::new(activation);
     let binary = locate_nirdosha_binary();
-    let out_dir = results_dir();
+    let out_dir = results_dir(&model);
     std::fs::create_dir_all(&out_dir).expect("creating crates/bench/results should not fail");
 
     let mut results = Vec::new();

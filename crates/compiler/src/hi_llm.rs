@@ -444,6 +444,30 @@ pub fn generate_from_task_prompt(client: &LlmClient, task_prompt: &str, on_log: 
     Err(format!("gave up after {MAX_SELF_REPAIR_ATTEMPTS} attempts -- last diagnostic:\n{last_diagnostic}"))
 }
 
+/// `nirdosha-master-plan.md` Part 3 Q1 2027's "`nirdosha suggest-
+/// contracts` v1 -- LLM-assisted contract inference" (parity target:
+/// Kōdo's own `kodoc annotate --ai`, Certora AutoProver). One-shot,
+/// deliberately: unlike `generate_from_task_prompt`'s bounded self-
+/// repair loop (which knows "did it compile" as its own stopping
+/// criterion), a *suggested contract* has no such self-checkable
+/// signal here -- whether it's actually true needs a real
+/// `nirdosha verify`/`certify` run against the spliced-in result,
+/// which is `cmd_suggest_contracts`'s job, not this function's; a
+/// contract can compile as valid `.nir` syntax and still be a false
+/// statement about the function (which is exactly what Certora's own
+/// AutoProver found on Aave v4: "independently derived one invariant,
+/// missed a human-written one" -- coverage is not the same as
+/// correctness, and this suggestion is explicitly not presented as
+/// either).
+pub fn suggest_contract(client: &LlmClient, file_source: &str, fn_name: &str) -> Result<String, String> {
+    let prompt = format!(
+        "Here is a Nirdosha (.nir) program:\n\n{file_source}\n\nSuggest a `validate {fn_name} {{ ... }}` block stating the strongest true Hoare pre/post contract you can infer for `{fn_name}` from its body, parameter names, and return type. Reply with ONLY the validate block source (starting with `validate {fn_name} {{` and ending with the matching `}}`), no prose, no markdown fence, no other declarations."
+    );
+    let history = vec![ChatMessage { role: "system", content: NIR_SYSTEM_PROMPT.to_string() }, ChatMessage { role: "user", content: prompt }];
+    let raw = client.complete(&history).map_err(|e| format!("couldn't reach the model: {e}"))?;
+    Ok(extract_nir_source(&raw))
+}
+
 /// Verifies a candidate source string actually typechecks, ownership-
 /// checks, *and* builds -- Generate mode's own lock definition
 /// (rfcs/0014: "a CodeUnit locks when its generated `.nir` both exists

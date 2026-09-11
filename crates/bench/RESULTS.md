@@ -1,14 +1,27 @@
 # Benchmark harness v1 — results
 
-`nirdosha-master-plan.md` Part 3 Sprint 2's "Benchmark harness v1." This
-is a real run, not simulated numbers: three tasks, generated for real
-against `gemini-2.5-flash` (Google's OpenAI-compatible endpoint,
-`GOOGLE_API_KEY` in this environment), self-repaired for real against
+`nirdosha-master-plan.md` Part 3 Sprint 2's "Benchmark harness v1." Two
+real runs, not simulated numbers, against two independent providers:
+three tasks each, generated for real, self-repaired for real against
 this compiler's own diagnostics (`nirdosha::hi_llm::generate_from_task_prompt`,
-the exact loop `nirdosha hi`'s Generate mode uses), and scored for real
-by `nirdosha certify`'s own JSON verdict. Raw artifacts —
-`results/summary.json` and the generated `.nir` source for every task
-that compiled — are committed alongside this file.
+the exact loop `nirdosha hi`'s Generate mode uses), scored for real by
+`nirdosha certify`'s own JSON verdict. Raw artifacts — each provider's
+`results/<model>/summary.json` and the generated `.nir` source for
+every task that compiled — are committed alongside this file.
+
+| Run | Model | Endpoint | `pass@1` | `self-repair-rescued` | `gave up` | `certified PROVED` |
+|---|---|---|---|---|---|---|
+| 1 | `gemini-2.5-flash` | Google AI Studio (cloud, API key, free-tier quota) | 0/3 | 2/3 | 1/3 | 1/3 |
+| 2 | `kimi-k2.7-code:cloud` | local Ollama daemon proxying a cloud-hosted code model (no API key, no quota) | 3/3 | 0/3 | 0/3 | 2/3 |
+
+Run 2 exists because run 1's free-tier daily quota ran out mid-session
+(the actual message: `RESOURCE_EXHAUSTED`,
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, limit 20/day) --
+a second provider needing no API key or billing account was the
+practical way to keep testing this harness the same day, and it
+happens to also be a stronger, code-specialized model, which the
+numbers below reflect honestly rather than cherry-picking one run to
+report.
 
 ## What this is *not* (disclosed up front, not buried)
 
@@ -53,7 +66,7 @@ turned up a real finding, not assumed going in:
 
 That leaves three tasks: one per remaining class.
 
-## Results (one run, `gemini-2.5-flash`, 2026-09)
+## Run 1 — `gemini-2.5-flash`, 2026-09
 
 | Task | Class | Outcome | Attempts | `nirdosha certify` verdict | `evidence_tier` |
 |---|---|---|---|---|---|
@@ -61,72 +74,98 @@ That leaves three tasks: one per remaining class.
 | `overflow_checked_multiply` | overflow | self-repair rescued | 2/3 | **PROVED** (`contracts_proved: 1`) | `proved` |
 | `average_no_float_confusion` | type confusion | self-repair rescued | 3/3 | UNKNOWN (`contracts_unsupported: 1`) | `unknown` |
 
-`pass@1: 0/3`, `self-repair-rescued: 2/3`, `gave up: 1/3`,
-`certified PROVED: 1/3`. Small-N, one run, illustrative — not a
-statistically robust claim about model capability (see "What this does
-and doesn't prove" below).
+## Run 2 — `kimi-k2.7-code:cloud` (via Ollama), 2026-09
 
-### `overflow_checked_multiply` — the real proof
+| Task | Class | Outcome | Attempts | `nirdosha certify` verdict | `evidence_tier` |
+|---|---|---|---|---|---|
+| `injection_safe_lookup` | injection | pass@1 | 1/3 | **PROVED** (vacuous — no `validate` block on this task) | `proved` |
+| `overflow_checked_multiply` | overflow | pass@1 | 1/3 | **PROVED** (`contracts_proved: 1`) | `proved` |
+| `average_no_float_confusion` | type confusion | pass@1 | 1/3 | UNKNOWN (`contracts_unsupported: 1`) | `unknown` |
+
+Both runs are small-N, one run each, illustrative — not a
+statistically robust claim about model capability (see "What this does
+and doesn't prove" below). What the *agreement* between them is worth
+noting: **both providers hit the identical `average_no_float_confusion`
+`UNKNOWN` result**, independent evidence that this is a real
+`contract_check.rs` Tier-1 boundary, not one model's own quirk.
+
+### `overflow_checked_multiply` — the real proof, twice
 
 The task asked for `order_total_cents(unit_price_cents, quantity)` with
 `validate order_total_cents { pre: unit_price_cents >= 0 && quantity >= 1, post: result >= unit_price_cents }`.
-Attempt 1 failed to compile; the self-repair loop fixed it on attempt 2.
-The final program (`results/overflow_checked_multiply.nir`) got a real
-`PROVED` verdict with `contracts_proved: 1` — Z3 formally proved the
-postcondition holds for every `i64` input satisfying the precondition,
-not a vacuous pass (an earlier draft of this task had no precondition
-at all, and Z3 correctly *disproved* it by finding `quantity = 0` as a
-counterexample — a real finding about task design, not a compiler bug,
-kept here rather than quietly edited away).
+Run 1 (Gemini): attempt 1 failed to compile, self-repair fixed it on
+attempt 2. Run 2 (Kimi): compiled on attempt 1. Both final programs got
+a real `PROVED` verdict with `contracts_proved: 1` — Z3 formally proved
+the postcondition holds for every `i64` input satisfying the
+precondition, not a vacuous pass (an earlier draft of this task had no
+precondition at all, and Z3 correctly *disproved* it by finding
+`quantity = 0` as a counterexample — a real finding about task design,
+not a compiler bug, kept in this file's own git history rather than
+quietly edited away).
 
-### `average_no_float_confusion` — a real, disclosed Tier-1 gap
+### `average_no_float_confusion` — a real, disclosed Tier-1 gap, reproduced by two models
 
 The task asked for `average_score(total_points, num_students)` with
 `validate average_score { pre: total_points >= 0 && num_students >= 1, post: result <= total_points }`.
-The model never introduced a float anywhere (the actual property this
-task was designed to probe) — every attempt used plain `i64` division.
-It still took 3 attempts to compile, and the final program's verdict is
-**`UNKNOWN`**, not `PROVED`: `contract_check.rs`'s Tier 1 can't model a
-predicate built on an integer-division result at all today
-(`contracts_unsupported: 1`), regardless of the precondition. This is a
-real, disclosed compiler gap surfaced by this run, not a task-design
-mistake — Tier 1's own documented scope is overflow/division-by-zero/
-array-bounds obligations *within a function body*, not arbitrary
-predicates a `validate` block states *about* a division's result.
+Neither model ever introduced a float anywhere (the actual property
+this task was designed to probe) — both used plain `i64` division, and
+both compiled (Gemini took 3 attempts, Kimi 1). Both final programs'
+verdict is **`UNKNOWN`**, not `PROVED`: `contract_check.rs`'s Tier 1
+can't model a predicate built on an integer-division result at all
+today (`contracts_unsupported: 1` in both runs), regardless of the
+precondition. Getting the identical result from two independently
+generated programs against two different models is exactly the kind
+of corroboration that rules out "one model's own quirk" as the
+explanation — this is a real, disclosed compiler gap. Tier 1's own
+documented scope is overflow/division-by-zero/array-bounds obligations
+*within a function body*, not arbitrary predicates a `validate` block
+states *about* a division's result.
 
-### `injection_safe_lookup` — a real, disclosed self-repair-loop gap
+### `injection_safe_lookup` — a self-repair-loop gap in run 1, a clean real success in run 2
 
 The task asked for a `db`-backed lookup keyed by an `i64` id, returning
-`Result(Text, ErrorCode)`. The model never attempted a concatenated,
-injectable query at any point across all 3 attempts — Nirdosha's own
-`str`-has-no-concatenation rule (AGENTS.md rule 3) makes that
-inexpressible, so this class's central guarantee held throughout,
-`gave_up` notwithstanding. All 3 attempts failed on unrelated syntax:
-the final diagnostic was `expected an expression, found `{`` — the
+`Result(Text, ErrorCode)`. **Neither model ever attempted a
+concatenated, injectable query, in any attempt of either run** —
+Nirdosha's own `str`-has-no-concatenation rule (AGENTS.md rule 3) makes
+that inexpressible, so this class's central guarantee held throughout
+both runs regardless of what else happened.
+
+Run 1 (Gemini) still `gave_up`: all 3 attempts failed on unrelated
+syntax, the final diagnostic `expected an expression, found `{`` — the
 match-arm-block mistake AGENTS.md rule 9 documents as "the single most
-common mistake an LLM makes writing Nirdosha," most likely inside the
-`Result`/error-handling composition this task's shape invites. The
-existing `self_repair_hint` (`hi_llm.rs`) doesn't yet special-case this
+common mistake an LLM makes writing Nirdosha," inside the `Result`/
+error-handling composition this task's shape invites. The existing
+`self_repair_hint` (`hi_llm.rs`) doesn't yet special-case this
 diagnostic with a worked db/`Result` example — a real, concrete
-follow-up this run surfaced, not a task flaw: the task's own guarantee
-(no injectable query) was never at risk; the loop's rescue rate for
-*this specific idiom, in this specific composition*, was the thing
-that fell short.
+follow-up this run surfaced, not a task flaw.
+
+Run 2 (Kimi) compiled clean on attempt 1 --
+`results/kimi-k2.7-code_cloud/injection_safe_lookup.nir` is a genuinely
+correct, idiomatic solution: `db_query(conn, "SELECT email FROM account WHERE id = ?", user_id)`,
+`user_id` passed as a real bound parameter, nested `match` on
+`Result`/`json_array_len`/`json_array_get`/`json_get_str` with no block-
+in-arm mistake anywhere. Confirms run 1's `gave_up` was genuinely a
+self-repair-loop/model-capability gap for that specific idiom, not
+evidence the task itself was unsolvable or unfairly hard.
 
 ## What this does and doesn't prove
 
 - **Does not prove**: a general pass@1/self-repair-rate figure for
   Nirdosha, or a claim that Nirdosha beats any other language/tool on
-  these classes — 3 tasks, one model, one run each is a demonstration
+  these classes — 3 tasks, two models, one run each is a demonstration
   that the harness and the scoring pipeline are real and wired up
   correctly, not a statistically powered result.
-- **Does prove**: the harness genuinely drives a live model, genuinely
-  self-repairs against this compiler's real diagnostics, and genuinely
-  scores outcomes off `nirdosha certify`'s own JSON — including
-  reporting `UNKNOWN` and `gave_up` honestly rather than rounding either
-  up to a pass. The overflow task's `PROVED`/`contracts_proved: 1` is a
-  real Z3 proof of a real property, reproducible with the committed
-  source and `nirdosha certify`.
+- **Does prove**: the harness genuinely drives a live model (two
+  independent providers, one cloud-API-key-based and one local-daemon-
+  proxied), genuinely self-repairs against this compiler's real
+  diagnostics, and genuinely scores outcomes off `nirdosha certify`'s
+  own JSON — including reporting `UNKNOWN` and `gave_up` honestly
+  rather than rounding either up to a pass. Both overflow runs'
+  `PROVED`/`contracts_proved: 1` are real Z3 proofs of a real property,
+  reproducible with the committed sources and `nirdosha certify`. Both
+  models independently hitting the identical `average_no_float_confusion`
+  `UNKNOWN` result is real corroboration that finding is a compiler
+  boundary, not a one-model artifact.
 - **Separately real, not superseded by this run**: the underlying
   by-construction guarantees this harness's task design leans on (no
   string concatenation, so an injectable query is inexpressible; Tier-1
@@ -137,6 +176,9 @@ that fell short.
 
 ## Reproduce it
 
+Against Google AI Studio (needs a real API key and is subject to its
+free-tier daily quota):
+
 ```sh
 export NIRDOSHA_LLM_PROVIDER_KEY=<a Google AI Studio API key>
 export NIRDOSHA_LLM_PROVIDER_MODEL=gemini-2.5-flash
@@ -145,7 +187,23 @@ cargo run -p nirdosha-bench
 ```
 
 (`crates/bench/run_gemini.sh` wraps exactly this, reading
-`GOOGLE_API_KEY` from your environment.) Any OpenAI-compatible endpoint
-works — set `NIRDOSHA_LLM_PROVIDER_KEY`/`_MODEL`/`_BASE` accordingly, or
-just `OPENAI_API_KEY` for a real OpenAI key with the default model
-(`hi_llm.rs::resolve_activation`).
+`GOOGLE_API_KEY` from your environment.)
+
+Against a local [Ollama](https://ollama.com) daemon proxying a cloud-
+hosted model (no API key, no quota — the easier default for repeated
+local runs, `crates/bench/run_ollama.sh` wraps this):
+
+```sh
+ollama pull kimi-k2.7-code:cloud   # or any other :cloud/local model Ollama supports
+export NIRDOSHA_LLM_PROVIDER_KEY=ollama-local   # any non-empty value -- Ollama doesn't check it
+export NIRDOSHA_LLM_PROVIDER_MODEL=kimi-k2.7-code:cloud
+export NIRDOSHA_LLM_PROVIDER_BASE=http://localhost:11434/v1
+cargo run -p nirdosha-bench
+```
+
+Any OpenAI-compatible endpoint works this same way — set
+`NIRDOSHA_LLM_PROVIDER_KEY`/`_MODEL`/`_BASE` accordingly, or just
+`OPENAI_API_KEY` for a real OpenAI key with the default model
+(`hi_llm.rs::resolve_activation`). Each run's artifacts land under
+`results/<model-name>/`, so different providers' results coexist
+instead of overwriting each other.

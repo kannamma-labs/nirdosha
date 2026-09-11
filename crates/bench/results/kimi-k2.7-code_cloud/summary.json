@@ -1,0 +1,49 @@
+{
+  "model": "kimi-k2.7-code:cloud",
+  "tasks_total": 3,
+  "pass_at_1": 3,
+  "self_repair_rescued": 0,
+  "gave_up": 0,
+  "certified_proved": 2,
+  "results": [
+    {
+      "id": "injection_safe_lookup",
+      "category": "injection",
+      "outcome": "pass_at_1",
+      "attempts": 1,
+      "verdict": "PROVED",
+      "evidence_tier": "proved",
+      "contracts_proved": 0,
+      "contracts_unsupported": 0,
+      "contracts_failed": 0,
+      "proven_in_range": 0,
+      "error": null
+    },
+    {
+      "id": "overflow_checked_multiply",
+      "category": "overflow",
+      "outcome": "pass_at_1",
+      "attempts": 1,
+      "verdict": "PROVED",
+      "evidence_tier": "proved",
+      "contracts_proved": 1,
+      "contracts_unsupported": 0,
+      "contracts_failed": 0,
+      "proven_in_range": 0,
+      "error": null
+    },
+    {
+      "id": "average_no_float_confusion",
+      "category": "type_confusion",
+      "outcome": "pass_at_1",
+      "attempts": 1,
+      "verdict": "UNKNOWN",
+      "evidence_tier": "unknown",
+      "contracts_proved": 0,
+      "contracts_unsupported": 1,
+      "contracts_failed": 0,
+      "proven_in_range": 0,
+      "error": null
+    }
+  ]
+}

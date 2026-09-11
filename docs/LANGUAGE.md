@@ -45,6 +45,8 @@ nirdosha attest <file.nir> --reviewer <name> --role agent|human --key <key.pk8> 
                                        # sign a real, unforgeable review attestation for a file (see below)
 nirdosha audit <file.nir> --trust-config <config.json> [--attestation <a.json>]...
                                        # consolidated trust report: formal verdict + attestation status
+nirdosha suggest-contracts <file.nir> <fn_name>
+                                       # ask an LLM for a validate block, then really check it with Z3
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -245,6 +247,26 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   2027) `nirdosha audit` "consolidated trust report" item — the same
   command, more inputs added to the same report later, not a
   competing one.
+- **`suggest-contracts`** (2026-09, `nirdosha-master-plan.md` Part 3
+  Q1 2027, "LLM-assisted contract inference", parity target: Kōdo's
+  `kodoc annotate --ai`, Certora AutoProver) —
+  `nirdosha suggest-contracts <file.nir> <fn_name>` asks a real LLM
+  (`hi_llm::suggest_contract`, the same activation/client plumbing
+  `nirdosha hi`'s Generate mode and `crates/bench` use — any OpenAI-
+  compatible endpoint, `NIRDOSHA_LLM_PROVIDER_KEY`/`_MODEL`/`_BASE` or
+  `OPENAI_API_KEY`; a local [Ollama](https://ollama.com) daemon
+  proxying a cloud model works well and needs no API key) for a
+  `validate` block, then **actually checks it**: splices the
+  suggestion into a scratch copy of the file and runs the identical
+  `run_verify_pipeline` every other command here uses before ever
+  presenting it, reporting the real `PROVED`/`DISPROVED`/`UNKNOWN`
+  verdict alongside the suggested text — never presented as
+  trustworthy on the strength of an LLM having produced it (Certora's
+  own AutoProver independently deriving one invariant but missing a
+  human-written one on Aave v4 is the concrete precedent this
+  distinction is drawn from). Refuses up front if `fn_name` already
+  has a `validate` block, rather than silently overwriting a possibly
+  hand-written contract.
 
 ---
 

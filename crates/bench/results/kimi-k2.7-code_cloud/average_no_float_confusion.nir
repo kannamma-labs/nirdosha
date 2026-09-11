@@ -1,0 +1,12 @@
+fn average_score(total_points: i64, num_students: i64) -> i64 requires(public) {
+    return total_points / num_students
+}
+
+validate average_score {
+    pre: total_points >= 0 && num_students >= 1
+    post: result <= total_points
+}
+
+fn main() requires(public) {
+    print(average_score(275, 4))
+}

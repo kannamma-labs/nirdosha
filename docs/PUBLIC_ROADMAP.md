@@ -331,19 +331,25 @@ runs behind it.
   own removal note), and nothing under this name existed in the repo
   until 2026-09's rebuild, below (master plan Part 3 Sprint 2's
   "Benchmark harness v1") — real this time: 3 tasks, run for real
-  against a live model (`gemini-2.5-flash`), self-repaired against real
-  compiler diagnostics (`hi_llm::generate_from_task_prompt`, reusing
-  `nirdosha hi`'s own Generate-mode loop), scored by `nirdosha certify`'s
-  real JSON verdict. `[PARTIAL]` because it covers Nirdosha only, not
-  the master plan's full comparison matrix (TypeScript/Rust/LLM+
-  XGrammar/LLM+Imandra baselines, or Kōdo's AlgoVeri/Vericoding corpus)
-  — see `crates/bench/RESULTS.md`'s own "What this is not" section for
-  exactly what's missing and why (third-party tools/corpora not present
-  in this environment, not a scope cut of convenience). A real
-  compiler gap surfaced along the way, disclosed rather than patched
-  around: Tier 1 can't model a `validate` predicate built on a division
-  result at all yet (`crates/bench/RESULTS.md`'s `average_no_float_confusion`
-  section).
+  against **two independent live providers** (`gemini-2.5-flash` via
+  Google AI Studio, and `kimi-k2.7-code:cloud` via a local Ollama
+  daemon proxying a cloud-hosted code model — added when Gemini's
+  free-tier daily quota ran out mid-session, and kept as a second,
+  independent result rather than replacing the first), self-repaired
+  against real compiler diagnostics (`hi_llm::generate_from_task_prompt`,
+  reusing `nirdosha hi`'s own Generate-mode loop), scored by
+  `nirdosha certify`'s real JSON verdict. `[PARTIAL]` because it covers
+  Nirdosha only, not the master plan's full comparison matrix
+  (TypeScript/Rust/LLM+XGrammar/LLM+Imandra baselines, or Kōdo's
+  AlgoVeri/Vericoding corpus) — see `crates/bench/RESULTS.md`'s own
+  "What this is not" section for exactly what's missing and why
+  (third-party tools/corpora not present in this environment, not a
+  scope cut of convenience). A real compiler gap surfaced along the
+  way, disclosed rather than patched around, and independently
+  reproduced by *both* models (ruling out "one model's own quirk" as
+  the explanation): Tier 1 can't model a `validate` predicate built on
+  a division result at all yet (`crates/bench/RESULTS.md`'s
+  `average_no_float_confusion` section).
 - [DONE] Red-team invitation published (2026-09, master plan Part 3
   Sprint 2, parity target: Certora's audit ethos) — `SECURITY.md`'s new
   top section reframes the file from a passive reporting form into an
@@ -496,6 +502,42 @@ runs behind it.
   `docs/STABILITY_AND_RELEASES.md`, already `[DONE]` under this
   roadmap's own Track A entry — this item closes out the one
   unchecked claim (test count) that document didn't itself carry.
+- [DONE] `nirdosha suggest-contracts` v1 — LLM-assisted contract
+  inference (2026-09, master plan Part 3 Q1 2027, parity target:
+  Kōdo's `kodoc annotate --ai`, Certora AutoProver) —
+  `nirdosha suggest-contracts <file.nir> <fn_name>` asks a real LLM
+  (`hi_llm::suggest_contract`, reusing `nirdosha hi`'s Generate-mode/
+  `crates/bench`'s own activation plumbing) for a `validate` block,
+  then actually checks it against Z3 before ever presenting it as
+  trustworthy — never accepted on the strength of an LLM having
+  produced it (Certora AutoProver's own Aave v4 miss is the cited
+  precedent). Refuses up front on a function that already has a
+  `validate` block. Real gap discovered and fixed while manually
+  testing this: `agent-skills/nirdosha/paste-anywhere-prompt.md` (the
+  system prompt every LLM call in this compiler sends) never
+  documented `validate`/`pre`/`post` syntax at all — only listed
+  `validate` as a reserved word — so a first real test produced
+  `requires(...)`/`ensures(...)`, plausible in other languages, a
+  parse error here; fixed by adding real syntax documentation with a
+  worked example, `[PARTIAL]` still open across `paste-anywhere-
+  prompt.md`'s 7 synced copies (`AGENTS.md`, `core.md`, `clinerules`,
+  `windsurfrules`, `cursor/nirdosha.mdc`, `claude-code/SKILL.md`,
+  `github/copilot-instructions.md`) — each has its own rule numbering
+  and curation, so propagating the fix needs a per-file pass, not a
+  blind copy, and is named here as a real follow-up rather than
+  silently left. After the prompt fix, a real Gemini run caught a
+  second genuine issue: a syntactically valid but out-of-range `i64`
+  literal (`x > -9223372036854775808`) in a suggested `abs_value`
+  precondition — correctly reported `DISPROVED`, not accepted. A
+  clean, genuine `PROVED` success (`clamp_to_zero`, `contracts_proved: 1`)
+  was captured against a local Ollama-proxied cloud code model
+  (`kimi-k2.7-code:cloud`, no API key or quota needed) once Gemini's
+  free-tier daily quota ran out mid-session. Tests:
+  `crates/compiler/tests/suggest_contracts.rs` covers everything that
+  doesn't need a live LLM call (usage errors, unknown function,
+  already-validated function refused, no provider configured); the
+  live-LLM path is documented, not simulated, per that file's own
+  doc comment naming all three real observed runs above.
 
 ---
 

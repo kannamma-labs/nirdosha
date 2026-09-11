@@ -26,6 +26,7 @@ fn main() -> ExitCode {
         "equivalence" => cmd_equivalence(args),
         "attest" => cmd_attest(args),
         "audit" => cmd_audit(args),
+        "suggest-contracts" => cmd_suggest_contracts(args),
         "mcp" => cmd_mcp(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
@@ -78,6 +79,10 @@ fn print_usage() {
     eprintln!("  nirdosha audit <file.nir> --trust-config <config.json> [--attestation <a.json>]...");
     eprintln!("                                      consolidated trust report: formal verdict + every");
     eprintln!("                                      attestation's real signature/trust/staleness status");
+    eprintln!("  nirdosha suggest-contracts <file.nir> <fn_name>");
+    eprintln!("                                      ask an LLM for a validate block, then really check it");
+    eprintln!("                                      with Z3 before recommending it (needs an LLM provider,");
+    eprintln!("                                      see NIRDOSHA_LLM_PROVIDER_KEY/OPENAI_API_KEY)");
     eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
     eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
@@ -2128,6 +2133,102 @@ fn cmd_audit(mut args: impl Iterator<Item = String>) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `nirdosha suggest-contracts <file.nir> <fn_name>` --
+/// `nirdosha-master-plan.md` Part 3 Q1 2027's "LLM-assisted contract
+/// inference" (parity target: Kōdo's `kodoc annotate --ai`, Certora
+/// AutoProver). Asks a real LLM (`hi_llm::suggest_contract`, same
+/// activation/client plumbing `nirdosha hi`'s Generate mode and
+/// `crates/bench` both use) for a `validate` block, then -- this is
+/// the part that matters -- **actually checks it**: splices the
+/// suggestion into a scratch copy of the file and runs the identical
+/// `run_verify_pipeline` every other command here uses, reporting the
+/// real verdict alongside the suggested text. A suggestion is never
+/// presented as trustworthy on the strength of an LLM having produced
+/// it; `docs/PUBLIC_ROADMAP.md`'s Certora citation (AutoProver
+/// "independently derived one invariant, missed a human-written one"
+/// on Aave v4) is the concrete reason this command's own doc comment
+/// insists on that distinction rather than assuming it's obvious.
+///
+/// Refuses up front if `fn_name` already has a `validate` block --
+/// a function has exactly one, and silently overwriting an existing,
+/// possibly hand-written contract is a worse failure mode than asking
+/// the caller to remove it first.
+fn cmd_suggest_contracts(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let (Some(path), Some(fn_name)) = (args.next(), args.next()) else {
+        eprintln!("usage: nirdosha suggest-contracts <file.nir> <fn_name>");
+        return ExitCode::FAILURE;
+    };
+
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error reading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (program, _src) = match nirdosha::loader::load_program(&path) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !program.fns.iter().any(|f| f.name == fn_name) {
+        eprintln!("no such function `{fn_name}` in {path}");
+        return ExitCode::FAILURE;
+    }
+    if program.validates.iter().any(|v| v.fn_name == fn_name) {
+        eprintln!("`{fn_name}` already has a `validate` block -- remove it first if you want a fresh suggestion (never overwritten automatically)");
+        return ExitCode::FAILURE;
+    }
+
+    let activation = match nirdosha::hi_llm::resolve_activation(&|k| std::env::var(k).ok()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("nirdosha suggest-contracts: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let client = nirdosha::hi_llm::LlmClient::new(activation);
+    let suggestion = match nirdosha::hi_llm::suggest_contract(&client, &source, &fn_name) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut scratch_path = std::env::temp_dir();
+    scratch_path.push(format!("nirdosha_suggest_contracts_{}_{fn_name}.nir", std::process::id()));
+    let spliced = format!("{source}\n\n{suggestion}\n");
+    if let Err(e) = std::fs::write(&scratch_path, &spliced) {
+        eprintln!("error writing scratch file: {e}");
+        return ExitCode::FAILURE;
+    }
+    let verdict = run_verify_pipeline(scratch_path.to_str().expect("temp_dir()-rooted path is always valid UTF-8 on every platform this ships for"));
+    let _ = std::fs::remove_file(&scratch_path);
+
+    let recommendation = match verdict.verdict {
+        ProofVerdict::Proved => "PROVED -- Z3 confirmed this contract holds for every input; safe to add as-is",
+        ProofVerdict::Disproved => "DISPROVED -- this suggestion is a false statement about the function (see the counterexample in contracts.obligations); do not use it as-is",
+        ProofVerdict::Unknown => "UNKNOWN -- Z3 couldn't decide this one; review it by hand before trusting it",
+    };
+    let report = serde_json::json!({
+        "file": path,
+        "fn_name": fn_name,
+        "suggested_contract": suggestion,
+        "verdict": verdict,
+        "recommendation": recommendation,
+    });
+    println!("{}", serde_json::to_string_pretty(&report).expect("this JSON value always serializes"));
+    eprintln!("{recommendation}");
+    match verdict.verdict {
+        ProofVerdict::Proved => ExitCode::SUCCESS,
+        ProofVerdict::Disproved => ExitCode::FAILURE,
+        ProofVerdict::Unknown => ExitCode::from(2),
     }
 }
 

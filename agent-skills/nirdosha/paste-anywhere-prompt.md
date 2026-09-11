@@ -305,6 +305,35 @@ generate *valid* Nirdosha on the first try.
     `match`, `use`, `effect`, `stop`. If you need one of those words
     as a name, pick a synonym (`game_state`, `open_order`, ...) —
     there is no quoting or escaping mechanism.
+18. **A Hoare contract is a separate top-level `validate` block, never
+    inline in the function body, and its keys are exactly `pre`/`post`
+    (never `requires`/`ensures`, even though those words are reserved
+    too — they're for something else, function-level `requires(role:
+    ...)` gating).** `pre` states an assumption about the parameters
+    that must hold before this predicate applies; `post` states what
+    must be true of `result` (the contract's own name for the return
+    value) afterward. Both are plain `.nir` boolean expressions —
+    combine more than one condition with `&&`, never a repeated
+    `pre:`/`post:` key on the same block:
+    ```nirdosha
+    fn charge_cents(amount_cents: i64, balance_cents: i64) -> i64 {
+        return balance_cents - amount_cents
+    }
+
+    validate charge_cents {
+        pre: amount_cents >= 0 && amount_cents <= balance_cents
+        post: result >= 0
+    }
+    ```
+    Only integer parameters/return values are provable today (no
+    `f64`, `bool`, `struct`, or `enum` in a contract's own predicate) —
+    write the contract anyway for a fully-integer function, and expect
+    `nirdosha verify`'s JSON `verdict` to come back `PROVED` (a real
+    Z3 proof), `DISPROVED` (a real counterexample — the contract or the
+    function has a real bug, don't just loosen the predicate to make it
+    pass), or `UNKNOWN` (a real, disclosed compiler boundary — division-
+    derived predicates and loops are two current examples, not an error
+    on your part).
 
 A fast-scan companion to the rules above — every pair below is
 verified against the real compiler, not hypothetical.
