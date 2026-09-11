@@ -563,6 +563,45 @@ runs behind it.
   (not just "some string"), composition with `--sign`, and confirming
   the flag is a pure wrapper (identical predicate content whether
   `--in-toto` is given or not).
+- [DONE] Test count re-verified again — 644, not ~1,350 (2026-09-11) —
+  the prior "~1,350" entry above was itself a bad grep-based estimate;
+  see `docs/STABILITY_AND_RELEASES.md`'s own note for the corrected,
+  actually-run number (644 total, 623 passing with no extra infra, 21
+  needing a real local Postgres).
+- [DONE] `v0.1.0` tagged, and two real CI bugs it exposed, both fixed
+  (2026-09-11, master plan Part 3 "land the branch" milestone) — the
+  tag push itself surfaced two real, previously-silent release-pipeline
+  bugs, not hypothetical ones: (1) the `x86_64-apple-darwin` matrix leg
+  targeted `macos-13`, a GitHub-hosted runner image retired 2025-12-08
+  — it queued forever with no runner ever assigned (confirmed
+  reproducing identically on the prior day's `v0.1.0-alpha.4` release,
+  stuck 23+ hours, never previously noticed); fixed by moving to
+  `macos-15-intel`, GitHub's replacement label. (2) A real
+  cold-machine install rehearsal (`scripts/install.sh` run inside a
+  fresh, unmodified `debian:bookworm-slim` container — no repo clone,
+  no dev tools staged) found the Linux release binary needs
+  `GLIBC_2.39`/`GLIBCXX_3.4.31` (from building on `ubuntu-latest` =
+  24.04) to even start — excluding Debian 12, Ubuntu 22.04 LTS, RHEL 9,
+  and older. Fixed by building on `ubuntu-22.04` instead (floor now
+  glibc 2.35); a new "Cold-machine rehearsal" CI step runs every future
+  Linux release binary inside a fresh `debian:bookworm-slim` container
+  as a permanent regression guard, since the pre-existing same-machine
+  smoke test structurally cannot catch a glibc mismatch. **Real,
+  disclosed gap left open**: RHEL 8/Debian 11/Amazon Linux 2 (glibc
+  <2.35) still can't run the binary; closing that needs a static
+  `x86_64-unknown-linux-musl` build, not attempted in this pass. The
+  `v0.1.0` tag itself was left pointing at the pre-fix commit (both
+  fixes landed in commits immediately after) rather than force-moved —
+  its GitHub Release currently has zero binaries attached (the stuck
+  run was cancelled outright, not just the broken leg); a corrected
+  tag/release is a deliberately deferred follow-up, not silently
+  glossed over here.
+- [DONE] PyPI package prepped, not published (2026-09-11, master plan
+  Part 3 Sep 26–Oct 9) — `clients/python/nirdosha-verify` builds a real
+  sdist + wheel (`python -m build`) and both pass `twine check`.
+  Publishing to the real PyPI index needs a maintainer's own PyPI
+  account/token, deliberately not done by an agent — prepared and
+  handed off, not silently skipped.
 
 ---
 
