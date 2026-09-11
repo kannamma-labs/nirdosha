@@ -14,6 +14,7 @@ struct McpSession {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
+    stderr: BufReader<std::process::ChildStderr>,
 }
 
 impl McpSession {
@@ -22,12 +23,30 @@ impl McpSession {
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Piped, not nulled: `cmd_mcp` discloses the session's
+            // tool-call log path on stderr at startup -- the tests
+            // below read that one line to assert the log itself.
+            .stderr(Stdio::piped())
             .spawn()
             .expect("nirdosha mcp should spawn");
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-        Self { child, stdin, stdout }
+        let stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+        Self { child, stdin, stdout, stderr }
+    }
+
+    /// The disclosed NDJSON call-log path `cmd_mcp` prints on stderr
+    /// at startup (surface `"mcp-stdio"`) -- the first line it ever
+    /// writes, before reading any stdin, so one `read_line` is
+    /// exactly enough to obtain it.
+    fn log_path(&mut self) -> std::path::PathBuf {
+        let mut line = String::new();
+        self.stderr.read_line(&mut line).expect("read from nirdosha mcp's stderr should succeed");
+        let path = line
+            .strip_prefix("[nirdosha mcp] tool-call log: ")
+            .unwrap_or_else(|| panic!("first stderr line should disclose the log path, got: {line:?}"))
+            .trim();
+        std::path::PathBuf::from(path)
     }
 
     fn send(&mut self, value: &serde_json::Value) {
@@ -82,17 +101,89 @@ fn initialize_negotiates_the_protocol_version_and_advertises_tools() {
 }
 
 #[test]
-fn tools_list_advertises_exactly_the_four_master_plan_tools() {
+fn tools_list_advertises_exactly_the_five_master_plan_tools() {
     let mut session = McpSession::start();
     session.initialize();
     session.send(&serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let response = session.recv();
     let tools = response["result"]["tools"].as_array().expect("tools should be an array");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().expect("name should be a string")).collect();
-    assert_eq!(names, vec!["verify_code", "get_grammar", "fix", "describe"], "response: {response}");
+    assert_eq!(names, vec!["verify_code", "get_grammar", "fix", "describe", "certify_code"], "response: {response}");
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], "object", "tool: {tool}");
     }
+}
+
+#[test]
+fn certify_code_issues_a_deterministic_certificate_for_every_verdict() {
+    let mut session = McpSession::start();
+    session.initialize();
+    // A DISPROVED source still gets its certificate -- the same honest
+    // "here is the conclusive evidence this code is wrong" contract
+    // `nirdosha certify` documents.
+    let source = serde_json::json!({ "source": "fn bad(a: i64) -> i64 {\n    return a - 1\n}\n\nvalidate bad {\n    post: result >= a\n}\n" });
+    let first = session.call_tool(2, "certify_code", source.clone());
+    let second = session.call_tool(3, "certify_code", source);
+    let first_structured = &first["result"]["structuredContent"];
+    let second_structured = &second["result"]["structuredContent"];
+    assert_eq!(first_structured["certificate_version"], "0", "response: {first}");
+    assert_eq!(first_structured["verdict_summary"]["verdict"], "DISPROVED", "response: {first}");
+    assert_eq!(first_structured["evidence_tier"], "proved", "a conclusive Z3 counterexample is formal evidence: {first}");
+    assert!(first_structured["source_hash"].as_str().expect("hash should be a string").starts_with("sha256:"), "response: {first}");
+    assert!(first_structured["grammar_hash"].as_str().expect("hash should be a string").starts_with("sha256:"), "response: {first}");
+    // Deterministic, hash-pinned: byte-for-byte identical for the same
+    // source and compiler version -- the property that makes a
+    // certificate reproducible by any third party.
+    assert_eq!(&first_structured, &second_structured, "two calls on the same source must produce identical certificates");
+}
+
+#[test]
+fn certify_code_missing_source_is_a_protocol_error() {
+    let mut session = McpSession::start();
+    session.initialize();
+    let response = session.call_tool(2, "certify_code", serde_json::json!({}));
+    assert_eq!(response["error"]["code"], -32602, "response: {response}");
+}
+
+#[test]
+fn every_call_is_logged_in_the_disclosed_ndjson_log() {
+    let mut session = McpSession::start();
+    session.initialize();
+    let log_path = session.log_path();
+    let verify = session.call_tool(
+        2,
+        "verify_code",
+        serde_json::json!({ "source": "fn bad(a: i64) -> i64 {\n    return a - 1\n}\n\nvalidate bad {\n    post: result >= a\n}\n" }),
+    );
+    assert_eq!(verify["result"]["structuredContent"]["verdict"], "DISPROVED", "response: {verify}");
+    let grammar = session.call_tool(3, "get_grammar", serde_json::json!({}));
+    assert!(grammar["result"]["structuredContent"]["grammar"].is_string(), "response: {grammar}");
+
+    let contents = std::fs::read_to_string(&log_path).expect("the disclosed log file should exist");
+    let records: Vec<serde_json::Value> = contents
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("log line was not valid JSON ({e}): {l:?}")))
+        .collect();
+    // session_start + one record per tools/call (initialize and
+    // notifications are wire-level protocol, not tool calls -- the
+    // log records the capability surface, not the transport).
+    assert_eq!(records.len(), 3, "records: {records:?}");
+    assert_eq!(records[0]["event"], "session_start");
+    assert_eq!(records[0]["surface"], "mcp-stdio");
+    assert_eq!(records[1]["tool"], "verify_code");
+    assert_eq!(records[1]["call_id"], 1);
+    assert_eq!(records[1]["surface"], "mcp-stdio");
+    assert_eq!(records[1]["verdict"], "DISPROVED");
+    assert!(records[1]["source"]["sha256"].as_str().expect("hash should be a string").starts_with("sha256:"));
+    assert!(records[1]["ts"].as_str().expect("ts should be a string").ends_with('Z'));
+    assert_eq!(records[2]["tool"], "get_grammar");
+    assert_eq!(records[2]["call_id"], 2);
+    let grammar_record = &records[2];
+    assert!(grammar_record.get("source").is_none(), "get_grammar carries no source: {grammar_record:?}");
+    assert_eq!(records[2]["outcome"], "ok");
+    // The user-facing cleanliness contract: the test leaves no
+    // scratch log behind.
+    let _ = std::fs::remove_file(&log_path);
 }
 
 #[test]

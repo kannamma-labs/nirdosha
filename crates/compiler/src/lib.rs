@@ -12,6 +12,7 @@ pub mod hi_server;
 pub mod hi_window;
 pub mod init;
 pub mod loader;
+pub mod mcp_tools;
 pub mod migrate;
 pub mod ownership;
 pub mod parser;
