@@ -509,6 +509,16 @@ struct Player { state: PlayerState, score: i64 }
 struct Player { game_state: PlayerState, score: i64 }
 ```
 
+19. **`print` takes scalars only** — `i64`/`f64`/`str`/`bool`/`unit`,
+    any number of them. `print` on a `json`, `Vector`/`Matrix`,
+    `struct`, `enum`, or `Result` value is a hard codegen error
+    ("codegen doesn't support `print` on a ... argument yet"), and no
+    stringify/dump builtin exists to paper over it. There is no
+    debugging shortcut here at all: when you need to see an aggregate
+    on the console, extract scalars and print those — the exact
+    json/Vector display loops are in the Print entry of the Common
+    builtins section below.
+
 ## Types
 
 | Type | Spelling | Notes |
@@ -785,7 +795,48 @@ function (no `acquire` needed, callable exactly as normally) and exists
 purely to silence rule 12's warning on a `fn` you're deliberately
 leaving open to anyone.
 
-**Print**: `print(x)` — any number of args, any scalar type.
+**Print**: `print(x, y, ...)` — any number of args, but **scalars only**:
+`i64`/`f64`/`str`/`bool`/`unit` (rule 19). `print` on a `json`,
+`Vector`/`Matrix`, `struct`, `enum`, or `Result` value is a hard
+codegen error — and there is no `json_to_str`/stringify builtin, so
+when a program must *show* an aggregate (a landing-page payload, a
+queue of requests, a db result set), extract scalars and print those.
+The exact shapes — note every json accessor returns a `Result`, always
+`match`ed:
+
+```nirdosha
+// a json object: pull typed fields out with json_get_*, print scalars
+let j: json = doc
+let user: str = match json_get_str(j, "user") {
+    Ok(s) => s,
+    Err(e) => "?",
+}
+print("landing for", user)
+
+// a json array: json_array_len + json_array_get in a while loop
+let rows: json = queue_json
+let n: i64 = match json_array_len(rows) {
+    Ok(k) => k,
+    Err(e) => 0,
+}
+let i: i64 = 0
+while i < n {
+    let status: str = match json_array_get(rows, i) {
+        Ok(row) => match json_get_str(row, "status") {
+            Ok(s) => s,
+            Err(e) => "?",
+        },
+        Err(e) => "?",
+    }
+    print("request", i, "status", status)
+    i = i + 1
+}
+```
+
+A `Vector` is the same loop shape with `v[i]` instead of the json
+accessors; a `struct` prints field by field (`s.field`); an `enum`
+`match`es to its variants and prints each payload; a `Result` is
+always `match`ed before anything inside it can be shown.
 
 ## A complete worked example
 
