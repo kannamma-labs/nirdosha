@@ -19,6 +19,17 @@ name: release
 # macOS binary needs `brew install z3` on the machine that runs it, same
 # as building from source would. Documented, not silent.
 #
+# Linux builds on `ubuntu-22.04`, not `ubuntu-latest` (= 24.04): found
+# by a real cold-machine install rehearsal (2026-09-11) -- a binary
+# built on 24.04 needs GLIBC_2.39/GLIBCXX_3.4.31 to even start, which a
+# plain `debian:bookworm-slim` container (glibc 2.36, a real "cold
+# machine" stand-in) doesn't have ("version `GLIBC_2.39' not found").
+# 22.04's older toolchain lowers that floor to glibc 2.35, covering
+# Debian 12/Ubuntu 22.04+/RHEL 9 -- still not RHEL 8/Debian
+# 11/Amazon Linux 2 (glibc <2.35), which would need a fully static
+# `x86_64-unknown-linux-musl` build to cover; not attempted in this
+# pass, a real disclosed gap (`docs/PUBLIC_ROADMAP.md`), not a silent one.
+#
 # `x86_64-apple-darwin` runs on `macos-15-intel`, not `macos-13`: found
 # by a real stuck v0.1.0 release run (2026-09-11) where that matrix leg
 # sat `queued` with no runner ever assigned while the other three legs
@@ -43,7 +54,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             asset: nirdosha-x86_64-unknown-linux-gnu.tar.gz
           - target: x86_64-apple-darwin
             os: macos-15-intel
@@ -173,6 +184,26 @@ jobs:
           target/${{ matrix.target }}/release/nirdosha build crates/compiler/tests/fixtures/hello.nir -o /tmp/nirdosha_smoke_test
           output="$(/tmp/nirdosha_smoke_test)"
           test "$output" = "8"
+
+      # Same-machine smoke test above can't catch a glibc-version
+      # mismatch (the runner that built it always has its own glibc
+      # available). This is a real cold-machine rehearsal instead: run
+      # the just-built binary inside a plain `debian:bookworm-slim`
+      # container (older glibc, no repo/toolchain, nothing pre-staged)
+      # -- exactly the check that caught the `ubuntu-latest` ->
+      # `ubuntu-22.04` glibc-floor bug this workflow now carries a fix
+      # for, kept here so a future toolchain bump can't silently
+      # reintroduce it.
+      - name: Cold-machine rehearsal (Linux only — older-glibc container, no clang/build tools)
+        # Deliberately just `--help`, not `build`: this step isolates
+        # the binary's own dynamic-linking requirement (glibc/glibcxx
+        # version) from `nirdosha build`'s separate, documented
+        # requirement that the *user's* machine has `clang` installed --
+        # conflating the two would make a missing-clang failure here
+        # look like the glibc regression this step exists to catch.
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          docker run --rm -v "$PWD/target/${{ matrix.target }}/release/nirdosha:/nirdosha:ro" debian:bookworm-slim /nirdosha --help
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
