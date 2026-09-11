@@ -480,6 +480,22 @@ runs behind it.
   against the real, checked-in files so a future compiler change that
   silently regresses Tier-1's modeling of any of these patterns fails
   a test, not just goes unnoticed in a markdown file.
+- [DONE] v1.0 stability promise, test-count claim checked (2026-09,
+  master plan Part 3 Dec 2026, "tests 211 → 10,000") — the "211"
+  circulating in planning material was stale: `crates/compiler` has
+  ~98 unit tests plus ~1,250 integration `#[test]` functions today
+  (`docs/STABILITY_AND_RELEASES.md`'s own "Test count, checked
+  directly" note), roughly 1,350, not 211. Deliberately not "fixed" by
+  writing filler tests toward 10,000 — a round number chased for its
+  own sake would cut directly against this project's actual testing
+  culture, where every test traces to a real regression, counterexample,
+  or feature's own end-to-end proof (this session's own commits are
+  the pattern: `fintech_canon.rs`/`trust_audit.rs`/
+  `equivalence_command.rs`/`signed_certificate.rs` and the rest, each
+  earning its place). The "v1.0 stability promise" itself is
+  `docs/STABILITY_AND_RELEASES.md`, already `[DONE]` under this
+  roadmap's own Track A entry — this item closes out the one
+  unchecked claim (test count) that document didn't itself carry.
 
 ---
 
