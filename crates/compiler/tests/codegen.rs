@@ -2223,6 +2223,105 @@ fn compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_bo
     assert!(missing_response.starts_with("HTTP/1.1 404"), "an unexposed path should 404, not silently match: {missing_response:?}");
 }
 
+/// A real red-team finding (`nirdosha-redteam/FULL_REDTEAM_REPORT.md`,
+/// 2026-09-11), reproduced and then confirmed fixed, end to end,
+/// against the *actual compiled binary* -- not just the typeck rule
+/// (`serve_exposure.rs`'s own test for that) or the hand-written
+/// `RouteHandler` stubs `compiled-serve/src/tests.rs` uses to test the
+/// HTTP engine in isolation. Before the fix, `emit_serve_route_wrapper`
+/// decoded a `RoleView`/`ClaimView`-typed parameter from `args_json`
+/// like any other struct -- so a client could supply
+/// `[{"role":"admin"}]` in the request body and construct an arbitrary,
+/// self-asserted `RoleView`, bypassing field-level masking for a caller
+/// whose *real* verified identity only ever proved `hr_staff`. This
+/// test mints a real `hr_staff`-only demo token, then sends the exact
+/// forged-role payload against a masked field, and asserts the real
+/// value never leaks.
+#[test]
+fn compiled_serve_never_lets_a_client_supplied_role_view_bypass_field_masking() {
+    let port = free_port();
+    let src = r#"
+        struct Employee {
+            name: str,
+            salary: f64 requires(role: "admin"),
+        }
+
+        fn list_employees(caller: RoleView) -> Employee
+            requires(role: "hr_staff")
+        {
+            return Employee("Ada", 150000.0)
+        }
+
+        serve {
+            expose list_employees
+        }
+
+        fn main() {
+        }
+    "#;
+
+    let program = parse_checked(src);
+    let report = nirdosha::smt::analyze(&program);
+    let mut out_path = std::env::temp_dir();
+    out_path.push(format!("nirdosha_test_serve_roleview_{}_{}", std::process::id(), unique_suffix()));
+    let opts = codegen::ServeCodegenOptions { port, ui_html: Vec::new() };
+    codegen::build_serve(&program, &report, &out_path, codegen::OptLevel::O2, &opts).expect("codegen::build_serve should succeed");
+    let mut child = Command::new(&out_path).spawn().expect("compiled serve binary should start");
+
+    use std::io::{Read, Write};
+    let raw_request = |request: &str| -> Vec<u8> {
+        let mut attempt = 0;
+        let mut conn = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => break s,
+                Err(_) if attempt < 50 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("could not connect to the compiled serve listener: {e}"),
+            }
+        };
+        conn.write_all(request.as_bytes()).unwrap();
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut buf = Vec::new();
+        conn.read_to_end(&mut buf).unwrap();
+        buf
+    };
+    let http_post = |path: &str, body: &str, extra_headers: &str| -> String {
+        String::from_utf8_lossy(&raw_request(&format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}",
+            body.len()
+        )))
+        .into_owned()
+    };
+
+    // A real demo-mode token proving *only* `hr_staff` -- never `admin`.
+    let login_response = http_post("/api/_demo_login", r#"{"subject":"carol","roles":["hr_staff"]}"#, "");
+    let login_body = login_response.split("\r\n\r\n").nth(1).expect("demo login should return a body");
+    let token = login_body.split("\"token\":\"").nth(1).and_then(|s| s.split('"').next()).expect("demo login response should contain a token");
+
+    // The actual exploit attempt: assert an admin `RoleView` via the
+    // request body, on an identity that never proved it.
+    let exploit_response = http_post("/api/list_employees", r#"[{"role":"admin"}]"#, &format!("Authorization: Bearer {token}\r\n"));
+    // A legitimate call with no forged payload, for comparison -- both
+    // must come back identically masked, proving the forged body had
+    // zero effect rather than merely "some" effect.
+    let legitimate_response = http_post("/api/list_employees", "[]", &format!("Authorization: Bearer {token}\r\n"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&out_path);
+
+    assert!(exploit_response.starts_with("HTTP/1.1 200"), "unexpected exploit-attempt response: {exploit_response:?}");
+    assert!(!exploit_response.contains("150000"), "CRITICAL: a client-forged `RoleView` bypassed field masking -- real salary leaked: {exploit_response:?}");
+    assert!(exploit_response.contains("\"salary\":0.0") || exploit_response.contains("\"salary\": 0.0"), "expected the masked (zeroed) salary, got: {exploit_response:?}");
+    assert_eq!(
+        exploit_response.split("\r\n\r\n").nth(1),
+        legitimate_response.split("\r\n\r\n").nth(1),
+        "a forged role in the request body must have zero effect on the response"
+    );
+}
+
 #[test]
 fn str_slice_and_str_index_of_parse_a_request_line() {
     let src = r#"

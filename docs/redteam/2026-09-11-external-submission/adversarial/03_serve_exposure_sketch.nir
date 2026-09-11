@@ -1,0 +1,37 @@
+// Adversarial probe 03: Serve exposure surface sketch
+// Claim under test: typeck::check_serve_exposure is deny-by-default;
+// only screen-bound or explicitly serve { expose ... } functions are reachable.
+//
+// This file is a template. Build with `nirdosha build --serve` and then
+// probe every route with curl / httpx while holding only a low-privilege token.
+
+struct Text { value: str }
+
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),
+}
+
+// Should NOT be reachable unless explicitly exposed or bound to a screen
+fn secret_admin_only(caller: RoleView) -> f64
+    requires(role: "admin")
+{
+    return 999999.0
+}
+
+fn list_employees(caller: RoleView) -> Employee
+    requires(role: "hr_staff")
+{
+    return Employee("Ada", "Engineering", 150000.0)
+}
+
+// Explicit expose — red team should verify this is the ONLY way a non-screen fn becomes reachable
+serve {
+    expose list_employees
+    // Do NOT expose secret_admin_only
+}
+
+fn main() {
+    print("Serve exposure probe scaffold")
+}

@@ -14,8 +14,20 @@ functions in a shipped example were callable with no token at all,
 mutating ones included), and that JWKS validation only ever checked a
 symmetric key, accepting no mainstream IdP's real key material — both
 root-caused, fixed, and left in `docs/ROADMAP.md` (search "A10"/"A11")
-as the record, not quietly folded away. An external finding of the same
-shape and severity is exactly what this invitation is for.
+as the record, not quietly folded away.
+
+**One external finding has already come through this exact channel and
+been fixed the same day**, the first real proof this invitation works
+as intended, not just internal self-scrutiny: a submitted red-team
+report (2026-09-11) named `codegen.rs`'s `requires`/`acquire`/masking
+lowering — exactly the area this file's own "Areas most worth scrutiny"
+section names below — as the highest-leverage place to look, and
+constructing a concrete probe against it found that compiled `serve`
+would accept a client-forged `RoleView` (`[{"role":"admin"}]` in a
+request body) and use it to bypass field-level masking, for a caller
+whose real verified identity only ever proved `hr_staff`. Root-caused,
+fixed, and left in `docs/ROADMAP.md` (search "A18") as the record — the
+same treatment A10/A11 got, this time for an external submission.
 
 **What counts as a real finding:** a concrete `.nir` file (or, for the
 compiled `serve` surface, a request) that violates a guarantee this

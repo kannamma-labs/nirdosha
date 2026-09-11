@@ -1,0 +1,29 @@
+// Adversarial probe 02: Attempt to return a masked field without admin proof
+// Expected: salary always zeroed for non-admin caller (or compile/runtime failure)
+// Claim under test: field-level requires(role: ...) masking is applied at every construction site
+
+struct Text {
+    value: str,
+}
+
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),
+}
+
+fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
+    effect(pure)
+    requires(role: "hr_staff")
+{
+    return Employee(name.value, department.value, salary)
+}
+
+fn main() {
+    // Only hr_staff, not admin
+    let identity: VerifiedIdentity = VerifiedIdentity("carol", "https://idp.example.com", "app", 0, 0, "hr_staff")
+    let proof = check_role(identity, "hr_staff")
+    // Use match / acquire pattern as in the real example
+    // If masking is correct, salary must be 0.0 regardless of the value passed
+    print("Probe 02: attempt to observe unmasked salary as non-admin")
+}

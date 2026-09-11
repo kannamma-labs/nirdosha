@@ -620,6 +620,37 @@ runs behind it.
   Publishing to the real PyPI index needs a maintainer's own PyPI
   account/token, deliberately not done by an agent — prepared and
   handed off, not silently skipped.
+- [DONE] First external red-team submission, triaged and the critical
+  finding fixed same day (2026-09-11, `SECURITY.md`'s invitation) — a
+  submitted report (`nirdosha-redteam/`) named `codegen.rs`'s
+  `requires`/`acquire`/masking lowering as the highest-leverage place to
+  probe; a concrete probe against it found compiled `serve` would
+  accept a client-forged `RoleView` (`[{"role":"admin"}]` in a request
+  body) and use it to bypass field-level masking for a caller whose
+  real verified identity only ever proved `hr_staff` — reproduced live
+  against a real compiled binary and a real demo-mode bearer token
+  before being fixed. Full writeup: `docs/ROADMAP.md`'s **A18** (search
+  for it) — the cause (`RoleView`/`ClaimView` parameters fell through
+  to the same generic request-body JSON decode any struct gets, with no
+  special case at all, unlike `VerifiedIdentity`), the two-part fix
+  (`typeck::check_serve_exposure` refuses to compile an exposed
+  `RoleView`/`ClaimView` parameter with no matching `requires`;
+  `codegen.rs::emit_serve_route_wrapper` now constructs the value from
+  the already-verified check instead), and the real HTTP-level
+  regression test (`crates/compiler/tests/codegen.rs::
+  compiled_serve_never_lets_a_client_supplied_role_view_bypass_field_masking`)
+  that sends the exact exploit payload against the real compiled binary
+  and asserts the real salary never appears. The report's other three
+  probes were also run for real: `RoleView` direct-construction forgery
+  (probe 01) and `serve`'s deny-by-default exposure model (probe 03,
+  confirming an unexposed route 404s even under a valid token) both held
+  as claimed; the `&` incomplete-exclusivity probe (04) confirms an
+  already-disclosed gap (`README.md`'s own "what these guarantees do
+  not cover"), not a new one. One confusing-but-lower-severity find
+  from the same pass — a stale `ungated_fn_warnings` false positive on
+  `main` — is a real, disclosed, deliberately-not-fixed-here follow-up
+  (`docs/ROADMAP.md` A18's own closing paragraph has the reason it's
+  more than a one-line fix).
 
 ---
 

@@ -467,6 +467,26 @@ pub enum TypeErrorKind {
     /// HTTP with no gate at all is a compile error, not a warning,
     /// because unlike a read this can change data.
     ExposedMutatingFnMissingRequires { fn_name: String },
+    /// A compiled-`serve`-exposed function has a `RoleView`/`ClaimView`-
+    /// typed parameter with no matching function-level `requires(role:
+    /// ...)`/`requires(claim: ..., ...)` of the right kind. Inside
+    /// ordinary compiled `.nir` code this parameter is safe by
+    /// construction — the only way a caller can *have* a `RoleView`/
+    /// `ClaimView` value at all is `check_role`/`extract_claim`
+    /// succeeding against a real `VerifiedIdentity` first (typeck
+    /// already rejects `RoleView("admin")` as a direct construction).
+    /// Compiled `serve`'s route wrapper is the one caller that isn't
+    /// itself compiled `.nir` code with that guarantee already proven —
+    /// without a `requires` of the matching kind to anchor which role/
+    /// claim the wrapper itself must verify before constructing the
+    /// value, there is no safe source for it at the HTTP boundary at
+    /// all. `codegen.rs::emit_serve_route_wrapper` never decodes a
+    /// `RoleView`/`ClaimView` from the request body (that would let a
+    /// client forge its own proof value over the wire, unforgeable-by-
+    /// construction or not) — a mismatch here is refused at compile
+    /// time instead, real hardening from a red-team finding
+    /// (2026-09-11), not a defensive guess.
+    ExposedFnRoleViewParamUnverifiable { fn_name: String, param_name: String, is_claim_view: bool },
 
     // ---- Track E1's `workspace`/`panel` DSL ---------------------------
     /// `workspace <Name>` with no `subject: <Struct>` entry at all.
@@ -984,6 +1004,19 @@ impl std::fmt::Display for TypeError {
                  but it has no `requires(...)` — add `requires(role: ...)`/`requires(claim: ..., ...)` to gate \
                  it, or `requires(public)` if an unauthenticated mutating route is genuinely intended"
             ),
+            TypeErrorKind::ExposedFnRoleViewParamUnverifiable { fn_name, param_name, is_claim_view } => {
+                let (ty_name, kind_word, example) =
+                    if *is_claim_view { ("ClaimView", "claim", "requires(claim: \"department\", \"cardiology\")") } else { ("RoleView", "role", "requires(role: \"admin\")") };
+                write!(
+                    f,
+                    "{line}:{col}: `{fn_name}` is exposed to compiled `serve` and its parameter `{param_name}` is a \
+                     `{ty_name}` — this can only be safely constructed at the HTTP boundary from a matching \
+                     function-level `{example}` (compiled `serve`'s route wrapper checks the caller's real \
+                     identity against exactly that {kind_word} and builds `{param_name}` from the result; it never \
+                     accepts one from the request body, since that would let a client forge its own proof value). \
+                     Add a matching `requires(...)` to `{fn_name}`, or don't expose it to `serve`."
+                )
+            }
             TypeErrorKind::WorkspaceMissingSubject(name) => write!(
                 f,
                 "{line}:{col}: `workspace {name}` has no `subject: <Struct>` entry — every workspace must name the struct it's scoped per-instance-of"
@@ -2633,6 +2666,30 @@ impl<'a> Checker<'a> {
             let Some(f) = program.fns.iter().find(|f| f.name == name) else { continue };
             if f.requires.is_none() && !f.explicit_public {
                 self.error(TypeErrorKind::ExposedMutatingFnMissingRequires { fn_name: f.name.clone() }, f.span);
+            }
+        }
+        // Every exposed function, not just the mutating-prefixed ones
+        // above -- a `RoleView`/`ClaimView` parameter with no anchoring
+        // `requires` is exactly as dangerous on a read as on a write
+        // (`ExposedFnRoleViewParamUnverifiable`'s own doc comment: the
+        // real red-team finding this closes was a masked-field *read*
+        // bypass, `list_employees`, not a mutation).
+        for name in exposed_fn_names(program) {
+            let Some(f) = program.fns.iter().find(|f| f.name == name) else { continue };
+            for p in &f.params {
+                let is_role_view = matches!(&p.ty, Ty::Named(n, args) if n == "RoleView" && args.is_empty());
+                let is_claim_view = matches!(&p.ty, Ty::Named(n, args) if n == "ClaimView" && args.is_empty());
+                if !is_role_view && !is_claim_view {
+                    continue;
+                }
+                let anchored = match &f.requires {
+                    Some(Requirement::Role(_)) => is_role_view,
+                    Some(Requirement::Claim(_, _)) => is_claim_view,
+                    _ => false,
+                };
+                if !anchored {
+                    self.error(TypeErrorKind::ExposedFnRoleViewParamUnverifiable { fn_name: f.name.clone(), param_name: p.name.clone(), is_claim_view }, f.span);
+                }
             }
         }
     }

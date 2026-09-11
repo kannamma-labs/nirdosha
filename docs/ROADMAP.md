@@ -2278,6 +2278,80 @@ types are involved. Worked around throughout this file by routing each
 arm through a small named helper function instead of writing the bare
 constructor as the arm's own tail expression.
 
+- `[DONE]` **A18. Compiled `serve` let a client forge its own `RoleView`
+  over HTTP, bypassing field-level masking.** Found by an external
+  red-team report (`SECURITY.md`'s invitation, submitted 2026-09-11,
+  `nirdosha-redteam/FULL_REDTEAM_REPORT.md`'s Critical #2: "codegen
+  lowering of requires/acquire/masking... is the real security
+  boundary"), confirmed live against the real compiled binary, not just
+  read from source: `codegen.rs::emit_serve_route_wrapper` special-cased
+  `VerifiedIdentity`/`Option(VerifiedIdentity)` parameters to be filled
+  from the verified `identity_json` rather than the request body, but
+  had no equivalent case for `RoleView`/`ClaimView` — those fell through
+  to the same generic per-argument JSON decode every ordinary struct
+  parameter gets. Reproduced: a real `nirdosha build --serve` binary,
+  exposing `fn list_employees(caller: RoleView) -> Employee
+  requires(role: "hr_staff")` where `Employee.salary requires(role:
+  "admin")`, given a real demo-mode bearer token proving only
+  `hr_staff` — `curl .../api/list_employees -d '[{"role":"admin"}]'`
+  returned the real, unmasked salary (`150000.0`), not the `0.0` a
+  `hr_staff`-only caller should ever see. `RoleView` is unforgeable
+  *inside* compiled `.nir` code (`RoleView("admin")` is a compile-time
+  error, `typeck.rs`'s `UnforgeableProofConstruction`) — compiled
+  `serve`'s HTTP boundary was the one caller that wasn't itself
+  `.nir` code already holding that guarantee, and nothing filled the
+  gap.
+
+  **Fixed same day, two parts:**
+  - `typeck::check_serve_exposure` gained
+    `ExposedFnRoleViewParamUnverifiable`: an exposed function with a
+    `RoleView`/`ClaimView`-typed parameter and no function-level
+    `requires` of the matching kind (`requires(role: ...)` /
+    `requires(claim: ..., ...)`) is now a compile error, not a silent
+    fallback to an unsafe shape — there's no safe source for the value
+    at the HTTP boundary otherwise. A `RoleView`/`ClaimView` parameter
+    on a function never exposed to `serve` is unaffected (the ordinary,
+    already-safe `acquire`-gated pattern).
+  - `codegen.rs::emit_serve_route_wrapper`: the existing
+    `nir_check_role`/`nir_extract_claim` call that already enforces
+    `f.requires` now also *constructs* the real `RoleView`/`ClaimView`
+    value right there (from the literal role text / the actually-
+    extracted claim value — never from anything client-suppliable) and
+    hands that to `f`, skipping `RoleView`/`ClaimView` parameters from
+    positional `args_json` decoding entirely (the same skip
+    `VerifiedIdentity` already got).
+
+  Verified two ways: `crates/compiler/tests/serve_exposure.rs` (6 new
+  typeck tests — matching/mismatched/absent `requires` for both
+  `RoleView` and `ClaimView`, and the never-exposed case staying
+  unflagged) and `crates/compiler/tests/codegen.rs::compiled_serve_never_lets_a_client_supplied_role_view_bypass_field_masking`
+  — a real compiled binary, a real demo-mode bearer token, the exact
+  `[{"role":"admin"}]` exploit payload, asserting the real salary never
+  appears in the response and the forged-body response is byte-identical
+  to a clean one. Full `cargo test --release` (651 tests: 630 passing, 21
+  `#[ignore]`-gated needing Postgres) reverified green, Redis included.
+  **Separately noted, not fixed in this pass**: `nirdosha build --serve`
+  emits `` `main` has no `requires(...)`... it will be callable by
+  anyone `` even when `main` isn't `serve`-exposed at all (it never is —
+  `main` has no HTTP route, confirmed live: `curl .../api/main` 404s
+  against a program exposing something else entirely). `typeck::
+  ungated_fn_warnings` scans every declared `fn` in the program, not
+  just `exposed_fn_names` — stale from the deleted interpreted
+  `serve.rs::dispatch`, which really did route any declared fn, unlike
+  compiled `serve`'s real deny-by-default model. **Attempted and
+  reverted, not just left alone**: filtering to `exposed_fn_names`
+  breaks `tests/ungated_fn_warning.rs::a_plain_fn_with_no_gate_at_all_warns`
+  and others, which deliberately assert this warning fires on *any*
+  ungated fn regardless of whether the test program declares a
+  `serve`/`screen` block at all — a real, intentional "would be unsafe
+  if ever exposed" lint, not simply an oversight to filter away.
+  Reconciling "warn proactively before exposure" with "don't warn about
+  a fn that provably has no route" needs a real design decision (a
+  narrower message for the definitely-unexposed case, most likely) plus
+  updating that test suite's own expectations together — a proper
+  follow-up, not a one-line fix, filed here rather than silently
+  patched around or silently dropped.
+
 ---
 
 ## Track C — Agent-Facing API (`docs/nirdosha-agent-api.md`)

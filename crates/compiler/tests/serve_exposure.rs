@@ -210,6 +210,120 @@ fn only_one_serve_block_is_allowed_per_program() {
     assert!(err.message.contains("only one `serve"), "unexpected message: {}", err.message);
 }
 
+// ---- `ExposedFnRoleViewParamUnverifiable` -- red-team finding, 2026-09-11 ----
+//
+// Before this rule existed, a `RoleView`/`ClaimView`-typed parameter on
+// an exposed fn with no matching `requires` fell through to
+// `codegen.rs`'s generic JSON-arg decode path at the compiled `serve`
+// boundary -- letting a client construct an arbitrary, self-asserted
+// `RoleView` via the request body (`[{"role":"admin"}]`), bypassing
+// field-level masking for a caller whose real identity never proved it.
+// See `crates/compiler/tests/codegen.rs::compiled_serve_never_lets_a_client_supplied_role_view_bypass_field_masking`
+// for the full HTTP-level reproduction of that exploit against the real
+// compiled binary; these are the narrower typeck-layer tests for the
+// rule that now refuses to compile the unsafe shape at all.
+
+#[test]
+fn an_exposed_fn_with_a_role_view_param_and_matching_requires_is_accepted() {
+    let src = r#"
+        struct Employee { name: str, salary: f64 requires(role: "admin") }
+        fn list_employees(caller: RoleView) -> Employee requires(role: "hr_staff") {
+            return Employee("Ada", 150000.0)
+        }
+        serve {
+            expose list_employees
+        }
+        fn main() {}
+    "#;
+    let program = parse_ok(src);
+    typecheck(&program).expect("a RoleView param anchored by a matching requires(role: ...) should typecheck");
+}
+
+#[test]
+fn an_exposed_fn_with_a_role_view_param_and_no_requires_at_all_is_rejected() {
+    let src = r#"
+        struct Employee { name: str, salary: f64 requires(role: "admin") }
+        fn list_employees(caller: RoleView) -> Employee {
+            return Employee("Ada", 150000.0)
+        }
+        serve {
+            expose list_employees
+        }
+        fn main() {}
+    "#;
+    let kind = first_type_error(src);
+    assert_eq!(kind, TypeErrorKind::ExposedFnRoleViewParamUnverifiable { fn_name: "list_employees".to_string(), param_name: "caller".to_string(), is_claim_view: false });
+}
+
+#[test]
+fn an_exposed_fn_with_a_role_view_param_but_a_claim_requires_is_rejected() {
+    // The parameter *type* and the `requires` *kind* must match -- a
+    // `requires(claim: ...)` doesn't anchor a `RoleView` parameter, even
+    // though both ultimately check something about the identity.
+    let src = r#"
+        struct Employee { name: str, salary: f64 requires(role: "admin") }
+        fn list_employees(caller: RoleView) -> Employee requires(claim: "department", "hr") {
+            return Employee("Ada", 150000.0)
+        }
+        serve {
+            expose list_employees
+        }
+        fn main() {}
+    "#;
+    let kind = first_type_error(src);
+    assert_eq!(kind, TypeErrorKind::ExposedFnRoleViewParamUnverifiable { fn_name: "list_employees".to_string(), param_name: "caller".to_string(), is_claim_view: false });
+}
+
+#[test]
+fn an_exposed_fn_with_a_claim_view_param_and_matching_requires_is_accepted() {
+    let src = r#"
+        struct Employee { name: str, salary: f64 requires(role: "admin") }
+        fn list_employees(caller: ClaimView) -> Employee requires(claim: "department", "hr") {
+            return Employee("Ada", 150000.0)
+        }
+        serve {
+            expose list_employees
+        }
+        fn main() {}
+    "#;
+    let program = parse_ok(src);
+    typecheck(&program).expect("a ClaimView param anchored by a matching requires(claim: ...) should typecheck");
+}
+
+#[test]
+fn an_exposed_fn_with_a_claim_view_param_and_no_requires_at_all_is_rejected() {
+    let src = r#"
+        struct Employee { name: str, salary: f64 requires(role: "admin") }
+        fn list_employees(caller: ClaimView) -> Employee {
+            return Employee("Ada", 150000.0)
+        }
+        serve {
+            expose list_employees
+        }
+        fn main() {}
+    "#;
+    let kind = first_type_error(src);
+    assert_eq!(kind, TypeErrorKind::ExposedFnRoleViewParamUnverifiable { fn_name: "list_employees".to_string(), param_name: "caller".to_string(), is_claim_view: true });
+}
+
+#[test]
+fn a_role_view_param_on_a_fn_never_exposed_to_serve_is_not_flagged() {
+    // The whole rule is about the compiled-`serve` HTTP boundary
+    // specifically -- an ordinary, never-exposed `.nir` function taking
+    // a `RoleView` (the normal, safe, `acquire`-gated pattern) is
+    // unaffected regardless of whether it declares a matching
+    // `requires` itself.
+    let src = r#"
+        struct Employee { name: str, salary: f64 requires(role: "admin") }
+        fn get_employee(caller: RoleView) -> Employee {
+            return Employee("Ada", 150000.0)
+        }
+        fn main() {}
+    "#;
+    let program = parse_ok(src);
+    typecheck(&program).expect("a RoleView param on a never-exposed fn must not be flagged");
+}
+
 #[test]
 fn serve_expose_accepts_a_trailing_comma() {
     let src = r#"

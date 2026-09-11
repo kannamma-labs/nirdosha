@@ -8379,7 +8379,24 @@ impl Codegen<'_> {
     ///   from the request body (`typeck::is_verified_identity`/
     ///   `is_optional_verified_identity`, the same predicates
     ///   `is_reachable_with_no_token` already uses for this exact
-    ///   distinction).
+    ///   distinction) -- and, as of a real red-team finding
+    ///   (2026-09-11), *also* skipping any `RoleView`/`ClaimView`
+    ///   parameter, filled instead from whichever `f.requires` check
+    ///   above already verified against the real identity
+    ///   (`verified_role_view_val`/`verified_claim_view_val`). Before
+    ///   this fix, `RoleView`/`ClaimView` fell through to the same
+    ///   generic decode path as any other struct parameter, meaning a
+    ///   client could supply `[{"role":"admin"}]` in the request body
+    ///   and construct an **arbitrary, self-asserted `RoleView`** for a
+    ///   route that only proved the caller's *real* identity held
+    ///   `hr_staff` -- a full bypass of field-level masking
+    ///   (`requires(role: "admin")` on a field) despite `RoleView`
+    ///   being, everywhere else in this language, unforgeable by
+    ///   construction. `typeck::check_serve_exposure`'s
+    ///   `ExposedFnRoleViewParamUnverifiable` refuses to compile a
+    ///   program that exposes a `RoleView`/`ClaimView` parameter with no
+    ///   matching `requires` to anchor it, so the `.expect()`s below are
+    ///   sound, not merely hopeful.
     /// - `f`'s return value is JSON-encoded back out (Stage 1's
     ///   `emit_encode_value_json`), `Result(_, _)`'s own tag driving
     ///   the `0`/`1` status `compiled_serve::call_route` already
@@ -8405,6 +8422,22 @@ impl Codegen<'_> {
         writeln!(self.out, "  store i64 0, ptr %out_cookie_len").unwrap();
 
         let identity_present = self.icmp("sgt", "i64", "%identity_json_len", "0")?;
+
+        // Set inside the matching `Requirement::Role`/`Requirement::Claim`
+        // arm below, once that check has actually passed -- the *only*
+        // place a `RoleView`/`ClaimView` value is ever allowed to come
+        // from in this wrapper. `typeck::check_serve_exposure`'s
+        // `ExposedFnRoleViewParamUnverifiable` already guarantees any
+        // `RoleView`/`ClaimView`-typed parameter has a matching
+        // `requires` of the right kind, so the parameter loop below can
+        // `.expect()` these unconditionally rather than silently falling
+        // back to decoding a caller-suppliable value from the request
+        // body -- exactly the red-team-confirmed bypass
+        // (`[{"role":"admin"}]` in the JSON body previously overrode a
+        // real `hr_staff`-only identity's masking) this whole mechanism
+        // exists to close.
+        let mut verified_role_view_val: Option<String> = None;
+        let mut verified_claim_view_val: Option<String> = None;
 
         // ---- `f.requires` enforcement, independent of whether `f`
         // itself declares a `VerifiedIdentity`/`Option(VerifiedIdentity)`
@@ -8461,6 +8494,22 @@ impl Codegen<'_> {
                     writeln!(self.out, "{fail_label}:").unwrap();
                     self.emit_serve_return_unauthorized();
                     writeln!(self.out, "{pass_label}:").unwrap();
+
+                    // The real `RoleView` this wrapper is ever allowed to
+                    // hand to `f` -- built from `role_global`/`role.len()`
+                    // (the *literal role text this exact check just
+                    // verified against the caller's real identity*),
+                    // never from anything client-suppliable. Same
+                    // `{ptr, i64}`-via-`insertvalue` shape a plain `str`
+                    // literal expression already uses elsewhere in this
+                    // module (`RoleView`'s sole field is `role: str`, so
+                    // its value representation *is* this pair, per
+                    // `emit_check_role`'s own doc comment).
+                    let role_partial = self.fresh_reg("serve_verified_role_view_partial");
+                    writeln!(self.out, "  {role_partial} = insertvalue {{ptr, i64}} undef, ptr {role_global}, 0").unwrap();
+                    let role_full = self.fresh_reg("serve_verified_role_view");
+                    writeln!(self.out, "  {role_full} = insertvalue {{ptr, i64}} {role_partial}, i64 {}, 1", role.len()).unwrap();
+                    verified_role_view_val = Some(role_full);
                 }
                 Requirement::Claim(key, expected_value) => {
                     let key_global = self.fresh_global("serve_requires_claim_key");
@@ -8507,6 +8556,22 @@ impl Codegen<'_> {
                     writeln!(self.out, "{fail_label}:").unwrap();
                     self.emit_serve_return_unauthorized();
                     writeln!(self.out, "{pass_label}:").unwrap();
+
+                    // The real `ClaimView` this wrapper is ever allowed
+                    // to hand to `f` -- built from `actual_ptr`/
+                    // `actual_len`, the claim value *this exact check
+                    // just extracted from the caller's real identity and
+                    // confirmed equals `expected_value`* (not
+                    // `expected_global`/`expected_value` directly, though
+                    // they're equal by this point -- using the extracted
+                    // value keeps this honestly "what the identity
+                    // actually said," not "what the source code expected
+                    // it to say"). Never from anything client-suppliable.
+                    let claim_partial = self.fresh_reg("serve_verified_claim_view_partial");
+                    writeln!(self.out, "  {claim_partial} = insertvalue {{ptr, i64}} undef, ptr {actual_ptr}, 0").unwrap();
+                    let claim_full = self.fresh_reg("serve_verified_claim_view");
+                    writeln!(self.out, "  {claim_full} = insertvalue {{ptr, i64}} {claim_partial}, i64 {actual_len}, 1").unwrap();
+                    verified_claim_view_val = Some(claim_full);
                 }
             }
         }
@@ -8515,6 +8580,29 @@ impl Codegen<'_> {
         let mut call_operands: Vec<String> = Vec::new();
         let mut json_idx: i64 = 0;
         for p in &f.params {
+            let is_role_view = matches!(&p.ty, Ty::Named(n, args) if n == "RoleView" && args.is_empty());
+            let is_claim_view = matches!(&p.ty, Ty::Named(n, args) if n == "ClaimView" && args.is_empty());
+            if is_role_view || is_claim_view {
+                // Never decoded from `args_json` -- see this function's
+                // own doc comment and `verified_role_view_val`/
+                // `verified_claim_view_val`'s. `typeck::check_serve_exposure`
+                // already refused to compile this program at all if `f`
+                // has one of these parameters without the matching
+                // `requires`, so exactly one of the two `.expect()`s
+                // below is live for any program that reaches codegen.
+                let (verified_val, ty_name) = if is_role_view {
+                    (verified_role_view_val.as_deref().expect("typeck guarantees a RoleView param has a matching requires(role: ...)"), "RoleView")
+                } else {
+                    (verified_claim_view_val.as_deref().expect("typeck guarantees a ClaimView param has a matching requires(claim: ...)"), "ClaimView")
+                };
+                let slot = self.fresh_reg("serve_verified_proof_slot");
+                let proof_ty = Ty::Named(ty_name.to_string(), vec![]);
+                let proof_llty = self.llvm_ty(&proof_ty)?;
+                self.emit_alloca(&slot, &proof_llty);
+                writeln!(self.out, "  store {{ptr, i64}} {verified_val}, ptr {slot}").unwrap();
+                call_operands.push(format!("ptr {slot}"));
+                continue;
+            }
             if is_verified_identity(&p.ty) {
                 let fail_label = self.fresh_label("serve_identity_required_fail");
                 let ok_label = self.fresh_label("serve_identity_required_ok");
