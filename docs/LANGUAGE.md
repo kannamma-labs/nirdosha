@@ -826,6 +826,19 @@ every run, disclosing the real boundary of the guarantee above rather
 than letting it be read as broader than it is. (What that file does
 show, honestly: ~18x faster than Python on the identical naive,
 unsynchronized workload — a real runtime difference, not a safety one.)
+This boundary is *addressable today*, with ordinary SQL discipline, not
+a gap waiting on a new language primitive: `race_probe_atomic.nir`
+closes the single-row case with one atomic `UPDATE ... WHERE <predicate
+on the current row>`, and `race_probe_booking.nir`/
+`race_probe_booking_pg_exclude.nir` close a genuinely multi-row,
+multi-statement case (a room-booking overlap check) the same way — a
+single conditional DML statement (`INSERT ... SELECT ... WHERE NOT
+EXISTS`), or, on Postgres, a schema-level `EXCLUDE USING gist`
+constraint with no application-level check at all. Measured, not
+argued: `examples/killer_demo/RESULTS_BOOKING.md`, and
+`rfcs/0015-keyed-guard-external-state.md`'s Motivation section, which
+also documents why a keyed-lock language primitive was considered and,
+on this evidence, not built.
 
 **`spawn`/`join`/`chan`/`send`/`recv` compile now (§10), backed by a
 real admission-controlled kernel, not just interpreted.** `spawn` runs

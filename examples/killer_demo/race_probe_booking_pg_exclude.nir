@@ -1,0 +1,190 @@
+// RFC 0015's "Implementation plan" Phase A2, run for real: can `.nir`'s
+// `db_execute` issue `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING
+// gist` against a real Postgres server, and does it actually enforce
+// the room-booking invariant with **no application-level check at
+// all** -- the schema-level answer RFC 0015's Motivation section names
+// but, before this file, never actually ran?
+//
+// Unlike race_probe_booking.nir (the INSERT...SELECT...WHERE NOT
+// EXISTS collapse), `try_book_inner` below does *no* overlap check of
+// its own -- it just inserts and lets the exclusion constraint accept
+// or reject. If Postgres rejects every genuinely-overlapping insert,
+// this is the strongest form of A2's claim: no lock, no guard, no
+// hand-written check, the database itself is the only invariant.
+//
+// Needs a real local Postgres: `docker compose -f docker-compose.dev.yml
+// up -d` (this repo's own dev convention, see that file).
+//
+// Run it:
+//   nirdosha build examples/killer_demo/race_probe_booking_pg_exclude.nir -o /tmp/race_probe_booking_pg_exclude
+//   /tmp/race_probe_booking_pg_exclude
+
+enum ErrorCode {
+    DbError(str),
+}
+
+struct Text {
+    value: str,
+}
+
+fn reset_booking_inner(conn: db) -> Result(Text, ErrorCode) {
+    let ext: i64 = match db_execute(conn, "CREATE EXTENSION IF NOT EXISTS btree_gist") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let dropped: i64 = match db_execute(conn, "DROP TABLE IF EXISTS booking_pg_exclude") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let created: Result(i64, ErrorCode) = match db_execute(conn, "CREATE TABLE booking_pg_exclude (id SERIAL PRIMARY KEY, room_id INTEGER, during INT4RANGE)") {
+        Ok(n) => Ok(n),
+        Err(e) => Err(DbError(e)),
+    }
+    // The schema-level answer itself: the exclusion constraint is the
+    // *entire* invariant. No `guard`, no lock, no read-check-write --
+    // Postgres rejects any insert whose `during` range overlaps an
+    // existing row for the same `room_id`.
+    let constrained: Result(Text, ErrorCode) = match created {
+        Ok(_) => match db_execute(conn, "ALTER TABLE booking_pg_exclude ADD CONSTRAINT booking_pg_exclude_no_overlap EXCLUDE USING gist (room_id WITH =, during WITH &&)") {
+            Ok(n) => Ok(Text("constrained")),
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(e),
+    }
+    stop conn
+    return constrained
+}
+
+fn reset_booking() -> Result(Text, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => reset_booking_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn count_bookings_inner(conn: db) -> Result(i64, ErrorCode) {
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COUNT(*) as c FROM booking_pg_exclude WHERE room_id = 1") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "c") {
+                Ok(c) => Ok(c),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn count_bookings() -> Result(i64, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => count_bookings_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn overlap_count_inner(conn: db) -> Result(i64, ErrorCode) {
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COUNT(*) as c FROM booking_pg_exclude a JOIN booking_pg_exclude b ON a.id < b.id AND a.room_id = b.room_id WHERE a.room_id = 1 AND a.during && b.during") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "c") {
+                Ok(c) => Ok(c),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn overlap_count() -> Result(i64, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => overlap_count_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+// No overlap check here at all -- the exclusion constraint is the only
+// thing standing between this and a double-booking. If Postgres's own
+// constraint enforcement is what RFC 0015 claims, every genuinely
+// conflicting insert fails with a constraint-violation error here.
+fn try_book_inner(conn: db, room_id: i64, start_ts: i64, end_ts: i64) -> Result(i64, ErrorCode) {
+    sleep_ms(2) // same simulated round-trip cost as the other probes, for a fair comparison
+    let inserted: Result(i64, ErrorCode) = match db_execute(conn, "INSERT INTO booking_pg_exclude (room_id, during) VALUES (?, int4range(?, ?, '[)'))", room_id, start_ts, end_ts) {
+        Ok(n) => Ok(n),
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return inserted
+}
+
+fn try_book(room_id: i64, start_ts: i64, end_ts: i64) -> Result(i64, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => try_book_inner(conn, room_id, start_ts, end_ts),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn worker(room_id: i64, iterations: i64) -> i64 {
+    let i: i64 = 0
+    let successes: i64 = 0
+    while i < iterations {
+        let start_ts: i64 = i * 10
+        let end_ts: i64 = start_ts + 10
+        let r: Result(i64, ErrorCode) = try_book(room_id, start_ts, end_ts)
+        let ok: bool = match r {
+            Ok(n) => n >= 1,
+            Err(_) => false,
+        }
+        if ok {
+            successes = successes + 1
+        }
+        i = i + 1
+    }
+    return successes
+}
+
+fn main() {
+    let setup: Result(Text, ErrorCode) = reset_booking()
+    match setup {
+        Ok(n) => print("booking table + exclusion constraint created"),
+        Err(e) => print("setup error"),
+    }
+
+    let t1: thread i64 = spawn worker(1, 250)
+    let t2: thread i64 = spawn worker(1, 250)
+    let t3: thread i64 = spawn worker(1, 250)
+    let t4: thread i64 = spawn worker(1, 250)
+    let t5: thread i64 = spawn worker(1, 250)
+    let t6: thread i64 = spawn worker(1, 250)
+    let t7: thread i64 = spawn worker(1, 250)
+    let t8: thread i64 = spawn worker(1, 250)
+
+    let s1: i64 = join t1
+    let s2: i64 = join t2
+    let s3: i64 = join t3
+    let s4: i64 = join t4
+    let s5: i64 = join t5
+    let s6: i64 = join t6
+    let s7: i64 = join t7
+    let s8: i64 = join t8
+
+    print("successful bookings (sum across workers, expected 250):")
+    print(s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8)
+
+    let final_count: Result(i64, ErrorCode) = count_bookings()
+    print("final booking row count for room 1 (expected 250):")
+    match final_count {
+        Ok(n) => print(n),
+        Err(e) => print("error reading count"),
+    }
+
+    let overlaps: Result(i64, ErrorCode) = overlap_count()
+    print("overlapping booking pairs for room 1 (expected 0):")
+    match overlaps {
+        Ok(n) => print(n),
+        Err(e) => print("error reading overlap count"),
+    }
+}

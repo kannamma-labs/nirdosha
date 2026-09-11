@@ -1,0 +1,226 @@
+// RFC 0015's "Implementation plan" Phase A3, run for real: is
+// `SELECT pg_advisory_xact_lock($1, $2)` callable through `db_query`
+// against a real Postgres server, and does the lock it takes actually
+// serialize the naive check-then-insert sequence -- the same naive
+// shape `race_probe_booking_naive.nir` proves races on SQLite -- when
+// wrapped in an explicit `BEGIN ... COMMIT` on one held connection?
+//
+// Correction to how A3 was originally scoped in RFC 0015: `transact`
+// is not a plain SQL-transaction wrapper (`docs/TRANSACT.md`: six
+// named slots -- precheck/network/verify/commit/compensate/log -- for
+// durable, compensating external effects), so "inside a `transact`
+// block" was never the right test. What actually matters is whether a
+// single `db` connection handle can hold one Postgres session/
+// transaction across multiple `db_execute`/`db_query` calls without
+// being silently multiplexed across different pooled physical
+// connections. It can (`kernel::pool::PoolRegistry`: one `db_connect`
+// checks out one physical connection, held until `stop conn`), which
+// is what makes `BEGIN` / `pg_advisory_xact_lock` / ... / `COMMIT` as
+// four ordinary calls on the same `conn` value actually correct. No
+// `transact` involved.
+//
+// Needs a real local Postgres: `docker compose -f docker-compose.dev.yml
+// up -d` (this repo's own dev convention, see that file).
+//
+// **Known to deadlock under real contention, not fixed here on
+// purpose.** This file demonstrates the mechanism (the lock is
+// reachable and genuinely releases at COMMIT -- see the sequential
+// smoke test in RESULTS_BOOKING.md) but running it with real
+// concurrent contention hits kannamma-labs/nirdosha#37
+// (`HandleTable::with` holding a process-wide mutex across the
+// blocking Postgres call) -- a kernel bug, not a property of advisory
+// locks. Do not treat this file as a working pattern to copy; see
+// `docs/CONCURRENT_STATE_PATTERNS.md` for what to actually use today.
+//
+// Run it:
+//   nirdosha build examples/killer_demo/race_probe_booking_advisory.nir -o /tmp/race_probe_booking_advisory
+//   /tmp/race_probe_booking_advisory
+
+enum ErrorCode {
+    DbError(str),
+}
+
+struct Text {
+    value: str,
+}
+
+fn reset_booking_inner(conn: db) -> Result(Text, ErrorCode) {
+    let dropped: i64 = match db_execute(conn, "DROP TABLE IF EXISTS booking_advisory") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let created: Result(Text, ErrorCode) = match db_execute(conn, "CREATE TABLE booking_advisory (id SERIAL PRIMARY KEY, room_id INTEGER, start_ts INTEGER, end_ts INTEGER)") {
+        Ok(n) => Ok(Text("reset")),
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return created
+}
+
+fn reset_booking() -> Result(Text, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => reset_booking_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn count_bookings_inner(conn: db) -> Result(i64, ErrorCode) {
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COUNT(*) as c FROM booking_advisory WHERE room_id = 1") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "c") {
+                Ok(c) => Ok(c),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn count_bookings() -> Result(i64, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => count_bookings_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn overlap_count_inner(conn: db) -> Result(i64, ErrorCode) {
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COUNT(*) as c FROM booking_advisory a JOIN booking_advisory b ON a.id < b.id AND a.room_id = b.room_id WHERE a.room_id = 1 AND NOT (a.end_ts <= b.start_ts OR a.start_ts >= b.end_ts)") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "c") {
+                Ok(c) => Ok(c),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn overlap_count() -> Result(i64, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => overlap_count_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+// The exact naive check-then-insert shape from race_probe_booking_naive.nir
+// (separate SELECT, a sleep_ms gap, unconditional INSERT) -- but now
+// wrapped in BEGIN / pg_advisory_xact_lock(1, room_id) / ... / COMMIT
+// on one held connection. `1` is the constant "tag" (this RFC's
+// `guard("room", room_id)` tag, as an int4 classid); `room_id` is the
+// key. If the lock genuinely serializes, this naive body -- otherwise
+// guaranteed to race, per the SQLite control -- should not race here.
+fn try_book_inner(conn: db, room_id: i64, start_ts: i64, end_ts: i64) -> Result(i64, ErrorCode) {
+    let began: i64 = match db_execute(conn, "BEGIN") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let locked: i64 = match db_query(conn, "SELECT pg_advisory_xact_lock(1, ?)", room_id) {
+        Ok(rows) => 1,
+        Err(e) => -1,
+    }
+    let overlap: Result(i64, ErrorCode) = match db_query(conn, "SELECT COUNT(*) as c FROM booking_advisory WHERE room_id = ? AND NOT (end_ts <= ? OR start_ts >= ?)", room_id, start_ts, end_ts) {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "c") {
+                Ok(c) => Ok(c),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    sleep_ms(2) // the same gap race_probe_booking_naive.nir leaves open -- the lock, not the absence of a gap, is what's under test
+    let inserted: Result(i64, ErrorCode) = match overlap {
+        Ok(c) => if c > 0 {
+            Ok(0)
+        } else {
+            match db_execute(conn, "INSERT INTO booking_advisory (room_id, start_ts, end_ts) VALUES (?, ?, ?)", room_id, start_ts, end_ts) {
+                Ok(n) => Ok(n),
+                Err(e) => Err(DbError(e)),
+            }
+        },
+        Err(e) => Err(e),
+    }
+    // Releases the advisory lock -- pg_advisory_xact_lock is
+    // automatically released at transaction end, no explicit unlock call.
+    let committed: i64 = match db_execute(conn, "COMMIT") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    stop conn
+    return inserted
+}
+
+fn try_book(room_id: i64, start_ts: i64, end_ts: i64) -> Result(i64, ErrorCode) {
+    return match db_connect("postgres://nirdosha:nirdosha@localhost:5432/nirdosha_dev") {
+        Ok(conn) => try_book_inner(conn, room_id, start_ts, end_ts),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn worker(room_id: i64, iterations: i64) -> i64 {
+    let i: i64 = 0
+    let successes: i64 = 0
+    while i < iterations {
+        let start_ts: i64 = i * 10
+        let end_ts: i64 = start_ts + 10
+        let r: Result(i64, ErrorCode) = try_book(room_id, start_ts, end_ts)
+        let ok: bool = match r {
+            Ok(n) => n >= 1,
+            Err(_) => false,
+        }
+        if ok {
+            successes = successes + 1
+        }
+        i = i + 1
+    }
+    return successes
+}
+
+fn main() {
+    let setup: Result(Text, ErrorCode) = reset_booking()
+    match setup {
+        Ok(n) => print("booking table reset"),
+        Err(e) => print("setup error"),
+    }
+
+    let t1: thread i64 = spawn worker(1, 250)
+    let t2: thread i64 = spawn worker(1, 250)
+    let t3: thread i64 = spawn worker(1, 250)
+    let t4: thread i64 = spawn worker(1, 250)
+    let t5: thread i64 = spawn worker(1, 250)
+    let t6: thread i64 = spawn worker(1, 250)
+    let t7: thread i64 = spawn worker(1, 250)
+    let t8: thread i64 = spawn worker(1, 250)
+
+    let s1: i64 = join t1
+    let s2: i64 = join t2
+    let s3: i64 = join t3
+    let s4: i64 = join t4
+    let s5: i64 = join t5
+    let s6: i64 = join t6
+    let s7: i64 = join t7
+    let s8: i64 = join t8
+
+    print("successful bookings (sum across workers, expected 250):")
+    print(s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8)
+
+    let final_count: Result(i64, ErrorCode) = count_bookings()
+    print("final booking row count for room 1 (expected 250):")
+    match final_count {
+        Ok(n) => print(n),
+        Err(e) => print("error reading count"),
+    }
+
+    let overlaps: Result(i64, ErrorCode) = overlap_count()
+    print("overlapping booking pairs for room 1 (expected 0):")
+    match overlaps {
+        Ok(n) => print(n),
+        Err(e) => print("error reading overlap count"),
+    }
+}

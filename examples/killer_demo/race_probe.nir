@@ -1,4 +1,5 @@
-// A naive two-account money-transfer ledger, raced with Nirdosha's own
+// expected_race -- this file is deliberately left unfixed. A naive
+// two-account money-transfer ledger, raced with Nirdosha's own
 // `spawn`/`thread`/`join` -- real OS threads (`docs/ROADMAP.md`'s
 // reused-worker thread pool), all hitting the same pooled, WAL-mode
 // SQLite connection (`crates/compiler/src/dbconn.rs`) `db_connect`
@@ -12,6 +13,21 @@
 // the direct Python twin -- same schema, same naive shape, same thread
 // count, `threading.Thread` instead of `spawn` -- for the apples-to-
 // apples comparison RESULTS.md reports.
+//
+// Two real, measured fixes exist, by shape of invariant, per
+// `rfcs/0015-keyed-guard-external-state.md` ("Compatibility," B2):
+// `race_probe_atomic.nir` -- a single atomic `UPDATE ... WHERE
+// balance_cents >= ?` -- for this file's own single-row,
+// single-statement case; `race_probe_booking.nir` (a single
+// `INSERT ... SELECT ... WHERE NOT EXISTS`) and
+// `race_probe_booking_pg_exclude.nir` (a Postgres `EXCLUDE USING gist`
+// schema constraint, no application-level check at all) for the
+// multi-row, multi-statement case that RFC originally motivated a new
+// `guard` language primitive for -- until nine rounds of review found
+// that neither this file's race nor the multi-row case needs one; see
+// that RFC's Motivation and "Implementation plan" sections, and
+// `examples/killer_demo/RESULTS_BOOKING.md` for the numbers. `guard`
+// itself was not built; this file was not rewritten to use it.
 //
 // Run it:
 //   nirdosha examples/killer_demo/race_probe.nir
