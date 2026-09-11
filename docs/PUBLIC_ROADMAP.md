@@ -378,6 +378,28 @@ runs behind it.
   directly, the same "test the logic, not the YAML" split as
   everywhere else) plus a real self-test step in
   `.github/workflows/build.yml` running inside actual GitHub Actions.
+- [PARTIAL] Spec Kit extension `nirdosha-speckit` (2026-09, master plan
+  Part 3 Nov 2026, parity target: GitHub Spec Kit ecosystem) —
+  `extensions/nirdosha-speckit/`, a real extension matching Spec Kit's
+  own published schema (`extension.yml` validated against
+  `extensions/EXTENSION-PUBLISHING-GUIDE.md`'s documented fields).
+  Two commands: `speckit.nirdosha-speckit.contracts` turns `spec.md`'s
+  functional requirements into `validate` blocks and runs `nirdosha
+  verify` on each one immediately, never assuming a contract that
+  compiles is one that holds; `speckit.nirdosha-speckit.converge`
+  checks every requirement against the *current* code for contract
+  existence, predicate-still-matches-spec, and a real `nirdosha
+  certify` verdict, reporting an honest fraction rather than a rollup.
+  Since Spec Kit commands are agent-executed prompts, not compiled
+  code, "tested" means a full hand-run walkthrough against the real
+  compiler: `extensions/nirdosha-speckit/docs/examples/wallet-debit.md`
+  is a real requirement → contract → real `DISPROVED` counterexample →
+  real fix → real `PROVED` certificate trace, every JSON snippet
+  copy-pasted from an actual run, not illustrative. `[PARTIAL]`: not
+  yet submitted to Spec Kit's community catalog — that's a GitHub
+  issue against a third-party repo naming a human submitter, left as a
+  deliberate manual step (`extensions/nirdosha-speckit/README.md`'s
+  own "Publishing status").
 
 ---
 

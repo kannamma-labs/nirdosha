@@ -1,0 +1,29 @@
+schema_version: "1.0"
+
+extension:
+  id: "nirdosha-speckit"
+  name: "Nirdosha Contracts"
+  version: "0.1.0"
+  description: "Turn spec.md requirements into Nirdosha validate contracts and machine-check convergence"
+  author: "kannamma-labs"
+  repository: "https://github.com/kannamma-labs/nirdosha"
+  license: "MIT"
+  homepage: "https://github.com/kannamma-labs/nirdosha"
+
+requires:
+  speckit_version: ">=0.1.0"
+
+provides:
+  commands:
+    - name: "speckit.nirdosha-speckit.contracts"
+      file: "commands/contracts.md"
+      description: "Draft/update Nirdosha validate blocks from spec.md's testable requirements"
+    - name: "speckit.nirdosha-speckit.converge"
+      file: "commands/converge.md"
+      description: "Machine-check whether the .nir implementation still satisfies every spec.md requirement, via nirdosha certify"
+
+tags:
+  - "nirdosha"
+  - "formal-verification"
+  - "contracts"
+  - "convergence"
