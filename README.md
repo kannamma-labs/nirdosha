@@ -1,12 +1,23 @@
 # Nirdosha — निर्दोष
 
 <p align="center">
-  <b>A systems language designed so your AI agent can't write the bugs AI agents always write.</b><br/>
-  No GC. No data races. No deadlocks. No buffer overflow. <i>Proven at build time — not promised, not tested.</i>
+  <b>The verification layer for AI-generated code.</b><br/>
+  Agents write it; Nirdosha proves it — constrained at generation, verified by construction, repaired in a closed loop, certified for auditors.<br/>
+  <i>Guarantees about the language, not the model.</i>
+</p>
+
+<p align="center"><i>No GC. No data races. No deadlocks. No buffer overflow. Proven at build time — not promised, not tested.</i></p>
+
+<p align="center">
+  <b>Constrain</b> — LL(1) grammar exported to GBNF / vLLM / JSON-Schema &nbsp;·&nbsp;
+  <b>Verify</b> — Z3 proofs, <code>PROVED / DISPROVED / UNKNOWN</code> + counterexamples &nbsp;·&nbsp;
+  <b>Repair</b> — byte-offset FixPatch agent loop &nbsp;·&nbsp;
+  <b>Certify</b> — hash-pinned, signed, <code>evidence_tier</code> &nbsp;·&nbsp;
+  <b>Execute</b> — LLVM-native binary, compiled <code>serve</code>
 </p>
 
 [![build](https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml/badge.svg)](https://github.com/kannamma-labs/nirdosha/actions/workflows/build.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Wiki](https://img.shields.io/badge/docs-wiki-blue)](https://github.com/kannamma-labs/nirdosha/wiki)
 [![Contributing](https://img.shields.io/badge/CONTRIBUTING-read-blue)](./CONTRIBUTING.md)
 [![Governance](https://img.shields.io/badge/GOVERNANCE-read-blue)](./GOVERNANCE.md)
@@ -14,8 +25,37 @@
 [![Maintainers](https://img.shields.io/badge/maintainers-5-green)](./MAINTAINERS.md)
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/arunsoman)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)
+<!-- add at launch, when PyPI is live: [![PyPI](https://img.shields.io/pypi/v/nirdosha-verify)](https://pypi.org/project/nirdosha-verify/) -->
 
 ![A themed dashboard with live SQLite data, a sortable/searchable table, and a role-gated approval action — the same screen under a lower-privileged identity, with a field dropped and an action disabled](./demo.gif)
+
+## Every certificate declares its evidence
+
+Verification tools that answer "pass" are lying in one direction or the other. Nirdosha's verdicts are three-valued — **`PROVED`** (a Z3 proof exists), **`DISPROVED`** (with a concrete counterexample you can run), or **`UNKNOWN`** (not yet tractable; honestly declared) — and every certificate carries an `evidence_tier` field that says which one you got.
+
+If a guarantee has a disclosed edge, this repo says so instead of letting the claim read broader than it is — several sections below exist for exactly that purpose. **Trust nothing you can't re-run:** every verdict, benchmark, and certificate in this repo ships the commands that reproduce it.
+
+## The trust pipeline — callable by any agent, from any language
+
+`nirdosha verify <file.nir>` runs the same typecheck/ownership/contract-check gates `build` does — no LLVM/clang toolchain, no binary produced — and prints a JSON verdict with a real exit code, built exactly for a CI pipeline or an agent's own repair loop to call:
+
+| Stage | Command | What an agent gets |
+|---|---|---|
+| Verify | `nirdosha verify file.nir` | JSON verdict: `PROVED / DISPROVED / UNKNOWN`, Z3 counterexamples, exit code |
+| Repair | `nirdosha fix file.nir --apply` | byte-offset `FixPatch` objects — the loop is write → verify → fix → re-verify, no prose parsing, ever |
+| Explain | `nirdosha explain E0201` | the full machine-learnable error index |
+| Certify | `nirdosha certify file.nir` | deterministic, hash-pinned certificate (`--in-toto` predicate; `keygen` / `--sign` / `verify-certificate` for signed attestations) |
+| Integrate | `nirdosha mcp` | MCP tools over stdio: `verify_code`, `get_grammar`, `fix`, `describe` |
+| From Python | `pip install nirdosha-verify` | thin client over verify/fix/certify (ships with the v0.1.0 release) |
+| In CI | [`.github/actions/verify`](./.github/actions/verify) | gate every agent PR on the verdict |
+
+Beyond the loop: `nirdosha equivalence` proves a refactor is behavior-identical before it merges; `nirdosha attest` / `nirdosha audit` carry `@authored_by`/`@confidence` through the call graph with reviewer-forgery prevention (`--trust-config` — an LLM cannot fake `@reviewed_by`); `nirdosha suggest-contracts` drafts the invariants an LLM proposes and the prover accepts or refutes them. A [Spec Kit extension](https://github.com/github/spec-kit) turns `spec.md` intent into machine-checked `validate` contracts — spec-driven development, but with proofs instead of hope.
+
+## Who this is for
+
+- **Agent builders** — your agent writes `.nir`, the pipeline verifies, repairs, and certifies it; the repair loop speaks JSON, not prose.
+- **Platform & safety teams** — gate what agents can emit: constrained decoding at generation, by-construction safety at compile time, verdicts in CI.
+- **Auditors and compliance** — hash-pinned, signed, third-party-replayable certificates that say exactly what was proved, under which assumptions, about which artifact. [SECURITY.md](./SECURITY.md) is an open invitation to try to break it, not just a reporting form.
 
 ## Try it in 30 seconds
 
@@ -37,13 +77,13 @@ That exact prompt has produced a working **e-commerce store**, a **food-delivery
 
 ## The part that isn't a demo — a real prompt injection, two agents
 
-[`examples/attack_demo/`](./examples/attack_demo/) puts that claim in an adversarial frame: the same indirect prompt injection, against the same HR-directory tool, built two ways. Agent A (system-prompt guardrail + JSON schema, the way most agents ship today) leaks a masked salary and lets an attacker's `<script>` tag land unescaped in a real HTML file. Agent B — the same tool, compiled with Nirdosha — receives the identical attack and can't leak it, because the masked field's value is closed to `{0}` at compile time, not guarded by a runtime check the injection could argue past. A companion file shows what happens when an agent tries to route around that anyway: a real compiler error, captured verbatim. Fully reproducible, no API key required — see the demo's own README and [`RESULTS.md`](./examples/attack_demo/RESULTS.md) for exact commands and unedited output.
+[`examples/attack_demo/`](./examples/attack_demo/) puts the by-construction claim in an adversarial frame: the same indirect prompt injection, against the same HR-directory tool, built two ways. Agent A (system-prompt guardrail + JSON schema, the way most agents ship today) leaks a masked salary and lets an attacker's `<script>` tag land unescaped in a real HTML file. Agent B — the same tool, compiled with Nirdosha — receives the identical attack and can't leak it, because the masked field's value is closed to `{0}` at compile time, not guarded by a runtime check the injection could argue past. A companion file shows what happens when an agent tries to route around that anyway: a real compiler error, captured verbatim. Fully reproducible, no API key required — see the demo's own README and [`RESULTS.md`](./examples/attack_demo/RESULTS.md) for exact commands and unedited output.
 
-Want the verdict as data instead of reading terminal output? `nirdosha verify <file.nir>` runs the same typecheck/ownership/contract-check gates `build` does — no LLVM/clang toolchain, no binary produced — and prints a JSON verdict with a real exit code, built exactly for a CI pipeline or an agent's own repair loop to call. `nirdosha fix`/`nirdosha certify` extend the same pipeline with byte-offset patches and a deterministic, hash-pinned certificate; `nirdosha mcp` exposes all three as MCP tools over stdio. From Python: [`clients/python/nirdosha-verify/`](./clients/python/nirdosha-verify/) is a thin client over the same three commands (not yet published to PyPI — build/install it locally for now). See `docs/LANGUAGE.md` §1.
+## Where a guarantee has an edge, this repo says so
 
 And where a guarantee has a disclosed edge, this repo says so instead of letting the claim read broader than it is: [`examples/killer_demo/`](./examples/killer_demo/) races Nirdosha's own `spawn`/`thread` against Python's `threading` on the identical naive, unsynchronized database transfer — both corrupt the ledger on every run, because the race-freedom guarantee is real but scoped to `chan`/`spawn`'s in-memory primitives, not `db` (yet). What does hold up, measured on the same machine: ~18x faster than Python on the identical naive workload. See [`examples/killer_demo/RESULTS.md`](./examples/killer_demo/RESULTS.md).
 
-Same discipline applied to the benchmark harness: [`crates/bench/RESULTS.md`](./crates/bench/RESULTS.md) runs 3 real generate-then-self-repair-then-verify tasks against two independent live models (Gemini, then a local Ollama-proxied cloud code model once Gemini's free-tier quota ran out mid-session — kept as a second result, not a replacement), scored by `nirdosha certify`'s own JSON verdict. Both models independently hit the identical Tier-1 modeling gap on one task — real corroboration, not a one-model quirk — and the second run's clean `injection_safe_lookup` pass confirms the first run's failure there was a self-repair-loop gap, not an unfair task. It is explicitly *not* the full Nirdosha-vs-TypeScript-vs-Rust-vs-LLM+XGrammar-vs-LLM+Imandra comparison the roadmap calls for — see that file's own "what this is not" section for exactly what's missing and why.
+Same discipline applied to the benchmark harness: [`crates/bench/RESULTS.md`](./crates/bench/RESULTS.md) runs real generate-then-self-repair-then-verify tasks against live models, scored by `nirdosha certify`'s own JSON verdict — including a run where two independent models hit the identical Tier-1 modeling gap on one task, real corroboration, not a one-model quirk. It is explicitly *not* the full Nirdosha-vs-TypeScript-vs-Rust-vs-LLM+XGrammar-vs-LLM+Imandra comparison the roadmap calls for — see that file's own "what this is not" section for exactly what's missing and why.
 
 Want to see the guarantees applied to real financial code instead of toy examples? [`examples/fintech-canon/`](./examples/fintech-canon/) is 13 small `.nir` files — payment fees, refunds, ledger entries, overdraft limits, credit limits, and PII field masking — 12 with a real Z3-proved `validate` contract (output captured in [`RESULTS.md`](./examples/fintech-canon/RESULTS.md), including a real bug one of them had on its first draft, caught by `nirdosha certify` and fixed, not quietly edited away).
 
@@ -52,6 +92,10 @@ Want to see the guarantees applied to real financial code instead of toy example
 > 💡 **[A Language Is Only as Good as Its Ecosystem](https://github.com/kannamma-labs/nirdosha/wiki/A-Language-Is-Only-as-Good-as-Its-Ecosystem)** — every capability a compiled `.nir` binary has is an ordinary Rust crate underneath, so Nirdosha's capability ceiling is Rust's. Databases, TLS, JWT, Redis — reachable by design, not by waiting on maintainers. *"Good artists copy, great artists steal."*
 
 ---
+
+## The language: how the guarantees are possible
+
+The verification layer above is what you adopt. The language below is why its verdicts can say `PROVED` — every guarantee is a property of what the compiler accepts, true regardless of which model wrote the code.
 
 <details>
 <summary><b>📄 One function, five guarantees the compiler itself checks</b></summary>
@@ -125,7 +169,7 @@ layout {
 
 Both are additive — every existing `bar_chart`/`graph`/`heatmap`/`timeline`/`divider`/`card` program keeps working exactly as it did.
 
-**Why this door doesn't undo agent safety:** other generative-UI specs (OpenUI, Vercel's json-render, Google's A2UI) resolve their component catalog *inside the running app process* — editable by the same process that's talking to the agent. Here, your catalog is fully resolved and typechecked at `nirdosha build`/`emit-ui` time, before the binary the agent talks to exists. No admin API, no hot-reload, no session negotiation. Growing the vocabulary is something *you* do once, by adding a Cargo dependency you reviewed — never something a chat turn can do. Full argument: [`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md) §"Effect on the permission model".
+**Why this door doesn't undo agent safety:** other generative-UI specs (OpenUI, Vercel's json-render, Google's A2A) resolve their component catalog *inside the running app process* — editable by the same process that's talking to the agent. Here, your catalog is fully resolved and typechecked at `nirdosha build`/`emit-ui` time, before the binary the agent talks to exists. No admin API, no hot-reload, no session negotiation. Growing the vocabulary is something *you* do once, by adding a Cargo dependency you reviewed — never something a chat turn can do. Full argument: [`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md) §"Effect on the permission model".
 </details>
 
 <details>
@@ -223,14 +267,17 @@ Full rationale: [`AGENTS.md`](./AGENTS.md).
 
 - **Language core** — LL(1) grammar cross-verified against an independent LALR(1) generator, a static type checker, ownership/affine types (`box`/`&`/`froze`, no GC, no manual `free`), `spawn`/`thread`/`chan` with no mutex in the language, generics, `Option`/`Result`, SMT-backed (Z3) integer/buffer-overflow proofs, and `validate { pre:/post: }` Hoare contracts (Z3-proven at build time for Tier-1 integer functions).
 - **Native codegen** — LLVM `-O2` compilation for the numeric/control-flow/`box`/`froze`/`str`/`tcp`/`file`/concurrency subset, within 1.4× of `gcc -O2` on the operations it covers.
+- **Trust pipeline** — `nirdosha verify` (JSON verdict, exit code, three-valued), `fix` (byte-offset FixPatch), `explain`, `certify` (hash-pinned certificates, `--in-toto` predicate, `keygen`/`--sign`/`verify-certificate`), `equivalence` (refactor proofs), `attest`/`audit` (authorship + confidence propagation with reviewer-forgery prevention), `suggest-contracts`, `mcp` (MCP server over stdio), and the [GitHub Action](./.github/actions/verify) for CI/PR gating.
 - **Identity and data protection** — `check_role` against a real `VerifiedIdentity`, producing an unforgeable `RoleView`; field-level `requires(role/claim: ...)` masking; function-level `requires(role/claim: ...)` + `acquire` gating callability — all three compiled, all enforced in the binary itself, no server process involved.
 - **`nfr(...)`** — non-functional requirements as a first-class, compiled fn annotation: automatic latency/error-rate/throughput/concurrency tracking via the APM kernel, with async escalation to an observability endpoint on a crossed threshold.
 - **UI engine (static)** — `nirdosha emit-ui` derives a Material-styled page from `struct`/`screen`/`dashboard` conventions; `render: "chart"` adds a bounded grammar-of-graphics config, and a Rust crate can contribute a custom `layout` widget — hand-assembled or auto-discovered from the app's own `Cargo.toml` — with no runtime code-execution hole ([`rfcs/0009`](./rfcs/0009-ui-catalog-extensibility.md)).
 - **Cross-platform CI** — Linux, macOS, and Windows all build and run their full test suite on every push, not just at release time.
 
-**Also real, compiled, and running — landed after the interpreter was removed, not blocked by it:** `db` (SQLite + Postgres, pooled), `json`, `http`/`https` (a real client with keep-alive/pooling, and a real compiled `serve` mode — `nirdosha build --serve` — dispatching `POST`/`GET` requests with real bodies to compiled functions per a `serve { expose ... }` exposure set), `mq` (Redis), `transact` (including a real crash-durable log and replay), and `workflow` (Layer 1: durable state machines, real notification sends, SLA detection). The generated UI's `fetch()` calls against `/api/<fn>` are real once served this way, closing the basic CRUD/dashboard case of the "live, server-backed UI" gap this section used to name in full.
+**Also real, compiled, and running** — `db` (SQLite + Postgres, pooled), `json`, `http`/`https` (a real client with keep-alive/pooling, and a real compiled `serve` mode — `nirdosha build --serve` — dispatching `POST`/`GET` requests with real bodies to compiled functions per a `serve { expose ... }` exposure set), `mq` (Redis), `transact` (including a real crash-durable log and replay), and `workflow` (Layer 1: durable state machines, real notification sends, SLA detection).
 
-**Not currently running in any form:** `sandbox` (a real, separate OS *process*, not a thread — explicitly descoped from v1, a materially larger design question than the concurrency work above) and a handful of specific UI-engine widgets that need more than basic route serving (`workspace`/`panel` composite screens, `visual`/`render` beyond the existing bar chart, a live SLA countdown chip, an action's "show result" preview, a workflow stage stepper) — see [Track B](./docs/PUBLIC_ROADMAP.md) for the exact, current list; treat the roadmap's older entries with caution, since some still describe the pre-removal world.
+**Not currently running in any form:** `sandbox` (a real, separate OS *process*, not a thread — explicitly descoped from v1, a materially larger design question than the concurrency work above) and a handful of specific UI-engine widgets that need more than basic route serving — see [Track B](./docs/PUBLIC_ROADMAP.md) for the exact, current list.
+
+**On the post-seed roadmap, not hidden:** `CHECKED` evidence tier — sandboxed behavioral validation of non-`.nir` code, so the certificate can honestly cover mixed stacks without pretending it proved them.
 </details>
 
 <details>
@@ -241,7 +288,7 @@ Small team — high-context contributions matter more than volume. See [`MAINTAI
 | If you care about | Try |
 | --- | --- |
 | Ownership/concurrency, PL theory | A `Track B` codegen gap, or an SMT/typeck edge case |
-| Constrained decoding, agent repair loops | `crates/bench/`'s pass@1 harness — the scaffold's real, it just hasn't been pointed at a live model yet |
+| Constrained decoding, agent repair loops | `crates/bench/`'s pass@1 harness — point it at a live model and score a run |
 | Real backends, CRUD, sandboxing | `db`/`json`/`http`/`mq` are real and compiled already — `sandbox` is the one still-unstarted `Track B` gap, plus the specific live-UI widgets named above |
 | Docs / DX | Error-message clarity, Getting Started walkthroughs, missing examples |
 
@@ -269,9 +316,13 @@ This README is the pitch and the five-minute quick start. Everything else lives 
 <details>
 <summary><b>❓ FAQ (short version)</b></summary>
 
-**Is it production-ready?** No — it's pre-1.0 and moving fast. The compiled path covers a real, growing subset, and the core backend-service capabilities (`db`/`json`/`http`/`mq`/`transact`/`workflow`) are real and compiled today; what's still missing is `sandbox` and a handful of specific live-UI widgets, plus the general pre-1.0 hardening (deployment story, real Windows verification, and more). See the [Public Roadmap](./docs/PUBLIC_ROADMAP.md).
+**Do we have to rewrite our stack?** No. The trust pipeline (verify/fix/certify/MCP/CI) is callable by any agent or pipeline from any language today. `PROVED`-by-construction guarantees apply to `.nir` services — typically the new, agent-written ones, not your existing code. The `CHECKED` tier — sandboxed validation of non-`.nir` code — is the post-seed roadmap item that extends certificates to mixed stacks, honestly labeled.
 
-**Why not just use Rust?** Rust already solves memory safety for teams that can invest in its learning curve. Nirdosha targets a narrower problem — AI agents writing backend code unsupervised. [Full answer](https://github.com/kannamma-labs/nirdosha/wiki/Nirdosha-vs-Alternatives).
+**Is it production-ready?** It's pre-1.0 and moving fast. The compiled path covers a real, growing subset, and the core backend-service capabilities (`db`/`json`/`http`/`mq`/`transact`/`workflow`) are real and compiled today; what's still missing is `sandbox` and a handful of specific live-UI widgets, plus the general pre-1.0 hardening. See the [Public Roadmap](./docs/PUBLIC_ROADMAP.md).
+
+**Why not just use Rust?** Rust already solves memory safety for teams that can invest in its learning curve. Nirdosha targets a narrower problem — AI agents writing backend code unsupervised — and wraps the guarantees in a callable verification pipeline. [Full answer](https://github.com/kannamma-labs/nirdosha/wiki/Nirdosha-vs-Alternatives).
+
+**What does a certificate actually prove?** Stated properties, under stated assumptions, about a hash-pinned artifact, produced by a stated toolchain — replayable by anyone, with its evidence tier on the label. Read the tier; read the edges; re-run the checker.
 
 **Found a bug?** Open an issue with the `nirdosha build`/`emit-llvm` error message and the `.nir` source. Think you found a way past a guarantee this project claims? [SECURITY.md](./SECURITY.md) is an open invitation to try, not just a reporting form — two internal findings of exactly that shape (`docs/ROADMAP.md`'s "A10"/"A11") are already fixed and on the record there.
 
@@ -281,5 +332,6 @@ This README is the pitch and the five-minute quick start. Everything else lives 
 ---
 
 <p align="center">
-<i>निर्दोष — designed so that what the compiler accepts is, provably, without fault.</i>
+  <b>दोष</b> = fault. <b>निर्</b> = without.<br/>
+  <i>निर्दोष — the language named after its own guarantee: what the compiler accepts is, provably, without fault.</i>
 </p>
