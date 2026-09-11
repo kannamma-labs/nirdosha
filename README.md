@@ -6,7 +6,7 @@
   <i>Guarantees about the language, not the model.</i>
 </p>
 
-<p align="center"><i>No GC. No data races. No deadlocks. No buffer overflow. Proven at build time — not promised, not tested.</i></p>
+<p align="center"><i>No GC. No data races <b>between the language's own concurrency primitives</b>. No deadlocks. No buffer overflow. Proven at build time — not promised, not tested — with every guarantee's scope published alongside it, including where it doesn't reach yet.</i></p>
 
 <p align="center">
   <b>Constrain</b> — LL(1) grammar exported to GBNF / vLLM / JSON-Schema &nbsp;·&nbsp;
@@ -204,8 +204,8 @@ there:
 
 ```sh
 cd crates/compiler
-cargo run -- ../../examples/syntax/hello_nir.nir
-cargo run -- serve ../../examples/syntax/06_identity_and_declarative_ui.nir --port 8080   # open via the Ports tab
+cargo run -- build ../../examples/syntax/hello_nir.nir -o hello && ./hello
+cargo run -- build ../../examples/features/51_compiled_serve.nir -o serve_demo --serve 8080 && ./serve_demo   # compiled serve; open http://127.0.0.1:8080 via the Ports tab
 ```
 
 **Don't want to learn the syntax first?** Paste
