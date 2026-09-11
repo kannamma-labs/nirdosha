@@ -415,6 +415,26 @@ runs behind it.
   correctly rejected, a certificate re-signed-looking-but-wrong-key
   correctly rejected, and a plain (unsigned) certificate failing
   `verify-certificate` cleanly rather than crashing.
+- [PARTIAL] Equivalence checking (2026-09, master plan Part 3
+  Dec 2026, "prove the agent's refactor is behavior-identical", parity
+  target: Velvet, Imandra) — `nirdosha equivalence <file.nir> <fn_a>
+  <fn_b>` (`contract_check::check_equivalence`), built entirely out of
+  `validate` contract-checking's own already-tested `int_expr`
+  expression-to-Z3 translation (a value-position `if`/`else` already
+  becomes a full nested `ite` term) rather than a second symbolic-
+  execution engine. Real, checked end to end: a genuine refactor bug
+  (`max_v1`/`max_buggy`) caught with a real counterexample
+  (`a=0, b=1`, `1 != 0`), and two differently-tie-broken-but-
+  behaviorally-identical implementations of the same function
+  correctly proved equivalent. `[PARTIAL]`, deliberately narrower than
+  `validate` checking: each function's body must be exactly one
+  `return <expr>` statement (nested if/else is fine; a `let` binding,
+  an early-return chain, or a loop is not — those need a per-return-
+  point predicate check, a materially different design this v1
+  doesn't attempt, honestly `UNSUPPORTED` rather than approximated).
+  Parameters pair positionally with matching integer types; both
+  functions must return the same integer type. Tests:
+  `crates/compiler/tests/equivalence_command.rs`.
 
 ---
 

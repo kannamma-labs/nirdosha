@@ -357,6 +357,172 @@ pub fn unsupported_validate_notes(program: &Program) -> Vec<String> {
         .collect()
 }
 
+/// `nirdosha-master-plan.md` Part 3 Dec 2026's "Equivalence checking
+/// -- 'prove the agent's refactor is behavior-identical'" (parity
+/// target: Velvet, Imandra). `Equivalent` means Z3 proved
+/// `fn_a(x) == fn_b(x)` for *every* input both functions' declared
+/// parameter types admit; `Different` names a concrete input where
+/// they diverge, with both real return values, the same "a real
+/// counterexample, not just a refusal" discipline `ContractCheckResult::
+/// Counterexample` already has.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EquivalenceResult {
+    Equivalent,
+    Different {
+        bindings: Vec<(String, i64)>,
+        result_a: Option<i64>,
+        result_b: Option<i64>,
+    },
+    Unsupported(String),
+}
+
+/// Checks whether `fn_a_name` and `fn_b_name` (two functions already
+/// resolved in `program`) compute the same result for every input --
+/// built entirely out of `int_expr`'s already-tested expression-to-Z3
+/// translation (the exact machinery `check_fn_contract`'s post-
+/// condition checking uses for a single function), never a second,
+/// parallel symbolic-execution engine: given *shared* symbolic
+/// parameter terms (the same Z3 constants bound into both functions'
+/// scopes, so "same inputs" is structural, not asserted), each
+/// function's return value becomes one Z3 `Int` term via
+/// `function_result_term` (`int_expr` on a value-position `Expr::If`
+/// already builds a full nested `ite`, recursively -- exactly what a
+/// whole function's control flow needs to collapse into one term).
+/// Equivalence is then one query: is `fn_a's term != fn_b's term`
+/// unsatisfiable?
+///
+/// **Scope, narrower than `check_fn_contract` on purpose** -- see
+/// `function_result_term`'s own doc comment for exactly why (a body
+/// with `let`/early-return/loops needs the `Flow`-tracked walker
+/// `check_fn_contract_parsed` uses, which checks a *predicate* at each
+/// return point rather than building one whole-function term; that
+/// shape is a real, disclosed gap here, not silently approximated —
+/// see `docs/PUBLIC_ROADMAP.md`). Parameters are paired *positionally*
+/// (`fn_a`'s 1st parameter with `fn_b`'s 1st, and so on) with matching
+/// integer types required, since two independently-written functions
+/// describing "the same" operation aren't guaranteed to share
+/// parameter names; both functions must also return the same integer
+/// type. Anything outside that shape is `Unsupported`, honestly, on
+/// either function — the same "abort the moment it can't model
+/// something, never approximate" rule this whole module already
+/// applies everywhere else.
+pub fn check_equivalence(program: &Program, fn_a_name: &str, fn_b_name: &str) -> EquivalenceResult {
+    let Some(fn_a) = program.fns.iter().find(|f| f.name == fn_a_name) else {
+        return EquivalenceResult::Unsupported(format!("no such function `{fn_a_name}`"));
+    };
+    let Some(fn_b) = program.fns.iter().find(|f| f.name == fn_b_name) else {
+        return EquivalenceResult::Unsupported(format!("no such function `{fn_b_name}`"));
+    };
+
+    if fn_a.params.len() != fn_b.params.len() {
+        return EquivalenceResult::Unsupported(format!(
+            "`{fn_a_name}` takes {} parameter(s), `{fn_b_name}` takes {} — equivalence checking pairs parameters positionally and needs the same count",
+            fn_a.params.len(),
+            fn_b.params.len()
+        ));
+    }
+    for (pa, pb) in fn_a.params.iter().zip(fn_b.params.iter()) {
+        if !pa.ty.is_integer() || !pb.ty.is_integer() {
+            return EquivalenceResult::Unsupported(format!(
+                "equivalence checking only models integer parameters (`{}: {}` / `{}: {}`)",
+                pa.name,
+                pa.ty.name(),
+                pb.name,
+                pb.ty.name()
+            ));
+        }
+        if pa.ty != pb.ty {
+            return EquivalenceResult::Unsupported(format!(
+                "parameters `{}`/`{}` have different types (`{}` vs `{}`) — equivalence checking needs pairwise-matching types",
+                pa.name,
+                pb.name,
+                pa.ty.name(),
+                pb.ty.name()
+            ));
+        }
+    }
+    if !fn_a.ret.is_integer() || !fn_b.ret.is_integer() {
+        return EquivalenceResult::Unsupported("equivalence checking only models an integer return type today".to_string());
+    }
+    if fn_a.ret != fn_b.ret {
+        return EquivalenceResult::Unsupported(format!("`{fn_a_name}` returns `{}`, `{fn_b_name}` returns `{}` — different return types can never be equivalent", fn_a.ret.name(), fn_b.ret.name()));
+    }
+
+    let solver = Solver::new();
+    let summaries = HashMap::new();
+    let mut top_a = HashMap::new();
+    let mut top_b = HashMap::new();
+    let mut shared: Vec<(String, Int)> = Vec::new();
+    for (pa, pb) in fn_a.params.iter().zip(fn_b.params.iter()) {
+        let term = Int::fresh_const(&format!("shared_{}", pa.name));
+        assert_bounds(&solver, &term, &pa.ty);
+        top_a.insert(pa.name.clone(), term.clone());
+        top_b.insert(pb.name.clone(), term.clone());
+        shared.push((pa.name.clone(), term));
+    }
+
+    let result_a = match function_result_term(fn_a, top_a, &solver, &summaries) {
+        Ok(t) => t,
+        Err(msg) => return EquivalenceResult::Unsupported(format!("`{fn_a_name}`: {msg}")),
+    };
+    let result_b = match function_result_term(fn_b, top_b, &solver, &summaries) {
+        Ok(t) => t,
+        Err(msg) => return EquivalenceResult::Unsupported(format!("`{fn_b_name}`: {msg}")),
+    };
+
+    solver.push();
+    solver.assert(result_a.eq(result_b.clone()).not());
+    let sat = solver.check();
+    if sat == SatResult::Unsat {
+        EquivalenceResult::Equivalent
+    } else {
+        let model = solver.get_model().expect("SAT result has a model");
+        let bindings: Vec<(String, i64)> = shared.iter().filter_map(|(name, term)| model.eval(term, true).and_then(|v| v.as_i64()).map(|v| (name.clone(), v))).collect();
+        EquivalenceResult::Different {
+            bindings,
+            result_a: model.eval(&result_a, true).and_then(|v| v.as_i64()),
+            result_b: model.eval(&result_b, true).and_then(|v| v.as_i64()),
+        }
+    }
+}
+
+/// Collapses one function's body into a single Z3 `Int` term, given
+/// its parameters already bound (`top`) — the building block
+/// `check_equivalence` needs and `check_fn_contract_parsed`'s own
+/// `Flow`-tracked walker doesn't provide (that walker checks a
+/// predicate at each return *point*, under that point's own path
+/// condition, rather than ever materializing "the function's result"
+/// as one term spanning every path — the right design for a single
+/// post-condition, the wrong shape for comparing two functions' whole
+/// behavior against each other).
+///
+/// **Only a body that is exactly one `return <expr>` statement is
+/// supported.** Not an arbitrary restriction: `int_expr`'s own
+/// `Expr::If` arm already builds a fully general nested `ite` term for
+/// a *value-position* `if`/`else` (recursing through `block_value`),
+/// so `return <expr>` — where `<expr>` may itself be an arbitrarily
+/// nested value-position `if`/`else` — is exactly the shape that
+/// machinery natively handles with zero new code. A body using `let`
+/// bindings or statement-position early returns has no single
+/// "the whole function's value" expression to hand `int_expr` at
+/// all — that shape needs `check_fn_contract_parsed`'s `Flow`-tracked
+/// per-return-point checking instead, a real, disclosed scope
+/// boundary for equivalence checking specifically (`docs/PUBLIC_ROADMAP.md`),
+/// not a silent gap.
+fn function_result_term(f: &FnDecl, top: HashMap<String, Int>, solver: &Solver, summaries: &HashMap<String, Summary>) -> Result<Int, String> {
+    match f.body.stmts.as_slice() {
+        [Stmt::Return { value: Some(e), .. }] => {
+            let mut eval = Eval { solver, post_logic: &[], outcome: None, summaries };
+            let mut scopes = Scopes(vec![top]);
+            eval.int_expr(e, &mut scopes)
+        }
+        _ => Err(format!(
+            "equivalence checking only models a function whose body is a single `return <expr>` (nested if/else in value position is fine) — `{}`'s body has a different shape (multiple statements, a `let`, an early return, or a loop)",
+            f.name
+        )),
+    }
+}
+
 fn check_fn_contract_parsed(
     f: &FnDecl,
     pre_exprs: &[(String, Expr)],

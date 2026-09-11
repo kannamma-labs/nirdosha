@@ -39,6 +39,8 @@ nirdosha certify <file.nir> [--sign <key.pk8>]
 nirdosha keygen [-o <key.pk8>]         # generate an Ed25519 keypair for `nirdosha certify --sign`
 nirdosha verify-certificate <certificate.json>
                                        # check a signed certificate's signature against its embedded key
+nirdosha equivalence <file.nir> <fn_a> <fn_b>
+                                       # prove fn_a and fn_b compute the same result, or find a counterexample
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -186,6 +188,26 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   which public keys a verifier accepts is an operational policy
   ("key-pinned"), the same trust model TLS certificate pinning uses,
   not something the certificate format itself enforces.
+- **`equivalence`** (2026-09, `nirdosha-master-plan.md` Part 3
+  Dec 2026, parity target: Velvet, Imandra) —
+  `nirdosha equivalence <file.nir> <fn_a> <fn_b>` proves two functions
+  compute the same result for every input both accept, or finds a real
+  counterexample where they diverge (a real refactor bug, caught
+  formally rather than by inspection). Built entirely out of the same
+  `int_expr` expression-to-Z3 translation `validate` contract-checking
+  already uses — a value-position `if`/`else` already becomes a full
+  nested `ite` Z3 term, so a function's whole body collapses into one
+  term with no new symbolic-execution engine needed. **Scope,
+  narrower than `validate` checking on purpose:** each function's body
+  must be exactly one `return <expr>` statement (nested if/else is
+  fine; a `let` binding, an early-return chain, or a loop is not —
+  those need a per-return-point predicate check, not one whole-
+  function term, a materially different design this v1 doesn't
+  attempt). Parameters are paired positionally with matching integer
+  types; both functions must return the same integer type. Exit code
+  is three-valued like `verify`'s own: `0` `EQUIVALENT`, `1`
+  `DIFFERENT` (a real, concrete counterexample), `2` `UNSUPPORTED` —
+  never collapsed, so "couldn't check" can never read as a false pass.
 
 ---
 

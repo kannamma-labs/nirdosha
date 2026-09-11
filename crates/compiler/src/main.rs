@@ -23,6 +23,7 @@ fn main() -> ExitCode {
         "certify" => cmd_certify(args),
         "keygen" => cmd_keygen(args),
         "verify-certificate" => cmd_verify_certificate(args),
+        "equivalence" => cmd_equivalence(args),
         "mcp" => cmd_mcp(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
@@ -66,6 +67,9 @@ fn print_usage() {
     eprintln!("  nirdosha verify-certificate <certificate.json>");
     eprintln!("                                      check a signed certificate's signature against its own");
     eprintln!("                                      embedded public key");
+    eprintln!("  nirdosha equivalence <file.nir> <fn_a> <fn_b>");
+    eprintln!("                                      prove fn_a and fn_b compute the same result for every");
+    eprintln!("                                      input, or find a real counterexample where they diverge");
     eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
     eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
@@ -1747,6 +1751,65 @@ fn cmd_verify_certificate(mut args: impl Iterator<Item = String>) -> ExitCode {
         eprintln!("INVALID: {path}'s signature does not match its embedded public key (or the certificate was modified after signing)");
         ExitCode::FAILURE
     }
+}
+
+/// `nirdosha equivalence <file.nir> <fn_a> <fn_b>` --
+/// `nirdosha-master-plan.md` Part 3 Dec 2026's "Equivalence checking --
+/// 'prove the agent's refactor is behavior-identical'" (parity target:
+/// Velvet, Imandra). Loads and typechecks `file.nir` (equivalence
+/// checking needs a well-typed program the same way `validate`
+/// contract-checking does -- an ill-typed function has no meaningful
+/// semantics to compare), then hands `fn_a`/`fn_b` to
+/// `contract_check::check_equivalence`. JSON on stdout, matching
+/// `verify`/`fix`/`certify`'s own convention; exit `0` for
+/// `Equivalent`, `1` for a real, concrete `Different` counterexample,
+/// `2` for `Unsupported` (today's real scope boundary, not a claim
+/// either function actually differs) -- the same three-valued shape
+/// `verify`'s own `PROVED`/`DISPROVED`/`UNKNOWN` already established,
+/// for the identical reason: "couldn't check" must never collapse into
+/// either a false pass or a false fail.
+fn cmd_equivalence(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let (Some(path), Some(fn_a), Some(fn_b)) = (args.next(), args.next(), args.next()) else {
+        eprintln!("usage: nirdosha equivalence <file.nir> <fn_a> <fn_b>");
+        return ExitCode::FAILURE;
+    };
+    let (program, _src) = match nirdosha::loader::load_program(&path) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(errs) = nirdosha::typeck::typecheck_optional_main(&program) {
+        for e in &errs {
+            eprintln!("{e}");
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let result = nirdosha::contract_check::check_equivalence(&program, &fn_a, &fn_b);
+    let (value, exit) = match &result {
+        nirdosha::contract_check::EquivalenceResult::Equivalent => (serde_json::json!({ "result": "EQUIVALENT", "fn_a": fn_a, "fn_b": fn_b }), ExitCode::SUCCESS),
+        nirdosha::contract_check::EquivalenceResult::Different { bindings, result_a, result_b } => (
+            serde_json::json!({
+                "result": "DIFFERENT",
+                "fn_a": fn_a,
+                "fn_b": fn_b,
+                "counterexample": bindings.iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::BTreeMap<_, _>>(),
+                "result_a": result_a,
+                "result_b": result_b,
+            }),
+            ExitCode::FAILURE,
+        ),
+        nirdosha::contract_check::EquivalenceResult::Unsupported(msg) => (serde_json::json!({ "result": "UNSUPPORTED", "fn_a": fn_a, "fn_b": fn_b, "detail": msg }), ExitCode::from(2)),
+    };
+    println!("{}", serde_json::to_string_pretty(&value).expect("this JSON value always serializes"));
+    match result {
+        nirdosha::contract_check::EquivalenceResult::Equivalent => eprintln!("EQUIVALENT: `{fn_a}` and `{fn_b}` produce the same result for every input Z3 could check"),
+        nirdosha::contract_check::EquivalenceResult::Different { .. } => eprintln!("DIFFERENT: `{fn_a}` and `{fn_b}` diverge -- see the counterexample above"),
+        nirdosha::contract_check::EquivalenceResult::Unsupported(ref msg) => eprintln!("UNSUPPORTED: {msg}"),
+    }
+    exit
 }
 
 /// A `.nir` source file that exists only for the duration of one MCP
