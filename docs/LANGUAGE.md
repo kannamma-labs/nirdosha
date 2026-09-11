@@ -30,11 +30,13 @@ performance.
 
 ```sh
 nirdosha build <file.nir> -o <out> [--opt0]   # compile to a native binary (LLVM, -O2 by default)
-nirdosha verify <file.nir>            # 3-valued JSON verdict (PROVED/DISPROVED/UNKNOWN) + exit 0/1/2, no LLVM/clang needed (see below)
-nirdosha fix <file.nir> [--apply]     # same checks as verify, plus a byte-offset FixPatch per fixable diagnostic (see below)
+nirdosha verify <file.nir> [--in-toto]
+                                       # 3-valued JSON verdict (PROVED/DISPROVED/UNKNOWN) + exit 0/1/2, no LLVM/clang needed (see below)
+nirdosha fix <file.nir> [--apply] [--in-toto]
+                                       # same checks as verify, plus a byte-offset FixPatch per fixable diagnostic (see below)
 nirdosha explain [<code>]             # the machine-learnable error index -- NIR0001..NIR0013 (see below)
 nirdosha mcp                          # an MCP server on stdio: verify_code/get_grammar/fix/describe (see below)
-nirdosha certify <file.nir> [--sign <key.pk8>]
+nirdosha certify <file.nir> [--sign <key.pk8>] [--in-toto]
                                        # same checks, wrapped in a deterministic Certificate v0/v1 (see below)
 nirdosha keygen [-o <key.pk8>]         # generate an Ed25519 keypair for `nirdosha certify --sign`
 nirdosha verify-certificate <certificate.json>
@@ -267,6 +269,22 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   distinction is drawn from). Refuses up front if `fn_name` already
   has a `validate` block, rather than silently overwriting a possibly
   hand-written contract.
+- **`--in-toto` (Spec v1)** (2026-09, `nirdosha-master-plan.md` Part 3
+  Q1 2027, "verdict schema + certificate format + repair protocol as
+  an in-toto predicate — compose with SLSA, don't compete") —
+  `nirdosha verify`/`fix`/`certify` all accept `--in-toto`, wrapping
+  their existing JSON output (unchanged) as the `predicate` of a real
+  [in-toto v1 Statement](https://github.com/in-toto/attestation)
+  (`_type: "https://in-toto.io/Statement/v1"`), addressed to the exact
+  source file via a real SHA-256 `subject` digest, under one of three
+  nirdosha-owned `predicateType` URIs
+  (`.../attestations/{verify,certificate,fix}/v1`). Composes with
+  `certify --sign`: a signed certificate's signature fields ride inside
+  the wrapped `predicate` unchanged. See
+  [`docs/SPEC_V1.md`](./SPEC_V1.md) for the full, versioned schema of
+  all three predicate bodies, published separately from this compiler
+  so an alternative implementation can produce or consume them without
+  depending on `crates/compiler` at all.
 
 ---
 

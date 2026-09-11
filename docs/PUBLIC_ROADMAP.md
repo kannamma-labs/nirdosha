@@ -538,6 +538,27 @@ runs behind it.
   already-validated function refused, no provider configured); the
   live-LLM path is documented, not simulated, per that file's own
   doc comment naming all three real observed runs above.
+- [DONE] Spec v1 published — verdict schema + certificate format +
+  repair protocol as an in-toto predicate (2026-09, master plan
+  Part 3 Q1 2027, "compose with SLSA, don't compete") —
+  [`docs/SPEC_V1.md`](./SPEC_V1.md), a real, versioned schema for all
+  three JSON shapes (`nirdosha verify`/`certify`/`fix`'s own output),
+  published separately from `crates/compiler` so an alternative
+  implementation can produce or consume them without depending on this
+  compiler at all. `--in-toto` on `verify`/`fix`/`certify` wraps the
+  existing, unchanged JSON as the `predicate` of a real in-toto v1
+  Statement (`_type: "https://in-toto.io/Statement/v1"`, verified
+  against the published in-toto spec directly, not guessed), addressed
+  to the source file via a real SHA-256 `subject` digest, under one of
+  three nirdosha-owned `predicateType` URIs. Composes with
+  `certify --sign` (a signed certificate's signature fields ride inside
+  the wrapped predicate unchanged). Tests:
+  `crates/compiler/tests/in_toto.rs` — the Statement envelope checked
+  field by field against the real spec shape for all three predicate
+  kinds, the subject digest checked against the file's actual SHA-256
+  (not just "some string"), composition with `--sign`, and confirming
+  the flag is a pure wrapper (identical predicate content whether
+  `--in-toto` is given or not).
 
 ---
 

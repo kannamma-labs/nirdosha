@@ -55,14 +55,17 @@ fn print_usage() {
     eprintln!("                                      real db_connect/db_execute/db_query bodies, no LLM");
     eprintln!("  nirdosha build <file.nir> -o <out> [--opt0]");
     eprintln!("                                      compile to a native binary (LLVM, -O2 by default)");
-    eprintln!("  nirdosha verify <file.nir>          typecheck/ownership/contract-check only, no LLVM/clang");
-    eprintln!("                                      needed -- 3-valued JSON verdict on stdout, exit 0/1/2");
-    eprintln!("  nirdosha fix <file.nir> [--apply]   same checks as verify, plus a byte-offset FixPatch per");
+    eprintln!("  nirdosha verify <file.nir> [--in-toto]");
+    eprintln!("                                      typecheck/ownership/contract-check only, no LLVM/clang");
+    eprintln!("                                      needed -- 3-valued JSON verdict on stdout, exit 0/1/2;");
+    eprintln!("                                      --in-toto wraps it as an in-toto v1 Statement, see below");
+    eprintln!("  nirdosha fix <file.nir> [--apply] [--in-toto]");
+    eprintln!("                                      same checks as verify, plus a byte-offset FixPatch per");
     eprintln!("                                      obligation where one exists (auto/assisted/manual);");
     eprintln!("                                      --apply writes every `auto` patch to the file in place");
     eprintln!("  nirdosha explain [<code>]           print the machine-learnable error index (JSON on stdout);");
     eprintln!("                                      with no <code>, lists every NIR-code and its title");
-    eprintln!("  nirdosha certify <file.nir> [--sign <key.pk8>]");
+    eprintln!("  nirdosha certify <file.nir> [--sign <key.pk8>] [--in-toto]");
     eprintln!("                                      same checks as verify, wrapped in a deterministic, hash-pinned");
     eprintln!("                                      Certificate v0/v1 (source_hash/grammar_hash/evidence_tier/...;");
     eprintln!("                                      --sign adds a real Ed25519 signature, see `nirdosha keygen`)");
@@ -990,14 +993,69 @@ fn fix_unbound_identifier(name: &str, span: nirdosha::token::Span, candidates: &
 /// first failure -- a later stage stays `Skipped`, not silently
 /// `Passed`, so the verdict never claims to have checked something it
 /// never actually ran.
+/// `nirdosha-master-plan.md` Part 3 Q1 2027's "Spec v1 published --
+/// verdict schema + certificate format + repair protocol as an
+/// in-toto predicate (compose with SLSA, don't compete)." Wraps any of
+/// this compiler's three attestation-shaped JSON outputs (`verify`'s
+/// `VerifyVerdict`, `certify`'s `Certificate`, `fix`'s `FixReport`) in
+/// a real in-toto v1 Statement envelope
+/// (<https://in-toto.io/Statement/v1>, verified against the published
+/// spec directly, not guessed) -- the existing JSON becomes the
+/// `predicate` body unchanged, addressed to the exact source file via
+/// a real SHA-256 `subject` digest, under a nirdosha-owned
+/// `predicateType` URI namespace (see `docs/SPEC_V1.md` for the full,
+/// versioned type list). "Compose with SLSA, don't compete": this is
+/// the same generic Statement/Predicate envelope SLSA provenance
+/// attestations use, so a nirdosha attestation sits in the identical
+/// slot in any in-toto-aware verification pipeline (`cosign verify-
+/// attestation`, GitHub's own attestation store, etc.) instead of
+/// inventing a separate, incompatible wrapper format.
+fn wrap_in_toto(path: &str, source_hash: &str, predicate_kind: &str, predicate: serde_json::Value) -> serde_json::Value {
+    const IN_TOTO_STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
+    const NIRDOSHA_PREDICATE_NAMESPACE: &str = "https://nirdosha.dev/attestations";
+    // in-toto's own `digest` map is `{"<algorithm>": "<hex, no prefix>"}`
+    // -- `sha256_hex`'s own `"sha256:<hex>"` form is this project's
+    // convention (`Certificate::source_hash` etc.), not in-toto's, so
+    // the prefix is stripped here rather than baked into a second
+    // hashing convention just for this wrapper.
+    let hex = source_hash.strip_prefix("sha256:").unwrap_or(source_hash);
+    serde_json::json!({
+        "_type": IN_TOTO_STATEMENT_TYPE,
+        "subject": [ { "name": path, "digest": { "sha256": hex } } ],
+        "predicateType": format!("{NIRDOSHA_PREDICATE_NAMESPACE}/{predicate_kind}"),
+        "predicate": predicate,
+    })
+}
+
 fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let Some(path) = args.next() else {
-        eprintln!("usage: nirdosha verify <file.nir>");
+    let mut path: Option<String> = None;
+    let mut in_toto = false;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--in-toto" => in_toto = true,
+            other => path = Some(other.to_string()),
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: nirdosha verify <file.nir> [--in-toto]");
         return ExitCode::FAILURE;
     };
 
     let verdict = run_verify_pipeline(&path);
-    println!("{}", serde_json::to_string_pretty(&verdict).expect("VerifyVerdict always serializes"));
+    let output = if in_toto {
+        let source_hash = match std::fs::read(&path) {
+            Ok(bytes) => sha256_hex(&bytes),
+            Err(e) => {
+                eprintln!("error reading {path} to compute its subject digest: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let predicate = serde_json::to_value(&verdict).expect("VerifyVerdict always serializes");
+        wrap_in_toto(&path, &source_hash, "verify/v1", predicate)
+    } else {
+        serde_json::to_value(&verdict).expect("VerifyVerdict always serializes")
+    };
+    println!("{}", serde_json::to_string_pretty(&output).expect("this JSON value always serializes"));
     match verdict.verdict {
         ProofVerdict::Proved => {
             eprintln!("PROVED: {path} passed every check");
@@ -1312,16 +1370,26 @@ fn write_auto_patches(path: &str, before: &VerifyVerdict) -> Result<Vec<AppliedP
 fn cmd_fix(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut path: Option<String> = None;
     let mut apply = false;
+    let mut in_toto = false;
     for a in args.by_ref() {
         match a.as_str() {
             "--apply" => apply = true,
+            "--in-toto" => in_toto = true,
             other => path = Some(other.to_string()),
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: nirdosha fix <file.nir> [--apply]");
+        eprintln!("usage: nirdosha fix <file.nir> [--apply] [--in-toto]");
         return ExitCode::FAILURE;
     };
+
+    // Captured before the pipeline runs (and before `--apply` can
+    // change the file on disk) -- the in-toto `subject` digest below
+    // is deliberately the file's state at the *start* of this
+    // invocation, the same "before" half `FixReport` itself already
+    // reports against, not whatever `--apply` may have rewritten it to
+    // by the time this function returns.
+    let subject_hash = std::fs::read(&path).map(|bytes| sha256_hex(&bytes)).ok();
 
     let before = run_verify_pipeline(&path);
 
@@ -1341,7 +1409,16 @@ fn cmd_fix(mut args: impl Iterator<Item = String>) -> ExitCode {
     let effective_verdict = after.as_ref().map(|v| v.verdict).unwrap_or(before.verdict);
 
     let report = FixReport { before, applied, after };
-    println!("{}", serde_json::to_string_pretty(&report).expect("FixReport always serializes"));
+    let report_value = serde_json::to_value(&report).expect("FixReport always serializes");
+    let output = match (in_toto, &subject_hash) {
+        (true, Some(hash)) => wrap_in_toto(&path, hash, "fix/v1", report_value),
+        (true, None) => {
+            eprintln!("--in-toto needs the file's own bytes for its subject digest, and {path} couldn't be read a second time to compute one");
+            return ExitCode::FAILURE;
+        }
+        (false, _) => report_value,
+    };
+    println!("{}", serde_json::to_string_pretty(&output).expect("this JSON value always serializes"));
 
     eprintln!(
         "{} auto fix(es) applied to {path}",
@@ -1512,20 +1589,22 @@ fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certificat
 fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut path: Option<String> = None;
     let mut sign_key_path: Option<String> = None;
+    let mut in_toto = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--sign" => {
                 sign_key_path = args.next();
                 if sign_key_path.is_none() {
-                    eprintln!("--sign needs a private-key path -- usage: nirdosha certify <file.nir> [--sign <key.pk8>]");
+                    eprintln!("--sign needs a private-key path -- usage: nirdosha certify <file.nir> [--sign <key.pk8>] [--in-toto]");
                     return ExitCode::FAILURE;
                 }
             }
+            "--in-toto" => in_toto = true,
             other => path = Some(other.to_string()),
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: nirdosha certify <file.nir> [--sign <key.pk8>]");
+        eprintln!("usage: nirdosha certify <file.nir> [--sign <key.pk8>] [--in-toto]");
         return ExitCode::FAILURE;
     };
     let source_bytes = match std::fs::read(&path) {
@@ -1539,18 +1618,20 @@ fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
     let verdict = pipeline.verdict;
     let certificate = build_certificate(&source_bytes, pipeline);
     let evidence_tier = certificate.evidence_tier.clone();
+    let source_hash = certificate.source_hash.clone();
 
-    let print_result = match sign_key_path {
-        None => serde_json::to_string_pretty(&certificate).expect("Certificate always serializes"),
+    let certificate_value = match sign_key_path {
+        None => serde_json::to_value(&certificate).expect("Certificate always serializes"),
         Some(key_path) => match sign_certificate(&certificate, &key_path) {
-            Ok(signed) => serde_json::to_string_pretty(&signed).expect("SignedCertificate always serializes"),
+            Ok(signed) => serde_json::to_value(&signed).expect("SignedCertificate always serializes"),
             Err(e) => {
                 eprintln!("signing failed: {e}");
                 return ExitCode::FAILURE;
             }
         },
     };
-    println!("{print_result}");
+    let output = if in_toto { wrap_in_toto(&path, &source_hash, "certificate/v1", certificate_value) } else { certificate_value };
+    println!("{}", serde_json::to_string_pretty(&output).expect("this JSON value always serializes"));
 
     match verdict {
         ProofVerdict::Proved => {
