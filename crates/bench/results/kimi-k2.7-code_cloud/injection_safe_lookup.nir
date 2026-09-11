@@ -4,40 +4,38 @@ struct Text {
 
 enum ErrorCode {
     DbError(str),
-    NotFound(str),
+    NotFound(i64),
+    JsonError(str),
 }
 
 fn find_user_email(conn: db, user_id: i64) -> Result(Text, ErrorCode) requires(public) {
     let rows_result: Result(json, str) = db_query(conn, "SELECT email FROM account WHERE id = ?", user_id)
-    return match rows_result {
-        Ok(rows) => match json_array_len(rows) {
-            Ok(len) => if len > 0 {
-                match json_array_get(rows, 0) {
-                    Ok(row) => match json_get_str(row, "email") {
-                        Ok(email) => Ok(Text(email)),
-                        Err(e) => Err(DbError(e)),
-                    },
-                    Err(e) => Err(DbError(e)),
-                }
-            } else {
-                Err(NotFound("user not found"))
+    let result: Result(Text, ErrorCode) = match rows_result {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_str(row, "email") {
+                Ok(email) => Ok(Text(email)),
+                Err(e) => Err(JsonError(e)),
             },
-            Err(e) => Err(DbError(e)),
+            Err(e) => Err(NotFound(user_id)),
         },
         Err(e) => Err(DbError(e)),
     }
+    stop(conn)
+    return result
 }
 
 fn main() requires(public) {
-    let result: Result(Text, ErrorCode) = match db_connect("bench_users.db") {
+    let conn_result: Result(db, str) = db_connect("bench_users.db")
+    let outcome: Result(Text, ErrorCode) = match conn_result {
         Ok(conn) => find_user_email(conn, 1),
         Err(e) => Err(DbError(e)),
     }
-    match result {
+    match outcome {
         Ok(text) => print(text.value),
         Err(e) => match e {
-            DbError(msg) => print("database error:", msg),
-            NotFound(msg) => print("not found:", msg),
+            DbError(msg) => print("database error"),
+            NotFound(id) => print("not found"),
+            JsonError(msg) => print("json error"),
         },
     }
 }

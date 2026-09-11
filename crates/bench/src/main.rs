@@ -35,6 +35,8 @@
 use nirdosha::hi_llm;
 use serde::Serialize;
 
+mod cross_lang;
+
 /// One benchmark task: a natural-language prompt an LLM must turn into
 /// working `.nir` source, plus which failure class it targets.
 ///
@@ -251,4 +253,13 @@ fn main() {
     let summary_json = serde_json::to_string_pretty(&summary).expect("RunSummary always serializes");
     std::fs::write(out_dir.join("summary.json"), &summary_json).expect("writing the summary artifact should not fail");
     println!("{summary_json}");
+
+    if std::env::var("NIRDOSHA_BENCH_SKIP_CROSS_LANG").is_err() {
+        eprintln!("\n=== cross-language baseline (TypeScript / Rust, plain LLM, no self-repair) ===");
+        let cross_results = cross_lang::run(&client, &out_dir);
+        for r in &cross_results {
+            eprintln!("  {} [{}] -> {} ({})", r.task_id, r.language, r.outcome, r.detail);
+        }
+        println!("{}", serde_json::to_string_pretty(&cross_results).expect("cross-lang results always serialize"));
+    }
 }

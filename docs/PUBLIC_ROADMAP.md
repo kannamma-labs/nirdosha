@@ -338,18 +338,36 @@ runs behind it.
   independent result rather than replacing the first), self-repaired
   against real compiler diagnostics (`hi_llm::generate_from_task_prompt`,
   reusing `nirdosha hi`'s own Generate-mode loop), scored by
-  `nirdosha certify`'s real JSON verdict. `[PARTIAL]` because it covers
-  Nirdosha only, not the master plan's full comparison matrix
-  (TypeScript/Rust/LLM+XGrammar/LLM+Imandra baselines, or Kōdo's
-  AlgoVeri/Vericoding corpus) — see `crates/bench/RESULTS.md`'s own
-  "What this is not" section for exactly what's missing and why
-  (third-party tools/corpora not present in this environment, not a
-  scope cut of convenience). A real compiler gap surfaced along the
-  way, disclosed rather than patched around, and independently
-  reproduced by *both* models (ruling out "one model's own quirk" as
-  the explanation): Tier 1 can't model a `validate` predicate built on
-  a division result at all yet (`crates/bench/RESULTS.md`'s
-  `average_no_float_confusion` section).
+  `nirdosha certify`'s real JSON verdict. **Updated 2026-09-11 (master
+  plan Part 3 Oct 10–30):** `crates/bench/src/cross_lang.rs` adds a real
+  TypeScript/Rust plain-LLM baseline (same model, one shot, no self-
+  repair, actually compiled and run with `node`/`rustc`) for the
+  `overflow`/`type_confusion` tasks, plus a weaker static heuristic for
+  `injection` — see `crates/bench/RESULTS.md`'s cross-language section
+  for the full table and an honest read in both directions (Nirdosha's
+  `overflow` proof genuinely beats both baselines; its `type_confusion`
+  verdict is genuinely beaten by both, the same disclosed Tier-1 gap
+  below, not softened here). `[PARTIAL]` because three columns of the
+  master plan's full matrix are still not attempted, each checked
+  directly rather than assumed missing: **LLM+XGrammar** needs raw
+  logit access for grammar-constrained decoding, which Ollama's
+  OpenAI-compatible chat-completions endpoint (what this harness talks
+  to) doesn't expose. **LLM+Imandra** needs a commercial license not
+  available here. **AlgoVeri/Vericoding** — the real corpus
+  (github.com/haoyuzhao123/algoveri, arXiv 2602.09464, 77 algorithms)
+  was fetched and read directly: its tasks require universally-
+  quantified postconditions over arbitrary-length sequences
+  (`forall i :: ... s[i] < target`) discharged via loop-invariant/
+  inductive reasoning — confirmed by grep that `contract_check.rs` has
+  zero quantifier support of any kind. Not a narrower version of
+  Tier-1's bounded per-function arithmetic checking; a genuinely
+  different verification paradigm Tier-1 was never built to attempt.
+  Named here as a real architectural boundary, not a "not attempted
+  yet." A real compiler gap surfaced along the way, disclosed rather
+  than patched around, and independently reproduced by *both* models
+  (ruling out "one model's own quirk" as the explanation): Tier 1 can't
+  model a `validate` predicate built on a division result at all yet
+  (`crates/bench/RESULTS.md`'s `average_no_float_confusion` section).
 - [DONE] Red-team invitation published (2026-09, master plan Part 3
   Sprint 2, parity target: Certora's audit ethos) — `SECURITY.md`'s new
   top section reframes the file from a passive reporting form into an

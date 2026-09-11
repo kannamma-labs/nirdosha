@@ -1,4 +1,4 @@
-fn average_score(total_points: i64, num_students: i64) -> i64 requires(public) {
+fn average_score(total_points: i64, num_students: i64) -> i64 {
     return total_points / num_students
 }
 
@@ -7,6 +7,7 @@ validate average_score {
     post: result <= total_points
 }
 
-fn main() requires(public) {
-    print(average_score(275, 4))
+fn main() {
+    let avg: i64 = average_score(275, 4)
+    print(avg)
 }

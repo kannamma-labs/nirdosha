@@ -7,7 +7,6 @@ validate order_total_cents {
     post: result >= unit_price_cents
 }
 
-fn main() {
-    let total: i64 = order_total_cents(250, 4)
-    print(total)
+fn main() requires(public) {
+    print(order_total_cents(250, 4))
 }

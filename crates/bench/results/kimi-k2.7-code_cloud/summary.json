@@ -16,7 +16,7 @@
       "contracts_proved": 0,
       "contracts_unsupported": 0,
       "contracts_failed": 0,
-      "proven_in_range": 0,
+      "proven_in_range": 1,
       "error": null
     },
     {

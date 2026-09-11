@@ -29,19 +29,39 @@ The master plan's own comparison matrix for this item is: *"Nirdosha vs
 TypeScript vs Rust vs plain-LLM vs LLM+XGrammar vs LLM+Imandra ... on
 injection / type confusion / overflow / deadlock classes; includes
 AlgoVeri/Vericoding tasks → direct published comparison vs Kōdo's 20/20
-claim."* This run covers none of the cross-language or cross-tool
-columns, and doesn't reproduce Kōdo's benchmark:
+claim."* As of 2026-09-11 the TypeScript/Rust/plain-LLM columns are
+real (below); three still are not, for reasons checked directly rather
+than assumed:
 
-- **TypeScript/Rust baselines** need a parallel generate-then-
-  statically-analyze pipeline in each language, scored for the same
-  failure classes — a second harness, not built here.
-- **LLM+XGrammar/LLM+Imandra** need those third-party tools installed
-  and wired up; neither is present in this repo or this environment.
-- **AlgoVeri/Vericoding** needs Kōdo's own benchmark corpus
-  (arXiv 2602.09464), not available locally.
+- **LLM+XGrammar** needs raw logit access for grammar-constrained
+  decoding. Ollama's OpenAI-compatible chat-completions endpoint (what
+  this harness talks to) only returns finished text — there is no
+  logit stream to constrain. Wiring this up for real would mean running
+  a model through a local HF/vLLM stack directly instead of through
+  Ollama, a materially different (and heavier) setup than this
+  environment has, not attempted.
+- **LLM+Imandra** needs a commercial Imandra license; none available
+  here.
+- **AlgoVeri/Vericoding** — checked directly against the real published
+  corpus (github.com/haoyuzhao123/algoveri, arXiv 2602.09464, 77
+  classical algorithms in Dafny/Verus/Lean). One task read in full
+  (`binary_search`'s `dafny_spec.dfy`) settles the question: its
+  postcondition is `forall i :: 0 <= i < result ==> s[i] < target`, a
+  universally-quantified property over an arbitrary-length sequence,
+  requiring loop-invariant/inductive reasoning to discharge. Confirmed
+  by grep: `contract_check.rs` has zero `forall`/quantifier handling of
+  any kind. This is not "AlgoVeri is harder" — it's a different
+  verification paradigm than Tier-1's bounded per-function arithmetic
+  encoding (overflow/division/bounds *within* one function body, no
+  quantifiers, no loops with invariants) was ever built to attempt.
+  Real, disclosed, and not closeable without a substantially new
+  verification tier — named here as exactly that, not narrowed
+  quietly to "not attempted yet."
 
-What *is* real: Nirdosha's own generate → self-repair → verify loop,
-measured against a live model, for three tasks.
+What *is* real below: Nirdosha's own generate → self-repair → verify
+loop against a live model (three tasks, two providers), *and* a
+plain-LLM (no self-repair) TypeScript/Rust baseline against the same
+two failure classes, run against the same model.
 
 ## Why three tasks, and why these three
 
@@ -174,6 +194,68 @@ evidence the task itself was unsolvable or unfairly hard.
   `crates/compiler/tests/`, not established for the first time by this
   benchmark.
 
+## Cross-language baseline — TypeScript / Rust, plain LLM, no self-repair (2026-09-11)
+
+Same model (`kimi-k2.7-code:cloud` via Ollama), asked **once each, no
+self-repair** — the "plain-LLM" column specifically — to solve the
+`overflow` and `type_confusion` tasks in TypeScript and in Rust, then
+actually compiled/run (`node`, bare `rustc`) against real, adversarially
+chosen inputs (`crates/bench/src/cross_lang.rs`). `injection` is
+included too but scored by a static heuristic on the generated source
+(parameterized-query placeholder vs raw string interpolation), not by
+execution — weaker evidence, reported as such, not dressed up to look
+equivalent to the other two. Real artifacts:
+`results/kimi-k2.7-code_cloud/cross_lang/` (generated source per
+language) and `cross_lang_summary.json` (machine-readable outcomes).
+
+| Task | Nirdosha | TypeScript (plain LLM) | Rust (plain LLM) |
+|---|---|---|---|
+| `overflow` | **PROVED** (Z3, in advance, before any input runs) | **silently_wrong** — `orderTotalCents(123456789012345, 987654321)` returned `1.2193263112482786e+23`; exact answer is `121932631124827861592745`. No error raised. | **safe** — panicked at runtime (`attempt to multiply with overflow`, Rust's default debug-mode check) rather than returning the wrong number |
+| `type_confusion` | **UNKNOWN** (Tier-1 can't model a division-result predicate — see above) | safe — this run happened to floor correctly (`68`) | safe — `i64` return type forces integer division by construction |
+| `injection` | **PROVED** (inexpressible by construction — `str` has no concatenation operator) | heuristic_pass — used a `?` placeholder, no string interpolation into SQL detected | heuristic_pass — same |
+
+**Read this table honestly, both directions:**
+
+- **`overflow` is the clean, real differentiator this benchmark exists
+  to surface.** Three genuinely different safety stories for the exact
+  same bug-shaped task: Nirdosha proves it can never happen, for any
+  input, before the program ever runs. Rust's plain-LLM output happened
+  to be safe only because the *language runtime* caught the mistake at
+  the moment it occurred (a real, valuable property of Rust — not
+  nothing — but reactive, not proved). TypeScript's plain-LLM output
+  was silently, undetectably wrong — no error, no crash, just a
+  confidently printed incorrect number, the exact failure mode this
+  whole benchmark category is about.
+- **`type_confusion` cuts the other way, and that's reported plainly,
+  not softened.** Both TypeScript (this run) and Rust beat Nirdosha's
+  own verdict here — Rust by real static typing (`i64` forces integer
+  division, a fair, structural win, the same class of guarantee
+  Nirdosha's own typechecker would also provide if `contract_check.rs`
+  could express the property), TypeScript by this particular
+  generation happening not to introduce a float. This is the same
+  disclosed Tier-1 gap `average_no_float_confusion`'s own section
+  above already documents, now with a second, harder data point: it's
+  not just "Nirdosha can't prove the property," it's "a plain LLM
+  targeting a language with real static typing can produce a
+  *structurally* safer result than Nirdosha's own `certify` verdict for
+  the identical task." Not spun away — a genuine current weakness.
+- **`injection`'s heuristic result is the weakest evidence in this
+  table** and shouldn't be read as equivalent to the other two rows —
+  it says "this one generated snippet looked disciplined," not "this
+  language prevents the bug class." Nirdosha's `PROVED` on this row
+  means something categorically stronger: the bug class is not
+  expressible in the language at all, checked by the typechecker, not
+  a property of one generation.
+- **Single run, N=1 per language per task, same caveat as the
+  Nirdosha-only runs above**: illustrative, not a statistically
+  powered claim. The `overflow` numbers chosen for this task (a product
+  that both exceeds `i64::MAX` *and* IEEE-754 double's 2^53 exact-
+  integer range — verified in `cross_lang.rs`'s own tests, not just
+  asserted in the prompt) are deterministic by construction regardless
+  of N, though: no plausible plain-LLM output could get TypeScript's
+  default `number` type to represent that exact value correctly, so
+  that particular row is not a fluke of this one run.
+
 ## Reproduce it
 
 Against Google AI Studio (needs a real API key and is subject to its
@@ -207,3 +289,8 @@ Any OpenAI-compatible endpoint works this same way — set
 (`hi_llm.rs::resolve_activation`). Each run's artifacts land under
 `results/<model-name>/`, so different providers' results coexist
 instead of overwriting each other.
+
+The cross-language TypeScript/Rust baseline runs automatically as part
+of the same `cargo run -p nirdosha-bench` invocation above (needs
+`node` and `rustc` on `PATH`); set `NIRDOSHA_BENCH_SKIP_CROSS_LANG=1` to
+skip it and only run the Nirdosha-only tasks.

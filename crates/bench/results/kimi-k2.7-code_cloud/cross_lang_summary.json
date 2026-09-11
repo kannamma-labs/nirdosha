@@ -1,0 +1,38 @@
+[
+  {
+    "task_id": "overflow",
+    "language": "typescript",
+    "outcome": "silently_wrong",
+    "detail": "expected exact value 121932631124827861592745, got 1.2193263112482786e+23 -- wrong, and no error was raised"
+  },
+  {
+    "task_id": "overflow",
+    "language": "rust",
+    "outcome": "safe",
+    "detail": "panicked rather than returning a silently wrong value: thread 'main' (978391) panicked at /tmp/nirdosha_bench_cross_lang_978227/overflow_rust.rs:2:5:\nattempt to multiply with overflow\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+  },
+  {
+    "task_id": "type_confusion",
+    "language": "typescript",
+    "outcome": "safe",
+    "detail": "returned the correctly-floored integer"
+  },
+  {
+    "task_id": "type_confusion",
+    "language": "rust",
+    "outcome": "safe",
+    "detail": "returned the correctly-floored integer"
+  },
+  {
+    "task_id": "injection",
+    "language": "typescript",
+    "outcome": "heuristic_pass",
+    "detail": "uses a parameterized-query placeholder, no direct string interpolation of user_id into SQL detected"
+  },
+  {
+    "task_id": "injection",
+    "language": "rust",
+    "outcome": "heuristic_pass",
+    "detail": "uses a parameterized-query placeholder, no direct string interpolation of user_id into SQL detected"
+  }
+]

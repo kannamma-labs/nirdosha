@@ -444,6 +444,19 @@ pub fn generate_from_task_prompt(client: &LlmClient, task_prompt: &str, on_log: 
     Err(format!("gave up after {MAX_SELF_REPAIR_ATTEMPTS} attempts -- last diagnostic:\n{last_diagnostic}"))
 }
 
+/// One-shot, no self-repair, no Nirdosha system prompt -- the plain
+/// "ask a model for code" call `crates/bench`'s cross-language
+/// baseline needs to ask the *same* model for a TypeScript/Rust
+/// solution to a task, for comparison against `generate_from_task_prompt`'s
+/// Nirdosha-specific self-repair loop. Deliberately not routed through
+/// `generate_from_task_prompt` -- that function's whole point is
+/// looping against `.nir`-specific compile diagnostics, which makes no
+/// sense for a language this compiler doesn't parse.
+pub fn generate_plain(client: &LlmClient, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+    let history = [ChatMessage { role: "system", content: system_prompt.to_string() }, ChatMessage { role: "user", content: user_prompt.to_string() }];
+    client.complete(&history)
+}
+
 /// `nirdosha-master-plan.md` Part 3 Q1 2027's "`nirdosha suggest-
 /// contracts` v1 -- LLM-assisted contract inference" (parity target:
 /// Kōdo's own `kodoc annotate --ai`, Certora AutoProver). One-shot,
