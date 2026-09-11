@@ -34,7 +34,11 @@ nirdosha verify <file.nir>            # 3-valued JSON verdict (PROVED/DISPROVED/
 nirdosha fix <file.nir> [--apply]     # same checks as verify, plus a byte-offset FixPatch per fixable diagnostic (see below)
 nirdosha explain [<code>]             # the machine-learnable error index -- NIR0001..NIR0013 (see below)
 nirdosha mcp                          # an MCP server on stdio: verify_code/get_grammar/fix/describe (see below)
-nirdosha certify <file.nir>            # same checks, wrapped in a deterministic Certificate v0 (see below)
+nirdosha certify <file.nir> [--sign <key.pk8>]
+                                       # same checks, wrapped in a deterministic Certificate v0/v1 (see below)
+nirdosha keygen [-o <key.pk8>]         # generate an Ed25519 keypair for `nirdosha certify --sign`
+nirdosha verify-certificate <certificate.json>
+                                       # check a signed certificate's signature against its embedded key
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -166,6 +170,22 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   still formal evidence) and `"unknown"` only when contract-check never
   ran at all, or Z3 couldn't decide something. Exit code mirrors
   `verify`'s own `0`/`1`/`2`.
+- **Certificate v1 — signed certificates** (2026-09,
+  `nirdosha-master-plan.md` Part 3 Nov 2026, parity target: Velvet) —
+  `nirdosha certify <file.nir> --sign <key.pk8>` adds a real Ed25519
+  signature (`ring`, already a dependency — no hand-rolled crypto) over
+  Certificate v0's own canonical byte serialization, plus the signing
+  key's public half, both additive fields (`signature_algorithm`/
+  `public_key`/`signature`) on top of every v0 field, still present
+  unchanged. `nirdosha keygen [-o key.pk8]` generates the keypair (raw
+  PKCS#8 private key + a base64 `.pub` file — the private key must be
+  kept secret; the public key is what gets distributed/pinned).
+  `nirdosha verify-certificate <certificate.json>` checks a signature
+  against its own embedded public key and reports `"valid": true`/
+  `false` — it does not decide whether that key should be *trusted*;
+  which public keys a verifier accepts is an operational policy
+  ("key-pinned"), the same trust model TLS certificate pinning uses,
+  not something the certificate format itself enforces.
 
 ---
 

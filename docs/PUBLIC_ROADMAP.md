@@ -400,6 +400,21 @@ runs behind it.
   issue against a third-party repo naming a human submitter, left as a
   deliberate manual step (`extensions/nirdosha-speckit/README.md`'s
   own "Publishing status").
+- [DONE] Signed certificates v1 — key-pinned verdicts (2026-09, master
+  plan Part 3 Nov 2026, parity target: Velvet) — `nirdosha certify
+  --sign <key.pk8>` adds a real Ed25519 signature (`ring`, already a
+  dependency) over Certificate v0's own canonical bytes, additive on
+  top of every v0 field per `docs/STABILITY_AND_RELEASES.md`'s rule for
+  this schema. `nirdosha keygen` generates the keypair; `nirdosha
+  verify-certificate` checks a signature against its own embedded
+  public key, answering exactly "is this signature valid for this
+  key" — never "should this key be trusted," which stays the
+  verifier's own operational pinning policy. Tests:
+  `crates/compiler/tests/signed_certificate.rs` — a real keypair
+  signing a real certificate that verifies, a tampered certificate
+  correctly rejected, a certificate re-signed-looking-but-wrong-key
+  correctly rejected, and a plain (unsigned) certificate failing
+  `verify-certificate` cleanly rather than crashing.
 
 ---
 

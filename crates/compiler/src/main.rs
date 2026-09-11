@@ -21,6 +21,8 @@ fn main() -> ExitCode {
         "fix" => cmd_fix(args),
         "explain" => cmd_explain(args),
         "certify" => cmd_certify(args),
+        "keygen" => cmd_keygen(args),
+        "verify-certificate" => cmd_verify_certificate(args),
         "mcp" => cmd_mcp(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
@@ -56,8 +58,14 @@ fn print_usage() {
     eprintln!("                                      --apply writes every `auto` patch to the file in place");
     eprintln!("  nirdosha explain [<code>]           print the machine-learnable error index (JSON on stdout);");
     eprintln!("                                      with no <code>, lists every NIR-code and its title");
-    eprintln!("  nirdosha certify <file.nir>         same checks as verify, wrapped in a deterministic, hash-pinned");
-    eprintln!("                                      Certificate v0 (source_hash/grammar_hash/evidence_tier/...)");
+    eprintln!("  nirdosha certify <file.nir> [--sign <key.pk8>]");
+    eprintln!("                                      same checks as verify, wrapped in a deterministic, hash-pinned");
+    eprintln!("                                      Certificate v0/v1 (source_hash/grammar_hash/evidence_tier/...;");
+    eprintln!("                                      --sign adds a real Ed25519 signature, see `nirdosha keygen`)");
+    eprintln!("  nirdosha keygen [-o <key.pk8>]      generate an Ed25519 keypair for `nirdosha certify --sign`");
+    eprintln!("  nirdosha verify-certificate <certificate.json>");
+    eprintln!("                                      check a signed certificate's signature against its own");
+    eprintln!("                                      embedded public key");
     eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
     eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
@@ -665,7 +673,7 @@ enum StageStatus {
 /// the same three-way split (0/1/2, `cmd_verify` below), not just this
 /// JSON field, for the same reason: a caller that only inspects `$?`
 /// must be able to see the difference too.
-#[derive(serde::Serialize, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum ProofVerdict {
     Proved,
@@ -782,7 +790,7 @@ struct ContractsResult {
 /// at runtime instead (the same "proved vs. still-safely-checked"
 /// distinction `contract_check.rs`'s `Unsupported` already draws for
 /// `validate` blocks).
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ProofObligations {
     proven_in_range: usize,
     proven_nonzero_divisor: usize,
@@ -1399,22 +1407,29 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// sandbox tier, post-seed; see the master plan's "language-agnostic
 /// ladder"). A certificate a future `nirdosha check` emits can set
 /// either of those without this struct's shape ever changing.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Certificate {
-    certificate_version: &'static str,
+    certificate_version: String,
     source_hash: String,
     grammar_hash: String,
-    toolchain_version: &'static str,
+    toolchain_version: String,
     /// `"proved"` | `"checked"` | `"sampled"` | `"unknown"` -- see this
-    /// struct's own doc comment for why the type is `&'static str`
+    /// struct's own doc comment for why the type is a plain `String`
     /// (an open, forward-declared vocabulary) rather than a 2-variant
-    /// enum that would have to grow a breaking variant later.
-    evidence_tier: &'static str,
+    /// enum that would have to grow a breaking variant later. `String`,
+    /// not `&'static str`: `Certificate` also derives `Deserialize`
+    /// (`cmd_verify_certificate`'s round trip), and a borrowed
+    /// `&'static str` field makes a derived `Deserialize` impl
+    /// unsatisfiable for any real deserializer (it would need to
+    /// borrow from the input buffer for the `'static` lifetime, which
+    /// no buffer actually has) -- a real compile error caught here,
+    /// not a style preference.
+    evidence_tier: String,
     verdict_summary: VerdictSummary,
     proof_obligations: ProofObligations,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct VerdictSummary {
     verdict: ProofVerdict,
     contracts_proved: usize,
@@ -1450,11 +1465,11 @@ fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certificat
         }
     };
     Certificate {
-        certificate_version: "0",
+        certificate_version: "0".to_string(),
         source_hash: sha256_hex(source_bytes),
         grammar_hash: sha256_hex(NIRDOSHA_GBNF.as_bytes()),
-        toolchain_version: env!("CARGO_PKG_VERSION"),
-        evidence_tier,
+        toolchain_version: env!("CARGO_PKG_VERSION").to_string(),
+        evidence_tier: evidence_tier.to_string(),
         verdict_summary: VerdictSummary {
             verdict,
             contracts_proved: contracts.proved,
@@ -1478,8 +1493,22 @@ fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certificat
 /// `PROVED`/`DISPROVED`/`UNKNOWN`) so CI gating on `certify` behaves
 /// identically to gating on `verify` directly.
 fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let Some(path) = args.next() else {
-        eprintln!("usage: nirdosha certify <file.nir>");
+    let mut path: Option<String> = None;
+    let mut sign_key_path: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--sign" => {
+                sign_key_path = args.next();
+                if sign_key_path.is_none() {
+                    eprintln!("--sign needs a private-key path -- usage: nirdosha certify <file.nir> [--sign <key.pk8>]");
+                    return ExitCode::FAILURE;
+                }
+            }
+            other => path = Some(other.to_string()),
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: nirdosha certify <file.nir> [--sign <key.pk8>]");
         return ExitCode::FAILURE;
     };
     let source_bytes = match std::fs::read(&path) {
@@ -1492,20 +1521,231 @@ fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
     let pipeline = run_verify_pipeline(&path);
     let verdict = pipeline.verdict;
     let certificate = build_certificate(&source_bytes, pipeline);
-    println!("{}", serde_json::to_string_pretty(&certificate).expect("Certificate always serializes"));
+    let evidence_tier = certificate.evidence_tier.clone();
+
+    let print_result = match sign_key_path {
+        None => serde_json::to_string_pretty(&certificate).expect("Certificate always serializes"),
+        Some(key_path) => match sign_certificate(&certificate, &key_path) {
+            Ok(signed) => serde_json::to_string_pretty(&signed).expect("SignedCertificate always serializes"),
+            Err(e) => {
+                eprintln!("signing failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    println!("{print_result}");
+
     match verdict {
         ProofVerdict::Proved => {
-            eprintln!("PROVED: certificate issued for {path}, evidence_tier={}", certificate.evidence_tier);
+            eprintln!("PROVED: certificate issued for {path}, evidence_tier={evidence_tier}");
             ExitCode::SUCCESS
         }
         ProofVerdict::Disproved => {
-            eprintln!("DISPROVED: certificate issued for {path} recording the failure, evidence_tier={}", certificate.evidence_tier);
+            eprintln!("DISPROVED: certificate issued for {path} recording the failure, evidence_tier={evidence_tier}");
             ExitCode::FAILURE
         }
         ProofVerdict::Unknown => {
-            eprintln!("UNKNOWN: certificate issued for {path}, evidence_tier={}", certificate.evidence_tier);
+            eprintln!("UNKNOWN: certificate issued for {path}, evidence_tier={evidence_tier}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Certificate v1 (`nirdosha-master-plan.md` Part 3 Nov 2026, "Signed
+/// certificates (v1) -- key-pinned verdicts", parity target: Velvet)
+/// -- Certificate v0 plus a real Ed25519 signature (`ring`, already a
+/// dependency; no hand-rolled crypto) over v0's own canonical bytes.
+/// `#[serde(flatten)]` puts every v0 field back at the top level
+/// (additive over v0, per `docs/STABILITY_AND_RELEASES.md`'s own rule
+/// for this schema -- a v0-only consumer reading a v1 certificate
+/// still finds every field it expects, plus three it can ignore).
+/// "Key-pinned": the public key travels with the certificate so a
+/// verifier never needs external key discovery to check the
+/// signature -- trust is established by the *verifier* pinning which
+/// public keys it accepts in advance (an operational policy, not
+/// something this format enforces), the same model TLS certificate
+/// pinning uses for the same reason.
+#[derive(serde::Serialize)]
+struct SignedCertificate {
+    #[serde(flatten)]
+    certificate: Certificate,
+    signature_algorithm: &'static str,
+    public_key: String,
+    signature: String,
+}
+
+/// Signs `certificate`'s own canonical byte serialization
+/// (`serde_json::to_vec` on the plain `Certificate` struct --
+/// `Certificate` derives `Serialize` with no `#[serde(rename_all)]`
+/// alphabetizing pass, so this is always the same bytes for the same
+/// values, independent of what order any particular JSON *source*
+/// text happened to list fields in) with the Ed25519 private key at
+/// `key_path` (raw PKCS#8, as `nirdosha keygen` writes). Verification
+/// (`cmd_verify_certificate`) does the mirror operation: parse the
+/// signed JSON back into a plain `Certificate` (ignoring the three
+/// signature-related fields, which `Certificate` doesn't declare),
+/// re-serialize *that*, and check the signature against those exact
+/// bytes -- so the two sides never need to agree on a JSON
+/// canonicalization scheme beyond "both go through the same Rust
+/// struct's own `Serialize` impl."
+fn sign_certificate(certificate: &Certificate, key_path: &str) -> Result<SignedCertificate, String> {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use ring::signature::KeyPair;
+
+    let pkcs8 = std::fs::read(key_path).map_err(|e| format!("reading private key {key_path}: {e}"))?;
+    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}"))?;
+
+    let canonical = serde_json::to_vec(certificate).expect("Certificate always serializes");
+    let signature = keypair.sign(&canonical);
+
+    Ok(SignedCertificate {
+        certificate: serde_json::from_slice(&canonical).expect("re-parsing what was just serialized cannot fail"),
+        signature_algorithm: "ed25519",
+        public_key: BASE64_STANDARD.encode(keypair.public_key().as_ref()),
+        signature: BASE64_STANDARD.encode(signature.as_ref()),
+    })
+}
+
+/// `nirdosha keygen [-o <path>]` -- generates a real Ed25519 keypair
+/// (`ring::rand::SystemRandom`, the OS CSPRNG, not a fixed/test seed)
+/// for `nirdosha certify --sign`. Writes the private key as raw
+/// PKCS#8 DER to `<path>` (default `nirdosha_signing_key.pk8`) --
+/// **keep this file secret**, anyone holding it can sign certificates
+/// your key will be trusted for -- and the base64 public key to
+/// `<path>.pub`, the thing you actually distribute/pin.
+fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use ring::signature::KeyPair;
+
+    let mut out: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-o" => {
+                out = args.next();
+                if out.is_none() {
+                    eprintln!("-o needs a path -- usage: nirdosha keygen [-o key.pk8]");
+                    return ExitCode::FAILURE;
+                }
+            }
+            other => {
+                eprintln!("unknown argument `{other}` -- usage: nirdosha keygen [-o key.pk8]");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let out_path = out.unwrap_or_else(|| "nirdosha_signing_key.pk8".to_string());
+
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("key generation failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(&out_path, pkcs8.as_ref()) {
+        eprintln!("error writing {out_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("a key this function just generated always parses");
+    let public_key_b64 = BASE64_STANDARD.encode(keypair.public_key().as_ref());
+    let pub_path = format!("{out_path}.pub");
+    if let Err(e) = std::fs::write(&pub_path, format!("{public_key_b64}\n")) {
+        eprintln!("error writing {pub_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "private_key_path": out_path,
+            "public_key_path": pub_path,
+            "public_key": public_key_b64,
+            "algorithm": "ed25519",
+        }))
+        .expect("this JSON value always serializes")
+    );
+    eprintln!("wrote {out_path} (private -- keep secret) and {pub_path} (public -- distribute/pin this)");
+    ExitCode::SUCCESS
+}
+
+/// `nirdosha verify-certificate <certificate.json>` -- the other half
+/// of `nirdosha certify --sign`/`nirdosha keygen`'s round trip: checks
+/// a signed certificate's Ed25519 signature against its own embedded
+/// `public_key`. Does **not** decide whether to *trust* that key
+/// (`SignedCertificate`'s own doc comment: pinning which public keys
+/// are acceptable is the verifier's operational policy, not this
+/// command's job) -- it answers exactly one question, "is this
+/// signature valid for this certificate and this embedded key,"
+/// honestly, as its own field (`"valid": true`/`false`), never folded
+/// into a generic success/failure exit code a caller might
+/// misconstrue as "and therefore this key is trustworthy."
+fn cmd_verify_certificate(mut args: impl Iterator<Item = String>) -> ExitCode {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+
+    let Some(path) = args.next() else {
+        eprintln!("usage: nirdosha verify-certificate <certificate.json>");
+        return ExitCode::FAILURE;
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error reading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let full: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{path} is not valid JSON: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (Some(signature_b64), Some(public_key_b64)) = (full.get("signature").and_then(|v| v.as_str()), full.get("public_key").and_then(|v| v.as_str())) else {
+        eprintln!("{path} is not a signed certificate -- missing `signature`/`public_key` fields (did you mean to run `nirdosha certify --sign`?)");
+        return ExitCode::FAILURE;
+    };
+    let certificate: Certificate = match serde_json::from_value(full.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{path}'s own certificate fields don't match Certificate v0's shape: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let canonical = serde_json::to_vec(&certificate).expect("Certificate always serializes");
+
+    let signature_bytes = match BASE64_STANDARD.decode(signature_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("`signature` is not valid base64: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let public_key_bytes = match BASE64_STANDARD.decode(public_key_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("`public_key` is not valid base64: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let public_key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public_key_bytes);
+    let valid = public_key.verify(&canonical, &signature_bytes).is_ok();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({ "valid": valid, "public_key": public_key_b64, "source_hash": certificate.source_hash }))
+            .expect("this JSON value always serializes")
+    );
+    if valid {
+        eprintln!("VALID: {path}'s signature matches its embedded public key");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("INVALID: {path}'s signature does not match its embedded public key (or the certificate was modified after signing)");
+        ExitCode::FAILURE
     }
 }
 
