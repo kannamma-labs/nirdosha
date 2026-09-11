@@ -488,20 +488,24 @@ runs behind it.
   a test, not just goes unnoticed in a markdown file.
 - [DONE] v1.0 stability promise, test-count claim checked (2026-09,
   master plan Part 3 Dec 2026, "tests 211 → 10,000") — the "211"
-  circulating in planning material was stale: `crates/compiler` has
-  ~98 unit tests plus ~1,250 integration `#[test]` functions today
-  (`docs/STABILITY_AND_RELEASES.md`'s own "Test count, checked
-  directly" note), roughly 1,350, not 211. Deliberately not "fixed" by
-  writing filler tests toward 10,000 — a round number chased for its
-  own sake would cut directly against this project's actual testing
-  culture, where every test traces to a real regression, counterexample,
-  or feature's own end-to-end proof (this session's own commits are
-  the pattern: `fintech_canon.rs`/`trust_audit.rs`/
-  `equivalence_command.rs`/`signed_certificate.rs` and the rest, each
-  earning its place). The "v1.0 stability promise" itself is
-  `docs/STABILITY_AND_RELEASES.md`, already `[DONE]` under this
-  roadmap's own Track A entry — this item closes out the one
-  unchecked claim (test count) that document didn't itself carry.
+  circulating in planning material was stale. **Re-verified 2026-09-11
+  against a real `cargo test --release` run (Redis + Postgres present,
+  not a grep estimate): 644 real tests (95 unit + 549 integration), 623
+  passing with no extra infra, 21 `#[ignore]`-gated needing Postgres —
+  see `docs/STABILITY_AND_RELEASES.md`.** The prior entry here said
+  "~1,350," itself a bad grep-based estimate corrected the same way the
+  "211" figure was: by actually counting and running, not repeating a
+  number forward. Deliberately not "fixed" by writing filler tests
+  toward 10,000 — a round number chased for its own sake would cut
+  directly against this project's actual testing culture, where every
+  test traces to a real regression, counterexample, or feature's own
+  end-to-end proof (this session's own commits are the pattern:
+  `fintech_canon.rs`/`trust_audit.rs`/`equivalence_command.rs`/
+  `signed_certificate.rs` and the rest, each earning its place). The
+  "v1.0 stability promise" itself is `docs/STABILITY_AND_RELEASES.md`,
+  already `[DONE]` under this roadmap's own Track A entry — this item
+  closes out the one unchecked claim (test count) that document didn't
+  itself carry.
 - [DONE] `nirdosha suggest-contracts` v1 — LLM-assisted contract
   inference (2026-09, master plan Part 3 Q1 2027, parity target:
   Kōdo's `kodoc annotate --ai`, Certora AutoProver) —

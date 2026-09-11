@@ -18,17 +18,23 @@ releases happen from here, and an honest checklist for what "v1.0"
 actually has to mean before it's declared.
 
 **Test count, checked directly rather than carried forward from an
-older count (2026-09):** `crates/compiler` has ~98 `#[cfg(test)]` unit
-tests plus ~1,250 `#[test]` functions across its `tests/` integration
-suite — roughly 1,350 real tests today, not a number chased for its
-own sake but simply what counting them turned up. An earlier informal
-figure of "211" circulated in planning material and is stale; it is
-not corrected by writing filler tests to hit any particular target —
-this project's own testing culture (every test in `crates/compiler/
-tests/` traces to a real regression, a real counterexample, or a real
-feature's own end-to-end proof, per this repo's commit history) is
-worth more than any round number, and stays the actual bar going
-forward.
+older count (2026-09-11, re-verified against `cargo test --release`
+with a real local Redis and Postgres present, not just grepped):**
+`crates/compiler` has 95 `#[cfg(test)]` unit tests plus 549 `#[test]`
+functions across its `tests/` integration suite — **644 real tests
+today**, of which 623 run and pass with no extra infrastructure and 21
+are `#[ignore]`-gated (need a real local Postgres, run explicitly via
+`-- --ignored`), not a number chased for its own sake but simply what
+counting and running them turned up. Two earlier figures both proved
+wrong when actually checked, and both corrections are recorded here
+rather than silently overwritten: "211" (stale planning-material
+figure) and "~1,350" (this document's own prior estimate, based on a
+grep that overcounted). Not corrected by writing filler tests to hit
+any particular target — this project's own testing culture (every test
+in `crates/compiler/tests/` traces to a real regression, a real
+counterexample, or a real feature's own end-to-end proof, per this
+repo's commit history) is worth more than any round number, and stays
+the actual bar going forward.
 
 ## The cadence, starting now
 
