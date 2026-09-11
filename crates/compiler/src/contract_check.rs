@@ -51,6 +51,7 @@ use z3::{SatResult, Solver};
 
 use crate::ast::*;
 use crate::parser::parse_standalone_expr;
+use crate::token::Span;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractCheckResult {
@@ -68,7 +69,12 @@ pub enum ContractCheckResult {
     /// A name in the predicate is neither `result`, nor `fn_name`'s own
     /// parameter, nor supplied in `extra_bindings` — §7.1a's "the spec
     /// references a quantity the code doesn't parameterize on" case.
-    UnboundIdentifier(String),
+    /// Carries `span` (the identifier's own real source location, from
+    /// the lexer's byte-accurate `Span` — see `token::Span::byte`) and
+    /// `candidates` (`fn_name`'s parameter names plus `"result"`, sorted)
+    /// so `nirdosha fix` can offer a real, byte-offset typo-correction
+    /// patch without re-deriving the function's signature itself.
+    UnboundIdentifier { name: String, span: Span, candidates: Vec<String> },
     /// No function named `fn_name` exists in `program`.
     NoSuchFunction(String),
     /// `predicate_src` isn't a valid Nirdosha expression.
@@ -306,7 +312,7 @@ fn contract_error_message(outcome: &ValidateOutcome) -> Option<String> {
                 result.map(|r| r.to_string()).unwrap_or_else(|| "<uncomputed>".to_string())
             ))
         }
-        ContractCheckResult::UnboundIdentifier(name) => Some(format!(
+        ContractCheckResult::UnboundIdentifier { name, .. } => Some(format!(
             "`validate {}`: `{name}` is neither `result` nor one of `{}`'s own parameters",
             outcome.fn_name, outcome.fn_name
         )),
@@ -376,15 +382,26 @@ fn check_fn_contract_parsed(
     }
 
     let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
-    let mut free = HashSet::new();
+    let mut free = HashMap::new();
     for (_, e) in pre_exprs.iter().chain(post_exprs.iter()) {
         collect_idents(e, &mut free);
     }
-    for name in &free {
-        if name == "result" || param_names.contains(name.as_str()) || extra_bindings.contains_key(name.as_str()) {
-            continue;
-        }
-        return ContractCheckResult::UnboundIdentifier(name.clone());
+    // Sorted by first-occurrence byte offset, not `HashMap`'s own
+    // (unspecified, run-to-run-unstable) iteration order -- when a
+    // predicate has more than one unbound identifier, which one gets
+    // reported first should be the same every time this runs, both for
+    // reproducible test output and so `nirdosha fix` always offers a
+    // patch for the same one first.
+    let mut unbound: Vec<(&String, &Span)> = free
+        .iter()
+        .filter(|(name, _)| name.as_str() != "result" && !param_names.contains(name.as_str()) && !extra_bindings.contains_key(name.as_str()))
+        .collect();
+    unbound.sort_by_key(|(_, span)| span.byte);
+    if let Some((name, span)) = unbound.first() {
+        let mut candidates: Vec<String> = param_names.iter().map(|s| s.to_string()).collect();
+        candidates.push("result".to_string());
+        candidates.sort();
+        return ContractCheckResult::UnboundIdentifier { name: (*name).clone(), span: **span, candidates };
     }
 
     let solver = Solver::new();
@@ -432,10 +449,18 @@ fn assert_bounds(solver: &Solver, term: &Int, ty: &Ty) {
     solver.assert(term.le(Int::from_i64(hi)));
 }
 
-fn collect_idents(e: &Expr, out: &mut HashSet<String>) {
+/// Collects every free identifier a `pre`/`post` predicate expression
+/// references, paired with the span of its first occurrence -- the span
+/// is what lets `UnboundIdentifier` (below) report a real byte-offset
+/// location for `nirdosha fix`'s patches, not just a name string with
+/// nowhere to point a fix at. `HashMap`, not `HashSet<String>` (the
+/// shape this used before `nirdosha fix` needed a location): existence
+/// checking (`free.contains`/`for name in &free`) works identically
+/// either way, `.keys()` when only names matter.
+fn collect_idents(e: &Expr, out: &mut HashMap<String, Span>) {
     match e {
-        Expr::Ident(name, _) => {
-            out.insert(name.clone());
+        Expr::Ident(name, span) => {
+            out.entry(name.clone()).or_insert(*span);
         }
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Chan(_) => {}
         Expr::Unary(_, inner, _)
@@ -451,8 +476,8 @@ fn collect_idents(e: &Expr, out: &mut HashSet<String>) {
             collect_idents(l, out);
             collect_idents(r, out);
         }
-        Expr::Assign(name, rhs, _) => {
-            out.insert(name.clone());
+        Expr::Assign(name, rhs, span) => {
+            out.entry(name.clone()).or_insert(*span);
             collect_idents(rhs, out);
         }
         Expr::Call(_, args, _) | Expr::Spawn(_, args, _) | Expr::SpawnSandbox(_, args, _) => {
@@ -460,8 +485,8 @@ fn collect_idents(e: &Expr, out: &mut HashSet<String>) {
                 collect_idents(a, out);
             }
         }
-        Expr::Acquire(name, proof, _) => {
-            out.insert(name.clone());
+        Expr::Acquire(name, proof, span) => {
+            out.entry(name.clone()).or_insert(*span);
             collect_idents(proof, out);
         }
         Expr::Send(a, b, _) | Expr::Connect(a, b, _) => {
@@ -508,11 +533,11 @@ fn collect_idents(e: &Expr, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_idents_block(b: &Block, out: &mut HashSet<String>) {
+fn collect_idents_block(b: &Block, out: &mut HashMap<String, Span>) {
     collect_idents_stmts(&b.stmts, out);
 }
 
-fn collect_idents_stmts(stmts: &[Stmt], out: &mut HashSet<String>) {
+fn collect_idents_stmts(stmts: &[Stmt], out: &mut HashMap<String, Span>) {
     for s in stmts {
         match s {
             Stmt::Let { value, .. } => collect_idents(value, out),

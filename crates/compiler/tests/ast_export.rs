@@ -116,7 +116,7 @@ fn a_fragment_referencing_an_unknown_variable_is_rejected() {
     let result = nirdosha::typeck::validate_fragment(&json, &Ty::I64, &env);
     match result {
         Err(diags) => assert!(
-            matches!(&diags[0], Diagnostic::Type(e) if matches!(e.kind, TypeErrorKind::UnknownVar(_))),
+            matches!(&diags[0], Diagnostic::Type(e) if matches!(e.kind, TypeErrorKind::UnknownVar { .. })),
             "expected UnknownVar, got {diags:?}"
         ),
         other => panic!("expected a rejection, got {other:?}"),

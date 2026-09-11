@@ -16,9 +16,13 @@ generate *valid* Nirdosha on the first try.
 
 ## The rules that will break your output if you get them wrong
 
-1. **No `::` token exists anywhere in the lexer.** Enum variants are
-   flat, unqualified calls: `Some(5)`, `None()`, `Circle(r)` — never
-   `EnumName::Variant`. A zero-payload variant still needs `()` at the
+1. **Enum variants are flat, unqualified calls: `Some(5)`, `None()`,
+   `Circle(r)`.** A qualified `EnumName::Variant` spelling is also
+   accepted as optional disambiguation sugar (`Shape::Circle(1.0)`
+   parses; the flat form is the canonical one every example uses),
+   but inside a real `module Ident { ... }` block the *qualified*
+   form is what's required — references to anything declared in one
+   must spell `Mod::Name`. A zero-payload variant still needs `()` at the
    call site: `None()`, not bare `None`.
 2. **`str` cannot be a function's parameter or return type** — checked
    recursively through `Result`/`Option`/generics/`box`/`&`/`thread`/
@@ -64,7 +68,7 @@ generate *valid* Nirdosha on the first try.
    `{ statement; statement }` block.** This is the single most common
    mistake an LLM makes writing Nirdosha (it's valid in Rust, which is
    why the instinct is strong). `Ok(conn) => { let x = f(conn) stop(conn) x }`
-   is a parse error (`expected an expression, found LBrace`), full
+   is a parse error (`expected an expression, found `{``), full
    stop, even though it looks completely reasonable. If an arm needs
    more than one step, do what every real Nirdosha program in this
    repo does: **extract a small helper function and call it as the
@@ -100,7 +104,7 @@ generate *valid* Nirdosha on the first try.
    early-return-on-error idiom that's completely normal in most
    languages —
    ```nirdosha
-   // WRONG — "found Return" parse error, every time:
+   // WRONG — "found the reserved keyword `return`" parse error, every time:
    let x: i64 = match may_fail(n) {
        Ok(v) => v,
        Err(e) => return Err(e),
@@ -160,15 +164,36 @@ generate *valid* Nirdosha on the first try.
    must not run after a prior failure, guard each one with its own
    `if previous_ok { ... } else { -1 }` instead of a flat sequence.
 10. **No compound assignment operators.** `total += i` is a parse
-    error (`expected an expression, found Assign`) — there is no `+=`,
+    error (`expected an expression, found `=``) — there is no `+=`,
     `-=`, `*=`, `/=` at all. Write it out: `total = total + i`.
 11. **Only `//` line comments exist — no `/* ... */` block comments at
     all.** The lexer doesn't recognize `/*` as the start of anything;
-    a leading `/*` produces `parse error: expected 'fn', found Slash`
+    a leading `/*` produces `parse error: expected `fn`, found `/``
     (or similar, wherever it appears) because the parser just sees a
     stray `/` where a top-level item or expression was expected. Use
     `//` for every comment, including multi-line ones (one `//` per
     line — there's no multi-line comment syntax at all).
+12. **Reserved words can never be identifiers.** Nirdosha has a fixed
+    reserved-word list, and none of them can be a variable, field,
+    parameter, `fn`, `struct`, `enum`, `screen`, or `module` name — not
+    a style rule, but a lexer fact: each one lexes as its own keyword
+    token, so the parser sees a keyword where a name is required and
+    stops. `struct Player { state: str }` is a parse error
+    (`expected identifier, found the reserved keyword `state``),
+    because `state` names a `workflow` state-machine state and is
+    reserved language-wide. The full list: `fn let return if else
+    while box froze spawn join thread chan send recv sandbox stop
+    connect listen accept open effect requires nfr acquire audited
+    transact struct enum match screen dashboard landing serve module
+    workflow state workspace validate pub use Vector Matrix handle
+    true false` — plus every scalar type name (`i8`…`i64`, `str`,
+    `bool`, `tcp`, `db`, `mq`, ...) is equally unusable as an identifier
+    (`the reserved type name `str``). The ones that actually collide
+    with ordinary app vocabulary: `state`, `open`, `serve`, `screen`,
+    `landing`, `handle`, `send`, `recv`, `connect`, `listen`, `accept`,
+    `match`, `use`, `effect`, `stop`. If you need one of those words
+    as a name, pick a synonym (`game_state`, `open_order`, ...) —
+    there is no quoting or escaping mechanism.
 
 ## Quick reference: wrong vs. right
 
@@ -177,8 +202,9 @@ verified against the real compiler, not hypothetical.
 
 **Enum variant construction (rule 1)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found Colon
-let s: Shape = Shape::Circle(1.0)
+// WRONG -- type error: unknown variable `Circle` (construction is a
+// *call*; a bare variant name is just an identifier to the parser)
+let s: Shape = Circle
 // RIGHT
 let s: Shape = Circle(1.0)
 ```
@@ -248,12 +274,12 @@ let p: Point = Point(1, 2)
 
 **`match` arm bodies (rule 9 — the single most common mistake)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found LBrace
+// WRONG -- parse error: expected an expression, found `{`
 let x: i64 = match r {
     Ok(conn) => { let a = f(conn) stop(conn) a },
     Err(e) => -1,
 }
-// WRONG -- parse error: expected an expression, found Return
+// WRONG -- parse error: expected an expression, found the reserved keyword `return`
 let x: i64 = match r {
     Ok(v) => v,
     Err(e) => return -1,
@@ -273,7 +299,7 @@ let x: i64 = match r {
 
 **Compound assignment (rule 10)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found Assign
+// WRONG -- parse error: expected an expression, found `=`
 total += i
 // RIGHT
 total = total + i
@@ -281,10 +307,18 @@ total = total + i
 
 **Comments (rule 11)**
 ```nirdosha
-// WRONG -- parse error: expected `fn`, found Slash
+// WRONG -- parse error: expected `fn`, found `/`
 /* a block comment */
 // RIGHT -- // is the only comment syntax, one per line
 // a comment
+```
+
+**Reserved words as identifiers (rule 12)**
+```nirdosha
+// WRONG -- parse error: expected identifier, found the reserved keyword `state`
+struct Player { state: PlayerState, score: i64 }
+// RIGHT -- the concept keeps a synonym; the keyword stays untouched
+struct Player { game_state: PlayerState, score: i64 }
 ```
 
 **`db_query`'s array result (a silent *runtime* bug, not a compile

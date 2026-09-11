@@ -782,7 +782,7 @@ pub struct EnumDecl {
 /// with any other real declaration, with no special-casing anywhere else
 /// in the checker.
 pub fn prelude_enums() -> Vec<EnumDecl> {
-    let span = Span { line: 0, col: 0 };
+    let span = Span { line: 0, col: 0, byte: 0 };
     vec![
         EnumDecl {
             name: "Option".to_string(),
@@ -941,7 +941,7 @@ fn zero_payload_enum(name: &str, variants: &[&str], span: Span) -> EnumDecl {
 /// `http_response_value` constructs the matching `Value::Struct`
 /// positionally, in this exact order.
 pub fn prelude_structs() -> Vec<StructDecl> {
-    let span = Span { line: 0, col: 0 };
+    let span = Span { line: 0, col: 0, byte: 0 };
     vec![
         StructDecl {
             name: "HttpResponse".to_string(),

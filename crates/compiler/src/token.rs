@@ -11,6 +11,19 @@
 pub struct Span {
     pub line: usize,
     pub col: usize,
+    /// Byte offset of this span's first byte into the source file,
+    /// `0`-based. Added for `nirdosha fix` (byte-offset `FixPatch`es,
+    /// `docs/PUBLIC_ROADMAP.md`'s master-plan Sprint 1 item) -- `line`/
+    /// `col` are for human-readable diagnostics, `byte` is for a patch
+    /// applier that needs to slice and splice the original source text
+    /// exactly, the same reason `rustc`'s own `Span` is byte-addressed
+    /// (`BytePos`), not line/column-addressed. Real for every span the
+    /// lexer mints (`Lexer::span`, the source of every real `Span` in
+    /// this compiler); `0` for compiler-synthesized spans that were
+    /// never a real range in the original source (an implicit `main`
+    /// call, a desugared default) -- those never need a patch applied
+    /// against them, so a placeholder is honest, not a lie.
+    pub byte: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -252,6 +265,131 @@ pub enum Tok {
     Eof,
 }
 
+/// What a diagnostic should print for a token — its own source text,
+/// never the derived `Debug` name. A real, root-caused `hi` :generate
+/// failure (the same class RFC 0012's `main`-less prompt fix was, one
+/// run later): a confirmed-candidates generate pass produced a struct
+/// field named `state`, the parser answered `expected identifier,
+/// found State` — `Tok`'s *Rust variant name*, because every "found ..."
+/// site formatted the token with `{:?}` — and the bounded self-repair
+/// loop in `hi_llm.rs` fed that back to the model verbatim. The model
+/// had no way to know `State` meant the lowercase keyword `state` it
+/// had written (its own type names were `GameState`-shaped, and
+/// "State" plausibly *looked* like one of them), so it "fixed"
+/// something else and failed identically on all 3 attempts. That is
+/// exactly the row-9 failure mode `docs/goal.md` spells out — an
+/// agent's self-repair loop only works where the compiler can say
+/// something structured back — so this `impl` renders every token as
+/// the text the programmer actually typed, and reserved words say so
+/// outright ("the reserved keyword `state`"): the complete repair
+/// instruction, not just the fact of failure. Kept on `Tok` rather than
+/// patched into one parser site because all fifteen "found ..."
+/// messages in `parser.rs` leak the same internals.
+///
+/// Deliberately one big exhaustive match with no catch-all arm: adding
+/// a `Tok` variant is a compile error here until it gets a rendering,
+/// so this mapping can never silently drift from the enum the way a
+/// `_ =>` arm would let it. The keyword spellings below must match
+/// `Lexer::tokenize`'s identifier-case match (the same table written
+/// in the opposite direction) — `token.rs`'s own tests round-trip every
+/// one of them to keep that honest.
+impl std::fmt::Display for Tok {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Tok::Int(n) => write!(f, "`{n}`"),
+            // `{:?}` (not `{}`) on the f64 so `3.0` stays visibly a
+            // float, not the integer `3` — the same reason the lexer
+            // keeps them distinct tokens in the first place.
+            Tok::Float(x) => write!(f, "`{x:?}`"),
+            Tok::Str(s) => write!(f, "`\"{s}\"`"),
+            Tok::Ident(s) => write!(f, "`{s}`"),
+            // `i64`/`str`/`db`/... — reserved like the keywords below
+            // (the lexer makes them their own `TypeName` token, so they
+            // can never be an identifier either), flagged as type names
+            // because a bare "found `str`" would read as a perfectly
+            // legal identifier to a repairing agent that doesn't know
+            // better.
+            Tok::TypeName(s) => write!(f, "the reserved type name `{s}`"),
+            Tok::LParen => write!(f, "`(`"),
+            Tok::RParen => write!(f, "`)`"),
+            Tok::LBrace => write!(f, "`{{`"),
+            Tok::RBrace => write!(f, "`}}`"),
+            Tok::LBracket => write!(f, "`[`"),
+            Tok::RBracket => write!(f, "`]`"),
+            Tok::Colon => write!(f, "`:`"),
+            Tok::Comma => write!(f, "`,`"),
+            Tok::Dot => write!(f, "`.`"),
+            Tok::Arrow => write!(f, "`->`"),
+            Tok::FatArrow => write!(f, "`=>`"),
+            Tok::Assign => write!(f, "`=`"),
+            Tok::Plus => write!(f, "`+`"),
+            Tok::Minus => write!(f, "`-`"),
+            Tok::Star => write!(f, "`*`"),
+            Tok::Slash => write!(f, "`/`"),
+            Tok::Percent => write!(f, "`%`"),
+            Tok::EqEq => write!(f, "`==`"),
+            Tok::NotEq => write!(f, "`!=`"),
+            Tok::Lt => write!(f, "`<`"),
+            Tok::Gt => write!(f, "`>`"),
+            Tok::LtEq => write!(f, "`<=`"),
+            Tok::GtEq => write!(f, "`>=`"),
+            Tok::AndAnd => write!(f, "`&&`"),
+            Tok::OrOr => write!(f, "`||`"),
+            Tok::Bang => write!(f, "`!`"),
+            Tok::Amp => write!(f, "`&`"),
+            Tok::DotStar => write!(f, "`.*`"),
+            Tok::DotSlash => write!(f, "`./`"),
+            Tok::ColonColon => write!(f, "`::`"),
+            Tok::Eof => write!(f, "end of file"),
+            Tok::Fn => write!(f, "the reserved keyword `fn`"),
+            Tok::Let => write!(f, "the reserved keyword `let`"),
+            Tok::Return => write!(f, "the reserved keyword `return`"),
+            Tok::If => write!(f, "the reserved keyword `if`"),
+            Tok::Else => write!(f, "the reserved keyword `else`"),
+            Tok::While => write!(f, "the reserved keyword `while`"),
+            Tok::Box => write!(f, "the reserved keyword `box`"),
+            Tok::Froze => write!(f, "the reserved keyword `froze`"),
+            Tok::Spawn => write!(f, "the reserved keyword `spawn`"),
+            Tok::Join => write!(f, "the reserved keyword `join`"),
+            Tok::Thread => write!(f, "the reserved keyword `thread`"),
+            Tok::Chan => write!(f, "the reserved keyword `chan`"),
+            Tok::Send => write!(f, "the reserved keyword `send`"),
+            Tok::Recv => write!(f, "the reserved keyword `recv`"),
+            Tok::Sandbox => write!(f, "the reserved keyword `sandbox`"),
+            Tok::Stop => write!(f, "the reserved keyword `stop`"),
+            Tok::Connect => write!(f, "the reserved keyword `connect`"),
+            Tok::Listen => write!(f, "the reserved keyword `listen`"),
+            Tok::Accept => write!(f, "the reserved keyword `accept`"),
+            Tok::Open => write!(f, "the reserved keyword `open`"),
+            Tok::Effect => write!(f, "the reserved keyword `effect`"),
+            Tok::Requires => write!(f, "the reserved keyword `requires`"),
+            Tok::Nfr => write!(f, "the reserved keyword `nfr`"),
+            Tok::Acquire => write!(f, "the reserved keyword `acquire`"),
+            Tok::Audited => write!(f, "the reserved keyword `audited`"),
+            Tok::Transact => write!(f, "the reserved keyword `transact`"),
+            Tok::Struct => write!(f, "the reserved keyword `struct`"),
+            Tok::Enum => write!(f, "the reserved keyword `enum`"),
+            Tok::Match => write!(f, "the reserved keyword `match`"),
+            Tok::Screen => write!(f, "the reserved keyword `screen`"),
+            Tok::Dashboard => write!(f, "the reserved keyword `dashboard`"),
+            Tok::Landing => write!(f, "the reserved keyword `landing`"),
+            Tok::Serve => write!(f, "the reserved keyword `serve`"),
+            Tok::Module => write!(f, "the reserved keyword `module`"),
+            Tok::Workflow => write!(f, "the reserved keyword `workflow`"),
+            Tok::State => write!(f, "the reserved keyword `state`"),
+            Tok::Workspace => write!(f, "the reserved keyword `workspace`"),
+            Tok::Validate => write!(f, "the reserved keyword `validate`"),
+            Tok::Pub => write!(f, "the reserved keyword `pub`"),
+            Tok::Use => write!(f, "the reserved keyword `use`"),
+            Tok::VectorKw => write!(f, "the reserved keyword `Vector`"),
+            Tok::MatrixKw => write!(f, "the reserved keyword `Matrix`"),
+            Tok::HandleKw => write!(f, "the reserved keyword `handle`"),
+            Tok::True => write!(f, "the reserved keyword `true`"),
+            Tok::False => write!(f, "the reserved keyword `false`"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub tok: Tok,
@@ -302,7 +440,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn span(&self) -> Span {
-        Span { line: self.line, col: self.col }
+        Span { line: self.line, col: self.col, byte: self.pos }
     }
 
     fn skip_ws_and_comments(&mut self) {
@@ -543,5 +681,63 @@ impl<'a> Lexer<'a> {
             out.push(Token { tok, span });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every reserved word, exactly as the lexer's identifier-case
+    /// match spells it -- the one list both that match and `Display
+    /// for Tok` must agree with. The lexer maps `text -> Tok`;
+    /// `Display` maps `Tok -> text`; this round-trips one through the
+    /// other so the two can never drift apart silently (a mismatched
+    /// spelling would render a diagnostic naming a word that isn't in
+    /// the language, sending a repairing agent hunting for it).
+    const ALL_KEYWORDS: &[&str] = &[
+        "fn", "let", "return", "if", "else", "while", "box", "froze", "spawn", "join", "thread", "chan", "send",
+        "recv", "sandbox", "stop", "connect", "listen", "accept", "open", "effect", "requires", "nfr", "acquire",
+        "audited", "transact", "struct", "enum", "match", "screen", "dashboard", "landing", "serve", "module",
+        "workflow", "state", "workspace", "validate", "pub", "use", "Vector", "Matrix", "handle", "true", "false",
+    ];
+
+    #[test]
+    fn every_keyword_round_trips_lexer_to_display() {
+        for &word in ALL_KEYWORDS {
+            let toks = Lexer::new(word).tokenize().expect("lexing a lone keyword cannot fail");
+            assert_eq!(toks.len(), 2, "`{word}` must lex as one token plus Eof");
+            let rendered = toks[0].tok.to_string();
+            assert_eq!(rendered, format!("the reserved keyword `{word}`"), "`{word}` must render as its own source text, got: {rendered}");
+        }
+    }
+
+    #[test]
+    fn every_keyword_is_not_an_identifier_token() {
+        // The whole point of the reserved-word rendering: each of
+        // these lexes to its own keyword token, never `Tok::Ident`, so
+        // none of them can ever be a variable/field/function name --
+        // which is exactly what `expected identifier, found the
+        // reserved keyword ...` reports.
+        for &word in ALL_KEYWORDS {
+            let toks = Lexer::new(word).tokenize().expect("lexing a lone keyword cannot fail");
+            assert!(!matches!(toks[0].tok, Tok::Ident(_)), "`{word}` must not lex as an identifier");
+        }
+    }
+
+    #[test]
+    fn literals_idents_symbols_and_eof_render_as_source_text() {
+        let render = |src: &str| -> String {
+            let toks = Lexer::new(src).tokenize().expect("lex should succeed");
+            toks[0].tok.to_string()
+        };
+        assert_eq!(render("42"), "`42`");
+        assert_eq!(render("3.0"), "`3.0`");
+        assert_eq!(render("\"hi\""), "`\"hi\"`");
+        assert_eq!(render("some_name"), "`some_name`");
+        assert_eq!(render("i64"), "the reserved type name `i64`");
+        assert_eq!(render("->"), "`->`");
+        assert_eq!(render("::"), "`::`");
+        assert_eq!(Lexer::new("").tokenize().expect("empty lex")[0].tok.to_string(), "end of file");
     }
 }

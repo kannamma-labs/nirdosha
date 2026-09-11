@@ -261,6 +261,41 @@ fn extract_nir_source(raw: &str) -> String {
 
 const MAX_SELF_REPAIR_ATTEMPTS: u32 = 3;
 
+/// The pointed follow-up appended to a failed attempt's generic "fix
+/// it" request, one arm per *diagnostic class this loop has actually
+/// failed on in the field* -- not per error. A bounded retry loop's
+/// real enemy is a diagnostic the model can read but can't act on:
+/// each arm below exists because a real `:generate` run burned all
+/// `MAX_SELF_REPAIR_ATTEMPTS` tries on exactly that (see each arm's
+/// own comment), and each says what to *do*, not just what went wrong.
+fn self_repair_hint(diagnostic: &str) -> &'static str {
+    if diagnostic.contains("no `fn main()` found") {
+        // Defense in depth on top of `units_prompt`'s own fix, not a
+        // substitute for it: a model that still drops `fn main()`
+        // despite the now-explicit instruction gets one more, pointed
+        // reminder rather than a generic "fix it" that repeats
+        // whatever ambiguity caused this in the first place.
+        " Add a `fn main()` -- it is required in addition to every named component from the original request, not instead of any of them."
+    } else if diagnostic.contains("found the reserved keyword") {
+        // Root-caused from a real give-up: the model named a struct
+        // field `state`, the parser answered `expected identifier,
+        // found State` -- `Tok`'s derived-Debug variant name, not the
+        // source text -- and the model, whose own types were
+        // `GameState`-shaped, had no way to tell that "State" meant
+        // the lowercase keyword it had written, so every retry
+        // "fixed" something else until the loop gave up. The parser
+        // now names the exact reserved word itself (`token.rs`'s
+        // `Display for Tok`), which makes the diagnostic readable;
+        // this arm makes the *action* explicit too: rename it, because
+        // no escaping mechanism exists -- a model that doesn't know
+        // that might just re-spell or case-shift the same word and
+        // hand the next retry the identical failure.
+        " Rename that identifier: a reserved keyword can never be a variable, field, parameter, or function name in Nirdosha (there is no quoting/escaping mechanism), so pick a different word -- `state` -> `app_state`, `open` -> `open_order`, and so on."
+    } else {
+        ""
+    }
+}
+
 fn units_prompt(units: &[CandidateUnit]) -> String {
     // A real generation failure, root-caused rather than guessed at:
     // `populate_candidates`'s own system prompt asks for the
@@ -348,18 +383,12 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
                 }
                 on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed to compile, asking the model to fix it..."));
                 history.push(ChatMessage { role: "assistant", content: source });
-                // Defense in depth on top of `units_prompt`'s own fix,
-                // not a substitute for it: a model that still drops
-                // `fn main()` despite the now-explicit instruction gets
-                // one more, pointed reminder rather than a generic "fix
-                // it" that repeats whatever ambiguity caused this in
-                // the first place.
-                let hint = if diagnostic.contains("no `fn main()` found") {
-                    " Add a `fn main()` -- it is required in addition to every named component from the original request, not instead of any of them."
-                } else {
-                    ""
-                };
-                history.push(ChatMessage { role: "user", content: format!("That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{hint}") });
+                // One pointed follow-up per diagnostic class this loop
+                // has actually failed on in the field
+                // (`self_repair_hint`'s own doc comment) -- never a
+                // generic "fix it" that just re-sends whatever
+                // ambiguity caused the failure in the first place.
+                history.push(ChatMessage { role: "user", content: format!("That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}", self_repair_hint(&diagnostic)) });
             }
         }
     }
@@ -469,6 +498,30 @@ mod tests {
         let prompt = units_prompt(&units);
         assert!(prompt.contains("fn main()"), "the generate-mode prompt must explicitly require fn main(), got: {prompt}");
         assert!(prompt.contains("not itself one of the named components") || prompt.contains("even though"), "the prompt should make clear main() is required in *addition* to the named components, not instead of asking for it plainly");
+    }
+
+    #[test]
+    fn a_missing_main_diagnostic_gets_the_add_main_hint() {
+        assert!(self_repair_hint("type error: no `fn main()` found").contains("fn main()"), "the hint must say what to do, not just repeat the problem");
+    }
+
+    #[test]
+    fn a_reserved_keyword_diagnostic_gets_the_rename_hint() {
+        // Regression: the exact give-up shape -- the parser used to
+        // report `found State` (the Tok variant's Debug name), the
+        // model had no way to map that to the `state` it wrote, and
+        // all three retries failed identically. With the parser now
+        // naming the word itself, the hint's remaining job is to make
+        // the *action* explicit: rename it, since no escaping exists.
+        let diagnostic = "parse error in /tmp/nirdosha_hi_generate_check_595385_2.nir at 224:15: expected identifier, found the reserved keyword `state`";
+        let hint = self_repair_hint(diagnostic);
+        assert!(hint.contains("Rename"), "the hint must say to rename, got: {hint}");
+        assert!(hint.contains("state"), "the hint should speak in the same terms as the diagnostic: {hint}");
+    }
+
+    #[test]
+    fn an_ordinary_diagnostic_gets_no_hint() {
+        assert_eq!(self_repair_hint("type error: expected `i64`, found `f64`"), "", "unrecognized diagnostics stay a plain fix-it request");
     }
 
     #[test]

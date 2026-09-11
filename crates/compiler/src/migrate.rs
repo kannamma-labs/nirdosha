@@ -235,7 +235,7 @@ mod tests {
     use crate::ast::{EnumDecl, Ty, Variant};
     use crate::token::Span;
 
-    const SPAN: Span = Span { line: 0, col: 0 };
+    const SPAN: Span = Span { line: 0, col: 0, byte: 0 };
 
     fn mk_field(name: &str, ty: Ty) -> Field {
         Field { name: name.to_string(), ty, mask_requires: None }

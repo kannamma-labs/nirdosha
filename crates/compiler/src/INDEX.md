@@ -411,15 +411,17 @@ threshold or simply weren't covered before.
 - `575` `const STD_CATALOG_JSON` — `include_str!` of `catalog/std/0.1.json` (rfcs/0009 Phase 0)
 - `577` `fn cmd_emit_catalog` — `nirdosha emit-catalog [-o out.json]`: prints the std catalog (no plugin-merge step yet — see `rfcs/0009`'s Status box)
 
-## token.rs (521 lines, as of 2026-09-07)
+## token.rs (730 lines, as of 2026-09-10)
 
 - `1` — module doc: tokens and the lexer; every token carries a `Span` for structured error reporting downstream (parser, typeck, codegen — corrected 2026-09-07, previously said "parser, interpreter")
 - `11` `pub struct Span`
 - `17` `pub enum Tok` — every token kind the lexer produces
-- `233` `pub struct Token`
-- `238` `const TYPE_NAMES` — the fixed primitive/keyword type-name list `expect_type`/the lexer both key off
-- `244` `pub struct LexError`
-- `249` `pub struct Lexer<'a>` — the hand-written lexer, methods below are inside it
+- `283` `impl Display for Tok` — the human/agent-facing rendering every parse diagnostic's "found ..." half prints (source text, never the derived-Debug variant name; reserved words say so outright). Root cause: a real `hi` :generate give-up where `found State` — a `Tok` variant name — sent the self-repair loop hunting for a `GameState`-shaped name instead of the lowercase `state` it had actually written
+- `381` `pub struct Token`
+- `386` `const TYPE_NAMES` — the fixed primitive/keyword type-name list `expect_type`/the lexer both key off
+- `392` `pub struct LexError`
+- `397` `pub struct Lexer<'a>` — the hand-written lexer, methods below are inside it
+- `675` `mod tests` — keyword round-trip lexer→`Display` (the two spellings of the same table can't drift), plus literal/symbol/Eof renderings
 
 ## effects.rs (512 lines, as of 2026-09-07)
 

@@ -18,6 +18,7 @@ fn main() -> ExitCode {
         "gen-crud" => cmd_gen_crud(args),
         "build" => cmd_build(args),
         "verify" => cmd_verify(args),
+        "fix" => cmd_fix(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
@@ -46,7 +47,10 @@ fn print_usage() {
     eprintln!("  nirdosha build <file.nir> -o <out> [--opt0]");
     eprintln!("                                      compile to a native binary (LLVM, -O2 by default)");
     eprintln!("  nirdosha verify <file.nir>          typecheck/ownership/contract-check only, no LLVM/clang");
-    eprintln!("                                      needed -- JSON verdict on stdout, exit 0/1 (CI/agent use)");
+    eprintln!("                                      needed -- 3-valued JSON verdict on stdout, exit 0/1/2");
+    eprintln!("  nirdosha fix <file.nir> [--apply]   same checks as verify, plus a byte-offset FixPatch per");
+    eprintln!("                                      obligation where one exists (auto/assisted/manual);");
+    eprintln!("                                      --apply writes every `auto` patch to the file in place");
     eprintln!("  nirdosha emit-llvm <file.nir>       print the generated LLVM IR");
     eprintln!("  nirdosha emit-ast <file.nir>        print the parsed AST as JSON (docs/goal.md row 9)");
     eprintln!("  nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]");
@@ -613,6 +617,12 @@ struct VerifyDiagnostic {
     line: usize,
     col: usize,
     message: String,
+    /// Same meaning as `ContractObligation::fix` -- `None` unless this
+    /// specific diagnostic kind has real fix analysis attached (v1:
+    /// only `typeck::TypeErrorKind::UnknownVar`, an edit-distance typo
+    /// correction against the names actually in scope -- see
+    /// `fix_unbound_identifier`).
+    fix: Option<Fix>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, PartialEq)]
@@ -658,11 +668,74 @@ impl StageResult {
     }
 }
 
+/// `nirdosha fix`'s three fixability classes (`nirdosha-master-plan.md`
+/// Part 3, Sprint 1: "fixability classes (auto / assisted / manual)",
+/// parity target: Kōdo). Modeled directly on `rustc`'s own
+/// `Applicability` enum (`MachineApplicable`/`MaybeIncorrect`/
+/// `HasPlaceholders`/`Unspecified`, the real precedent `rustfix`/
+/// `cargo fix` already ship against) rather than invented from scratch:
+/// `Auto` == `MachineApplicable` (safe to apply without review -- the
+/// only class `nirdosha fix --apply` ever writes to disk on its own);
+/// `Assisted` == `MaybeIncorrect`/`HasPlaceholders` collapsed into one
+/// (a real fix exists, or a shape of one does, but it needs a judgment
+/// call `nirdosha fix` can't make safely by itself); `Manual` ==
+/// `Unspecified` (no mechanical fix known for this diagnostic kind at
+/// all, today).
+#[derive(serde::Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum Applicability {
+    Auto,
+    Assisted,
+    Manual,
+}
+
+/// A byte-offset text replacement -- `[start_byte, end_byte)` in the
+/// original source file, replaced with `replacement`. Byte offsets, not
+/// line/column: a patch applier needs to slice and splice the exact
+/// original bytes, and `token::Span::byte`'s own doc comment names the
+/// same reason `rustc`'s `Span`/`BytePos` is byte-addressed rather than
+/// line/column-addressed. Only ever present when `Fix::applicability`
+/// is `Auto` or `Assisted` -- a `Manual` fix has no patch to offer by
+/// definition, so its `Fix::patch` is always `None`, not a patch that
+/// happens to be a no-op.
+#[derive(serde::Serialize)]
+struct FixPatch {
+    start_byte: usize,
+    end_byte: usize,
+    replacement: String,
+}
+
+#[derive(serde::Serialize)]
+struct Fix {
+    applicability: Applicability,
+    /// Present for `Auto` (always) and `Assisted` (when a concrete
+    /// replacement text exists, even if it needs review before
+    /// trusting it); absent for `Manual`, and absent for an `Assisted`
+    /// fix that only has *guidance* to offer, not literal replacement
+    /// text (e.g. "wrap this in a `struct Text` or a real `enum`,
+    /// your call" -- two shapes, no single patch is honest to propose).
+    patch: Option<FixPatch>,
+    /// Human-readable explanation of what this fix does and why this
+    /// applicability class, not a fix format's own vocabulary --
+    /// printed as-is by any caller that doesn't want to interpret
+    /// `applicability` itself.
+    rationale: String,
+}
+
 #[derive(serde::Serialize)]
 struct ContractObligation {
     fn_name: String,
     status: &'static str,
     detail: Option<String>,
+    /// `None` means no automated-fix analysis produced anything for
+    /// this obligation's kind yet -- not the same claim as `Manual`
+    /// (which is a considered "no mechanical fix exists"). `nirdosha
+    /// fix` v1 only analyzes `unbound_identifier` obligations (a real,
+    /// bounded, edit-distance typo correction against the function's
+    /// own parameter names); every other obligation kind is `None`
+    /// here, honestly, rather than a blanket `Manual` that implies more
+    /// analysis happened than actually did.
+    fix: Option<Fix>,
 }
 
 #[derive(serde::Serialize)]
@@ -718,6 +791,108 @@ struct VerifyVerdict {
     proof_obligations: ProofObligations,
 }
 
+/// Levenshtein edit distance -- standard textbook dynamic-programming
+/// form (a single rolling `prev_row`, `O(len(a) * len(b))` time,
+/// `O(min(len(a), len(b)))` space via the shorter string as columns).
+/// Used only for `fix_unbound_identifier`'s typo suggestions, over
+/// short identifier strings (a handful of characters, never a whole
+/// file), so the naive DP form is the right amount of engineering --
+/// no need for the banded/early-exit variants a spell-checker over a
+/// large dictionary would want.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev_row: Vec<usize> = (0..=b.len()).collect();
+    for (i, &ca) in a.iter().enumerate() {
+        let mut cur_row = vec![i + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            let insert = cur_row[j] + 1;
+            let delete = prev_row[j + 1] + 1;
+            let substitute = prev_row[j] + cost;
+            cur_row.push(insert.min(delete).min(substitute));
+        }
+        prev_row = cur_row;
+    }
+    prev_row[b.len()]
+}
+
+/// `nirdosha fix`'s one real, tested fixability analysis for v1
+/// (`nirdosha-master-plan.md` Part 3 Sprint 1): a `validate` predicate
+/// referencing a name that's neither `result` nor one of the function's
+/// own parameters, most often a plain typo (`ammount` for `amount`).
+/// Modeled on `rustc`'s own identifier-typo suggestions
+/// (`find_best_match_for_name`), which use the same edit-distance
+/// technique and the same "only suggest when unambiguous" discipline --
+/// a real precedent for exactly this shape of fix, not a heuristic
+/// invented here from nothing.
+///
+/// - Exactly one candidate strictly closer than every other, and within
+///   a relative threshold -- `Auto`: the typo is unambiguous, the patch
+///   is the obviously-intended one, safe to apply without a human in
+///   the loop (matches `rustc`'s own `MachineApplicable` bar for typo
+///   fixes).
+/// - More than one candidate tied at the closest distance -- `Assisted`:
+///   a real fix is one of these names, but which one is a judgment call
+///   this analysis can't make safely; no single patch, the rationale
+///   lists every tied candidate.
+/// - Nothing within the threshold -- `Manual`: this isn't a typo of any
+///   parameter name close enough to guess at; the rationale lists what
+///   *is* available so a human or an agent's repair loop has the real
+///   options in front of it, not just "no".
+fn fix_unbound_identifier(name: &str, span: nirdosha::token::Span, candidates: &[String]) -> Fix {
+    // A relative threshold, not a flat constant -- `1/3` of the name's
+    // own length (floor, minimum 1) roughly matches how many characters
+    // a plausible single typo (one substitution/transposition/drop)
+    // changes in a short identifier, without also matching two
+    // genuinely different short names to each other (e.g. `a` and `b`
+    // are distance 1 but not a typo of each other -- a flat threshold
+    // of 1 would still suggest one for the other; `a`'s own length-based
+    // threshold is 1 too, so this doesn't fully solve that single-char
+    // case, but it's the same tradeoff `rustc`'s own suggestion
+    // threshold makes, not an oversight unique to this implementation).
+    let threshold = (name.chars().count() / 3).max(1);
+
+    let mut distances: Vec<(usize, &String)> =
+        candidates.iter().map(|c| (levenshtein(name, c), c)).filter(|(d, _)| *d <= threshold).collect();
+    distances.sort_by_key(|(d, name)| (*d, name.to_string()));
+
+    let start_byte = span.byte;
+    let end_byte = span.byte + name.len();
+
+    match distances.as_slice() {
+        [] => Fix {
+            applicability: Applicability::Manual,
+            patch: None,
+            rationale: format!(
+                "`{name}` isn't within edit distance {threshold} of any available name ({}) -- not a plausible typo of one of them, needs a real decision about what this predicate should reference",
+                candidates.join(", ")
+            ),
+        },
+        [(only_dist, only_name)] => Fix {
+            applicability: Applicability::Auto,
+            patch: Some(FixPatch { start_byte, end_byte, replacement: (*only_name).clone() }),
+            rationale: format!("`{name}` is edit distance {only_dist} from `{only_name}`, the only candidate this close -- almost certainly a typo"),
+        },
+        [(best_dist, _), (tied_dist, _), ..] if best_dist == tied_dist => {
+            let tied: Vec<&str> = distances.iter().filter(|(d, _)| d == best_dist).map(|(_, n)| n.as_str()).collect();
+            Fix {
+                applicability: Applicability::Assisted,
+                patch: None,
+                rationale: format!(
+                    "`{name}` is equally close (edit distance {best_dist}) to more than one candidate ({}) -- one of these is almost certainly intended, but which one needs a human or an agent's own judgment, not a guess",
+                    tied.join(", ")
+                ),
+            }
+        }
+        [(best_dist, best_name), ..] => Fix {
+            applicability: Applicability::Auto,
+            patch: Some(FixPatch { start_byte, end_byte, replacement: (*best_name).clone() }),
+            rationale: format!("`{name}` is edit distance {best_dist} from `{best_name}`, strictly closer than every other candidate -- almost certainly a typo"),
+        },
+    }
+}
+
 /// `nirdosha verify <file.nir>` -- a standalone, machine-readable
 /// verdict over the same gates `build`/`emit-llvm` already run
 /// (`typecheck_and_own_impl`'s own pipeline: typecheck, ownership,
@@ -751,6 +926,34 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    let verdict = run_verify_pipeline(&path);
+    println!("{}", serde_json::to_string_pretty(&verdict).expect("VerifyVerdict always serializes"));
+    match verdict.verdict {
+        ProofVerdict::Proved => {
+            eprintln!("PROVED: {path} passed every check");
+            ExitCode::SUCCESS
+        }
+        ProofVerdict::Disproved => {
+            eprintln!("DISPROVED: {path} failed verification");
+            ExitCode::FAILURE
+        }
+        ProofVerdict::Unknown => {
+            eprintln!("UNKNOWN: {path} has at least one obligation Z3 couldn't decide -- not proved, not disproved");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// The shared gate pipeline behind both `nirdosha verify` and `nirdosha
+/// fix` -- load, typecheck, ownership, `validate` contract-check (with
+/// `nirdosha fix`'s per-obligation `Fix` analysis always attached, per
+/// `ContractObligation::fix`'s own doc comment: computing it is cheap
+/// and it's additive to the JSON schema, so `verify` callers get it
+/// too, not just `fix` ones), plus `smt::analyze`'s Tier-1 counts.
+/// Extracted out of `cmd_verify` so `cmd_fix` runs the exact same
+/// checks instead of a second, maintained-separately copy that could
+/// drift from what `verify` actually checks.
+fn run_verify_pipeline(path: &str) -> VerifyVerdict {
     let mut load = StageResult { status: StageStatus::Passed, errors: vec![] };
     let mut typecheck = StageResult::skipped();
     let mut ownership = StageResult::skipped();
@@ -764,11 +967,11 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
     };
     let mut proof_obligations = ProofObligations { proven_in_range: 0, proven_nonzero_divisor: 0, proven_index_bounds: 0 };
 
-    let program = match nirdosha::loader::load_program(&path) {
+    let program = match nirdosha::loader::load_program(path) {
         Ok((program, _src)) => Some(program),
         Err(msg) => {
             load.status = StageStatus::Failed;
-            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg });
+            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg, fix: None });
             None
         }
     };
@@ -780,8 +983,18 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
         Err(errs) => {
             typecheck.status = StageStatus::Failed;
-            typecheck.errors =
-                errs.iter().map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string() }).collect();
+            typecheck.errors = errs
+                .iter()
+                .map(|e| {
+                    let fix = match &e.kind {
+                        nirdosha::typeck::TypeErrorKind::UnknownVar { name, candidates } => {
+                            Some(fix_unbound_identifier(name, e.span, candidates))
+                        }
+                        _ => None,
+                    };
+                    VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix }
+                })
+                .collect();
             None
         }
     });
@@ -793,8 +1006,10 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
         Err(errs) => {
             ownership.status = StageStatus::Failed;
-            ownership.errors =
-                errs.iter().map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string() }).collect();
+            ownership.errors = errs
+                .iter()
+                .map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix: None })
+                .collect();
             None
         }
     });
@@ -806,7 +1021,7 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
             match outcome.result {
                 ContractCheckResult::Proved => {
                     contracts.proved += 1;
-                    contracts.obligations.push(ContractObligation { fn_name: outcome.fn_name, status: "proved", detail: None });
+                    contracts.obligations.push(ContractObligation { fn_name: outcome.fn_name, status: "proved", detail: None, fix: None });
                 }
                 ContractCheckResult::Unsupported(msg) => {
                     contracts.unsupported += 1;
@@ -814,6 +1029,7 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                         fn_name: outcome.fn_name,
                         status: "unsupported",
                         detail: Some(msg),
+                        fix: None,
                     });
                 }
                 ContractCheckResult::Counterexample { violated_predicate, bindings, result } => {
@@ -827,14 +1043,16 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                         fn_name: outcome.fn_name,
                         status: "counterexample",
                         detail: Some(detail),
+                        fix: None,
                     });
                 }
-                ContractCheckResult::UnboundIdentifier(name) => {
+                ContractCheckResult::UnboundIdentifier { name, span, candidates } => {
                     contracts.failed += 1;
                     contracts.obligations.push(ContractObligation {
                         fn_name: outcome.fn_name,
                         status: "unbound_identifier",
-                        detail: Some(name),
+                        detail: Some(name.clone()),
+                        fix: Some(fix_unbound_identifier(&name, span, &candidates)),
                     });
                 }
                 ContractCheckResult::NoSuchFunction(name) => {
@@ -843,6 +1061,7 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                         fn_name: outcome.fn_name,
                         status: "no_such_function",
                         detail: Some(name),
+                        fix: None,
                     });
                 }
                 ContractCheckResult::PredicateParseError(msg) => {
@@ -851,6 +1070,7 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
                         fn_name: outcome.fn_name,
                         status: "predicate_parse_error",
                         detail: Some(msg),
+                        fix: None,
                     });
                 }
             }
@@ -891,30 +1111,147 @@ fn cmd_verify(mut args: impl Iterator<Item = String>) -> ExitCode {
         ProofVerdict::Proved
     };
 
-    let verdict = VerifyVerdict {
-        source: path.clone(),
+    VerifyVerdict {
+        source: path.to_string(),
         verdict: verdict_value,
         load,
         typecheck,
         ownership,
         contracts,
         proof_obligations,
+    }
+}
+
+/// One `Auto`-class patch `nirdosha fix --apply` actually wrote to
+/// disk -- distinct from `Fix`/`FixPatch` above (which describe a
+/// *proposed* patch, applied or not): this is the record of one that
+/// really was, so `FixReport.applied` is a true audit trail, not a
+/// re-derivation of `before`'s obligations filtered by applicability.
+#[derive(serde::Serialize)]
+struct AppliedPatch {
+    fn_name: String,
+    obligation_status: &'static str,
+    start_byte: usize,
+    end_byte: usize,
+    replacement: String,
+}
+
+#[derive(serde::Serialize)]
+struct FixReport {
+    /// The verdict before any patch was applied -- identical shape to
+    /// `nirdosha verify`'s own output, `fix` fields included, whether
+    /// or not `--apply` was given.
+    before: VerifyVerdict,
+    /// Every `Auto`-class patch actually written to disk. Always empty
+    /// without `--apply` -- `nirdosha fix` on its own only *reports*
+    /// patches, matching `rustc`'s own separation between emitting
+    /// suggestions and a separate tool (`rustfix`/`cargo fix`)
+    /// applying them; `--apply` is that second step folded into the
+    /// same command instead of a second binary, not a different
+    /// analysis.
+    applied: Vec<AppliedPatch>,
+    /// Re-verification after applying `applied`'s patches -- `None`
+    /// unless `--apply` was given. This is the honest check that the
+    /// patches this command just wrote actually improved the verdict,
+    /// not an assumption that generating a patch means it worked.
+    after: Option<VerifyVerdict>,
+}
+
+/// `nirdosha fix <file.nir> [--apply]` -- `nirdosha-master-plan.md`
+/// Part 3, Sprint 1 ("`nirdosha fix` -- byte-offset FixPatch,
+/// fixability classes (auto / assisted / manual)", parity target:
+/// Kōdo). Runs the exact same gate pipeline `nirdosha verify` does
+/// (`run_verify_pipeline`, shared, not duplicated) and reports it
+/// unchanged, plus -- with `--apply` -- writes every `Auto`-class patch
+/// to the file and re-verifies to show whether it actually worked.
+/// `Assisted`/`Manual` fixes are never applied automatically, by
+/// design: `Auto` is this command's own bar for "safe without a human
+/// in the loop," the same bar `rustc`'s `Applicability::MachineApplicable`
+/// sets for `cargo fix` (see `Applicability`'s own doc comment).
+fn cmd_fix(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut path: Option<String> = None;
+    let mut apply = false;
+    for a in args.by_ref() {
+        match a.as_str() {
+            "--apply" => apply = true,
+            other => path = Some(other.to_string()),
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: nirdosha fix <file.nir> [--apply]");
+        return ExitCode::FAILURE;
     };
 
-    println!("{}", serde_json::to_string_pretty(&verdict).expect("VerifyVerdict always serializes"));
-    match verdict_value {
-        ProofVerdict::Proved => {
-            eprintln!("PROVED: {path} passed every check");
-            ExitCode::SUCCESS
+    let before = run_verify_pipeline(&path);
+
+    let mut applied = Vec::new();
+    if apply {
+        // Collect every `Auto` patch first, then apply in *descending*
+        // start-byte order -- applying low-to-high would shift every
+        // later patch's own byte offsets out from under it the moment
+        // an earlier one changed the file's length; high-to-low never
+        // does, since nothing after the current patch's end has been
+        // touched yet by the time it's applied.
+        let mut patches: Vec<(&ContractObligation, &FixPatch)> = before
+            .contracts
+            .obligations
+            .iter()
+            .filter_map(|ob| match &ob.fix {
+                Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) => Some((ob, p)),
+                _ => None,
+            })
+            .collect();
+        patches.sort_by(|a, b| b.1.start_byte.cmp(&a.1.start_byte));
+
+        if !patches.is_empty() {
+            match std::fs::read_to_string(&path) {
+                Ok(mut src) => {
+                    for (ob, patch) in &patches {
+                        if patch.start_byte > src.len() || patch.end_byte > src.len() || patch.start_byte > patch.end_byte {
+                            // A patch computed against a stale byte range
+                            // (shouldn't happen -- `before` was just read
+                            // from this same file -- but a corrupt/
+                            // concurrently-modified file is a real
+                            // possibility this must not silently
+                            // misapply against) is skipped, not forced.
+                            continue;
+                        }
+                        src.replace_range(patch.start_byte..patch.end_byte, &patch.replacement);
+                        applied.push(AppliedPatch {
+                            fn_name: ob.fn_name.clone(),
+                            obligation_status: ob.status,
+                            start_byte: patch.start_byte,
+                            end_byte: patch.end_byte,
+                            replacement: patch.replacement.clone(),
+                        });
+                    }
+                    if let Err(e) = std::fs::write(&path, &src) {
+                        eprintln!("error writing patched file: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error reading {path} to apply patches: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
         }
-        ProofVerdict::Disproved => {
-            eprintln!("DISPROVED: {path} failed verification");
-            ExitCode::FAILURE
-        }
-        ProofVerdict::Unknown => {
-            eprintln!("UNKNOWN: {path} has at least one obligation Z3 couldn't decide -- not proved, not disproved");
-            ExitCode::from(2)
-        }
+    }
+
+    let after = if apply { Some(run_verify_pipeline(&path)) } else { None };
+    let effective_verdict = after.as_ref().map(|v| v.verdict).unwrap_or(before.verdict);
+
+    let report = FixReport { before, applied, after };
+    println!("{}", serde_json::to_string_pretty(&report).expect("FixReport always serializes"));
+
+    eprintln!(
+        "{} auto fix(es) applied to {path}",
+        if apply { report.applied.len().to_string() } else { "0 (pass --apply to write)".to_string() }
+    );
+    match effective_verdict {
+        ProofVerdict::Proved => ExitCode::SUCCESS,
+        ProofVerdict::Disproved => ExitCode::FAILURE,
+        ProofVerdict::Unknown => ExitCode::from(2),
     }
 }
 

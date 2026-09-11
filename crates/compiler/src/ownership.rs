@@ -86,7 +86,7 @@ pub struct OwnershipError {
 
 impl std::fmt::Display for OwnershipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Span { line, col } = self.span;
+        let Span { line, col, .. } = self.span;
         match &self.kind {
             OwnershipErrorKind::UseAfterMove { name } => {
                 write!(f, "{line}:{col}: use of `{name}` after it was moved")

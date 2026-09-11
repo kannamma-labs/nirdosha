@@ -287,7 +287,7 @@ fn pattern_on_non_str_field_is_rejected() {
             struct_name: "Widget".to_string(),
             field_name: "id".to_string(),
             key: "pattern".to_string(),
-            field_ty: "I64".to_string(),
+            field_ty: "i64".to_string(),
         }
     );
 }
@@ -313,7 +313,7 @@ fn min_on_non_numeric_field_is_rejected() {
             struct_name: "Widget".to_string(),
             field_name: "name".to_string(),
             key: "min".to_string(),
-            field_ty: "Str".to_string(),
+            field_ty: "str".to_string(),
         }
     );
 }
@@ -499,7 +499,7 @@ fn countdown_render_on_a_non_integer_field_is_rejected() {
             struct_name: "Case".to_string(),
             field_name: "sla_deadline".to_string(),
             key: "render".to_string(),
-            field_ty: "Str".to_string(),
+            field_ty: "str".to_string(),
         }
     );
 }

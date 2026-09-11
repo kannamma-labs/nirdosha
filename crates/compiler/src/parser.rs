@@ -121,7 +121,7 @@ impl Parser {
             Ok(self.bump())
         } else {
             Err(ParseError {
-                message: format!("expected {what}, found {:?}", self.peek().tok),
+                message: format!("expected {what}, found {}", self.peek().tok),
                 span: self.span(),
             })
         }
@@ -135,7 +135,7 @@ impl Parser {
                 Ok(s)
             }
             other => Err(ParseError {
-                message: format!("expected identifier, found {other:?}"),
+                message: format!("expected identifier, found {other}"),
                 span: self.span(),
             }),
         }
@@ -179,7 +179,7 @@ impl Parser {
                     span,
                 })
             }
-            other => Err(ParseError { message: format!("expected a dimension, found {other:?}"), span }),
+            other => Err(ParseError { message: format!("expected a dimension, found {other}"), span }),
         }
     }
 
@@ -319,7 +319,7 @@ impl Parser {
                 Ok(Ty::Named(n, args))
             }
             other => Err(ParseError {
-                message: format!("expected a type, found {other:?}"),
+                message: format!("expected a type, found {other}"),
                 span: self.span(),
             }),
         }
@@ -762,7 +762,7 @@ impl Parser {
             return Err(ParseError { message: "layout nested too deeply".to_string(), span });
         }
         let Tok::Ident(name) = self.peek().tok.clone() else {
-            return Err(ParseError { message: format!("expected a layout item, found {:?}", self.peek().tok), span });
+            return Err(ParseError { message: format!("expected a layout item, found {}", self.peek().tok), span });
         };
         match name.as_str() {
             "row" => {
@@ -799,7 +799,7 @@ impl Parser {
                     let is_tab = matches!(&self.peek().tok, Tok::Ident(s) if s == "tab");
                     if !is_tab {
                         return Err(ParseError {
-                            message: format!("expected `tab`, found {:?}", self.peek().tok),
+                            message: format!("expected `tab`, found {}", self.peek().tok),
                             span: self.span(),
                         });
                     }
@@ -1111,7 +1111,7 @@ impl Parser {
                 }
                 ref other => {
                     return Err(ParseError {
-                        message: format!("expected `state` inside `workflow {name}`, found {other:?}"),
+                        message: format!("expected `state` inside `workflow {name}`, found {other}"),
                         span: self.span(),
                     });
                 }
@@ -1195,7 +1195,7 @@ impl Parser {
                 other => {
                     return Err(ParseError {
                         message: format!(
-                            "expected `on_entry`, `on_exit`, `on`, or a `key: value` entry inside `state {name}`, found {other:?}"
+                            "expected `on_entry`, `on_exit`, `on`, or a `key: value` entry inside `state {name}`, found {other}"
                         ),
                         span: self.span(),
                     });
@@ -1608,7 +1608,7 @@ impl Parser {
                 self.bump();
                 Ok(if negative { -n } else { n })
             }
-            other => Err(ParseError { message: format!("expected an integer for `{what}`, found {other:?}"), span }),
+            other => Err(ParseError { message: format!("expected an integer for `{what}`, found {other}"), span }),
         }
     }
 
@@ -1633,7 +1633,7 @@ impl Parser {
                 self.bump();
                 n as f64
             }
-            other => return Err(ParseError { message: format!("expected a number for `{what}`, found {other:?}"), span }),
+            other => return Err(ParseError { message: format!("expected a number for `{what}`, found {other}"), span }),
         };
         Ok(if negative { -v } else { v })
     }
@@ -1648,7 +1648,7 @@ impl Parser {
                 Ok(s)
             }
             other => Err(ParseError {
-                message: format!("expected {what} as a string literal, found {other:?}"),
+                message: format!("expected {what} as a string literal, found {other}"),
                 span: self.span(),
             }),
         }
@@ -1687,7 +1687,7 @@ impl Parser {
             }
             other => {
                 return Err(ParseError {
-                    message: format!("expected a string literal justification after `audited`, found {other:?}"),
+                    message: format!("expected a string literal justification after `audited`, found {other}"),
                     span: self.span(),
                 })
             }
@@ -1870,7 +1870,7 @@ impl Parser {
                         Ok(Some(n))
                     }
                     ref other => {
-                        Err(ParseError { message: format!("expected an integer literal after `{label}`, found {other:?}"), span })
+                        Err(ParseError { message: format!("expected an integer literal after `{label}`, found {other}"), span })
                     }
                 }
             }
@@ -1893,7 +1893,7 @@ impl Parser {
             }
             other => {
                 return Err(ParseError {
-                    message: format!("expected `{label}` in `transact`, found {other:?}"),
+                    message: format!("expected `{label}` in `transact`, found {other}"),
                     span,
                 });
             }
@@ -2343,7 +2343,7 @@ impl Parser {
                 Ok(Expr::ArrayLit(elements, span))
             }
             other => Err(ParseError {
-                message: format!("expected an expression, found {other:?}"),
+                message: format!("expected an expression, found {other}"),
                 span,
             }),
         }

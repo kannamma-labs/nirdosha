@@ -49,7 +49,7 @@
 //!   would be needless allocation on every recursive call for no benefit,
 //!   since nothing here ever needs to *own* an expected type, only read it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +59,17 @@ use crate::token::Span;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum TypeErrorKind {
-    UnknownVar(String),
+    /// `candidates` is every name actually in scope at the point of
+    /// reference (every open `Scopes` level's own bindings, plus every
+    /// known function name — both are ordinary identifiers a bare
+    /// `Expr::Ident` can resolve to, per `infer`'s own `Expr::Ident`
+    /// arm) — collected for `nirdosha fix`'s typo-correction analysis
+    /// (`main.rs`'s `fix_unbound_identifier`), not used by typeck
+    /// itself. Added alongside `name`, not left as a bare `String`,
+    /// because a fix suggestion needs to know what *was* available to
+    /// suggest from, and nothing downstream of a `Vec<TypeError>` can
+    /// reconstruct that scope after the fact.
+    UnknownVar { name: String, candidates: Vec<String> },
     UnknownFn(String),
     DuplicateFn(String),
     /// A user `fn` declared with the same name as a builtin
@@ -573,9 +583,9 @@ pub struct TypeError {
 
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Span { line, col } = self.span;
+        let Span { line, col, .. } = self.span;
         match &self.kind {
-            TypeErrorKind::UnknownVar(n) => write!(f, "{line}:{col}: unknown variable `{n}`"),
+            TypeErrorKind::UnknownVar { name, .. } => write!(f, "{line}:{col}: unknown variable `{name}`"),
             TypeErrorKind::UnknownFn(n) => write!(f, "{line}:{col}: unknown function `{n}`"),
             TypeErrorKind::DuplicateFn(n) => {
                 write!(f, "{line}:{col}: `{n}` is defined more than once")
@@ -1129,6 +1139,20 @@ impl Scopes {
     fn get(&self, name: &str) -> Option<Ty> {
         self.0.iter().rev().find_map(|s| s.get(name)).cloned()
     }
+    /// Every locally-bound name visible right now, across every open
+    /// scope level, deduped -- used only to build `UnknownVar`'s
+    /// `candidates` list for `nirdosha fix`'s typo-correction analysis
+    /// (`main.rs`'s `fix_unbound_identifier`), never on a hot path: an
+    /// `UnknownVar` is already a hard error, so paying for a `HashSet`
+    /// here only happens once per genuine typo, not per successful
+    /// lookup.
+    fn names(&self) -> Vec<String> {
+        let mut set = HashSet::new();
+        for scope in &self.0 {
+            set.extend(scope.keys().cloned());
+        }
+        set.into_iter().collect()
+    }
 }
 
 pub struct Checker<'a> {
@@ -1292,7 +1316,7 @@ pub enum TypeWarningKind {
 
 impl std::fmt::Display for TypeWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Span { line, col } = self.span;
+        let Span { line, col, .. } = self.span;
         match &self.kind {
             TypeWarningKind::UngatedFnReachableWithNoToken { fn_name } => write!(
                 f,
@@ -1717,7 +1741,7 @@ fn typecheck_impl(
     }
 
     match c.sigs.get("main") {
-        None if require_main => c.error(TypeErrorKind::NoMainFn, Span { line: 0, col: 0 }),
+        None if require_main => c.error(TypeErrorKind::NoMainFn, Span { line: 0, col: 0, byte: 0 }),
         None => {}
         Some(sig) if !sig.params.is_empty() => {
             let span = program.fns.iter().find(|f| f.name == "main").unwrap().span;
@@ -1853,7 +1877,7 @@ impl<'a> Checker<'a> {
                     struct_name: struct_name.to_string(),
                     field_name: field_name.to_string(),
                     key: "pattern".to_string(),
-                    field_ty: format!("{ty:?}"),
+                    field_ty: ty.name(),
                 },
                 value.span(),
             );
@@ -1893,7 +1917,7 @@ impl<'a> Checker<'a> {
                     struct_name: struct_name.to_string(),
                     field_name: field_name.to_string(),
                     key: "format".to_string(),
-                    field_ty: format!("{ty:?}"),
+                    field_ty: ty.name(),
                 },
                 value.span(),
             );
@@ -1917,7 +1941,7 @@ impl<'a> Checker<'a> {
                     struct_name: struct_name.to_string(),
                     field_name: field_name.to_string(),
                     key: key.to_string(),
-                    field_ty: format!("{ty:?}"),
+                    field_ty: ty.name(),
                 },
                 value.span(),
             );
@@ -1960,7 +1984,7 @@ impl<'a> Checker<'a> {
                     struct_name: struct_name.to_string(),
                     field_name: field_name.to_string(),
                     key: "render".to_string(),
-                    field_ty: format!("{ty:?}"),
+                    field_ty: ty.name(),
                 },
                 value.span(),
             ),
@@ -1972,7 +1996,7 @@ impl<'a> Checker<'a> {
                             struct_name: struct_name.to_string(),
                             field_name: field_name.to_string(),
                             key: "render".to_string(),
-                            field_ty: format!("{ty:?}"),
+                            field_ty: ty.name(),
                         },
                         value.span(),
                     );
@@ -3034,7 +3058,9 @@ impl<'a> Checker<'a> {
                     }
                     Some(sig) => Ty::Fn(sig.params.clone(), Box::new(sig.ret.clone())),
                     None => {
-                        self.error(TypeErrorKind::UnknownVar(name.clone()), *span);
+                        let mut candidates = scopes.names();
+                        candidates.extend(self.sigs.keys().cloned());
+                        self.error(TypeErrorKind::UnknownVar { name: name.clone(), candidates }, *span);
                         Ty::Error
                     }
                 },
@@ -3073,7 +3099,7 @@ impl<'a> Checker<'a> {
                 let ty = match scopes.get(name) {
                     Some(t) => t,
                     None => {
-                        self.error(TypeErrorKind::UnknownVar(name.clone()), *span);
+                        self.error(TypeErrorKind::UnknownVar { name: name.clone(), candidates: scopes.names() }, *span);
                         return Ty::Error;
                     }
                 };
@@ -5542,7 +5568,7 @@ pub fn validate_fragment(json: &str, expected_ty: &Ty, env: &FragmentEnv) -> Res
     let expr: Expr = serde_json::from_str(json).map_err(|e| {
         vec![crate::Diagnostic::Type(TypeError {
             kind: TypeErrorKind::MalformedFragmentJson { message: e.to_string() },
-            span: Span { line: 0, col: 0 },
+            span: Span { line: 0, col: 0, byte: 0 },
         })]
     })?;
 

@@ -751,7 +751,7 @@ unary       ::= ("!" | "-" | "*" | "box" | "froze" | "&") unary
 // Exactly zero or one call, not "zero or more" — `f()()` is a **parse
 // error**, checked directly against the real parser, not assumed:
 //
-//     parse error: expected an expression, found RParen
+//     parse error: expected an expression, found `)`
 //
 // A `*` here (as an earlier revision of this EBNF had it, claiming a
 // call's *result* could itself be called again — currying-style) would

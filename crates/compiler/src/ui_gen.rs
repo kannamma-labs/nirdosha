@@ -2238,7 +2238,7 @@ mod tests {
     use super::*;
     use crate::token::Span;
 
-    const SPAN: Span = Span { line: 0, col: 0 };
+    const SPAN: Span = Span { line: 0, col: 0, byte: 0 };
 
     fn call(name: &str, args: Vec<Expr>) -> Expr {
         Expr::Call(name.to_string(), args, SPAN)

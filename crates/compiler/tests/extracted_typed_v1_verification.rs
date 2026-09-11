@@ -332,7 +332,10 @@ fn required_eyes_for_amount_post_logic_is_unbound_without_a_threshold_binding() 
     let program = build_program(TRADE_PAYMENT_APPROVAL_NIR);
     let routing_fn = wf_trdpay_001_routing_fn(&file);
     let result = check_fn_contract(&program, &routing_fn.name, &routing_fn.pre_logic, &routing_fn.post_logic, &HashMap::new());
-    assert_eq!(result, ContractCheckResult::UnboundIdentifier("high_value_threshold".to_string()));
+    match result {
+        ContractCheckResult::UnboundIdentifier { name, .. } => assert_eq!(name, "high_value_threshold"),
+        other => panic!("expected UnboundIdentifier(\"high_value_threshold\"), got {other:?}"),
+    }
 }
 
 /// The other side of the same coin: if the *wrong* concrete threshold

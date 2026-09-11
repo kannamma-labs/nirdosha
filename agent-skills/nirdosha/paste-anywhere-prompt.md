@@ -10,15 +10,16 @@ systems language with no garbage collector, no data races, no
 deadlocks, and no integer/buffer overflow, built around a small LL(1)
 grammar. I'm going to ask you to write `.nir` code. Follow the rules
 below exactly — Nirdosha's syntax is stricter and less forgiving than
-most languages you've seen, and small deviations (using `::`, using
-`str` as a function parameter, adding a semicolon, using `for`,
-putting a multi-statement block or a `return` inside a `match` arm,
-using `+=`, using `/* */` block comments, a trailing comma in a call's
-arguments, or putting `if`/`match` directly on the right of a plain
-`x = ...` reassignment) will produce code that doesn't compile. A
-"Quick reference: wrong vs. right" section below has a verified
-bad/good pair for every one of these — check your draft against it
-before presenting anything as final.
+most languages you've seen, and small deviations (using `str` as a
+function parameter, adding a semicolon, using `for`, putting a
+multi-statement block or a `return` inside a `match` arm, using `+=`,
+using `/* */` block comments, a trailing comma in a call's arguments,
+using a reserved word (`state`, `open`, `serve`, `match`, ...) as a
+variable/field/function name, or putting `if`/`match` directly on the
+right of a plain `x = ...` reassignment) will produce code that
+doesn't compile. A "Quick reference: wrong vs. right" section below
+has a verified bad/good pair for every one of these — check your draft
+against it before presenting anything as final.
 
 
 
@@ -32,9 +33,13 @@ generate *valid* Nirdosha on the first try.
 
 ## The rules that will break your output if you get them wrong
 
-1. **No `::` token exists anywhere in the lexer.** Enum variants are
-   flat, unqualified calls: `Some(5)`, `None()`, `Circle(r)` — never
-   `EnumName::Variant`. A zero-payload variant still needs `()` at the
+1. **Enum variants are flat, unqualified calls: `Some(5)`, `None()`,
+   `Circle(r)`.** A qualified `EnumName::Variant` spelling is also
+   accepted as optional disambiguation sugar (`Shape::Circle(1.0)`
+   parses; the flat form is the canonical one every example uses),
+   but inside a real `module Ident { ... }` block the *qualified*
+   form is what's required — references to anything declared in one
+   must spell `Mod::Name`. A zero-payload variant still needs `()` at the
    call site: `None()`, not bare `None`. This flat namespace is
    *program-wide*, including two built-in prelude enums you didn't
    declare: `CurrencyCode` (every active ISO 4217 code — `USD`, `EUR`,
@@ -88,13 +93,13 @@ generate *valid* Nirdosha on the first try.
 
    **A variant arm's pattern is flat, one variant deep — it can never
    nest another constructor.** `Err(DbError(_)) => ...` is a parse
-   error (`expected \`)\`, found LParen`), every time — a pattern's
+   error (`expected \`)\`, found \`(\``), every time — a pattern's
    payload position can only bind a plain name (or `_`), never another
    variant call. To inspect *what kind* of error a bound payload itself
    is, bind the whole payload to a name and `match` on that name again,
    nested:
    ```nirdosha
-   // WRONG — parse error, "expected `)`, found LParen":
+   // WRONG — parse error, "expected `)`, found `(`":
    match setup {
        Ok(_) => "ready",
        Err(DbError(_)) => "db error",
@@ -114,7 +119,7 @@ generate *valid* Nirdosha on the first try.
    `{ statement; statement }` block.** This is the single most common
    mistake an LLM makes writing Nirdosha (it's valid in Rust, which is
    why the instinct is strong). `Ok(conn) => { let x = f(conn) stop(conn) x }`
-   is a parse error (`expected an expression, found LBrace`), full
+   is a parse error (`expected an expression, found `{``), full
    stop, even though it looks completely reasonable. If an arm needs
    more than one step, do what every real Nirdosha program in this
    repo does: **extract a small helper function and call it as the
@@ -150,7 +155,7 @@ generate *valid* Nirdosha on the first try.
    early-return-on-error idiom that's completely normal in most
    languages —
    ```nirdosha
-   // WRONG — "found Return" parse error, every time:
+   // WRONG — "found the reserved keyword `return`" parse error, every time:
    let x: i64 = match may_fail(n) {
        Ok(v) => v,
        Err(e) => return Err(e),
@@ -210,11 +215,11 @@ generate *valid* Nirdosha on the first try.
    must not run after a prior failure, guard each one with its own
    `if previous_ok { ... } else { -1 }` instead of a flat sequence.
 10. **No compound assignment operators.** `total += i` is a parse
-    error (`expected an expression, found Assign`) — there is no `+=`,
+    error (`expected an expression, found `=``) — there is no `+=`,
     `-=`, `*=`, `/=` at all. Write it out: `total = total + i`.
 11. **Only `//` line comments exist — no `/* ... */` block comments at
     all.** The lexer doesn't recognize `/*` as the start of anything;
-    a leading `/*` produces `parse error: expected 'fn', found Slash`
+    a leading `/*` produces `parse error: expected `fn`, found `/``
     (or similar, wherever it appears) because the parser just sees a
     stray `/` where a top-level item or expression was expected. Use
     `//` for every comment, including multi-line ones (one `//` per
@@ -244,14 +249,14 @@ generate *valid* Nirdosha on the first try.
     A call's argument list (`f(a, b,)`), a `fn`'s own parameter list
     (`fn f(a: i64, b: i64,)`), and an array/matrix literal
     (`[1, 2, 3,]`) all reject a trailing comma before the closing
-    delimiter — `expected an expression, found RParen`/`RBracket`, or
-    (for params) a bogus "expected identifier" once the parser tries
+    delimiter — `expected an expression, found `)`/`]``, or
+    (for params) `expected identifier, found `)`` once the parser tries
     to read a nonexistent next parameter. Only `struct`/`enum`
     declarations tolerate one.
 14. **A plain reassignment's right-hand side can't start with `if`,
     `match`, or `transact` directly** — only a `let` binding or
     `return` can. `x = if cond { 1 } else { 2 }` is a parse error
-    (`expected an expression, found If`), because `x = ...`'s
+    (`expected an expression, found the reserved keyword `if``), because `x = ...`'s
     right-hand side is parsed by a rule that never re-enters the
     top-level dispatch those three keywords need; a `let`'s value and
     a `return`'s value *do* go through that dispatch, which is why
@@ -262,10 +267,14 @@ generate *valid* Nirdosha on the first try.
     `if`/`match`/`transact` again. Needed most often accumulating a
     value across loop iterations, e.g. `total = (if v > 0 { total + v } else { total })`.
 15. **A call's result can't be followed by `.field` or `[index]`.**
-    `source_label(t.source).value` and `lookup(k)[0]` are both parse
-    errors — postfix field/index access only ever applies to a
-    primary expression, and the parser never gives a call's own
-    result another pass through that rule. Bind the call to a `let`
+    `source_label(t.source).value` is a parse error (`expected an
+    expression, found `.``) — postfix field access only ever applies
+    to a primary expression, and the parser never gives a call's own
+    result another pass through that rule. `lookup(k)[0]` is *worse
+    than a parse error*: with no statement separator, the statement
+    silently ends at the call and the `[0]` becomes a stray array-
+    literal statement — so it looks like it worked while `x` holds the
+    whole call result, not the indexed cell. Bind the call to a `let`
     first: `let s: Text = source_label(t.source)` then use `s.value`.
 16. **`%` is a real operator — truncating remainder, same precedence
     as `*`/`/` — for `i64`/`f64` only.** `x % board_width`,
@@ -275,14 +284,36 @@ generate *valid* Nirdosha on the first try.
     producing a wrong or NaN-looking `i64`. There is no `dec128`
     (`Money`) remainder — a type error, not a runtime failure, if you
     try `some_money % other_money`.
+17. **Reserved words can never be identifiers.** Nirdosha has a fixed
+    reserved-word list, and none of them can be a variable, field,
+    parameter, `fn`, `struct`, `enum`, `screen`, or `module` name — not
+    a style rule, but a lexer fact: each one lexes as its own keyword
+    token, so the parser sees a keyword where a name is required and
+    stops. `struct Player { state: str }` is a parse error
+    (`expected identifier, found the reserved keyword `state``),
+    because `state` names a `workflow` state-machine state and is
+    reserved language-wide. The full list: `fn let return if else
+    while box froze spawn join thread chan send recv sandbox stop
+    connect listen accept open effect requires nfr acquire audited
+    transact struct enum match screen dashboard landing serve module
+    workflow state workspace validate pub use Vector Matrix handle
+    true false` — plus every scalar type name (`i8`…`i64`, `str`,
+    `bool`, `tcp`, `db`, `mq`, ...) is equally unusable as an identifier
+    (`the reserved type name `str``). The ones that actually collide
+    with ordinary app vocabulary: `state`, `open`, `serve`, `screen`,
+    `landing`, `handle`, `send`, `recv`, `connect`, `listen`, `accept`,
+    `match`, `use`, `effect`, `stop`. If you need one of those words
+    as a name, pick a synonym (`game_state`, `open_order`, ...) —
+    there is no quoting or escaping mechanism.
 
 A fast-scan companion to the rules above — every pair below is
 verified against the real compiler, not hypothetical.
 
 **Enum variant construction (rule 1)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found Colon
-let s: Shape = Shape::Circle(1.0)
+// WRONG -- type error: unknown variable `Circle` (construction is a
+// *call*; a bare variant name is just an identifier to the parser)
+let s: Shape = Circle
 // RIGHT
 let s: Shape = Circle(1.0)
 ```
@@ -352,12 +383,12 @@ let p: Point = Point(1, 2)
 
 **`match` arm bodies (rule 9 — the single most common mistake)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found LBrace
+// WRONG -- parse error: expected an expression, found `{`
 let x: i64 = match r {
     Ok(conn) => { let a = f(conn) stop(conn) a },
     Err(e) => -1,
 }
-// WRONG -- parse error: expected an expression, found Return
+// WRONG -- parse error: expected an expression, found the reserved keyword `return`
 let x: i64 = match r {
     Ok(v) => v,
     Err(e) => return -1,
@@ -377,7 +408,7 @@ let x: i64 = match r {
 
 **Compound assignment (rule 10)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found Assign
+// WRONG -- parse error: expected an expression, found `=`
 total += i
 // RIGHT
 total = total + i
@@ -385,7 +416,7 @@ total = total + i
 
 **Comments (rule 11)**
 ```nirdosha
-// WRONG -- parse error: expected `fn`, found Slash
+// WRONG -- parse error: expected `fn`, found `/`
 /* a block comment */
 // RIGHT -- // is the only comment syntax, one per line
 // a comment
@@ -412,7 +443,7 @@ json_array_get(db_query_result, 0)   // then json_get_i64 on THAT
 
 **Trailing comma (rule 13)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found RParen
+// WRONG -- parse error: expected an expression, found `)`
 create_widget(name, price,)
 // RIGHT -- no trailing comma in a call's arguments (same for a fn's
 // own parameter list, and an array/matrix literal)
@@ -421,7 +452,7 @@ create_widget(name, price)
 
 **`if`/`match` on a reassignment's right-hand side (rule 14)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found If
+// WRONG -- parse error: expected an expression, found the reserved keyword `if`
 total = if v > 0 { total + v } else { total }
 // RIGHT -- wrap it in parens so it's re-parsed from the top
 total = (if v > 0 { total + v } else { total })
@@ -429,11 +460,19 @@ total = (if v > 0 { total + v } else { total })
 
 **Field/index access after a call (rule 15)**
 ```nirdosha
-// WRONG -- parse error: expected `)`, found Dot
+// WRONG -- parse error: expected an expression, found `.`
 let s: str = source_label(t.source).value
 // RIGHT -- bind the call's result first
 let label: Text = source_label(t.source)
 let s: str = label.value
+```
+
+**Reserved words as identifiers (rule 17)**
+```nirdosha
+// WRONG -- parse error: expected identifier, found the reserved keyword `state`
+struct Player { state: PlayerState, score: i64 }
+// RIGHT -- the concept keeps a synonym; the keyword stays untouched
+struct Player { game_state: PlayerState, score: i64 }
 ```
 
 ## Types

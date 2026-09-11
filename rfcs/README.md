@@ -26,6 +26,7 @@ this list.
 | [0012](./0012-nirdosha-hi-agentic-console.md) | `nirdosha hi` — a native LLM console gated on provider credentials |
 | [0013](./0013-nirdosha-realm.md) | Nirdosha Realm — a local-first project knowledge graph with bidirectional `.nir` traceability |
 | [0014](./0014-generative-build-console.md) | The generative build console — prompt → build → generate → publish, over an interactive Realm graph (speculative, nothing built) |
+| [0015](./0015-keyed-guard-external-state.md) | `guard(keys) { ... }` — keyed mutual exclusion for multi-statement invariants over external (`db`+`http`) state (speculative, nothing built) |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a
