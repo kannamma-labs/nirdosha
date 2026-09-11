@@ -24,6 +24,8 @@ fn main() -> ExitCode {
         "keygen" => cmd_keygen(args),
         "verify-certificate" => cmd_verify_certificate(args),
         "equivalence" => cmd_equivalence(args),
+        "attest" => cmd_attest(args),
+        "audit" => cmd_audit(args),
         "mcp" => cmd_mcp(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
@@ -70,6 +72,12 @@ fn print_usage() {
     eprintln!("  nirdosha equivalence <file.nir> <fn_a> <fn_b>");
     eprintln!("                                      prove fn_a and fn_b compute the same result for every");
     eprintln!("                                      input, or find a real counterexample where they diverge");
+    eprintln!("  nirdosha attest <file.nir> --reviewer <name> --role agent|human --key <key.pk8>");
+    eprintln!("                  --trust-config <config.json> [--note <text>] [-o <attestation.json>]");
+    eprintln!("                                      sign a real, unforgeable review attestation for a file");
+    eprintln!("  nirdosha audit <file.nir> --trust-config <config.json> [--attestation <a.json>]...");
+    eprintln!("                                      consolidated trust report: formal verdict + every");
+    eprintln!("                                      attestation's real signature/trust/staleness status");
     eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
     eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
@@ -1810,6 +1818,317 @@ fn cmd_equivalence(mut args: impl Iterator<Item = String>) -> ExitCode {
         nirdosha::contract_check::EquivalenceResult::Unsupported(ref msg) => eprintln!("UNSUPPORTED: {msg}"),
     }
     exit
+}
+
+/// A trusted identity's own record in a trust config -- `name` paired
+/// with the Ed25519 public key that name is allowed to sign
+/// attestations with. Which list it's registered in
+/// (`TrustConfig::known_agents` vs `human_reviewers`) is itself part
+/// of the trust claim: `nirdosha audit` checks an attestation's
+/// claimed `role` against the *matching* list, so an agent identity
+/// can never satisfy a "human-reviewed" gate by forging its own role
+/// string -- the role comes from which list the name is actually
+/// registered in, not from the attestation's own say-so.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct TrustedIdentity {
+    name: String,
+    public_key: String,
+}
+
+/// `nirdosha-master-plan.md` Part 3 Dec 2026's "known_agents/
+/// human_reviewers trust config" -- the registry `nirdosha attest`
+/// checks a reviewer name against before signing, and `nirdosha audit`
+/// checks an attestation's claimed reviewer+role against before
+/// trusting it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TrustConfig {
+    trust_config_version: String,
+    known_agents: Vec<TrustedIdentity>,
+    human_reviewers: Vec<TrustedIdentity>,
+}
+
+/// The part of an `Attestation` that gets signed -- kept as its own
+/// struct (not just "`Attestation` minus its signature field") for the
+/// same reason `Certificate`/`SignedCertificate` are two structs: the
+/// signed bytes must be exactly reproducible by both the signer and a
+/// later verifier parsing the full `Attestation` back and discarding
+/// its signature fields, and a single struct that *also* carries
+/// `signature`/`signature_algorithm` would make "sign everything except
+/// these two fields" a fragile, easy-to-get-wrong manual exclusion
+/// instead of "sign this struct, full stop."
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AttestationCore {
+    attestation_version: String,
+    file_hash: String,
+    reviewer: String,
+    role: String,
+    note: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Attestation {
+    #[serde(flatten)]
+    core: AttestationCore,
+    signature_algorithm: String,
+    signature: String,
+}
+
+/// `nirdosha-master-plan.md` Part 3 Dec 2026's "reviewer-forgery
+/// prevention... an LLM can't fake `@reviewed_by`." Implemented as a
+/// sidecar attestation over a file's content hash, signed with a real
+/// Ed25519 key registered in a `TrustConfig` -- deliberately **not** a
+/// new `.nir` source annotation (no `@reviewed_by(...)` token in the
+/// grammar): `docs/GRAMMAR.md`'s own stated discipline treats every new
+/// keyword as a breaking addition pre-1.0, worth an RFC, not something
+/// to land as a side effect of a trust-reporting feature. An
+/// attestation is exactly as strong as its signature: forging one
+/// without the named reviewer's private key is exactly as hard as
+/// forging any other Ed25519 signature, the same real cryptographic
+/// guarantee `nirdosha certify --sign` already provides for a
+/// certificate.
+///
+/// `nirdosha attest <file.nir> --reviewer <name> --role agent|human
+/// --key <key.pk8> --trust-config <config.json> [--note <text>]
+/// [-o <attestation.json>]` -- refuses to sign for a name that isn't
+/// registered under the matching list in `--trust-config` (an
+/// unregistered reviewer producing a "valid-looking" attestation
+/// nobody would trust is a real usability trap this rejects up front,
+/// not just something `audit` would catch later).
+fn cmd_attest(mut args: impl Iterator<Item = String>) -> ExitCode {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+
+    let mut path: Option<String> = None;
+    let mut reviewer: Option<String> = None;
+    let mut role: Option<String> = None;
+    let mut key_path: Option<String> = None;
+    let mut trust_config_path: Option<String> = None;
+    let mut note: Option<String> = None;
+    let mut out: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--reviewer" => reviewer = args.next(),
+            "--role" => role = args.next(),
+            "--key" => key_path = args.next(),
+            "--trust-config" => trust_config_path = args.next(),
+            "--note" => note = args.next(),
+            "-o" => out = args.next(),
+            other => path = Some(other.to_string()),
+        }
+    }
+    let usage = "usage: nirdosha attest <file.nir> --reviewer <name> --role agent|human --key <key.pk8> --trust-config <config.json> [--note <text>] [-o <attestation.json>]";
+    let (Some(path), Some(reviewer), Some(role), Some(key_path), Some(trust_config_path)) = (path, reviewer, role, key_path, trust_config_path) else {
+        eprintln!("{usage}");
+        return ExitCode::FAILURE;
+    };
+    let role = match role.as_str() {
+        "agent" => "known_agent".to_string(),
+        "human" => "human_reviewer".to_string(),
+        other => {
+            eprintln!("--role must be `agent` or `human`, got `{other}`");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let trust_config: TrustConfig = match std::fs::read_to_string(&trust_config_path).and_then(|s| serde_json::from_str(&s).map_err(std::io::Error::other)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error reading trust config {trust_config_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let registry = if role == "known_agent" { &trust_config.known_agents } else { &trust_config.human_reviewers };
+    if !registry.iter().any(|identity| identity.name == reviewer) {
+        eprintln!("`{reviewer}` is not registered as a `{role}` in {trust_config_path} -- add them first, or check --role");
+        return ExitCode::FAILURE;
+    }
+
+    let source_bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error reading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pkcs8 = match std::fs::read(&key_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error reading private key {key_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let core = AttestationCore { attestation_version: "0".to_string(), file_hash: sha256_hex(&source_bytes), reviewer, role, note };
+    let canonical = serde_json::to_vec(&core).expect("AttestationCore always serializes");
+    let signature = keypair.sign(&canonical);
+    let attestation = Attestation { core: serde_json::from_slice(&canonical).expect("re-parsing what was just serialized cannot fail"), signature_algorithm: "ed25519".to_string(), signature: BASE64_STANDARD.encode(signature.as_ref()) };
+
+    let printed = serde_json::to_string_pretty(&attestation).expect("Attestation always serializes");
+    if let Some(out_path) = &out {
+        if let Err(e) = std::fs::write(out_path, &printed) {
+            eprintln!("error writing {out_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    println!("{printed}");
+    eprintln!("attestation for {path} signed by `{}` ({}){}", attestation.core.reviewer, attestation.core.role, out.map(|p| format!(" -- wrote {p}")).unwrap_or_default());
+    ExitCode::SUCCESS
+}
+
+/// Verifies one `Attestation` against a `TrustConfig` and the file's
+/// *current* real content hash -- four honest outcomes, never
+/// collapsed into a single pass/fail:
+/// - `UNTRUSTED_REVIEWER`: the claimed name isn't registered under the
+///   matching list at all -- checked *before* touching the signature,
+///   since an unregistered name can never be trusted regardless of
+///   whether it signed correctly with *some* key.
+/// - `FORGED_OR_TAMPERED`: the name is registered, but the signature
+///   doesn't verify against that registered public key -- exactly the
+///   case this whole feature exists to catch (`docs/PUBLIC_ROADMAP.md`'s
+///   "an LLM can't fake `@reviewed_by`").
+/// - `STALE`: the signature is genuinely valid, but `file_hash` no
+///   longer matches the file's real current content -- the code moved
+///   on since this review, and the attestation doesn't cover today's
+///   version.
+/// - `CURRENT`: valid signature, registered reviewer, matching hash --
+///   this file, as it exists right now, really was reviewed by this
+///   name.
+fn audit_one_attestation(attestation: &Attestation, trust_config: &TrustConfig, current_file_hash: &str) -> serde_json::Value {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+
+    let registry = if attestation.core.role == "known_agent" { &trust_config.known_agents } else { &trust_config.human_reviewers };
+    let Some(identity) = registry.iter().find(|i| i.name == attestation.core.reviewer) else {
+        return serde_json::json!({ "reviewer": attestation.core.reviewer, "role": attestation.core.role, "status": "UNTRUSTED_REVIEWER" });
+    };
+
+    let canonical = serde_json::to_vec(&attestation.core).expect("AttestationCore always serializes");
+    let valid = (|| -> Option<bool> {
+        let public_key_bytes = BASE64_STANDARD.decode(&identity.public_key).ok()?;
+        let signature_bytes = BASE64_STANDARD.decode(&attestation.signature).ok()?;
+        let public_key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public_key_bytes);
+        Some(public_key.verify(&canonical, &signature_bytes).is_ok())
+    })()
+    .unwrap_or(false);
+
+    if !valid {
+        return serde_json::json!({ "reviewer": attestation.core.reviewer, "role": attestation.core.role, "status": "FORGED_OR_TAMPERED" });
+    }
+    if attestation.core.file_hash != current_file_hash {
+        return serde_json::json!({ "reviewer": attestation.core.reviewer, "role": attestation.core.role, "status": "STALE", "attested_hash": attestation.core.file_hash, "current_hash": current_file_hash });
+    }
+    serde_json::json!({ "reviewer": attestation.core.reviewer, "role": attestation.core.role, "status": "CURRENT", "note": attestation.core.note })
+}
+
+/// `nirdosha audit <file.nir> --trust-config <config.json>
+/// [--attestation <attestation.json>]...` --
+/// `nirdosha-master-plan.md` Part 3 Dec 2026's "confidence/trust
+/// propagation": combines `run_verify_pipeline`'s own formal verdict
+/// with every attestation's real, checked status
+/// (`audit_one_attestation`) into one report, rather than reporting
+/// them side by side and leaving the reader to combine them. This is a
+/// deliberately small first version of what the master plan's later
+/// (Q1 2027) `nirdosha audit` item calls a "consolidated trust
+/// report" -- named here as the same command because it already does
+/// that job for the two signals that exist today (formal proof,
+/// signed review); a later pass adds more inputs to the same report,
+/// not a competing command.
+fn cmd_audit(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut path: Option<String> = None;
+    let mut trust_config_path: Option<String> = None;
+    let mut attestation_paths: Vec<String> = Vec::new();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--trust-config" => trust_config_path = args.next(),
+            "--attestation" => {
+                if let Some(p) = args.next() {
+                    attestation_paths.push(p);
+                }
+            }
+            other => path = Some(other.to_string()),
+        }
+    }
+    let (Some(path), Some(trust_config_path)) = (path, trust_config_path) else {
+        eprintln!("usage: nirdosha audit <file.nir> --trust-config <config.json> [--attestation <attestation.json>]...");
+        return ExitCode::FAILURE;
+    };
+    let trust_config: TrustConfig = match std::fs::read_to_string(&trust_config_path).and_then(|s| serde_json::from_str(&s).map_err(std::io::Error::other)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error reading trust config {trust_config_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let source_bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error reading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let current_hash = sha256_hex(&source_bytes);
+
+    let mut attestation_reports = Vec::new();
+    for attestation_path in &attestation_paths {
+        let attestation: Attestation = match std::fs::read_to_string(attestation_path).and_then(|s| serde_json::from_str(&s).map_err(std::io::Error::other)) {
+            Ok(a) => a,
+            Err(e) => {
+                attestation_reports.push(serde_json::json!({ "attestation_file": attestation_path, "status": "UNREADABLE", "detail": e.to_string() }));
+                continue;
+            }
+        };
+        let mut report = audit_one_attestation(&attestation, &trust_config, &current_hash);
+        report["attestation_file"] = serde_json::json!(attestation_path);
+        attestation_reports.push(report);
+    }
+
+    let verdict = run_verify_pipeline(&path);
+    let formally_proved = verdict.verdict == ProofVerdict::Proved;
+    let currently_reviewed = attestation_reports.iter().any(|r| r["status"] == "CURRENT");
+    let human_reviewed = attestation_reports.iter().any(|r| r["status"] == "CURRENT" && r["role"] == "human_reviewer");
+    let any_red_flag = attestation_reports.iter().any(|r| r["status"] == "FORGED_OR_TAMPERED" || r["status"] == "UNTRUSTED_REVIEWER");
+
+    // A small, honest rollup -- not a numeric score (a fabricated
+    // "87% confidence" would claim more precision than two boolean
+    // signals actually support). Order matters: a forged/untrusted
+    // attestation is worse than having none at all, so it's checked
+    // first regardless of what the formal verdict says.
+    let trust_summary = if any_red_flag {
+        "REJECTED_ATTESTATION_PRESENT"
+    } else if formally_proved && human_reviewed {
+        "PROVED_AND_HUMAN_REVIEWED"
+    } else if formally_proved && currently_reviewed {
+        "PROVED_AND_AGENT_REVIEWED"
+    } else if formally_proved {
+        "PROVED_ONLY"
+    } else if human_reviewed {
+        "HUMAN_REVIEWED_ONLY"
+    } else if currently_reviewed {
+        "AGENT_REVIEWED_ONLY"
+    } else {
+        "UNVERIFIED"
+    };
+
+    let report = serde_json::json!({
+        "file": path,
+        "verify_verdict": verdict.verdict,
+        "attestations": attestation_reports,
+        "trust_summary": trust_summary,
+    });
+    println!("{}", serde_json::to_string_pretty(&report).expect("this JSON value always serializes"));
+    eprintln!("{trust_summary}: {path}");
+    if any_red_flag {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// A `.nir` source file that exists only for the duration of one MCP

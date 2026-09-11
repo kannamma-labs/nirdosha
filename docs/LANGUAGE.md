@@ -41,6 +41,10 @@ nirdosha verify-certificate <certificate.json>
                                        # check a signed certificate's signature against its embedded key
 nirdosha equivalence <file.nir> <fn_a> <fn_b>
                                        # prove fn_a and fn_b compute the same result, or find a counterexample
+nirdosha attest <file.nir> --reviewer <name> --role agent|human --key <key.pk8> --trust-config <config.json>
+                                       # sign a real, unforgeable review attestation for a file (see below)
+nirdosha audit <file.nir> --trust-config <config.json> [--attestation <a.json>]...
+                                       # consolidated trust report: formal verdict + attestation status
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -208,6 +212,39 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   is three-valued like `verify`'s own: `0` `EQUIVALENT`, `1`
   `DIFFERENT` (a real, concrete counterexample), `2` `UNSUPPORTED` —
   never collapsed, so "couldn't check" can never read as a false pass.
+- **`attest`/`audit` — confidence/trust propagation, reviewer-forgery
+  prevention** (2026-09, `nirdosha-master-plan.md` Part 3 Dec 2026,
+  "`known_agents`/`human_reviewers` trust config — an LLM can't fake
+  `@reviewed_by`") — implemented as a real, signed sidecar attestation
+  over a file's content hash, deliberately **not** a new `.nir` source
+  annotation: adding a `@reviewed_by(...)` token to the grammar is a
+  breaking pre-1.0 addition worth an RFC (`docs/GRAMMAR.md`'s own
+  discipline), not something to land as a side effect of a trust-
+  reporting feature. `nirdosha attest <file.nir> --reviewer <name>
+  --role agent|human --key <key.pk8> --trust-config <config.json>`
+  signs a real Ed25519 attestation (reusing `certify --sign`'s exact
+  signing approach) over the file's SHA-256 hash — and refuses up
+  front if `<name>` isn't registered under the matching list
+  (`known_agents`/`human_reviewers`) in the trust config, so a
+  produced attestation is never one nobody would trust in the first
+  place. `nirdosha audit <file.nir> --trust-config <config.json>
+  [--attestation <a.json>]...` combines the real `verify` verdict with
+  every attestation's real, checked status into one report:
+  `UNTRUSTED_REVIEWER` (name not registered), `FORGED_OR_TAMPERED`
+  (registered, but the signature doesn't verify — exactly the "can't
+  fake it" case this feature exists for), `STALE` (valid signature,
+  but the file changed since), or `CURRENT`. A small `trust_summary`
+  rollup (`PROVED_AND_HUMAN_REVIEWED`/`PROVED_ONLY`/
+  `REJECTED_ATTESTATION_PRESENT`/...) combines the two real signals —
+  deliberately not a numeric confidence score, which would claim more
+  precision than two boolean signals actually support. A known-agent
+  attestation never counts toward "human reviewed," by construction
+  (the role comes from which trust-config list the name is registered
+  in, never from the attestation's own say-so). This command is also a
+  deliberately small first version of the master plan's later (Q1
+  2027) `nirdosha audit` "consolidated trust report" item — the same
+  command, more inputs added to the same report later, not a
+  competing one.
 
 ---
 

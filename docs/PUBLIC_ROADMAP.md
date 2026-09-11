@@ -435,6 +435,30 @@ runs behind it.
   Parameters pair positionally with matching integer types; both
   functions must return the same integer type. Tests:
   `crates/compiler/tests/equivalence_command.rs`.
+- [DONE] Confidence/trust propagation + reviewer-forgery prevention
+  (2026-09, master plan Part 3 Dec 2026, "`known_agents`/
+  `human_reviewers` trust config — an LLM can't fake `@reviewed_by`")
+  — `nirdosha attest`/`nirdosha audit`, a real signed sidecar
+  attestation over a file's content hash (reusing `certify --sign`'s
+  Ed25519 signing), deliberately not a new `.nir` grammar annotation
+  (a breaking pre-1.0 addition worth its own RFC, not a side effect of
+  this feature). `attest` refuses to sign for a reviewer name not
+  registered in the trust config's matching `known_agents`/
+  `human_reviewers` list; `audit` combines the real `verify` verdict
+  with every attestation's real checked status
+  (`UNTRUSTED_REVIEWER`/`FORGED_OR_TAMPERED`/`STALE`/`CURRENT`) into
+  one `trust_summary` rollup. A known-agent attestation never counts
+  as human-reviewed, by construction — the role comes from which
+  trust-config list the name is registered in, never the attestation's
+  own claim. Doubles as a deliberately small first version of the
+  later (Q1 2027) `nirdosha audit` "consolidated trust report" item —
+  same command, more inputs added later, not a competing one. Tests:
+  `crates/compiler/tests/trust_audit.rs` — real keys signing real
+  attestations, an unregistered reviewer rejected at `attest` time, a
+  tampered attestation caught as forged (rejecting the whole report),
+  a stale attestation correctly downgrading `trust_summary` without
+  failing the report outright, and an agent attestation never
+  satisfying a human-reviewed rollup.
 
 ---
 
