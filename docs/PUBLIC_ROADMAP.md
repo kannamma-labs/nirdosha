@@ -124,6 +124,24 @@ any form today; added 2026-09, see the callout just below).
   registry entry is real, browsable reference material
   (`nirdosha explain NIR0009` works today) that nothing auto-tags onto
   a live diagnostic yet. Tests: `crates/compiler/tests/explain_command.rs`.
+- [DONE] `nirdosha mcp` (2026-09, master plan Part 3 Sprint 1) — an MCP
+  server on the stdio transport (JSON-RPC 2.0, newline-delimited),
+  parity target: Acutis, Imandra, Kōdo. Four tools, all `source`-based
+  (never a filesystem path, matching how an MCP client actually calls
+  a tool): `verify_code`, `get_grammar` (the real `nirdosha.gbnf`),
+  `fix` (with `apply: true` returning `patched_source` instead of
+  writing a file — there's no file in an MCP call to write back to),
+  and `describe` (a curated fn/struct/enum/`validate` structural
+  summary, parse-only, modeled on Kōdo's own `kodo.describe` tool —
+  distinct from `emit-ast`'s full span-carrying AST). Every tool
+  reuses the exact `run_verify_pipeline`/`write_auto_patches` the CLI
+  commands run, including a shared fix applied via the same helper
+  `nirdosha fix --apply` uses (extracted, not duplicated, specifically
+  to avoid a second copy of the byte-offset-ordering bug `nirdosha
+  fix`'s own changelog entry above already names once). Tests:
+  `crates/compiler/tests/mcp_server.rs` — spawns the real binary and
+  speaks the stdio transport directly (initialize/tools list/tools
+  call/notifications/malformed input/unknown method).
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)

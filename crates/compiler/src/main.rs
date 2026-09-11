@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         "verify" => cmd_verify(args),
         "fix" => cmd_fix(args),
         "explain" => cmd_explain(args),
+        "mcp" => cmd_mcp(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
@@ -54,6 +55,9 @@ fn print_usage() {
     eprintln!("                                      --apply writes every `auto` patch to the file in place");
     eprintln!("  nirdosha explain [<code>]           print the machine-learnable error index (JSON on stdout);");
     eprintln!("                                      with no <code>, lists every NIR-code and its title");
+    eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
+    eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
+    eprintln!("                                      launch via an MCP client's config, not interactively");
     eprintln!("  nirdosha emit-llvm <file.nir>       print the generated LLVM IR");
     eprintln!("  nirdosha emit-ast <file.nir>        print the parsed AST as JSON (docs/goal.md row 9)");
     eprintln!("  nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]");
@@ -1210,6 +1214,62 @@ struct FixReport {
     after: Option<VerifyVerdict>,
 }
 
+/// Collects every `Auto`-class patch across all four `before` stages
+/// (`load`/`typecheck`/`ownership`'s `VerifyDiagnostic`s, plus
+/// `contracts.obligations`) and writes them to `path`, highest byte
+/// offset first -- applying low-to-high would shift every later
+/// patch's own byte offsets out from under it the moment an earlier
+/// one changed the file's length; high-to-low never does, since
+/// nothing after the current patch's end has been touched yet by the
+/// time it's applied. Extracted out of `cmd_fix` so the MCP `fix` tool
+/// (`mcp_fix`) shares this exact algorithm instead of a second,
+/// maintained-separately copy -- the real bug `AppliedPatch`'s own doc
+/// comment describes (an earlier revision only ever scanned
+/// `contracts.obligations`, silently dropping every `Auto` patch
+/// attached to a stage diagnostic instead) was exactly this kind of
+/// drift, and it only had one call site to go wrong in at the time.
+fn write_auto_patches(path: &str, before: &VerifyVerdict) -> Result<Vec<AppliedPatch>, String> {
+    let mut patches: Vec<(String, String, &FixPatch)> = Vec::new();
+    for diag in before.load.errors.iter().chain(before.typecheck.errors.iter()).chain(before.ownership.errors.iter()) {
+        if let Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) = &diag.fix {
+            patches.push((format!("{}:{}", diag.line, diag.col), diag.message.clone(), p));
+        }
+    }
+    for ob in &before.contracts.obligations {
+        if let Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) = &ob.fix {
+            patches.push((ob.fn_name.clone(), ob.status.to_string(), p));
+        }
+    }
+    patches.sort_by(|a, b| b.2.start_byte.cmp(&a.2.start_byte));
+
+    let mut applied = Vec::new();
+    if patches.is_empty() {
+        return Ok(applied);
+    }
+
+    let mut src = std::fs::read_to_string(path).map_err(|e| format!("error reading {path} to apply patches: {e}"))?;
+    for (site, detail, patch) in &patches {
+        if patch.start_byte > src.len() || patch.end_byte > src.len() || patch.start_byte > patch.end_byte {
+            // A patch computed against a stale byte range (shouldn't
+            // happen -- `before` was just read from this same file --
+            // but a corrupt/concurrently-modified file is a real
+            // possibility this must not silently misapply against) is
+            // skipped, not forced.
+            continue;
+        }
+        src.replace_range(patch.start_byte..patch.end_byte, &patch.replacement);
+        applied.push(AppliedPatch {
+            site: site.clone(),
+            detail: detail.clone(),
+            start_byte: patch.start_byte,
+            end_byte: patch.end_byte,
+            replacement: patch.replacement.clone(),
+        });
+    }
+    std::fs::write(path, &src).map_err(|e| format!("error writing patched file: {e}"))?;
+    Ok(applied)
+}
+
 /// `nirdosha fix <file.nir> [--apply]` -- `nirdosha-master-plan.md`
 /// Part 3, Sprint 1 ("`nirdosha fix` -- byte-offset FixPatch,
 /// fixability classes (auto / assisted / manual)", parity target:
@@ -1237,65 +1297,17 @@ fn cmd_fix(mut args: impl Iterator<Item = String>) -> ExitCode {
 
     let before = run_verify_pipeline(&path);
 
-    let mut applied = Vec::new();
-    if apply {
-        // Collect every `Auto` patch from *every* stage that can carry
-        // one -- `load`/`typecheck`/`ownership`'s own `VerifyDiagnostic`s
-        // (e.g. `fix_unbound_identifier` firing out of `typeck.rs`) as
-        // well as `contracts.obligations` -- not just the latter; see
-        // `AppliedPatch`'s doc comment for the real bug this fixes. Then
-        // apply in *descending* start-byte order -- applying low-to-high
-        // would shift every later patch's own byte offsets out from
-        // under it the moment an earlier one changed the file's length;
-        // high-to-low never does, since nothing after the current
-        // patch's end has been touched yet by the time it's applied.
-        let mut patches: Vec<(String, String, &FixPatch)> = Vec::new();
-        for diag in before.load.errors.iter().chain(before.typecheck.errors.iter()).chain(before.ownership.errors.iter()) {
-            if let Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) = &diag.fix {
-                patches.push((format!("{}:{}", diag.line, diag.col), diag.message.clone(), p));
+    let applied = if apply {
+        match write_auto_patches(&path, &before) {
+            Ok(applied) => applied,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
             }
         }
-        for ob in &before.contracts.obligations {
-            if let Some(Fix { applicability: Applicability::Auto, patch: Some(p), .. }) = &ob.fix {
-                patches.push((ob.fn_name.clone(), ob.status.to_string(), p));
-            }
-        }
-        patches.sort_by(|a, b| b.2.start_byte.cmp(&a.2.start_byte));
-
-        if !patches.is_empty() {
-            match std::fs::read_to_string(&path) {
-                Ok(mut src) => {
-                    for (site, detail, patch) in &patches {
-                        if patch.start_byte > src.len() || patch.end_byte > src.len() || patch.start_byte > patch.end_byte {
-                            // A patch computed against a stale byte range
-                            // (shouldn't happen -- `before` was just read
-                            // from this same file -- but a corrupt/
-                            // concurrently-modified file is a real
-                            // possibility this must not silently
-                            // misapply against) is skipped, not forced.
-                            continue;
-                        }
-                        src.replace_range(patch.start_byte..patch.end_byte, &patch.replacement);
-                        applied.push(AppliedPatch {
-                            site: site.clone(),
-                            detail: detail.clone(),
-                            start_byte: patch.start_byte,
-                            end_byte: patch.end_byte,
-                            replacement: patch.replacement.clone(),
-                        });
-                    }
-                    if let Err(e) = std::fs::write(&path, &src) {
-                        eprintln!("error writing patched file: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("error reading {path} to apply patches: {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-    }
+    } else {
+        Vec::new()
+    };
 
     let after = if apply { Some(run_verify_pipeline(&path)) } else { None };
     let effective_verdict = after.as_ref().map(|v| v.verdict).unwrap_or(before.verdict);
@@ -1354,6 +1366,353 @@ fn cmd_explain(mut args: impl Iterator<Item = String>) -> ExitCode {
             }
         },
     }
+}
+
+/// A `.nir` source file that exists only for the duration of one MCP
+/// tool call -- `run_verify_pipeline`/`write_auto_patches`/
+/// `loader::load_program` all take a filesystem path (import
+/// resolution, `write_auto_patches`'s own read-modify-write, and
+/// `db_connect`-relative paths in the source itself all need a real
+/// file on disk), but an MCP tool call only ever carries source text
+/// inline (`mcp_tools_list`'s own schemas -- every tool takes `source`,
+/// never `path`, the same choice Kōdo's MCP tools make). Rather than
+/// fork the pipeline into a path-based and a source-based variant,
+/// every MCP handler below materializes `source` to one of these and
+/// reuses the exact same, already-tested pipeline `verify`/`fix` run
+/// against a real file. `Drop` removes it unconditionally, not a
+/// manual `remove_file` at the end of each handler, so a long-running
+/// `nirdosha mcp` process serving many calls never accumulates temp
+/// files -- including on an early `?`-return from a handler.
+struct TempNirFile(std::path::PathBuf);
+
+impl TempNirFile {
+    fn write(source: &str) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut p = std::env::temp_dir();
+        p.push(format!("nirdosha_mcp_{}_{n}.nir", std::process::id()));
+        std::fs::write(&p, source).map_err(|e| format!("failed to stage source for verification: {e}"))?;
+        Ok(Self(p))
+    }
+
+    fn path_str(&self) -> &str {
+        self.0.to_str().expect("temp_dir()-rooted path is always valid UTF-8 on every platform this ships for")
+    }
+}
+
+impl Drop for TempNirFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn require_str_arg<'a>(arguments: &'a serde_json::Value, name: &str) -> Result<&'a str, String> {
+    arguments.get(name).and_then(|v| v.as_str()).ok_or_else(|| format!("Missing required parameter '{name}'"))
+}
+
+/// `verify_code` -- runs `run_verify_pipeline` (the exact pipeline
+/// `nirdosha verify`/`nirdosha fix` both run) against inline source and
+/// returns the identical `VerifyVerdict` JSON shape, `source` replaced
+/// with `"<inline>"` since the real value (a temp path) is an
+/// implementation detail no caller should key off of.
+fn mcp_verify_code(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let source = require_str_arg(arguments, "source")?;
+    let temp = TempNirFile::write(source)?;
+    let verdict = run_verify_pipeline(temp.path_str());
+    let mut value = serde_json::to_value(&verdict).expect("VerifyVerdict always serializes");
+    value["source"] = serde_json::json!("<inline>");
+    Ok(value)
+}
+
+/// Baked into the binary at compile time (`include_str!`), the same
+/// "ships inside the binary" posture `STD_CATALOG_JSON` documents for
+/// `emit-catalog` -- `nirdosha.gbnf` is checked into the repo at the
+/// crate root and re-generated by `crates/grammar_export`'s own tests
+/// against `llama-cpp-gbnf`, never hand-edited independently of the
+/// grammar it's exported from.
+const NIRDOSHA_GBNF: &str = include_str!("../nirdosha.gbnf");
+
+/// `get_grammar` -- returns the full LL(1) Nirdosha grammar in GBNF
+/// form (constrained-decoding target for llama.cpp/vLLM-style grammar-
+/// constrained generation). No arguments; the grammar is one fixed
+/// artifact per compiler version, not parameterized per call.
+fn mcp_get_grammar(_arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({ "format": "gbnf", "grammar": NIRDOSHA_GBNF }))
+}
+
+/// `fix` -- same pipeline as `verify_code`, plus `write_auto_patches`
+/// (the exact algorithm `nirdosha fix --apply` uses, shared not
+/// duplicated) when `apply: true`. There's no file for the CLI's own
+/// `--apply` to write back to and hand the caller a path for, so this
+/// returns the patched source text directly in `patched_source`
+/// instead -- the MCP-native equivalent of `--apply` actually rewriting
+/// the file on disk.
+fn mcp_fix(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let source = require_str_arg(arguments, "source")?;
+    let apply = arguments.get("apply").and_then(|v| v.as_bool()).unwrap_or(false);
+    let temp = TempNirFile::write(source)?;
+
+    let before = run_verify_pipeline(temp.path_str());
+    let applied = if apply { write_auto_patches(temp.path_str(), &before)? } else { Vec::new() };
+
+    let mut before_value = serde_json::to_value(&before).expect("VerifyVerdict always serializes");
+    before_value["source"] = serde_json::json!("<inline>");
+    let mut result = serde_json::json!({ "before": before_value, "applied": applied });
+
+    if apply {
+        let patched = std::fs::read_to_string(temp.path_str()).map_err(|e| format!("failed to read patched source back: {e}"))?;
+        let after = run_verify_pipeline(temp.path_str());
+        let mut after_value = serde_json::to_value(&after).expect("VerifyVerdict always serializes");
+        after_value["source"] = serde_json::json!("<inline>");
+        result["after"] = after_value;
+        result["patched_source"] = serde_json::json!(patched);
+    }
+    Ok(result)
+}
+
+/// `describe` -- parses (does not require it to typecheck, the same
+/// "AST of a program that doesn't yet typecheck is still legitimate to
+/// inspect" contract `cmd_emit_ast` already documents) inline source
+/// and returns a curated structural summary via `describe_program`.
+fn mcp_describe(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let source = require_str_arg(arguments, "source")?;
+    let temp = TempNirFile::write(source)?;
+    let (program, _src) = nirdosha::loader::load_program(temp.path_str())?;
+    Ok(describe_program(&program))
+}
+
+/// A curated structural summary of a parsed `Program` -- every fn's
+/// signature (never its body), every struct's fields, every enum's
+/// variants, every top-level `validate` block's contracts, as real
+/// structured JSON (`Ty`/`Expr`/`Requirement`/`NfrSpec`/`Effect` all
+/// derive `Serialize` already -- no need for Kōdo's own `{:?}`-string
+/// shortcut here). Deliberately not the same thing `emit-ast` already
+/// gives: that's the full, span-carrying AST (every expression, every
+/// statement, meant for round-tripping); this is the signature-level
+/// summary an agent actually wants when it asks "what does this file
+/// declare" -- modeled on Kōdo's own `kodo.describe` MCP tool
+/// (functions/types/meta, bodies omitted).
+fn describe_program(program: &nirdosha::ast::Program) -> serde_json::Value {
+    let functions: Vec<serde_json::Value> = program
+        .fns
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "params": f.params.iter().map(|p| serde_json::json!({ "name": p.name, "type": p.ty })).collect::<Vec<_>>(),
+                "return_type": f.ret,
+                "effects": f.declared_effects,
+                "requires": f.requires,
+                "nfr": f.nfr,
+                "exported": f.exported,
+            })
+        })
+        .collect();
+    let structs: Vec<serde_json::Value> = program
+        .structs
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "fields": s.fields.iter().map(|f| serde_json::json!({ "name": f.name, "type": f.ty })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let enums: Vec<serde_json::Value> = program
+        .enums
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "variants": e.variants.iter().map(|v| serde_json::json!({ "name": v.name, "payload": v.payload })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let validates: Vec<serde_json::Value> = program
+        .validates
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "fn_name": v.fn_name,
+                "entries": v.entries.iter().map(|(key, expr)| serde_json::json!({ "key": key, "expr": expr })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "functions": functions, "structs": structs, "enums": enums, "validates": validates })
+}
+
+/// Wraps one tool handler's structured output in the MCP `tools/call`
+/// result shape -- `content[0].text` is the same JSON serialized as
+/// text (the spec's own documented backward-compatibility rule for
+/// `structuredContent`: "a tool that returns structured content SHOULD
+/// also return the serialized JSON in a TextContent block"), and
+/// `isError` stays `false` here unconditionally: a `DISPROVED`/
+/// `UNKNOWN` verdict, or an `Assisted`/`Manual` (unfixable) diagnostic,
+/// is a normal, successful, informative answer to the question asked
+/// -- not a tool failure. `isError: true` is reserved for
+/// `mcp_tools_call` never reaching this function at all (a missing
+/// argument or unknown tool name is a *protocol* error instead, per
+/// the spec's own two-tier error model -- see `mcp_tools_call`).
+fn mcp_tool_ok(structured: serde_json::Value) -> serde_json::Value {
+    let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{}".to_string());
+    serde_json::json!({
+        "content": [ { "type": "text", "text": text } ],
+        "structuredContent": structured,
+        "isError": false,
+    })
+}
+
+/// `tools/list` -- one entry per tool `mcp_tools_call` dispatches to,
+/// `nirdosha-master-plan.md` Part 3 Sprint 1's exact four: `verify_code`,
+/// `get_grammar`, `fix`, `describe` (parity target: Acutis, Imandra,
+/// Kōdo). Every `inputSchema` is plain JSON Schema, per spec.
+fn mcp_tools_list() -> serde_json::Value {
+    serde_json::json!({
+        "tools": [
+            {
+                "name": "verify_code",
+                "title": "Verify Nirdosha source",
+                "description": "Run nirdosha verify's full gate pipeline (load, typecheck, ownership, validate contracts with Z3 proof obligations) against inline .nir source. Returns the same three-valued PROVED/DISPROVED/UNKNOWN verdict JSON `nirdosha verify` prints on stdout.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "source": { "type": "string", "description": "Nirdosha (.nir) source code to verify" } },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "get_grammar",
+                "title": "Get the Nirdosha GBNF grammar",
+                "description": "Returns the full LL(1) Nirdosha grammar in GBNF form, for constrained decoding (llama.cpp/vLLM-style grammar-constrained generation) -- the exact grammar nirdosha.gbnf ships inside the compiler binary.",
+                "inputSchema": { "type": "object", "properties": {} },
+            },
+            {
+                "name": "fix",
+                "title": "Propose or apply automated fixes",
+                "description": "Runs the same pipeline as verify_code, plus a byte-offset FixPatch for any diagnostic that has one, classified auto/assisted/manual. With apply: true, writes every auto-class patch into the source and returns the patched text alongside a re-verified verdict.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": { "type": "string", "description": "Nirdosha (.nir) source code to check and, optionally, patch" },
+                        "apply": { "type": "boolean", "description": "If true, apply every auto-class patch and return patched_source. Defaults to false (report only, nothing patched)." },
+                    },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "describe",
+                "title": "Describe a Nirdosha source file's structure",
+                "description": "Parses the given source (does not require it to typecheck) and returns a curated structural summary: every fn's name/params/return type/declared effects/requires/nfr, every struct's fields, every enum's variants, and every top-level validate block's pre/post contracts.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "source": { "type": "string", "description": "Nirdosha (.nir) source code to describe" } },
+                    "required": ["source"],
+                },
+            },
+        ],
+    })
+}
+
+/// `tools/call` -- dispatches `params.name` to one of the four MCP
+/// handlers above with `params.arguments`. A missing `name`, an
+/// unknown tool name, or a missing required argument are all *protocol*
+/// errors (JSON-RPC `-32602 Invalid params`, matching the phrasing
+/// Kōdo's own `missing_param_error` uses) per the spec's own
+/// distinction between protocol errors ("Unknown tools", "Invalid
+/// arguments") and tool-execution errors (`isError: true` in a
+/// successful result) -- see `mcp_tool_ok`'s doc comment for why every
+/// path that reaches a handler at all comes back `isError: false`.
+fn mcp_tools_call(params: &serde_json::Value) -> Result<serde_json::Value, (i64, String)> {
+    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| (-32602, "Missing required parameter 'name'".to_string()))?;
+    let empty = serde_json::json!({});
+    let arguments = params.get("arguments").unwrap_or(&empty);
+    let outcome = match name {
+        "verify_code" => mcp_verify_code(arguments),
+        "get_grammar" => mcp_get_grammar(arguments),
+        "fix" => mcp_fix(arguments),
+        "describe" => mcp_describe(arguments),
+        other => return Err((-32602, format!("Unknown tool: {other}"))),
+    };
+    outcome.map(mcp_tool_ok).map_err(|message| (-32602, message))
+}
+
+/// Routes one already-parsed JSON-RPC message. Returns `None` for a
+/// notification (`id` absent from the original request) -- per the MCP
+/// stdio transport spec the server must never write a response for
+/// one, `notifications/initialized` above all (sent right after
+/// `initialize`, never expecting an answer; every tool call here is
+/// already independently stateless, so there's no session flag to set
+/// in response to it either).
+fn mcp_dispatch(method: &str, params: &serde_json::Value, id: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let id = id?.clone();
+    let result = match method {
+        "initialize" => Ok(serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "nirdosha", "version": env!("CARGO_PKG_VERSION") },
+        })),
+        "ping" => Ok(serde_json::json!({})),
+        "tools/list" => Ok(mcp_tools_list()),
+        "tools/call" => mcp_tools_call(params),
+        other => Err((-32601, format!("method not found: {other}"))),
+    };
+    Some(match result {
+        Ok(result) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err((code, message)) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+    })
+}
+
+/// Writes one MCP message to `stdout` -- messages are newline-delimited
+/// and **must not** contain an embedded newline (MCP stdio transport
+/// spec), so this is `to_string` (compact), never `to_string_pretty`,
+/// as a correctness requirement, not a style choice.
+fn write_mcp_message(stdout: &mut impl std::io::Write, value: &serde_json::Value) {
+    let _ = writeln!(stdout, "{}", serde_json::to_string(value).expect("an MCP response always serializes"));
+    let _ = stdout.flush();
+}
+
+/// `nirdosha mcp` -- `nirdosha-master-plan.md` Part 3 Sprint 1's MCP
+/// server (parity target: Acutis, Imandra, Kōdo), stdio transport
+/// (JSON-RPC 2.0, newline-delimited -- the transport MCP clients
+/// **SHOULD** support, and the only one that makes sense for a server
+/// an MCP client launches as a subprocess rather than one serving many
+/// remote clients). Reads one JSON-RPC message per line from stdin
+/// until stdin closes (the client's own documented shutdown sequence:
+/// close stdin, wait, `SIGTERM`, `SIGKILL` -- this loop's `for line in
+/// ...lines()` ending is exactly what "stdin closes" looks like from
+/// here), writes at most one response per request to stdout, and
+/// writes nothing at all for a notification. Every tool call
+/// (`mcp_tools_call`) reuses the identical, already-tested `verify`/
+/// `fix` pipeline the CLI commands run -- this is a second transport
+/// for the same logic, not a second implementation of it.
+fn cmd_mcp(_args: impl Iterator<Item = String>) -> ExitCode {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    for line in std::io::BufRead::lines(stdin.lock()) {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let request: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                write_mcp_message(
+                    &mut stdout,
+                    &serde_json::json!({ "jsonrpc": "2.0", "id": serde_json::Value::Null, "error": { "code": -32700, "message": format!("parse error: {e}") } }),
+                );
+                continue;
+            }
+        };
+        let id = request.get("id");
+        let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let empty_params = serde_json::Value::Null;
+        let params = request.get("params").unwrap_or(&empty_params);
+        if let Some(response) = mcp_dispatch(method, params, id) {
+            write_mcp_message(&mut stdout, &response);
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// docs/goal.md row 9: hands back the parsed `Program` as JSON, the same

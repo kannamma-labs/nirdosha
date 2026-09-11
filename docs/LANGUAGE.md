@@ -33,6 +33,7 @@ nirdosha build <file.nir> -o <out> [--opt0]   # compile to a native binary (LLVM
 nirdosha verify <file.nir>            # 3-valued JSON verdict (PROVED/DISPROVED/UNKNOWN) + exit 0/1/2, no LLVM/clang needed (see below)
 nirdosha fix <file.nir> [--apply]     # same checks as verify, plus a byte-offset FixPatch per fixable diagnostic (see below)
 nirdosha explain [<code>]             # the machine-learnable error index -- NIR0001..NIR0013 (see below)
+nirdosha mcp                          # an MCP server on stdio: verify_code/get_grammar/fix/describe (see below)
 nirdosha emit-llvm <file.nir>         # print the generated LLVM IR
 nirdosha emit-ast <file.nir>          # print the parsed AST as JSON
 nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]
@@ -118,6 +119,32 @@ nirdosha gen-crud <plan.json> --db <literal> [-o out.nir]   # deterministic stru
   null` — the registry entry exists and is real, but nothing auto-tags
   it onto a live diagnostic yet (`docs/PUBLIC_ROADMAP.md`'s `[PARTIAL]`
   entry names exactly which).
+- **`mcp`** (2026-09, `nirdosha-master-plan.md` Part 3 Sprint 1, parity
+  target: Acutis, Imandra, Kōdo) — an MCP server on the stdio transport
+  (JSON-RPC 2.0, newline-delimited, per the MCP spec's own stdio
+  framing — never Content-Length-framed like LSP), meant to be launched
+  by an MCP client's own config (Claude Code/Desktop's `mcpServers`,
+  etc.), not run interactively. Exposes four tools, every one taking
+  inline `source` text rather than a filesystem path (an agent has the
+  code in-context, not necessarily written to disk yet): `verify_code`
+  (the identical `verify` pipeline and JSON verdict shape, `source`
+  replaced with `"<inline>"`), `get_grammar` (the real `nirdosha.gbnf`
+  the binary ships, for constrained decoding), `fix` (the identical
+  `fix` pipeline; `apply: true` returns a `patched_source` string
+  instead of writing a file, since there's no file to write back to),
+  and `describe` (a curated structural summary — every fn's signature,
+  every struct's fields, every enum's variants, every top-level
+  `validate` block's contracts — parse-only, the same "doesn't have to
+  typecheck" contract `emit-ast` already has, and deliberately *not*
+  the full span-carrying AST `emit-ast` gives). Every tool reuses the
+  exact pipeline the CLI commands run — this is a second transport for
+  the same logic, never a second implementation of it. A missing
+  argument or an unknown tool name is a JSON-RPC protocol error
+  (`-32602`); a `DISPROVED`/`UNKNOWN` verdict or an `Assisted`/`Manual`
+  (unfixable) diagnostic is a normal, successful tool result
+  (`isError: false`) — the verdict itself carries the outcome, the same
+  distinction the MCP spec draws between protocol errors and
+  tool-execution errors.
 
 ---
 
