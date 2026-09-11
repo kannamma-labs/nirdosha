@@ -1,0 +1,16 @@
+// Canon: adding a transaction fee to a payment amount must never
+// produce a total less than the original amount — a sign error in fee
+// arithmetic (subtracting instead of adding, or a negative fee)
+// silently undercharges every transaction it touches.
+fn total_with_fee_cents(amount_cents: i64, fee_cents: i64) -> i64 {
+    return amount_cents + fee_cents
+}
+
+validate total_with_fee_cents {
+    pre: amount_cents >= 0 && fee_cents >= 0
+    post: result >= amount_cents
+}
+
+fn main() {
+    print(total_with_fee_cents(10000, 250))
+}

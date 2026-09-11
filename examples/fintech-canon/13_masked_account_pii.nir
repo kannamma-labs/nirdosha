@@ -1,0 +1,55 @@
+// Canon: a customer record returned from a lookup masks its sensitive
+// financial PII (account number) unless the caller separately proves
+// a compliance role — the same real, compiled `check_role`/field-
+// masking mechanism `examples/features/50_field_masking_and_check_role.nir`
+// demonstrates in full, trimmed here to the one pattern most fintech
+// APIs need: "who can call this" and "what does a successful caller
+// see back" are two independent gates, neither expressible as a
+// runtime `if` a caller (or an attacker) could argue past.
+struct Text {
+    value: str,
+}
+
+struct CustomerRecord {
+    display_name: str,
+    account_number: str requires(role: "compliance"),
+}
+
+fn lookup_customer(caller: RoleView, display_name: Text, account_number: Text) -> CustomerRecord
+    requires(role: "support_agent")
+{
+    return CustomerRecord(display_name.value, account_number.value)
+}
+
+fn main() {
+    // A support agent who is *also* compliance-cleared sees the real
+    // account number.
+    let compliance_identity: VerifiedIdentity = VerifiedIdentity("alice", "https://idp.example.com", "support-app", 0, 0, "support_agent,compliance")
+    let compliance_view: CustomerRecord = match check_role(compliance_identity, "support_agent") {
+        Err(e) => CustomerRecord("", ""),
+        Ok(support_proof) => match acquire lookup_customer(support_proof) {
+            Err(msg) => CustomerRecord("denied", ""),
+            Ok(f) => match check_role(compliance_identity, "compliance") {
+                Err(e) => f(support_proof, Text("Dana Support"), Text("ACC-000123456")),
+                Ok(compliance_proof) => f(compliance_proof, Text("Dana Support"), Text("ACC-000123456")),
+            },
+        },
+    }
+    print(compliance_view.account_number) // ACC-000123456 -- caller proved "compliance"
+
+    // An ordinary support agent (not compliance-cleared) can still look
+    // the customer up -- the function-level gate only requires
+    // "support_agent" -- but the account number masks to "" on the way
+    // out, because the *field*-level gate is a separate proof this
+    // caller never obtained.
+    let plain_identity: VerifiedIdentity = VerifiedIdentity("bob", "https://idp.example.com", "support-app", 0, 0, "support_agent")
+    let plain_view: CustomerRecord = match check_role(plain_identity, "support_agent") {
+        Err(e) => CustomerRecord("", ""),
+        Ok(support_proof) => match acquire lookup_customer(support_proof) {
+            Err(msg) => CustomerRecord("denied", ""),
+            Ok(f) => f(support_proof, Text("Dana Support"), Text("ACC-000123456")),
+        },
+    }
+    print(plain_view.account_number) // "" -- masked
+    print(plain_view.display_name)   // Dana Support -- unmasked fields still pass through
+}

@@ -45,6 +45,8 @@ And where a guarantee has a disclosed edge, this repo says so instead of letting
 
 Same discipline applied to the benchmark harness: [`crates/bench/RESULTS.md`](./crates/bench/RESULTS.md) runs 3 real generate-then-self-repair-then-verify tasks against a live model, scored by `nirdosha certify`'s own JSON verdict — one genuinely `PROVED` by Z3, one blocked by a real, disclosed Tier-1 modeling gap, one where the self-repair loop itself fell short. It is explicitly *not* the full Nirdosha-vs-TypeScript-vs-Rust-vs-LLM+XGrammar-vs-LLM+Imandra comparison the roadmap calls for — see that file's own "what this is not" section for exactly what's missing and why.
 
+Want to see the guarantees applied to real financial code instead of toy examples? [`examples/fintech-canon/`](./examples/fintech-canon/) is 13 small `.nir` files — payment fees, refunds, ledger entries, overdraft limits, credit limits, and PII field masking — 12 with a real Z3-proved `validate` contract (output captured in [`RESULTS.md`](./examples/fintech-canon/RESULTS.md), including a real bug one of them had on its first draft, caught by `nirdosha certify` and fixed, not quietly edited away).
+
 ## Why you won't be waiting on us
 
 > 💡 **[A Language Is Only as Good as Its Ecosystem](https://github.com/kannamma-labs/nirdosha/wiki/A-Language-Is-Only-as-Good-as-Its-Ecosystem)** — every capability a compiled `.nir` binary has is an ordinary Rust crate underneath, so Nirdosha's capability ceiling is Rust's. Databases, TLS, JWT, Redis — reachable by design, not by waiting on maintainers. *"Good artists copy, great artists steal."*

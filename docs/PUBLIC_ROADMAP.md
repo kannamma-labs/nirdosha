@@ -459,6 +459,27 @@ runs behind it.
   a stale attestation correctly downgrading `trust_summary` without
   failing the report outright, and an agent attestation never
   satisfying a human-reviewed rollup.
+- [DONE] Fintech canon v1 (2026-09, master plan Part 3 Dec 2026, "12-15
+  `validate` templates (payments, ledger, masking)", parity target:
+  C Proof) — `examples/fintech-canon/`: 13 real files, 12 with a
+  genuine Z3-proved `validate` contract (`nirdosha certify` output
+  captured for every one in `examples/fintech-canon/RESULTS.md`, not
+  hand-written), plus one demonstrating the real, compiled field-
+  masking mechanism (`requires(role: ...)` on a struct field) for
+  financial PII, trimmed from `examples/features/50_field_masking_and_check_role.nir`'s
+  full demonstration. Six payments templates (fee/refund/late-fee/
+  minimum-payment/discount/daily-limit), six ledger templates
+  (nonnegative-balance/overdraft/interest-accrual/ledger-entry/
+  withdrawal/credit-limit), one masking template. A real miss surfaced
+  and fixed while writing these, kept in `RESULTS.md` rather than
+  quietly edited away: `02_overdraft_within_limit.nir`'s first draft
+  computed its clamped floor from the current balance instead of a
+  fixed value, and `nirdosha certify` caught it with a real
+  counterexample before it landed. Tests:
+  `crates/compiler/tests/fintech_canon.rs` — regression coverage
+  against the real, checked-in files so a future compiler change that
+  silently regresses Tier-1's modeling of any of these patterns fails
+  a test, not just goes unnoticed in a markdown file.
 
 ---
 

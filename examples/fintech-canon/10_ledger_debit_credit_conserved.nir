@@ -1,0 +1,16 @@
+// Canon: posting a ledger entry (a debit and a credit against the same
+// balance) must never leave the account in a state the entry's own
+// preconditions didn't already allow for — the double-entry
+// bookkeeping invariant, checked at the single-account level.
+fn post_ledger_entry_cents(balance_cents: i64, debit_cents: i64, credit_cents: i64) -> i64 {
+    return balance_cents - debit_cents + credit_cents
+}
+
+validate post_ledger_entry_cents {
+    pre: balance_cents >= 0 && debit_cents >= 0 && credit_cents >= 0 && debit_cents <= balance_cents + credit_cents
+    post: result >= 0
+}
+
+fn main() {
+    print(post_ledger_entry_cents(10000, 3000, 500))
+}

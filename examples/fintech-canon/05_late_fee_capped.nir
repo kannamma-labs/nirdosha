@@ -1,0 +1,18 @@
+// Canon: a late fee must never exceed a regulatory/policy cap,
+// regardless of how the base fee was computed upstream.
+fn apply_late_fee_cap(base_fee_cents: i64, cap_cents: i64) -> i64 {
+    return if base_fee_cents > cap_cents {
+        cap_cents
+    } else {
+        base_fee_cents
+    }
+}
+
+validate apply_late_fee_cap {
+    pre: base_fee_cents >= 0 && cap_cents >= 0
+    post: result <= cap_cents
+}
+
+fn main() {
+    print(apply_late_fee_cap(9000, 2500))
+}

@@ -1,0 +1,15 @@
+// Canon: a refund can never exceed what was originally charged — the
+// classic "refund more than was paid" bug that turns a support ticket
+// into a real financial loss.
+fn apply_refund_cents(original_cents: i64, refund_cents: i64) -> i64 {
+    return original_cents - refund_cents
+}
+
+validate apply_refund_cents {
+    pre: original_cents >= 0 && refund_cents >= 0 && refund_cents <= original_cents
+    post: result >= 0
+}
+
+fn main() {
+    print(apply_refund_cents(5000, 2000))
+}

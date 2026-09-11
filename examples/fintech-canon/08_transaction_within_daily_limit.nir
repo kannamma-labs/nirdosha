@@ -1,0 +1,20 @@
+// Canon: a card/account daily spending limit must be enforced against
+// what's already been spent today, not just the incoming transaction
+// amount in isolation.
+fn accepted_transaction_cents(amount_cents: i64, spent_today_cents: i64, daily_limit_cents: i64) -> i64 {
+    let remaining_cents: i64 = daily_limit_cents - spent_today_cents
+    return if amount_cents > remaining_cents {
+        remaining_cents
+    } else {
+        amount_cents
+    }
+}
+
+validate accepted_transaction_cents {
+    pre: amount_cents >= 0 && spent_today_cents >= 0 && daily_limit_cents >= spent_today_cents
+    post: result >= 0 && result <= amount_cents && result <= daily_limit_cents - spent_today_cents
+}
+
+fn main() {
+    print(accepted_transaction_cents(30000, 45000, 50000))
+}

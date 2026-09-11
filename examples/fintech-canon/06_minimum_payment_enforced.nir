@@ -1,0 +1,18 @@
+// Canon: a payment processor that enforces a minimum payment amount
+// must never accept (or silently record) less than that minimum.
+fn accepted_payment_cents(requested_cents: i64, minimum_cents: i64) -> i64 {
+    return if requested_cents < minimum_cents {
+        minimum_cents
+    } else {
+        requested_cents
+    }
+}
+
+validate accepted_payment_cents {
+    pre: requested_cents >= 0 && minimum_cents >= 0
+    post: result >= minimum_cents
+}
+
+fn main() {
+    print(accepted_payment_cents(500, 1000))
+}

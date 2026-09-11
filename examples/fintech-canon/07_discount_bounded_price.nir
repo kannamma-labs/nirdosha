@@ -1,0 +1,19 @@
+// Canon: a discount can never make a price negative, and the
+// discounted price can never exceed the original — both directions of
+// the same pricing-engine bug class.
+fn discounted_price_cents(price_cents: i64, discount_cents: i64) -> i64 {
+    return if discount_cents > price_cents {
+        0
+    } else {
+        price_cents - discount_cents
+    }
+}
+
+validate discounted_price_cents {
+    pre: price_cents >= 0 && discount_cents >= 0
+    post: result >= 0 && result <= price_cents
+}
+
+fn main() {
+    print(discounted_price_cents(2000, 2500))
+}

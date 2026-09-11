@@ -1,0 +1,19 @@
+// Canon: a withdrawal (no overdraft) must never pay out more than the
+// account actually holds, and must never leave the balance negative --
+// two directions of the same guarantee, both checked.
+fn withdraw_cents(balance_cents: i64, amount_cents: i64) -> i64 {
+    return if amount_cents > balance_cents {
+        balance_cents
+    } else {
+        balance_cents - amount_cents
+    }
+}
+
+validate withdraw_cents {
+    pre: balance_cents >= 0 && amount_cents >= 0
+    post: result >= 0 && result <= balance_cents
+}
+
+fn main() {
+    print(withdraw_cents(4000, 9000))
+}

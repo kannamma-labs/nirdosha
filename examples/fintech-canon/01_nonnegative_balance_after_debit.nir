@@ -1,0 +1,22 @@
+// Canon: a wallet/account debit must never take a balance negative.
+// The naive `balance - amount` is the textbook version of this bug —
+// see extensions/nirdosha-speckit/docs/examples/wallet-debit.md for a
+// real Z3 counterexample against exactly that naive form. This
+// template is the corrected shape: clamp to zero instead of going
+// negative.
+fn debit_wallet(balance_cents: i64, amount_cents: i64) -> i64 {
+    return if amount_cents > balance_cents {
+        0
+    } else {
+        balance_cents - amount_cents
+    }
+}
+
+validate debit_wallet {
+    pre: balance_cents >= 0 && amount_cents >= 0
+    post: result >= 0
+}
+
+fn main() {
+    print(debit_wallet(1000, 300))
+}

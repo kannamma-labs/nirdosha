@@ -1,0 +1,19 @@
+// Canon: a charge against a credit line must be rejected (represented
+// here as clamped to the limit) rather than silently pushing the
+// balance past the approved credit limit.
+fn charge_within_credit_limit_cents(balance_cents: i64, charge_cents: i64, credit_limit_cents: i64) -> i64 {
+    return if balance_cents + charge_cents > credit_limit_cents {
+        credit_limit_cents
+    } else {
+        balance_cents + charge_cents
+    }
+}
+
+validate charge_within_credit_limit_cents {
+    pre: balance_cents >= 0 && charge_cents >= 0 && balance_cents <= credit_limit_cents
+    post: result <= credit_limit_cents
+}
+
+fn main() {
+    print(charge_within_credit_limit_cents(9000, 5000, 10000))
+}
