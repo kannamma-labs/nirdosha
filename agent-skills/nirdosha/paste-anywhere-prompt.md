@@ -74,7 +74,12 @@ generate *valid* Nirdosha on the first try.
    continuation of the previous one (this bites unary `-` and calls
    most often).
 5. **No `for` loops, no closures/lambdas, no tuples.** Use `while` for
-   iteration. Use a real `struct`/`enum` instead of a tuple. Plain
+   iteration. Use a real `struct`/`enum` instead of a tuple — and the
+   ban is *literal*: `Result((i64, str), E)` and `Option((i64, str))`
+   nest a tuple inside a generic and still fail to parse
+   (`expected a type, found "("`). If a function must return more
+   than one value, declare a `struct` to carry them, or return `json`
+   (which has no static shape at all). Plain
    first-class functions exist (`let f: fn(i64) -> i64 = double`) but
    capture nothing — there's no enclosing-scope capture at all.
 6. **No implicit conversions, ever**, between two already-typed values
@@ -840,10 +845,11 @@ fn main() requires(public) {
 Naming `list_<struct>`/`create_<struct>`/`update_<struct>`/
 `delete_<struct>` functions like this is also what `nirdosha emit-ui`
 uses to auto-generate a full CRUD web UI with zero extra syntax (a
-static HTML file — there is no `nirdosha serve`/compiled serving mode
-anymore, the interpreter it depended on was deleted) — see the `screen`/`dashboard` DSL in `docs/LANGUAGE.md` §11 if
-you need to customize that generated UI (custom labels, field
-validation, role-gated visibility, dashboard tiles/charts).
+static HTML file), and what `nirdosha build file.nir --serve` renders as
+live, authenticated pages from a real compiled HTTP server — see
+"Serving it on the web" below. The `screen`/`dashboard` DSL in
+`docs/LANGUAGE.md` §11 customizes that generated UI (custom labels,
+field validation, role-gated visibility, dashboard tiles/charts).
 
 **This naming match has to be exact, and getting it wrong is silent —
 compiles fine, runs fine, the struct just never gets a screen at all.**
@@ -880,17 +886,152 @@ from the nav until a specific role can act on it, give it a real
 `create_<struct>`.
 
 Multi-step approval / state-machine flows (KYC onboarding, purchase
-approvals, maker-checker) have their own construct: `workflow Name {
-data { field: Ty, ... } state Name { on_entry { ... } on Event ->
-Target } ... }` — durable, named states with `on <Event> -> <Target>`
-transitions, desugared into ordinary `fn`s (`start_<name>`,
-`advance_<name>`, etc.), so it needs no new runtime. `state { owner:
-role("...") }` names who may fire that state's outgoing events —
-checked live, per instance, not statically — and `nirdosha emit-ui`
-generates a "Workflows" queue screen from it automatically
-(each role sees only what's waiting on them, plus a "my requests" tab
-for whoever started an instance and an audit-trail "history" view), no
-extra syntax needed. See `docs/WORKFLOW.md` for the full construct.
+approvals, maker-checker) have their own construct, `workflow Name { ... }`,
+desugared into ordinary fns right after parsing — no new runtime.
+For `nirdosha build` the `data` block must stay **empty** (`data {}`) —
+a non-empty data block is the one part of this construct the compiled
+backend rejects by name; if instances must remember something, keep
+it in your own struct (keyed by `instance_id`), not in `data`.
+
+```nirdosha
+fn log_opened(instance_id: i64) -> unit {
+    print("approval", instance_id, "pending")
+}
+
+workflow Approval {
+    data {}
+    state Pending {
+        sla_seconds: 86400
+        on_entry { log_opened(instance_id) }
+        on Approve -> Approved
+        on Reject -> Rejected
+    }
+    state Approved terminal { }
+    state Rejected terminal { }
+}
+```
+
+Each state holds `on <Event> -> <Target>` transitions, an optional
+`sla_seconds: N` SLA, an optional `owner: role("...")` gate (checked
+live, per instance — an identity lacking the role gets
+`Err(NotStateOwner)`, never a trap), and `on_entry { ... }` actions —
+which may only use `instance_id` and call other fns; `data.<field>`
+access doesn't exist in the compiled layer.
+
+The desugaring synthesizes, per workflow `Approval`:
+- an `ApprovalEvent` enum — one zero-payload variant per event
+  (`Approve()` / `Reject()` — still need their `()`), plus a
+  `WorkflowActionError` error enum you match on;
+- `start_approval(identity: Option(VerifiedIdentity), data: ApprovalData) -> Result(i64, WorkflowActionError)` — `data` is the
+  synthesized empty struct, constructed `ApprovalData()`; returns the
+  new instance id. Pass `Some(identity)` when any state has an
+  `owner:` gate, `None()` otherwise;
+- `advance_approval(identity: VerifiedIdentity, instance_id: i64, event: ApprovalEvent, payload: json) -> Result(bool, WorkflowActionError)` —
+  `true` = advanced; `Err(NotStateOwner)` on an `owner:` mismatch.
+  `payload` is a plain `json` value (an empty object literal works
+  when you carry nothing extra);
+- `list_approval_overdue() -> json` — instances whose state's
+  `sla_seconds` has elapsed. Nothing fires on its own: poll it from
+  `fn main()` or an exposed fn and `advance_approval` what it reports;
+- `list_approval_submitted_by_me(identity: VerifiedIdentity) -> json`.
+
+`nirdosha emit-ui` and the served pages render a "Workflows" queue
+screen from a workflow automatically (each role sees only what's
+waiting on them, plus a "my requests" tab and an audit-trail
+"history" view), no extra syntax needed. See `docs/WORKFLOW.md` for
+the full construct.
+
+## Real transactions (`transact`)
+
+Two-sided settlement flows have a dedicated block form. The whole
+block is an expression of type `bool` — `true` means every step ran
+and committed; `false` means it compensated (rolled back) and
+returned safely. Each step is `name: <one expression>` on its own
+line — no braces, no commas, no trailing separators — and later
+steps read earlier steps' bindings (`network`, `verify`, ...) by
+name:
+
+```nirdosha
+fn db_up() -> bool { return true }
+fn call_processor(txn_id: str, amount: i64) -> i64 { return amount }
+fn resp_ok(resp: i64) -> bool { return resp > 0 }
+fn commit_db(amount: i64) -> i64 { print("committing", amount); return amount }
+fn refund(amount: i64) -> i64 { print("compensating", amount); return amount }
+fn write_log(amount: i64, ok: bool) -> unit { print("settled", amount, ok) }
+
+fn settle(amount: i64) -> bool {
+    return transact {
+        precheck:   db_up()
+        network:    call_processor(txn_id, amount)
+        verify:     resp_ok(network)
+        commit:     commit_db(amount)
+        compensate: refund(amount)
+        log:        write_log(amount, verify)
+    }
+}
+```
+
+`txn_id` is a unique id the desugaring provides (safe-to-replay
+deduplication); `precheck:`/`compensate:`/`log:` are optional —
+`network:`/`verify:`/`commit:` are the minimum shape. The compiled
+backend also keeps a durability log and replays incomplete
+transactions after a crash, so the same `network:` call may run
+twice across a restart — build downstream effects to be idempotent
+on `txn_id`.
+
+## Serving it on the web
+
+`nirdosha build file.nir --serve -o app` (then run `./app`) compiles
+the *same* program into a real HTTP server: the naming-convention
+pages render live under `/`, and each `expose`d fn becomes one
+authenticated route. One `serve { ... }` block per program, `expose`
+followed by a comma-separated fn-name list:
+
+```nirdosha
+serve {
+    expose list_payment_request, stat_open_approval_count, approve_payment
+}
+```
+
+Three rules are enforced for you, at the route boundary:
+- an exposed fn named `create_...`/`update_...`/`delete_...` must
+  carry `requires(role: ...)` (or explicit `public`) or the program
+  doesn't typecheck — mutating routes are deny-by-default;
+- every exposed fn's `requires(...)` is checked against the signed-in
+  identity before the call, using the same kernels `acquire` uses;
+- any `VerifiedIdentity` parameter is filled from the signed-in
+  identity itself, never from the request body — so
+  `fn get_landing_page(identity: VerifiedIdentity, user_id: i64) -> json`
+  answers each signed-in user with that user's own identity. That is
+  how per-user pages are built.
+
+With no IdP configured the server runs demo mode: the sign-in page
+lets you declare any subject + roles and mints a real,
+signature-verified token for them — per-process ephemeral key, so a
+restart invalidates every demo token. Production mode passes a real
+IdP's `--jwks-file`/`--issuer`/`--audience` instead; the verification
+path is the same either way.
+
+`screen <Struct> { ... }` blocks are the optional cosmetic layer over
+the auto-generated pages — a friendlier title, relabeled or
+validated fields, an extra action button:
+
+```nirdosha
+screen PaymentRequest {
+    title: "Payment Requests"
+    field amount_cents {
+        label: "Amount (cents)"
+    }
+    action "Approve Selected" -> approve_payment {
+        confirm: "Approve this payment?"
+    }
+}
+```
+
+`screen <Struct>` must name a real struct, `field <f>` a real field
+of it, and an action's `->` target a real fn — typecheck enforces
+all three. A struct with no screen block gets the default page
+unchanged.
 
 ## How to verify what you wrote
 
@@ -919,11 +1060,17 @@ interpreter, and there is no fallback for it (the panic-on-
 `DuplicateConstructor` gap this section used to warn about was specific
 to that deleted flag, and no longer applies to anything reachable).
 `nirdosha build` only compiles what `codegen.rs::check_supported`
-accepts — `db`/`json`/`mq`/`transact`/`sandbox` and most Row 12 identity
-builtins (`oidc_validate_token`, `extract_claim`, ...) aren't in that
-set yet, so a program using any of them will fail `build`/`emit-llvm`
-with a named "unsupported" reason (`docs/LANGUAGE.md` §10's
-compiled-vs-not table) — that's not a bug to work around, it's today's
+accepts. That compiled set now includes `db`, `json`, `transact`,
+`tcp`, the Row 12 identity builtins (`oidc_validate_token`,
+`extract_claim`, ...) — and `requires(role/claim: ...)`/`acquire`/
+`check_role`, workflow state machines (empty `data {}` only), and
+`serve { expose ... }` blocks all compile and run for real. What still
+does *not* build is named in `docs/LANGUAGE.md` §10's live
+compiled-vs-not table — `dec128` is the one construct in this prompt's
+working set: a program using it (or any other Row the table marks no)
+will fail `build`/`emit-llvm`
+with a named "unsupported" reason — that's not a bug to work around,
+it's today's
 real, disclosed boundary of what actually runs. `requires(role/claim:
 ...)`/`acquire`/`check_role` **do** compile and run for real.
 
@@ -938,7 +1085,9 @@ A `type error: ...`/`ownership error: ...` line (from `emit-ui`) or an
 `unsupported: ...` line (from `build`/`emit-llvm`) names the exact rule
 violated — read it and fix the named issue rather than guessing. If you
 don't have shell access (a plain chat interface), self-check your
-output line-by-line against the 15 rules above before presenting it,
+output line-by-line against the numbered rules above — including the
+workflow/`transact`/`serve` recipes, which are exact spellings the
+compiler accepts, not paraphrases — before presenting it,
 and say plainly that it hasn't been run through the real compiler.
 
 ## Where to go deeper
