@@ -93,15 +93,27 @@ any form today; added 2026-09, see the callout just below).
   (`auto`/`assisted`/`manual`, `main.rs`'s `Applicability` doc comment),
   `--apply` writes every `Auto` patch to disk (highest byte offset
   first, so earlier patches' ranges never shift under a later one) and
-  re-verifies afterward. Parity target: Kōdo. v1's one real fixability
-  analysis: unknown-identifier typo correction by edit distance
-  (`fix_unbound_identifier`) against names in scope — an unambiguous
-  single closest candidate is `auto`, a tie is `assisted` (names both,
-  picks neither), nothing close enough is `manual`. `[PARTIAL]` because
-  every other diagnostic kind (parse errors, ownership violations,
-  counterexamples, unsupported obligations) still reports `fix: null`,
-  honestly, rather than a fabricated `manual` implying analysis that
-  hasn't been built yet. Tests:
+  re-verifies afterward. Parity target: Kōdo. Two real fixability
+  analyses now, both built on the same edit-distance technique
+  (`fix_unbound_identifier`) against names actually in scope — an
+  unambiguous single closest candidate is `auto`, a tie is `assisted`
+  (names both, picks neither), nothing close enough is `manual`:
+  unknown-identifier typos (`TypeErrorKind::UnknownVar`), and (2026-09)
+  `validate <fn_name> { ... }` targeting a misspelled function name
+  (`TypeErrorKind::ValidateFnNotFound`, against `program.fns`' real
+  names) — `ValidateDecl` now carries the target identifier's own
+  `fn_name_span`, not just the `validate` keyword's, so the patch lands
+  on the right byte range. **Investigated and explicitly rejected**: a
+  mechanical "insert `.clone()`" fix for ownership's `UseAfterMove` —
+  this language's `box` has no `.clone()`/copy operation at all
+  (deliberately affine, unlike Rust's `Box`), so there's no
+  semantics-preserving mechanical patch to offer; `fix: null` stays the
+  honest answer there, not a fabricated one. `[PARTIAL]` because parse
+  errors and every other diagnostic kind (ownership violations,
+  counterexamples, unsupported obligations) still report `fix: null`,
+  honestly — parse-error fixability specifically needs
+  `loader::load_program`/`ParseError` widened to carry structured spans
+  first, a real refactor, not a shortcut skipped here. Tests:
   `crates/compiler/tests/fix_command.rs` (CLI-level, including a
   regression test for a real bug caught by hand-running this end to
   end: an earlier revision's `--apply` only scanned
@@ -115,15 +127,25 @@ any form today; added 2026-09, see the callout just below).
   target: Kōdo, Midspiral. Modeled on `rustc --explain`'s real
   precedent (a curated subset of diagnostics get long-form docs, most
   don't) rather than a mechanical dump of every internal error variant.
-  `[PARTIAL]` because only three diagnostic sites auto-attach a `code`
+  `[PARTIAL]` because only six diagnostic sites auto-attach a `code`
   to `verify`/`fix`'s own JSON output today — `NIR0002` (`str` in a
   `fn` signature), `NIR0012` (reserved word as identifier, recovered
   from `loader::load_program`'s formatted error string via a narrowly-
   scoped substring match, since `ParseError` doesn't carry a structured
-  code field yet), `NIR0013` (unbound identifier) — every other
-  registry entry is real, browsable reference material
-  (`nirdosha explain NIR0009` works today) that nothing auto-tags onto
-  a live diagnostic yet. Tests: `crates/compiler/tests/explain_command.rs`.
+  code field yet), `NIR0013` (unbound identifier), and, 2026-09:
+  `NIR0001` (a bare enum variant name with no `(...)` — `UnknownVar`
+  checked against the program's own declared variant names before
+  falling through to `NIR0013`'s typo path), `NIR0006` (`TypeMismatch`
+  narrowed to the numeric-vs-numeric case — two already-typed values
+  combined without a conversion), `NIR0008` (`MatchArmMustBeVariant`/
+  `NonExhaustiveMatch` — a wildcard arm on an enum match, or a variant
+  left uncovered, the two ways to violate "match is exhaustive, no
+  wildcard for variants"). The remaining six codes (`NIR0003`-`0005`,
+  `0007`, `0009`-`0011`) stay real, browsable reference material only
+  (`nirdosha explain NIR0009` works today) — mostly parse-side
+  diagnostics, blocked on the same `ParseError`-widening `fix`'s own
+  parse-error gap needs (see the `fix` entry above), not attempted here.
+  Tests: `crates/compiler/tests/explain_command.rs`.
 - [DONE] `nirdosha mcp` (2026-09, master plan Part 3 Sprint 1) — an MCP
   server on the stdio transport (JSON-RPC 2.0, newline-delimited),
   parity target: Acutis, Imandra, Kōdo. Four tools, all `source`-based
@@ -741,17 +763,21 @@ identity section under "Shipped" above and B1/B2/B3/B5/B8 below)
   cargo-dependency.md`) that can depend on crates.io crates — the
   actual, previously-invisible reason `dec128` stayed interpreter-only
   this long: `rust_decimal` was simply unreachable from the old build.
-- [PARTIAL] `dec128` — `dec_from_i64`/`dec_to_str`/`dec_round`/
+- [DONE] `dec128` (2026-09) — `dec_from_i64`/`dec_to_str`/`dec_round`/
   `dec_scale`, `+`/`-`/`*`/`/`, and all six comparisons compile to real
   `rust_decimal`-backed native code (`nir_dec128_*` kernels), verified
   against the interpreter byte for byte, including the division-by-zero
-  trap and a `dec128` field inside a real `struct`. Only `dec_from_str`
-  remains — its `.nir`-visible return type is `Result(dec128, str)`,
-  and no existing compiled builtin actually constructs a real
-  `Result(_, _)` enum value as its return yet (`inv`/`solve`, this
-  codebase's other fallible builtins, present failure a different way)
-  — a real, deliberately deferred design question, not a shortcut;
-  cleanly rejected in the meantime.
+  trap and a `dec128` field inside a real `struct`. `dec_from_str` now
+  closes the set: its `.nir`-visible return type is `Result(dec128,
+  str)`, built via `emit_result_merge` — the same generic tag-then-
+  payload convention every `db`/`json` builtin already established, not
+  a new one. `nir_dec128_from_str` now reports a real `Err` message on a
+  malformed string via the standard `NirStrOut` out-param, not a silent
+  zero. Verified end to end (not just typechecked): `nirdosha build`
+  against `examples/features/11_decimal_dec128.nir`, unmodified, plus
+  `crates/compiler/tests/codegen.rs`'s
+  `dec_from_str_parses_a_well_formed_string_into_a_real_ok_dec128`/
+  `dec_from_str_reports_a_real_err_message_for_a_malformed_string`.
 - `[DONE]` **B1. `transact` codegen** (2026-09) — Layer 1 real:
   `precheck?/network/verify/commit/compensate?/log?`, a real `bool`
   result, `examples/features/36_transact.nir` unmodified and verified.
@@ -787,9 +813,21 @@ identity section under "Shipped" above and B1/B2/B3/B5/B8 below)
   landed as planned. Postgres landed as a real 2026-09 follow-up too —
   pooled (`kernel::pool::PoolRegistry`), vendored-TLS (`postgres`/
   `postgres-native-tls`, verify-by-default off-`localhost`,
-  `docs/adr/0005`). Named gaps still open: a zero-payload `enum` bind
-  value not yet compiled; `BLOB` columns represented as JSON `null` (no
-  `bytes` type to carry them).
+  `docs/adr/0005`). A zero-payload `enum` bind value now compiles too
+  (2026-09) — `typeck::check_db_bind_ty` accepts it (any variant
+  carrying a payload is a clean compile-time rejection instead, closing
+  a real, previously-unchecked miscompiled-IR risk this same check found
+  — bind arguments had *no* type restriction before this), binding as
+  the enum's plain `i64` discriminant (`emit_db_binds`'s new branch);
+  verified against a real SQLite column, not just typechecked
+  (`crates/compiler/tests/codegen.rs`:
+  `zero_payload_enum_bind_value_round_trips_through_a_real_sqlite_column`).
+  One named gap still open, deliberately not attempted alongside the
+  above: `BLOB` columns represented as JSON `null` — blocked on Nirdosha
+  having no `bytes`/`blob` first-class type at all (the same undesigned-
+  type dependency the file/attachment roadmap entry names), a
+  materially bigger, separate design question from a bind-value
+  encoding fix.
 - [DONE] **B8. Compiled `serve` mode** (2026-09) — this was never
   actually gated on the rest of Track B (that was a sequencing choice,
   not a technical one), and shipped in two real layers, both still

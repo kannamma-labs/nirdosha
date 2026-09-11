@@ -593,6 +593,21 @@ pub enum TypeErrorKind {
     /// Two `on` transitions out of the *same* `state` share an event
     /// name — `advance_<workflow>` couldn't dispatch unambiguously.
     WorkflowDuplicateEvent { workflow: String, state: String, event: String },
+    /// A `db_query`/`db_execute` bind argument's type isn't one
+    /// `emit_db_binds`/`NirBindValue` (`runtime-kernels/src/lib.rs`)
+    /// actually has a wire representation for — `str`/`i64`-family/`f64`/
+    /// `bool` all bind directly, and a *zero-payload* `enum` binds as its
+    /// discriminant (`Status::Active` -> `0`, e.g.), but anything with a
+    /// non-integer aggregate shape (`dec128`, `Vector`/`Matrix`, a
+    /// `struct`, or an enum that carries a payload on *any* variant) has
+    /// no defined bind encoding. Previously unchecked here at all
+    /// (`infer`, not `check` — the doc comment right above this arm's
+    /// call site used to say the *interpreter's* `sql_bind_params` was
+    /// the real runtime gate; that interpreter is gone, so this was a
+    /// real, silent miscompiled-IR risk until this check existed) — a
+    /// clean compile-time rejection now, not a shape `codegen.rs` had to
+    /// discover was wrong at the LLVM level.
+    UnsupportedDbBindType { found: Ty },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1108,6 +1123,13 @@ impl std::fmt::Display for TypeError {
                 f,
                 "{line}:{col}: `workflow {workflow}`'s state `{state}` declares the event `{event}` on \
                  more than one outgoing transition"
+            ),
+            TypeErrorKind::UnsupportedDbBindType { found } => write!(
+                f,
+                "{line}:{col}: a `db_query`/`db_execute` bind argument has type `{}`, which has no \
+                 defined bind encoding -- use `str`/`i64`-family/`f64`/`bool`, or a zero-payload `enum` \
+                 (binds as its discriminant)",
+                found.name()
             ),
         }
     }
@@ -2247,7 +2269,7 @@ impl<'a> Checker<'a> {
     /// *proven* by the Z3 pass.
     fn check_validate(&mut self, decl: &ValidateDecl, program: &Program) {
         if !self.sigs.contains_key(&decl.fn_name) {
-            self.error(TypeErrorKind::ValidateFnNotFound(decl.fn_name.clone()), decl.span);
+            self.error(TypeErrorKind::ValidateFnNotFound(decl.fn_name.clone()), decl.fn_name_span);
             return;
         }
         // `sigs` and `program.fns` are built from the same `Program` in
@@ -4262,6 +4284,31 @@ impl<'a> Checker<'a> {
         is_builtin(name) || self.plugins.contains_key(name)
     }
 
+    /// `db_query`/`db_execute`'s bind-argument gate — `str`/`i64`-family/
+    /// `f64`/`bool` bind directly (`emit_db_binds`'s own four branches);
+    /// a zero-payload `enum` (every variant's `payload` empty) also
+    /// binds, as its discriminant (`emit_db_binds`'s new enum branch) --
+    /// an enum with even one payload-carrying variant has no defined bind
+    /// encoding, since which variant a given value holds is a runtime
+    /// fact this checker can't narrow at a bind-argument call site.
+    /// Anything else (`dec128`, `Vector`/`Matrix`, a `struct`) is
+    /// unconditionally rejected: none of them have *any* bind encoding
+    /// today, payload or not.
+    fn check_db_bind_ty(&mut self, ty: &Ty, span: Span) {
+        let ok = match ty {
+            Ty::Str | Ty::Bool => true,
+            t if t.is_integer() || *t == Ty::F64 => true,
+            Ty::Named(name, _) => match self.registry.enum_variants(name) {
+                Some(variants) => variants.iter().all(|v| v.payload.is_empty()),
+                None => false,
+            },
+            _ => false,
+        };
+        if !ok {
+            self.error(TypeErrorKind::UnsupportedDbBindType { found: ty.clone() }, span);
+        }
+    }
+
     /// Every builtin's shape rule, dispatched by name — `is_builtin`
     /// (ast.rs) is the shared membership check; the actual per-builtin
     /// logic lives here (and `interpreter.rs`'s `Expr::Call` arm has its
@@ -4759,13 +4806,17 @@ impl<'a> Checker<'a> {
             // backend) -- the *only* route to a parameterized query, since
             // `str` has no concatenation (docs/LANGUAGE.md §2): there's no way
             // to build a dynamic SQL string in Nirdosha source at all
-            // otherwise. Each bind value's own type isn't constrained here
-            // (`infer` only, not `check` against one fixed `Ty`) -- it can
-            // be `str`/`i64`/`f64`/`bool`, whichever a caller's data
-            // actually is; `interpreter.rs`'s `sql_bind_params` is the
-            // real (runtime) gate on that, same "some proven away
-            // statically, some at runtime" split every Tier-2 check here
-            // already makes (`docs/LANGUAGE.md` §8).
+            // otherwise. Each bind value's own type isn't pinned to one
+            // fixed `Ty` here (`infer`, not `check`) -- it can be
+            // `str`/`i64`-family/`f64`/`bool`, or (2026-09) a zero-payload
+            // `enum`, whichever a caller's data actually is --
+            // `check_db_bind_ty` right below is the real (now
+            // compile-time, not runtime) gate on that: the now-deleted
+            // interpreter's own `sql_bind_params` used to be the only
+            // check, which meant a genuinely unsupported bind shape
+            // (`dec128`, a `struct`, an enum carrying a payload) reached
+            // `codegen.rs`'s `emit_db_binds` with no rejection at all --
+            // a real, silent miscompiled-IR risk this check closes.
             //
             // **Disclosed gap, not silently missing**: a non-empty bind
             // array against a *plugin-routed* connection (rfcs/0011's
@@ -4787,7 +4838,8 @@ impl<'a> Checker<'a> {
                 self.check(&args[0], &Ty::Db, expected_ret, scopes);
                 self.check(&args[1], &Ty::Str, expected_ret, scopes); // sql
                 for a in &args[2..] {
-                    self.infer(a, expected_ret, scopes);
+                    let ty = self.infer(a, expected_ret, scopes);
+                    self.check_db_bind_ty(&ty, a.span());
                 }
                 result_of(Ty::Json)
             }
@@ -4795,7 +4847,8 @@ impl<'a> Checker<'a> {
                 self.check(&args[0], &Ty::Db, expected_ret, scopes);
                 self.check(&args[1], &Ty::Str, expected_ret, scopes); // sql
                 for a in &args[2..] {
-                    self.infer(a, expected_ret, scopes);
+                    let ty = self.infer(a, expected_ret, scopes);
+                    self.check_db_bind_ty(&ty, a.span());
                 }
                 result_of(Ty::I64)
             }

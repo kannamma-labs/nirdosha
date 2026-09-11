@@ -32,6 +32,7 @@ fn main() -> ExitCode {
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
         "emit-catalog" => cmd_emit_catalog(args),
+        "roles" => cmd_roles(args),
         "hi" => cmd_hi(args),
         other => {
             eprintln!("unknown subcommand `{other}` -- nirdosha has no interpreter/`run`/`serve` mode anymore; use `build` or `emit-llvm`.");
@@ -99,6 +100,12 @@ fn print_usage() {
     eprintln!("  nirdosha emit-catalog [-o out.json]");
     eprintln!("                                      print the std UI catalog (rfcs/0009 Phase 0) -- the closed");
     eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
+    eprintln!("  nirdosha roles <file.nir> [-o out.json]");
+    eprintln!("                                      every role/claim gate in the program, grouped by role/claim:");
+    eprintln!("                                      which fns it gates (requires(role/claim: ...)) and which");
+    eprintln!("                                      screen fields it gates (view/edit) -- pure static analysis");
+    eprintln!("                                      over data typeck/ui_gen already compute, no new runtime");
+    eprintln!("                                      concept (ROADMAP.md A6, \"Roles -> functions/fields report\")");
     eprintln!("  nirdosha hi                          open the native build-mode window: a live 3D graph over");
     eprintln!("                                      .nir/hi.db (rfcs/0013/0014) -- auto-scaffolds/syncs .nir/");
     eprintln!("                                      first (NIRDOSHA_HI_DISABLE=1 to skip). This *is* `hi` --");
@@ -1116,10 +1123,49 @@ fn run_verify_pipeline(path: &str) -> VerifyVerdict {
                 .iter()
                 .map(|e| {
                     let (fix, code) = match &e.kind {
+                        // A bare variant name used without call syntax (`let s:
+                        // Shape = Circle`, NIR0001's own "wrong" example) parses
+                        // as a plain identifier -- `UnknownVar`, same as any
+                        // other unresolved name -- so it's indistinguishable
+                        // from a real typo (`NIR0013`) without this extra
+                        // check: is `name` one of `program`'s own declared
+                        // enum variant names? If so, tag `NIR0001` instead --
+                        // `fix_unbound_identifier`'s own candidates are local
+                        // scope names, not variant names, so it naturally finds
+                        // nothing close and reports `Manual`, which is honest
+                        // here (the real fix is adding `(...)`, not a rename).
                         nirdosha::typeck::TypeErrorKind::UnknownVar { name, candidates } => {
-                            (Some(fix_unbound_identifier(name, e.span, candidates)), Some("NIR0013"))
+                            let is_variant_name = program.enums.iter().any(|en| en.variants.iter().any(|v| &v.name == name));
+                            let code = if is_variant_name { "NIR0001" } else { "NIR0013" };
+                            (Some(fix_unbound_identifier(name, e.span, candidates)), Some(code))
                         }
                         nirdosha::typeck::TypeErrorKind::StrInFnSignature { .. } => (None, Some("NIR0002")),
+                        // Two typed values combined/assigned without a
+                        // conversion -- NIR0006's own "wrong" example
+                        // (`i32` + `i64`). Narrowed to the numeric-vs-numeric
+                        // case specifically: `TypeMismatch` is also the
+                        // catch-all for every other kind of type error, most
+                        // of which aren't "forgot to convert."
+                        nirdosha::typeck::TypeErrorKind::TypeMismatch { expected, found } if expected.is_numeric() && found.is_numeric() => {
+                            (None, Some("NIR0006"))
+                        }
+                        // `_` used as a variant-match arm, or a variant left
+                        // uncovered -- both are the same "match is exhaustive,
+                        // no wildcard for variants" rule NIR0008 documents,
+                        // just the two ways to violate it (the wrong wildcard
+                        // pattern, vs. simply missing an arm).
+                        nirdosha::typeck::TypeErrorKind::MatchArmMustBeVariant { .. }
+                        | nirdosha::typeck::TypeErrorKind::NonExhaustiveMatch { .. } => (None, Some("NIR0008")),
+                        // `validate <fn_name> { ... }` where `<fn_name>` doesn't
+                        // resolve — same typo shape `UnknownVar` already covers,
+                        // `fix_unbound_identifier` reused directly against
+                        // `program.fns`' own names as candidates (`e.span` is now
+                        // `ValidateDecl::fn_name_span`, the identifier's own real
+                        // location, not the `validate` keyword's).
+                        nirdosha::typeck::TypeErrorKind::ValidateFnNotFound(name) => {
+                            let candidates: Vec<String> = program.fns.iter().map(|f| f.name.clone()).collect();
+                            (Some(fix_unbound_identifier(name, e.span, &candidates)), None)
+                        }
                         _ => (None, None),
                     };
                     VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix, code }
@@ -2883,6 +2929,132 @@ fn cmd_emit_catalog(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
     };
     let json = serde_json::to_string_pretty(&value).expect("a parsed serde_json::Value always re-serializes");
+    match output {
+        Some(out) => match std::fs::write(&out, &json) {
+            Ok(()) => {
+                println!("wrote {out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error writing {out}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        None => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// One field a `screen` block gates by role or claim, named by its
+/// owning struct -- `ui_gen::GatedField`'s own `field_name` has no
+/// struct context on its own, so `cmd_roles` attaches it here.
+#[derive(serde::Serialize)]
+struct RoleGatedFieldRef {
+    #[serde(rename = "struct")]
+    struct_name: String,
+    field: String,
+}
+
+#[derive(serde::Serialize, Default)]
+struct RoleReportEntry {
+    functions: Vec<String>,
+    view_fields: Vec<RoleGatedFieldRef>,
+    edit_fields: Vec<RoleGatedFieldRef>,
+}
+
+#[derive(serde::Serialize)]
+struct ClaimReportEntry {
+    key: String,
+    value: String,
+    functions: Vec<String>,
+    view_fields: Vec<RoleGatedFieldRef>,
+    edit_fields: Vec<RoleGatedFieldRef>,
+}
+
+/// `nirdosha roles <file.nir>` (`ROADMAP.md` A6, "Roles -> functions/
+/// fields report") -- pure static analysis, no new runtime concept: every
+/// role/claim gate already computed by `typeck.rs`/`ui_gen.rs`, grouped
+/// by the role/claim itself rather than by where it appears. Two real
+/// sources, both already load-bearing elsewhere: a `fn`'s own
+/// `requires(role/claim: ...)` (`FnDecl::requires`, same data
+/// `ui_gen`'s private `fn_role_gate` reads), and a `screen` block's
+/// field-level `view`/`edit` gates (`ui_gen::field_gates_for_struct`,
+/// its one function already exposed outside that module for exactly
+/// this "which fields does this gate touch" question -- see its own doc
+/// comment). Workflow `state { owner: role(...) }` gates are
+/// deliberately **not** folded in here: A6's own spec scopes this report
+/// to "functions/fields," and a workflow state owner is neither -- the
+/// existing `typeck::collect_role_claim_strings` (the demo-mode identity
+/// catalog's own source) already covers that separately for whatever
+/// wants the full role vocabulary instead of this report's narrower,
+/// site-attributed shape.
+fn cmd_roles(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut input: Option<String> = None;
+    let mut output: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-o" => output = args.next(),
+            other => input = Some(other.to_string()),
+        }
+    }
+    let Some(path) = input else {
+        eprintln!("usage: nirdosha roles <file.nir> [-o out.json]");
+        return ExitCode::FAILURE;
+    };
+    let (program, _src) = match typecheck_and_own(&path) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut roles: std::collections::BTreeMap<String, RoleReportEntry> = std::collections::BTreeMap::new();
+    let mut claims: Vec<ClaimReportEntry> = Vec::new();
+    let mut claim_index: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    let claim_slot = |claims: &mut Vec<ClaimReportEntry>, index: &mut std::collections::HashMap<(String, String), usize>, key: &str, value: &str| -> usize {
+        *index.entry((key.to_string(), value.to_string())).or_insert_with(|| {
+            claims.push(ClaimReportEntry { key: key.to_string(), value: value.to_string(), functions: vec![], view_fields: vec![], edit_fields: vec![] });
+            claims.len() - 1
+        })
+    };
+
+    for f in &program.fns {
+        match &f.requires {
+            Some(nirdosha::ast::Requirement::Role(role)) => {
+                roles.entry(role.clone()).or_default().functions.push(f.name.clone());
+            }
+            Some(nirdosha::ast::Requirement::Claim(key, value)) => {
+                let idx = claim_slot(&mut claims, &mut claim_index, key, value);
+                claims[idx].functions.push(f.name.clone());
+            }
+            None => {}
+        }
+    }
+
+    for s in &program.structs {
+        for gated in nirdosha::ui_gen::field_gates_for_struct(&program, &s.name) {
+            for role in &gated.view_roles {
+                roles.entry(role.clone()).or_default().view_fields.push(RoleGatedFieldRef { struct_name: s.name.clone(), field: gated.field_name.clone() });
+            }
+            for role in &gated.edit_roles {
+                roles.entry(role.clone()).or_default().edit_fields.push(RoleGatedFieldRef { struct_name: s.name.clone(), field: gated.field_name.clone() });
+            }
+            if let Some((key, value)) = &gated.view_claim {
+                let idx = claim_slot(&mut claims, &mut claim_index, key, value);
+                claims[idx].view_fields.push(RoleGatedFieldRef { struct_name: s.name.clone(), field: gated.field_name.clone() });
+            }
+            if let Some((key, value)) = &gated.edit_claim {
+                let idx = claim_slot(&mut claims, &mut claim_index, key, value);
+                claims[idx].edit_fields.push(RoleGatedFieldRef { struct_name: s.name.clone(), field: gated.field_name.clone() });
+            }
+        }
+    }
+
+    let report = serde_json::json!({ "roles": roles, "claims": claims });
+    let json = serde_json::to_string_pretty(&report).expect("built entirely from plain strings, always serializes");
     match output {
         Some(out) => match std::fs::write(&out, &json) {
             Ok(()) => {

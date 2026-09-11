@@ -1754,6 +1754,12 @@ pub struct Program {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ValidateDecl {
     pub fn_name: String,
+    /// `fn_name`'s own token span, distinct from `span` below (the
+    /// `validate` keyword's) — `typeck.rs`'s `ValidateFnNotFound` uses
+    /// this precise location so `nirdosha fix` can offer a real
+    /// byte-offset typo-correction patch, the same `token::Span::byte`
+    /// precision `contract_check.rs`'s `UnboundIdentifier` already needs.
+    pub fn_name_span: Span,
     pub entries: Vec<KvEntry>,
     pub span: Span,
 }

@@ -363,7 +363,7 @@ fn a_cookie_route_gets_a_real_set_cookie_header_with_security_attributes() {
 #[test]
 fn a_bearer_token_reaches_the_route_as_identity_json() {
     let config = ServeConfig::default();
-    let token = identity::mock_issue_token("alice", &config.auth, &["admin".to_string()], &[("dept".to_string(), "eng".to_string())]).expect("minting a demo token should succeed");
+    let token = identity::mock_issue_token("alice", &config.auth[0], &["admin".to_string()], &[("dept".to_string(), "eng".to_string())]).expect("minting a demo token should succeed");
     let (addr, _r) = start_test_server(config);
     let req = format!("GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
     let resp = raw_request(addr, &req);
@@ -372,6 +372,65 @@ fn a_bearer_token_reaches_the_route_as_identity_json() {
     assert!(body.contains("\"subject\":\"alice\""), "body: {body}");
     assert!(body.contains("roles") && body.contains("admin"), "body: {body}");
     assert!(body.contains("eng"), "body: {body}");
+}
+
+/// A real, distinct `AuthConfig` for multi-provider tests — same
+/// ephemeral-`/dev/urandom`-secret construction `AuthConfig::demo()`
+/// uses, just with a caller-chosen issuer/audience instead of the fixed
+/// `"nirdosha-demo"` pair, so two calls never collide.
+fn make_test_auth_config(issuer: &str, audience: &str) -> AuthConfig {
+    use base64::Engine as _;
+    let mut buf = [0u8; 32];
+    std::fs::File::open("/dev/urandom").and_then(|mut f| Read::read_exact(&mut f, &mut buf)).expect("OS entropy source");
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
+    let jwks_json = serde_json::json!({"keys": [{"kid": "test", "kty": "oct", "k": secret}]}).to_string();
+    AuthConfig { jwks_json, issuer: issuer.to_string(), audience: audience.to_string() }
+}
+
+/// ROADMAP.md A6's "Multi-IdP registry" — `identity::validate_token`
+/// dispatches by the token's own (unverified) issuer claim, then runs
+/// the real signature check against the *matching* provider's own JWKS,
+/// never a different one's.
+#[test]
+fn multiple_providers_dispatch_by_the_tokens_own_issuer_claim() {
+    let provider_a = make_test_auth_config("issuer-a", "aud-a");
+    let provider_b = make_test_auth_config("issuer-b", "aud-b");
+    let mut config = ServeConfig::default();
+    config.auth = vec![provider_a.clone(), provider_b.clone()];
+    config.demo_mode = false;
+
+    let token_a = identity::mock_issue_token("alice", &provider_a, &["admin".to_string()], &[]).expect("mint against provider a");
+    let token_b = identity::mock_issue_token("bob", &provider_b, &[], &[]).expect("mint against provider b");
+    let (addr, _r) = start_test_server(config);
+
+    let req_a = format!("GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token_a}\r\nConnection: close\r\n\r\n");
+    let resp_a = raw_request(addr, &req_a);
+    assert_eq!(status_of(&resp_a), 200, "a token from provider a must verify against provider a's own JWKS: {}", body_of(&resp_a));
+    assert!(body_of(&resp_a).contains("\"subject\":\"alice\""), "body: {}", body_of(&resp_a));
+
+    let req_b = format!("GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token_b}\r\nConnection: close\r\n\r\n");
+    let resp_b = raw_request(addr, &req_b);
+    assert_eq!(status_of(&resp_b), 200, "a token from provider b must verify against provider b's own JWKS, not provider a's: {}", body_of(&resp_b));
+    assert!(body_of(&resp_b).contains("\"subject\":\"bob\""), "body: {}", body_of(&resp_b));
+}
+
+/// A token whose issuer matches none of the configured providers is a
+/// real 401, never a silent fallback to whichever provider happens to
+/// be first in the list.
+#[test]
+fn an_unrecognized_issuer_401s_rather_than_falling_back() {
+    let provider_a = make_test_auth_config("issuer-a", "aud-a");
+    let provider_b = make_test_auth_config("issuer-b", "aud-b");
+    let provider_unconfigured = make_test_auth_config("issuer-unconfigured", "aud-unconfigured");
+    let mut config = ServeConfig::default();
+    config.auth = vec![provider_a, provider_b];
+    config.demo_mode = false;
+
+    let token = identity::mock_issue_token("eve", &provider_unconfigured, &[], &[]).expect("mint against the unconfigured provider");
+    let (addr, _r) = start_test_server(config);
+    let req = format!("GET /api/identity HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    let resp = raw_request(addr, &req);
+    assert_eq!(status_of(&resp), 401, "body: {}", body_of(&resp));
 }
 
 #[test]
@@ -569,4 +628,98 @@ fn trusted_proxies_from_env_parses_a_comma_separated_list_and_skips_invalid_entr
 fn trusted_proxies_from_env_is_empty_when_unset() {
     unsafe { std::env::remove_var("NIRDOSHA_SERVE_TRUSTED_PROXIES") };
     assert!(trusted_proxies_from_env().is_empty());
+}
+
+#[test]
+fn auth_providers_from_env_is_demo_mode_when_unset() {
+    unsafe {
+        std::env::remove_var("NIRDOSHA_JWKS_FILE");
+        std::env::remove_var("NIRDOSHA_ISSUER");
+        std::env::remove_var("NIRDOSHA_AUDIENCE");
+        std::env::remove_var("NIRDOSHA_IDENTITY_PROVIDERS");
+    }
+    let (auth, demo_mode) = auth_providers_from_env();
+    assert!(demo_mode);
+    assert_eq!(auth.len(), 1);
+    assert_eq!(auth[0].issuer, "nirdosha-demo");
+}
+
+/// Same "process-wide env var, safe only run alone" reasoning as
+/// `trusted_proxies_from_env_parses_a_comma_separated_list...` right
+/// above — every other test in this file calls `ServeConfig::default()`
+/// too.
+#[test]
+#[ignore]
+fn auth_providers_from_env_reads_a_real_single_provider() {
+    let jwks_path = std::env::temp_dir().join(format!("nirdosha_test_jwks_{}.json", std::process::id()));
+    std::fs::write(&jwks_path, r#"{"keys":[]}"#).expect("scratch jwks file should write");
+    unsafe {
+        std::env::set_var("NIRDOSHA_JWKS_FILE", &jwks_path);
+        std::env::set_var("NIRDOSHA_ISSUER", "https://issuer.example");
+        std::env::set_var("NIRDOSHA_AUDIENCE", "my-app");
+        std::env::remove_var("NIRDOSHA_IDENTITY_PROVIDERS");
+    }
+    let (auth, demo_mode) = auth_providers_from_env();
+    assert!(!demo_mode);
+    assert_eq!(auth.len(), 1);
+    assert_eq!(auth[0].issuer, "https://issuer.example");
+    assert_eq!(auth[0].audience, "my-app");
+    assert_eq!(auth[0].jwks_json, r#"{"keys":[]}"#);
+    unsafe {
+        std::env::remove_var("NIRDOSHA_JWKS_FILE");
+        std::env::remove_var("NIRDOSHA_ISSUER");
+        std::env::remove_var("NIRDOSHA_AUDIENCE");
+    }
+    let _ = std::fs::remove_file(&jwks_path);
+}
+
+#[test]
+#[ignore]
+fn auth_providers_from_env_reads_a_real_provider_list_file() {
+    let jwks_path_a = std::env::temp_dir().join(format!("nirdosha_test_jwks_a_{}.json", std::process::id()));
+    let jwks_path_b = std::env::temp_dir().join(format!("nirdosha_test_jwks_b_{}.json", std::process::id()));
+    std::fs::write(&jwks_path_a, r#"{"keys":["a"]}"#).expect("scratch jwks file should write");
+    std::fs::write(&jwks_path_b, r#"{"keys":["b"]}"#).expect("scratch jwks file should write");
+    let providers_json = serde_json::json!([
+        {"jwks_file": jwks_path_a.to_str().unwrap(), "issuer": "issuer-a", "audience": "aud-a"},
+        {"jwks_file": jwks_path_b.to_str().unwrap(), "issuer": "issuer-b", "audience": "aud-b"},
+    ]);
+    let providers_path = std::env::temp_dir().join(format!("nirdosha_test_providers_{}.json", std::process::id()));
+    std::fs::write(&providers_path, providers_json.to_string()).expect("scratch providers file should write");
+    unsafe {
+        std::env::remove_var("NIRDOSHA_JWKS_FILE");
+        std::env::set_var("NIRDOSHA_IDENTITY_PROVIDERS", &providers_path);
+    }
+    let (auth, demo_mode) = auth_providers_from_env();
+    assert!(!demo_mode);
+    assert_eq!(auth.len(), 2, "auth: {auth:?}");
+    assert_eq!(auth[0].issuer, "issuer-a");
+    assert_eq!(auth[0].jwks_json, r#"{"keys":["a"]}"#);
+    assert_eq!(auth[1].issuer, "issuer-b");
+    assert_eq!(auth[1].jwks_json, r#"{"keys":["b"]}"#);
+    unsafe { std::env::remove_var("NIRDOSHA_IDENTITY_PROVIDERS") };
+    let _ = std::fs::remove_file(&jwks_path_a);
+    let _ = std::fs::remove_file(&jwks_path_b);
+    let _ = std::fs::remove_file(&providers_path);
+}
+
+/// A malformed/unreadable `NIRDOSHA_IDENTITY_PROVIDERS` degrades to demo
+/// mode with a loud `eprintln!`, the same non-fatal posture every other
+/// env-config parse failure in this crate already has — never a process
+/// crash over a deployment mistake.
+#[test]
+#[ignore]
+fn auth_providers_from_env_degrades_to_demo_mode_on_a_malformed_providers_file() {
+    let providers_path = std::env::temp_dir().join(format!("nirdosha_test_providers_bad_{}.json", std::process::id()));
+    std::fs::write(&providers_path, "not valid json").expect("scratch providers file should write");
+    unsafe {
+        std::env::remove_var("NIRDOSHA_JWKS_FILE");
+        std::env::set_var("NIRDOSHA_IDENTITY_PROVIDERS", &providers_path);
+    }
+    let (auth, demo_mode) = auth_providers_from_env();
+    assert!(demo_mode);
+    assert_eq!(auth.len(), 1);
+    assert_eq!(auth[0].issuer, "nirdosha-demo");
+    unsafe { std::env::remove_var("NIRDOSHA_IDENTITY_PROVIDERS") };
+    let _ = std::fs::remove_file(&providers_path);
 }

@@ -992,16 +992,51 @@ of Track B has landed.*
     unrelated `identity_directory` table still reopens a fresh SQLite
     connection on every single `resolve_identity` call — this session's
     cache only covers `role_mapping` reads, not that.
-  - `[OPEN]` **Multi-IdP registry** — today `nirdosha serve` takes exactly one
-    fixed `--jwks-file`/`--issuer`/`--audience` triple (`AuthConfig`).
-    An admin-editable `IdentityProviderConfig` list (mirroring the
-    provider-config struct pattern again) would let `resolve_identity`
-    pick the right provider by the token's own issuer claim.
-  - `[OPEN]` **Roles → functions/fields report** — pure static analysis, no new
-    runtime concept: walk `program.fns`' `requires(role: ...)` and
+  - `[DONE]` **Multi-IdP registry** (2026-09) — closed with a real, disclosed
+    narrowing of the original spec: the interpreter-era `resolve_identity`/
+    DB-admin-editable `IdentityProviderConfig` pattern this bullet
+    originally proposed doesn't exist to extend any more (that
+    scaffolding was deleted with the interpreter, never ported to
+    compiled `serve`) — and compiled `serve` had *no* real single-provider
+    identity wiring at all before this pass (`nirdosha build --serve` was
+    demo-mode-only; `compiled-serve/src/lib.rs`'s own doc comment named
+    this as disclosed follow-up work). Closed both gaps together:
+    `crates/compiled-serve/src/lib.rs::auth_providers_from_env` reads
+    `NIRDOSHA_JWKS_FILE`/`NIRDOSHA_ISSUER`/`NIRDOSHA_AUDIENCE` (one real
+    provider) or `NIRDOSHA_IDENTITY_PROVIDERS` (a JSON file listing more
+    than one) at process start — a **runtime** config read, not a
+    `nirdosha build` flag, so the identical built binary redeploys
+    against a different IdP with no rebuild; degrades to
+    `AuthConfig::demo()` on absence/parse failure with a loud `eprintln!`,
+    same non-fatal posture `trusted_proxies_from_env` already has.
+    `identity::validate_token` dispatches by the token's own *unverified*
+    issuer claim when more than one provider is configured (peeked before
+    any signature check, since that's exactly what picks which JWKS to
+    verify the signature against), then runs the real, unchanged
+    signature verification against the matching provider only — an
+    unrecognized issuer is a real 401, never a silent fallback. Verified
+    end to end against a real bound listener, not just typechecked:
+    `crates/compiled-serve/src/tests.rs`'s
+    `multiple_providers_dispatch_by_the_tokens_own_issuer_claim`/
+    `an_unrecognized_issuer_401s_rather_than_falling_back` (two providers,
+    two independently-minted real tokens, each verifying only against its
+    own JWKS) plus four `#[ignore]`d (process-env-mutating, safe only run
+    alone) `auth_providers_from_env` tests covering the single-provider,
+    multi-provider-file, and malformed-config-degrades-to-demo cases.
+  - `[DONE]` **Roles → functions/fields report** (2026-09) — `nirdosha
+    roles <file.nir>`: pure static analysis, no new runtime concept.
+    Walks `program.fns`' `requires(role/claim: ...)` and
     `ui_gen::field_gates_for_struct`'s already-computed table/field ACL
-    gates (that data already exists, just isn't surfaced as a page),
-    group by role name.
+    gates (that data already existed, just wasn't surfaced as its own
+    report), grouped by role name (claims grouped by their `(key,
+    value)` pair, since a claim isn't a single string the way a role
+    is) — each entry lists the functions it gates plus the `struct`-
+    attributed `view`/`edit` fields it gates. Deliberately excludes
+    workflow `state { owner: role(...) }` gates (out of this report's
+    own "functions/fields" scope; `typeck::collect_role_claim_strings`
+    already covers the fuller role vocabulary including those, for the
+    demo-mode identity catalog). Verified end to end:
+    `crates/compiler/tests/roles_command.rs`.
   - **On-demand activation is already solved, not a new problem** — a
     program that declares none of these marker structs renders none of
     this UI today, the same way a hello-world script that never

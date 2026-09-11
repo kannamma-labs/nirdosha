@@ -113,6 +113,49 @@ fn unrelated_name_is_manual_not_a_forced_guess() {
 }
 
 #[test]
+fn validate_target_typo_proposes_an_auto_patch_against_real_fn_names() {
+    // `validate <fn_name> { ... }` where `<fn_name>` doesn't resolve is
+    // caught by `typeck.rs`'s `ValidateFnNotFound` -- same typo shape as
+    // `UnknownVar`, `fix_unbound_identifier` reused directly against
+    // `program.fns`' own names. Regression-relevant: the patch must land
+    // on `addonex`'s own byte range (`ValidateDecl::fn_name_span`), not the
+    // `validate` keyword's.
+    let src = "fn addone(x: i64) -> i64 {\n    return x + 1\n}\n\nvalidate addonex {\n    post: result == x + 1\n}\n";
+    let path = scratch_file("validate_typo_no_apply", src);
+    let (report, code) = run_fix(&path, false);
+    assert_eq!(code, 1, "report: {report}");
+
+    let fix = &report["before"]["typecheck"]["errors"][0]["fix"];
+    assert_eq!(fix["applicability"], "auto", "report: {report}");
+    assert_eq!(fix["patch"]["replacement"], "addone", "report: {report}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn validate_target_typo_patch_is_applied_to_disk_at_the_right_offset() {
+    let src = "fn addone(x: i64) -> i64 {\n    return x + 1\n}\n\nvalidate addonex {\n    post: result == x + 1\n}\n";
+    let path = scratch_file("validate_typo_apply", src);
+    let (report, code) = run_fix(&path, true);
+
+    let applied = report["applied"].as_array().expect("applied should be an array");
+    assert_eq!(applied.len(), 1, "exactly one Auto patch should have been written: {report}");
+    assert_eq!(applied[0]["replacement"], "addone", "report: {report}");
+
+    let patched = std::fs::read_to_string(&path).expect("scratch file should still exist");
+    assert_eq!(
+        patched,
+        "fn addone(x: i64) -> i64 {\n    return x + 1\n}\n\nvalidate addone {\n    post: result == x + 1\n}\n",
+        "only `addonex` -> `addone` must change, at its own byte offset (not the `validate` keyword's)"
+    );
+    assert!(!report["after"].is_null(), "--apply must re-verify after patching: {report}");
+    assert_eq!(report["after"]["typecheck"]["status"], "passed", "report: {report}");
+    assert_eq!(code, 0, "the corrected, Tier-1-provable contract is PROVED, exit 0: {report}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn apply_with_nothing_auto_to_fix_still_reruns_and_reports_empty() {
     // `contracts.obligations`'s own `unsupported`/`counterexample` kinds
     // carry no `Fix` at all -- `--apply` on a file whose only problem is

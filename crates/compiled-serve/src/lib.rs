@@ -20,17 +20,24 @@
 //! for the exact contract a codegen-generated (or, for now, hand-
 //! written test) handler must honor.
 //!
-//! **Identity is real; route dispatch is not wired to `codegen.rs`
-//! yet.** `identity`'s bearer-token verification (demo mode's
-//! self-minted, ephemeral-but-genuinely-signed tokens, and production
-//! mode's real IdP JWKS) is real, exercised end to end by this crate's
-//! own tests, against hand-written `extern "C"` test routes — the
-//! matching `codegen.rs` work to emit real per-route wrapper functions
-//! from a compiled program's own exposure set (RFC 0010) and a
-//! `nirdosha build --serve` CLI flag to link this crate in is real,
-//! separate follow-up work, the same "build the mechanism, prove it,
-//! then wire it to codegen" order this session's own `transact`
-//! durability work (`docs/adr/0009`) already followed.
+//! **Identity is real; route dispatch is wired to `codegen.rs` too, as
+//! of a later 2026-09 session than this comment originally described.**
+//! `identity`'s bearer-token verification (demo mode's self-minted,
+//! ephemeral-but-genuinely-signed tokens, and production mode's real IdP
+//! JWKS — one provider or, since Multi-IdP registry landed, more than
+//! one, dispatched by a token's own issuer claim, see
+//! [`auth_providers_from_env`]) is real, exercised end to end both by
+//! this crate's own tests (against hand-written `extern "C"` test
+//! routes) *and* by `nirdosha build --serve`'s real production path:
+//! `codegen.rs`'s Stage 3 emits real per-route wrapper functions from a
+//! compiled program's own exposure set (RFC 0010) and links this crate
+//! in — see `crates/compiler/tests/codegen.rs`'s
+//! `compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_body`.
+//! `nirdosha build --serve` still bakes in demo mode only at the
+//! *codegen* layer (`ServeCodegenOptions` has no identity fields); real
+//! production identity is chosen entirely at *runtime*, by this crate's
+//! own env-var read (`auth_providers_from_env`) — no rebuild needed to
+//! point a given binary at a different IdP.
 
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
@@ -169,19 +176,30 @@ pub struct ServeConfig {
     /// itself is bound to localhost; `Some` requires
     /// `Authorization: Bearer <token>` to match exactly.
     pub metrics_token: Option<String>,
-    /// The JWKS/issuer/audience every bearer token on this server is
-    /// checked against. Every server has one — there is no "identity
-    /// checking is off" mode — the only choice is *whose*:
-    /// [`AuthConfig::demo()`] (this struct's own `Default`, when
-    /// whoever starts the binary supplied no real `--jwks-file`/
-    /// `--issuer`/`--audience`) or a real IdP's own trio.
-    pub auth: AuthConfig,
-    /// `true` exactly when `auth` is [`AuthConfig::demo()`] — gates
-    /// whether `/api/_demo_login` exists at all (real production
-    /// identity has no self-service login; a caller gets a token from
-    /// the org's actual IdP). Tracked as its own flag rather than
-    /// inferred from `auth`'s contents, so the "which mode" decision
-    /// stays a single, explicit fact set once at startup, not a
+    /// The JWKS/issuer/audience trio(s) every bearer token on this
+    /// server is checked against — always non-empty, since every server
+    /// has one, there is no "identity checking is off" mode. One entry
+    /// (the common case): every token is checked against it directly, no
+    /// issuer dispatch needed. More than one (2026-09, ROADMAP.md A6's
+    /// "Multi-IdP registry"): [`identity::validate_token`] peeks the
+    /// token's own *unverified* `iss` claim first to pick the matching
+    /// entry, then runs the exact same real verification against it —
+    /// an unrecognized issuer is a real 401, never a silent fallback.
+    /// [`AuthConfig::demo()`] (this struct's own `Default`, a single
+    /// entry, when whoever starts the binary supplied no real provider
+    /// via `NIRDOSHA_JWKS_FILE`/`NIRDOSHA_IDENTITY_PROVIDERS`) or one or
+    /// more real IdPs' own trios — see [`auth_providers_from_env`] for
+    /// the env-var/config-file mechanism, deliberately not the
+    /// interpreter-era DB-admin-editable pattern (that scaffolding was
+    /// deleted along with the interpreter and isn't being rebuilt here;
+    /// a real, disclosed narrowing of A6's original spec).
+    pub auth: Vec<AuthConfig>,
+    /// `true` exactly when `auth` is a single [`AuthConfig::demo()`]
+    /// entry — gates whether `/api/_demo_login` exists at all (real
+    /// production identity has no self-service login; a caller gets a
+    /// token from the org's actual IdP). Tracked as its own flag rather
+    /// than inferred from `auth`'s contents, so the "which mode"
+    /// decision stays a single, explicit fact set once at startup, not a
     /// heuristic re-derived from a JWKS/issuer string shape.
     pub demo_mode: bool,
     /// `GET /`'s response body — the program's own `emit-ui`-derived
@@ -198,6 +216,7 @@ pub struct ServeConfig {
 
 impl Default for ServeConfig {
     fn default() -> Self {
+        let (auth, demo_mode) = auth_providers_from_env();
         ServeConfig {
             header_timeout: Duration::from_secs(10),
             body_timeout: Duration::from_secs(30),
@@ -209,8 +228,8 @@ impl Default for ServeConfig {
             rate_limit_window: Duration::from_secs(60),
             trusted_proxies: trusted_proxies_from_env(),
             metrics_token: None,
-            auth: AuthConfig::demo(),
-            demo_mode: true,
+            auth,
+            demo_mode,
             ui_html: Vec::new(),
         }
     }
@@ -236,6 +255,85 @@ fn trusted_proxies_from_env() -> Vec<IpAddr> {
             }
         })
         .collect()
+}
+
+/// `ServeConfig::auth`/`demo_mode`'s real source (ROADMAP.md A6, "Multi-
+/// IdP registry") — same "read once at process start, degrade to the
+/// safe default on absence/parse failure with a loud `eprintln!`, never
+/// fail the whole process" posture [`trusted_proxies_from_env`] already
+/// established for `NIRDOSHA_SERVE_TRUSTED_PROXIES`. A **runtime** env
+/// read, not a `nirdosha build` flag — no `codegen.rs`/LLVM IR change
+/// needed at all, and it means the exact same built binary can be
+/// redeployed against a different IdP (or a different provider list)
+/// without a rebuild.
+///
+/// Three cases, checked in order:
+/// - `NIRDOSHA_IDENTITY_PROVIDERS` set (a path to a JSON file: `[{
+///   "jwks_file": "...", "issuer": "...", "audience": "..."}, ...]`) —
+///   one or more real providers, [`identity::validate_token`] dispatches
+///   between them by the token's own issuer claim. An empty list or a
+///   read/parse failure degrades to demo mode, same as every other case
+///   here — a real, deliberately non-fatal deployment mistake, not a
+///   crash.
+/// - `NIRDOSHA_JWKS_FILE`/`NIRDOSHA_ISSUER`/`NIRDOSHA_AUDIENCE` all set —
+///   exactly one real provider, no issuer dispatch needed.
+/// - Neither — [`AuthConfig::demo()`], this crate's long-standing
+///   default; `demo_mode: true`.
+fn auth_providers_from_env() -> (Vec<AuthConfig>, bool) {
+    if let Ok(path) = std::env::var("NIRDOSHA_IDENTITY_PROVIDERS") {
+        match load_identity_providers_file(&path) {
+            Ok(providers) if !providers.is_empty() => return (providers, false),
+            Ok(_) => {
+                eprintln!("nirdosha compiled-serve: NIRDOSHA_IDENTITY_PROVIDERS at {path:?} is an empty list -- falling back to demo mode")
+            }
+            Err(e) => {
+                eprintln!("nirdosha compiled-serve: NIRDOSHA_IDENTITY_PROVIDERS at {path:?} could not be read: {e} -- falling back to demo mode")
+            }
+        }
+    } else if let Some(auth) = single_provider_from_env() {
+        return (vec![auth], false);
+    }
+    (vec![AuthConfig::demo()], true)
+}
+
+/// The single-provider case: all three of `NIRDOSHA_JWKS_FILE`/
+/// `NIRDOSHA_ISSUER`/`NIRDOSHA_AUDIENCE` must be set together, or this
+/// falls back like any other absent/malformed config (a partially-set
+/// trio almost certainly means a deployment mistake, not "two of three
+/// intentionally unset").
+fn single_provider_from_env() -> Option<AuthConfig> {
+    let jwks_file = std::env::var("NIRDOSHA_JWKS_FILE").ok()?;
+    let issuer = std::env::var("NIRDOSHA_ISSUER").ok()?;
+    let audience = std::env::var("NIRDOSHA_AUDIENCE").ok()?;
+    match std::fs::read_to_string(&jwks_file) {
+        Ok(jwks_json) => Some(AuthConfig { jwks_json, issuer, audience }),
+        Err(e) => {
+            eprintln!("nirdosha compiled-serve: NIRDOSHA_JWKS_FILE at {jwks_file:?} could not be read: {e} -- falling back to demo mode");
+            None
+        }
+    }
+}
+
+/// `NIRDOSHA_IDENTITY_PROVIDERS`'s own file format — a plain
+/// `serde_json::Value` walk, not a `#[derive(Deserialize)]` struct
+/// (this crate doesn't otherwise depend on `serde`'s derive machinery,
+/// only `serde_json`, the same "walk `Value` directly" style
+/// `identity::mock_issue_token` already uses for its own JSON building).
+fn load_identity_providers_file(path: &str) -> Result<Vec<AuthConfig>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let entries = value.as_array().ok_or("expected a JSON array of provider objects")?;
+    entries
+        .iter()
+        .map(|entry| {
+            let jwks_file = entry.get("jwks_file").and_then(|v| v.as_str()).ok_or("each provider needs a string `jwks_file`")?;
+            let issuer = entry.get("issuer").and_then(|v| v.as_str()).ok_or("each provider needs a string `issuer`")?;
+            let audience = entry.get("audience").and_then(|v| v.as_str()).ok_or("each provider needs a string `audience`")?;
+            let jwks_json = std::fs::read_to_string(jwks_file)
+                .map_err(|e| format!("provider issuer {issuer:?}: jwks_file {jwks_file:?} could not be read: {e}"))?;
+            Ok(AuthConfig { jwks_json, issuer: issuer.to_string(), audience: audience.to_string() })
+        })
+        .collect::<Result<Vec<AuthConfig>, String>>()
 }
 
 /// A bound-but-not-yet-accepting listener — the bind-before-replay
@@ -547,7 +645,7 @@ fn resolve_identity(req: &http::Request, config: &ServeConfig) -> Result<Option<
     let Some(token) = auth_header.strip_prefix("Bearer ").or_else(|| auth_header.strip_prefix("bearer ")) else {
         return Err(http::Response::error(401, "Authorization header must be `Bearer <token>`"));
     };
-    match identity::validate_token(token, &config.auth) {
+    match identity::validate_token(token, &config.auth[..]) {
         Ok(claims) => Ok(Some(identity::identity_json(&claims))),
         Err(e) => Err(http::Response::error(401, &format!("invalid token: {e}"))),
     }
@@ -579,7 +677,15 @@ fn demo_login_response(req: &http::Request, config: &ServeConfig) -> http::Respo
         .and_then(serde_json::Value::as_object)
         .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
         .unwrap_or_default();
-    match identity::mock_issue_token(&subject, &config.auth, &roles, &claims) {
+    // `demo_mode` (already checked above) is only ever `true` alongside
+    // a single-entry `auth` (`auth_providers_from_env`'s own contract) --
+    // `.first()` over an index, so a hand-built `ServeConfig` that
+    // somehow violates that (this crate's own tests never do) degrades
+    // to a clean 500, not a panic.
+    let Some(demo_auth) = config.auth.first() else {
+        return http::Response::error(500, "demo mode is enabled but no identity provider is configured");
+    };
+    match identity::mock_issue_token(&subject, demo_auth, &roles, &claims) {
         Ok(token) => http::Response::ok_text(200, &serde_json::json!({"token": token}).to_string()),
         Err(e) => http::Response::error(500, &format!("failed to mint demo token: {e}")),
     }

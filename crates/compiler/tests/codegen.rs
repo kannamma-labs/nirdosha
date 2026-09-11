@@ -588,6 +588,45 @@ fn remainder_is_not_supported_for_dec128() {
     assert!(msg.contains("dec128") && msg.contains('%'), "error should name both the operator and the unsupported type, got: {msg}");
 }
 
+/// `dec_from_str` — the first `dec128` builtin to construct a real
+/// `Result(dec128, str)` value (`DEC128_BUILTINS`'s own doc comment).
+/// Mirrors `examples/features/11_decimal_dec128.nir`'s own `dec_from_str`
+/// usage: a well-formed string reaches `Ok`, a malformed one reaches
+/// `Err` with a real, non-empty message — not a silent zero.
+#[test]
+fn dec_from_str_parses_a_well_formed_string_into_a_real_ok_dec128() {
+    let src = r#"
+        fn main() {
+            let parsed: dec128 = match dec_from_str("5.01") {
+                Ok(d) => d,
+                Err(e) => dec_from_i64(0, 0),
+            }
+            print(dec_to_str(parsed))
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "5.01");
+}
+
+#[test]
+fn dec_from_str_reports_a_real_err_message_for_a_malformed_string() {
+    let src = r#"
+        fn main() {
+            let msg: str = match dec_from_str("not-a-number") {
+                Ok(d) => "no error",
+                Err(e) => e,
+            }
+            print(msg)
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    let out = stdout.trim();
+    assert_ne!(out, "no error", "a malformed dec128 string must reach the Err arm");
+    assert!(!out.is_empty(), "the Err payload must be a real, non-empty message, not a silent default");
+}
+
 // ---- Phase 2: `sha256_hex`/`constant_time_str_eq` (linked native calls
 // into a from-scratch SHA-256 in `runtime_kernels.rs`, since that crate
 // has no access to the `sha2` crate `interpreter.rs` uses) -------------
@@ -3016,6 +3055,86 @@ fn db_connect_execute_query_round_trips_real_sqlite_rows() {
     let (stdout, code) = compile_and_run(src);
     assert_eq!(code, 0);
     assert_eq!(stdout, "ada\n1\n");
+}
+
+/// A zero-payload `enum` bind value (`typeck::check_db_bind_ty`,
+/// `codegen.rs::emit_db_binds`'s new enum branch) — binds as its plain
+/// `i64` discriminant (`Status::Active` is variant 0, declaration order,
+/// same as every other enum tag in this backend), round-tripped through
+/// a real SQLite `INSERT`/`SELECT`, not just typechecked.
+#[test]
+fn zero_payload_enum_bind_value_round_trips_through_a_real_sqlite_column() {
+    let src = r#"
+        enum Status {
+            Active,
+            Inactive,
+        }
+
+        fn run_all(conn: db) -> i64 {
+            let created: i64 = match db_execute(conn, "CREATE TABLE t (status INTEGER)") {
+                Ok(n) => n,
+                Err(e) => -1,
+            }
+            let inserted: i64 = match db_execute(conn, "INSERT INTO t (status) VALUES (?)", Inactive()) {
+                Ok(n) => n,
+                Err(e) => -1,
+            }
+            let count: i64 = match db_query(conn, "SELECT * FROM t WHERE status = ?", Inactive()) {
+                Ok(rows) => match json_array_len(rows) {
+                    Ok(n) => n,
+                    Err(e) => -1,
+                },
+                Err(e) => -1,
+            }
+            stop conn
+            return count
+        }
+
+        fn main() {
+            let count: i64 = match db_connect(":memory:") {
+                Ok(conn) => run_all(conn),
+                Err(e) => -1,
+            }
+            print(count) // 1 -- the `Inactive` (tag 1) row, correctly bound and matched
+        }
+    "#;
+    let (stdout, code) = compile_and_run(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "1");
+}
+
+/// A payload-carrying `enum` bind value is cleanly rejected at
+/// typecheck, not silently miscompiled (`typeck::check_db_bind_ty`'s own
+/// doc comment: this used to reach `codegen.rs` with no check at all).
+#[test]
+fn payload_carrying_enum_bind_value_is_a_clean_typecheck_rejection() {
+    let src = r#"
+        enum Reading {
+            Celsius(i64),
+        }
+
+        fn run_all(conn: db) -> i64 {
+            let inserted: i64 = match db_execute(conn, "INSERT INTO t (v) VALUES (?)", Celsius(5)) {
+                Ok(n) => n,
+                Err(e) => -1,
+            }
+            stop conn
+            return inserted
+        }
+
+        fn main() {
+            let inserted: i64 = match db_connect(":memory:") {
+                Ok(conn) => run_all(conn),
+                Err(e) => -1,
+            }
+            print(inserted)
+        }
+    "#;
+    let toks = nirdosha::token::Lexer::new(src).tokenize().expect("lex should succeed");
+    let program = nirdosha::parser::Parser::new(toks).parse_program().expect("parse should succeed");
+    let err = nirdosha::typeck::typecheck(&program).expect_err("a payload-carrying enum bind has no defined encoding");
+    let msg = err.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+    assert!(msg.contains("no defined bind encoding"), "error should name the real gap, got: {msg}");
 }
 
 /// `env(name) -> Result(str, str)` (RFC 0011 §1) — `Ok(value)` when the

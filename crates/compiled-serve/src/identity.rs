@@ -21,7 +21,7 @@ use nirdosha_runtime_kernels::{nir_mock_issue_token, nir_oidc_validate_token, Ni
 /// whoever starts the binary) or [`AuthConfig::demo()`]'s own
 /// ephemeral, self-generated one (demo mode, the default — see
 /// [`ServeConfig`](crate::ServeConfig)'s own `Default` impl).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AuthConfig {
     pub jwks_json: String,
     pub issuer: String,
@@ -86,6 +86,49 @@ unsafe fn read_str_out(out: &NirStrOut) -> String {
     String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(out.ptr, out.len as usize) }).into_owned()
 }
 
+/// `ServeConfig::auth`'s real dispatcher (ROADMAP.md A6, "Multi-IdP
+/// registry") — the public entry point every caller (`lib.rs::
+/// resolve_identity`) uses. One provider (the common case): verified
+/// against it directly, no issuer dispatch needed at all. More than one:
+/// [`peek_unverified_issuer`] reads `token`'s own *unverified* `iss`
+/// claim first (no signature check yet — that's exactly why it's
+/// needed, to pick *which* provider's JWKS to verify the signature
+/// against) and looks up the matching provider by its own `issuer`; no
+/// match is a real, honest `Err` (never a silent fallback to some other
+/// provider or to demo mode). `providers` is never empty in practice
+/// (`ServeConfig::auth`'s own invariant), but an empty slice still fails
+/// cleanly here rather than panicking.
+pub fn validate_token(token: &str, providers: &[AuthConfig]) -> Result<VerifiedClaims, String> {
+    let auth = match providers {
+        [] => return Err("invalid token: no identity provider is configured".to_string()),
+        [only] => only,
+        many => {
+            let issuer = peek_unverified_issuer(token)
+                .ok_or_else(|| "invalid token: could not read an issuer claim to select an identity provider".to_string())?;
+            many.iter()
+                .find(|p| p.issuer == issuer)
+                .ok_or_else(|| format!("invalid token: issuer {issuer:?} does not match any configured identity provider"))?
+        }
+    };
+    validate_token_against(token, auth)
+}
+
+/// `token`'s own `iss` claim, read directly out of its base64url-decoded
+/// JWT payload segment — deliberately **not** signature-verified (there
+/// is no key to verify against yet; that's the whole reason this exists,
+/// to pick one first). Never trusted as a real identity fact on its
+/// own — [`validate_token`] only ever uses this to select *which*
+/// provider's JWKS to run the real, signature-verifying check against;
+/// the actual trust decision still happens entirely inside
+/// [`validate_token_against`].
+fn peek_unverified_issuer(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let payload_b64 = token.split('.').nth(1)?;
+    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    payload.get("iss").and_then(|v| v.as_str()).map(str::to_string)
+}
+
 /// Verifies `token` against `auth`'s JWKS/issuer/audience via the real,
 /// compiled `nir_oidc_validate_token` — the exact same check a
 /// `.nir` program's own `oidc_validate_token(...)` call compiles down
@@ -97,7 +140,7 @@ unsafe fn read_str_out(out: &NirStrOut) -> String {
 /// red-team finding already made for the now-deleted interpreted
 /// `serve.rs::resolve_identity` (recovered as this fn's own ground
 /// truth), ported here since compiled `serve` needs it just as much.
-pub fn validate_token(token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String> {
+fn validate_token_against(token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String> {
     let mut out_subject = NirStrOut { ptr: std::ptr::null(), len: 0 };
     let mut out_issuer = NirStrOut { ptr: std::ptr::null(), len: 0 };
     let mut out_audience = NirStrOut { ptr: std::ptr::null(), len: 0 };

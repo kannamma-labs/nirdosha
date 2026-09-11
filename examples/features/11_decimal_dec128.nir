@@ -1,8 +1,10 @@
 // Feature: `dec128` decimal arithmetic (LANGUAGE.md §2, §5). 128-bit
 // fixed-point (`rust_decimal::Decimal`), up to 28 significant digits.
 // No literal syntax and no implicit conversion to/from `i64`/`f64` --
-// construct only via `dec_from_str`/`dec_from_i64`. Interpreter-only
-// for now (`nirdosha build` rejects it, same as `db`/`json`/`mq`).
+// construct only via `dec_from_str`/`dec_from_i64`. Fully compiled,
+// `dec_from_str` included: it's the first `dec128` builtin to construct
+// a real `Result(dec128, str)` value (`nirdosha build` compiles this
+// file unmodified).
 
 fn main() {
     // `dec_from_i64(unscaled, scale)` -- 1999 at scale 2 is 19.99

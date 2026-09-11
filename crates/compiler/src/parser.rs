@@ -416,6 +416,7 @@ impl Parser {
     fn parse_validate_decl(&mut self) -> PResult<ValidateDecl> {
         let span = self.span();
         self.expect(&Tok::Validate, "`validate`")?;
+        let fn_name_span = self.span();
         let fn_name = self.expect_ident()?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut entries = Vec::new();
@@ -423,7 +424,7 @@ impl Parser {
             entries.push(self.parse_kv_entry()?);
         }
         self.expect(&Tok::RBrace, "`}`")?;
-        Ok(ValidateDecl { fn_name, entries, span })
+        Ok(ValidateDecl { fn_name, fn_name_span, entries, span })
     }
 
     /// `module_decl ::= "module" (STRING | namespace_module) "{" ... "}"`

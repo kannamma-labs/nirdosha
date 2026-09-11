@@ -202,34 +202,27 @@ const RAND_BUILTINS: &[&str] = &["rand_seed", "rand_f64", "rand_gaussian"];
 /// real wall-clock sleep, `nir_sleep_ms` (`runtime-kernels/src/lib.rs`).
 const SLEEP_BUILTINS: &[&str] = &["sleep_ms"];
 
-/// `dec_from_i64`/`dec_to_str`/`dec_round`/`dec_scale` — linked calls
-/// into `runtime-kernels/src/lib.rs`'s `rust_decimal`-backed kernels
-/// (rfcs/0005-plugin-boundary-safety-and-performance.md's own build-
-/// architecture-change finding: `dec128` was interpreter-only
+/// `dec_from_i64`/`dec_to_str`/`dec_round`/`dec_scale`/`dec_from_str` —
+/// linked calls into `runtime-kernels/src/lib.rs`'s `rust_decimal`-
+/// backed kernels (rfcs/0005-plugin-boundary-safety-and-performance.md's
+/// own build-architecture-change finding: `dec128` was interpreter-only
 /// specifically because the old bare-`rustc` kernel build had no way to
 /// reach `rust_decimal` at all). Own list, not folded into
 /// `STR_CRYPTO_BUILTINS`/`RAND_BUILTINS`, for the same "describes
 /// something different" reason those two aren't folded into each
 /// other.
 ///
-/// **Not yet included**: `dec_from_str`. Its kernel
-/// (`nir_dec128_from_str`) already exists, but its `.nir`-visible
-/// return type is `Result(dec128, str)` — checked directly, no
-/// existing compiled builtin actually constructs a real `Result(_, _)`
-/// enum value as its return (`inv`/`solve`, this codebase's other
-/// fallible `PHASE5_BUILTINS`, present their own failure some other
-/// way — `local_ty_of`'s own `"inv" => self.local_ty_of(&args[0],
-/// scopes)`/`"solve" => self.local_ty_of(&args[1], scopes)` arms report
-/// the *matrix* type, not a `Result` wrapping it). Wiring
-/// `dec_from_str` would mean being the first to establish that
-/// convention in codegen, not reusing a proven one the way every other
-/// `dec128` builtin here does — real, deliberately deferred design
-/// work, not a shortcut. `construct_variant`'s generic payload-
-/// placement machinery (`conservative_word_count`'s new `Ty::Dec128 =>
-/// 2` arm, added for this pass) should make it straightforward once
-/// someone picks this convention question up; cleanly rejected in the
-/// meantime, same as before.
-const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "dec_scale"];
+/// `dec_from_str`'s `.nir`-visible return type is `Result(dec128, str)`
+/// — it reuses `check_role`'s own established convention
+/// (`emit_result_merge`, see that fn's doc comment) via `emit_dec_from_str`
+/// (`Codegen::call_ptr`'s dispatch), the same generic tag-then-payload
+/// machinery every `db`/`json` builtin already uses. `nir_dec128_from_str`
+/// now takes a real `out_err: *mut NirStrOut` alongside its `ok_ptr`
+/// bool, populated with a real message on a malformed string —
+/// `construct_variant`'s generic payload-placement machinery
+/// (`conservative_word_count`'s `Ty::Dec128 => 2` arm) already handled
+/// the payload-placement half of this.
+const DEC128_BUILTINS: &[&str] = &["dec_from_i64", "dec_to_str", "dec_round", "dec_scale", "dec_from_str"];
 
 /// `check_role` — the first compiled builtin to actually construct a
 /// real `Result(_, _)` value as its return (`DEC128_BUILTINS`'s own
@@ -1763,6 +1756,7 @@ fn emit_llvm_ir_impl<'a>(
     writeln!(cg.out, "declare i32 @nir_dec128_cmp({{i64, i64}}, {{i64, i64}})").unwrap();
     writeln!(cg.out, "declare {{i64, i64}} @nir_dec128_round({{i64, i64}}, i32)").unwrap();
     writeln!(cg.out, "declare i64 @nir_dec128_scale({{i64, i64}})").unwrap();
+    writeln!(cg.out, "declare {{i64, i64}} @nir_dec128_from_str(ptr, i64, ptr, ptr)").unwrap();
     // `box`'s heap allocator — see `Expr::Box`'s doc comment for why
     // `nir_free` isn't called anywhere yet (this phase deliberately
     // leaks; a later phase wires the calls once ownership.rs's move data
@@ -2864,6 +2858,7 @@ impl Codegen<'_> {
             Expr::Call(name, _, _) if name == "dec_from_i64" || name == "dec_round" => Ty::Dec128,
             Expr::Call(name, _, _) if name == "dec_to_str" => Ty::Str,
             Expr::Call(name, _, _) if name == "dec_scale" => Ty::U32,
+            Expr::Call(name, _, _) if name == "dec_from_str" => Ty::Named("Result".to_string(), vec![Ty::Dec128, Ty::Str]),
             Expr::Call(name, _, _) if name == "check_role" => {
                 Ty::Named("Result".to_string(), vec![Ty::Named("RoleView".to_string(), vec![]), Ty::Str])
             }
@@ -5840,6 +5835,9 @@ impl Codegen<'_> {
         if name == "check_role" {
             return self.emit_check_role(args, scopes);
         }
+        if name == "dec_from_str" {
+            return self.emit_dec_from_str(args, scopes);
+        }
         if name == "oidc_validate_token" {
             return self.emit_oidc_validate_token(args, scopes);
         }
@@ -6836,11 +6834,29 @@ impl Codegen<'_> {
                 let widened = self.fresh_reg("db_bind_bool_widened");
                 writeln!(self.out, "  {widened} = zext i1 {v} to i64").unwrap();
                 writeln!(self.out, "  store i64 {widened}, ptr {i_ptr}").unwrap();
+            } else if let Ty::Named(_, _) = &arg_ty {
+                // A zero-payload `enum` bind (`typeck.rs::check_db_bind_ty`
+                // already proved every variant of this enum carries no
+                // payload — anything else was a clean compile-time
+                // rejection, never reaches codegen) — binds as its plain
+                // `i64` discriminant, the same tag-0 "integer" slot the
+                // fallback arm below uses for a real integer. `expr_ptr`,
+                // not `expr`: an enum is aggregate-valued (`is_aggregate()`),
+                // so its value lives behind a pointer, same as
+                // `Expr::Match`'s own scrutinee-tag extraction.
+                writeln!(self.out, "  store i32 0, ptr {tag_ptr}").unwrap();
+                let value_ptr = self.expr_ptr(arg, scopes)?;
+                let enum_llty = self.llvm_ty(&arg_ty)?;
+                let enum_tag_ptr = self.fresh_reg("db_bind_enum_tag_ptr");
+                writeln!(self.out, "  {enum_tag_ptr} = getelementptr inbounds {enum_llty}, ptr {value_ptr}, i32 0, i32 0").unwrap();
+                let tag_val = self.fresh_reg("db_bind_enum_tag");
+                writeln!(self.out, "  {tag_val} = load i64, ptr {enum_tag_ptr}").unwrap();
+                writeln!(self.out, "  store i64 {tag_val}, ptr {i_ptr}").unwrap();
             } else {
-                // Every other bind-value type `typeck.rs`'s `infer` (not
-                // `check`) allowed through is some integer width — widen
-                // to i64 the same way every other integer-typed value
-                // already does on its way into a linked kernel call.
+                // Every other bind-value type `typeck.rs`'s `check_db_bind_ty`
+                // allows through is some integer width — widen to i64 the
+                // same way every other integer-typed value already does on
+                // its way into a linked kernel call.
                 writeln!(self.out, "  store i32 0, ptr {tag_ptr}").unwrap();
                 let v = self.expr(arg, scopes)?;
                 let widened = self.widen_to_i64(&v, &arg_ty);
@@ -6880,6 +6896,37 @@ impl Codegen<'_> {
         let err_val = self.fresh_reg("env_err_val");
         writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
         self.emit_result_merge(&result_ty, &is_ok, "{ptr, i64}", &value_val, &err_val, "env")
+    }
+
+    /// `dec_from_str(s) -> Result(dec128, str)` — `DEC128_BUILTINS`'s own
+    /// doc comment: reuses `emit_result_merge`, the same generic
+    /// tag-then-payload machinery `emit_env`/`emit_db_connect` (just
+    /// below) already use, rather than hand-rolling the branch/merge
+    /// shape the way `emit_check_role` did before that helper existed.
+    /// `nir_dec128_from_str` returns its `Dec128Bits` payload directly
+    /// (by value, not through an out-pointer) — the one real difference
+    /// from `emit_db_connect`'s `handle_scratch`, since dec128 is already
+    /// passed/returned by value everywhere in this backend (`llvm_ty`'s
+    /// `Ty::Dec128` arm).
+    fn emit_dec_from_str(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {
+        let result_ty = Ty::Named("Result".to_string(), vec![Ty::Dec128, Ty::Str]);
+        let (s_ptr, s_len) = self.str_parts(&args[0], scopes)?;
+        let ok_scratch = self.fresh_reg("dec_from_str_ok_scratch");
+        self.emit_alloca(&ok_scratch, "i32");
+        let err_scratch = self.fresh_reg("dec_from_str_err_scratch");
+        self.emit_alloca(&err_scratch, "{ptr, i64}");
+        let d = self.fresh_reg("dec_from_str_val");
+        writeln!(
+            self.out,
+            "  {d} = call {{i64, i64}} @nir_dec128_from_str(ptr {s_ptr}, i64 {s_len}, ptr {ok_scratch}, ptr {err_scratch})"
+        )
+        .unwrap();
+        let ok_loaded = self.fresh_reg("dec_from_str_ok");
+        writeln!(self.out, "  {ok_loaded} = load i32, ptr {ok_scratch}").unwrap();
+        let is_ok = self.icmp("ne", "i32", &ok_loaded, "0")?;
+        let err_val = self.fresh_reg("dec_from_str_err_val");
+        writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+        self.emit_result_merge(&result_ty, &is_ok, "{i64, i64}", &d, &err_val, "dec_from_str")
     }
 
     fn emit_db_connect(&mut self, args: &[Expr], scopes: &mut Scopes) -> Result<String, CodegenError> {

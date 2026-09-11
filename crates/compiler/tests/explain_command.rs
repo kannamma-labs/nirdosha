@@ -108,3 +108,71 @@ fn an_unbound_identifier_typo_is_auto_tagged_nir0013_in_verify() {
     assert_eq!(value["typecheck"]["errors"][0]["code"], "NIR0013", "verdict: {value}");
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_bare_variant_name_used_without_call_syntax_is_auto_tagged_nir0001_in_verify() {
+    // NIR0001's own "wrong" example: a bare variant name (`Circle`, no
+    // `(...)`) parses as a plain identifier, so it's an `UnknownVar` --
+    // indistinguishable from a real typo (NIR0013) unless the unresolved
+    // name is checked against the program's own declared variant names.
+    let path = scratch_file(
+        "nir0001",
+        "enum Shape {\n    Circle(i64),\n    Square(i64),\n}\n\nfn main() {\n    let s: Shape = Circle\n}\n",
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha"))
+        .arg("verify")
+        .arg(&path)
+        .output()
+        .expect("nirdosha verify should run");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("verify should print valid JSON");
+    assert_eq!(value["typecheck"]["errors"][0]["code"], "NIR0001", "verdict: {value}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn mixing_i32_and_i64_without_a_conversion_is_auto_tagged_nir0006_in_verify() {
+    let path = scratch_file(
+        "nir0006",
+        "fn main() {\n    let a: i32 = 1\n    let b: i64 = 2\n    let c: i64 = a + b\n}\n",
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha"))
+        .arg("verify")
+        .arg(&path)
+        .output()
+        .expect("nirdosha verify should run");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("verify should print valid JSON");
+    assert_eq!(value["typecheck"]["errors"][0]["code"], "NIR0006", "verdict: {value}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_wildcard_arm_on_an_enum_match_is_auto_tagged_nir0008_in_verify() {
+    let path = scratch_file(
+        "nir0008_wildcard",
+        "enum Shape {\n    Circle(i64),\n    Square(i64),\n}\n\nfn area(shape: Shape) -> i64 {\n    return match shape {\n        Circle(r) => 1,\n        _ => 0,\n    }\n}\n\nfn main() {\n}\n",
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha"))
+        .arg("verify")
+        .arg(&path)
+        .output()
+        .expect("nirdosha verify should run");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("verify should print valid JSON");
+    assert_eq!(value["typecheck"]["errors"][0]["code"], "NIR0008", "verdict: {value}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_missing_variant_arm_is_auto_tagged_nir0008_in_verify() {
+    let path = scratch_file(
+        "nir0008_missing_arm",
+        "enum Shape {\n    Circle(i64),\n    Square(i64),\n}\n\nfn area(shape: Shape) -> i64 {\n    return match shape {\n        Circle(r) => 1,\n    }\n}\n\nfn main() {\n}\n",
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha"))
+        .arg("verify")
+        .arg(&path)
+        .output()
+        .expect("nirdosha verify should run");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("verify should print valid JSON");
+    assert_eq!(value["typecheck"]["errors"][0]["code"], "NIR0008", "verdict: {value}");
+    let _ = std::fs::remove_file(&path);
+}

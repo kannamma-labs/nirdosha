@@ -4428,16 +4428,22 @@ pub unsafe extern "C" fn nir_dec128_to_str(value: Dec128Bits, out_ptr: *mut u8, 
     bytes.len() as i64
 }
 
-/// `dec_from_str(s)` — matches `interpreter.rs`'s `Decimal::from_str`
-/// call exactly. Returns `Dec128Bits` by value plus an `i32` success
-/// flag (`1` ok, `0` malformed) via `ok_ptr`, the same "packed result,
-/// no `Result` type at this ABI layer" shape `nir_inv`/`nir_solve`
-/// already use for their own fallible linear-algebra kernels.
+/// `dec_from_str(s) -> Result(dec128, str)` — matches `interpreter.rs`'s
+/// `Decimal::from_str` call exactly. Returns `Dec128Bits` by value plus
+/// an `i32` success flag (`1` ok, `0` malformed) via `ok_ptr`, and now a
+/// real error message via `out_err` on failure — the same `NirStrOut`
+/// out-param convention every other `emit_result_merge`-backed kernel
+/// uses (e.g. `nir_json_get_str`), not the bare "packed result, no
+/// message" shape `nir_inv`/`nir_solve` still use for their own fallible
+/// kernels (`codegen.rs`'s `DEC128_BUILTINS` doc comment: `dec_from_str`
+/// is the first `dec128` builtin to construct a real `Result(_, _)`
+/// value, so it needs a real message to put in the `Err` case).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nir_dec128_from_str(s_ptr: *const u8, s_len: i64, ok_ptr: *mut i32) -> Dec128Bits {
+pub unsafe extern "C" fn nir_dec128_from_str(s_ptr: *const u8, s_len: i64, ok_ptr: *mut i32, out_err: *mut NirStrOut) -> Dec128Bits {
     use std::str::FromStr;
     let bytes = unsafe { std::slice::from_raw_parts(s_ptr, s_len as usize) };
-    let parsed = std::str::from_utf8(bytes).ok().and_then(|s| Decimal::from_str(s).ok());
+    let text = std::str::from_utf8(bytes).ok();
+    let parsed = text.and_then(|s| Decimal::from_str(s).ok());
     match parsed {
         Some(d) => {
             unsafe { *ok_ptr = 1 };
@@ -4445,6 +4451,11 @@ pub unsafe extern "C" fn nir_dec128_from_str(s_ptr: *const u8, s_len: i64, ok_pt
         }
         None => {
             unsafe { *ok_ptr = 0 };
+            let msg = match text {
+                Some(s) => format!("malformed dec128 string: {s:?}"),
+                None => "malformed dec128 string: not valid UTF-8".to_string(),
+            };
+            unsafe { write_str_out(out_err, msg) };
             decimal_to_bits(Decimal::ZERO)
         }
     }
