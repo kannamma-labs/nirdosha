@@ -526,6 +526,22 @@ pub fn run_verify_pipeline(path: &str) -> VerifyVerdict {
                         fix: None,
                     });
                 }
+                ContractCheckResult::EngineLimit { obligation, fuel } => {
+                    // RFC 0016 fail-closed semantics: "we couldn't check it"
+                    // must never publish. EngineLimit counts as a failed
+                    // proof for the verdict (Disproved, not Unknown) but is
+                    // NOT a code violation -- its status is its own, so the
+                    // Phase 1 coverage gate can tell VIOLATED from
+                    // ENGINE_LIMIT and stop the model being blamed for a
+                    // solver limit.
+                    contracts.failed += 1;
+                    contracts.obligations.push(ContractObligation {
+                        fn_name: outcome.fn_name,
+                        status: "engine_limit",
+                        detail: Some(format!("{obligation} (rlimit={fuel}; fail-closed -- blocks publishing, but an engine limit, not a code bug)")),
+                        fix: None,
+                    });
+                }
             }
         }
 

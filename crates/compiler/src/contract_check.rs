@@ -49,6 +49,60 @@ use std::collections::{HashMap, HashSet};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
+// ---------------------------------------------------------------------------
+// RFC 0016 Phase 0: deterministic solver fuel.
+//
+// Every proof check this module runs is bounded by Z3's `rlimit` -- a
+// deterministic resource counter (conflicts/decisions/steps), never a
+// wall-clock timeout, so "same source, same fuel, same verdict" holds on
+// any machine and the attestation can be reproducible. Exhausting the
+// fuel is reported as `ContractCheckResult::EngineLimit` (or
+// `EquivalenceResult::EngineLimit`) -- classified as an engine limit, not
+// a violation, per the RFC's VIOLATED/ENGINE_LIMIT split: the caller
+// (Phase 1's coverage gate) must treat it as a failed proof that blocks
+// publishing, but never blame it on the generated code.
+//
+// `rlimit` counts resources consumed by a solver *cumulatively* -- the
+// whole per-function check (precondition walk + every post_logic search)
+// shares one budget, which is exactly the "per-proof limit is a fixed
+// toolchain constant" the RFC specifies.
+
+/// The default fuel, in Z3 `rlimit` units -- far above what the Tier-1
+/// walker's linear-arithmetic contracts ever consume in practice (they
+/// typically settle in the low thousands), yet finite, so a pathological
+/// obligation can never run away. A toolchain constant; `verify` records
+/// the fuel actually used in every result detail so attestation (Phase 2)
+/// can pin it.
+const DEFAULT_PROOF_FUEL_RLIMIT: u32 = 5_000_000;
+
+/// A test/operator override for the fuel cap, 0 meaning "use the
+/// default" -- deliberately process-global and code-level, not an env
+/// var, so tests stay deterministic and the default is the honest
+/// toolchain constant everywhere else.
+static PROOF_FUEL_OVERRIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Overrides the solver-fuel cap for this process (0 restores the
+/// default). Exists for tests and operators diagnosing a hard proof; the
+/// fuel actually used is reported in every `EngineLimit` result.
+pub fn set_proof_fuel_rlimit(rlimit: u32) {
+    PROOF_FUEL_OVERRIDE.store(rlimit, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The fuel cap every solver created by this module runs under.
+pub fn proof_fuel_rlimit() -> u32 {
+    let fuel_override = PROOF_FUEL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst);
+    if fuel_override != 0 { fuel_override } else { DEFAULT_PROOF_FUEL_RLIMIT }
+}
+
+/// Bounds a solver with the effective fuel cap -- called at every solver
+/// creation site in this module, before any assertion, so no proof path
+/// can exist unbounded.
+fn apply_proof_fuel(solver: &Solver) {
+    let mut params = z3::Params::new();
+    params.set_u32("rlimit", proof_fuel_rlimit());
+    solver.set_params(&params);
+}
+
 use crate::ast::*;
 use crate::parser::parse_standalone_expr;
 use crate::token::Span;
@@ -77,6 +131,16 @@ pub enum ContractCheckResult {
     /// authoring mistake (a typo'd range), never an intentional "this
     /// validate block should never run."
     VacuousPrecondition,
+    /// The deterministic solver fuel (see `apply_proof_fuel`) ran out --
+    /// or Z3 answered `unknown` -- before this obligation could be
+    /// decided. **Not a verdict about the code either way**: RFC 0016's
+    /// fail-closed semantics make it a failed proof for gating purposes
+    /// ("we couldn't check it" must never publish), but it is an engine
+    /// limit, never a violation -- the Phase 1 coverage gate must not
+    /// spend the model's repair budget on it or blame the draft. Carries
+    /// the obligation that couldn't be decided, in human-readable form,
+    /// plus the fuel that was in force.
+    EngineLimit { obligation: String, fuel: u32 },
     /// A name in the predicate is neither `result`, nor `fn_name`'s own
     /// parameter, nor supplied in `extra_bindings` — §7.1a's "the spec
     /// references a quantity the code doesn't parameterize on" case.
@@ -310,8 +374,10 @@ pub fn check_program_contracts_diagnostics(program: &Program) -> Vec<ContractDia
 /// `None` for `Proved`/`Unsupported` (nothing to report — see
 /// `check_program_contracts`'s own doc comment for why `Unsupported`
 /// specifically is never an error here); `Some(message)` for every
-/// other `ContractCheckResult`, shared verbatim by both public entry
-/// points above so their wording never drifts apart.
+/// other `ContractCheckResult` — including `EngineLimit`, which RFC
+/// 0016 makes a gate failure even though it is no one's fault — shared
+/// verbatim by both public entry points above so their wording never
+/// drifts apart.
 fn contract_error_message(outcome: &ValidateOutcome) -> Option<String> {
     match &outcome.result {
         ContractCheckResult::Proved | ContractCheckResult::Unsupported(_) => None,
@@ -327,6 +393,12 @@ fn contract_error_message(outcome: &ValidateOutcome) -> Option<String> {
             "`validate {}`: pre_logic can never be true for any input `{}`'s parameter types admit -- \
              every post_logic would \"pass\" vacuously; check for a typo (e.g. an impossible range)",
             outcome.fn_name, outcome.fn_name
+        )),
+        ContractCheckResult::EngineLimit { obligation, fuel } => Some(format!(
+            "`validate {}`: couldn't decide -- {obligation} (solver fuel rlimit={fuel}; \
+             an engine limit, not a violation -- fail-closed per RFC 0016: this blocks publishing \
+             but is not a code bug)",
+            outcome.fn_name
         )),
         ContractCheckResult::UnboundIdentifier { name, .. } => Some(format!(
             "`validate {}`: `{name}` is neither `result` nor one of `{}`'s own parameters",
@@ -389,6 +461,13 @@ pub enum EquivalenceResult {
         result_a: Option<i64>,
         result_b: Option<i64>,
     },
+    /// The same fail-closed engine-limit classification as
+    /// `ContractCheckResult::EngineLimit` -- fuel exhausted or Z3
+    /// `unknown` before equivalence could be decided. Before fuel caps
+    /// this case was unreachable in practice (and, being reachable now,
+    /// used to panic on `get_model().expect(...)` below -- which is why
+    /// it must be handled here, explicitly).
+    EngineLimit,
     Unsupported(String),
 }
 
@@ -465,6 +544,7 @@ pub fn check_equivalence(program: &Program, fn_a_name: &str, fn_b_name: &str) ->
     }
 
     let solver = Solver::new();
+    apply_proof_fuel(&solver);
     let summaries = HashMap::new();
     let mut top_a = HashMap::new();
     let mut top_b = HashMap::new();
@@ -488,16 +568,19 @@ pub fn check_equivalence(program: &Program, fn_a_name: &str, fn_b_name: &str) ->
 
     solver.push();
     solver.assert(result_a.eq(result_b.clone()).not());
-    let sat = solver.check();
-    if sat == SatResult::Unsat {
-        EquivalenceResult::Equivalent
-    } else {
-        let model = solver.get_model().expect("SAT result has a model");
-        let bindings: Vec<(String, i64)> = shared.iter().filter_map(|(name, term)| model.eval(term, true).and_then(|v| v.as_i64()).map(|v| (name.clone(), v))).collect();
-        EquivalenceResult::Different {
-            bindings,
-            result_a: model.eval(&result_a, true).and_then(|v| v.as_i64()),
-            result_b: model.eval(&result_b, true).and_then(|v| v.as_i64()),
+    match solver.check() {
+        SatResult::Unsat => EquivalenceResult::Equivalent,
+        // Before fuel caps this was `else { get_model().expect(...) }` --
+        // an `unknown` there would have panicked on the missing model.
+        SatResult::Unknown => EquivalenceResult::EngineLimit,
+        SatResult::Sat => {
+            let model = solver.get_model().expect("SAT result has a model");
+            let bindings: Vec<(String, i64)> = shared.iter().filter_map(|(name, term)| model.eval(term, true).and_then(|v| v.as_i64()).map(|v| (name.clone(), v))).collect();
+            EquivalenceResult::Different {
+                bindings,
+                result_a: model.eval(&result_a, true).and_then(|v| v.as_i64()),
+                result_b: model.eval(&result_b, true).and_then(|v| v.as_i64()),
+            }
         }
     }
 }
@@ -528,7 +611,7 @@ pub fn check_equivalence(program: &Program, fn_a_name: &str, fn_b_name: &str) ->
 fn function_result_term(f: &FnDecl, top: HashMap<String, Int>, solver: &Solver, summaries: &HashMap<String, Summary>) -> Result<Int, String> {
     match f.body.stmts.as_slice() {
         [Stmt::Return { value: Some(e), .. }] => {
-            let mut eval = Eval { solver, post_logic: &[], outcome: None, summaries };
+            let mut eval = Eval { solver, fn_name: &f.name, post_logic: &[], outcome: None, summaries };
             let mut scopes = Scopes(vec![top]);
             eval.int_expr(e, &mut scopes)
         }
@@ -587,6 +670,7 @@ fn check_fn_contract_parsed(
     }
 
     let solver = Solver::new();
+    apply_proof_fuel(&solver);
     let mut top = HashMap::new();
     for p in &f.params {
         let term = Int::fresh_const(&p.name);
@@ -605,7 +689,7 @@ fn check_fn_contract_parsed(
     }
 
     let mut scopes = Scopes(vec![top]);
-    let mut eval = Eval { solver: &solver, post_logic: &post_exprs, outcome: None, summaries };
+    let mut eval = Eval { solver: &solver, fn_name: &f.name, post_logic: &post_exprs, outcome: None, summaries };
     // Assert every precondition as a hypothesis *before* walking the
     // body — everything downstream (including every `return` point's
     // counterexample search) then only ever considers inputs where
@@ -623,8 +707,22 @@ fn check_fn_contract_parsed(
     // this same precondition-restricted space, so if that space is
     // empty, every one of them "succeeds" vacuously instead of failing
     // loudly. See `ContractCheckResult::VacuousPrecondition`'s own doc.
-    if !pre_exprs.is_empty() && solver.check() == SatResult::Unsat {
-        return ContractCheckResult::VacuousPrecondition;
+    if !pre_exprs.is_empty() {
+        match solver.check() {
+            SatResult::Unsat => return ContractCheckResult::VacuousPrecondition,
+            // The fuel ran out mid-vacuity-check -- "couldn't decide"
+            // is an engine limit, never "satisfiable, so proceed": an
+            // `unknown` treated as `Sat` here would push the obligation
+            // downstream, where the post-logic search would burn more of
+            // the already-empty budget and misreport the whole contract.
+            SatResult::Unknown => {
+                return ContractCheckResult::EngineLimit {
+                    obligation: format!("pre_logic satisfiability for `{}` (the vacuity check) exhausted the solver fuel before deciding", f.name),
+                    fuel: proof_fuel_rlimit(),
+                }
+            }
+            SatResult::Sat => {}
+        }
     }
     if let Err(msg) = eval.stmts(&f.body.stmts, &mut scopes) {
         return ContractCheckResult::Unsupported(msg);
@@ -768,6 +866,9 @@ impl Scopes {
 
 struct Eval<'s> {
     solver: &'s Solver,
+    /// The function being checked -- used only for `EngineLimit`'s
+    /// human-readable obligation text, never the proof itself.
+    fn_name: &'s str,
     /// `(source text, parsed)` for every `post_logic` entry — kept
     /// paired with its own source string so a counterexample can name
     /// exactly which clause it violates, not just "some post_logic
@@ -970,22 +1071,37 @@ impl Eval<'_> {
 
             self.solver.push();
             self.solver.assert(holds.not());
-            let sat = self.solver.check();
-            if sat == SatResult::Sat {
-                let model = self.solver.get_model().expect("SAT result has a model");
-                let mut bindings = Vec::new();
-                for scope in &scopes.0 {
-                    for (name, t) in scope {
-                        if name == "result" {
-                            continue;
-                        }
-                        if let Some(v) = model.eval(t, true).and_then(|v| v.as_i64()) {
-                            bindings.push((name.clone(), v));
+            match self.solver.check() {
+                SatResult::Sat => {
+                    let model = self.solver.get_model().expect("SAT result has a model");
+                    let mut bindings = Vec::new();
+                    for scope in &scopes.0 {
+                        for (name, t) in scope {
+                            if name == "result" {
+                                continue;
+                            }
+                            if let Some(v) = model.eval(t, true).and_then(|v| v.as_i64()) {
+                                bindings.push((name.clone(), v));
+                            }
                         }
                     }
+                    let result = model.eval(&term, true).and_then(|v| v.as_i64());
+                    self.outcome = Some(ContractCheckResult::Counterexample { violated_predicate: src.clone(), bindings, result });
                 }
-                let result = model.eval(&term, true).and_then(|v| v.as_i64());
-                self.outcome = Some(ContractCheckResult::Counterexample { violated_predicate: src.clone(), bindings, result });
+                // Unsat: no input within the pre-conditions breaks this
+                // clause -- it holds, and the next clause is checked.
+                SatResult::Unsat => {}
+                // Fail-closed (RFC 0016): fuel exhausted mid-search is an
+                // engine limit, never a silent "clause holds". Before
+                // fuel caps this branch was structurally unreachable --
+                // now it is the difference between `EngineLimit` and a
+                // false `Proved` under pressure.
+                SatResult::Unknown => {
+                    self.outcome = Some(ContractCheckResult::EngineLimit {
+                        obligation: format!("post_logic `{src}` for `{}` -- the counterexample search exhausted the solver fuel before deciding", self.fn_name),
+                        fuel: proof_fuel_rlimit(),
+                    });
+                }
             }
             self.solver.pop(1);
         }

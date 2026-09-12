@@ -1213,12 +1213,14 @@ fn cmd_equivalence(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::FAILURE,
         ),
         nirdosha::contract_check::EquivalenceResult::Unsupported(msg) => (serde_json::json!({ "result": "UNSUPPORTED", "fn_a": fn_a, "fn_b": fn_b, "detail": msg }), ExitCode::from(2)),
+        nirdosha::contract_check::EquivalenceResult::EngineLimit => (serde_json::json!({ "result": "ENGINE_LIMIT", "fn_a": fn_a, "fn_b": fn_b, "detail": "the solver fuel ran out before equivalence could be decided -- fail-closed per RFC 0016, not a verdict about the functions" }), ExitCode::from(2)),
     };
     println!("{}", serde_json::to_string_pretty(&value).expect("this JSON value always serializes"));
     match result {
         nirdosha::contract_check::EquivalenceResult::Equivalent => eprintln!("EQUIVALENT: `{fn_a}` and `{fn_b}` produce the same result for every input Z3 could check"),
         nirdosha::contract_check::EquivalenceResult::Different { .. } => eprintln!("DIFFERENT: `{fn_a}` and `{fn_b}` diverge -- see the counterexample above"),
         nirdosha::contract_check::EquivalenceResult::Unsupported(ref msg) => eprintln!("UNSUPPORTED: {msg}"),
+        nirdosha::contract_check::EquivalenceResult::EngineLimit => eprintln!("ENGINE_LIMIT: the solver fuel ran out before deciding -- raise NIRDOSHA-equivalent fuel via `set_proof_fuel_rlimit` or simplify the functions"),
     }
     exit
 }
