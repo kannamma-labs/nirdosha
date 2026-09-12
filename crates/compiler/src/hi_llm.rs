@@ -315,6 +315,262 @@ fn machine_error(stage: &str, line: Option<usize>, col: Option<usize>, message: 
     serde_json::json!({ "stage": stage, "line": line, "col": col, "message": message }).to_string()
 }
 
+// ===========================================================================
+// RFC 0016 Phase 1: the contract coverage gate.
+//
+// The demonstrated seam (2026-09-11, the run that opened the RFC): decompose
+// proposes what should be proven, generate can drop it, publish doesn't
+// notice -- a clean-compiling banking program shipped with zero `validate`
+// contracts and `nirdosha verify` reported `PROVED 0/0`, which is silence,
+// not safety. This gate turns "the units demanded a contract" from prompt
+// decoration into a publish-blocking check, exactly the way
+// `typecheck_and_build_check` already turns type rules into one.
+
+/// Why a coverage check failed -- the class drives the repair loop's budget
+/// discipline (RFC 0016's VIOLATED/ENGINE_LIMIT split):
+/// - everything except `EngineLimit` is the model's to fix and consumes the
+///   repair budget, each class with its own `self_repair_hint` teaching;
+/// - `EngineLimit` is *nobody's* fault, consumes no budget, gets exactly one
+///   off-budget simplification attempt, and then escalates to the operator
+///   with the proof obligation attached instead of blaming the draft.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoverageFailureClass {
+    /// A confirmed fn unit demanded a `validate` contract; the draft's fn
+    /// carries none (or the fn itself is absent).
+    ContractDropped,
+    /// A demanded contract exists but the fn genuinely breaks it (or the
+    /// contract itself is malformed: unbound identifier, no such fn,
+    /// predicate parse error) -- the model's to fix.
+    ContractViolated,
+    /// A demanded contract's `pre:` is unsatisfiable -- it passes vacuously
+    /// (Phase 0's `VacuousPrecondition`, surfaced here per-unit).
+    VacuousContract,
+    /// The proof engine's deterministic fuel ran out (Phase 0's
+    /// `EngineLimit`) -- an engine limit, never a code bug.
+    EngineLimit,
+    /// A demanded contract uses a shape the Tier-1 walker can't model
+    /// (`Unsupported`) -- a demanded contract is not optional, so "can't
+    /// decide" fails the gate and the hint teaches the provable subset.
+    ContractUnprovable,
+}
+
+/// One coverage-gate failure, ready for the repair conversation: the class
+/// (for budget discipline) and the full diagnostic (prose + machine-readable
+/// errors, the 2026-09-11 format), attributed to the unit that demanded the
+/// contract. Phase 2 packs will add pack-ID attribution on the same struct.
+#[derive(Debug, Clone)]
+pub struct CoverageFailure {
+    pub class: CoverageFailureClass,
+    pub diagnostic: String,
+}
+
+/// Phase 1's demand convention: an attribute line beginning with
+/// `validate contract` (optionally with a `:` after) or `contract:` is a
+/// **proof demand** -- the attribute prose says what must hold; the gate
+/// requires the named unit's fn to carry a `validate` block that Z3
+/// actually PROVES. Returns the demand text (everything after the marker,
+/// trimmed) for attribution. Deliberately a fixed, documented convention
+/// rather than fuzzy matching: Phase 2's pack manifests carry structured
+/// demands, and this form is what `:attach` writes when a human states the
+/// law by hand (`validate contract balance_nonnegative: ...`).
+pub fn demanded_contract(attr_line: &str) -> Option<&str> {
+    let t = attr_line.trim();
+    let rest = t
+        .strip_prefix("validate contract")
+        .or_else(|| t.strip_prefix("contract:"))
+        .map(|r| r.trim_start_matches([':', ' ']).trim());
+    match rest {
+        Some(r) if !r.is_empty() => Some(r),
+        _ => None,
+    }
+}
+
+/// The coverage gate itself: parse `source`, then require that (1) every
+/// confirmed fn unit whose attributes carry a proof demand actually has a
+/// `validate` block on its fn in the draft, and (2) every demanded fn's
+/// contract PROVES -- no counterexample, non-vacuous, within the engine's
+/// deterministic fuel, inside the provable subset. Parses its own copy of
+/// the source because the generate loop only holds a `&str` (the parse is
+/// cheap next to the LLM call that produced it); publish's re-check calls
+/// [`contract_coverage_check_program`] with its already-loaded `Program`.
+/// Programs from graphs where no unit demands anything pass untouched --
+/// every existing project is unaffected until someone states a law.
+pub fn contract_coverage_check(source: &str, units: &[crate::hi_graph::CandidateUnit]) -> Result<(), CoverageFailure> {
+    let toks = crate::token::Lexer::new(source).tokenize();
+    let toks = match toks {
+        Ok(t) => t,
+        Err(e) => {
+            return Err(CoverageFailure {
+                class: CoverageFailureClass::ContractViolated,
+                diagnostic: format!("contract coverage failure: the source no longer lexes, so demanded contracts cannot be checked: {e:?}"),
+            })
+        }
+    };
+    let program = match crate::parser::Parser::new(toks).parse_program() {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(CoverageFailure {
+                class: CoverageFailureClass::ContractViolated,
+                diagnostic: format!("contract coverage failure: the source no longer parses, so demanded contracts cannot be checked: {e:?}"),
+            })
+        }
+    };
+    contract_coverage_check_program(&program, units)
+}
+
+/// [`contract_coverage_check`] against an already-parsed program -- what
+/// `handle_publish`'s re-check calls with its own loaded `Program`, so the
+/// gate runs identically at generate time (where the model can repair) and
+/// at publish time (where a hand-edited file can't sneak past).
+pub fn contract_coverage_check_program(program: &crate::ast::Program, units: &[crate::hi_graph::CandidateUnit]) -> Result<(), CoverageFailure> {
+    // (fn_name, demand text) for every confirmed fn unit carrying a proof
+    // demand. Only fn units can demand: a `validate` block targets a fn.
+    let mut demanded_fns: Vec<(String, String)> = Vec::new();
+    for u in units {
+        if u.kind != "fn" {
+            continue;
+        }
+        for attr in &u.attributes {
+            for line in attr.lines() {
+                if let Some(demand) = demanded_contract(line) {
+                    demanded_fns.push((u.name.clone(), demand.to_string()));
+                }
+            }
+        }
+    }
+    if demanded_fns.is_empty() {
+        return Ok(());
+    }
+    let demanded_names: Vec<&str> = demanded_fns.iter().map(|(n, _)| n.as_str()).collect();
+
+    let mut failures: Vec<(CoverageFailureClass, String, Option<(usize, usize)>)> = Vec::new();
+
+    // (1) Presence: each demanded fn must exist AND carry a validate block.
+    let mut reported_dropped_fns: Vec<&str> = Vec::new();
+    for (fn_name, demand) in &demanded_fns {
+        match program.fns.iter().find(|f| &f.name == fn_name) {
+            None => {
+                if !reported_dropped_fns.contains(&fn_name.as_str()) {
+                    reported_dropped_fns.push(fn_name);
+                    failures.push((
+                        CoverageFailureClass::ContractDropped,
+                        format!("the confirmed unit `{fn_name}` (demand: `{demand}`) demands a proving `validate` block, but the draft has no fn `{fn_name}` at all -- the unit itself was dropped"),
+                        None,
+                    ));
+                }
+            }
+            Some(f) => {
+                if !program.validates.iter().any(|v| &v.fn_name == fn_name) && !reported_dropped_fns.contains(&fn_name.as_str()) {
+                    reported_dropped_fns.push(fn_name);
+                    failures.push((
+                        CoverageFailureClass::ContractDropped,
+                        format!("the confirmed unit `{fn_name}` (demand: `{demand}`) demands a proving `validate` block, but the draft's fn `{fn_name}` carries none -- write `validate {fn_name} {{ pre: ... post: ... }}`; it must PROVE, not merely parse"),
+                        Some((f.span.line, f.span.col)),
+                    ));
+                }
+            }
+        }
+    }
+
+    // (2) Proof: every demanded fn's validate outcomes must hold. This runs
+    // even for fns whose block was just reported missing -- a missing block
+    // has no outcomes, so the loop below simply finds nothing for it.
+    // NOTE on `Unsupported`: `contract_error_message` deliberately returns
+    // `None` for it (check_program_contracts' long-standing "never an error
+    // there" policy), but a DEMANDED contract is not optional -- the gate
+    // maps Unsupported to `ContractUnprovable` with its own message instead
+    // of skipping it, which is why that arm is handled here and not via the
+    // shared helper.
+    let outcomes = crate::contract_check::run_program_validates(program);
+    for outcome in &outcomes {
+        if !demanded_names.contains(&outcome.fn_name.as_str()) {
+            continue; // a present-but-undemanded contract is verify's report, not the gate's scope
+        }
+        let (class, message): (CoverageFailureClass, String) = match &outcome.result {
+            crate::contract_check::ContractCheckResult::Proved => continue,
+            crate::contract_check::ContractCheckResult::Unsupported(msg) => {
+                (CoverageFailureClass::ContractUnprovable, format!("the proof engine can't model this contract's shape: {msg}"))
+            }
+            crate::contract_check::ContractCheckResult::VacuousPrecondition => (CoverageFailureClass::VacuousContract, crate::contract_check::contract_error_message(outcome).expect("VacuousPrecondition always carries a message")),
+            crate::contract_check::ContractCheckResult::EngineLimit { .. } => (CoverageFailureClass::EngineLimit, crate::contract_check::contract_error_message(outcome).expect("EngineLimit always carries a message")),
+            crate::contract_check::ContractCheckResult::Counterexample { .. }
+            | crate::contract_check::ContractCheckResult::UnboundIdentifier { .. }
+            | crate::contract_check::ContractCheckResult::NoSuchFunction(_)
+            | crate::contract_check::ContractCheckResult::PredicateParseError(_) => (CoverageFailureClass::ContractViolated, crate::contract_check::contract_error_message(outcome).expect("failure classes always carry a message")),
+        };
+        let span = program
+            .validates
+            .iter()
+            .find(|v| v.fn_name == outcome.fn_name)
+            .map(|v| (v.span.line, v.span.col));
+        let mut line = format!("the confirmed unit `{}` demands a `validate` contract that proves; its contract failed: {}", outcome.fn_name, message);
+        if class == CoverageFailureClass::ContractUnprovable {
+            line.push_str(" -- a demanded contract is not optional: rewrite it in the provable subset (integer-only params/result, linear arithmetic, no loops/calls)");
+        }
+        failures.push((class, line, span));
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+    let machine: Vec<String> = failures
+        .iter()
+        .map(|(_, message, span)| machine_error("coverage", span.map(|s| s.0), span.map(|s| s.1), message))
+        .collect();
+    // EngineLimit dominates the run's class (RFC 0016): when the engine
+    // couldn't decide *any* demanded contract, the model must not be charged
+    // budget for work it cannot influence -- even if other failures are
+    // also present, the escalation message carries the full list.
+    let class = if failures.iter().any(|(c, _, _)| *c == CoverageFailureClass::EngineLimit) {
+        CoverageFailureClass::EngineLimit
+    } else {
+        failures[0].0.clone()
+    };
+    Err(CoverageFailure {
+        class,
+        diagnostic: format!(
+            "contract coverage failure: {}\nmachine-readable errors: [{}]",
+            failures.iter().map(|(_, m, _)| m.as_str()).collect::<Vec<_>>().join(" "),
+            machine.join(", ")
+        ),
+    })
+}
+
+/// How one failed attempt charges the repair budget (RFC 0016 Phase 1's
+/// VIOLATED/ENGINE_LIMIT split, extracted pure so the discipline itself is
+/// unit-tested without an LLM client):
+/// - a VIOLATED-class failure (anything the model can fix, including every
+///   compile failure) consumes one of `MAX_SELF_REPAIR_ATTEMPTS`;
+/// - an ENGINE_LIMIT failure consumes none, but only ONE off-budget
+///   simplification attempt is allowed -- a second engine limit escalates
+///   to the operator instead of looping on work no code edit can fix.
+#[derive(Debug, PartialEq)]
+enum BudgetCharge {
+    /// Push a repair turn and continue.
+    Continue,
+    /// Budget exhausted -- give up with the last diagnostic.
+    StopGiveUp,
+    /// Second engine limit -- escalate to the operator with the obligation.
+    StopEscalate,
+}
+fn charge_budget(budget: &mut u32, engine_limit_simplifications: &mut u32, class: CoverageFailureClass) -> BudgetCharge {
+    if class == CoverageFailureClass::EngineLimit {
+        *engine_limit_simplifications += 1;
+        if *engine_limit_simplifications > 1 {
+            BudgetCharge::StopEscalate
+        } else {
+            BudgetCharge::Continue // off-budget: the model gets one simplification
+        }
+    } else {
+        if *budget == 0 {
+            BudgetCharge::StopGiveUp
+        } else {
+            *budget -= 1;
+            if *budget == 0 { BudgetCharge::StopGiveUp } else { BudgetCharge::Continue }
+        }
+    }
+}
+
 /// Appends the offending source line(s) to a diagnostic so the model
 /// sees WHAT it wrote at the position, not just where. A model cannot
 /// reliably count lines of its own previous output -- especially after
@@ -335,7 +591,25 @@ fn attach_source_lines(source: &str, diagnostic: &str) -> String {
 }
 
 fn self_repair_hint(diagnostic: &str) -> &'static str {
-    if diagnostic.contains("no `fn main()` found") {
+    if diagnostic.contains("contract coverage failure") {
+        // RFC 0016 Phase 1: the coverage gate's own classes. Sub-dispatched
+        // on one outer marker so no compile diagnostic can misfire these
+        // arms, and ordered engine-limit-first because a combined
+        // diagnostic mentioning a fuel exhaustion must never be answered
+        // with "fix your code" -- that is exactly the budget-split mistake
+        // the RFC exists to prevent.
+        if diagnostic.contains("engine limit") {
+            " This is an engine limit, not a code bug: the demanded contract is too hard for the solver's deterministic fuel. Simplify the arithmetic into provable form -- linearize the fee (bound it with `pre:` instead of a nested min/max), split a tiered rule into one provable branch per tier -- while keeping the contract's MEANING; never loosen it to pass. If it cannot be simplified, the run will escalate to the operator rather than charge you for it."
+        } else if diagnostic.contains("vacuously") {
+            " The demanded contract's `pre:` can never be true for any input the parameter types admit -- an impossible range is almost always a typo. Fix the precondition to the fn's real domain, or fix the code if the domain was genuinely meant to be that narrow."
+        } else if diagnostic.contains("carries none") || diagnostic.contains("no fn") {
+            " Write the missing contract as a separate top-level block: `validate <fn> { pre: <param assumptions> post: <result property> }` -- integer params/result only, linear arithmetic (`+`, `-`, comparisons), no loops or calls in the predicate. It must PROVE under Z3, not merely parse."
+        } else if diagnostic.contains("provable subset") {
+            " Rewrite the demanded contract in the provable subset: integer-only parameters and return, linear arithmetic, no loops, no function calls, no floats -- the strongest true contract that subset can state. A demanded contract is mandatory, so `UNSUPPORTED` from the walker is a rewrite instruction, not a pass."
+        } else {
+            " The fn genuinely breaks the demanded contract at the counterexample input shown -- fix the code, or fix the contract if it misstates the unit's demand; never loosen a predicate just to make it pass."
+        }
+    } else if diagnostic.contains("no `fn main()` found") {
         // Defense in depth on top of `units_prompt`'s own fix, not a
         // substitute for it: a model that still drops `fn main()`
         // despite the now-explicit instruction gets one more, pointed
@@ -434,7 +708,16 @@ fn units_prompt(units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge
     for u in units {
         out.push_str(&format!("### {} {}\n{}\n", u.kind, u.name, u.driving_text));
         for attr in &u.attributes {
-            out.push_str(&format!("- attribute to attach: {attr}\n"));
+            if let Some(demand) = attr.lines().find_map(demanded_contract) {
+                // RFC 0016 Phase 1: a proof demand is not decoration. The
+                // coverage gate refuses any draft whose fn lacks a proving
+                // `validate` block, so say so at the only point the model
+                // reads the demand -- first-try compliance beats repair
+                // turns every time.
+                out.push_str(&format!("- PROOF DEMAND, not optional -- `validate` contract: {demand}: the generated fn `{}` MUST carry a separate top-level `validate {}` block whose `pre:`/`post:` Z3 actually PROVES; Generate refuses the program otherwise\n", u.name, u.name));
+            } else {
+                out.push_str(&format!("- attribute to attach: {attr}\n"));
+            }
         }
         out.push('\n');
     }
@@ -499,7 +782,18 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
     }
     let mut history = vec![ChatMessage { role: "system", content: NIR_SYSTEM_PROMPT.to_string() }, ChatMessage { role: "user", content: units_prompt(units, edges) }];
     let mut last_diagnostic = String::new();
-    for attempt in 1..=MAX_SELF_REPAIR_ATTEMPTS {
+    // RFC 0016 Phase 1's budget discipline: `violation_budget` counts only
+    // failures the model can fix (compile errors, dropped/violated/vacuous/
+    // unprovable contracts). An ENGINE_LIMIT failure charges nothing and gets
+    // exactly one off-budget simplification attempt (charge_budget) -- a
+    // second one escalates to the operator with the proof obligation, since
+    // no code edit can fix a solver fuel limit and four retries would just
+    // produce a correct-but-ungeneratable program with no lever.
+    let mut violation_budget = MAX_SELF_REPAIR_ATTEMPTS;
+    let mut engine_limit_simplifications = 0u32;
+    let mut attempt = 0usize;
+    while violation_budget > 0 {
+        attempt += 1;
         let raw = client.complete(&history).map_err(|e| format!("couldn't reach the model: {e}"))?;
         let source = extract_nir_source(&raw);
         // Every draft is persisted BEFORE the check runs (2026-09-11,
@@ -519,7 +813,19 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
         if let Err(e) = std::fs::create_dir_all(&drafts_dir).and_then(|()| std::fs::write(drafts_dir.join(format!("attempt_{attempt}.nir")), &source)) {
             on_log(&format!("warning: could not persist attempt {attempt}'s draft: {e}"));
         }
-        match typecheck_and_build_check(&source) {
+        // The gate order is load-bearing: build checks first (a draft that
+        // doesn't compile has no meaningful contracts to check), then the
+        // coverage gate on the compiled draft (RFC 0016 Phase 1) -- a
+        // program that typechecks but proves nothing about its money math
+        // no longer passes, which is the demonstrated seam this closes.
+        let outcome: Result<(), (String, Option<CoverageFailureClass>)> = match typecheck_and_build_check(&source) {
+            Err(diagnostic) => Err((diagnostic, None)),
+            Ok(()) => match contract_coverage_check(&source, units) {
+                Err(failure) => Err((failure.diagnostic, Some(failure.class))),
+                Ok(()) => Ok(()),
+            },
+        };
+        match outcome {
             Ok(()) => {
                 let out_path = generated_source_path(root);
                 std::fs::create_dir_all(out_path.parent().expect("generated_source_path always has a parent")).map_err(|e| format!("creating {}: {e}", out_path.display()))?;
@@ -527,19 +833,36 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
                 on_log(&format!("wrote {} (attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS})", out_path.display()));
                 return Ok(out_path);
             }
-            Err(diagnostic) => {
+            Err((diagnostic, class)) => {
                 last_diagnostic = diagnostic.clone();
-                if attempt == MAX_SELF_REPAIR_ATTEMPTS {
-                    break;
+                let class = class.unwrap_or(CoverageFailureClass::ContractViolated);
+                match charge_budget(&mut violation_budget, &mut engine_limit_simplifications, class.clone()) {
+                    BudgetCharge::Continue => {
+                        let engine_limit_turn = class == CoverageFailureClass::EngineLimit;
+                        if engine_limit_turn {
+                            on_log(&format!("attempt {attempt}: the proof engine hit its deterministic fuel limit on a demanded contract -- an engine limit, not a code bug; asking the model for one off-budget simplification..."));
+                        } else {
+                            on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed the checks, asking the model to fix it..."));
+                        }
+                        history.push(ChatMessage { role: "assistant", content: source });
+                        // One pointed follow-up per diagnostic class this loop
+                        // has actually failed on in the field
+                        // (`self_repair_hint`'s own doc comment) -- never a
+                        // generic "fix it" that just re-sends whatever
+                        // ambiguity caused the failure in the first place.
+                        history.push(ChatMessage { role: "user", content: format!("That attempt failed with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}", self_repair_hint(&diagnostic)) });
+                    }
+                    BudgetCharge::StopGiveUp => {
+                        break;
+                    }
+                    BudgetCharge::StopEscalate => {
+                        // RFC 0016: escalate to the operator, never blame the
+                        // model for a solver limit. The obligation rides
+                        // along verbatim, the draft is already on disk, and
+                        // the operator's levers are named.
+                        return Err(format!("escalated to the operator (RFC 0016): the proof engine's deterministic fuel ran out on a demanded contract -- an engine limit, NOT a code bug. The model's one off-budget simplification attempt (draft kept at .nir/generated/attempts/attempt_{attempt}.nir) did not clear it. Proof obligation, verbatim:\n{last_diagnostic}\nOperator options: state a weaker-but-provable demand on the unit, raise the fuel (`nirdosha::contract_check::set_proof_fuel_rlimit`), or waive the demand (`:waive`) and re-generate."));
+                    }
                 }
-                on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed to compile, asking the model to fix it..."));
-                history.push(ChatMessage { role: "assistant", content: source });
-                // One pointed follow-up per diagnostic class this loop
-                // has actually failed on in the field
-                // (`self_repair_hint`'s own doc comment) -- never a
-                // generic "fix it" that just re-sends whatever
-                // ambiguity caused the failure in the first place.
-                history.push(ChatMessage { role: "user", content: format!("That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}", self_repair_hint(&diagnostic)) });
             }
         }
     }
@@ -908,4 +1231,239 @@ mod tests {
         assert!(err.contains("\"line\":3"), "the structured block must carry the real line number, got:\n{err}");
         assert!(err.contains("\"col\":18"), "the structured block must carry the real column, got:\n{err}");
         assert!(err.contains("Ok(d) => return false"), "the offending source line must still be attached, got:\n{err}");
+    }
+
+    // =========================================================================
+    // RFC 0016 Phase 1: the contract coverage gate.
+    //
+    // One lock serializes every test that runs a proof (the fuel override
+    // is process-global, and tests run in parallel threads within this
+    // binary -- without the lock, the engine-limit test's starved fuel
+    // could flip a concurrently-running prove test to EngineLimit).
+    static COVERAGE_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn demand_unit(name: &str, demand: &str) -> crate::hi_graph::CandidateUnit {
+        crate::hi_graph::CandidateUnit {
+            id: format!("code:fn:{name}"),
+            kind: "fn".to_string(),
+            name: name.to_string(),
+            driving_text: format!("{name} does money math"),
+            attributes: vec![format!("validate contract {demand}")],
+        }
+    }
+
+    const CHARGED_WITH_CONTRACT: &str = r#"
+fn charge_cents(amount_cents: i64, balance_cents: i64) -> i64 {
+    return balance_cents - amount_cents
+}
+
+validate charge_cents {
+    pre: amount_cents >= 0 && amount_cents <= balance_cents
+    post: result >= 0
+}
+"#;
+
+    #[test]
+    fn demanded_contract_recognizes_the_canonical_forms() {
+        assert_eq!(demanded_contract("validate contract balance_nonnegative: result >= 0").unwrap(), "balance_nonnegative: result >= 0");
+        assert_eq!(demanded_contract("contract: no overspend".trim()).unwrap(), "no overspend");
+        assert_eq!(demanded_contract("validate contract:"), None, "an empty demand is not a demand");
+        assert_eq!(demanded_contract("attribute to attach: fast"), None, "ordinary attributes are not demands");
+        assert_eq!(demanded_contract("  validate contract spaced: yes").unwrap(), "spaced: yes");
+    }
+
+    #[test]
+    fn coverage_check_passes_when_nothing_is_demanded() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The compat property: every existing graph (no demand
+        // attributes anywhere) passes the gate untouched -- the gate
+        // is inert until someone states a law.
+        let units = vec![crate::hi_graph::CandidateUnit {
+            id: "code:fn:double".to_string(),
+            kind: "fn".to_string(),
+            name: "double".to_string(),
+            driving_text: "doubles".to_string(),
+            attributes: vec!["fast".to_string()],
+        }];
+        contract_coverage_check(CHARGED_WITH_CONTRACT, &units).expect("no demands means no gate");
+    }
+
+    #[test]
+    fn coverage_check_passes_when_the_demanded_contract_proves() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let units = vec![demand_unit("charge_cents", "balance_nonnegative: result >= 0")];
+        contract_coverage_check(CHARGED_WITH_CONTRACT, &units).expect("a demanded, proving contract must pass the gate");
+    }
+
+    #[test]
+    fn coverage_check_flags_a_dropped_contract() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let no_contract = CHARGED_WITH_CONTRACT
+            .split("validate charge_cents")
+            .next()
+            .unwrap()
+            .to_string();
+        let units = vec![demand_unit("charge_cents", "balance_nonnegative: result >= 0")];
+        let failure = contract_coverage_check(&no_contract, &units).expect_err("a dropped demanded contract must fail");
+        assert_eq!(failure.class, CoverageFailureClass::ContractDropped);
+        assert!(failure.diagnostic.contains("carries none"), "the hint-arm marker must appear, got:\n{}", failure.diagnostic);
+        assert!(failure.diagnostic.contains("balance_nonnegative"), "the demand text must be attributed, got:\n{}", failure.diagnostic);
+        assert!(failure.diagnostic.contains("machine-readable errors: ["), "the structured block must ride along, got:\n{}", failure.diagnostic);
+        assert!(failure.diagnostic.contains("\"stage\":\"coverage\""), "coverage-stage entries expected, got:\n{}", failure.diagnostic);
+    }
+
+    #[test]
+    fn coverage_check_flags_a_dropped_fn() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The unit itself was dropped from the draft: a stronger
+        // dropped case than a present fn with no contract.
+        let units = vec![demand_unit("authorize_payment_cents", "no overspend")];
+        let failure = contract_coverage_check(CHARGED_WITH_CONTRACT, &units).expect_err("a demanded unit absent from the draft must fail");
+        assert_eq!(failure.class, CoverageFailureClass::ContractDropped);
+        assert!(failure.diagnostic.contains("no fn `authorize_payment_cents`"), "got:\n{}", failure.diagnostic);
+    }
+
+    #[test]
+    fn coverage_check_flags_a_violated_contract() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let violated = r#"
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+validate double {
+    post: result > x
+}
+"#;
+        let units = vec![demand_unit("double", "always increases")];
+        let failure = contract_coverage_check(violated, &units).expect_err("a demanded contract the fn breaks must fail");
+        assert_eq!(failure.class, CoverageFailureClass::ContractViolated);
+        assert!(failure.diagnostic.contains("violated when"), "the real counterexample wording must ride along, got:\n{}", failure.diagnostic);
+    }
+
+    #[test]
+    fn coverage_check_flags_a_vacuous_contract() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let vacuous = r#"
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+validate double {
+    pre: x > 10 && x < 5
+    post: result > 0
+}
+"#;
+        let units = vec![demand_unit("double", "positive inputs stay positive")];
+        let failure = contract_coverage_check(vacuous, &units).expect_err("a vacuous demanded contract must fail");
+        assert_eq!(failure.class, CoverageFailureClass::VacuousContract);
+        assert!(failure.diagnostic.contains("vacuously"), "the vacuity wording must ride along, got:\n{}", failure.diagnostic);
+    }
+
+    #[test]
+    fn coverage_check_classifies_engine_limit_and_it_dominates_the_class() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let hard = r#"
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+validate double {
+    post: result > x
+}
+"#;
+        let units = vec![demand_unit("double", "always increases")];
+        crate::contract_check::set_proof_fuel_rlimit(1);
+        let failure = contract_coverage_check(hard, &units).expect_err("a fuel-starved demanded contract must fail closed");
+        crate::contract_check::set_proof_fuel_rlimit(0); // restore BEFORE any assertion can bail
+        assert_eq!(failure.class, CoverageFailureClass::EngineLimit, "engine limit, never a silent Proved, never a violation");
+        assert!(failure.diagnostic.contains("engine limit"), "the hint-arm marker must appear, got:\n{}", failure.diagnostic);
+        assert!(failure.diagnostic.contains("rlimit=1"), "the fuel actually in force must be reported, got:\n{}", failure.diagnostic);
+    }
+
+    #[test]
+    fn coverage_check_flags_an_unprovable_demanded_contract() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A demanded contract is not optional, so `Unsupported` from the
+        // walker is a rewrite instruction -- unlike verify's long-standing
+        // policy of reporting unsupported contracts without failing.
+        let unprovable = r#"
+fn rate(base: f64) -> i64 {
+    return 0
+}
+
+validate rate {
+    pre: base > 1.0
+    post: result >= 0
+}
+"#;
+        let units = vec![demand_unit("rate", "rate never negative")];
+        let failure = contract_coverage_check(unprovable, &units).expect_err("a demanded contract outside the provable subset must fail");
+        assert_eq!(failure.class, CoverageFailureClass::ContractUnprovable);
+        assert!(failure.diagnostic.contains("provable subset"), "the hint-arm marker must appear, got:\n{}", failure.diagnostic);
+    }
+
+    #[test]
+    fn coverage_hint_arms_fire_per_class_and_outrank_the_generic_arms() {
+        // The coverage dispatch is FIRST in the chain and gated on one
+        // outer marker, so a diagnostic that happens to also contain a
+        // compile-class marker must still get its coverage hint.
+        let dropped = "contract coverage failure: the confirmed unit `x` demands a proving `validate` block, but the draft's fn `x` carries none. no `fn main()` found";
+        let hint = self_repair_hint(dropped);
+        assert!(hint.contains("separate top-level block: `validate <fn>"), "the dropped arm must teach the exact shape, got:\n{hint}");
+
+        let engine_limit = "contract coverage failure: the confirmed unit `x` demands a `validate` contract that proves; its contract failed: `validate x`: couldn't decide -- post_logic exhausted the solver fuel (rlimit=1; an engine limit, not a violation)";
+        let hint = self_repair_hint(engine_limit);
+        assert!(hint.contains("Simplify the arithmetic into provable form"), "the engine-limit arm must teach simplification, not a code fix, got:\n{hint}");
+
+        let vacuous = "contract coverage failure: the confirmed unit `x` demands a `validate` contract that proves; its contract failed: pre_logic can never be true -- every post_logic would pass vacuously";
+        let hint = self_repair_hint(vacuous);
+        assert!(hint.contains("impossible range"), "the vacuous arm must point at the precondition, got:\n{hint}");
+
+        let unprovable = "contract coverage failure: ... rewrite it in the provable subset (integer-only params/result, linear arithmetic, no loops/calls)";
+        let hint = self_repair_hint(unprovable);
+        assert!(hint.contains("provable subset"), "got:\n{hint}");
+
+        let violated = "contract coverage failure: the confirmed unit `x` demands a `validate` contract that proves; its contract failed: `result > x` is violated when x = -1";
+        let hint = self_repair_hint(violated);
+        assert!(hint.contains("never loosen a predicate"), "the violated arm must forbid predicate-gaming, got:\n{hint}");
+    }
+
+    #[test]
+    fn charge_budget_splits_violated_from_engine_limit() {
+        // RFC 0016 Phase 1's budget discipline, pure: violated-class
+        // failures consume MAX_SELF_REPAIR_ATTEMPTS; engine-limit
+        // consumes none but allows exactly ONE simplification, then
+        // escalates -- a correct-but-hard program never burns the
+        // model's budget on work no code edit can fix.
+        let mut budget = 4u32;
+        let mut simplifications = 0u32;
+        assert_eq!(charge_budget(&mut budget, &mut simplifications, CoverageFailureClass::ContractViolated), BudgetCharge::Continue);
+        assert_eq!(budget, 3, "a violation consumes budget");
+        assert_eq!(charge_budget(&mut budget, &mut simplifications, CoverageFailureClass::EngineLimit), BudgetCharge::Continue);
+        assert_eq!(budget, 3, "an engine limit consumes NO budget");
+        assert_eq!(simplifications, 1);
+        assert_eq!(charge_budget(&mut budget, &mut simplifications, CoverageFailureClass::EngineLimit), BudgetCharge::StopEscalate, "a second engine limit escalates to the operator");
+        assert_eq!(budget, 3, "escalation still never charged the model");
+        let mut last = 1u32;
+        assert_eq!(charge_budget(&mut last, &mut simplifications, CoverageFailureClass::ContractDropped), BudgetCharge::StopGiveUp);
+        assert_eq!(last, 0);
+    }
+
+    #[test]
+    fn units_prompt_renders_proof_demands_as_mandatory() {
+        let units = vec![
+            demand_unit("charge_cents", "balance_nonnegative: result >= 0"),
+            crate::hi_graph::CandidateUnit {
+                id: "code:fn:double".to_string(),
+                kind: "fn".to_string(),
+                name: "double".to_string(),
+                driving_text: "doubles".to_string(),
+                attributes: vec!["fast".to_string()],
+            },
+        ];
+        let prompt = units_prompt(&units, &[]);
+        assert!(prompt.contains("PROOF DEMAND, not optional"), "the demand must be unmissable, got:\n{prompt}");
+        assert!(prompt.contains("MUST carry a separate top-level `validate charge_cents` block"), "the exact validate target must be named, got:\n{prompt}");
+        assert!(prompt.contains("- attribute to attach: fast"), "ordinary attributes render unchanged, got:\n{prompt}");
     }

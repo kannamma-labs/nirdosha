@@ -339,6 +339,11 @@ generate *valid* Nirdosha on the first try.
     pass), or `UNKNOWN` (a real, disclosed compiler boundary — division-
     derived predicates and loops are two current examples, not an error
     on your part).
+    **Enforced, not advisory:** when a component's listed attribute
+    begins `validate contract`, that is a proof demand — the program is
+    refused unless that component's fn carries a `validate` block Z3
+    actually proves. Treat such attributes as mandatory requirements,
+    never decoration.
 
 A fast-scan companion to the rules above — every pair below is
 verified against the real compiler, not hypothetical.

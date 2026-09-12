@@ -150,7 +150,7 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         "/api/waive" => handle_waive(&conn, body),
         "/api/unwaive" => handle_unwaive(&conn, body),
         "/api/generate" => handle_generate(root, &conn, body),
-        "/api/publish" => handle_publish(root),
+        "/api/publish" => handle_publish(root, &conn),
         _ => ApiResponse::error(404, "not found"),
     }
 }
@@ -374,7 +374,7 @@ fn handle_generate(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
 /// "publish" here means "produce the final compiled artifact this
 /// project's confirmed graph currently describes," the honest subset of
 /// the RFC's own larger, undesigned ambition.
-fn handle_publish(root: &Path) -> ApiResponse {
+fn handle_publish(root: &Path, conn: &Connection) -> ApiResponse {
     let source_path = crate::hi_llm::generated_source_path(root);
     if !source_path.exists() {
         return ApiResponse::error(400, "nothing generated yet -- run :generate first");
@@ -387,6 +387,15 @@ fn handle_publish(root: &Path) -> ApiResponse {
         }
         if let Err(errors) = crate::ownership::check_ownership(&program) {
             return Err(errors.iter().map(|e| format!("ownership error: {e}")).collect::<Vec<_>>().join("\n"));
+        }
+        // RFC 0016 Phase 1: the coverage gate re-checks the file actually
+        // being published, not the one generate produced -- a hand edit
+        // between :generate and :publish (or a stale draft from an older
+        // graph state) must not sneak a demanded-contract violation past
+        // the gate. Same check, same classes, as the generate loop ran.
+        let units = crate::hi_graph::confirmed_units(conn, None)?;
+        if let Err(failure) = crate::hi_llm::contract_coverage_check_program(&program, &units) {
+            return Err(format!("publish refused -- the file fails the contract coverage re-check (RFC 0016): {}", failure.diagnostic));
         }
         let smt_report = crate::smt::analyze(&program);
         let out_path = crate::hi_graph::hi_dir(root).join("generated").join("hi_build");
@@ -676,6 +685,52 @@ mod tests {
         let resp = handle(&dir, "POST", "/api/publish", "", b"");
         assert_eq!(resp.status, 400);
         assert!(String::from_utf8_lossy(&resp.body).contains("nothing generated"));
+    }
+
+    #[test]
+    fn publish_refuses_when_a_demanded_contract_is_dropped() {
+        // RFC 0016 Phase 1: the coverage gate re-checks the file actually
+        // being published. This is the hand-edit hole: generate produced a
+        // draft whose contracts passed (or was written before the demand
+        // existed), a hand edit between :generate and :publish removed the
+        // contract -- publish must refuse, not compile it silently.
+        let dir = scratch_dir("publish_coverage_dropped");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let id = crate::hi_graph::add_candidate(&conn, "fn", "charge_cents", "charges money", "test").expect("add");
+        crate::hi_graph::attach_attribute(&conn, &id, "validate contract balance_nonnegative: result >= 0").expect("attach");
+        crate::hi_graph::confirm_node(&conn, &id).expect("confirm");
+        drop(conn);
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(&out_path, "fn charge_cents(amount_cents: i64, balance_cents: i64) -> i64 {\n    return balance_cents - amount_cents\n}\n\nfn main() requires(public) {\n    print(\"charge\", charge_cents(100, 500))\n}\n").expect("write");
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(false), "publish must refuse a file without the demanded contract: {body}");
+        assert!(body.contains("coverage re-check"), "the refusal must name the gate: {body}");
+        assert!(body.contains("carries none"), "the refusal must carry the class's own marker: {body}");
+    }
+
+    #[test]
+    fn publish_succeeds_when_the_demanded_contract_proves() {
+        // The happy path through the same gate: a demanded, proving
+        // contract must not false-positive the publish re-check.
+        let dir = scratch_dir("publish_coverage_proves");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let id = crate::hi_graph::add_candidate(&conn, "fn", "charge_cents", "charges money", "test").expect("add");
+        crate::hi_graph::attach_attribute(&conn, &id, "validate contract balance_nonnegative: result >= 0").expect("attach");
+        crate::hi_graph::confirm_node(&conn, &id).expect("confirm");
+        drop(conn);
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(
+            &out_path,
+            "fn charge_cents(amount_cents: i64, balance_cents: i64) -> i64 {\n    return balance_cents - amount_cents\n}\n\nvalidate charge_cents {\n    pre: amount_cents >= 0 && amount_cents <= balance_cents\n    post: result >= 0\n}\n\nfn main() requires(public) {\n    print(\"charge\", charge_cents(100, 500))\n}\n",
+        ).expect("write");
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(true), "a demanded, proving contract must publish: {body}");
     }
 
     #[test]

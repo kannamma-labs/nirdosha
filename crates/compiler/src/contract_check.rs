@@ -378,7 +378,7 @@ pub fn check_program_contracts_diagnostics(program: &Program) -> Vec<ContractDia
 /// 0016 makes a gate failure even though it is no one's fault — shared
 /// verbatim by both public entry points above so their wording never
 /// drifts apart.
-fn contract_error_message(outcome: &ValidateOutcome) -> Option<String> {
+pub fn contract_error_message(outcome: &ValidateOutcome) -> Option<String> {
     match &outcome.result {
         ContractCheckResult::Proved | ContractCheckResult::Unsupported(_) => None,
         ContractCheckResult::Counterexample { violated_predicate, bindings, result } => {
