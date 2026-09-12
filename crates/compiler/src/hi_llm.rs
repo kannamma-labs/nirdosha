@@ -686,7 +686,7 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
     }
 }
 
-fn units_prompt(units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge]) -> String {
+pub fn units_prompt(units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge]) -> String {
     // A real generation failure, root-caused rather than guessed at:
     // `populate_candidates`'s own system prompt asks for the
     // *conceptual* components a description implies (for a game:
@@ -739,6 +739,7 @@ fn units_prompt(units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge
         out.push('\n');
     }
     out.push_str("A component that no other component references and that `fn main()` never calls or mentions is a bug in the generated program: it orphans the design. Every declared component must appear in at least one function's signature, or in a call from `fn main()` -- an enum in a parameter/return type counts only if some confirmed fn actually uses that type.\n");
+    out.push_str(&crate::hi_plugin::plugin_law_prompt(units));
     out
 }
 
@@ -796,6 +797,33 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
         attempt += 1;
         let raw = client.complete(&history).map_err(|e| format!("couldn't reach the model: {e}"))?;
         let source = extract_nir_source(&raw);
+        // RFC 0016 Phase 2: 5a pack injection.  If a demanded fn is
+        // present but the model forgot its contract, the pack's sealed
+        // template is appended.  A signature mismatch is a coverage
+        // failure (the model violated the domain law's exact shape).
+        let source = match crate::hi_plugin::inject_pack_validates_into_source(root, &source) {
+            Ok(s) => s,
+            Err(failure) => {
+                let diagnostic = failure.diagnostic;
+                last_diagnostic = diagnostic.clone();
+                let class = failure.class;
+                match charge_budget(
+                    &mut violation_budget,
+                    &mut engine_limit_simplifications,
+                    class.clone(),
+                ) {
+                    BudgetCharge::Continue => {
+                        history.push(ChatMessage { role: "assistant", content: source });
+                        history.push(ChatMessage { role: "user", content: format!("That attempt failed with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}", self_repair_hint(&diagnostic)) });
+                    }
+                    BudgetCharge::StopGiveUp => break,
+                    BudgetCharge::StopEscalate => {
+                        return Err(format!("escalated to the operator (RFC 0016): the proof engine's deterministic fuel ran out on a demanded contract -- an engine limit, NOT a code bug. The model's one off-budget simplification attempt did not clear it. Proof obligation, verbatim:\n{last_diagnostic}\nOperator options: state a weaker-but-provable demand on the unit, raise the fuel (`nirdosha::contract_check::set_proof_fuel_rlimit`), or waive the demand (`:waive`) and re-generate."));
+                    }
+                }
+                continue;
+            }
+        };
         // Every draft is persisted BEFORE the check runs (2026-09-11,
         // born from the user's "take out the first generated code"
         // instruction): until now a failed attempt existed only in

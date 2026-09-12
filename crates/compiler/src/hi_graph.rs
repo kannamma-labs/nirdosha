@@ -46,7 +46,7 @@ pub fn hi_dir(root: &Path) -> PathBuf {
     root.join(".nir")
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
@@ -117,6 +117,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     // to point at, not just which file.
     add_column_if_missing(conn, "nodes", "line", "INTEGER")?;
     add_column_if_missing(conn, "nodes", "col", "INTEGER")?;
+    add_column_if_missing(conn, "nodes", "plugin_origin", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "non_waivable", "INTEGER NOT NULL DEFAULT 0")?;
+    // plugins table for installed domain packs
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS plugins (\n            id TEXT PRIMARY KEY,\n            name TEXT NOT NULL,\n            sha256 TEXT NOT NULL,\n            manifest_path TEXT,\n            installed_at TEXT,\n            revoked_at TEXT\n        )",
+        [],
+    )
+    .map_err(|e| format!("creating plugins table: {e}"))?;
     // rfcs/0014's prompt/build/generate/publish pipeline: the text layer
     // a `CodeUnit` node carries *before* any `.nir` exists
     // (`driving_text`), who/what put it there (`created_by` --
@@ -233,7 +241,7 @@ fn code_units_in_file(path: &Path) -> Result<Vec<CodeUnit>, String> {
     Ok(units)
 }
 
-fn code_unit_node_id(kind: &str, qualified_name: &str) -> String {
+pub fn code_unit_node_id(kind: &str, qualified_name: &str) -> String {
     format!("code:{kind}:{qualified_name}")
 }
 
@@ -742,9 +750,17 @@ pub fn confirm_all(conn: &Connection) -> Result<Vec<String>, String> {
 /// confirming.
 pub fn delete_node(conn: &Connection, id: &str) -> Result<(), String> {
     require_node_exists(conn, id)?;
+    if let Some(origin) = plugin_origin(conn, id)? {
+        return Err(format!("cannot delete `{id}`: it is a non-waivable invariant contributed by pack `{origin}` -- revoke the pack with `nirdosha plugin revoke {origin}` if you really want it removed"));
+    }
     conn.execute("DELETE FROM edges WHERE src = ?1 OR dst = ?1", [id]).map_err(|e| format!("deleting edges touching {id}: {e}"))?;
     conn.execute("DELETE FROM nodes WHERE id = ?1", [id]).map_err(|e| format!("deleting node {id}: {e}"))?;
     Ok(())
+}
+
+fn plugin_origin(conn: &Connection, id: &str) -> Result<Option<String>, String> {
+    conn.query_row("SELECT plugin_origin FROM nodes WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))
+        .map_err(|e| format!("reading plugin_origin for {id}: {e}"))
 }
 
 /// Edits a candidate's driving text. If the unit had already locked (an
@@ -785,11 +801,20 @@ pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), S
 /// deleting the requirement or hand-authoring `.nir` around it.
 pub fn waive_node(conn: &Connection, id: &str, reason: &str) -> Result<(), String> {
     require_node_exists(conn, id)?;
+    if non_waivable(conn, id)? {
+        return Err(format!("cannot waive `{id}`: it is a non-waivable invariant contributed by pack `{}`", plugin_origin(conn, id)?.unwrap_or_default()));
+    }
     if reason.trim().is_empty() {
         return Err("a waive reason is required".to_string());
     }
     conn.execute("UPDATE nodes SET waived = 1, waive_reason = ?2 WHERE id = ?1", params![id, reason]).map_err(|e| format!("waiving {id}: {e}"))?;
     Ok(())
+}
+
+fn non_waivable(conn: &Connection, id: &str) -> Result<bool, String> {
+    let flag: i64 = conn.query_row("SELECT non_waivable FROM nodes WHERE id = ?1", [id], |r| r.get(0))
+        .map_err(|e| format!("reading non_waivable for {id}: {e}"))?;
+    Ok(flag != 0)
 }
 
 pub fn unwaive_node(conn: &Connection, id: &str) -> Result<(), String> {
@@ -1330,5 +1355,65 @@ mod tests {
         assert_eq!(edges[0].src, "authorize_payment_cents");
         assert_eq!(edges[0].dst, "channel_daily_limit_cents");
         assert_eq!(edges[0].kind, "RELATES_TO");
+    }
+
+    #[test]
+    fn default_banking_pack_installs_on_explicit_ensure_call() {
+        let dir = scratch_dir("plugin_default_banking");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let ids = crate::hi_plugin::installed_pack_ids(&conn).expect("list");
+        assert!(ids.contains(&"banking-v0".to_string()), "banking-v0 must be installed by default, got: {ids:?}");
+        let units = confirmed_units(&conn, None).expect("confirmed_units");
+        let names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
+        assert!(names.contains(&"charge_cents".to_string()));
+        assert!(names.contains(&"credit_cents".to_string()));
+        assert!(names.contains(&"net_change_cents".to_string()));
+        // Pack nodes are confirmed and locked.
+        let generatable = generatable_units(&conn, None).expect("generatable");
+        assert!(generatable.is_empty(), "pack invariants are locked, never generatable");
+    }
+
+    #[test]
+    fn non_waivable_pack_nodes_cannot_be_waived_or_deleted() {
+        let dir = scratch_dir("plugin_non_waivable");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let id = code_unit_node_id("fn", "charge_cents");
+
+        let waive_err = waive_node(&conn, &id, "not needed").unwrap_err();
+        assert!(waive_err.contains("non-waivable"), "waive must refuse a pack invariant: {waive_err}");
+        assert!(waive_err.contains("banking-v0"));
+
+        let delete_err = delete_node(&conn, &id).unwrap_err();
+        assert!(delete_err.contains("non-waivable"), "delete must refuse a pack invariant: {delete_err}");
+        assert!(delete_err.contains("banking-v0"));
+    }
+
+    #[test]
+    fn plugin_revoke_removes_pack_nodes() {
+        let dir = scratch_dir("plugin_revoke");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let before = confirmed_units(&conn, None).expect("confirmed_units");
+        assert!(before.iter().any(|u| u.name == "charge_cents"));
+
+        crate::hi_plugin::revoke_pack(&conn, &dir, "banking-v0").expect("revoke");
+        let after = confirmed_units(&conn, None).expect("confirmed_units");
+        assert!(!after.iter().any(|u| u.name == "charge_cents"), "revoking the pack must delete its nodes");
+        let ids = crate::hi_plugin::installed_pack_ids(&conn).expect("list");
+        assert!(!ids.contains(&"banking-v0".to_string()), "revoked pack must not be listed as active");
+    }
+
+    #[test]
+    fn pack_invariants_render_in_units_prompt() {
+        let dir = scratch_dir("plugin_units_prompt");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let units = confirmed_units(&conn, None).expect("confirmed_units");
+        let prompt = crate::hi_llm::units_prompt(&units, &[]);
+        assert!(prompt.contains("DOMAIN LAW"), "pack units must render in a dedicated section, got:\n{prompt}");
+        assert!(prompt.contains("charge_cents_conservation"), "the demand text must appear, got:\n{prompt}");
+        assert!(prompt.contains("MUST carry a separate top-level `validate charge_cents`"), "exact validate target must be named, got:\n{prompt}");
     }
 }

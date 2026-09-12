@@ -38,6 +38,7 @@ fn main() -> ExitCode {
         "audit" => cmd_audit(args),
         "suggest-contracts" => cmd_suggest_contracts(args),
         "mcp" => cmd_mcp(args),
+        "plugin" => cmd_plugin(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
@@ -100,6 +101,11 @@ fn print_usage() {
     eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
     eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
+    eprintln!("  nirdosha plugin install [--dry-run] <pack.json>");
+    eprintln!("                                      install or refresh a 5a domain plugin; --dry-run checks");
+    eprintln!("                                      the manifest and proves its own contracts against a stub");
+    eprintln!("  nirdosha plugin list                list installed/available domain plugins");
+    eprintln!("  nirdosha plugin revoke <pack-id>    remove a plugin and its non-waivable invariants");
     eprintln!("  nirdosha emit-llvm <file.nir>       print the generated LLVM IR");
     eprintln!("  nirdosha emit-ast <file.nir>        print the parsed AST as JSON (docs/goal.md row 9)");
     eprintln!("  nirdosha emit-ui <file.nir> [-o out.html] [--theme theme.json] [--manifest-path Cargo.toml]");
@@ -497,6 +503,12 @@ fn cmd_hi(mut args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Err(e) = nirdosha::hi_plugin::ensure_default_packs(&conn, &cwd) {
+        eprintln!("hi: default domain packs failed to install, continuing: {e}");
+    }
+    if let Err(e) = nirdosha::hi_plugin::reload_installed_packs(&conn, &cwd) {
+        eprintln!("hi: installed domain packs failed to reload, continuing: {e}");
+    }
     match sub.as_str() {
         "ingest" => {
             let Some(doc) = args.next() else {
@@ -604,6 +616,12 @@ fn cmd_hi_window(cwd: &std::path::Path) -> ExitCode {
     if !nirdosha::hi_graph::is_disabled(&|k| std::env::var(k).ok()) {
         match nirdosha::hi_graph::open(cwd) {
             Ok(conn) => {
+                if let Err(e) = nirdosha::hi_plugin::ensure_default_packs(&conn, cwd) {
+                    eprintln!("hi: default domain packs failed to install, continuing: {e}");
+                }
+                if let Err(e) = nirdosha::hi_plugin::reload_installed_packs(&conn, cwd) {
+                    eprintln!("hi: installed domain packs failed to reload, continuing: {e}");
+                }
                 if let Err(e) = nirdosha::hi_graph::sync(&conn, cwd, &[]) {
                     eprintln!("hi: sync failed, continuing with a possibly-stale graph: {e}");
                 }
@@ -1720,6 +1738,110 @@ fn cmd_mcp(_args: impl Iterator<Item = String>) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn cmd_plugin(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(sub) = args.next() else {
+        eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json> | list | revoke <pack-id>");
+        return ExitCode::FAILURE;
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error resolving the current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let conn = match nirdosha::hi_graph::open(&cwd) {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match sub.as_str() {
+        "install" => {
+            let mut dry_run = false;
+            let mut path: Option<String> = None;
+            for arg in args {
+                if arg == "--dry-run" {
+                    dry_run = true;
+                } else if path.is_none() {
+                    path = Some(arg);
+                } else {
+                    eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json>");
+                    return ExitCode::FAILURE;
+                }
+            }
+            let Some(path) = path else {
+                eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json>");
+                return ExitCode::FAILURE;
+            };
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("reading {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if dry_run {
+                match nirdosha::hi_plugin::install_pack_from_bytes(&conn, &cwd, &bytes, &format!("dry-run {path}"),
+                ) {
+                    Ok(id) => {
+                        // Roll back: dry-run must not persist.
+                        let _ = nirdosha::hi_plugin::revoke_pack(&conn, &cwd, &id);
+                        println!("dry-run ok: pack {id} from {path}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(msg) => {
+                        eprintln!("dry-run failed: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                match nirdosha::hi_plugin::install_pack_from_bytes(&conn, &cwd, &bytes, &path,
+                ) {
+                    Ok(id) => {
+                        println!("installed pack {id} from {path}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(msg) => {
+                        eprintln!("install failed: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        }
+        "list" => {
+            match nirdosha::hi_plugin::list_packs(&conn) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "revoke" => {
+            let Some(id) = args.next() else {
+                eprintln!("usage: nirdosha plugin revoke <pack-id>");
+                return ExitCode::FAILURE;
+            };
+            match nirdosha::hi_plugin::revoke_pack(&conn, &cwd, &id) {
+                Ok(()) => {
+                    println!("revoked pack {id}");
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!("unknown plugin subcommand `{other}` -- use install, list, or revoke");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// docs/goal.md row 9: hands back the parsed `Program` as JSON, the same
