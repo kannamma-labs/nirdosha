@@ -259,7 +259,14 @@ fn extract_nir_source(raw: &str) -> String {
     trimmed.to_string()
 }
 
-const MAX_SELF_REPAIR_ATTEMPTS: u32 = 3;
+/// 4, not 3, since 2026-09-11: parse errors surface one at a time
+/// (LL(1), first error only), so a program with N grammar slips needs
+/// N repair rounds, and 3 total compile attempts left only 2. The
+/// `self_repair_hint` arms below (knowledge injection per failure
+/// class) are what actually fixes runs; this is headroom for the
+/// serial-slip case that remains when the model's first draft carries
+/// several gaps at once.
+const MAX_SELF_REPAIR_ATTEMPTS: u32 = 4;
 
 /// The pointed follow-up appended to a failed attempt's generic "fix
 /// it" request, one arm per *diagnostic class this loop has actually
@@ -268,6 +275,49 @@ const MAX_SELF_REPAIR_ATTEMPTS: u32 = 3;
 /// each arm below exists because a real `:generate` run burned all
 /// `MAX_SELF_REPAIR_ATTEMPTS` tries on exactly that (see each arm's
 /// own comment), and each says what to *do*, not just what went wrong.
+/// Every line number a diagnostic points at, extracted from the two
+/// formats this pipeline actually emits: the parser's
+/// `... at {line}:{col}: ...` (also `type error: ...` / `ownership
+/// error: ...`, whose `Display` starts with `{line}:{col}:`). Capped
+/// by the caller; duplicate lines reported once.
+fn diagnostic_line_numbers(diagnostic: &str) -> Vec<usize> {
+    let mut found: Vec<usize> = Vec::new();
+    for line in diagnostic.lines() {
+        let rest = line
+            .rsplit_once(" at ")
+            .map(|(_, r)| r)
+            .or_else(|| line.split_once("type error: ").map(|(_, r)| r))
+            .or_else(|| line.split_once("ownership error: ").map(|(_, r)| r));
+        let Some(rest) = rest else { continue };
+        let Some(digits) = rest.split(':').next() else { continue };
+        if let Ok(n) = digits.trim().parse::<usize>() {
+            if n >= 1 && !found.contains(&n) {
+                found.push(n);
+            }
+        }
+    }
+    found
+}
+
+/// Appends the offending source line(s) to a diagnostic so the model
+/// sees WHAT it wrote at the position, not just where. A model cannot
+/// reliably count lines of its own previous output -- especially after
+/// a repair edit shifted everything below the edit -- so a bare
+/// `at 154:19` asks it to find the line by arithmetic it does badly;
+/// quoting the line removes that whole failure mode. The check owns
+/// the exact source text (`typecheck_and_build_check`'s own input),
+/// so this costs one vector lookup, not a re-read.
+fn attach_source_lines(source: &str, diagnostic: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = diagnostic.to_string();
+    for n in diagnostic_line_numbers(diagnostic).into_iter().take(3) {
+        if let Some(text) = lines.get(n - 1) {
+            out.push_str(&format!("\n  the source line that points at (line {n}) is: `{text}`"));
+        }
+    }
+    out
+}
+
 fn self_repair_hint(diagnostic: &str) -> &'static str {
     if diagnostic.contains("no `fn main()` found") {
         // Defense in depth on top of `units_prompt`'s own fix, not a
@@ -276,6 +326,45 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
         // reminder rather than a generic "fix it" that repeats
         // whatever ambiguity caused this in the first place.
         " Add a `fn main()` -- it is required in addition to every named component from the original request, not instead of any of them."
+    } else if diagnostic.contains("expected an expression, found the reserved keyword `return`") {
+        // Field-failure 2026-09-11, and the one that forced the
+        // holistic re-read: the model wrote `Ok(id) => return false`
+        // inside a match arm. Rule 9 already forbade exactly this in
+        // the system prompt, the model violated it anyway, and a bare
+        // "fix it" retry re-taught nothing -- the proof that prompt-
+        // resident rules are not retained under generation pressure
+        // and the repair message is the only guaranteed-fresh
+        // attention channel. This arm must sit ABOVE the generic
+        // reserved-keyword arm, whose "rename that identifier"
+        // advice would be nonsense for `return`.
+        " `return` is a statement, never an expression: it cannot appear inside a `match` arm (`Ok(x) => return ...`), on the right of `=`, or inside a call's arguments. Restructure: every arm yields a value, bind the whole match (`let ok: bool = match ... { ... }`), then `return ok` (or print it) after the match ends."
+    } else if diagnostic.contains("found the reserved type name") {
+        // Field-failure 2026-09-11: `return unit`. Notably the EXISTING
+        // "reserved keyword" arm never fired -- this message says
+        // "reserved TYPE name" -- so even the one-arm-per-class idea
+        // had a gap; the class matcher must match the class's actual
+        // message text.
+        " A type name (`unit`, `json`, `i64`, `db`, ...) can never appear where an expression is expected. `unit` has no literal at all: a `-> unit` function simply ends after its last statement, and an early exit returns a unit-typed CALL, e.g. `return print(\"done\")`. To get a `json`/`db` value, call the builtin that produces one (`json_parse(...)`, `db_connect(...)`), never write the type name."
+    } else if diagnostic.contains("expected a type, found") {
+        // Field-failure 2026-09-11: `Result((i64, str), E)` -- a tuple
+        // nested inside a generic, so the rule-5 ban the model did
+        // read didn't register as covering this shape.
+        " There are no tuple types, including nested inside `Result`/`Option`: `Result((i64, str), E)` is a parse error exactly like a bare `(i64, str)`. To return more than one value, declare a `struct` to carry the fields, or return `json`. If the diagnostic names a reserved word instead, it was used as a type -- types are only the names in the Types table."
+    } else if diagnostic.contains("doesn't support `print` on") {
+        // Field-failure 2026-09-11: `print(some_json)`/`print(vector)`
+        // -- the model treated print as a debug-print of anything.
+        " `print` takes scalars only: `i64`/`f64`/`str`/`bool`/`unit`, any number of them -- never `json`, `Vector`/`Matrix`, `struct`, `enum`, or `Result` (and no stringify builtin exists). To display an aggregate, extract scalars first: `json_get_str(j, \"field\")` / `json_get_i64`, and for arrays `json_array_len(rows)` + `json_array_get(rows, i)` inside a `while` loop -- every json accessor returns a `Result`, always `match` it. A `struct` prints field by field; an `enum` matches to its variants; a `Result` is matched before anything inside it is shown."
+    } else if diagnostic.contains("unexpected character `;`") {
+        // Field-failure 2026-09-11: found it in the transact recipe of
+        // the teaching prompt itself (fixed there too) -- models
+        // coming from C-family languages add separators by reflex.
+        " Nirdosha has no statement separators at all: delete the `;` and put each statement on its own line."
+    } else if diagnostic.contains("codegen doesn't support `workflow") {
+        // Field-failure class from the first v4 attempt: a workflow
+        // written with a non-empty `data { ... }` block, which parses
+        // fine and is rejected only at codegen -- the exact
+        // superset-vs-subset trap a grammar can't see.
+        " The compiled backend rejects a workflow's `data { ... }` block unless it is EMPTY: write `data {}` and keep anything instances must remember in your own struct keyed by `instance_id`. `on_entry` actions may only use `instance_id` and fn calls."
     } else if diagnostic.contains("found the reserved keyword") {
         // Root-caused from a real give-up: the model named a struct
         // field `state`, the parser answered `expected identifier,
@@ -513,12 +602,12 @@ fn typecheck_and_build_check(source: &str) -> Result<(), String> {
 
     let result = (|| -> Result<(), String> {
         let path_str = path.to_str().ok_or_else(|| format!("temp path {} is not valid UTF-8", path.display()))?;
-        let (program, _src): (crate::ast::Program, String) = crate::loader::load_program(path_str)?;
+        let (program, _src): (crate::ast::Program, String) = crate::loader::load_program(path_str).map_err(|e| attach_source_lines(source, &e))?;
         if let Err(errors) = crate::typeck::typecheck(&program) {
-            return Err(errors.iter().map(|e| format!("type error: {e}")).collect::<Vec<_>>().join("\n"));
+            return Err(attach_source_lines(source, &errors.iter().map(|e| format!("type error: {e}")).collect::<Vec<_>>().join("\n")));
         }
         if let Err(errors) = crate::ownership::check_ownership(&program) {
-            return Err(errors.iter().map(|e| format!("ownership error: {e}")).collect::<Vec<_>>().join("\n"));
+            return Err(attach_source_lines(source, &errors.iter().map(|e| format!("ownership error: {e}")).collect::<Vec<_>>().join("\n")));
         }
         let smt_report = crate::smt::analyze(&program);
         crate::codegen::build(&program, &smt_report, &out_path, crate::codegen::OptLevel::O2)
@@ -646,3 +735,70 @@ mod tests {
         assert!(err.contains("type error"), "expected a type error, got: {err}");
     }
 }
+
+    #[test]
+    fn self_repair_hints_cover_every_field_failure_class() {
+        // Each entry is a diagnostic string a real `:generate` run
+        // burned all its attempts on (2026-09-11, the v4 fintech runs)
+        // plus the needle its actionable hint must contain. A bare
+        // "fix it" for any of these re-sent the same ignorance the
+        // failure came from -- the whole point of `self_repair_hint`.
+        let cases = [
+            (
+                "parse error in /tmp/x.nir at 154:19: expected an expression, found the reserved keyword `return`",
+                "never an expression",
+            ),
+            (
+                "parse error in /tmp/x.nir at 151:95: expected a type, found `(`",
+                "no tuple types",
+            ),
+            (
+                "parse error in /tmp/x.nir at 12:9: expected an expression, found the reserved type name `unit`",
+                "unit` has no literal",
+            ),
+            (
+                "codegen doesn't support `print` on a Vector/Matrix argument yet — only integer/f64/str/bool/unit-typed arguments are supported so far",
+                "scalars only",
+            ),
+            (
+                "lex error in /tmp/x.nir at 20:63: unexpected character `;`",
+                "no statement separators",
+            ),
+            (
+                "codegen doesn't support `workflow Approval` yet — its `data { ... }` block is non-empty",
+                "EMPTY",
+            ),
+        ];
+        for (diag, needle) in cases {
+            let hint = self_repair_hint(diag);
+            assert!(!hint.is_empty(), "diagnostic class must have a hint, got none for: {diag}");
+            assert!(hint.contains(needle), "hint for\n  {diag}\nshould mention `{needle}`, got:\n  {hint}");
+        }
+    }
+
+    #[test]
+    fn return_hint_wins_over_the_generic_keyword_rename_arm() {
+        // The `=> return ...` message literally contains "found the
+        // reserved keyword", so the generic rename-identifier arm
+        // would fire first -- and tell the model to rename `return`.
+        // Arm order is load-bearing; this pins it.
+        let hint = self_repair_hint("parse error in /tmp/x.nir at 3:18: expected an expression, found the reserved keyword `return`");
+        assert!(hint.contains("never an expression"), "the `return`-as-expression arm must win, got: {hint}");
+        let rename = self_repair_hint("parse error in /tmp/x.nir at 5:14: expected identifier, found the reserved keyword `state`");
+        assert!(rename.contains("Rename"), "identifier-shaped violations still get the rename hint, got: {rename}");
+    }
+
+    #[test]
+    fn offending_source_line_is_attached_to_parse_diagnostics() {
+        // The model gets told WHAT it wrote at the line, not just a
+        // line number it cannot reliably count to in its own output
+        // -- especially after a repair edit shifted the lines below.
+        let src = "fn main() {\n    let ok: bool = match json_parse(\"{}\") {\n        Ok(d) => return false,\n    }\n}\n";
+        let diag = "parse error in /tmp/x.nir at 3:18: expected an expression, found the reserved keyword `return`";
+        let with = attach_source_lines(src, diag);
+        assert!(with.contains("Ok(d) => return false"), "the offending line itself must be quoted, got:\n{with}");
+        // Type errors use a different prefix but must attach too.
+        let tdiag = "type error: 3:18: `x` is not defined";
+        let twith = attach_source_lines(src, tdiag);
+        assert!(twith.contains("Ok(d) => return false"), "type-error diagnostics attach the line too, got:\n{twith}");
+    }
