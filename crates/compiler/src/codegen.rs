@@ -2748,7 +2748,22 @@ impl Codegen<'_> {
                             // branch above), so `was_err` is always `"0"`.
                             self.emit_nfr_call_end("0");
                             let ret_llty = self.llvm_ty(&ret_ty)?;
-                            writeln!(self.out, "  ret {} {val}", ret_llty).unwrap();
+                            if matches!(ret_ty, Ty::Unit) {
+                                // `ret void` takes no operand. An explicit
+                                // `return <unit-typed call>` (e.g. `return
+                                // print("...")` early-exiting a `-> unit` fn)
+                                // is typecheck-legal and lands here in the
+                                // scalar arm — `llvm_ty(unit)` is "void",
+                                // but the call's own value ("0") must not
+                                // ride along: `ret void 0` is invalid IR and
+                                // clang rejects the whole module (found
+                                // 2026-09-11 while compile-testing the
+                                // paste-anywhere prompt's rule-20 example
+                                // end to end, not by reading).
+                                writeln!(self.out, "  ret void").unwrap();
+                            } else {
+                                writeln!(self.out, "  ret {} {val}", ret_llty).unwrap();
+                            }
                         }
                     }
                     None => {

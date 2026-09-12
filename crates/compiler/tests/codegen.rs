@@ -4343,3 +4343,18 @@ fn if_else_branch_reconstructing_a_bare_err_result_does_not_panic_codegen() {
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "ok");
 }
+
+/// 2026-09-11: an explicit `return <unit-typed call>` early-exiting a
+/// `-> unit` fn is typecheck-legal but used to emit `ret void 0` --
+/// invalid IR; clang rejected the whole module. Found while
+/// compile-testing the paste-anywhere prompt's rule-20 example end to
+/// end, not by reading code.
+#[test]
+fn return_of_unit_typed_call_emits_valid_ret_void() {
+    let (out, code) = compile_and_run(
+        "fn log_if_positive(amount: i64) -> unit {\n    if amount < 0 {\n        return print(\"negative, skipping\")\n    }\n    print(\"positive\", amount)\n}\n\nfn main() {\n    log_if_positive(-5)\n    log_if_positive(5)\n}",
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("negative, skipping"));
+    assert!(out.contains("positive"));
+}

@@ -519,6 +519,33 @@ struct Player { game_state: PlayerState, score: i64 }
     json/Vector display loops are in the Print entry of the Common
     builtins section below.
 
+20. **Type names are never expressions.** The lexer reserves the type
+    names `i8` `i16` `i32` `i64` `u8` `u16` `u32` `u64` `usize` `f64`
+    `dec128` `bool` `unit` `str` `tcp` `tcp_listener` `file` `json` `db`
+    `mq` as their own token class, and the parser rejects one wherever
+    an expression is expected: `expected an expression, found the
+    reserved type name `unit``. There is no `unit` literal — a
+    `-> unit` fn simply ends after its last statement, and an early
+    exit returns a *unit-typed call*, never the word:
+
+```nirdosha
+// WRONG -- parse error: expected an expression, found the reserved type name `unit`
+fn log_decision(instance_id: i64) -> unit {
+    return unit
+}
+// RIGHT -- the body just ends; the last statement is the implicit return
+fn log_decision(instance_id: i64) -> unit {
+    print("approved", instance_id)
+}
+// RIGHT -- early exit: return a unit-typed call's result
+fn log_if_positive(amount: i64) -> unit {
+    if amount < 0 {
+        return print("negative, skipping")
+    }
+    print("positive", amount)
+}
+```
+
 ## Types
 
 | Type | Spelling | Notes |
@@ -1006,8 +1033,14 @@ name:
 fn db_up() -> bool { return true }
 fn call_processor(txn_id: str, amount: i64) -> i64 { return amount }
 fn resp_ok(resp: i64) -> bool { return resp > 0 }
-fn commit_db(amount: i64) -> i64 { print("committing", amount); return amount }
-fn refund(amount: i64) -> i64 { print("compensating", amount); return amount }
+fn commit_db(amount: i64) -> i64 {
+    print("committing", amount)
+    return amount
+}
+fn refund(amount: i64) -> i64 {
+    print("compensating", amount)
+    return amount
+}
 fn write_log(amount: i64, ok: bool) -> unit { print("settled", amount, ok) }
 
 fn settle(amount: i64) -> bool {
