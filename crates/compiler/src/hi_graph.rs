@@ -811,7 +811,7 @@ pub struct CandidateUnit {
     pub attributes: Vec<String>,
 }
 
-fn parse_code_unit_id(id: &str) -> Option<(String, String)> {
+pub fn parse_code_unit_id(id: &str) -> Option<(String, String)> {
     let rest = id.strip_prefix("code:")?;
     let (kind, name) = rest.split_once(':')?;
     Some((kind.to_string(), name.to_string()))
@@ -857,6 +857,57 @@ pub fn generatable_units(conn: &Connection, target: Option<&str>) -> Result<Vec<
 /// `generatable_units` reports.
 pub fn confirmed_units(conn: &Connection, target: Option<&str>) -> Result<Vec<CandidateUnit>, String> {
     query_confirmed_units(conn, "1=1", target)
+}
+
+/// One dependency edge between two confirmed code units, in the
+/// prompt-facing name form Generate mode needs -- not raw node ids.
+/// The decompose step (`hi_api::handle_prompt`'s `depends_on`
+/// handling, `add_relation`) stores these as `RELATES_TO` rows at
+/// prompt time, but until 2026-09-11 `generate_program` never read
+/// them back out: the code-writing model got a flat component list
+/// and free-ranged the wiring. That was the root cause of the
+/// "decorative enum" class of failure -- a component designed with
+/// relationships but never wired, because nothing told the generating
+/// model the relationships existed.
+#[derive(Debug)]
+pub struct ConfirmedEdge {
+    pub src: String,
+    pub dst: String,
+    pub kind: String,
+}
+
+/// Every edge whose BOTH endpoints are confirmed, non-waived code
+/// units -- the relational half of the graph that `confirmed_units`
+/// deliberately leaves out (it returns nodes only). Edges touching
+/// unconfirmed/waived nodes are skipped: Generate mode composes only
+/// the confirmed set, so an edge naming a component that will not be
+/// in the program would be noise the model can't act on.
+pub fn confirmed_edges(conn: &Connection) -> Result<Vec<ConfirmedEdge>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.src, e.dst, e.kind FROM edges e \
+             JOIN nodes s ON s.id = e.src \
+             JOIN nodes d ON d.id = e.dst \
+             WHERE s.kind = 'CodeUnit' AND d.kind = 'CodeUnit' \
+               AND s.confirmed = 1 AND d.confirmed = 1 \
+               AND s.waived = 0 AND d.waived = 0",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let mut out = Vec::new();
+    for (src_id, dst_id, kind) in rows {
+        // Both endpoints must be code units with parsable ids -- an
+        // edge into any other node kind has no declaration-side name
+        // to print in a wiring list.
+        let Some((_, src)) = parse_code_unit_id(&src_id) else { continue };
+        let Some((_, dst)) = parse_code_unit_id(&dst_id) else { continue };
+        out.push(ConfirmedEdge { src, dst, kind });
+    }
+    Ok(out)
 }
 
 /// Marks a unit locked after Generate mode's whole-composed-program
@@ -1256,5 +1307,28 @@ mod tests {
         assert!(err.contains("no node"));
         let edge_count: i64 = conn.query_row("SELECT COUNT(*) FROM edges WHERE src = ?1 OR dst = ?1", [&a], |r| r.get(0)).expect("count edges");
         assert_eq!(edge_count, 0, "deleting a node must also delete edges touching it");
+    }
+#[test]
+    fn confirmed_edges_returns_only_both_endpoints_confirmed_pairs_in_name_form() {
+        // 2026-09-11 (a)-RCA regression: the decompose step stores
+        // `depends_on` edges via `add_relation`, and Generate mode
+        // must be able to read exactly those back out -- in prompt
+        // names, not node ids, and never an edge dangling into an
+        // unconfirmed component.
+        let dir = scratch_dir("confirmed_edges");
+        let conn = open(&dir).expect("open");
+        let src_id = add_candidate(&conn, "fn", "authorize_payment_cents", "checks balance and limits", "llm-prompt-mode").expect("add_candidate");
+        let dst_id = add_candidate(&conn, "fn", "channel_daily_limit_cents", "the per-channel cap", "llm-prompt-mode").expect("add_candidate");
+        let unconfirmed_id = add_candidate(&conn, "enum", "PaymentChannel", "the channels", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &src_id).expect("confirm src");
+        confirm_node(&conn, &dst_id).expect("confirm dst");
+        add_relation(&conn, &src_id, &dst_id).expect("the confirmed edge");
+        add_relation(&conn, &src_id, &unconfirmed_id).expect("the edge into an unconfirmed node");
+
+        let edges = confirmed_edges(&conn).expect("confirmed_edges");
+        assert_eq!(edges.len(), 1, "only the both-endpoints-confirmed edge survives, got: {edges:?}");
+        assert_eq!(edges[0].src, "authorize_payment_cents");
+        assert_eq!(edges[0].dst, "channel_daily_limit_cents");
+        assert_eq!(edges[0].kind, "RELATES_TO");
     }
 }

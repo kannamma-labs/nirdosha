@@ -334,12 +334,20 @@ fn handle_generate(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
     if units.is_empty() {
         return ApiResponse::error(400, "nothing confirmed to generate -- `:confirm <node>` at least one candidate first");
     }
+    // The relational half of the confirmed graph: the decompose step
+    // stored `depends_on` edges at prompt time, and until 2026-09-11
+    // Generate mode dropped them on the floor -- the code model got a
+    // flat component list and free-ranged the wiring.
+    let edges = match crate::hi_graph::confirmed_edges(conn) {
+        Ok(e) => e,
+        Err(e) => return ApiResponse::error(500, &e),
+    };
     let client = match require_llm_client() {
         Ok(c) => c,
         Err(e) => return ApiResponse::error(500, &e),
     };
     let mut log_lines: Vec<String> = Vec::new();
-    let path = match crate::hi_llm::generate_program(root, &client, &units, &mut |line| log_lines.push(line.to_string())) {
+    let path = match crate::hi_llm::generate_program(root, &client, &units, &edges, &mut |line| log_lines.push(line.to_string())) {
         Ok(p) => p,
         Err(e) => return ApiResponse::json(&serde_json::json!({ "ok": false, "error": e, "log": log_lines })),
     };

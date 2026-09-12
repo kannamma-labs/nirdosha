@@ -299,6 +299,22 @@ fn diagnostic_line_numbers(diagnostic: &str) -> Vec<usize> {
     found
 }
 
+/// `{line}:{col}` out of the parser's own `... at {line}:{col}: ...`
+/// error format, so parse-stage diagnostics can carry the same
+/// structured fields type/ownership-stage errors get from their
+/// `Span`s.
+fn first_span_in(s: &str) -> Option<(usize, usize)> {
+    let rest = s.rsplit_once(" at ").map(|(_, r)| r)?;
+    let mut it = rest.split(':');
+    let line = it.next()?.trim().parse::<usize>().ok()?;
+    let col = it.next()?.trim().parse::<usize>().ok()?;
+    Some((line, col))
+}
+
+fn machine_error(stage: &str, line: Option<usize>, col: Option<usize>, message: &str) -> String {
+    serde_json::json!({ "stage": stage, "line": line, "col": col, "message": message }).to_string()
+}
+
 /// Appends the offending source line(s) to a diagnostic so the model
 /// sees WHAT it wrote at the position, not just where. A model cannot
 /// reliably count lines of its own previous output -- especially after
@@ -385,7 +401,7 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
     }
 }
 
-fn units_prompt(units: &[CandidateUnit]) -> String {
+fn units_prompt(units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge]) -> String {
     // A real generation failure, root-caused rather than guessed at:
     // `populate_candidates`'s own system prompt asks for the
     // *conceptual* components a description implies (for a game:
@@ -411,6 +427,24 @@ fn units_prompt(units: &[CandidateUnit]) -> String {
         }
         out.push('\n');
     }
+    // The translation contract + the design's own relationships. Until
+    // 2026-09-11 this prompt carried only the flattened node list: the
+    // decompose step had already recorded `depends_on` relationships in
+    // the graph, Generate mode just never read them back out, so the
+    // code model invented wiring from nothing -- and a component the
+    // design never wired became decorative (declared, never referenced:
+    // the v2 `PaymentChannel` enum, zero edges, zero call sites). Edges
+    // + an explicit what-an-edge-means contract close that gap at the
+    // only point where a model reads them.
+    if !edges.is_empty() {
+        out.push_str("### How the components relate (confirmed design facts, not suggestions)\n");
+        out.push_str("Each edge below is a confirmed relationship from the design graph. It translates to .nir concretely: the source component's declaration must genuinely reference the target -- a parameter of its type, a call, or a variant in a match -- and `fn main()` must wire executed calls so the relationship appears in real running code, not in a comment.\n\n");
+        for e in edges {
+            out.push_str(&format!("- {} {} {}\n", e.src, e.kind.to_lowercase(), e.dst));
+        }
+        out.push('\n');
+    }
+    out.push_str("A component that no other component references and that `fn main()` never calls or mentions is a bug in the generated program: it orphans the design. Every declared component must appear in at least one function's signature, or in a call from `fn main()` -- an enum in a parameter/return type counts only if some confirmed fn actually uses that type.\n");
     out
 }
 
@@ -448,11 +482,11 @@ pub fn generated_source_path(root: &Path) -> PathBuf {
 /// still a real compile with real self-repair, just file-granularity
 /// locking (`hi_graph::lock_units_after_sync`) rather than the RFC's
 /// finer per-unit one.
-pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit], on_log: &mut dyn FnMut(&str)) -> Result<PathBuf, String> {
+pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge], on_log: &mut dyn FnMut(&str)) -> Result<PathBuf, String> {
     if units.is_empty() {
         return Err("nothing confirmed and unlocked to generate -- `:confirm <node>` at least one candidate first".to_string());
     }
-    let mut history = vec![ChatMessage { role: "system", content: NIR_SYSTEM_PROMPT.to_string() }, ChatMessage { role: "user", content: units_prompt(units) }];
+    let mut history = vec![ChatMessage { role: "system", content: NIR_SYSTEM_PROMPT.to_string() }, ChatMessage { role: "user", content: units_prompt(units, edges) }];
     let mut last_diagnostic = String::new();
     for attempt in 1..=MAX_SELF_REPAIR_ATTEMPTS {
         let raw = client.complete(&history).map_err(|e| format!("couldn't reach the model: {e}"))?;
@@ -602,12 +636,20 @@ fn typecheck_and_build_check(source: &str) -> Result<(), String> {
 
     let result = (|| -> Result<(), String> {
         let path_str = path.to_str().ok_or_else(|| format!("temp path {} is not valid UTF-8", path.display()))?;
-        let (program, _src): (crate::ast::Program, String) = crate::loader::load_program(path_str).map_err(|e| attach_source_lines(source, &e))?;
+        let (program, _src): (crate::ast::Program, String) = crate::loader::load_program(path_str).map_err(|e| {
+            let mut machine = vec![machine_error("parse", None, None, &e)];
+            if let Some((line, col)) = first_span_in(&e) {
+                machine = vec![machine_error("parse", Some(line), Some(col), &e)];
+            }
+            attach_source_lines(source, &format!("{e}\nmachine-readable errors: [{}]", machine.join(", ")))
+        })?;
         if let Err(errors) = crate::typeck::typecheck(&program) {
-            return Err(attach_source_lines(source, &errors.iter().map(|e| format!("type error: {e}")).collect::<Vec<_>>().join("\n")));
+            let machine: Vec<String> = errors.iter().map(|e| machine_error("typecheck", Some(e.span.line as usize), Some(e.span.col as usize), &format!("{e}"))).collect();
+            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", errors.iter().map(|e| format!("type error: {e}")).collect::<Vec<_>>().join("\n"), machine.join(", "))));
         }
         if let Err(errors) = crate::ownership::check_ownership(&program) {
-            return Err(attach_source_lines(source, &errors.iter().map(|e| format!("ownership error: {e}")).collect::<Vec<_>>().join("\n")));
+            let machine: Vec<String> = errors.iter().map(|e| machine_error("ownership", Some(e.span.line as usize), Some(e.span.col as usize), &format!("{e}"))).collect();
+            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", errors.iter().map(|e| format!("ownership error: {e}")).collect::<Vec<_>>().join("\n"), machine.join(", "))));
         }
         let smt_report = crate::smt::analyze(&program);
         crate::codegen::build(&program, &smt_report, &out_path, crate::codegen::OptLevel::O2)
@@ -670,7 +712,7 @@ mod tests {
         // contradiction instead of ever being told it no longer
         // applies. See units_prompt's own doc comment for the full RCA.
         let units = vec![CandidateUnit { id: "code:fn:tick".to_string(), kind: "fn".to_string(), name: "tick".to_string(), driving_text: "advances the game clock".to_string(), attributes: vec![] }];
-        let prompt = units_prompt(&units);
+        let prompt = units_prompt(&units, &[]);
         assert!(prompt.contains("fn main()"), "the generate-mode prompt must explicitly require fn main(), got: {prompt}");
         assert!(prompt.contains("not itself one of the named components") || prompt.contains("even though"), "the prompt should make clear main() is required in *addition* to the named components, not instead of asking for it plainly");
     }
@@ -801,4 +843,41 @@ mod tests {
         let tdiag = "type error: 3:18: `x` is not defined";
         let twith = attach_source_lines(src, tdiag);
         assert!(twith.contains("Ok(d) => return false"), "type-error diagnostics attach the line too, got:\n{twith}");
+    }
+
+    #[test]
+    fn units_prompt_renders_confirmed_edges_and_the_wiring_contract() {
+        // (a) of the 2026-09-11 RCA: the decompose step records
+        // `depends_on` edges in the graph, and Generate mode used to
+        // drop them -- the model free-ranged the wiring and components
+        // went decorative. The prompt must now carry both the edges
+        // AND the translation contract (what an edge means in .nir).
+        let units = vec![
+            CandidateUnit { id: "code:fn:authorize_payment_cents".to_string(), kind: "fn".to_string(), name: "authorize_payment_cents".to_string(), driving_text: "checks balance and limits".to_string(), attributes: vec![] },
+            CandidateUnit { id: "code:fn:channel_daily_limit_cents".to_string(), kind: "fn".to_string(), name: "channel_daily_limit_cents".to_string(), driving_text: "the per-channel cap".to_string(), attributes: vec![] },
+        ];
+        let edges = vec![crate::hi_graph::ConfirmedEdge { src: "authorize_payment_cents".to_string(), dst: "channel_daily_limit_cents".to_string(), kind: "RELATES_TO".to_string() }];
+        let prompt = units_prompt(&units, &edges);
+        assert!(prompt.contains("authorize_payment_cents relates_to channel_daily_limit_cents"), "the edge must be rendered in the wiring section, got: {prompt}");
+        assert!(prompt.contains("confirmed design facts"), "the wiring section must mark these as design facts, got: {prompt}");
+        assert!(prompt.contains("orphans the design"), "the orphan rule must be stated, got: {prompt}");
+        // With no edges, the wiring section is omitted but the orphan rule still applies.
+        let bare = units_prompt(&units, &[]);
+        assert!(!bare.contains("How the components relate"));
+        assert!(bare.contains("orphans the design"));
+    }
+
+    #[test]
+    fn diagnostics_carry_a_machine_readable_block() {
+        // (b) of the 2026-09-11 RCA: the repair conversation should
+        // carry the compiler's own structured error data, not just
+        // prose a model has to re-parse -- plus the offending source
+        // line, since it cannot count to line 154 of its own output.
+        let src = "fn main() {\n    let ok: bool = match json_parse(\"{}\") {\n        Ok(d) => return false,\n    }\n}\n";
+        let err = typecheck_and_build_check(src).expect_err("the match-arm return must fail the check");
+        assert!(err.contains("machine-readable errors: ["), "structured block expected, got:\n{err}");
+        assert!(err.contains("\"stage\":\"parse\""), "parse-stage machine errors expected, got:\n{err}");
+        assert!(err.contains("\"line\":3"), "the structured block must carry the real line number, got:\n{err}");
+        assert!(err.contains("\"col\":18"), "the structured block must carry the real column, got:\n{err}");
+        assert!(err.contains("Ok(d) => return false"), "the offending source line must still be attached, got:\n{err}");
     }
