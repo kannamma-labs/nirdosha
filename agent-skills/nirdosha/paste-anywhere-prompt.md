@@ -344,6 +344,54 @@ generate *valid* Nirdosha on the first try.
     refused unless that component's fn carries a `validate` block Z3
     actually proves. Treat such attributes as mandatory requirements,
     never decoration.
+19. **Identity, roles, and the `acquire` pattern are builtins — do not
+    redeclare them and do not invent your own identity type.** The only
+    identity type is `VerifiedIdentity`; roles are plain strings such as
+    `"requester"`, `"finance_director"`, `"admin"`. `check_role(identity,
+    "role")` and `acquire fn_name(proof)` are provided by the runtime.
+    Never write `fn check_role(...)`, `fn acquire(...)`, or structs/enums
+    named `User`, `UserRole`, `RoleProof`, etc. A privileged action looks
+    exactly like this:
+    ```nirdosha
+    fn approve_payment(instance_id: i64) -> bool requires(role: "finance_director") {
+        return true
+    }
+
+    fn try_approve(identity: VerifiedIdentity, instance_id: i64) -> bool requires(public) {
+        return match check_role(identity, "finance_director") {
+            Ok(proof) => match acquire approve_payment(proof) {
+                Ok(f) => f(instance_id),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        }
+    }
+    ```
+20. **`transact` step functions must accept the implicit `txn_id`.**
+    Every function used in the `network:`, `verify:`, `commit:`,
+    `compensate:`, or `log:` slots must take `txn_id: str` as one of its
+    arguments, because the desugaring binds that name for idempotent
+    replay. The block itself does **not** declare `txn_id`; it is
+    injected:
+    ```nirdosha
+    fn call_processor(txn_id: str, amount: i64) -> i64 { return amount }
+    fn verify_positive(txn_id: str, amount: i64) -> bool { return amount > 0 }
+    fn commit_payment(txn_id: str, amount: i64) -> i64 { return amount }
+
+    fn settle(amount: i64) -> bool {
+        return transact {
+            network: call_processor(txn_id, amount)
+            verify: verify_positive(txn_id, network)
+            commit: commit_payment(txn_id, network)
+        }
+    }
+    ```
+21. **Dynamic lists are `json`, not `Vector(T, N)`.** `Vector(T, N)` is
+    a fixed-size, compile-time-length array only. A function that
+    returns "a list of pending requests" returns `json` (built with
+    `json_set_str`, or the result of `db_query`), iterated with
+    `json_array_len`/`json_array_get`. Never write `Vector(PaymentRequest, 1)`
+    for a variable-length queue.
 
 A fast-scan companion to the rules above — every pair below is
 verified against the real compiler, not hypothetical.
@@ -1202,12 +1250,15 @@ I'll describe what I want in plain language. Respond with:
    wrote any comments, confirm every single one uses `//` — no `/* */`
    anywhere. If you read a single row out of a `db_query` result,
    confirm you called `json_array_get(rows, 0)` before `json_get_*` —
-   skipping that compiles fine and fails silently. Go through every
-   `fn` you wrote and confirm each one has `requires(role/claim: ...)`,
-   `requires(public)`, or takes a `VerifiedIdentity` parameter — rule
-   12's warning, not a compile error, but every function in your output
-   should end up in exactly one of those three buckets on purpose, not
-   by omission.
+   skipping that compiles fine and fails silently. If the request
+   involves roles, confirm you used `VerifiedIdentity` and plain-string
+   roles with `check_role`/`acquire`, and did not invent a `User` or
+   `UserRole` type. If you used `transact`, confirm every step function
+   takes `txn_id: str`. Go through every `fn` you wrote and confirm
+   each one has `requires(role/claim: ...)`, `requires(public)`, or takes
+   a `VerifiedIdentity` parameter — rule 12's warning, not a compile
+   error, but every function in your output should end up in exactly one
+   of those three buckets on purpose, not by omission.
 4. A one-line reminder that this hasn't been run through the real
    compiler — I should verify with
    `nirdosha emit-ui file.nir -o /tmp/out.html` (typecheck-only, no

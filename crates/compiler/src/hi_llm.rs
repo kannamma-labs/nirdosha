@@ -616,6 +616,22 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
         // reminder rather than a generic "fix it" that repeats
         // whatever ambiguity caused this in the first place.
         " Add a `fn main()` -- it is required in addition to every named component from the original request, not instead of any of them."
+    } else if diagnostic.contains("is a builtin name and cannot be used as a function name") {
+        // Field-failure from the v4 generate attempt under the banking
+        // pack: the model declared its own `fn check_role` and
+        // `fn acquire_role`, which collide with runtime builtins.
+        " Delete the custom `fn check_role(...)` / `fn acquire(...)` / any function whose name matches a builtin. Identity and role handling are runtime builtins: the only identity type is `VerifiedIdentity`; roles are plain strings like \"finance_director\"; call `check_role(identity, \"role\")` and unwrap its `Result(RoleView, str)`, then pass the `RoleView` to `acquire fn_name(proof)` to get a callable. Never invent a `User` or `UserRole` type."
+    } else if diagnostic.contains("expected `VerifiedIdentity`, found `User`") || diagnostic.contains("expected `VerifiedIdentity`, found `UserRole`") {
+        " The identity type is `VerifiedIdentity`, not a `User` struct or `UserRole` enum you invent. Roles are plain strings (\"requester\", \"finance_director\", \"admin\"). Pass a `VerifiedIdentity` value (built with `VerifiedIdentity(subject, issuer, audience, iat, exp, roles_csv)`) to every role-gated fn."
+    } else if diagnostic.contains("`transact`'s `network` slot must pass the implicit `txn_id`") || diagnostic.contains("unknown variable `txn_id`") {
+        " In a `transact` block, `txn_id` is an implicit binding provided by the desugaring. Every function used in `network:`, `verify:`, `commit:`, `compensate:`, or `log:` must accept `txn_id: str` as one of its parameters and actually use it in the call: `network: call_processor(txn_id, amount)`, `commit: commit_payment(txn_id, network)`, etc. The block itself does not declare `txn_id`."
+    } else if diagnostic.contains("unknown variable `commit`") && diagnostic.contains("transact") {
+        " Inside a `transact` block, `commit` is a step NAME, not a variable you can read directly. If you need the commit result in a later step (like `log:`), the step itself must return the value and the later step must call a function that receives it -- or use `verify` as the boolean guard and keep the committed amount as the step's return value."
+    } else if diagnostic.contains("non-scalar element type") && diagnostic.contains("Vector") {
+        // Field-failure from the v4 generate attempt: the model used
+        // `Vector(PaymentRequest, 1)` as a variable-length list of
+        // structs, which codegen cannot represent and used to panic on.
+        " `Vector(T, N)` and `Matrix(T, R, C)` only support scalar element types (i64, f64, etc.) in the compiled backend. A variable-length list of structs, enums, or other aggregates must be `json`: build it with `json_set_str`/`json_set_i64` or return it from `db_query`, then walk it with `json_array_len` + `json_array_get`. Never use `Vector(StructName, N)` for a resizable queue."
     } else if diagnostic.contains("expected an expression, found the reserved keyword `return`") {
         // Field-failure 2026-09-11, and the one that forced the
         // holistic re-read: the model wrote `Ok(id) => return false`

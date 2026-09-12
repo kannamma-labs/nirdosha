@@ -1024,6 +1024,49 @@ pub fn check_supported_with_plugins(
         ));
     }
     let registry = TypeRegistry::build(program);
+    // `Vector`/`Matrix` currently codegen only for scalar element types
+    // (f64/i64/...). A non-scalar element (struct/enum/another Vector)
+    // used to reach `elem_byte_size` and panic; reject it up front with
+    // a named error so the generate repair loop can teach the rule.
+    fn is_scalar_element(ty: &crate::ast::Ty) -> bool {
+        matches!(ty, crate::ast::Ty::I8 | crate::ast::Ty::U8 | crate::ast::Ty::I16
+            | crate::ast::Ty::U16 | crate::ast::Ty::I32 | crate::ast::Ty::U32
+            | crate::ast::Ty::I64 | crate::ast::Ty::U64 | crate::ast::Ty::Usize
+            | crate::ast::Ty::F64)
+    }
+    fn check_vec_elem(ty: &crate::ast::Ty) -> Option<String> {
+        match ty {
+            crate::ast::Ty::Vector(elem, n) => {
+                if !is_scalar_element(elem) {
+                    return Some(format!("Vector({elem:?}, {n})"));
+                }
+                check_vec_elem(elem)
+            }
+            crate::ast::Ty::Matrix(elem, r, c) => {
+                if !is_scalar_element(elem) {
+                    return Some(format!("Matrix({elem:?}, {r}, {c})"));
+                }
+                check_vec_elem(elem)
+            }
+            _ => None,
+        }
+    }
+    for f in &program.fns {
+        for p in &f.params {
+            if let Some(bad) = check_vec_elem(&p.ty) {
+                return unsupported(format!(
+                    "`{}` uses {bad} with a non-scalar element type -- Vector/Matrix currently only support scalar elements (i64, f64, etc.); use `json` for a variable-length list of structs/enums",
+                    f.name
+                ));
+            }
+        }
+        if let Some(bad) = check_vec_elem(&f.ret) {
+            return unsupported(format!(
+                "`{}` returns {bad} with a non-scalar element type -- Vector/Matrix currently only support scalar elements (i64, f64, etc.); use `json` for a variable-length list of structs/enums",
+                f.name
+            ));
+        }
+    }
     // Reject a cyclic struct/enum *declaration* itself, before any
     // function signature or body is even walked — the same "reject,
     // don't leak the backend's own error text" standard every other

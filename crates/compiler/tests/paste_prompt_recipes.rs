@@ -38,7 +38,9 @@ fn prompt_md() -> String {
     std::fs::read_to_string(&path).expect("agent-skills/nirdosha/paste-anywhere-prompt.md should exist next to the crate")
 }
 
-/// Every ```nirdosha fenced block in the md, in order.
+/// Every ```nirdosha fenced block in the md, in order.  Common leading
+/// whitespace is stripped from each block so recipes nested inside
+/// numbered-list indentation still compile verbatim.
 fn nir_blocks() -> Vec<String> {
     let md = prompt_md();
     let mut blocks = Vec::new();
@@ -48,12 +50,37 @@ fn nir_blocks() -> Vec<String> {
         if trimmed == "```nirdosha" && current.is_none() {
             current = Some(Vec::new());
         } else if trimmed == "```" && current.is_some() {
-            blocks.push(current.take().unwrap().join("\n"));
+            let raw = current.take().unwrap();
+            blocks.push(dedent(&raw).join("\n"));
         } else if let Some(lines) = current.as_mut() {
             lines.push(line.to_string());
         }
     }
     blocks
+}
+
+/// Remove the largest common leading whitespace prefix shared by all
+/// non-empty lines, but never remove more than the minimum indentation.
+fn dedent(lines: &[String]) -> Vec<String> {
+    let non_empty: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    if non_empty.is_empty() {
+        return lines.to_vec();
+    }
+    let min_indent = non_empty
+        .iter()
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                String::new()
+            } else {
+                l.chars().skip(min_indent).collect()
+            }
+        })
+        .collect()
 }
 
 /// The first block containing `anchor` — the prompt teaches one recipe
@@ -111,7 +138,7 @@ fn transact_recipe_as_taught_compiles_and_runs() {
     // main() just settles a positive amount, which must commit and
     // print -- and the recipe must contain no `;` (the 2026-09-11 bug
     // this suite was born from was exactly that).
-    let block = block_containing("return transact {");
+    let block = block_containing("fn db_up()");
     assert!(!block.contains(';'), "the transact recipe in the paste-anywhere prompt contains a `;` -- rule 4 violation in the very block that teaches the construct");
     let src = format!("{block}\n\nfn main() {{\n    let ok: bool = settle(10)\n    print(\"settled\", ok)\n}}");
     let (out, code) = compile_and_run(&src, "transact");
@@ -152,6 +179,55 @@ fn json_display_loops_as_taught_compile_and_run() {
     assert_eq!(code, 0);
     assert!(out.contains("ravi"), "json display loop should extract the user field, got: {out}");
     assert!(out.contains("pending"), "json display loop should walk the array items, got: {out}");
+}
+
+#[test]
+fn identity_acquire_pattern_as_taught_compiles_and_runs() {
+    // Rule 19's exact acquire/check_role recipe must compile and run
+    // when assembled with only a main() that exercises it.
+    let block = block_containing("fn try_approve");
+    let src = format!(
+        "{block}\n\nfn main() {{
+    let identity: VerifiedIdentity = VerifiedIdentity(\"meera\", \"https://idp.example.com\", \"corp-pay\", 0, 0, \"finance_director\")
+    let ok: bool = try_approve(identity, 1)
+    print(\"approved\", ok)
+}}"
+    );
+    let (out, code) = compile_and_run(&src, "identity_acquire");
+    assert_eq!(code, 0);
+    assert!(out.contains("approved"), "identity/acquire recipe output should contain approved line, got: {out}");
+}
+
+#[test]
+fn transact_txn_id_recipe_as_taught_compiles_and_runs() {
+    // Rule 20's exact transact recipe with txn_id must compile and
+    // commit.
+    let block = block_containing("fn call_processor(txn_id: str");
+    assert!(!block.contains(';'), "the txn_id transact recipe contains a `;`");
+    let src = format!(
+        "{block}\n\nfn main() {{
+    let ok: bool = settle(10)
+    print(\"settled\", ok)
+}}"
+    );
+    let (out, code) = compile_and_run(&src, "transact_txn_id");
+    assert_eq!(code, 0);
+    assert!(out.contains("settled"), "txn_id transact recipe should settle, got: {out}");
+}
+
+#[test]
+fn prompt_forbids_user_and_userrole() {
+    // Rule 19's negative instruction: the prompt must not tell the
+    // model to invent a User/UserRole type for role handling.
+    let md = prompt_md();
+    assert!(
+        !md.contains("struct User"),
+        "the prompt must not contain a `struct User` recipe"
+    );
+    assert!(
+        !md.contains("enum UserRole"),
+        "the prompt must not contain an `enum UserRole` recipe"
+    );
 }
 
 #[test]
