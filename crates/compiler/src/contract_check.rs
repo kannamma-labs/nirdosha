@@ -66,6 +66,17 @@ pub enum ContractCheckResult {
     /// them straight into `nir_scenario!` or an integration test to
     /// reproduce it.
     Counterexample { violated_predicate: String, bindings: Vec<(String, i64)>, result: Option<i64> },
+    /// `pre_logic` is unsatisfiable on its own — no input the function's
+    /// declared parameter types admit can ever make every `pre_logic`
+    /// entry true at once (e.g. `x > 10` and `x < 5` asserted together).
+    /// Reported instead of `Proved` because a vacuous precondition would
+    /// otherwise make every `post_logic` entry "hold" for a reason that
+    /// has nothing to do with the function being correct — Z3 finds no
+    /// counterexample because there's no input to search, not because
+    /// the postcondition is actually true of anything. Almost always an
+    /// authoring mistake (a typo'd range), never an intentional "this
+    /// validate block should never run."
+    VacuousPrecondition,
     /// A name in the predicate is neither `result`, nor `fn_name`'s own
     /// parameter, nor supplied in `extra_bindings` — §7.1a's "the spec
     /// references a quantity the code doesn't parameterize on" case.
@@ -312,6 +323,11 @@ fn contract_error_message(outcome: &ValidateOutcome) -> Option<String> {
                 result.map(|r| r.to_string()).unwrap_or_else(|| "<uncomputed>".to_string())
             ))
         }
+        ContractCheckResult::VacuousPrecondition => Some(format!(
+            "`validate {}`: pre_logic can never be true for any input `{}`'s parameter types admit -- \
+             every post_logic would \"pass\" vacuously; check for a typo (e.g. an impossible range)",
+            outcome.fn_name, outcome.fn_name
+        )),
         ContractCheckResult::UnboundIdentifier { name, .. } => Some(format!(
             "`validate {}`: `{name}` is neither `result` nor one of `{}`'s own parameters",
             outcome.fn_name, outcome.fn_name
@@ -599,6 +615,16 @@ fn check_fn_contract_parsed(
             Ok(b) => solver.assert(b),
             Err(msg) => return ContractCheckResult::Unsupported(format!("pre_logic `{src}`: {msg}")),
         }
+    }
+    // Checked once, right here -- after every precondition is asserted,
+    // before the body walk (and every per-`post_logic` counterexample
+    // search below) even starts. No per-clause check below can catch
+    // this on its own: each of those already only ever searches within
+    // this same precondition-restricted space, so if that space is
+    // empty, every one of them "succeeds" vacuously instead of failing
+    // loudly. See `ContractCheckResult::VacuousPrecondition`'s own doc.
+    if !pre_exprs.is_empty() && solver.check() == SatResult::Unsat {
+        return ContractCheckResult::VacuousPrecondition;
     }
     if let Err(msg) = eval.stmts(&f.body.stmts, &mut scopes) {
         return ContractCheckResult::Unsupported(msg);

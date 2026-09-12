@@ -40,6 +40,22 @@
 //! isn't available" — the reason given below for keeping it — was never
 //! actually built; there is no such fallback switch in the real pipeline.
 //!
+//! **And that fallback switch couldn't be a real one today even if
+//! built.** `contract_check.rs` (Hoare-contract checking for `validate`
+//! blocks) was added after this module, uses `z3::Solver` directly and
+//! unconditionally, and has no interval-analysis equivalent — nothing
+//! like this module exists for it. So the `z3` crate is already a hard,
+//! non-optional dependency of this binary regardless of what `codegen.rs`
+//! does with bounds proofs; an environment with genuinely no Z3 available
+//! can't build this compiler at all today, full stop. This module's
+//! actual remaining value is as a real, tested, independently-verified
+//! comparison technique (`tests/smt.rs`'s `condition_narrowing_proves_
+//! what_interval_analysis_cannot` exists specifically to demonstrate what
+//! Z3 can prove that this can't) — not as a live build-time alternative
+//! to `smt.rs`. Treat any future "wire this in as the Z3-absent path"
+//! proposal as blocked on first making `contract_check.rs`'s Z3 use
+//! itself optional, a separate and much larger project.
+//!
 //! **Loops: widen, don't iterate to a fixed point.** A `while` body might
 //! run any number of times, so any binding it reassigns is widened to its
 //! full declared-type range *before* the body is analyzed at all — the

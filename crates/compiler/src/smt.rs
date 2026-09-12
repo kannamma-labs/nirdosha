@@ -56,7 +56,12 @@
 //! own `RefineReport` has no equivalent consumer — it's exercised only
 //! by its own tests today, not read by `main.rs`/`codegen.rs` at all,
 //! so it isn't actually serving as a documented Z3-unavailable fallback
-//! in the real pipeline, whatever its module doc says.
+//! in the real pipeline, whatever its module doc says. And it couldn't
+//! be wired in as a real Z3-unavailable fallback today regardless:
+//! `contract_check.rs`'s Hoare-contract checking also uses `z3::Solver`
+//! directly, unconditionally, with no interval-analysis equivalent —
+//! `z3` is already a hard dependency of this binary either way. See
+//! `refine.rs`'s own module doc for the fuller account.
 
 use std::collections::{HashMap, HashSet};
 
