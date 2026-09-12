@@ -513,6 +513,19 @@ pub fn run_verify_pipeline(path: &str) -> VerifyVerdict {
                         fix: None,
                     });
                 }
+                ContractCheckResult::VacuousPrecondition => {
+                    // RFC 0016 fail-closed semantics: a vacuous proof is
+                    // reported as such and counts as a failure for gating
+                    // purposes -- PROVED with zero reachable states is the
+                    // vacuous sibling of PROVED 0/0, not a pass.
+                    contracts.failed += 1;
+                    contracts.obligations.push(ContractObligation {
+                        fn_name: outcome.fn_name,
+                        status: "vacuous_precondition",
+                        detail: Some("pre_logic can never be true for any input the parameter types admit -- every post_logic passes vacuously; check for a typo'd precondition".to_string()),
+                        fix: None,
+                    });
+                }
             }
         }
 
