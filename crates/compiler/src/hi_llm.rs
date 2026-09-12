@@ -354,6 +354,17 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
         // reserved-keyword arm, whose "rename that identifier"
         // advice would be nonsense for `return`.
         " `return` is a statement, never an expression: it cannot appear inside a `match` arm (`Ok(x) => return ...`), on the right of `=`, or inside a call's arguments. Restructure: every arm yields a value, bind the whole match (`let ok: bool = match ... { ... }`), then `return ok` (or print it) after the match ends."
+    } else if diagnostic.contains("arms must name a variant") || diagnostic.contains("doesn't cover") {
+        // Field-failure 2026-09-11 (the v4 attempt-4 give-up): the model
+        // matched an enum-typed field with Rust-flavored arms -- string
+        // literals (`\"approved\" => ...`) and `_ => 0` -- while rule 8
+        // already forbade both. Same class as the `=> return` failure:
+        // a rule that lives in the system prompt is not retained under
+        // generation pressure; the repair turn is the teaching moment.
+        // Both diagnostics are unusually self-describing (the second
+        // literally lists the missing variants) -- this arm converts
+        // that into the exact rewrite shape.
+        " Enum matches: every arm names a bare VARIANT of the enum (`Pending => ...`, `Approved => ...`) -- never a string/number literal, never `_`. The `doesn't cover` errors list the exact variants missing: give each of them its own arm. If you meant to match string values, the SCRUTINEE is the bug, not the arms: the field/variable is enum-typed (`RequestStatus`), so either the arms must become variant names or the field's declared type must change -- you cannot string-match an enum."
     } else if diagnostic.contains("found the reserved type name") {
         // Field-failure 2026-09-11: `return unit`. Notably the EXISTING
         // "reserved keyword" arm never fired -- this message says
@@ -491,6 +502,23 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
     for attempt in 1..=MAX_SELF_REPAIR_ATTEMPTS {
         let raw = client.complete(&history).map_err(|e| format!("couldn't reach the model: {e}"))?;
         let source = extract_nir_source(&raw);
+        // Every draft is persisted BEFORE the check runs (2026-09-11,
+        // born from the user's "take out the first generated code"
+        // instruction): until now a failed attempt existed only in
+        // conversation memory -- the check's scratch file is deleted
+        // per call -- so "what did attempt 1 actually look like" was
+        // unanswerable after the fact. Drafts land under
+        // .nir/generated/attempts/, one file per attempt, overwritten
+        // by the next generate run; the give-up error names the
+        // directory. Persisting first, checking second also means a
+        // crash mid-check still leaves the draft for inspection.
+        let drafts_dir = generated_source_path(root)
+            .parent()
+            .expect("generated_source_path always has a parent")
+            .join("attempts");
+        if let Err(e) = std::fs::create_dir_all(&drafts_dir).and_then(|()| std::fs::write(drafts_dir.join(format!("attempt_{attempt}.nir")), &source)) {
+            on_log(&format!("warning: could not persist attempt {attempt}'s draft: {e}"));
+        }
         match typecheck_and_build_check(&source) {
             Ok(()) => {
                 let out_path = generated_source_path(root);
@@ -515,7 +543,7 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
             }
         }
     }
-    Err(format!("gave up after {MAX_SELF_REPAIR_ATTEMPTS} attempts -- last diagnostic:\n{last_diagnostic}"))
+    Err(format!("gave up after {MAX_SELF_REPAIR_ATTEMPTS} attempts -- every attempt's full draft is kept under .nir/generated/attempts/ for inspection. Last diagnostic:\n{last_diagnostic}"))
 }
 
 /// A bounded generate/self-repair round trip over a *plain* natural-
