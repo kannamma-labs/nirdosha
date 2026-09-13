@@ -503,7 +503,10 @@ struct WorkflowQueue {
 /// `Todo` -> `todo`, `UserProfile` -> `user_profile`, `HTTPClient` ->
 /// `http_client`. Only needs to handle the ASCII PascalCase Nirdosha
 /// struct names actually use — not a general-purpose Unicode caser.
-fn to_snake_case(name: &str) -> String {
+/// `pub(crate)`: `hi_llm`'s screen-derivation coverage gate reuses this
+/// exact convention rather than re-deriving it, so the two can never
+/// silently drift on what counts as a screen's backing fn name.
+pub(crate) fn to_snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     for (i, ch) in name.chars().enumerate() {
         if ch.is_uppercase() {
@@ -900,8 +903,11 @@ fn kv_gate(entries: &[(String, Expr)], key: &str) -> (Vec<String>, Option<(Strin
 /// The declared `screen <Struct> { ... }` block for one struct, if any —
 /// `ui_gen`'s bridge from Row 12's typechecked DSL into the inference
 /// pipeline below. A struct with no matching `ScreenDecl` takes every
-/// default from inference, unchanged.
-fn find_screen_decl<'a>(program: &'a Program, struct_name: &str) -> Option<&'a ScreenDecl> {
+/// default from inference, unchanged. `pub(crate)`: `hi_llm`'s screen-
+/// derivation coverage gate reads a screen's own `list:`/`get:`/etc.
+/// overrides through this, the same accessor `build_screens` itself uses,
+/// rather than a second lookup that could drift from it.
+pub(crate) fn find_screen_decl<'a>(program: &'a Program, struct_name: &str) -> Option<&'a ScreenDecl> {
     program.screens.iter().find(|sd| sd.struct_name == struct_name)
 }
 

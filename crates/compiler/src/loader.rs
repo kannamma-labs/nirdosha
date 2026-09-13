@@ -28,24 +28,106 @@ use std::path::{Path, PathBuf};
 /// which is already meaningful relative to whichever file actually
 /// produced it — see `resolve_imports`'s doc comment for why that's
 /// enough for correct diagnostics with no multi-file source map).
-pub fn load_program(entry_path: &str) -> Result<(Program, String), String> {
-    let src = std::fs::read_to_string(entry_path).map_err(|e| format!("error reading {entry_path}: {e}"))?;
-    let mut program = parse_one(&src, entry_path)?;
+/// Which phase a [`LoadDiagnostic`] came from -- drives both its
+/// `Display` formatting (matching each phase's pre-existing prose
+/// exactly, so [`load_program`]'s `String` wrapper stays byte-for-byte
+/// unchanged) and whether a real source `Span` exists at all: `Io` and
+/// `Import` failures have no in-source position (a missing file, an
+/// import cycle), so their `span` stays the `0,0,0` placeholder that
+/// was already implicit before this type existed.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum LoadStage {
+    Io,
+    Lex,
+    Parse,
+    Import,
+}
+
+/// Structured sibling of the plain `String` every load failure used to
+/// flatten into immediately -- both `LexError`/`ParseError`'s real
+/// `Span` used to be thrown away the moment `parse_one` formatted them
+/// into a message (`mcp_tools::run_verify_pipeline`'s `VerifyDiagnostic`
+/// hardcoded `line: 0, col: 0` for every load-stage error as a direct
+/// result: there was nowhere else for the real position to go). Kept
+/// alongside the original `String`-returning functions, not instead of
+/// them -- [`load_program`] is a thin wrapper over
+/// [`load_program_diag`] whose `Display` impl reproduces the exact same
+/// text every existing caller already depends on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LoadDiagnostic {
+    pub stage: LoadStage,
+    pub path: String,
+    pub message: String,
+    pub span: token::Span,
+}
+
+impl std::fmt::Display for LoadDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.stage {
+            LoadStage::Io => write!(f, "error reading {}: {}", self.path, self.message),
+            LoadStage::Lex => {
+                write!(f, "lex error in {} at {}:{}: {}", self.path, self.span.line, self.span.col, self.message)
+            }
+            LoadStage::Parse => {
+                write!(f, "parse error in {} at {}:{}: {}", self.path, self.span.line, self.span.col, self.message)
+            }
+            // Import-resolution failures (missing file, cycle, an
+            // imported file's own load error) never carried a
+            // `{path} at {line}:{col}:` prefix even before this type
+            // existed -- `resolve_imports` builds its own fully-worded
+            // `String` message per failure kind, so this just passes it
+            // through unchanged.
+            LoadStage::Import => write!(f, "{}", self.message),
+        }
+    }
+}
+
+/// See `entry_path`'s own doc comment on [`load_program`] -- identical
+/// behavior, `Err` carries a [`LoadDiagnostic`] instead of a pre-
+/// flattened `String`.
+pub fn load_program_diag(entry_path: &str) -> Result<(Program, String), LoadDiagnostic> {
+    let placeholder_span = token::Span { line: 0, col: 0, byte: 0 };
+    let src = std::fs::read_to_string(entry_path).map_err(|e| LoadDiagnostic {
+        stage: LoadStage::Io,
+        path: entry_path.to_string(),
+        message: e.to_string(),
+        span: placeholder_span,
+    })?;
+    let mut program = parse_one_diag(&src, entry_path)?;
     let mut visited = HashSet::new();
     if let Ok(canon) = std::fs::canonicalize(entry_path) {
         visited.insert(canon);
     }
-    resolve_imports(&mut program, entry_path, &mut visited)?;
+    resolve_imports(&mut program, entry_path, &mut visited).map_err(|message| LoadDiagnostic {
+        stage: LoadStage::Import,
+        path: entry_path.to_string(),
+        message,
+        span: placeholder_span,
+    })?;
     Ok((program, src))
 }
 
+pub fn load_program(entry_path: &str) -> Result<(Program, String), String> {
+    load_program_diag(entry_path).map_err(|e| e.to_string())
+}
+
+fn parse_one_diag(src: &str, path: &str) -> Result<Program, LoadDiagnostic> {
+    let toks = token::Lexer::new(src).tokenize().map_err(|e| LoadDiagnostic {
+        stage: LoadStage::Lex,
+        path: path.to_string(),
+        message: e.message,
+        span: e.span,
+    })?;
+    parser::Parser::new(toks).parse_program().map_err(|e| LoadDiagnostic {
+        stage: LoadStage::Parse,
+        path: path.to_string(),
+        message: e.message,
+        span: e.span,
+    })
+}
+
 fn parse_one(src: &str, path: &str) -> Result<Program, String> {
-    let toks = token::Lexer::new(src)
-        .tokenize()
-        .map_err(|e| format!("lex error in {path} at {}:{}: {}", e.span.line, e.span.col, e.message))?;
-    parser::Parser::new(toks)
-        .parse_program()
-        .map_err(|e| format!("parse error in {path} at {}:{}: {}", e.span.line, e.span.col, e.message))
+    parse_one_diag(src, path).map_err(|e| e.to_string())
 }
 
 /// Each `use "path.nir"` in `program` (already parsed, not yet

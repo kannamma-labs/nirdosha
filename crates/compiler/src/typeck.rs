@@ -616,6 +616,25 @@ pub struct TypeError {
     pub span: Span,
 }
 
+/// `number`/`string`/`boolean`/`int`/`float`/`String`/`Boolean` all
+/// parse fine as an ordinary unknown named type (`expect_type`'s
+/// `Ident` fallback, `parser.rs`) and only fail here -- the single
+/// most likely TS/JS/Python/Java scalar-type idiom a model reaches for,
+/// since Nirdosha's real scalar names (`i8`..`i64`, `f64`, `str`,
+/// `bool`, ...) don't overlap with any mainstream language's. `None`
+/// for anything else, so an actually-unknown/misspelled type name still
+/// gets the plain, honest "unknown type" message rather than a wrong
+/// guess.
+pub(crate) fn foreign_type_name_suggestion(name: &str) -> Option<&'static str> {
+    match name {
+        "number" | "int" | "Int" | "Number" | "integer" => Some("i64"),
+        "float" | "double" | "Float" | "Double" => Some("f64"),
+        "string" | "String" => Some("str"),
+        "boolean" | "Boolean" => Some("bool"),
+        _ => None,
+    }
+}
+
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Span { line, col, .. } = self.span;
@@ -810,7 +829,10 @@ impl std::fmt::Display for TypeError {
                 f,
                 "{line}:{col}: `{struct_name}` declares field `{field}` more than once"
             ),
-            TypeErrorKind::UnknownType(n) => write!(f, "{line}:{col}: unknown type `{n}`"),
+            TypeErrorKind::UnknownType(n) => match foreign_type_name_suggestion(n) {
+                Some(suggestion) => write!(f, "{line}:{col}: unknown type `{n}` -- did you mean `{suggestion}`?"),
+                None => write!(f, "{line}:{col}: unknown type `{n}`"),
+            },
             TypeErrorKind::PrivateItem(n) => {
                 write!(f, "{line}:{col}: `{n}` is private to its own module — mark it `pub` to reference it from outside")
             }

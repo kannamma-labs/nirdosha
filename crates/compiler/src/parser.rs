@@ -439,6 +439,23 @@ impl Parser {
                     structs.append(&mut mstructs);
                     enums.append(&mut menums);
                 }
+                // None of `for`/`def`/`class`/`try`/`catch` are reserved
+                // words in this grammar -- they lex as plain identifiers,
+                // so without this arm they'd fall to the catch-all below
+                // and fail inside `parse_fn_decl` with the generic
+                // `expected \`fn\`, found \`for\`` (etc.), which never
+                // says these constructs don't exist at all. Field-
+                // failure-shaped: these are exactly the top-level
+                // constructs a model importing Python/Java/Rust idioms
+                // reaches for.
+                Tok::Ident(ref s) if matches!(s.as_str(), "for" | "def" | "class" | "try" | "catch") => {
+                    return Err(ParseError {
+                        message: format!(
+                            "Nirdosha has no `{s}` -- there are no `for` loops, `def`/`class` declarations, or `try`/`catch`; loop with `while`, and every top-level item starts with `fn`/`struct`/`enum`/`screen`/etc."
+                        ),
+                        span: self.span(),
+                    });
+                }
                 _ => fns.push(self.parse_fn_decl()?),
             }
         }
@@ -1776,6 +1793,30 @@ impl Parser {
         let span = self.span();
         self.expect(&Tok::Let, "`let`")?;
         let name = self.expect_ident()?;
+        // Two field-failure traps, both misread here rather than a
+        // clean "expected `:`" a step later: `mut` isn't a reserved
+        // word, so `let mut x: i64 = 0` parses `mut` AS `name` above,
+        // then fails confusingly on the real variable name where `:`
+        // was expected; and a bare `let _ = expr()` (Rust's discard
+        // idiom -- there is no such form here) fails on `=` where `:`
+        // was expected, with nothing in the bare "expected `:`, found
+        // `=`" message to say why. Both are checked here, before the
+        // generic `expect(&Tok::Colon, ...)` below, so the diagnostic
+        // names the actual mistake instead of just the token mismatch.
+        if name == "mut" {
+            return Err(ParseError {
+                message: "Nirdosha has no `mut` qualifier -- every `let` binding is already reassignable by name; drop `mut` and write `let <name>: <Type> = ...`".to_string(),
+                span: self.span(),
+            });
+        }
+        if self.peek().tok == Tok::Assign {
+            return Err(ParseError {
+                message: format!(
+                    "`let` always needs an explicit type: `let {name}: <Type> = ...` -- there is no type inference and no `let _ = expr` discard form; bind the result to a real, typed name, or drop the call entirely if the result is genuinely unused"
+                ),
+                span: self.span(),
+            });
+        }
         self.expect(&Tok::Colon, "`:`")?;
         let ty = self.expect_type()?;
         self.expect(&Tok::Assign, "`=`")?;
@@ -2021,7 +2062,7 @@ impl Parser {
                     Ok(Expr::Assign(name, Box::new(rhs), span))
                 }
                 _ => Err(ParseError {
-                    message: "left-hand side of `=` must be a plain variable name".to_string(),
+                    message: "left-hand side of `=` must be a plain variable name -- structs and array/vector elements can't be assigned into (no `s.field = x` / `a[i] = x`); rebuild the whole value instead (`s = StructName(new_field, s.other_field, ...)`), or reassign the whole `let`-bound variable".to_string(),
                     span: eq_span,
                 }),
             }

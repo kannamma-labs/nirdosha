@@ -184,7 +184,7 @@ fn main() {
     // env var either way) rather than adding a getter this binary
     // would be the only caller of.
     let model = std::env::var("NIRDOSHA_LLM_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o-mini (OpenAI default)".to_string());
-    let client = hi_llm::LlmClient::new(activation);
+    let client = hi_llm::LlmClient::new(activation).expect("building the LLM HTTP client");
     let binary = locate_nirdosha_binary();
     let out_dir = results_dir(&model);
     std::fs::create_dir_all(&out_dir).expect("creating crates/bench/results should not fail");

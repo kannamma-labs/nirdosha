@@ -101,14 +101,18 @@ fn initialize_negotiates_the_protocol_version_and_advertises_tools() {
 }
 
 #[test]
-fn tools_list_advertises_exactly_the_five_master_plan_tools() {
+fn tools_list_advertises_exactly_the_five_master_plan_tools_plus_constructs_and_ui_conventions() {
     let mut session = McpSession::start();
     session.initialize();
     session.send(&serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let response = session.recv();
     let tools = response["result"]["tools"].as_array().expect("tools should be an array");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().expect("name should be a string")).collect();
-    assert_eq!(names, vec!["verify_code", "get_grammar", "fix", "describe", "certify_code"], "response: {response}");
+    assert_eq!(
+        names,
+        vec!["verify_code", "get_grammar", "fix", "describe", "certify_code", "get_nirdosha_constructs", "get_ui_conventions"],
+        "response: {response}"
+    );
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], "object", "tool: {tool}");
     }
@@ -230,6 +234,51 @@ fn get_grammar_returns_the_real_gbnf_file() {
     let grammar = response["result"]["structuredContent"]["grammar"].as_str().expect("grammar should be a string");
     assert_eq!(response["result"]["structuredContent"]["format"], "gbnf", "response: {response}");
     assert!(grammar.contains("::="), "response should embed real GBNF, not a placeholder: {response}");
+}
+
+#[test]
+fn get_nirdosha_constructs_reports_every_construct_as_compiling() {
+    let mut session = McpSession::start();
+    session.initialize();
+    let response = session.call_tool(2, "get_nirdosha_constructs", serde_json::json!({}));
+    let constructs = response["result"]["structuredContent"]["constructs"].as_array().expect("constructs should be an array");
+    assert!(!constructs.is_empty(), "response: {response}");
+    for c in constructs {
+        assert!(c["name"].as_str().is_some(), "entry missing name: {c}");
+        assert!(c["example"].as_str().is_some(), "entry missing example: {c}");
+        // Every construct this module claims is real should actually
+        // compile against the binary under test -- a `false` here means
+        // either the inventory or the compiler has regressed, and
+        // `cargo test --test capabilities` is where that gets diagnosed.
+        assert_eq!(c["supported"], true, "construct should compile against this build: {c}");
+        assert!(c["diagnostic"].is_null(), "a supported construct should carry no diagnostic: {c}");
+    }
+    let names: Vec<&str> = constructs.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"fn + arithmetic"), "response: {response}");
+    assert!(names.contains(&"workflow (state machine)"), "response: {response}");
+}
+
+#[test]
+fn get_ui_conventions_covers_naming_annotations_and_screen_grammar() {
+    let mut session = McpSession::start();
+    session.initialize();
+    let response = session.call_tool(2, "get_ui_conventions", serde_json::json!({}));
+    let structured = &response["result"]["structuredContent"];
+
+    let crud = structured["naming_conventions"]["crud_functions"].as_array().expect("crud_functions should be an array");
+    let crud_patterns: Vec<&str> = crud.iter().map(|c| c["pattern"].as_str().unwrap()).collect();
+    assert!(crud_patterns.contains(&"list_<struct_snake_case>"), "response: {response}");
+    assert!(crud_patterns.contains(&"create_<struct_snake_case>"), "response: {response}");
+
+    let annotations = structured["function_annotations"].as_array().expect("function_annotations should be an array");
+    let annotation_names: Vec<&str> = annotations.iter().map(|a| a["annotation"].as_str().unwrap()).collect();
+    assert!(annotation_names.iter().any(|a| a.contains("requires(public)")), "response: {response}");
+    assert!(annotation_names.iter().any(|a| a.starts_with("nfr(")), "response: {response}");
+
+    assert!(structured["ui_grammar"]["screen"]["grammar"].as_array().expect("screen grammar should be an array").iter().any(|line| {
+        line.as_str().unwrap().contains("screen_decl")
+    }), "response: {response}");
+    assert!(structured["ui_grammar"]["serve"]["grammar"][0].as_str().unwrap().contains("expose"), "response: {response}");
 }
 
 #[test]

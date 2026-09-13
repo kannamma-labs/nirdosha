@@ -100,7 +100,8 @@ fn print_usage() {
     eprintln!("                                      with Z3 before recommending it (needs an LLM provider,");
     eprintln!("                                      see NIRDOSHA_LLM_PROVIDER_KEY/OPENAI_API_KEY)");
     eprintln!("  nirdosha mcp                        run an MCP server on stdio (JSON-RPC, newline-delimited) --");
-    eprintln!("                                      exposes verify_code/get_grammar/fix/describe as MCP tools;");
+    eprintln!("                                      exposes verify_code/get_grammar/fix/describe/certify_code/");
+    eprintln!("                                      get_nirdosha_constructs/get_ui_conventions as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
     eprintln!("  nirdosha plugin install [--dry-run] <pack.json>");
     eprintln!("                                      install or refresh a 5a domain plugin; --dry-run checks");
@@ -1658,7 +1659,13 @@ fn cmd_suggest_contracts(mut args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let client = nirdosha::hi_llm::LlmClient::new(activation);
+    let client = match nirdosha::hi_llm::LlmClient::new(activation) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("nirdosha suggest-contracts: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let suggestion = match nirdosha::hi_llm::suggest_contract(&client, &source, &fn_name) {
         Ok(s) => s,
         Err(e) => {

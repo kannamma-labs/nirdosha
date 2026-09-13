@@ -89,7 +89,10 @@ impl std::fmt::Display for OwnershipError {
         let Span { line, col, .. } = self.span;
         match &self.kind {
             OwnershipErrorKind::UseAfterMove { name } => {
-                write!(f, "{line}:{col}: use of `{name}` after it was moved")
+                write!(
+                    f,
+                    "{line}:{col}: use of `{name}` after it was moved -- `box` values are affine: using one by name (as a `let` initializer, assignment RHS, call argument, or `return`) moves it away. Borrow with `&{name}` to reuse it without moving, or restructure so it's consumed once"
+                )
             }
         }
     }

@@ -1,8 +1,9 @@
 //! A live, compiler-verified inventory of what Nirdosha the current
 //! compiler build can actually compile (and, for the ones with a
-//! `main`, run) -- not prose. `hi_llm.rs`'s `NIR_SYSTEM_PROMPT` (the
-//! paste-anywhere prompt baked into `hi generate`'s system message) is
-//! a static, hand-maintained file: `tests/paste_prompt_recipes.rs`
+//! `main`, run) -- not prose. `agent-skills/nirdosha/paste-anywhere-
+//! prompt.md` (the human-facing paste-anywhere guide -- no longer `hi
+//! generate`'s system message, see `hi_llm.rs`'s `HI_PROMPT`) is a
+//! static, hand-maintained file: `tests/paste_prompt_recipes.rs`
 //! catches a *broken* recipe in it, but nothing catches a *stale claim*
 //! about what the compiler supports beyond that suite's two hard-coded
 //! substring checks (`prompt_has_no_stale_unsupported_claims`).
@@ -38,10 +39,13 @@ use crate::smt::analyze;
 use crate::token::Lexer;
 use crate::typeck::typecheck;
 
-/// The same doc `hi_llm::NIR_SYSTEM_PROMPT` embeds -- read a second,
-/// independent time here rather than importing that constant, so a
-/// recipe's pass/fail in this report is never accidentally coupled to
-/// `hi_llm`'s own module-private wiring.
+/// The same doc `mcp_tools::get_ui_conventions`'s "sources" list names
+/// (and `hi_llm.rs`'s now-retired `NIR_SYSTEM_PROMPT` used to embed as
+/// `hi generate`'s system message -- see `hi_llm.rs`'s `HI_PROMPT` for
+/// what replaced it) -- read a second, independent time here rather
+/// than sharing an `include_str!`, so a recipe's pass/fail in this
+/// report is never accidentally coupled to another module's own
+/// private wiring.
 const PROMPT_MD: &str = include_str!("../../../agent-skills/nirdosha/paste-anywhere-prompt.md");
 
 /// One named, self-contained Nirdosha program this module claims
@@ -58,6 +62,12 @@ pub struct CapabilityResult {
     pub passed: bool,
     /// The failing stage's diagnostic, verbatim -- `None` when `passed`.
     pub diagnostic: Option<String>,
+    /// The `Capability`'s own source, carried through so a caller (the
+    /// MCP `get_nirdosha_constructs` tool, in particular) can hand an
+    /// LLM a worked example alongside the pass/fail bit -- "this
+    /// construct is real" is more useful paired with "here is exactly
+    /// how it's written" than as a bare boolean.
+    pub source: String,
 }
 
 /// Every ```nirdosha fenced block in `PROMPT_MD`, in source order.
@@ -207,9 +217,12 @@ fn check_one(source: &str) -> Result<(), String> {
 pub fn run_capability_checks() -> Vec<CapabilityResult> {
     compiler_capabilities()
         .into_iter()
-        .map(|cap| match check_one(&cap.source) {
-            Ok(()) => CapabilityResult { name: cap.name, passed: true, diagnostic: None },
-            Err(diagnostic) => CapabilityResult { name: cap.name, passed: false, diagnostic: Some(diagnostic) },
+        .map(|cap| {
+            let outcome = check_one(&cap.source);
+            match outcome {
+                Ok(()) => CapabilityResult { name: cap.name, passed: true, diagnostic: None, source: cap.source },
+                Err(diagnostic) => CapabilityResult { name: cap.name, passed: false, diagnostic: Some(diagnostic), source: cap.source },
+            }
         })
         .collect()
 }

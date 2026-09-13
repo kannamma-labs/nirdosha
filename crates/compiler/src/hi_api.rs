@@ -165,7 +165,7 @@ fn ok_response() -> ApiResponse {
 
 fn require_llm_client() -> Result<crate::hi_llm::LlmClient, String> {
     let activation = crate::hi_llm::resolve_activation(&|k| std::env::var(k).ok())?;
-    Ok(crate::hi_llm::LlmClient::new(activation))
+    crate::hi_llm::LlmClient::new(activation)
 }
 
 /// `hi_graph::ask`'s local keyword search first, always -- fast, free,

@@ -31,7 +31,7 @@
 //! `typeck`/`ownership` functions directly.
 //!
 //! Everything a caller needs is `pub`; the helpers only the pipeline
-//! itself uses (`levenshtein`, `classify_load_error_code`,
+//! itself uses (`levenshtein`, `classify_load_diagnostic`,
 //! `fix_unbound_identifier`, `require_str_arg`, `describe_program`,
 //! `tool_ok`) stay private to this module.
 
@@ -267,15 +267,74 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// site or an unrelated reserved-word mention. A heuristic, not a
 /// guess: narrowed by construction to the one message shape that means
 /// this rule, nothing looser.
-fn classify_load_error_code(msg: &str) -> Option<&'static str> {
-    const PREFIX: &str = "expected identifier, found ";
-    let after = msg.find(PREFIX)? + PREFIX.len();
-    let found = &msg[after..];
-    if found.starts_with("the reserved keyword ") || found.starts_with("the reserved type name ") {
-        Some("NIR0012")
-    } else {
-        None
+/// Load-stage (`LoadStage::Lex`/`Parse`) diagnostics all still arrive as
+/// prose (`ParseError`/`LexError` don't carry a structured kind the way
+/// `TypeErrorKind`/`OwnershipErrorKind` do), so this is necessarily
+/// string-matching against the exact messages `parser.rs`/`token.rs`
+/// construct -- an honest, bounded heuristic, same caveat as before
+/// this was split out of `run_verify_pipeline`. Each arm here matches
+/// one of the field-failure-shaped messages `parser.rs` now raises
+/// on purpose (the `let`-without-a-type/`mut`/field-assignment/
+/// foreign-top-level-keyword traps), plus the pre-existing reserved-
+/// word case. `diag.message` is the bare `ParseError`/`LexError`
+/// message (no `"parse error in {path} at {line}:{col}:"` prefix), so
+/// these substrings never have to account for that wrapper.
+fn classify_load_diagnostic(diag: &crate::loader::LoadDiagnostic) -> (Option<Fix>, Option<&'static str>) {
+    let msg = diag.message.as_str();
+    const IDENT_PREFIX: &str = "expected identifier, found ";
+    if let Some(after) = msg.find(IDENT_PREFIX).map(|i| i + IDENT_PREFIX.len()) {
+        let found = &msg[after..];
+        if found.starts_with("the reserved keyword ") || found.starts_with("the reserved type name ") {
+            return (None, Some("NIR0012"));
+        }
     }
+    if msg.contains("there is no type inference and no `let _ = expr` discard form") {
+        return (
+            Some(Fix {
+                applicability: Applicability::Manual,
+                patch: None,
+                rationale: "Bind the result to a real, typed name: `let <name>: <Type> = <expr>` -- there is no type inference and no `let _ = expr` discard form.".to_string(),
+            }),
+            None,
+        );
+    }
+    if msg.contains("Nirdosha has no `mut` qualifier") {
+        return (
+            Some(Fix {
+                applicability: Applicability::Manual,
+                patch: None,
+                rationale: "Drop `mut` -- every `let` binding is already reassignable by name.".to_string(),
+            }),
+            None,
+        );
+    }
+    if msg.contains("structs and array/vector elements can't be assigned into") {
+        return (
+            Some(Fix {
+                applicability: Applicability::Manual,
+                patch: None,
+                rationale: "Rebuild the whole value instead of assigning into a field/index: `s = StructName(new_field, s.other_field, ...)`, or reassign the whole `let`-bound variable.".to_string(),
+            }),
+            None,
+        );
+    }
+    if msg.contains("there are no `for` loops, `def`/`class` declarations, or `try`/`catch`") {
+        // NIR0005 ("No `for` loops, no closures/lambdas, no tuples") is
+        // a real, direct match only for the `for` spelling specifically
+        // -- `def`/`class`/`try`/`catch` are the same class of foreign-
+        // keyword mistake but aren't what that rule documents, so they
+        // stay uncoded rather than force-fit.
+        let code = if msg.starts_with("Nirdosha has no `for`") { Some("NIR0005") } else { None };
+        return (
+            Some(Fix {
+                applicability: Applicability::Manual,
+                patch: None,
+                rationale: "Loop with `while` -- there are no `for` loops, `def`/`class` declarations, or `try`/`catch` in Nirdosha.".to_string(),
+            }),
+            code,
+        );
+    }
+    (None, None)
 }
 
 /// `nirdosha fix`'s one real, tested fixability analysis for v1
@@ -382,7 +441,12 @@ pub struct TypecheckOwnershipOutcome {
 
 pub fn typecheck_and_check_ownership(program: crate::ast::Program, require_main: bool) -> TypecheckOwnershipOutcome {
     let mut typecheck = StageResult { status: StageStatus::Passed, errors: vec![] };
-    let mut ownership = StageResult { status: StageStatus::Passed, errors: vec![] };
+    // `Skipped`, not `Passed`: ownership only actually runs below when
+    // typecheck produced a `program` to check -- a `None` program (the
+    // `.and_then` below short-circuits without touching `ownership` at
+    // all) must leave this stage reporting the truth, "never ran,"
+    // rather than defaulting to a claim ownership checking never made.
+    let mut ownership = StageResult { status: StageStatus::Skipped, errors: vec![] };
 
     let typecheck_result =
         if require_main { crate::typeck::typecheck(&program) } else { crate::typeck::typecheck_optional_main(&program) };
@@ -438,6 +502,20 @@ pub fn typecheck_and_check_ownership(program: crate::ast::Program, require_main:
                             let candidates: Vec<String> = program.fns.iter().map(|f| f.name.clone()).collect();
                             (Some(fix_unbound_identifier(name, e.span, &candidates)), None)
                         }
+                        // `number`/`string`/`boolean`/`int`/`float` --
+                        // parse fine as an unknown named type, and only
+                        // fail here; `foreign_type_name_suggestion` is
+                        // the same lookup the `Display` message itself
+                        // now consults, so the JSON `fix.rationale`
+                        // agrees with the prose exactly.
+                        crate::typeck::TypeErrorKind::UnknownType(name) => {
+                            let fix = crate::typeck::foreign_type_name_suggestion(name).map(|suggestion| Fix {
+                                applicability: Applicability::Manual,
+                                patch: None,
+                                rationale: format!("`{name}` isn't a Nirdosha type -- use `{suggestion}` instead."),
+                            });
+                            (fix, None)
+                        }
                         _ => (None, None),
                     };
                     VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix, code }
@@ -448,12 +526,30 @@ pub fn typecheck_and_check_ownership(program: crate::ast::Program, require_main:
     };
 
     let program = program.and_then(|program| match crate::ownership::check_ownership(&program) {
-        Ok(()) => Some(program),
+        Ok(()) => {
+            ownership.status = StageStatus::Passed;
+            Some(program)
+        }
         Err(errs) => {
             ownership.status = StageStatus::Failed;
             ownership.errors = errs
                 .iter()
-                .map(|e| VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix: None, code: None })
+                .map(|e| {
+                    // `OwnershipErrorKind` has exactly one variant today
+                    // -- still matched explicitly, not a bare `Some`,
+                    // so a future second variant doesn't silently
+                    // inherit this rationale.
+                    let fix = match &e.kind {
+                        crate::ownership::OwnershipErrorKind::UseAfterMove { name } => Some(Fix {
+                            applicability: Applicability::Manual,
+                            patch: None,
+                            rationale: format!(
+                                "`box` values are affine -- borrow with `&{name}` to reuse it without moving, or restructure so it's consumed once."
+                            ),
+                        }),
+                    };
+                    VerifyDiagnostic { line: e.span.line, col: e.span.col, message: e.to_string(), fix, code: None }
+                })
                 .collect();
             None
         }
@@ -483,12 +579,19 @@ pub fn run_verify_pipeline(path: &str) -> VerifyVerdict {
     };
     let mut proof_obligations = ProofObligations { proven_in_range: 0, proven_nonzero_divisor: 0, proven_index_bounds: 0 };
 
-    let program = match crate::loader::load_program(path) {
+    let program = match crate::loader::load_program_diag(path) {
         Ok((program, _src)) => Some(program),
-        Err(msg) => {
+        Err(diag) => {
             load.status = StageStatus::Failed;
-            let code = classify_load_error_code(&msg);
-            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg, fix: None, code });
+            let (fix, code) = classify_load_diagnostic(&diag);
+            // `diag.span` is the real lex/parse position now (or the
+            // `0,0` placeholder for an `Io`/`Import`-stage failure,
+            // which never had one) -- `message` stays the same fully-
+            // worded text `load_program`'s old `String` error always
+            // carried (`LoadDiagnostic`'s own `Display`), so this is
+            // strictly more information, not a behavior change for any
+            // existing consumer of the prose.
+            load.errors.push(VerifyDiagnostic { line: diag.span.line, col: diag.span.col, message: diag.to_string(), fix, code });
             None
         }
     };
@@ -981,6 +1084,221 @@ pub fn certify_code(arguments: &serde_json::Value) -> Result<serde_json::Value, 
     Ok(serde_json::to_value(&certificate).expect("Certificate always serializes"))
 }
 
+/// `get_nirdosha_constructs` -- the live, compiler-verified inventory
+/// of Nirdosha's major language constructs (`crate::capabilities`):
+/// `fn`, `struct`, `enum`/`match`, `validate` contracts, `workflow`,
+/// `transact` (plain and with `txn_id`), `screen`+`serve`, json display
+/// loops, identity+`acquire`. Each entry's `source` is a real program
+/// just run through the exact pipeline `nirdosha build` runs (lex ->
+/// parse -> typecheck -> ownership -> `smt::analyze` -> `codegen::
+/// build`) against *this* compiler build -- not a hand-typed claim that
+/// can drift stale (see `capabilities.rs`'s own doc comment for why
+/// that drift is a real, previously-observed failure mode). A caller
+/// (an LLM generating Nirdosha source in particular) gets both "is this
+/// construct real right now" and "here is exactly how it's written" in
+/// one call, plus the real compiler diagnostic on `supported: false` --
+/// no separate roundtrip to find out why.
+pub fn get_nirdosha_constructs(_arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let constructs: Vec<serde_json::Value> = crate::capabilities::run_capability_checks()
+        .into_iter()
+        .map(|r| json!({ "name": r.name, "supported": r.passed, "example": r.source, "diagnostic": r.diagnostic }))
+        .collect();
+    Ok(json!({ "constructs": constructs }))
+}
+
+/// `get_ui_conventions` -- a curated, structured reference (not a live
+/// compiler check, unlike [`get_nirdosha_constructs`]) answering the
+/// three things an LLM generating Nirdosha needs to know to get a UI
+/// out of a program at all: (1) which *function names* `ui_gen.rs`'s
+/// naming-convention inference turns into a screen/dashboard tile, and
+/// what happens (silently) when a name doesn't match; (2) every
+/// annotation a `fn` (or struct field) can carry, what it does, and
+/// whether it's typeck-only or actually compiled/enforced; (3) the
+/// `screen`/`dashboard`/`serve`/`workspace`/`layout` UI DSL's real
+/// grammar, sourced from `docs/GRAMMAR.md`'s own EBNF productions
+/// rather than paraphrased, plus what each key changes in the
+/// generated UI (`docs/LANGUAGE.md` §11/§15/§18's own tables).
+///
+/// Static content, the same posture [`get_grammar`] takes with
+/// `NIRDOSHA_GBNF`: this is a snapshot of `docs/GRAMMAR.md` +
+/// `docs/LANGUAGE.md` + `crates/compiler/src/ui_gen.rs`'s real prefix
+/// strings (`ui_gen.rs:1100-1317`'s `list_`/`get_`/`create_`/
+/// `update_`/`delete_`, `ui_gen.rs:1001`/`:1009`'s `stat_`/`chart_`) at
+/// the time this function was written, not re-derived from the
+/// compiler on every call the way `get_nirdosha_constructs` is -- if
+/// `ui_gen.rs`'s prefixes or `docs/GRAMMAR.md`'s productions move,
+/// this tool needs a matching edit, same maintenance burden
+/// `capabilities.rs`'s own doc comment names for hand-transcribed
+/// prompt content in general.
+pub fn get_ui_conventions(_arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(json!({
+        "naming_conventions": {
+            "summary": "nirdosha emit-ui/serve derive a full CRUD+dashboard web UI from nothing but a program's struct declarations plus these function-naming conventions (crates/compiler/src/ui_gen.rs) -- no syntax needed for the common case. screen/dashboard blocks (see ui_grammar below) are an optional additive layer on top of this inference, never a replacement for it.",
+            "struct_name_rule": "<struct_snake_case> is the struct's OWN name, snake_cased, matched exactly -- e.g. `struct CompliancePolicy` needs `list_compliance_policy`/`create_compliance_policy`, not `list_policy`/`create_policy`, even though the latter reads naturally on its own.",
+            "crud_functions": [
+                { "pattern": "list_<struct_snake_case>", "slot": "list", "typical_signature": "fn() -> Result(json, _)", "generates": "the struct's table/list view and its nav entry" },
+                { "pattern": "get_<struct_snake_case>", "slot": "get", "typical_signature": "fn(id: i64) -> Result(json, _)", "generates": "the struct's detail view" },
+                { "pattern": "create_<struct_snake_case>", "slot": "create", "typical_signature": "fn(<Struct>) -> Result(i64, _)", "generates": "the create form/action" },
+                { "pattern": "update_<struct_snake_case>", "slot": "update", "typical_signature": "fn(<Struct>) -> Result(i64, _)", "generates": "the edit form/action" },
+                { "pattern": "delete_<struct_snake_case>", "slot": "delete", "typical_signature": "fn(id: i64) -> Result(i64, _)", "generates": "the delete action" }
+            ],
+            "dashboard_functions": [
+                { "pattern": "stat_<name>", "typical_signature": "fn() -> i64 (or another scalar)", "generates": "a dashboard stat tile" },
+                { "pattern": "chart_<name>", "typical_signature": "fn() -> json", "generates": "a dashboard bar chart (the one built-in chart kind -- see ui_grammar.dashboard)" }
+            ],
+            "serve_route_rules": [
+                "an exposed fn named create_.../update_.../delete_... must carry requires(role: ...) (or explicit requires(public)) or the program fails to typecheck -- mutating routes are deny-by-default",
+                "every exposed fn's requires(...) is checked against the signed-in identity before the call",
+                "a VerifiedIdentity parameter is always filled from the signed-in identity itself, never from the request body -- that's how per-user pages are built"
+            ],
+            "gotchas": [
+                "Getting the name wrong is completely silent: compiles fine, runs fine, the struct just never gets a screen at all -- no error, no warning, nothing points at the missing screen; it's simply absent from the nav. If a struct you expect a screen for doesn't show up, check every one of its CRUD function names against this convention before assuming anything else is wrong.",
+                "A struct with only a create_<struct> function (no list_/get_/update_) has no read action to gate the nav entry on, so its nav item shows UNCONDITIONALLY to every identity, signed in or not -- regardless of create_<struct>'s own requires(...). That inner action still enforces its own gate correctly when actually called; only the nav entry's visibility is unconditional. Give the struct a real list_/get_ under the same role if it should stay hidden until that role can act on it.",
+                "A struct with no matching convention function at all (and no screen block naming it) is treated as a plain data type -- not shown in the nav, no screen generated, no error.",
+                "A PRD/spec that names its operations with a different verb (ingest_transaction, make_alert) is describing the same CRUD action under more natural-sounding prose -- translate it to the convention name (or add a thin wrapper under the convention name that calls the existing one) rather than transcribing the PRD's verb literally."
+            ]
+        },
+        "function_annotations": [
+            {
+                "annotation": "requires(public)",
+                "attaches_to": "fn",
+                "syntax": "fn health_check() -> bool requires(public) { ... }",
+                "effect": "Marks a fn intentionally callable with no signed-in identity/token. Does NOT gate the fn -- FnDecl::requires stays None, no acquire needed, exactly as directly callable as a fn with no requires(...) at all. Its only effect is silencing the 'ungated fn' warning nirdosha serve/emit-ui prints for every fn with no requires(...), no requires(public), no VerifiedIdentity parameter, and no db/mq parameter.",
+                "gates_callability": false,
+                "enforcement": "typeck warning only (non-fatal)"
+            },
+            {
+                "annotation": "requires(role: \"<name>\")",
+                "attaches_to": "fn or struct field",
+                "syntax": "fn transfer(amount: i64) -> i64 requires(role: \"admin\") { ... }  /  struct Employee { salary: f64 requires(role: \"admin\") }",
+                "effect": "On a fn: gates the fn's VALUE, not just its behavior -- a direct call or taking the fn as a value is a static TypeErrorKind::PrivilegedFnNotAcquired error. The only way to get a callable value is `acquire transfer(proof)`, where proof is a RoleView produced by `check_role(identity, \"admin\")`. On a struct field: masks that field to its type's zero value on every return, unless the returning function itself has a RoleView parameter proving the matching role -- no acquire step, no gate on the function's own callability, just that field silently zeroed for unauthorized viewers.",
+                "gates_callability": "fn form only",
+                "enforcement": "compiled for real (codegen-level indirect calls / emit_field_masking), not just typeck"
+            },
+            {
+                "annotation": "requires(claim: \"<name>\", \"<value>\")",
+                "attaches_to": "fn or struct field",
+                "syntax": "fn read_chart(id: i64) -> str requires(claim: \"department\", \"cardiology\") { ... }",
+                "effect": "Same mechanism as requires(role: ...) in both forms, but proven by a ClaimView from `extract_claim(identity, \"department\")` instead of a RoleView.",
+                "gates_callability": "fn form only",
+                "enforcement": "compiled for real"
+            },
+            {
+                "annotation": "nfr(latency_ms: N, error_rate_max: F, throughput_min_per_sec: N, concurrency_max: N)",
+                "attaches_to": "fn",
+                "syntax": "fn checkout(cart_id: i64) -> Result(i64, ErrorCode) nfr(latency_ms: 200, error_rate_max: 0.01, throughput_min_per_sec: 50, concurrency_max: 100) { ... }",
+                "effect": "Up to four independent, all-optional thresholds (at least one required) the APM kernel tracks automatically, zero code at the call site -- every call is codegen-wrapped in nir_nfr_call_begin/nir_nfr_call_end. error_rate_max additionally requires the fn's return type to be Result(_, _). A crossed threshold fires an async, fire-and-forget HTTP POST to NIRDOSHA_OBSERVABILITY_URL if that env var is set (never blocks the caller; unset = no escalation).",
+                "gates_callability": false,
+                "enforcement": "compiled (real per-fn atomics + escalation), disclosed simplifications: running max not a percentile histogram, cumulative not a sliding window"
+            },
+            {
+                "annotation": "effect(pure) | effect(rng, io, concurrent, network)",
+                "attaches_to": "fn",
+                "syntax": "fn f(...) -> T effect(io) { ... }",
+                "effect": "Declares an upper bound on the fn's real effect set (a Koka-style set, not a total order; pure denotes the empty set and can't combine with other names). Omitted (the common case): fully inferred, nothing checked. Declared: the real effect set, computed by fixpoint iteration over the call graph, must be a SUBSET of what's declared -- declaring more than the body uses is fine; an undeclared-but-performed effect is TypeErrorKind::EffectNotDeclared.",
+                "gates_callability": false,
+                "enforcement": "typeck-only, no codegen change"
+            },
+            {
+                "annotation": "audited \"<non-empty justification>\" { ... }",
+                "attaches_to": "a block inside a fn body (not the fn signature)",
+                "syntax": "audited \"reviewed: index bound already checked by the caller\" { arr[i] }",
+                "effect": "The one escape hatch that suppresses codegen's Tier-1/2 bounds-check and div-by-zero guards for code inside the block. Requires a non-empty justification string literal.",
+                "gates_callability": false,
+                "enforcement": "compiled (suppresses real guards); interpreter unaffected (there is no interpreter anymore)"
+            }
+        ],
+        "ui_grammar": {
+            "note": "EBNF quoted verbatim from docs/GRAMMAR.md; `screen`/`dashboard`/`landing`/`serve`/`workspace`/`module` are real reserved keywords (dispatched on like struct/enum), while field/action/paginate/tile/chart/visual/panel/role/claim/public/expose/default are CONTEXTUAL keywords -- matched by identifier text only in the one leading slot named, ordinary identifiers everywhere else.",
+            "screen": {
+                "purpose": "An optional, additive cosmetic layer over one struct's naming-convention-inferred screen: a friendlier title, a relabeled/validated field, an extra action button beyond plain create/update/delete. A struct with no screen block gets the default page unchanged.",
+                "grammar": [
+                    "screen_decl    ::= \"screen\" ident \"{\" screen_item* \"}\"",
+                    "screen_item    ::= paginate_block | field_override | action_decl | layout_decl | kv_entry",
+                    "paginate_block ::= \"paginate\" \"{\" kv_entry* \"}\"",
+                    "field_override ::= \"field\" ident \"{\" kv_entry* \"}\"",
+                    "action_decl    ::= \"action\" string \"->\" ident (\"{\" kv_entry* \"}\")?",
+                    "kv_entry       ::= ident \":\" expr"
+                ],
+                "checked": {
+                    "screen <Name>": "must name a real struct",
+                    "field <fname>": "must name a real field of that struct",
+                    "list/create/update/delete, an action's -> target": "must resolve to a real function",
+                    "view/edit": "must be role(...)/claim(...) with string-literal args -- same shape requires(...) itself accepts",
+                    "pattern": "string literal, valid regex; str field only",
+                    "format": "one of a fixed set: email/phone/date/url/uuid; str field only; may not be combined with pattern on the same field",
+                    "min/max": "int/float literal; numeric field only",
+                    "render": "must be \"countdown\" (the only value with meaning so far); integer field only"
+                },
+                "keys_and_effects": {
+                    "title": "overrides the nav label/heading/toast text; defaults to the struct name",
+                    "field <name> { label: \"...\" }": "overrides that field's displayed label everywhere shown; defaults to the raw field name",
+                    "list/create/update/delete": "overrides which function backs that slot; defaults to the <kind>_<snake_case_struct_name> naming convention",
+                    "action \"<label>\" -> <fn> { style, confirm, show_result }": "extra per-row button beyond the inferred CRUD set; calls <fn> with just the row's primary-key-shaped first param; window.confirm(...)-gated when confirm is set",
+                    "show_result: true": "opens <fn>'s own JSON response in a modal on success instead of a plain row-refresh -- <fn> must return Result(json, _)",
+                    "field { view, edit }": "role/claim visibility, enforced both client- and server-side (view-gated fields are redacted to null server-side; edit-gated changes are rejected 403 server-side)",
+                    "field { pattern/format }": "constrains a str field's value on both create_<S> and update_<S>, both as an HTML5 attribute (cosmetic) and as a real server-side check",
+                    "field { min/max }": "same, for a numeric field",
+                    "field { render: \"countdown\" }": "display-only: an integer unix-seconds field renders as a live 'ticking down' chip instead of the raw number, client-side only, no new route or network traffic"
+                }
+            },
+            "layout": {
+                "purpose": "An optional arrangement tree, declared inside a screen block, over that same field/action set -- rows/columns/groups/tabs/dividers instead of one flat implicit top-to-bottom list. At most one per screen.",
+                "grammar": [
+                    "layout_decl ::= \"layout\" \"{\" layout_node* \"}\"",
+                    "layout_node ::= (\"row\" | \"column\" | \"grid\" | \"group\" string?) layout_body",
+                    "              | \"tabs\" \"{\" (\"tab\" string \"{\" layout_node* \"}\")* \"}\"",
+                    "              | \"field\" ident",
+                    "              | \"action\" string",
+                    "              | ident layout_body            // widget leaf, e.g. divider {}",
+                    "layout_body ::= \"{\" kv_entry* layout_node* \"}\""
+                ],
+                "note": "row/column/grid/group/tabs/field/action are contextual keywords, reserved only as a layout_node's own leading identifier; any OTHER identifier is a widget leaf (kind = that identifier's text -- divider/card/timeline are the validated closed list so far)."
+            },
+            "dashboard": {
+                "purpose": "One dashboard section per program, built from stat_/chart_-prefixed functions by naming convention alone, or explicit tile/chart/visual entries.",
+                "grammar": [
+                    "dashboard_decl ::= \"dashboard\" \"{\" dashboard_item* \"}\"",
+                    "dashboard_item ::= (\"tile\" | \"chart\") string \"->\" ident",
+                    "                  | \"visual\" string \"->\" ident (\"{\" kv_entry* \"}\")?"
+                ],
+                "note": "chart is deliberately, permanently one chart kind -- an inline-SVG bar chart, no external charting dependency. `visual` (Track E2) is the escape hatch for graph/heatmap/timeline kinds, not a change to what chart itself does; its target must resolve to a real function, and render is typechecked against a closed vocabulary."
+            },
+            "landing": {
+                "purpose": "Per-role/claim default-screen dispatch after sign-in.",
+                "grammar": [
+                    "landing_decl ::= \"landing\" \"{\" landing_rule* \"}\"",
+                    "landing_rule ::= (\"role\" \"(\" string \")\" | \"claim\" \"(\" string \",\" string \")\" | \"default\") \"->\" ident"
+                ],
+                "note": "target (after ->) must name a real screen's own struct name."
+            },
+            "serve": {
+                "purpose": "The compiled `nirdosha build file.nir --serve` config section: names functions reachable over HTTP beyond the implicit screen/dashboard-bound set.",
+                "grammar": [
+                    "serve_decl ::= \"serve\" \"{\" (\"expose\" ident (\",\" ident)* \",\"?)? \"}\""
+                ],
+                "note": "One serve { ... } block per program. A general per-program serve-config section by design -- expose is its first entry, not its only reason to exist. See serve_route_rules under naming_conventions for the enforcement rules at the route boundary."
+            },
+            "workspace_panel": {
+                "purpose": "A composite, multi-panel screen scoped to one instance of a subject struct -- for real screens that need fields/lists from several structs composed onto one page (e.g. a case's own fields alongside its transactions, alerts, and notes). Additive over screen_decl/dashboard_decl the same way those are additive over pure naming-convention inference.",
+                "grammar": [
+                    "workspace_decl ::= \"workspace\" ident \"{\" workspace_item* \"}\"",
+                    "workspace_item ::= panel_decl | kv_entry",
+                    "panel_decl     ::= \"panel\" string \"{\" panel_item* \"}\"",
+                    "panel_item     ::= action_decl | kv_entry"
+                ],
+                "note": "subject: <Struct> names the struct this workspace is opened per instance of (that struct must have an id: i64 field) -- every panel's source is called with that instance's id. action_decl inside panel_item is screen_item's own production, reused unchanged."
+            }
+        },
+        "sources": [
+            "docs/GRAMMAR.md (screen_decl/layout_decl/dashboard_decl/landing_decl/serve_decl/workspace_decl/panel_decl, fn_decl's effect_annotation/requires_annotation/nfr_annotation, field_mask_requires, audited_stmt)",
+            "docs/LANGUAGE.md §6a/§6e/§6f (annotations), §11/§11c (screen/dashboard), §15 (workspace/panel), §18 (layout)",
+            "agent-skills/nirdosha/paste-anywhere-prompt.md (naming-convention worked examples and gotchas)",
+            "crates/compiler/src/ui_gen.rs (the real list_/get_/create_/update_/delete_/stat_/chart_ prefix strings)"
+        ]
+    }))
+}
+
 fn describe_program(program: &crate::ast::Program) -> serde_json::Value {
     let functions: Vec<serde_json::Value> = program
         .fns
@@ -1053,8 +1371,11 @@ fn tool_ok(structured: serde_json::Value) -> serde_json::Value {
 
 /// `tools/list` -- one entry per tool `tools_call` dispatches to:
 /// `verify_code`, `get_grammar`, `fix`, `describe`, `certify_code`
-/// (parity target: Acutis, Imandra, Kōdo). Every `inputSchema` is
-/// plain JSON Schema, per spec.
+/// (parity target: Acutis, Imandra, Kōdo), plus `get_nirdosha_constructs`
+/// and `get_ui_conventions` (this project's own additions: a live
+/// capability inventory and a curated UI/naming/annotation reference,
+/// neither a parity-target tool). Every `inputSchema` is plain JSON
+/// Schema, per spec.
 pub fn tools_list() -> serde_json::Value {
     json!({
         "tools": [
@@ -1107,11 +1428,23 @@ pub fn tools_list() -> serde_json::Value {
                     "required": ["source"],
                 },
             },
+            {
+                "name": "get_nirdosha_constructs",
+                "title": "Get Nirdosha's supported language constructs",
+                "description": "Returns a live, compiler-verified inventory of Nirdosha's major language constructs (fn, struct, enum/match, validate contracts, workflow, transact, transact w/ txn_id, screen+serve, json display loops, identity+acquire) -- each one just run through the real nirdosha build pipeline against this compiler build. Every entry carries a worked source example and whether it currently compiles; a failing one also carries the real compiler diagnostic. Call this to discover what Nirdosha actually supports right now, instead of relying on documentation that can drift stale.",
+                "inputSchema": { "type": "object", "properties": {} },
+            },
+            {
+                "name": "get_ui_conventions",
+                "title": "Get Nirdosha's UI naming conventions, fn annotations, and UI grammar",
+                "description": "Returns a structured reference for generating a program that actually gets a web UI out of nirdosha emit-ui/serve: (1) the list_/get_/create_/update_/delete_<struct_snake_case> and stat_/chart_<name> function-naming conventions that determine whether a struct gets a screen at all, plus the silent failure modes when a name doesn't match; (2) every annotation a fn or struct field can carry (requires(public), requires(role:...), requires(claim:...,...), nfr(...), effect(...), audited \"...\" { ... }) -- what each does and whether it's typeck-only or compiled/enforced; (3) the screen/dashboard/landing/serve/workspace/layout UI DSL's real EBNF grammar and what each key changes in the generated UI. Call this before writing a program that's meant to render a UI, or when a struct isn't showing up in the generated nav.",
+                "inputSchema": { "type": "object", "properties": {} },
+            },
         ],
     })
 }
 
-/// `tools/call` -- dispatches `params.name` to one of the five MCP
+/// `tools/call` -- dispatches `params.name` to one of the seven MCP
 /// handlers above with `params.arguments`, logging every call (from
 /// either surface) through `log`. A missing `name`, an unknown tool
 /// name, or a missing required argument are all *protocol* errors
@@ -1141,6 +1474,8 @@ pub fn tools_call(params: &serde_json::Value, log: &mut McpCallLog) -> Result<se
         "fix" => fix(arguments),
         "describe" => describe(arguments),
         "certify_code" => certify_code(arguments),
+        "get_nirdosha_constructs" => get_nirdosha_constructs(arguments),
+        "get_ui_conventions" => get_ui_conventions(arguments),
         other => Err(format!("Unknown tool: {other}")),
     };
     let latency_ms = started.elapsed().as_millis();
@@ -1328,10 +1663,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tools_list_advertises_all_five_tools() {
+    fn tools_list_advertises_all_seven_tools() {
         let list = tools_list();
         let names: Vec<&str> = list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["verify_code", "get_grammar", "fix", "describe", "certify_code"]);
+        assert_eq!(names, ["verify_code", "get_grammar", "fix", "describe", "certify_code", "get_nirdosha_constructs", "get_ui_conventions"]);
     }
 
     #[test]

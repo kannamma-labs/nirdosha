@@ -24,13 +24,15 @@
 //! `code` is auto-attached to a live diagnostic (`VerifyDiagnostic`
 //! in `main.rs`) only where a diagnostic's own site can identify the
 //! rule with certainty, today: `NIR0002` (`TypeErrorKind::
-//! StrInFnSignature`, a real 1:1 match) and `NIR0012` (reserved word
-//! used where an identifier was required -- detected from
-//! `loader::load_program`'s already-formatted error string, since
-//! `ParseError` doesn't carry a structured code field yet; see
-//! `classify_load_error_code`'s own doc comment for why that's an
-//! honest, bounded heuristic rather than a guess) and `NIR0013`
-//! (`TypeErrorKind::UnknownVar`, alongside its own `Fix`). Every other
+//! StrInFnSignature`, a real 1:1 match), `NIR0005` (a top-level `for`
+//! -- one specific case of `classify_load_diagnostic`'s foreign-
+//! keyword arm, `mcp_tools.rs`), `NIR0012` (reserved word used where an
+//! identifier was required -- detected from `loader::load_program`'s
+//! already-formatted error string, since `ParseError` doesn't carry a
+//! structured code field yet; see `classify_load_diagnostic`'s own doc
+//! comment for why that's an honest, bounded heuristic rather than a
+//! guess) and `NIR0013` (`TypeErrorKind::UnknownVar`, alongside its own
+//! `Fix`). Every other
 //! entry below is real, browsable reference material
 //! (`nirdosha explain NIR0009` works today) that nothing in the
 //! compiler auto-tags onto a diagnostic yet -- an honestly [PARTIAL]

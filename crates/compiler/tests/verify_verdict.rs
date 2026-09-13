@@ -163,3 +163,31 @@ validate flip {
     assert_eq!(code, 1);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_load_stage_parse_failure_carries_a_real_position_and_a_fix() {
+    // Regression lock for the JSON-schema gap this pass closed: a
+    // load/parse failure used to hardcode `line: 0, col: 0` and
+    // `fix: null` unconditionally (the real `Span` was thrown away the
+    // moment `loader::parse_one` flattened it to a `String`) — this is
+    // the real `verify_code`/`nirdosha verify` JSON schema
+    // (`VerifyDiagnostic`), not `hi`'s own separate ad-hoc `machine_error`
+    // JSON the `hi>` terminal happens to print.
+    let path = scratch_file(
+        "load_stage_position",
+        "fn credit_cents(a: i64, b: i64) -> i64 { return a + b }\nfn main() -> i64 {\n    let _ = credit_cents(1, 2)\n    return 0\n}\n",
+    );
+    let (verdict, code) = run_verify(&path);
+    assert_eq!(verdict["verdict"], "DISPROVED", "verdict: {verdict}");
+    assert_eq!(verdict["load"]["status"], "failed", "verdict: {verdict}");
+    let errs = verdict["load"]["errors"].as_array().expect("load.errors should be an array");
+    assert_eq!(errs.len(), 1, "verdict: {verdict}");
+    assert_eq!(errs[0]["line"], 3, "position must be the real offending line, not 0: {verdict}");
+    assert_ne!(errs[0]["col"], 0, "position must be the real offending column, not 0: {verdict}");
+    assert!(
+        errs[0]["fix"]["rationale"].as_str().expect("a known field-failure diagnostic should carry a Fix with a rationale").contains("typed name"),
+        "verdict: {verdict}"
+    );
+    assert_eq!(code, 1);
+    let _ = std::fs::remove_file(&path);
+}
