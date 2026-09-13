@@ -37,6 +37,12 @@ nirdosha_transact_log.sqlite*
 # running for a live browser demo) -- build artifacts, not source
 /.local-bin
 
+# `hi`'s per-project scratch state -- auto-scaffolded by `hi_graph::open`/
+# `hi_plugin::ensure_default_packs` on first run (hi.db, the confirmed-
+# unit graph; plugins/, an installed copy of each domain pack) and
+# regenerated freely. Local runtime state, not source.
+/.nir/
+
 # Launch marketing drafts (not project documentation)
 /announcements
 scratch/
