@@ -47,6 +47,7 @@ use std::time::Duration;
 use nirdosha_runtime_kernels::kernel::{self, domain};
 use nirdosha_runtime_kernels::constant_time_eq;
 
+mod dpop_replay;
 mod http;
 mod identity;
 mod ratelimit;
@@ -212,6 +213,21 @@ pub struct ServeConfig {
     /// --serve` always sets this; only a hand-rolled `ServeConfig` (this
     /// crate's own tests) leaves it empty.
     pub ui_html: Vec<u8>,
+    /// RFC 0016's FAPI wiring, `sender_constrained_tokens` requirement:
+    /// `false` (default, unchanged behavior) means an ordinary bearer
+    /// token is enough, same as every server before this field existed.
+    /// `true` additionally requires a valid `DPoP` header (RFC 9449) on
+    /// every request that also carries an `Authorization` header --
+    /// proof-of-possession over the token, checked in `resolve_identity`
+    /// via `nirdosha_runtime_kernels::nir_dpop_verify` -- rejecting a
+    /// missing or invalid proof with `401`, the same hard-failure
+    /// posture an invalid bearer token already gets. Set by `nirdosha
+    /// build --serve` only when a governing pack's compliance profile
+    /// declares this wiring requirement (`hi_plugin.rs`'s
+    /// `wiring_requires_sender_constrained_tokens`) -- never inferred,
+    /// never on by default, so an ungoverned build's behavior is
+    /// unchanged.
+    pub require_sender_constrained_tokens: bool,
 }
 
 impl Default for ServeConfig {
@@ -231,6 +247,7 @@ impl Default for ServeConfig {
             auth,
             demo_mode,
             ui_html: Vec::new(),
+            require_sender_constrained_tokens: false,
         }
     }
 }
@@ -421,6 +438,7 @@ impl Listener {
     pub fn run(self, routes: &'static [Route], config: ServeConfig, readiness: Readiness) -> std::io::Result<()> {
         let config = Arc::new(config);
         let limiter = Arc::new(ratelimit::RateLimiter::new());
+        let dpop_replay = Arc::new(dpop_replay::DpopReplayCache::new());
         for stream in self.tcp.incoming() {
             let stream = match stream {
                 Ok(s) => s,
@@ -434,8 +452,9 @@ impl Listener {
             }
             let config = Arc::clone(&config);
             let limiter = Arc::clone(&limiter);
+            let dpop_replay = Arc::clone(&dpop_replay);
             let readiness = readiness.clone();
-            std::thread::spawn(move || handle_connection(stream, routes, &config, &limiter, &readiness));
+            std::thread::spawn(move || handle_connection(stream, routes, &config, &limiter, &dpop_replay, &readiness));
         }
         Ok(())
     }
@@ -478,7 +497,7 @@ pub struct CRoute {
 /// process). `ui_html_ptr`/`ui_html_len` (zero/null for "no UI") must
 /// meet the same contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nir_compiled_serve_run(routes_ptr: *const CRoute, routes_count: i64, ui_html_ptr: *const u8, ui_html_len: i64, port: i64) -> i32 {
+pub unsafe extern "C" fn nir_compiled_serve_run(routes_ptr: *const CRoute, routes_count: i64, ui_html_ptr: *const u8, ui_html_len: i64, port: i64, require_dpop: i64) -> i32 {
     let c_routes = unsafe { std::slice::from_raw_parts(routes_ptr, routes_count as usize) };
     let mut routes = Vec::with_capacity(c_routes.len());
     for r in c_routes {
@@ -511,7 +530,7 @@ pub unsafe extern "C" fn nir_compiled_serve_run(routes_ptr: *const CRoute, route
     // ordering — bind happens above, replay happened earlier still, in
     // the caller) — this is "ready" the instant the listener is up.
     readiness.mark_ready();
-    let config = ServeConfig { ui_html, ..ServeConfig::default() };
+    let config = ServeConfig { ui_html, require_sender_constrained_tokens: require_dpop != 0, ..ServeConfig::default() };
     match listener.run(routes, config, readiness) {
         Ok(()) => 0,
         Err(e) => {
@@ -551,7 +570,7 @@ impl Drop for ServeHttpLease {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, readiness: &Readiness) {
+fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, dpop_replay: &dpop_replay::DpopReplayCache, readiness: &Readiness) {
     // `Listener::run` already called `kernel::acquire(domain::serve_http())`
     // for this connection before spawning the thread that's now running
     // this function (A11/A23 fix, see `run`'s own doc comment) — this
@@ -574,7 +593,7 @@ fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConf
         };
 
         let keep_alive = req.wants_keep_alive() && request_index + 1 < config.max_requests_per_connection;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, routes, config, limiter, peer, readiness)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, routes, config, limiter, dpop_replay, peer, readiness)));
         let response = result.unwrap_or_else(|_| http::Response::error(500, "internal error"));
         let done = http::write_response(&mut stream, response.status, response.content_type, &response.body, &response.headers, response.cookie.as_deref());
         if done.is_err() || !keep_alive {
@@ -583,7 +602,7 @@ fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConf
     }
 }
 
-fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, peer: Option<SocketAddr>, readiness: &Readiness) -> http::Response {
+fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, dpop_replay: &dpop_replay::DpopReplayCache, peer: Option<SocketAddr>, readiness: &Readiness) -> http::Response {
     if req.method == "OPTIONS" {
         return cors_preflight_response(req, config);
     }
@@ -609,7 +628,7 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
         return with_cors(demo_login_response(req, config), req, config);
     }
     if req.path == "/api/_whoami" {
-        return with_cors(whoami_response(req, config), req, config);
+        return with_cors(whoami_response(req, config, dpop_replay), req, config);
     }
     if config.rate_limited_paths.iter().any(|p| *p == req.path) {
         let key = client_ip_for_rate_limit(req, peer, config);
@@ -619,7 +638,7 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
             }
         }
     }
-    let identity_json = match resolve_identity(req, config) {
+    let identity_json = match resolve_identity(req, config, dpop_replay) {
         Ok(json) => json,
         Err(resp) => return with_cors(resp, req, config),
     };
@@ -640,15 +659,69 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
 /// whether the path even exists — mirrors the deleted interpreted
 /// `serve.rs::resolve_identity`'s own "present but invalid is always a
 /// hard failure, never silently anonymous" behavior.
-fn resolve_identity(req: &http::Request, config: &ServeConfig) -> Result<Option<String>, http::Response> {
+/// Freshness window `nir_dpop_verify`'s own `max_age_secs` bounds a
+/// proof's `iat` to, and the matching window `dpop_replay`'s cache
+/// remembers a `jti` for -- one constant, so the two stay in lockstep
+/// (this crate's own single source of truth, not two numbers that could
+/// drift apart). RFC 9449 sets no mandated value; 300s is generous
+/// enough for real network latency and clock drift while still bounding
+/// how long a captured-off-the-wire proof stays replayable at all.
+const DPOP_PROOF_FRESHNESS_WINDOW_SECS: i64 = 300;
+
+fn resolve_identity(req: &http::Request, config: &ServeConfig, dpop_replay: &dpop_replay::DpopReplayCache) -> Result<Option<String>, http::Response> {
     let Some(auth_header) = req.header("authorization") else { return Ok(None) };
     let Some(token) = auth_header.strip_prefix("Bearer ").or_else(|| auth_header.strip_prefix("bearer ")) else {
         return Err(http::Response::error(401, "Authorization header must be `Bearer <token>`"));
     };
-    match identity::validate_token(token, &config.auth[..]) {
-        Ok(claims) => Ok(Some(identity::identity_json(&claims))),
-        Err(e) => Err(http::Response::error(401, &format!("invalid token: {e}"))),
+    let claims = match identity::validate_token(token, &config.auth[..]) {
+        Ok(claims) => claims,
+        Err(e) => return Err(http::Response::error(401, &format!("invalid token: {e}"))),
+    };
+    if config.require_sender_constrained_tokens {
+        if let Err(resp) = check_dpop_binding(req, token, &claims, dpop_replay) {
+            return Err(resp);
+        }
     }
+    Ok(Some(identity::identity_json(&claims)))
+}
+
+/// RFC 0016's FAPI wiring, `sender_constrained_tokens` requirement --
+/// only ever called when `ServeConfig::require_sender_constrained_tokens`
+/// is set, so an ungoverned build's behavior (and every existing test
+/// that doesn't set it) is completely unchanged. Fails closed at every
+/// step: no `DPoP` header, a token with no `cnf.jkt` binding at all (an
+/// AS that issued a plain bearer token even though this deployment
+/// requires sender-constrained ones), a proof that doesn't verify, or a
+/// replayed `jti` are all a real `401`, never silently accepted.
+fn check_dpop_binding(req: &http::Request, token: &str, claims: &identity::VerifiedClaims, dpop_replay: &dpop_replay::DpopReplayCache) -> Result<(), http::Response> {
+    let Some(proof) = req.header("dpop") else {
+        return Err(http::Response::error(401, "this server requires a `DPoP` header (sender-constrained tokens only, RFC 9449)"));
+    };
+    let expected_jkt = match serde_json::from_str::<serde_json::Value>(&claims.claims_json).ok().and_then(|v| v.get("cnf").and_then(|c| c.get("jkt")).and_then(|j| j.as_str()).map(str::to_string)) {
+        Some(jkt) => jkt,
+        None => return Err(http::Response::error(401, "this access token has no `cnf.jkt` binding -- it was not issued as a sender-constrained token, and this server requires one")),
+    };
+    // `Host`, not a scheme this plain-HTTP server never terminates
+    // (`ServeConfig`'s own doc comments: TLS termination, if any, is a
+    // deployer's reverse proxy, not this crate) -- `http://` is what
+    // this process itself actually speaks, so it's what `htu` is
+    // checked against; a proxy-terminated-HTTPS deployment needs its
+    // proxy to forward the original scheme if `htu` must say `https://`
+    // instead, a real, disclosed limit of a from-scratch HTTP/1.1
+    // listener with no TLS of its own.
+    let host = req.header("host").unwrap_or("");
+    let expected_url = format!("http://{host}{}", req.path);
+    let expected_ath = identity::access_token_hash(token);
+    // `jkt` is already checked *inside* `verify_dpop_proof` (against
+    // `expected_jkt`, passed above) -- only `jti` is still this caller's
+    // own job, for replay tracking (`nir_dpop_verify`'s own doc comment
+    // on why that split exists).
+    let identity::DpopVerified { jkt: _, jti } = identity::verify_dpop_proof(proof, &req.method, &expected_url, &expected_ath, &expected_jkt, DPOP_PROOF_FRESHNESS_WINDOW_SECS)
+        .map_err(|e| http::Response::error(401, &format!("invalid DPoP proof: {e}")))?;
+    if !dpop_replay.check_and_record(&jti, Duration::from_secs(DPOP_PROOF_FRESHNESS_WINDOW_SECS as u64)) {
+        return Err(http::Response::error(401, "this DPoP proof has already been used (replay)"));
+    }
+    Ok(())
 }
 
 /// `POST /api/_demo_login` — demo mode only (`config.demo_mode`); `404`
@@ -697,8 +770,8 @@ fn demo_login_response(req: &http::Request, config: &ServeConfig) -> http::Respo
 /// since-restarted demo-mode process whose ephemeral signing key no
 /// longer matches (`ui_gen.rs`'s own doc comment on why this route
 /// exists).
-fn whoami_response(req: &http::Request, config: &ServeConfig) -> http::Response {
-    match resolve_identity(req, config) {
+fn whoami_response(req: &http::Request, config: &ServeConfig, dpop_replay: &dpop_replay::DpopReplayCache) -> http::Response {
+    match resolve_identity(req, config, dpop_replay) {
         Ok(Some(json)) => http::Response { status: 200, content_type: "application/json", body: json.into_bytes(), headers: Vec::new(), cookie: None },
         Ok(None) => http::Response::error(401, "no Authorization header"),
         Err(resp) => resp,

@@ -457,7 +457,50 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             let registry = nirdosha::ast::TypeRegistry::build(&program);
             let effects = nirdosha::effects::infer_effects(&program, &registry);
             let ui_html = nirdosha::ui_gen::generate(&program, &effects, None, false, true, false, None).into_bytes();
-            let opts = nirdosha::codegen::ServeCodegenOptions { port, ui_html };
+
+            // RFC 0016's FAPI wiring, activated through the graph/pack
+            // system (not a CLI flag): if this project's `.nir/hi.db`
+            // already exists and an active pack's compliance profile
+            // declares `sender_constrained_tokens`, this build turns on
+            // `compiled_serve`'s real DPoP enforcement. A project with
+            // no graph at all (the common case for a plain `nirdosha
+            // build --serve`) is completely unaffected -- `hi_graph::open`
+            // is never called unless `.nir/hi.db` already exists, so a
+            // plain build never gets the side effect of creating one.
+            let mut require_sender_constrained_tokens = false;
+            if let Ok(cwd) = std::env::current_dir() {
+                let hi_db = nirdosha::hi_graph::hi_dir(&cwd).join("hi.db");
+                if hi_db.is_file() {
+                    match nirdosha::hi_graph::open(&cwd) {
+                        Ok(conn) => match nirdosha::hi_plugin::wiring_requires_sender_constrained_tokens(&conn, &cwd) {
+                            Ok(required) => {
+                                require_sender_constrained_tokens = required;
+                                match nirdosha::hi_plugin::render_wiring_config(&conn, &cwd) {
+                                    Ok(Some(config)) => {
+                                        let sidecar_path = format!("{out}.fapi-config.json");
+                                        match serde_json::to_string_pretty(&config) {
+                                            Ok(text) => {
+                                                if let Err(e) = std::fs::write(&sidecar_path, text) {
+                                                    eprintln!("warning: failed to write {sidecar_path}: {e}");
+                                                } else {
+                                                    println!("wrote {sidecar_path} (compliance wiring your real authorization server/gateway must enforce -- nirdosha does not run one)");
+                                                }
+                                            }
+                                            Err(e) => eprintln!("warning: failed to render compliance wiring config: {e}"),
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => eprintln!("warning: failed to read compliance wiring config from installed packs: {e}"),
+                                }
+                            }
+                            Err(e) => eprintln!("warning: failed to check installed packs' wiring requirements: {e}"),
+                        },
+                        Err(e) => eprintln!("warning: failed to open {}: {e}", hi_db.display()),
+                    }
+                }
+            }
+
+            let opts = nirdosha::codegen::ServeCodegenOptions { port, ui_html, require_sender_constrained_tokens };
             nirdosha::codegen::build_serve(&program, &smt_report, std::path::Path::new(&out), opt, &opts)
         }
         None => nirdosha::codegen::build(&program, &smt_report, std::path::Path::new(&out), opt),
@@ -1785,12 +1828,10 @@ fn cmd_plugin(mut args: impl Iterator<Item = String>) -> ExitCode {
                 }
             };
             if dry_run {
-                match nirdosha::hi_plugin::install_pack_from_bytes(&conn, &cwd, &bytes, &format!("dry-run {path}"),
+                match nirdosha::hi_plugin::dry_run_install(&conn, &cwd, &bytes, &format!("dry-run {path}"),
                 ) {
                     Ok(id) => {
-                        // Roll back: dry-run must not persist.
-                        let _ = nirdosha::hi_plugin::revoke_pack(&conn, &cwd, &id);
-                        println!("dry-run ok: pack {id} from {path}");
+                        println!("dry-run ok: pack {id} from {path} (load + own contracts proved against a stub program)");
                         ExitCode::SUCCESS
                     }
                     Err(msg) => {

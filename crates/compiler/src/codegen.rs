@@ -1622,6 +1622,15 @@ pub fn emit_llvm_ir<'a>(program: &'a Program, smt_report: &'a SmtReport) -> Resu
 pub struct ServeCodegenOptions {
     pub port: u16,
     pub ui_html: Vec<u8>,
+    /// RFC 0016's FAPI wiring: `true` only when a pack governing the
+    /// project's graph (`hi_plugin.rs`'s
+    /// `wiring_requires_sender_constrained_tokens`) declares the
+    /// `sender_constrained_tokens` wiring requirement -- set by
+    /// `main.rs::cmd_build`, never inferred here, never on by default.
+    /// Threaded straight through to `compiled_serve::nir_compiled_serve_run`'s
+    /// own `require_dpop` parameter; see `ServeConfig::require_sender_constrained_tokens`'s
+    /// own doc comment for what it actually turns on at runtime.
+    pub require_sender_constrained_tokens: bool,
 }
 
 pub fn emit_llvm_ir_for_serve<'a>(program: &'a Program, smt_report: &'a SmtReport, serve: &ServeCodegenOptions) -> Result<String, CodegenError> {
@@ -1920,7 +1929,7 @@ fn emit_llvm_ir_impl<'a>(
     // declared unconditionally here anyway, same "an unused `declare`
     // is inert" convention every other kernel declare in this preamble
     // already follows.
-    writeln!(cg.out, "declare i32 @nir_compiled_serve_run(ptr, i64, ptr, i64, i64)").unwrap();
+    writeln!(cg.out, "declare i32 @nir_compiled_serve_run(ptr, i64, ptr, i64, i64, i64)").unwrap();
     // `env` (`ENV_BUILTINS`'s own doc comment, RFC 0011 §1) — reads a
     // process environment variable. Not resource-gated (no `Domain`, no
     // handle) — same reason `nir_json_get_str` isn't either.
@@ -2077,7 +2086,7 @@ fn emit_llvm_ir_impl<'a>(
                 let wrapper_symbol = cg.emit_serve_route_wrapper(f)?;
                 route_entries.push((format!("/api/{name}"), wrapper_symbol));
             }
-            cg.emit_c_main_serve(program, &route_entries, &opts.ui_html, opts.port)?;
+            cg.emit_c_main_serve(program, &route_entries, &opts.ui_html, opts.port, opts.require_sender_constrained_tokens)?;
         }
         None => cg.emit_c_main(program, native_plugins)?,
     }
@@ -7740,9 +7749,17 @@ impl Codegen<'_> {
                 writeln!(self.out, "  {slen} = extractvalue {{ptr, i64}} {v}, 1").unwrap();
                 Ok(self.emit_infallible_json_encode("nir_json_encode_str", &[format!("ptr {sptr}"), format!("i64 {slen}")], "encode_json_str"))
             }
+            Ty::Json => {
+                // A `json` value *is* already raw JSON text (`{ptr,
+                // i64}`). The route wrapper just returns it as the body.
+                let v = self.fresh_reg("encode_json_json_val");
+                writeln!(self.out, "  {v} = load {{ptr, i64}}, ptr {ptr}").unwrap();
+                Ok(v)
+            }
             Ty::Named(name, args) if name == "Result" && args.len() == 2 => self.emit_encode_result_json(&args[0], &args[1], ptr),
             Ty::Named(name, _) if self.registry.is_struct(name) => self.emit_encode_struct_json(ty, ptr),
-            other => unsupported(format!("encoding a `{}` to JSON isn't supported yet (compiled `serve` Stage 1's scope: scalars, structs, `Result`)", other.name())),
+            Ty::Named(name, _) if self.registry.is_enum(name) => self.emit_encode_enum_json(ty, ptr),
+            other => unsupported(format!("encoding a `{}` to JSON isn't supported yet (compiled `serve` Stage 1's scope: scalars, structs, enums, `Result`)", other.name())),
         }
     }
 
@@ -7866,6 +7883,90 @@ impl Codegen<'_> {
         Ok(result)
     }
 
+    /// Encode a user-defined enum as a JSON string for zero-payload
+    /// variants. Payload-carrying enums are still rejected -- the wire
+    /// format for those wants an object shape that Stage 1 doesn't yet
+    /// emit, and most route enums (PaymentChannel, status enums, etc.)
+    /// are zero-payload anyway.
+    fn emit_encode_enum_json(
+        &mut self,
+        ty: &Ty,
+        ptr: &str,
+    ) -> Result<String, CodegenError> {
+        let Ty::Named(name, _args) = ty else { unreachable!("caller already matched Ty::Named") };
+        let variants = self
+            .registry
+            .enum_variants(name)
+            .expect("caller already confirmed this is an enum")
+            .to_vec();
+        if variants.iter().any(|v| !v.payload.is_empty()) {
+            return unsupported(format!(
+                "encoding enum `{name}` to JSON: payload-carrying enum variants are not supported yet by compiled `serve` Stage 1"
+            ));
+        }
+
+        let enum_llty = self.llvm_ty(ty)?;
+        let tag_ptr = self.fresh_reg("encode_enum_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {enum_llty}, ptr {ptr}, i32 0, i32 0").unwrap();
+        let tag = self.fresh_reg("encode_enum_tag");
+        writeln!(self.out, "  {tag} = load i64, ptr {tag_ptr}").unwrap();
+
+        let merge_label = self.fresh_label("encode_enum_merge");
+        let mut arm_labels = Vec::new();
+        for i in 0..variants.len() {
+            arm_labels.push(self.fresh_label(&format!("encode_enum_variant_{i}")));
+        }
+        let default_label = self.fresh_label("encode_enum_default");
+        writeln!(self.out, "  switch i64 {tag}, label %{default_label} [").unwrap();
+        for (i, label) in arm_labels.iter().enumerate() {
+            writeln!(self.out, "    i64 {i}, label %{label}").unwrap();
+        }
+        writeln!(self.out, "  ]").unwrap();
+
+        let mut phi_pairs = Vec::new();
+        for (i, v) in variants.iter().enumerate() {
+            writeln!(self.out, "{}:", arm_labels[i]).unwrap();
+            let variant_name = &v.name;
+            let name_global = self.fresh_global(&format!("encode_enum_name_{i}"));
+            let escaped = llvm_escape_bytes(variant_name.as_bytes());
+            writeln!(
+                self.string_globals,
+                "{name_global} = private unnamed_addr constant [{} x i8] c\"{escaped}\"",
+                variant_name.len()
+            )
+            .unwrap();
+            let str_val = self.fresh_reg(&format!("encode_enum_str_{i}"));
+            writeln!(self.out, "  {str_val} = insertvalue {{ptr, i64}} undef, ptr {name_global}, 0").unwrap();
+            let str_val_full = self.fresh_reg(&format!("encode_enum_str_full_{i}"));
+            writeln!(
+                self.out,
+                "  {str_val_full} = insertvalue {{ptr, i64}} {str_val}, i64 {}, 1",
+                variant_name.len()
+            )
+            .unwrap();
+            let str_ptr = self.fresh_reg(&format!("encode_enum_str_ptr_{i}"));
+            writeln!(self.out, "  {str_ptr} = extractvalue {{ptr, i64}} {str_val_full}, 0").unwrap();
+            let str_len = self.fresh_reg(&format!("encode_enum_str_len_{i}"));
+            writeln!(self.out, "  {str_len} = extractvalue {{ptr, i64}} {str_val_full}, 1").unwrap();
+            let json = self.emit_infallible_json_encode("nir_json_encode_str", &[format!("ptr {str_ptr}"), format!("i64 {str_len}")], &format!("encode_enum_{i}"));
+            phi_pairs.push((json.clone(), arm_labels[i].clone()));
+            writeln!(self.out, "  br label %{merge_label}").unwrap();
+        }
+
+        writeln!(self.out, "{default_label}:").unwrap();
+        writeln!(self.out, "  unreachable").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        let result = self.fresh_reg("encode_enum_result");
+        let phi_in = phi_pairs
+            .iter()
+            .map(|(v, l)| format!("[ {v}, %{l} ]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(self.out, "  {result} = phi {{ptr, i64}} {phi_in}").unwrap();
+        Ok(result)
+    }
+
     /// `nir_json_set_raw("{}", key, value_json)` — wraps one already-
     /// encoded JSON value as a single-field object, `{"<key>": <value>}`.
     /// Shared by `emit_encode_result_json`'s `ok`/`err` branches.
@@ -7969,9 +8070,33 @@ impl Codegen<'_> {
                 writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
                 self.emit_result_merge(&Ty::Named("Result".to_string(), vec![Ty::Str, Ty::Str]), &is_ok, "{ptr, i64}", &value, &err_val, "decode_json_str")
             }
+            Ty::Json => {
+                // A `json` value *is* raw JSON text (`Ty::Json`'s
+                // `llvm_ty` arm), so decoding it is the same identity-
+                // on-success shape as `emit_json_parse`: validate with
+                // `nir_json_validate` (which accepts *any* JSON value --
+                // object, array, number, bool, string, null -- unlike
+                // `nir_json_decode_str`, which only accepts a JSON
+                // string literal and would wrongly reject an object or
+                // array `json` payload), and reuse `json`'s own
+                // already-split `{ptr, i64}` as the `Ok` payload rather
+                // than re-decoding it.
+                let (json_ptr, json_len) = self.split_str_word(json);
+                let err_scratch = self.fresh_reg("decode_json_json_err_scratch");
+                self.emit_alloca(&err_scratch, "{ptr, i64}");
+                let found = self.fresh_reg("decode_json_json_found");
+                writeln!(self.out, "  {found} = call i32 @nir_json_validate(ptr {json_ptr}, i64 {json_len}, ptr {err_scratch})").unwrap();
+                let is_ok = self.icmp("ne", "i32", &found, "0")?;
+                let err_val = self.fresh_reg("decode_json_json_err_val");
+                writeln!(self.out, "  {err_val} = load {{ptr, i64}}, ptr {err_scratch}").unwrap();
+                self.emit_result_merge(&Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str]),
+                    &is_ok, "{ptr, i64}", json, &err_val, "decode_json_json",
+                )
+            }
             Ty::Named(name, args) if name == "Result" && args.len() == 2 => self.emit_decode_result_json(&args[0], &args[1], json),
             Ty::Named(name, _) if self.registry.is_struct(name) => self.emit_decode_struct_json(ty, json),
-            other => unsupported(format!("decoding a `{}` from JSON isn't supported yet (compiled `serve` Stage 1's scope: scalars, structs, `Result`)", other.name())),
+            Ty::Named(name, args) if self.registry.is_enum(name) => self.emit_decode_enum_json(name, args, json),
+            other => unsupported(format!("decoding a `{}` from JSON isn't supported yet (compiled `serve` Stage 1's scope: scalars, structs, enums, `Result`)", other.name())),
         }
     }
 
@@ -8281,6 +8406,173 @@ impl Codegen<'_> {
             "  {final_dest} = phi ptr [ {dest_ok_good}, %{ok_payload_good_label} ], [ {dest_ok_bad}, %{ok_payload_bad_label} ], [ {dest_err_good}, %{err_payload_good_label} ], [ {dest_err_bad}, %{err_payload_bad_label} ], [ {dest_neither}, %{neither_label} ]"
         )
         .unwrap();
+        Ok(final_dest)
+    }
+
+    /// Decode a user-defined enum from a JSON string for zero-payload
+    /// variants. The JSON text must be one of the variant names (e.g.
+    /// `"Card"`) -- no surrounding object. Returns a pointer to a
+    /// `Result(enum_ty, str)`.
+    fn emit_decode_enum_json(
+        &mut self,
+        enum_name: &str,
+        type_args: &[Ty],
+        json: &str,
+    ) -> Result<String, CodegenError> {
+        let variants = self
+            .registry
+            .enum_variants(enum_name)
+            .expect("caller already confirmed this is an enum")
+            .to_vec();
+        let type_params = self.registry.enum_type_params(enum_name).unwrap_or(&[]);
+        let subst = zip_type_params(type_params, type_args);
+
+        if variants.iter().any(|v| !v.payload.is_empty()) {
+            return unsupported(format!(
+                "decoding enum `{enum_name}` from JSON: payload-carrying enum variants are not supported yet by compiled `serve` Stage 1"
+            ));
+        }
+
+        let enum_ty = Ty::Named(enum_name.to_string(), type_args.to_vec());
+        let enum_llty = self.llvm_ty(&enum_ty)?;
+        let result_ty = Ty::Named("Result".to_string(), vec![enum_ty.clone(), Ty::Str]);
+        let result_llty = self.llvm_ty(&result_ty)?;
+
+        let (json_ptr, json_len) = self.split_str_word(json);
+
+        let value_scratch = self.fresh_reg("decode_enum_str_value_scratch");
+        self.emit_alloca(&value_scratch, "{ptr, i64}");
+        let str_err_scratch = self.fresh_reg("decode_enum_str_err_scratch");
+        self.emit_alloca(&str_err_scratch, "{ptr, i64}");
+        let str_found = self.fresh_reg("decode_enum_str_found");
+        writeln!(
+            self.out,
+            "  {str_found} = call i32 @nir_json_decode_str(ptr {json_ptr}, i64 {json_len}, ptr {value_scratch}, ptr {str_err_scratch})"
+        )
+        .unwrap();
+        let str_is_ok = self.icmp("ne", "i32", &str_found, "0")?;
+        let str_ok_label = self.fresh_label("decode_enum_str_ok");
+        let str_fail_label = self.fresh_label("decode_enum_str_fail");
+        writeln!(self.out, "  br i1 {str_is_ok}, label %{str_ok_label}, label %{str_fail_label}").unwrap();
+
+        writeln!(self.out, "{str_fail_label}:").unwrap();
+        let str_err_val = self.fresh_reg("decode_enum_str_err_val");
+        writeln!(self.out, "  {str_err_val} = load {{ptr, i64}}, ptr {str_err_scratch}").unwrap();
+        let dest_str_fail = self.fresh_reg("decode_enum_dest_str_fail");
+        self.emit_alloca(&dest_str_fail, &result_llty);
+        let tag_ptr = self.fresh_reg("decode_enum_str_fail_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest_str_fail}, i32 0, i32 0").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let payload_ptr = self.fresh_reg("decode_enum_str_fail_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest_str_fail}, i32 0, i32 1").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {str_err_val}, ptr {payload_ptr}").unwrap();
+        let merge_label = self.fresh_label("decode_enum_merge");
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{str_ok_label}:").unwrap();
+        let str_val = self.fresh_reg("decode_enum_str_val");
+        writeln!(self.out, "  {str_val} = load {{ptr, i64}}, ptr {value_scratch}").unwrap();
+        let actual_ptr = self.fresh_reg("decode_enum_actual_ptr");
+        writeln!(self.out, "  {actual_ptr} = extractvalue {{ptr, i64}} {str_val}, 0").unwrap();
+        let actual_len = self.fresh_reg("decode_enum_actual_len");
+        writeln!(self.out, "  {actual_len} = extractvalue {{ptr, i64}} {str_val}, 1").unwrap();
+
+        let mut cmp_labels = Vec::new();
+        for i in 0..variants.len() {
+            cmp_labels.push(self.fresh_label(&format!("decode_enum_cmp_{i}")));
+        }
+        let no_match_label = self.fresh_label("decode_enum_no_match");
+        writeln!(self.out, "  br label %{}", cmp_labels[0]).unwrap();
+
+        let mut ok_dests = Vec::new();
+        let mut ok_labels = Vec::new();
+        for (i, v) in variants.iter().enumerate() {
+            let cmp_label = &cmp_labels[i];
+            let next_label = cmp_labels.get(i + 1).unwrap_or(&no_match_label);
+            writeln!(self.out, "{cmp_label}:").unwrap();
+            let expected_global = self.fresh_global(&format!("decode_enum_expected_{i}"));
+            let escaped = llvm_escape_bytes(v.name.as_bytes());
+            writeln!(
+                self.string_globals,
+                "{expected_global} = private unnamed_addr constant [{} x i8] c\"{escaped}\"",
+                v.name.len()
+            )
+            .unwrap();
+            let eq = self.fresh_reg(&format!("decode_enum_eq_{i}"));
+            writeln!(
+                self.out,
+                "  {eq} = call i32 @nir_str_eq(ptr {actual_ptr}, i64 {actual_len}, ptr {expected_global}, i64 {})",
+                v.name.len()
+            )
+            .unwrap();
+            let is_match = self.icmp("ne", "i32", &eq, "0")?;
+            let match_label = self.fresh_label(&format!("decode_enum_match_{i}"));
+            writeln!(self.out, "  br i1 {is_match}, label %{match_label}, label %{next_label}").unwrap();
+
+            writeln!(self.out, "{match_label}:").unwrap();
+            let dest = self.fresh_reg(&format!("decode_enum_dest_{i}"));
+            self.emit_alloca(&dest, &result_llty);
+            let tag_ptr = self.fresh_reg(&format!("decode_enum_tag_ptr_{i}"));
+            writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 0").unwrap();
+            writeln!(self.out, "  store i64 0, ptr {tag_ptr}").unwrap();
+            let enum_dest_ptr = self.fresh_reg(&format!("decode_enum_val_ptr_{i}"));
+            self.emit_alloca(&enum_dest_ptr, &enum_llty);
+            let enum_tag_ptr = self.fresh_reg(&format!("decode_enum_enum_tag_ptr_{i}"));
+            writeln!(self.out, "  {enum_tag_ptr} = getelementptr inbounds {enum_llty}, ptr {enum_dest_ptr}, i32 0, i32 0").unwrap();
+            writeln!(self.out, "  store i64 {i}, ptr {enum_tag_ptr}").unwrap();
+            let payload_ptr = self.fresh_reg(&format!("decode_enum_payload_ptr_{i}"));
+            writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {enum_llty}, ptr {enum_dest_ptr}, i32 0, i32 1").unwrap();
+            let payload_words = variants[i]
+                .payload
+                .iter()
+                .map(|t| conservative_word_count(&substitute_ty(t, &subst), &self.registry))
+                .sum::<u64>();
+            let words = std::cmp::max(1, payload_words);
+            writeln!(self.out, "  call void @llvm.memset.p0.i64(ptr {payload_ptr}, i8 0, i64 {}, i1 false)", words * 8).unwrap();
+            let enum_val = self.fresh_reg(&format!("decode_enum_val_{i}"));
+            writeln!(self.out, "  {enum_val} = load {enum_llty}, ptr {enum_dest_ptr}").unwrap();
+            let result_payload_ptr = self.fresh_reg(&format!("decode_enum_result_payload_ptr_{i}"));
+            writeln!(self.out, "  {result_payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest}, i32 0, i32 1").unwrap();
+            writeln!(self.out, "  store {enum_llty} {enum_val}, ptr {result_payload_ptr}").unwrap();
+            ok_dests.push(dest.clone());
+            ok_labels.push(match_label.clone());
+            writeln!(self.out, "  br label %{merge_label}").unwrap();
+        }
+
+        writeln!(self.out, "{no_match_label}:").unwrap();
+        let no_match_msg = self.fresh_global("decode_enum_no_match_msg");
+        const NO_MATCH_MSG: &str = "value is not a known enum variant";
+        writeln!(
+            self.string_globals,
+            "{no_match_msg} = private unnamed_addr constant [{} x i8] c\"{}\"",
+            NO_MATCH_MSG.len(),
+            llvm_escape_bytes(NO_MATCH_MSG.as_bytes())
+        )
+        .unwrap();
+        let no_match_partial = self.fresh_reg("decode_enum_no_match_partial");
+        writeln!(self.out, "  {no_match_partial} = insertvalue {{ptr, i64}} undef, ptr {no_match_msg}, 0").unwrap();
+        let no_match_full = self.fresh_reg("decode_enum_no_match_full");
+        writeln!(self.out, "  {no_match_full} = insertvalue {{ptr, i64}} {no_match_partial}, i64 {}, 1", NO_MATCH_MSG.len()).unwrap();
+        let dest_no_match = self.fresh_reg("decode_enum_dest_no_match");
+        self.emit_alloca(&dest_no_match, &result_llty);
+        let tag_ptr = self.fresh_reg("decode_enum_no_match_tag_ptr");
+        writeln!(self.out, "  {tag_ptr} = getelementptr inbounds {result_llty}, ptr {dest_no_match}, i32 0, i32 0").unwrap();
+        writeln!(self.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+        let payload_ptr = self.fresh_reg("decode_enum_no_match_payload_ptr");
+        writeln!(self.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {dest_no_match}, i32 0, i32 1").unwrap();
+        writeln!(self.out, "  store {{ptr, i64}} {no_match_full}, ptr {payload_ptr}").unwrap();
+        writeln!(self.out, "  br label %{merge_label}").unwrap();
+
+        writeln!(self.out, "{merge_label}:").unwrap();
+        let final_dest = self.fresh_reg("decode_enum_final_dest");
+        let mut phi_pairs: Vec<String> = ok_dests
+            .iter()
+            .zip(ok_labels.iter())
+            .map(|(d, l)| format!("[ {d}, %{l} ]"))
+            .collect();
+        phi_pairs.push(format!("[ {dest_str_fail}, %{str_fail_label} ]"));
+        phi_pairs.push(format!("[ {dest_no_match}, %{no_match_label} ]"));
+        writeln!(self.out, "  {final_dest} = phi ptr {}", phi_pairs.join(", ")).unwrap();
         Ok(final_dest)
     }
 
@@ -11763,7 +12055,7 @@ impl Codegen<'_> {
     /// omitted here, since `build_serve` (`codegen.rs`'s own public
     /// entry point for this mode) has no native-plugin roster to give
     /// it in the first place.
-    fn emit_c_main_serve(&mut self, program: &Program, route_entries: &[(String, String)], ui_html: &[u8], port: u16) -> Result<(), CodegenError> {
+    fn emit_c_main_serve(&mut self, program: &Program, route_entries: &[(String, String)], ui_html: &[u8], port: u16, require_sender_constrained_tokens: bool) -> Result<(), CodegenError> {
         writeln!(self.out, "define i32 @main() {{").unwrap();
         writeln!(self.out, "entry:").unwrap();
 
@@ -11846,9 +12138,10 @@ impl Codegen<'_> {
         };
 
         let code = self.fresh_reg("serve_run_code");
+        let require_dpop = if require_sender_constrained_tokens { 1 } else { 0 };
         writeln!(
             self.out,
-            "  {code} = call i32 @nir_compiled_serve_run(ptr {routes_global}, i64 {}, ptr {ui_ptr_operand}, i64 {ui_len}, i64 {port})",
+            "  {code} = call i32 @nir_compiled_serve_run(ptr {routes_global}, i64 {}, ptr {ui_ptr_operand}, i64 {ui_len}, i64 {port}, i64 {require_dpop})",
             route_entries.len()
         )
         .unwrap();
@@ -12307,6 +12600,8 @@ mod json_roundtrip_tests {
         writeln!(cg.out, "declare i32 @nir_json_decode_str(ptr, i64, ptr, ptr)").unwrap();
         writeln!(cg.out, "declare i32 @nir_json_get(ptr, i64, ptr, i64, ptr, ptr)").unwrap();
         writeln!(cg.out, "declare i32 @nir_json_set_raw(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_json_validate(ptr, i64, ptr)").unwrap();
+        writeln!(cg.out, "declare i32 @nir_str_eq(ptr, i64, ptr, i64)").unwrap();
     }
 
     /// Emits `call i64 @write(1, <ptr>, <len>)` on the `{ptr, i64}` SSA
@@ -12601,6 +12896,90 @@ mod json_roundtrip_tests {
         assert_eq!(lines[2], lines[0], "decode(Ok)-then-re-encode should reproduce the original JSON");
         assert_eq!(lines[3], "0", "decoding an `{{\"ok\":...}}` payload should land in the outer Result's Ok branch (tag 0)");
         assert_eq!(lines[4], lines[1], "decode(Err)-then-re-encode should reproduce the original JSON");
+    }
+
+    #[test]
+    fn zero_payload_enum_round_trips_through_encode_then_decode() {
+        let (program, report) = build_program(
+            "enum Status {\n    Pending,\n    Approved,\n    Rejected,\n}\n\
+             fn main() requires(public) { }",
+        );
+        let mut cg = new_codegen(&program, &report);
+        let status_ty = Ty::Named("Status".to_string(), vec![]);
+        let splice = start_main(&mut cg);
+
+        // `Status::Approved` (tag 1).
+        let status_llty = cg.llvm_ty(&status_ty).unwrap();
+        let slot = cg.fresh_reg("status");
+        cg.emit_alloca(&slot, &status_llty);
+        let tag_ptr = cg.fresh_reg("status_tag_ptr");
+        writeln!(cg.out, "  {tag_ptr} = getelementptr inbounds {status_llty}, ptr {slot}, i32 0, i32 0").unwrap();
+        writeln!(cg.out, "  store i64 1, ptr {tag_ptr}").unwrap();
+
+        let json1 = cg.emit_encode_value_json(&status_ty, &slot).unwrap();
+        emit_print_str(&mut cg, &json1);
+
+        let decoded = cg.emit_decode_value_json(&status_ty, &json1).unwrap();
+        let result_llty = cg.llvm_ty(&Ty::Named("Result".to_string(), vec![status_ty.clone(), Ty::Str])).unwrap();
+        let payload_ptr = cg.fresh_reg("status_payload_ptr");
+        writeln!(cg.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {decoded}, i32 0, i32 1").unwrap();
+        let json2 = cg.emit_encode_value_json(&status_ty, &payload_ptr).unwrap();
+        emit_print_str(&mut cg, &json2);
+
+        // Decoding an unknown variant name must be a clean `Err`, not a
+        // crash -- the `no_match` arm's own diagnostic message.
+        let bad_lit = cg.fresh_global("bad_variant_lit");
+        writeln!(cg.string_globals, "{bad_lit} = private unnamed_addr constant [7 x i8] c\"\\22Bogus\\22\"").unwrap();
+        let bad_partial = cg.fresh_reg("bad_partial");
+        writeln!(cg.out, "  {bad_partial} = insertvalue {{ptr, i64}} undef, ptr {bad_lit}, 0").unwrap();
+        let bad_json = cg.fresh_reg("bad_json");
+        writeln!(cg.out, "  {bad_json} = insertvalue {{ptr, i64}} {bad_partial}, i64 7, 1").unwrap();
+        let bad_decoded = cg.emit_decode_value_json(&status_ty, &bad_json).unwrap();
+        let bad_tag_ptr = cg.fresh_reg("bad_tag_ptr");
+        writeln!(cg.out, "  {bad_tag_ptr} = getelementptr inbounds {result_llty}, ptr {bad_decoded}, i32 0, i32 0").unwrap();
+        let bad_tag = cg.fresh_reg("bad_tag");
+        writeln!(cg.out, "  {bad_tag} = load i64, ptr {bad_tag_ptr}").unwrap();
+        let bad_tag_slot = cg.fresh_reg("bad_tag_slot");
+        cg.emit_alloca(&bad_tag_slot, "i64");
+        writeln!(cg.out, "  store i64 {bad_tag}, ptr {bad_tag_slot}").unwrap();
+        let bad_tag_json = cg.emit_encode_value_json(&Ty::I64, &bad_tag_slot).unwrap();
+        emit_print_str(&mut cg, &bad_tag_json);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines, vec!["\"Approved\"".to_string(), "\"Approved\"".to_string(), "1".to_string()]);
+    }
+
+    #[test]
+    fn json_value_passes_through_encode_and_decode_unchanged() {
+        let (program, report) = build_program("fn main() requires(public) { }");
+        let mut cg = new_codegen(&program, &report);
+        let splice = start_main(&mut cg);
+
+        // An object, not a bare string -- the case `nir_json_decode_str`
+        // would wrongly reject (it only accepts a JSON string literal).
+        let lit = cg.fresh_global("json_obj_lit");
+        let text = "{\"a\":1,\"b\":true}";
+        writeln!(cg.string_globals, "{lit} = private unnamed_addr constant [{} x i8] c\"{}\"", text.len(), llvm_escape_bytes(text.as_bytes())).unwrap();
+        let slot = cg.fresh_reg("json_val");
+        cg.emit_alloca(&slot, "{ptr, i64}");
+        let partial = cg.fresh_reg("json_val_partial");
+        writeln!(cg.out, "  {partial} = insertvalue {{ptr, i64}} undef, ptr {lit}, 0").unwrap();
+        let full = cg.fresh_reg("json_val_full");
+        writeln!(cg.out, "  {full} = insertvalue {{ptr, i64}} {partial}, i64 {}, 1", text.len()).unwrap();
+        writeln!(cg.out, "  store {{ptr, i64}} {full}, ptr {slot}").unwrap();
+
+        let json1 = cg.emit_encode_value_json(&Ty::Json, &slot).unwrap();
+        emit_print_str(&mut cg, &json1);
+
+        let decoded = cg.emit_decode_value_json(&Ty::Json, &json1).unwrap();
+        let result_llty = cg.llvm_ty(&Ty::Named("Result".to_string(), vec![Ty::Json, Ty::Str])).unwrap();
+        let payload_ptr = cg.fresh_reg("json_payload_ptr");
+        writeln!(cg.out, "  {payload_ptr} = getelementptr inbounds {result_llty}, ptr {decoded}, i32 0, i32 1").unwrap();
+        let json2 = cg.emit_encode_value_json(&Ty::Json, &payload_ptr).unwrap();
+        emit_print_str(&mut cg, &json2);
+
+        let lines = run_module(cg, splice);
+        assert_eq!(lines, vec![text.to_string(), text.to_string()], "an object `json` value must decode successfully and round-trip byte-for-byte");
     }
 }
 

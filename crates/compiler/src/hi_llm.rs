@@ -536,6 +536,72 @@ pub fn contract_coverage_check_program(program: &crate::ast::Program, units: &[c
     })
 }
 
+/// RFC 0016 Phase 3's mandatory-primitive gate: every fn a governing
+/// pack marks `mandatory_fns` must (1) have at least one real call site
+/// somewhere in the draft (`contract_check::collect_call_names` --
+/// "the model wires the ledger" needs the wiring to actually exist, not
+/// just the primitive sitting unused) and (2) every such call site must
+/// satisfy the primitive's own precondition
+/// (`contract_check::check_mandatory_primitive_call_sites`'s real
+/// interprocedural obligation, not a vacuous axiom). A no-op (`Ok(())`
+/// immediately) when nothing installed declares any mandatory
+/// primitives -- every project without a Phase-3-carrying pack is
+/// unaffected, same "no demand, no gate" contract `contract_coverage_
+/// check` itself already has.
+pub fn check_mandatory_primitive_coverage(source: &str, mandatory_fns: &std::collections::HashSet<String>) -> Result<(), CoverageFailure> {
+    if mandatory_fns.is_empty() {
+        return Ok(());
+    }
+    let toks = crate::token::Lexer::new(source).tokenize().map_err(|e| CoverageFailure {
+        class: CoverageFailureClass::ContractViolated,
+        diagnostic: format!("contract coverage failure: the source no longer lexes, so mandatory-primitive coverage cannot be checked: {e:?}"),
+    })?;
+    let program = crate::parser::Parser::new(toks).parse_program().map_err(|e| CoverageFailure {
+        class: CoverageFailureClass::ContractViolated,
+        diagnostic: format!("contract coverage failure: the source no longer parses, so mandatory-primitive coverage cannot be checked: {e:?}"),
+    })?;
+
+    let called = crate::contract_check::collect_call_names(&program);
+    let mut missing: Vec<&String> = mandatory_fns.iter().filter(|name| !called.contains(name.as_str())).collect();
+    missing.sort();
+    if let Some(name) = missing.first() {
+        return Err(CoverageFailure {
+            class: CoverageFailureClass::ContractDropped,
+            diagnostic: format!(
+                "contract coverage failure: the installed pack marks `{name}` a mandatory certified primitive, but the draft never calls it anywhere -- the model must wire the ledger (call `{name}`), not write its own version of what it does\nmachine-readable errors: [{}]",
+                machine_error("mandatory_primitive_coverage", None, None, &format!("`{name}` has no call site"))
+            ),
+        });
+    }
+
+    let outcomes = crate::contract_check::check_mandatory_primitive_call_sites(&program, mandatory_fns);
+    for outcome in &outcomes {
+        match &outcome.result {
+            crate::contract_check::ContractCheckResult::Proved | crate::contract_check::ContractCheckResult::Unsupported(_) => {}
+            crate::contract_check::ContractCheckResult::EngineLimit { .. } => {
+                return Err(CoverageFailure {
+                    class: CoverageFailureClass::EngineLimit,
+                    diagnostic: format!(
+                        "contract coverage failure: {}",
+                        crate::contract_check::contract_error_message(outcome).expect("EngineLimit always carries a message")
+                    ),
+                });
+            }
+            other => {
+                return Err(CoverageFailure {
+                    class: CoverageFailureClass::ContractViolated,
+                    diagnostic: format!(
+                        "contract coverage failure: in `{}`, a call site may violate a mandatory certified primitive's own precondition ({other:?}) -- guard the call so the primitive's precondition provably holds before it's invoked\nmachine-readable errors: [{}]",
+                        outcome.fn_name,
+                        machine_error("mandatory_primitive_call_site", None, None, &format!("{:?}", other))
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// How one failed attempt charges the repair budget (RFC 0016 Phase 1's
 /// VIOLATED/ENGINE_LIMIT split, extracted pure so the discipline itself is
 /// unit-tested without an LLM client):
@@ -606,6 +672,12 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
             " Write the missing contract as a separate top-level block: `validate <fn> { pre: <param assumptions> post: <result property> }` -- integer params/result only, linear arithmetic (`+`, `-`, comparisons), no loops or calls in the predicate. It must PROVE under Z3, not merely parse."
         } else if diagnostic.contains("provable subset") {
             " Rewrite the demanded contract in the provable subset: integer-only parameters and return, linear arithmetic, no loops, no function calls, no floats -- the strongest true contract that subset can state. A demanded contract is mandatory, so `UNSUPPORTED` from the walker is a rewrite instruction, not a pass."
+        } else if diagnostic.contains("never calls it anywhere") {
+            // RFC 0016 Phase 3: mandatory call-site coverage.
+            " The installed pack marks this fn a mandatory certified primitive: the model must WIRE the ledger by calling it, not re-derive the same arithmetic by hand. Add a real call site to the named fn instead of writing your own version of what it does."
+        } else if diagnostic.contains("may violate a mandatory certified primitive's own precondition") {
+            // RFC 0016 Phase 3: call-site precondition obligations.
+            " Guard the call site so the primitive's own precondition is provably established first (e.g. `if amount > 0 { transfer(...) }` when `transfer` requires `amount > 0`) -- an unconditional call whose arguments the precondition can't be proven to satisfy is a real gate failure, not a style note."
         } else {
             " The fn genuinely breaks the demanded contract at the counterexample input shown -- fix the code, or fix the contract if it misstates the unit's demand; never loosen a predicate just to make it pass."
         }
@@ -793,7 +865,7 @@ pub fn generated_source_path(root: &Path) -> PathBuf {
 /// still a real compile with real self-repair, just file-granularity
 /// locking (`hi_graph::lock_units_after_sync`) rather than the RFC's
 /// finer per-unit one.
-pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge], on_log: &mut dyn FnMut(&str)) -> Result<PathBuf, String> {
+pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmClient, units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge], on_log: &mut dyn FnMut(&str)) -> Result<PathBuf, String> {
     if units.is_empty() {
         return Err("nothing confirmed and unlocked to generate -- `:confirm <node>` at least one candidate first".to_string());
     }
@@ -813,6 +885,18 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
         attempt += 1;
         let raw = client.complete(&history).map_err(|e| format!("couldn't reach the model: {e}"))?;
         let source = extract_nir_source(&raw);
+        // RFC 0016 Phase 3: certified-primitive prelude.  Real code, not
+        // a template -- prepended before anything else touches `source`
+        // so `inject_pack_validates_into_source`/typecheck/the coverage
+        // gate all see the combined program, exactly the shape it will
+        // actually compile as.  A model that tries to redeclare a
+        // primitive's name fails typecheck with `DuplicateFn`, same as
+        // any other name collision -- no separate reserved-namespace
+        // check needed (`prepend_pack_primitives`'s own doc comment).
+        let source = match crate::hi_plugin::prepend_pack_primitives(conn, root, &source) {
+            Ok(s) => s,
+            Err(e) => return Err(format!("failed to load certified primitives from an installed pack: {e}")),
+        };
         // RFC 0016 Phase 2: 5a pack injection.  If a demanded fn is
         // present but the model forgot its contract, the pack's sealed
         // template is appended.  A signature mismatch is a coverage
@@ -866,7 +950,13 @@ pub fn generate_program(root: &Path, client: &LlmClient, units: &[CandidateUnit]
             Err(diagnostic) => Err((diagnostic, None)),
             Ok(()) => match contract_coverage_check(&source, units) {
                 Err(failure) => Err((failure.diagnostic, Some(failure.class))),
-                Ok(()) => Ok(()),
+                Ok(()) => match crate::hi_plugin::active_mandatory_primitive_names(conn, root) {
+                    Err(e) => Err((format!("could not determine this project's mandatory primitives: {e}"), None)),
+                    Ok(mandatory_fns) => match check_mandatory_primitive_coverage(&source, &mandatory_fns) {
+                        Err(failure) => Err((failure.diagnostic, Some(failure.class))),
+                        Ok(()) => Ok(()),
+                    },
+                },
             },
         };
         match outcome {
@@ -1314,6 +1404,85 @@ validate charge_cents {
         assert_eq!(demanded_contract("validate contract:"), None, "an empty demand is not a demand");
         assert_eq!(demanded_contract("attribute to attach: fast"), None, "ordinary attributes are not demands");
         assert_eq!(demanded_contract("  validate contract spaced: yes").unwrap(), "spaced: yes");
+    }
+
+    #[test]
+    fn mandatory_primitive_coverage_passes_when_nothing_is_mandatory() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        check_mandatory_primitive_coverage("fn main() requires(public) { }", &std::collections::HashSet::new()).expect("empty mandatory set is always a no-op");
+    }
+
+    const TRANSFER_WITH_MAIN: &str = r#"
+fn transfer(amount: i64) -> i64 {
+    return amount
+}
+
+validate transfer {
+    pre: amount > 0
+    post: result == amount
+}
+
+fn main() requires(public) { }
+"#;
+
+    #[test]
+    fn mandatory_primitive_coverage_flags_a_primitive_with_no_call_site() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mandatory = std::collections::HashSet::new();
+        mandatory.insert("transfer".to_string());
+        let failure = check_mandatory_primitive_coverage(TRANSFER_WITH_MAIN, &mandatory).expect_err("transfer is never called anywhere");
+        assert_eq!(failure.class, CoverageFailureClass::ContractDropped);
+        assert!(failure.diagnostic.contains("never calls it"), "got: {}", failure.diagnostic);
+    }
+
+    #[test]
+    fn mandatory_primitive_coverage_flags_an_unguarded_call_site() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mandatory = std::collections::HashSet::new();
+        mandatory.insert("transfer".to_string());
+        let source = r#"
+fn transfer(amount: i64) -> i64 {
+    return amount
+}
+
+validate transfer {
+    pre: amount > 0
+    post: result == amount
+}
+
+fn pay(amount: i64) -> i64 {
+    return transfer(amount)
+}
+
+fn main() requires(public) { }
+"#;
+        let failure = check_mandatory_primitive_coverage(source, &mandatory).expect_err("an unguarded call can violate transfer's own precondition");
+        assert_eq!(failure.class, CoverageFailureClass::ContractViolated);
+        assert!(failure.diagnostic.contains("may violate"), "got: {}", failure.diagnostic);
+    }
+
+    #[test]
+    fn mandatory_primitive_coverage_passes_a_guarded_call_site() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mandatory = std::collections::HashSet::new();
+        mandatory.insert("transfer".to_string());
+        let source = r#"
+fn transfer(amount: i64) -> i64 {
+    return amount
+}
+
+validate transfer {
+    pre: amount > 0
+    post: result == amount
+}
+
+fn pay(amount: i64) -> i64 {
+    return if amount > 0 { transfer(amount) } else { 0 }
+}
+
+fn main() requires(public) { }
+"#;
+        check_mandatory_primitive_coverage(source, &mandatory).expect("the guard establishes transfer's own precondition before the call");
     }
 
     #[test]

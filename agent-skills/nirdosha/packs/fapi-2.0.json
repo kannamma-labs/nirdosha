@@ -1,0 +1,43 @@
+{
+  "id": "fapi-2.0",
+  "name": "FAPI 2.0 Security Profile (fintech compliance profile)",
+  "compliance_profiles": [
+    {
+      "name": "fapi-2.0-security-profile",
+      "version": "2025-02-final",
+      "static_rules": [
+        { "kind": "exposed_mutating_requires_role" },
+        { "kind": "deny_by_default_exposure" },
+        { "kind": "no_plaintext_secret_params" }
+      ],
+      "wiring_requirements": [
+        {
+          "kind": "sender_constrained_tokens",
+          "params": { "mechanisms": ["dpop"], "rfc": "9449", "note": "nirdosha's compiled serve enforces this itself -- see ServeConfig::require_sender_constrained_tokens. mTLS (RFC 8705) is declared-only: this resource server does not terminate TLS itself." }
+        },
+        {
+          "kind": "pkce_s256",
+          "params": { "rfc": "7636", "note": "a client<->authorization-server step; nirdosha does not run an AS. Declared for the deployer's AS config." }
+        },
+        {
+          "kind": "par",
+          "params": { "required": true, "rfc": "9126", "note": "a client<->authorization-server step; nirdosha does not run an AS. Declared for the deployer's AS config." }
+        },
+        {
+          "kind": "par_request_uri_lifetime",
+          "params": { "max_seconds": 600, "rfc": "9126" }
+        },
+        {
+          "kind": "iss_check",
+          "params": { "rfc": "9207", "note": "the client must check `iss` on the authorization response; nirdosha does not run the client or the AS. Declared for the deployer's config." }
+        }
+      ],
+      "external_conformance": [
+        {
+          "kind": "oidf_conformance_suite",
+          "description": "OIDF FAPI 2.0 conformance-suite results, content-hashed and attached at deploy time. Authorization-server runtime behavior (clock-skew windows, code-replay rejection, TLS termination) and OIDF certification are legal/external acts nirdosha cannot check itself -- see RFC 0016's 'Compliance profiles' section, 'Honest scoping'."
+        }
+      ]
+    }
+  ]
+}

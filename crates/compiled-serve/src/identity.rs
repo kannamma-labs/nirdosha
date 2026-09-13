@@ -14,7 +14,7 @@
 //! that fix stopped this crate from *lying* about verifying a token;
 //! this module is the actual verification the ABI doc always promised.
 
-use nirdosha_runtime_kernels::{nir_mock_issue_token, nir_oidc_validate_token, NirStrOut};
+use nirdosha_runtime_kernels::{nir_dpop_verify, nir_mock_issue_token, nir_oidc_validate_token, NirStrOut};
 
 /// The JWKS/issuer/audience trio every bearer token on this server is
 /// checked against — either a real IdP's (production mode, supplied by
@@ -229,6 +229,72 @@ pub fn mock_issue_token(subject: &str, auth: &AuthConfig, roles: &[String], clai
         return Err(unsafe { read_str_out(&out_err) });
     }
     Ok(unsafe { read_str_out(&out_token) })
+}
+
+/// A verified DPoP proof (RFC 9449) -- `lib.rs::resolve_identity`'s own
+/// real check, once `ServeConfig::require_sender_constrained_tokens` is
+/// set. See `nirdosha_runtime_kernels::nir_dpop_verify`'s own doc
+/// comment for the full scope (P-256/ES256 only; replay protection
+/// lives in this crate's own `dpop_replay` module, not here, since the
+/// kernel stays a pure function of its inputs). `jkt` is real, public
+/// API surface even though `lib.rs`'s one caller today doesn't read it
+/// (it already passed `expected_jkt` in, so the binding was already
+/// checked) -- a future caller minting a fresh access token from a
+/// proof it just verified (binding a new token's `cnf.jkt` to a client
+/// key it just saw proven) is exactly what this field is for.
+#[allow(dead_code)]
+pub struct DpopVerified {
+    pub jkt: String,
+    pub jti: String,
+}
+
+/// Verifies `proof` (a raw `DPoP` header value) against this specific
+/// request's method/URL and (mandatorily, once this is called at all --
+/// see `lib.rs::resolve_identity`'s own reasoning) the access token's
+/// `ath` hash and `cnf.jkt` binding, via the real, compiled
+/// `nir_dpop_verify`. `now` is the real wall clock, read here (not
+/// inside the kernel) for the same reason `validate_token_against`'s own
+/// `exp` check reads it here rather than trusting an ambient clock
+/// inside a function that must stay pure.
+pub fn verify_dpop_proof(proof: &str, method: &str, url: &str, expected_ath: &str, expected_jkt: &str, max_age_secs: i64) -> Result<DpopVerified, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let mut out_jkt = NirStrOut { ptr: std::ptr::null(), len: 0 };
+    let mut out_jti = NirStrOut { ptr: std::ptr::null(), len: 0 };
+    let mut out_err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+    let ok = unsafe {
+        nir_dpop_verify(
+            proof.as_ptr(),
+            proof.len() as i64,
+            method.as_ptr(),
+            method.len() as i64,
+            url.as_ptr(),
+            url.len() as i64,
+            expected_ath.as_ptr(),
+            expected_ath.len() as i64,
+            expected_jkt.as_ptr(),
+            expected_jkt.len() as i64,
+            max_age_secs,
+            now,
+            &mut out_jkt,
+            &mut out_jti,
+            &mut out_err,
+        )
+    };
+    if ok == 0 {
+        return Err(unsafe { read_str_out(&out_err) });
+    }
+    Ok(DpopVerified { jkt: unsafe { read_str_out(&out_jkt) }, jti: unsafe { read_str_out(&out_jti) } })
+}
+
+/// The `ath` claim's own required value (RFC 9449 §4.3): `base64url(no
+/// padding, SHA-256(access_token))` -- the access token's *string form
+/// exactly as it appears in the `Authorization` header*, not its
+/// decoded claims.
+pub fn access_token_hash(token: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(token.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
 /// The wire shape `RouteHandler`'s own `identity_json` parameter

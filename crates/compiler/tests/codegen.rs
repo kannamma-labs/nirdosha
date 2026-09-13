@@ -2218,7 +2218,7 @@ fn compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_bo
     let report = nirdosha::smt::analyze(&program);
     let mut out_path = std::env::temp_dir();
     out_path.push(format!("nirdosha_test_serve_{}_{}", std::process::id(), unique_suffix()));
-    let opts = codegen::ServeCodegenOptions { port, ui_html: Vec::new() };
+    let opts = codegen::ServeCodegenOptions { port, ui_html: Vec::new(), require_sender_constrained_tokens: false };
     codegen::build_serve(&program, &report, &out_path, codegen::OptLevel::O2, &opts).expect("codegen::build_serve should succeed");
     let mut child = Command::new(&out_path).spawn().expect("compiled serve binary should start");
 
@@ -2303,7 +2303,7 @@ fn compiled_serve_never_lets_a_client_supplied_role_view_bypass_field_masking() 
     let report = nirdosha::smt::analyze(&program);
     let mut out_path = std::env::temp_dir();
     out_path.push(format!("nirdosha_test_serve_roleview_{}_{}", std::process::id(), unique_suffix()));
-    let opts = codegen::ServeCodegenOptions { port, ui_html: Vec::new() };
+    let opts = codegen::ServeCodegenOptions { port, ui_html: Vec::new(), require_sender_constrained_tokens: false };
     codegen::build_serve(&program, &report, &out_path, codegen::OptLevel::O2, &opts).expect("codegen::build_serve should succeed");
     let mut child = Command::new(&out_path).spawn().expect("compiled serve binary should start");
 

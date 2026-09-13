@@ -347,7 +347,7 @@ fn handle_generate(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
         Err(e) => return ApiResponse::error(500, &e),
     };
     let mut log_lines: Vec<String> = Vec::new();
-    let path = match crate::hi_llm::generate_program(root, &client, &units, &edges, &mut |line| log_lines.push(line.to_string())) {
+    let path = match crate::hi_llm::generate_program(conn, root, &client, &units, &edges, &mut |line| log_lines.push(line.to_string())) {
         Ok(p) => p,
         Err(e) => return ApiResponse::json(&serde_json::json!({ "ok": false, "error": e, "log": log_lines })),
     };
@@ -731,6 +731,85 @@ mod tests {
         let body = String::from_utf8_lossy(&resp.body);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
         assert_eq!(json["ok"], serde_json::json!(true), "a demanded, proving contract must publish: {body}");
+    }
+
+    /// RFC 0016 implementation plan, Phase 2 item 7: "the fintech v4 run
+    /// under the pack -- generate in one shot, `nirdosha verify` reports
+    /// `PROVED n/n` with the governing pack named." No standalone test
+    /// exercised this full round trip before this test -- the injection
+    /// unit tests in `hi_plugin.rs` prove the mechanics in isolation, but
+    /// nothing before this drove a banking-shaped draft all the way
+    /// through `/api/publish`'s real coverage re-check *and* independently
+    /// re-proved every contract to confirm PROVED n/n, naming the pack
+    /// that governed it.
+    ///
+    /// `generate_program` itself is not driven here (it calls out to a
+    /// real LLM) -- like `publish_succeeds_when_the_demanded_contract_proves`
+    /// above, this writes the draft `generate_program` would have
+    /// produced directly to the generated-source path, which is exactly
+    /// what `/api/publish` reads and re-checks.
+    #[test]
+    fn fintech_app_under_the_banking_pack_publishes_proved_n_of_n_with_the_governing_pack_named() {
+        let dir = scratch_dir("fintech_v4_under_pack");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+
+        // A banking-day draft using the pack's own mandatory fn names/
+        // signatures (`agent-skills/nirdosha/packs/banking-v0.json`) --
+        // the shape a real generate run under the pack must produce,
+        // since `contract_coverage_check`'s injected mode demands these
+        // exact signatures.
+        let draft = r#"
+fn charge_cents(balance_cents: i64, amount_cents: i64) -> i64 {
+    return balance_cents - amount_cents
+}
+
+fn credit_cents(balance_cents: i64, amount_cents: i64) -> i64 {
+    return balance_cents + amount_cents
+}
+
+fn net_change_cents(credits: i64, debits: i64) -> i64 {
+    return credits - debits
+}
+
+fn main() requires(public) {
+    let after_charge: i64 = charge_cents(10000, 1200)
+    let after_credit: i64 = credit_cents(after_charge, 300)
+    print("balance", after_credit)
+    print("net change", net_change_cents(300, 1200))
+}
+"#;
+        let injected = crate::hi_plugin::inject_pack_validates_into_source(&dir, draft).expect("pack injection must succeed over a signature-matching draft");
+        drop(conn);
+
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(&out_path, &injected).expect("write generated source");
+
+        // 1. `/api/publish`'s real coverage re-check must accept it.
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(true), "the pack-governed draft must publish: {body}");
+
+        // 2. PROVED n/n: every `validate` block the pack injected proves,
+        // none dropped, none merely non-vacuous-but-weak.
+        let (program, _src) = crate::loader::load_program(out_path.to_str().unwrap()).expect("published file must load");
+        let outcomes = crate::contract_check::run_program_validates(&program);
+        assert_eq!(outcomes.len(), 3, "all three pack-demanded contracts must be present, got {} named {:?}", outcomes.len(), outcomes.iter().map(|o| &o.fn_name).collect::<Vec<_>>());
+        for outcome in &outcomes {
+            assert_eq!(outcome.result, crate::contract_check::ContractCheckResult::Proved, "{} must be PROVED", outcome.fn_name);
+        }
+
+        // 3. The governing pack named -- `nirdosha verify`/`certify_code`
+        // do not yet surface this in their own output (that's the RFC's
+        // separate, unimplemented "generation audit and the governing-
+        // set snapshot" feature, not a Phase 2 item), so this checks the
+        // fact the RFC requires be nameable: exactly one active pack
+        // governed this graph, and it is `banking-v0`.
+        let conn = crate::hi_graph::open(&dir).expect("reopen");
+        let governing = crate::hi_plugin::installed_pack_ids(&conn).expect("list installed packs");
+        assert_eq!(governing, vec!["banking-v0".to_string()], "the banking pack must be the sole governing pack");
     }
 
     #[test]

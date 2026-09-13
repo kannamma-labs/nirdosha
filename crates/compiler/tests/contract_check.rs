@@ -3,10 +3,10 @@
 //! `extracted_typed_v1_verification.rs`/`extracted_typed_v2_verification.rs`,
 //! this file needs no local-only fixture, so `cargo test` always runs it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nirdosha::ast::Program;
-use nirdosha::contract_check::{check_fn_contract, ContractCheckResult};
+use nirdosha::contract_check::{check_fn_contract, check_mandatory_primitive_call_sites, ContractCheckResult};
 use nirdosha::ownership::check_ownership;
 use nirdosha::parser::Parser;
 use nirdosha::token::Lexer;
@@ -80,4 +80,73 @@ fn empty_pre_logic_is_never_vacuous() {
         ContractCheckResult::Counterexample { .. } => {}
         other => panic!("expected a Counterexample, got {other:?}"),
     }
+}
+
+// RFC 0016 Phase 3: `check_mandatory_primitive_call_sites` -- `transfer`
+// stands in for a pack's own certified primitive (its `validate` block
+// is exactly what `hi_plugin::prepend_pack_primitives` would prepend
+// alongside the primitive's own real body). `pay_invoice_unsafe` calls
+// it with no guard at all; `pay_invoice_safe` calls it only after
+// establishing the exact precondition `transfer` demands.
+const PRIMITIVE_AND_CALLERS_NIR: &str = r#"
+    fn transfer(amount: i64) -> i64 {
+        return amount
+    }
+
+    validate transfer {
+        pre: amount > 0
+        post: result == amount
+    }
+
+    fn pay_invoice_unsafe(amount: i64) -> i64 {
+        return transfer(amount)
+    }
+
+    fn pay_invoice_safe(amount: i64) -> i64 {
+        return if amount > 0 { transfer(amount) } else { 0 }
+    }
+"#;
+
+#[test]
+fn a_call_site_with_no_guard_at_all_is_a_real_precondition_violation() {
+    let program = build_program(PRIMITIVE_AND_CALLERS_NIR);
+    let mut mandatory = HashSet::new();
+    mandatory.insert("transfer".to_string());
+    let outcomes = check_mandatory_primitive_call_sites(&program, &mandatory);
+    let unsafe_outcome = outcomes.iter().find(|o| o.fn_name == "pay_invoice_unsafe").expect("pay_invoice_unsafe must be in the sweep");
+    match &unsafe_outcome.result {
+        ContractCheckResult::Counterexample { violated_predicate, .. } => {
+            assert!(violated_predicate.contains("transfer"), "got: {violated_predicate}");
+        }
+        other => panic!("expected a Counterexample (an unguarded call can pass amount <= 0), got {other:?}"),
+    }
+}
+
+#[test]
+fn a_call_site_guarded_by_the_callees_own_precondition_proves() {
+    let program = build_program(PRIMITIVE_AND_CALLERS_NIR);
+    let mut mandatory = HashSet::new();
+    mandatory.insert("transfer".to_string());
+    let outcomes = check_mandatory_primitive_call_sites(&program, &mandatory);
+    let safe_outcome = outcomes.iter().find(|o| o.fn_name == "pay_invoice_safe").expect("pay_invoice_safe must be in the sweep");
+    assert_eq!(safe_outcome.result, ContractCheckResult::Proved, "the `if amount > 0` guard already establishes transfer's own precondition on this path: {:?}", safe_outcome.result);
+}
+
+#[test]
+fn a_callee_not_named_in_mandatory_fns_is_never_gated() {
+    let program = build_program(PRIMITIVE_AND_CALLERS_NIR);
+    // `transfer` is deliberately absent from this set -- the same
+    // unguarded call site that fails the check above must be untouched
+    // when nothing declares `transfer` mandatory.
+    let mut mandatory = HashSet::new();
+    mandatory.insert("some_other_primitive_entirely".to_string());
+    let outcomes = check_mandatory_primitive_call_sites(&program, &mandatory);
+    let unsafe_outcome = outcomes.iter().find(|o| o.fn_name == "pay_invoice_unsafe").expect("pay_invoice_unsafe must be in the sweep");
+    assert_eq!(unsafe_outcome.result, ContractCheckResult::Proved, "a callee not declared mandatory must never be gated: {:?}", unsafe_outcome.result);
+}
+
+#[test]
+fn an_empty_mandatory_fns_set_sweeps_nothing() {
+    let program = build_program(PRIMITIVE_AND_CALLERS_NIR);
+    assert!(check_mandatory_primitive_call_sites(&program, &HashSet::new()).is_empty());
 }

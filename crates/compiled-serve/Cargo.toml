@@ -34,3 +34,8 @@ serde_json = "1"
 # `identity.rs` needs it too, only for encoding `AuthConfig::demo()`'s
 # random secret as the base64url a JWK's `k` member requires.
 base64 = "0.22"
+# RFC 0016's FAPI wiring: `identity::access_token_hash`'s RFC 9449 §4.3
+# `ath` claim value (`base64url(SHA-256(access_token))`). Same version
+# `runtime-kernels` (this same workspace) already pins for
+# `nir_dpop_verify`'s own `jkt` thumbprint -- no new provenance story.
+sha2 = "0.10"

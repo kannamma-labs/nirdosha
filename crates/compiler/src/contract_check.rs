@@ -197,7 +197,7 @@ pub fn check_fn_contract(
             Err(msg) => return ContractCheckResult::PredicateParseError(msg),
         }
     }
-    check_fn_contract_parsed(f, &pre_exprs, &post_exprs, extra_bindings, &HashMap::new())
+    check_fn_contract_parsed(f, &pre_exprs, &post_exprs, extra_bindings, &HashMap::new(), &HashSet::new())
 }
 
 /// Same Tier-1 walker as `check_fn_contract` above, fed a `.nir`
@@ -221,7 +221,7 @@ pub fn check_fn_contract(
 /// `run_program_validates` for the whole-program version that builds
 /// and uses them.
 pub fn check_fn_contract_exprs(program: &Program, fn_name: &str, pre: &[Expr], post: &[Expr]) -> ContractCheckResult {
-    check_fn_contract_exprs_with_summaries(program, fn_name, pre, post, &HashMap::new())
+    check_fn_contract_exprs_with_summaries(program, fn_name, pre, post, &HashMap::new(), &HashSet::new())
 }
 
 fn check_fn_contract_exprs_with_summaries(
@@ -230,13 +230,14 @@ fn check_fn_contract_exprs_with_summaries(
     pre: &[Expr],
     post: &[Expr],
     summaries: &HashMap<String, Summary>,
+    mandatory_fns: &HashSet<String>,
 ) -> ContractCheckResult {
     let Some(f) = program.fns.iter().find(|f| f.name == fn_name) else {
         return ContractCheckResult::NoSuchFunction(fn_name.to_string());
     };
     let pre_exprs: Vec<(String, Expr)> = pre.iter().map(|e| (format!("{e:?}"), e.clone())).collect();
     let post_exprs: Vec<(String, Expr)> = post.iter().map(|e| (format!("{e:?}"), e.clone())).collect();
-    check_fn_contract_parsed(f, &pre_exprs, &post_exprs, &HashMap::new(), summaries)
+    check_fn_contract_parsed(f, &pre_exprs, &post_exprs, &HashMap::new(), summaries, mandatory_fns)
 }
 
 /// A callee's independently-*proven* Hoare contract, promoted to a fact
@@ -301,6 +302,10 @@ pub struct ValidateOutcome {
 /// second merging step for a shape (`validate max_of {...} validate
 /// max_of {...}`) rare enough not to need it.
 pub fn run_program_validates(program: &Program) -> Vec<ValidateOutcome> {
+    run_program_validates_impl(program, &HashSet::new()).0
+}
+
+fn run_program_validates_impl(program: &Program, mandatory_fns: &HashSet<String>) -> (Vec<ValidateOutcome>, HashMap<String, Summary>) {
     let mut summaries: HashMap<String, Summary> = HashMap::new();
     let mut outcomes: Vec<ValidateOutcome> = Vec::new();
     for _ in 0..=program.validates.len() {
@@ -311,7 +316,7 @@ pub fn run_program_validates(program: &Program) -> Vec<ValidateOutcome> {
             .map(|v| {
                 let pre: Vec<Expr> = v.entries.iter().filter(|(k, _)| k == "pre").map(|(_, e)| e.clone()).collect();
                 let post: Vec<Expr> = v.entries.iter().filter(|(k, _)| k == "post").map(|(_, e)| e.clone()).collect();
-                let result = check_fn_contract_exprs_with_summaries(program, &v.fn_name, &pre, &post, &summaries);
+                let result = check_fn_contract_exprs_with_summaries(program, &v.fn_name, &pre, &post, &summaries, mandatory_fns);
                 if result == ContractCheckResult::Proved && !summaries.contains_key(&v.fn_name) {
                     if let Some(f) = program.fns.iter().find(|f| f.name == v.fn_name) {
                         summaries.insert(
@@ -328,7 +333,41 @@ pub fn run_program_validates(program: &Program) -> Vec<ValidateOutcome> {
             break;
         }
     }
-    outcomes
+    (outcomes, summaries)
+}
+
+/// RFC 0016 Phase 3's call-site precondition obligations: every fn in
+/// `program` (not just ones carrying their own `validate` block -- an
+/// ordinary wiring function that just calls a certified primitive and
+/// otherwise has no contract of its own is exactly the common case)
+/// gets driven through the same body walk `run_program_validates` uses
+/// for `validate` blocks, with an empty `pre`/`post` (nothing to check
+/// at the return point) purely to make `Eval::int_expr`'s `Expr::Call`
+/// arm visit every call site in every function. `mandatory_fns` is the
+/// set that arm actually gates on (`Eval::mandatory_fns`'s own doc
+/// comment); the plain per-`validate`-block fixed point
+/// (`run_program_validates_impl`) runs first, in the same call, so a
+/// primitive's own proven contract is already a usable `Summary` by the
+/// time this sweep reaches a caller that invokes it.
+///
+/// One `ValidateOutcome` per fn in the program (not one per `validate`
+/// block, a different indexing from `run_program_validates`'s own
+/// return shape) -- `Proved` for a function with no offending call site
+/// (including every function that doesn't call a mandatory primitive at
+/// all, and one whose body is simply `Unsupported` to this Tier-1
+/// walker, per its own "decline rather than guess" discipline: an
+/// unmodelable function is neither proved nor disproved, not silently
+/// passed).
+pub fn check_mandatory_primitive_call_sites(program: &Program, mandatory_fns: &HashSet<String>) -> Vec<ValidateOutcome> {
+    if mandatory_fns.is_empty() {
+        return Vec::new();
+    }
+    let (_, summaries) = run_program_validates_impl(program, mandatory_fns);
+    program
+        .fns
+        .iter()
+        .map(|f| ValidateOutcome { fn_name: f.name.clone(), result: check_fn_contract_exprs_with_summaries(program, &f.name, &[], &[], &summaries, mandatory_fns) })
+        .collect()
 }
 
 /// The build-time "self-check and fail" gate (`docs/ROADMAP.md` Track F, F3
@@ -611,7 +650,7 @@ pub fn check_equivalence(program: &Program, fn_a_name: &str, fn_b_name: &str) ->
 fn function_result_term(f: &FnDecl, top: HashMap<String, Int>, solver: &Solver, summaries: &HashMap<String, Summary>) -> Result<Int, String> {
     match f.body.stmts.as_slice() {
         [Stmt::Return { value: Some(e), .. }] => {
-            let mut eval = Eval { solver, fn_name: &f.name, post_logic: &[], outcome: None, summaries };
+            let mut eval = Eval { solver, fn_name: &f.name, post_logic: &[], outcome: None, summaries, mandatory_fns: &HashSet::new() };
             let mut scopes = Scopes(vec![top]);
             eval.int_expr(e, &mut scopes)
         }
@@ -628,6 +667,7 @@ fn check_fn_contract_parsed(
     post_exprs: &[(String, Expr)],
     extra_bindings: &HashMap<String, i64>,
     summaries: &HashMap<String, Summary>,
+    mandatory_fns: &HashSet<String>,
 ) -> ContractCheckResult {
     for p in &f.params {
         if !p.ty.is_integer() {
@@ -689,7 +729,7 @@ fn check_fn_contract_parsed(
     }
 
     let mut scopes = Scopes(vec![top]);
-    let mut eval = Eval { solver: &solver, fn_name: &f.name, post_logic: &post_exprs, outcome: None, summaries };
+    let mut eval = Eval { solver: &solver, fn_name: &f.name, post_logic: &post_exprs, outcome: None, summaries, mandatory_fns };
     // Assert every precondition as a hypothesis *before* walking the
     // body — everything downstream (including every `return` point's
     // counterexample search) then only ever considers inputs where
@@ -843,6 +883,120 @@ fn collect_idents_stmts(stmts: &[Stmt], out: &mut HashMap<String, Span>) {
     }
 }
 
+/// RFC 0016 Phase 3's mandatory call-site *coverage* half (as opposed
+/// to the precondition-obligation half `check_mandatory_primitive_call_
+/// sites` above provides): every fn name any `Expr::Call` in `program`
+/// invokes, anywhere -- a plain structural fact independent of Tier-1's
+/// own integer-only modeling scope (unlike `check_fn_contract_parsed`,
+/// this never runs the proof engine, so it sees a call inside a
+/// struct-typed or looping function exactly as well as an integer one).
+/// Deliberately the same exhaustive-`match`-over-every-`Expr`-variant
+/// shape `collect_idents` above already uses (and not built by
+/// generalizing that function itself): the compiler's own
+/// exhaustiveness check is what keeps this honest as `ast::Expr` grows
+/// new variants, and conflating "collect free identifiers" with
+/// "collect call targets" into one function would make either concern
+/// harder to change without the other, for a small function it's
+/// cheaper to just keep them two `match`es.
+pub fn collect_call_names(program: &Program) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for f in &program.fns {
+        collect_call_names_stmts(&f.body.stmts, &mut out);
+    }
+    out
+}
+
+fn collect_call_names_expr(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Ident(_, _) | Expr::Chan(_) => {}
+        Expr::Unary(_, inner, _)
+        | Expr::Box(inner, _)
+        | Expr::Froze(inner, _)
+        | Expr::Deref(inner, _)
+        | Expr::Ref(inner, _)
+        | Expr::Join(inner, _)
+        | Expr::Recv(inner, _)
+        | Expr::StopSandbox(inner, _)
+        | Expr::FieldAccess(inner, _, _) => collect_call_names_expr(inner, out),
+        Expr::Binary(_, l, r, _) => {
+            collect_call_names_expr(l, out);
+            collect_call_names_expr(r, out);
+        }
+        Expr::Assign(_, rhs, _) => collect_call_names_expr(rhs, out),
+        Expr::Call(name, args, _) => {
+            out.insert(name.clone());
+            for a in args {
+                collect_call_names_expr(a, out);
+            }
+        }
+        Expr::Spawn(name, args, _) | Expr::SpawnSandbox(name, args, _) => {
+            out.insert(name.clone());
+            for a in args {
+                collect_call_names_expr(a, out);
+            }
+        }
+        Expr::Acquire(name, proof, _) => {
+            out.insert(name.clone());
+            collect_call_names_expr(proof, out);
+        }
+        Expr::Send(a, b, _) | Expr::Connect(a, b, _) => {
+            collect_call_names_expr(a, out);
+            collect_call_names_expr(b, out);
+        }
+        Expr::Listen(a, _) | Expr::Open(a, _, _) | Expr::Accept(a, _) => collect_call_names_expr(a, out),
+        Expr::Index(base, indices, _) => {
+            collect_call_names_expr(base, out);
+            for i in indices {
+                collect_call_names_expr(i, out);
+            }
+        }
+        Expr::ArrayLit(elements, _) => {
+            for e in elements {
+                collect_call_names_expr(e, out);
+            }
+        }
+        Expr::If { cond, then_block, else_block, .. } => {
+            collect_call_names_expr(cond, out);
+            collect_call_names_stmts(&then_block.stmts, out);
+            match else_block.as_deref() {
+                Some(ElseBranch::Block(b)) => collect_call_names_stmts(&b.stmts, out),
+                Some(ElseBranch::If(e)) => collect_call_names_expr(e, out),
+                None => {}
+            }
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            collect_call_names_expr(scrutinee, out);
+            for arm in arms {
+                collect_call_names_expr(&arm.body, out);
+            }
+        }
+        Expr::Transact { precheck, network, verify, commit, compensate, log, .. } => {
+            for call in [precheck.as_ref(), Some(network), Some(verify), Some(commit), compensate.as_ref(), log.as_ref()].into_iter().flatten() {
+                out.insert(call.name.clone());
+                for a in &call.args {
+                    collect_call_names_expr(a, out);
+                }
+            }
+        }
+    }
+}
+
+fn collect_call_names_stmts(stmts: &[Stmt], out: &mut HashSet<String>) {
+    for s in stmts {
+        match s {
+            Stmt::Let { value, .. } => collect_call_names_expr(value, out),
+            Stmt::Return { value: Some(e), .. } => collect_call_names_expr(e, out),
+            Stmt::Return { value: None, .. } => {}
+            Stmt::While { cond, body, .. } => {
+                collect_call_names_expr(cond, out);
+                collect_call_names_stmts(&body.stmts, out);
+            }
+            Stmt::Expr(e) => collect_call_names_expr(e, out),
+            Stmt::Audited { body, .. } => collect_call_names_stmts(body, out),
+        }
+    }
+}
+
 /// Name -> symbolic term, block-scoped — same shape and reasoning as
 /// `smt.rs::Scopes`, duplicated rather than shared (that file's own doc
 /// comments already establish the precedent: two independently-evolving
@@ -887,6 +1041,19 @@ struct Eval<'s> {
     /// before this existed — a `Call` inside such a check is still an
     /// honest `Unsupported`.
     summaries: &'s HashMap<String, Summary>,
+    /// RFC 0016 Phase 3's call-site precondition obligations: the set of
+    /// certified-primitive fn names a governing pack marks `mandatory`.
+    /// A plain `Summary`-backed call (see `int_expr`'s `Expr::Call` arm)
+    /// only ever asserts `pre => post` as an axiom -- silently vacuous,
+    /// never an error, when a call site's arguments don't satisfy `pre`.
+    /// That's correct for an *ordinary* proven callee (the caller simply
+    /// gets no fact to use), but wrong for a *mandatory* one: "the model
+    /// wires the ledger; it does not write it" only holds if a call that
+    /// might violate the primitive's own precondition is a real gate
+    /// failure, not a silently-weakened axiom. Empty for every call site
+    /// outside `run_program_validates_with_mandatory_primitives` --
+    /// every other caller of this walker keeps today's behavior exactly.
+    mandatory_fns: &'s HashSet<String>,
 }
 
 type EvalResult<T> = Result<T, String>;
@@ -1172,11 +1339,56 @@ impl Eval<'_> {
                 for pre_e in &summary.pre {
                     pre_conjunction = pre_conjunction & self.bool_expr(pre_e, &mut call_scope)?;
                 }
+                // RFC 0016 Phase 3's call-site precondition obligation --
+                // the one piece the plain `pre => post` axiom below
+                // deliberately never checks: is there a reachable input
+                // (given everything already asserted on this exact path
+                // -- every enclosing `if`'s pushed condition, exactly
+                // the same live `self.solver` state `check_return` reads
+                // its own path condition from) where this *mandatory*
+                // primitive's own precondition is violated? An ordinary
+                // (non-mandatory) proven callee never gets this check --
+                // only "the model wires the ledger; it does not write
+                // it" primitives are load-bearing enough to fail the
+                // gate over, not merely produce a weaker axiom.
+                if self.mandatory_fns.contains(name.as_str()) && self.outcome.is_none() {
+                    self.solver.push();
+                    self.solver.assert(pre_conjunction.clone().not());
+                    match self.solver.check() {
+                        SatResult::Sat => {
+                            let model = self.solver.get_model().expect("SAT result has a model");
+                            let mut bindings = Vec::new();
+                            for (p, term) in summary.params.iter().zip(arg_terms.iter()) {
+                                if let Some(v) = model.eval(term, true).and_then(|v| v.as_i64()) {
+                                    bindings.push((p.name.clone(), v));
+                                }
+                            }
+                            self.outcome = Some(ContractCheckResult::Counterexample {
+                                violated_predicate: format!("call-site precondition for mandatory primitive `{name}` in `{}`", self.fn_name),
+                                bindings,
+                                result: None,
+                            });
+                        }
+                        SatResult::Unsat => {}
+                        SatResult::Unknown => {
+                            self.outcome = Some(ContractCheckResult::EngineLimit {
+                                obligation: format!("call-site precondition for mandatory primitive `{name}` in `{}` -- the obligation search exhausted the solver fuel before deciding", self.fn_name),
+                                fuel: proof_fuel_rlimit(),
+                            });
+                        }
+                    }
+                    self.solver.pop(1);
+                }
                 call_scope.define("result", result_term.clone());
                 // `pre => post`, an implication, never `post` on its own
                 // — a call site whose arguments don't satisfy the
                 // callee's own precondition gets a vacuous axiom here
-                // (true regardless of `result`), not a wrong one.
+                // (true regardless of `result`), not a wrong one. This
+                // still runs even when the check above already found a
+                // violation -- the axiom is sound either way (a vacuous
+                // implication from a possibly-unsatisfied premise is
+                // never a *wrong* fact to assert), and the gate already
+                // has its answer via `self.outcome`.
                 for post_e in &summary.post {
                     let post_term = self.bool_expr(post_e, &mut call_scope)?;
                     self.solver.assert(pre_conjunction.clone().not() | post_term);

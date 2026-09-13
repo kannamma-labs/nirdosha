@@ -2078,6 +2078,199 @@ pub unsafe extern "C" fn nir_extract_claim(claims_json_ptr: *const u8, claims_js
     }
 }
 
+// ---------------------------------------------------------------------------
+// RFC 0016's FAPI wiring: DPoP (RFC 9449) proof-of-possession verification.
+//
+// The one FAPI 2.0 requirement compiled `serve` can genuinely enforce
+// itself: `nirdosha`'s compiled `serve` is a *resource server* -- it
+// checks already-issued tokens on incoming requests, it never runs an
+// authorization server. PAR (RFC 9126), PKCE, and `iss`-echo checking
+// (RFC 9207) are steps between the client and an external AS; no
+// resource server, real or fake, has an enforcement point for them --
+// `hi_plugin.rs`'s `render_wiring_config` emits those as a declared
+// config sidecar for the deployer's real AS/gateway to honor, honestly,
+// rather than nirdosha pretending to be an AS. Sender-constrained
+// tokens are different: the resource server is exactly the party that
+// receives the `DPoP` header on every request, so this is a real check,
+// not theater.
+//
+// **Deliberately a pure function of its inputs, like
+// `nir_oidc_validate_token` above and for the identical reason** (that
+// function's own doc comment): `iat` freshness needs "now", but a
+// compiled kernel takes it as an explicit parameter rather than reading
+// an ambient clock, so the same source produces the same verdict on any
+// machine. Replay protection (rejecting a re-used `jti`) needs *state*
+// across requests, which a pure function can't hold either -- that
+// lives in `compiled-serve`'s own dispatch layer (`dpop_replay.rs`,
+// mirroring `ratelimit.rs`'s existing per-key windowed-state shape),
+// which this function enables by handing back the proof's own `jti`
+// unconditionally on success, not by tracking anything itself.
+//
+// **Scope, disclosed:** P-256/ES256 only (RFC 9449's baseline;
+// RSA/PS256 DPoP proofs are a real, undone follow-up, same shape as
+// `decoding_key_for`'s own EC-only-for-DPoP restriction below --
+// symmetric `oct` keys are never valid for DPoP at all, proof-of-
+// possession requires an asymmetric key pair). `ath` (the request's
+// access-token hash) is checked only when the caller supplies a
+// non-empty `expected_ath` -- optional per RFC 9449 §4.3, mandatory in
+// practice whenever a caller wants a proof bound to one specific
+// access token rather than merely to one specific key.
+
+/// RFC 7638 canonical JWK thumbprint, EC-only (this kernel's own
+/// disclosed scope): the exact member set `{crv, kty, x, y}`, no others,
+/// each already alphabetically ordered by name, `serde_json`'s own
+/// compact (no whitespace) rendering -- RFC 7638 requires *lexicographic
+/// member ordering with no insignificant whitespace*, which is exactly
+/// what building the literal object in this field order and serializing
+/// it compactly gives, with no separate canonicalization pass needed.
+fn dpop_jwk_thumbprint(ec: &jsonwebtoken::jwk::EllipticCurveKeyParameters) -> Result<String, String> {
+    use base64::Engine as _;
+    let crv = match ec.curve {
+        jsonwebtoken::jwk::EllipticCurve::P256 => "P-256",
+        _ => return Err("unsupported DPoP JWK curve (only P-256/ES256 is supported)".to_string()),
+    };
+    let canonical = serde_json::json!({ "crv": crv, "kty": "EC", "x": ec.x, "y": ec.y });
+    // `serde_json::Value` (a `BTreeMap`-backed object by default) already
+    // sorts keys -- `crv < kty < x < y` alphabetically is also RFC 7638's
+    // own required member order for an EC key, so no manual reordering
+    // is needed on top of `to_string`'s already-compact output.
+    let bytes = serde_json::to_vec(&canonical).map_err(|e| format!("failed to canonicalize DPoP JWK: {e}"))?;
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(&bytes);
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest))
+}
+
+struct DpopVerified {
+    /// The verified proof's own key thumbprint (RFC 7638) -- handed back
+    /// unconditionally on success so a caller can both check it against
+    /// an expected binding *and* record it (e.g. at token-issuance time,
+    /// to bind a freshly minted access token's own `cnf.jkt` to whatever
+    /// key the client just proved it holds).
+    jkt: String,
+    /// The proof's own `jti` -- handed back so the caller's own replay
+    /// cache (stateful, therefore not this function's job -- see this
+    /// section's own doc comment) can reject a repeat.
+    jti: String,
+}
+
+fn dpop_verify_inner(
+    proof: &str,
+    expected_method: &str,
+    expected_url: &str,
+    expected_ath: &str,
+    expected_jkt: &str,
+    max_age_secs: i64,
+    now: i64,
+) -> Result<DpopVerified, String> {
+    let header = jsonwebtoken::decode_header(proof).map_err(|e| format!("malformed DPoP proof: {e}"))?;
+    if header.typ.as_deref() != Some("dpop+jwt") {
+        return Err(format!("DPoP proof header `typ` must be `dpop+jwt`, got {:?}", header.typ));
+    }
+    // `header.jwk` is already `jsonwebtoken::jwk::Jwk`, parsed by
+    // `decode_header` itself -- no separate deserialize step needed, and
+    // no risk of this kernel's own JWK parsing disagreeing with the
+    // library's about what a well-formed one looks like.
+    let jwk = header.jwk.ok_or("DPoP proof header is missing the required embedded `jwk`")?;
+    let jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(ec) = &jwk.algorithm else {
+        return Err("DPoP proof's embedded key must be EC/P-256 (ES256) -- no other algorithm is supported yet".to_string());
+    };
+    if ec.curve != jsonwebtoken::jwk::EllipticCurve::P256 {
+        return Err("DPoP proof's embedded key must use the P-256 curve -- no other curve is supported yet".to_string());
+    }
+    let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y).map_err(|e| format!("invalid DPoP proof key material: {e}"))?;
+
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+    validation.required_spec_claims.clear();
+    validation.validate_exp = false;
+    let data = jsonwebtoken::decode::<serde_json::Value>(proof, &decoding_key, &validation).map_err(|e| format!("DPoP proof signature verification failed: {e}"))?;
+    let claims = data.claims;
+
+    let htm = claims.get("htm").and_then(|v| v.as_str()).ok_or("DPoP proof is missing the required `htm` claim")?;
+    if !htm.eq_ignore_ascii_case(expected_method) {
+        return Err(format!("DPoP proof's `htm` claim ({htm:?}) does not match this request's method ({expected_method:?})"));
+    }
+    let htu = claims.get("htu").and_then(|v| v.as_str()).ok_or("DPoP proof is missing the required `htu` claim")?;
+    // RFC 9449 §4.3: `htu` comparison ignores query and fragment on
+    // both sides -- stripped identically here rather than trusted to
+    // already be normalized on either side.
+    let strip_query_fragment = |u: &str| u.split(['?', '#']).next().unwrap_or(u).to_string();
+    if strip_query_fragment(htu) != strip_query_fragment(expected_url) {
+        return Err(format!("DPoP proof's `htu` claim ({htu:?}) does not match this request's URL ({expected_url:?})"));
+    }
+    let iat = claims.get("iat").and_then(|v| v.as_i64()).ok_or("DPoP proof is missing the required `iat` claim")?;
+    // A small forward-skew allowance (60s) for clock drift between
+    // client and server, symmetric with the backward `max_age_secs`
+    // freshness window -- neither side of this check reads an ambient
+    // clock; both `now` and the window are caller-supplied.
+    if iat < now - max_age_secs || iat > now + 60 {
+        return Err(format!("DPoP proof's `iat` ({iat}) is outside the freshness window (now={now}, max_age={max_age_secs}s)"));
+    }
+    let jti = claims.get("jti").and_then(|v| v.as_str()).ok_or("DPoP proof is missing the required `jti` claim")?.to_string();
+
+    let jkt = dpop_jwk_thumbprint(ec)?;
+    if !expected_jkt.is_empty() && jkt != expected_jkt {
+        return Err("DPoP proof's key does not match the access token's own `cnf.jkt` binding".to_string());
+    }
+    if !expected_ath.is_empty() {
+        let ath = claims.get("ath").and_then(|v| v.as_str()).ok_or("DPoP proof is missing the required `ath` claim (an access token is bound to this request)")?;
+        if ath != expected_ath {
+            return Err("DPoP proof's `ath` claim does not match this request's access token".to_string());
+        }
+    }
+    Ok(DpopVerified { jkt, jti })
+}
+
+/// `nir_dpop_verify`'s real, compiled implementation. `1` (with
+/// `out_jkt`/`out_jti` populated) if `proof` is a well-formed,
+/// signature-valid DPoP proof (RFC 9449) whose `htm`/`htu`/`iat` (and,
+/// when `expected_jkt_ptr`/`expected_ath_ptr` are non-empty, `cnf.jkt`/
+/// `ath` binding) all check out against the caller-supplied request
+/// context, `0` (with `out_err` populated) otherwise -- a malformed
+/// proof or a failed binding check is a real `Err`, never a trap, same
+/// as every other identity check in this codebase. `now`/`max_age_secs`
+/// are explicit parameters, not an ambient clock read -- see this
+/// section's own doc comment for why.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nir_dpop_verify(
+    proof_ptr: *const u8,
+    proof_len: i64,
+    method_ptr: *const u8,
+    method_len: i64,
+    url_ptr: *const u8,
+    url_len: i64,
+    expected_ath_ptr: *const u8,
+    expected_ath_len: i64,
+    expected_jkt_ptr: *const u8,
+    expected_jkt_len: i64,
+    max_age_secs: i64,
+    now: i64,
+    out_jkt: *mut NirStrOut,
+    out_jti: *mut NirStrOut,
+    out_err: *mut NirStrOut,
+) -> i32 {
+    let (Some(proof), Some(method), Some(url), Some(expected_ath), Some(expected_jkt)) = (
+        unsafe { str_from_raw(proof_ptr, proof_len) },
+        unsafe { str_from_raw(method_ptr, method_len) },
+        unsafe { str_from_raw(url_ptr, url_len) },
+        unsafe { str_from_raw(expected_ath_ptr, expected_ath_len) },
+        unsafe { str_from_raw(expected_jkt_ptr, expected_jkt_len) },
+    ) else {
+        unsafe { write_str_out(out_err, "proof/method/url/expected_ath/expected_jkt is not valid UTF-8".to_string()) };
+        return 0;
+    };
+    match dpop_verify_inner(proof, method, url, expected_ath, expected_jkt, max_age_secs, now) {
+        Ok(verified) => unsafe {
+            write_str_out(out_jkt, verified.jkt);
+            write_str_out(out_jti, verified.jti);
+            1
+        },
+        Err(msg) => unsafe {
+            write_str_out(out_err, msg);
+            0
+        },
+    }
+}
+
 #[cfg(test)]
 mod identity_kernel_tests {
     use super::*;
@@ -2171,6 +2364,146 @@ mod identity_kernel_tests {
         let mut out = NirStrOut { ptr: std::ptr::null(), len: 0 };
         let found = unsafe { nir_extract_claim(claims_json.as_ptr(), claims_json.len() as i64, name.as_ptr(), name.len() as i64, &mut out) };
         assert_eq!(found, 0);
+    }
+
+    // A fixed, checked-in P-256 test keypair (`openssl ecparam -genkey
+    // -name prime256v1`) -- test-only, never used for anything real.
+    // `DPOP_TEST_X`/`DPOP_TEST_Y`/`DPOP_TEST_JKT` are this key's own
+    // public coordinates and RFC 7638 thumbprint, computed independently
+    // (Python's `hashlib`/`base64`, not this crate's own code) so the
+    // jkt test below is checking this kernel's math against ground
+    // truth, not against itself.
+    // PKCS#8 (`-----BEGIN PRIVATE KEY-----`), not the older SEC1 `EC
+    // PRIVATE KEY` form `openssl ecparam -genkey` emits by default --
+    // `jsonwebtoken::EncodingKey::from_ec_pem` (via `ring`) parses
+    // PKCS#8 only; converted with `openssl pkcs8 -topk8 -nocrypt`.
+    const DPOP_TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgzvUAj7DFAlncvF+5\nKh1PaOnplTGaH4VKUbad2SJZRc2hRANCAAT4Fgvuc92G/Tlx3tdInAnryMO+cPO4\nZ77MvnaJskfNgdVa75Dkb9ta42OPIVpSYfDdWMIEg01aGaWsmssB/6vQ\n-----END PRIVATE KEY-----\n";
+    const DPOP_TEST_X: &str = "-BYL7nPdhv05cd7XSJwJ68jDvnDzuGe-zL52ibJHzYE";
+    const DPOP_TEST_Y: &str = "1VrvkORv21rjY48hWlJh8N1YwgSDTVoZpayaywH_q9A";
+    const DPOP_TEST_JKT: &str = "m4TkNpMqi-3VybpMJQzhinaLaT3W4Gt9I7JNoKjF9Y8";
+
+    /// Signs a real, well-formed DPoP proof JWT with the fixed test key
+    /// above -- `header.typ = "dpop+jwt"`, the embedded `jwk` (no `kid`,
+    /// per RFC 9449), and whatever claims the caller supplies.
+    fn make_dpop_proof(claims: serde_json::Value) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.typ = Some("dpop+jwt".to_string());
+        header.jwk = Some(jsonwebtoken::jwk::Jwk {
+            common: jsonwebtoken::jwk::CommonParameters::default(),
+            algorithm: jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(jsonwebtoken::jwk::EllipticCurveKeyParameters {
+                key_type: jsonwebtoken::jwk::EllipticCurveKeyType::EC,
+                curve: jsonwebtoken::jwk::EllipticCurve::P256,
+                x: DPOP_TEST_X.to_string(),
+                y: DPOP_TEST_Y.to_string(),
+            }),
+        });
+        let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(DPOP_TEST_PRIVATE_KEY_PEM.as_bytes()).expect("fixed test key must parse");
+        jsonwebtoken::encode(&header, &claims, &encoding_key).expect("signing a well-formed proof must succeed")
+    }
+
+    fn dpop_claims(htm: &str, htu: &str, iat: i64, jti: &str) -> serde_json::Value {
+        serde_json::json!({ "htm": htm, "htu": htu, "iat": iat, "jti": jti })
+    }
+
+    #[test]
+    fn valid_dpop_proof_verifies_and_reports_the_right_jkt() {
+        let proof = make_dpop_proof(dpop_claims("POST", "https://api.example.com/api/transfer", 1_000_000, "proof-1"));
+        let verified = dpop_verify_inner(&proof, "POST", "https://api.example.com/api/transfer", "", "", 300, 1_000_010).expect("a fresh, matching proof must verify");
+        assert_eq!(verified.jkt, DPOP_TEST_JKT, "the computed thumbprint must match the independently-computed ground truth");
+        assert_eq!(verified.jti, "proof-1");
+    }
+
+    #[test]
+    fn dpop_proof_is_case_insensitive_on_method_but_exact_on_url() {
+        let proof = make_dpop_proof(dpop_claims("post", "https://api.example.com/api/transfer", 1_000_000, "proof-2"));
+        assert!(dpop_verify_inner(&proof, "POST", "https://api.example.com/api/transfer", "", "", 300, 1_000_010).is_ok());
+        assert!(dpop_verify_inner(&proof, "POST", "https://api.example.com/api/OTHER", "", "", 300, 1_000_010).is_err());
+    }
+
+    #[test]
+    fn dpop_proof_htu_ignores_query_and_fragment_on_both_sides() {
+        let proof = make_dpop_proof(dpop_claims("GET", "https://api.example.com/api/read?x=1", 1_000_000, "proof-3"));
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/api/read#frag", "", "", 300, 1_000_010).is_ok());
+    }
+
+    #[test]
+    fn stale_dpop_proof_is_rejected() {
+        let proof = make_dpop_proof(dpop_claims("GET", "https://api.example.com/x", 1_000_000, "proof-4"));
+        // `now` far past the 300s freshness window.
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "", "", 300, 1_000_000 + 301).is_err());
+    }
+
+    #[test]
+    fn dpop_proof_key_mismatch_against_expected_jkt_is_rejected() {
+        let proof = make_dpop_proof(dpop_claims("GET", "https://api.example.com/x", 1_000_000, "proof-5"));
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "", "not-the-right-jkt", 300, 1_000_010).is_err());
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "", DPOP_TEST_JKT, 300, 1_000_010).is_ok());
+    }
+
+    #[test]
+    fn tampered_dpop_proof_signature_is_rejected() {
+        let mut proof = make_dpop_proof(dpop_claims("GET", "https://api.example.com/x", 1_000_000, "proof-6"));
+        proof.pop();
+        proof.push('x');
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "", "", 300, 1_000_010).is_err());
+    }
+
+    #[test]
+    fn dpop_proof_missing_dpop_jwt_typ_is_rejected() {
+        // A plain, otherwise-well-formed ES256 JWT whose `typ` is *not*
+        // `dpop+jwt` must not be accepted as a DPoP proof -- confusing an
+        // ordinary signed JWT for a proof-of-possession artifact would
+        // defeat the entire point of the `typ` header.
+        let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(DPOP_TEST_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.jwk = Some(jsonwebtoken::jwk::Jwk {
+            common: jsonwebtoken::jwk::CommonParameters::default(),
+            algorithm: jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(jsonwebtoken::jwk::EllipticCurveKeyParameters {
+                key_type: jsonwebtoken::jwk::EllipticCurveKeyType::EC,
+                curve: jsonwebtoken::jwk::EllipticCurve::P256,
+                x: DPOP_TEST_X.to_string(),
+                y: DPOP_TEST_Y.to_string(),
+            }),
+        });
+        let proof = jsonwebtoken::encode(&header, &dpop_claims("GET", "https://api.example.com/x", 1_000_000, "proof-7"), &encoding_key).unwrap();
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "", "", 300, 1_000_010).is_err());
+    }
+
+    #[test]
+    fn dpop_proof_ath_binding_is_checked_only_when_expected() {
+        let claims = serde_json::json!({ "htm": "GET", "htu": "https://api.example.com/x", "iat": 1_000_000, "jti": "proof-8", "ath": "expected-ath-hash" });
+        let proof = make_dpop_proof(claims);
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "", "", 300, 1_000_010).is_ok(), "no ath expected -> not checked");
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "expected-ath-hash", "", 300, 1_000_010).is_ok());
+        assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "wrong-ath-hash", "", 300, 1_000_010).is_err());
+    }
+
+    #[test]
+    fn nir_dpop_verify_ffi_populates_out_jkt_and_out_jti_on_success() {
+        let proof = make_dpop_proof(dpop_claims("GET", "https://api.example.com/x", 1_000_000, "proof-9"));
+        let method = "GET";
+        let url = "https://api.example.com/x";
+        let empty = "";
+        let mut out_jkt = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut out_jti = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let mut out_err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+        let ok = unsafe {
+            nir_dpop_verify(
+                proof.as_ptr(), proof.len() as i64,
+                method.as_ptr(), method.len() as i64,
+                url.as_ptr(), url.len() as i64,
+                empty.as_ptr(), 0,
+                empty.as_ptr(), 0,
+                300, 1_000_010,
+                &mut out_jkt, &mut out_jti, &mut out_err,
+            )
+        };
+        assert_eq!(ok, 1);
+        let jkt = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out_jkt.ptr, out_jkt.len as usize)).unwrap() };
+        let jti = unsafe { std::str::from_utf8(std::slice::from_raw_parts(out_jti.ptr, out_jti.len as usize)).unwrap() };
+        assert_eq!(jkt, DPOP_TEST_JKT);
+        assert_eq!(jti, "proof-9");
+        let _ = out_err;
     }
 }
 

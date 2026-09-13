@@ -936,3 +936,52 @@ gate changes what "a successful generate" means in 0014's flow;
 0014's "Open questions" already anticipated stricter per-unit
 locking. This RFC should be reconciled with 0014's scope-cut notes
 when either moves.
+- **When does domain/compliance law actually bind, relative to
+`:generate`?** (Asked directly, 2026-09-13; recorded, not fully
+answered.) It is layered, not one moment, and the layers already
+exist in code: pack install (`nirdosha plugin install`, an operator
+act, before any user session) writes invariants into the graph
+pre-confirmed/locked/non-waivable; by the time a user types
+`:generate` the law is already structurally present
+(`hi_graph::confirmed_units` feeds `generate_program`, `hi_plugin.rs`);
+injected mode (`inject_pack_validates_into_source`) inserts
+`ValidateDecl`s into the draft before typecheck; the coverage gate
+(`contract_coverage_check`) checks after typecheck and again at
+publish; `certify_code`/`verify` are meant to record which pack IDs
+governed the artifact afterward. That last step is not yet real: as
+of Phase 2, `verify_code`/`certify_code` (`mcp_tools.rs`) report no
+governing-pack information at all — "governing plugins: banking@…"
+in "What certification emits" above is still aspirational, part of
+the unimplemented generation-audit/governing-set-snapshot machinery,
+not a Phase 2 deliverable. And FAPI/compliance profiles specifically
+are **not implemented at all** — solution 7 is blocked on Phase 3
+(the certified-primitives prelude) plus a wiring emitter, neither of
+which exist yet; only the banking-invariant layer (5a) is real today.
+- **Opting out of a bundled compliance profile.** Not designed. A
+pack's invariants and any compliance profile it carries are not
+separable once installed — nothing in this RFC defines "keep the
+domain invariants, skip this one profile." The only levers that
+exist today are (a) don't install a pack/version that bundles the
+profile you don't want (`banking-v0` today carries no profile at
+all — see "The sealed plugin format" and "Compliance profiles"
+above, which are two independent sections of the same manifest),
+or (b) `break-glass`, which is operator-only, loud, logged, and
+disables that plugin's enforcement *entirely* (invariants and
+profile both, per "for the avoidance of doubt" under Break-glass
+above) and makes the artifact permanently non-attestable — a much
+bigger hammer than "skip FAPI." A future manifest-level bit letting
+a pack declare its profiles independently revocable/optional at
+install time is the natural shape of an answer, not designed here.
+- **A compliance regime nirdosha doesn't already know about (not
+FAPI/HIPAA/PCI).** Free if expressible purely in the four generic
+requirement kinds this RFC already defines (`validate_contract`,
+`static_rule`, `wiring_requirement`, `external_conformance`) — a new
+sealed pack carrying it is pure data, no toolchain change, the same
+claim "Compliance profiles" already makes for HIPAA/PCI. Gated the
+moment a `wiring_requirement` needs an emitter nirdosha's codegen
+doesn't have yet — which fails *at load*, not mid-generate, by this
+RFC's own rule ("Plugins declaring unsupported wiring requirements
+fail at load, not at generate") — and that case needs a compiler
+change first (the same category of work as extending compiled
+`serve` Stage 1's JSON encoding for a new type shape), before any
+pack can use it.
