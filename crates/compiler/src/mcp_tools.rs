@@ -19,6 +19,17 @@
 //! wire serves, and `main.rs`'s `cmd_verify`/`cmd_fix`/`cmd_certify`/
 //! `cmd_mcp` stay thin CLI wrappers over the same library code.
 //!
+//! That sharing used to stop at `main.rs`'s own commands, though --
+//! `hi_llm`'s Generate-mode self-repair loop (`typecheck_and_build_check`)
+//! re-derived its own load/typecheck/ownership checks straight against
+//! `typeck`/`ownership` instead of coming through here, so it could
+//! (and did, silently) drift from what `verify_code` actually checks.
+//! [`typecheck_and_check_ownership`] closes that: it's the one place
+//! `require_main = true` (a whole generated program) or `false` (a
+//! served/emit-ui program) typechecks and ownership-checks, and both
+//! `run_verify_pipeline` and `hi_llm` call it instead of the raw
+//! `typeck`/`ownership` functions directly.
+//!
 //! Everything a caller needs is `pub`; the helpers only the pipeline
 //! itself uses (`levenshtein`, `classify_load_error_code`,
 //! `fix_unbound_identifier`, `require_str_arg`, `describe_program`,
@@ -343,44 +354,41 @@ fn fix_unbound_identifier(name: &str, span: crate::token::Span, candidates: &[St
     }
 }
 
-/// The shared gate pipeline behind both `nirdosha verify` and `nirdosha
-/// fix` -- load, typecheck, ownership, `validate` contract-check (with
-/// `nirdosha fix`'s per-obligation `Fix` analysis always attached, per
-/// `ContractObligation::fix`'s own doc comment: computing it is cheap
-/// and it's additive to the JSON schema, so `verify` callers get it
-/// too, not just `fix` ones), plus `smt::analyze`'s Tier-1 counts.
-/// Extracted out of `cmd_verify` so `cmd_fix` runs the exact same
-/// checks instead of a second, maintained-separately copy that could
-/// drift from what `verify` actually checks.
-pub fn run_verify_pipeline(path: &str) -> VerifyVerdict {
-    let mut load = StageResult { status: StageStatus::Passed, errors: vec![] };
-    let mut typecheck = StageResult::skipped();
-    let mut ownership = StageResult::skipped();
-    let mut contracts = ContractsResult {
-        status: StageStatus::Skipped,
-        verdict: ProofVerdict::Proved,
-        proved: 0,
-        unsupported: 0,
-        failed: 0,
-        obligations: vec![],
-    };
-    let mut proof_obligations = ProofObligations { proven_in_range: 0, proven_nonzero_divisor: 0, proven_index_bounds: 0 };
+/// The two checks after a `.nir` file loads that both `run_verify_pipeline`
+/// and `hi_llm`'s self-repair loop need identically -- `typecheck`/
+/// `typecheck_optional_main` (whichever `require_main` selects) plus
+/// `ownership::check_ownership`, including the per-`TypeErrorKind`
+/// `NIR0xxx` code classification and `Fix` suggestions
+/// (`fix_unbound_identifier` et al.) either consumer gets for free.
+///
+/// Factored out so `hi_llm::typecheck_and_build_check` (Generate mode's
+/// own self-repair loop) calls this instead of re-deriving "typechecks
+/// and passes ownership" a second time against `typeck`/`ownership`
+/// directly -- the two used to be separate call sites that could
+/// silently drift on exactly what that means (see this module's own
+/// doc comment: the console and the wire are supposed to run the same
+/// code, and until now this particular pair of checks was the one
+/// place that promise didn't hold). `require_main` matches whichever of
+/// `typecheck`/`typecheck_optional_main` the caller actually needs --
+/// `run_verify_pipeline` passes `false` (a served/emit-ui program has
+/// no `main`); `hi_llm` passes `true` (a whole generated program
+/// always does, and Generate mode's own build-check relies on that).
+pub struct TypecheckOwnershipOutcome {
+    pub typecheck: StageResult,
+    pub ownership: StageResult,
+    /// `Some` only when both stages passed.
+    pub program: Option<crate::ast::Program>,
+}
 
-    let program = match crate::loader::load_program(path) {
-        Ok((program, _src)) => Some(program),
-        Err(msg) => {
-            load.status = StageStatus::Failed;
-            let code = classify_load_error_code(&msg);
-            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg, fix: None, code });
-            None
-        }
-    };
+pub fn typecheck_and_check_ownership(program: crate::ast::Program, require_main: bool) -> TypecheckOwnershipOutcome {
+    let mut typecheck = StageResult { status: StageStatus::Passed, errors: vec![] };
+    let mut ownership = StageResult { status: StageStatus::Passed, errors: vec![] };
 
-    let program = program.and_then(|program| match crate::typeck::typecheck_optional_main(&program) {
-        Ok(()) => {
-            typecheck.status = StageStatus::Passed;
-            Some(program)
-        }
+    let typecheck_result =
+        if require_main { crate::typeck::typecheck(&program) } else { crate::typeck::typecheck_optional_main(&program) };
+
+    let program = match typecheck_result {
+        Ok(()) => Some(program),
         Err(errs) => {
             typecheck.status = StageStatus::Failed;
             typecheck.errors = errs
@@ -437,13 +445,10 @@ pub fn run_verify_pipeline(path: &str) -> VerifyVerdict {
                 .collect();
             None
         }
-    });
+    };
 
     let program = program.and_then(|program| match crate::ownership::check_ownership(&program) {
-        Ok(()) => {
-            ownership.status = StageStatus::Passed;
-            Some(program)
-        }
+        Ok(()) => Some(program),
         Err(errs) => {
             ownership.status = StageStatus::Failed;
             ownership.errors = errs
@@ -453,6 +458,48 @@ pub fn run_verify_pipeline(path: &str) -> VerifyVerdict {
             None
         }
     });
+
+    TypecheckOwnershipOutcome { typecheck, ownership, program }
+}
+
+/// The shared gate pipeline behind both `nirdosha verify` and `nirdosha
+/// fix` -- load, typecheck, ownership, `validate` contract-check (with
+/// `nirdosha fix`'s per-obligation `Fix` analysis always attached, per
+/// `ContractObligation::fix`'s own doc comment: computing it is cheap
+/// and it's additive to the JSON schema, so `verify` callers get it
+/// too, not just `fix` ones), plus `smt::analyze`'s Tier-1 counts.
+/// Extracted out of `cmd_verify` so `cmd_fix` runs the exact same
+/// checks instead of a second, maintained-separately copy that could
+/// drift from what `verify` actually checks.
+pub fn run_verify_pipeline(path: &str) -> VerifyVerdict {
+    let mut load = StageResult { status: StageStatus::Passed, errors: vec![] };
+    let mut contracts = ContractsResult {
+        status: StageStatus::Skipped,
+        verdict: ProofVerdict::Proved,
+        proved: 0,
+        unsupported: 0,
+        failed: 0,
+        obligations: vec![],
+    };
+    let mut proof_obligations = ProofObligations { proven_in_range: 0, proven_nonzero_divisor: 0, proven_index_bounds: 0 };
+
+    let program = match crate::loader::load_program(path) {
+        Ok((program, _src)) => Some(program),
+        Err(msg) => {
+            load.status = StageStatus::Failed;
+            let code = classify_load_error_code(&msg);
+            load.errors.push(VerifyDiagnostic { line: 0, col: 0, message: msg, fix: None, code });
+            None
+        }
+    };
+
+    let (typecheck, ownership, program) = match program {
+        Some(program) => {
+            let outcome = typecheck_and_check_ownership(program, false);
+            (outcome.typecheck, outcome.ownership, outcome.program)
+        }
+        None => (StageResult::skipped(), StageResult::skipped(), None),
+    };
 
     if let Some(program) = &program {
         contracts.status = StageStatus::Passed;

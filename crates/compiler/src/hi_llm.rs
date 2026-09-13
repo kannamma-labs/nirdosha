@@ -1305,14 +1305,30 @@ fn typecheck_and_build_check(source: &str) -> Result<(), String> {
             }
             attach_source_lines(source, &format!("{e}\nmachine-readable errors: [{}]", machine.join(", ")))
         })?;
-        if let Err(errors) = crate::typeck::typecheck(&program) {
-            let machine: Vec<String> = errors.iter().map(|e| machine_error("typecheck", Some(e.span.line as usize), Some(e.span.col as usize), &format!("{e}"))).collect();
-            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", errors.iter().map(|e| format!("type error: {e}")).collect::<Vec<_>>().join("\n"), machine.join(", "))));
+        // Generate mode's own typecheck+ownership check, via the exact
+        // same `crate::mcp_tools::typecheck_and_check_ownership` that
+        // `run_verify_pipeline` (`nirdosha verify`/`nirdosha mcp`'s
+        // `verify_code`) uses -- `require_main: true` since a whole
+        // generated program always has one (this module's own `NIR_
+        // SYSTEM_PROMPT` demands it). Reformats the returned
+        // `VerifyDiagnostic`s into this loop's own long-tuned
+        // self-repair message shape (`self_repair_hint` pattern-matches
+        // on it) rather than a new shape, so the LLM-facing text is
+        // unchanged by this now being shared code.
+        let outcome = crate::mcp_tools::typecheck_and_check_ownership(program, true);
+        if outcome.typecheck.status == crate::mcp_tools::StageStatus::Failed {
+            let machine: Vec<String> =
+                outcome.typecheck.errors.iter().map(|d| machine_error("typecheck", Some(d.line), Some(d.col), &d.message)).collect();
+            let messages: Vec<String> = outcome.typecheck.errors.iter().map(|d| format!("type error: {}", d.message)).collect();
+            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", messages.join("\n"), machine.join(", "))));
         }
-        if let Err(errors) = crate::ownership::check_ownership(&program) {
-            let machine: Vec<String> = errors.iter().map(|e| machine_error("ownership", Some(e.span.line as usize), Some(e.span.col as usize), &format!("{e}"))).collect();
-            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", errors.iter().map(|e| format!("ownership error: {e}")).collect::<Vec<_>>().join("\n"), machine.join(", "))));
+        if outcome.ownership.status == crate::mcp_tools::StageStatus::Failed {
+            let machine: Vec<String> =
+                outcome.ownership.errors.iter().map(|d| machine_error("ownership", Some(d.line), Some(d.col), &d.message)).collect();
+            let messages: Vec<String> = outcome.ownership.errors.iter().map(|d| format!("ownership error: {}", d.message)).collect();
+            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", messages.join("\n"), machine.join(", "))));
         }
+        let program = outcome.program.expect("both typecheck and ownership passed, so typecheck_and_check_ownership always returns Some(program)");
         let smt_report = crate::smt::analyze(&program);
         crate::codegen::build(&program, &smt_report, &out_path, crate::codegen::OptLevel::O2)
     })();
