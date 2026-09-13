@@ -140,6 +140,17 @@ impl LlmClient {
         })?;
         let status = response.status();
         let body = response.text().map_err(|e| format!("reading response body: {e}"))?;
+        if status.as_u16() == 429 {
+            // Called out as its own case, not folded into the generic
+            // branch below: a 429 is neither a code problem the
+            // self-repair loop can fix nor a real "unreachable" --
+            // `generate_program`'s `client.complete(...)?` already
+            // aborts on the very first attempt for ANY `Err` here (no
+            // retry budget is charged before this call), so this is
+            // already a fail-fast path; the distinct message is so the
+            // console reports "rate limited", not a generic HTTP dump.
+            return Err(format!("rate limited (429) by {url} -- the provider is throttling this key/account, not rejecting the request; back off and retry later, or check its rate-limit dashboard. Response: {body}"));
+        }
         if !status.is_success() {
             return Err(format!("{url} returned {status}: {body}"));
         }
@@ -266,7 +277,7 @@ fn extract_nir_source(raw: &str) -> String {
 /// class) are what actually fixes runs; this is headroom for the
 /// serial-slip case that remains when the model's first draft carries
 /// several gaps at once.
-const MAX_SELF_REPAIR_ATTEMPTS: u32 = 4;
+const MAX_SELF_REPAIR_ATTEMPTS: u32 = 1;
 
 /// The pointed follow-up appended to a failed attempt's generic "fix
 /// it" request, one arm per *diagnostic class this loop has actually
@@ -774,6 +785,172 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
     }
 }
 
+/// One `components[]` entry in `graph_to_json`'s output -- the JSON
+/// shape of a `CandidateUnit`, plus its proof demand pulled out of
+/// `attributes` into its own field so the model doesn't have to parse
+/// an attribute string to find it.
+#[derive(Serialize)]
+struct JsonComponent {
+    kind: String,
+    name: String,
+    driving_text: String,
+    attributes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof_demand: Option<String>,
+}
+
+/// `(field, plain-English meaning)` for `JsonComponent`, in the
+/// struct's own declaration order -- the single source
+/// `json_shape_section` renders the prompt's field-by-field
+/// explanation from, and that `json_component_and_relationship_
+/// fields_stay_documented` (below) tests against a *real* serialized
+/// `JsonComponent`. Add/rename a field on the struct without updating
+/// this list and that test fails, instead of the prompt silently
+/// going stale the way `NIR_SYSTEM_PROMPT`'s old hand-typed `{kind,
+/// name, driving_text, ...}` sentence could.
+const JSON_COMPONENT_FIELD_DOCS: &[(&str, &str)] = &[
+    ("kind", "one of `fn`, `struct`, `enum`, `screen` -- which declaration this component becomes"),
+    ("name", "the exact identifier to declare it under"),
+    ("driving_text", "a plain-English description of what it should do -- your only source for the actual logic to write"),
+    ("attributes", "free-text notes captured during design; a `validate contract: ...` line among them is not just a note, see `proof_demand` below"),
+    (
+        "proof_demand",
+        "present only when this component's `attributes` demanded a proof -- when present, the generated fn MUST also carry a separate top-level `validate <name> { pre: ... post: ... }` block whose predicate actually proves under Z3; absent means no such requirement",
+    ),
+];
+
+/// One `relationships[]` entry -- the JSON shape of a `ConfirmedEdge`.
+#[derive(Serialize)]
+struct JsonRelationship {
+    src: String,
+    relation: String,
+    dst: String,
+}
+
+/// Same discipline as `JSON_COMPONENT_FIELD_DOCS`, for `JsonRelationship`.
+const JSON_RELATIONSHIP_FIELD_DOCS: &[(&str, &str)] = &[
+    ("src", "the referencing component's exact `name`"),
+    ("relation", "the relationship kind recorded during design (lowercased), e.g. `depends_on`, `calls`"),
+    ("dst", "the referenced component's exact `name`"),
+];
+
+#[derive(Serialize)]
+struct GraphDs {
+    components: Vec<JsonComponent>,
+    relationships: Vec<JsonRelationship>,
+}
+
+/// Serializes the confirmed graph's own data structure -- every
+/// confirmed `CandidateUnit` plus every `ConfirmedEdge` between them --
+/// as plain JSON, instead of `units_prompt`'s hand-formatted prose.
+/// This is the actual "ds of ni[rdosha]" the `hi` graph holds at
+/// Generate time: components (fn/struct/enum/screen, each with its
+/// driving text and any proof demand) and the relationships the
+/// decompose step recorded between them. `graph_to_nir_prompt`'s
+/// system prompt is the only place that explains how to read this
+/// shape into `.nir` source.
+pub fn graph_to_json(units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge]) -> String {
+    let components = units
+        .iter()
+        .map(|u| {
+            let proof_demand = u.attributes.iter().find_map(|attr| attr.lines().find_map(demanded_contract)).map(|s| s.to_string());
+            JsonComponent { kind: u.kind.clone(), name: u.name.clone(), driving_text: u.driving_text.clone(), attributes: u.attributes.clone(), proof_demand }
+        })
+        .collect();
+    let relationships = edges.iter().map(|e| JsonRelationship { src: e.src.clone(), relation: e.kind.to_lowercase(), dst: e.dst.clone() }).collect();
+    serde_json::to_string_pretty(&GraphDs { components, relationships }).expect("GraphDs has no non-JSON-representable field")
+}
+
+/// Mechanically-derived syntax reference (`nirdosha::grammar_gen`,
+/// generated by `nirdosha grammar-export`), checked in rather than
+/// regenerated at Generate time -- `hi generate` runs against a
+/// user's *project* directory, which has no `examples/` corpus to
+/// trace, and re-tracing 87 files on every generate call would be
+/// wasted work anyway when the compiler binary itself hasn't changed.
+/// Regenerate with `nirdosha grammar-export --root <this repo> -o
+/// crates/compiler/generated` whenever `parser.rs` changes; `tests/
+/// grammar_gen.rs` existing separately means a stale copy here is a
+/// missed appendix update, never a wrong compiler.
+const GENERATED_GRAMMAR: &str = include_str!("../generated/hi_grammar.ebnf");
+
+/// A real `GraphDs` value, serialized the same way `graph_to_json`
+/// would -- shown to the model as a worked example instead of a
+/// hand-typed JSON literal, so the example can never drift from what
+/// `JsonComponent`/`JsonRelationship` actually serialize to (a
+/// hand-typed literal could silently go stale after a field rename;
+/// this can't, since it's the same `#[derive(Serialize)]` producing
+/// both).
+fn json_shape_section() -> String {
+    let sample = GraphDs {
+        components: vec![
+            JsonComponent {
+                kind: "struct".to_string(),
+                name: "PaymentRequest".to_string(),
+                driving_text: "A payment awaiting approval: an amount in cents and its current status.".to_string(),
+                attributes: vec![],
+                proof_demand: None,
+            },
+            JsonComponent {
+                kind: "fn".to_string(),
+                name: "charge_cents".to_string(),
+                driving_text: "Charge amount_cents against balance_cents and return the new balance.".to_string(),
+                attributes: vec!["validate contract: result is never negative".to_string()],
+                proof_demand: Some("result is never negative".to_string()),
+            },
+        ],
+        relationships: vec![JsonRelationship { src: "charge_cents".to_string(), relation: "operates_on".to_string(), dst: "PaymentRequest".to_string() }],
+    };
+    let sample_json = serde_json::to_string_pretty(&sample).expect("GraphDs has no non-JSON-representable field");
+    let mut out = String::from(
+        "The JSON you receive has exactly two arrays, `components` and `relationships`. A real example (not hand-typed -- serialized straight from this build's own data structure) follows:\n\n```json\n",
+    );
+    out.push_str(&sample_json);
+    out.push_str("\n```\n\nEvery `components[]` field:\n");
+    for (field, meaning) in JSON_COMPONENT_FIELD_DOCS {
+        out.push_str(&format!("- `{field}`: {meaning}\n"));
+    }
+    out.push_str("\nEvery `relationships[]` field:\n");
+    for (field, meaning) in JSON_RELATIONSHIP_FIELD_DOCS {
+        out.push_str(&format!("- `{field}`: {meaning}\n"));
+    }
+    out
+}
+
+/// The system prompt for the graph-JSON -> `.nir` pipeline. Unlike
+/// `NIR_SYSTEM_PROMPT` (`paste-anywhere-prompt.md`, written for a human
+/// pasting free-form instructions into any chat LLM), this is written
+/// for exactly the input `hi`'s Generate mode actually has: a JSON
+/// object shaped like `graph_to_json`'s output, not prose. Three parts,
+/// only the middle one hand-authored:
+/// 1. `json_shape_section` -- mechanically derived from the real
+///    `JsonComponent`/`JsonRelationship` structs (see their own field-doc
+///    constants above), not hand-typed.
+/// 2. The translation-contract lessons below, hand-authored from real
+///    failures -- including the one rule the real 2026-09-13 `~/temp3`
+///    failure showed the task prompt never stated even though the
+///    language guide did: a `screen`-kind component with no same-named
+///    `struct` component must get one invented, because Nirdosha requires
+///    `screen <Name>` to name a real, already-declared struct. Plus the
+///    full human-oriented `NIR_SYSTEM_PROMPT` (recipes, builtins, the
+///    stdlib surface no grammar alone names).
+/// 3. `GENERATED_GRAMMAR` -- a mechanically current fallback reference,
+///    appended, never substituted for (2)'s hand-authored recipes and
+///    builtin-function knowledge, which grammar alone can't carry.
+pub(crate) fn build_generate_prompt() -> String {
+    format!(
+        "You convert a software project's confirmed design graph -- given to you as a JSON object, never as prose -- into a single valid Nirdosha (.nir) program.\n\n\
+{json_shape}\n\
+You must declare EVERY listed component using its own exact `name` for the corresponding `fn`/`struct`/`enum`/`screen` declaration. A `relationships[]` entry means the `src` component's declaration must genuinely reference `dst` -- a parameter of its type, a call, or a match variant -- and `fn main()` must wire an executed call so the relationship shows up in real running code, not a comment.\n\n\
+The component list is a FLOOR, not a ceiling. Your program must also contain a `fn main()` with a real body wiring the components together and exercising their behavior, even though `main` is never itself a listed component -- Nirdosha requires exactly one entry point to compile at all. You may ALSO declare supporting types the JSON doesn't list, when the language requires one: most commonly, a `screen`-kind component has no same-named `struct` component (it was modeled as a page/dashboard concept related_to other structs, not as data itself) -- in that exact case you MUST invent and declare `struct <Name>` yourself, with fields drawn from that screen's `relationships` and `driving_text`, because `screen <Name> {{ field <f> {{...}} }}` requires `<Name>` to already be a real, declared struct with a field `<f>`; never emit a `screen` block for a name with no backing struct.\n\n\
+A component that no other component references, and that `fn main()` never calls or mentions, orphans the design -- every declared component must appear in at least one function's signature or in a call from `fn main()`.\n\n\
+Below are the exact Nirdosha language rules. Follow them precisely -- Nirdosha's syntax is stricter than most languages you've seen, and small deviations produce code that does not compile.\n\n{NIR_SYSTEM_PROMPT}\n\n\
+## Current grammar, mechanically derived from this exact compiler build\n\n\
+Every rule below came from running this build's real parser over its own example corpus and recording which productions it actually walked (`nirdosha::grammar_gen`) -- never hand-transcribed, so it cannot be stale the way prose can be. Treat it as the authoritative fallback for anything the recipes above don't cover; the recipes above still take priority where they overlap, since they also show idiomatic shape and name standard-library functions this grammar alone can't.\n\n\
+```ebnf\n{GENERATED_GRAMMAR}\n```\n",
+        json_shape = json_shape_section(),
+    )
+}
+
 pub fn units_prompt(units: &[CandidateUnit], edges: &[crate::hi_graph::ConfirmedEdge]) -> String {
     // A real generation failure, root-caused rather than guessed at:
     // `populate_candidates`'s own system prompt asks for the
@@ -869,7 +1046,7 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
     if units.is_empty() {
         return Err("nothing confirmed and unlocked to generate -- `:confirm <node>` at least one candidate first".to_string());
     }
-    let mut history = vec![ChatMessage { role: "system", content: NIR_SYSTEM_PROMPT.to_string() }, ChatMessage { role: "user", content: units_prompt(units, edges) }];
+    let mut history = vec![ChatMessage { role: "system", content: build_generate_prompt() }, ChatMessage { role: "user", content: graph_to_json(units, edges) }];
     let mut last_diagnostic = String::new();
     // RFC 0016 Phase 1's budget discipline: `violation_budget` counts only
     // failures the model can fix (compile errors, dropped/violated/vacuous/
@@ -1148,6 +1325,69 @@ fn typecheck_and_build_check(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drift guard `JSON_COMPONENT_FIELD_DOCS`'/`JSON_RELATIONSHIP_
+    /// FIELD_DOCS`'s own doc comments promise: serializes a real
+    /// `JsonComponent`/`JsonRelationship` (the exact structs `graph_to_json`
+    /// sends) and checks their actual field names against what
+    /// `json_shape_section` documents in the prompt. A field added,
+    /// removed, or renamed on either struct without updating the matching
+    /// `_FIELD_DOCS` constant fails here instead of the prompt silently
+    /// describing a shape the model is no longer actually sent.
+    #[test]
+    fn json_component_and_relationship_fields_stay_documented() {
+        let component = JsonComponent { kind: "fn".to_string(), name: "x".to_string(), driving_text: "y".to_string(), attributes: vec![], proof_demand: Some("z".to_string()) };
+        let component_keys: std::collections::BTreeSet<String> = serde_json::to_value(&component).unwrap().as_object().unwrap().keys().cloned().collect();
+        let component_documented: std::collections::BTreeSet<String> = JSON_COMPONENT_FIELD_DOCS.iter().map(|(f, _)| f.to_string()).collect();
+        assert_eq!(component_keys, component_documented, "JsonComponent's real serialized fields and JSON_COMPONENT_FIELD_DOCS have drifted");
+
+        let relationship = JsonRelationship { src: "a".to_string(), relation: "b".to_string(), dst: "c".to_string() };
+        let relationship_keys: std::collections::BTreeSet<String> = serde_json::to_value(&relationship).unwrap().as_object().unwrap().keys().cloned().collect();
+        let relationship_documented: std::collections::BTreeSet<String> = JSON_RELATIONSHIP_FIELD_DOCS.iter().map(|(f, _)| f.to_string()).collect();
+        assert_eq!(relationship_keys, relationship_documented, "JsonRelationship's real serialized fields and JSON_RELATIONSHIP_FIELD_DOCS have drifted");
+    }
+
+    /// `build_generate_prompt` assembles three parts -- this just checks
+    /// all three actually landed in the output, since a typo in the
+    /// `format!` glueing them together would otherwise only show up as a
+    /// silently worse Generate mode, not a compile or test failure.
+    #[test]
+    fn build_generate_prompt_contains_all_three_sections() {
+        let prompt = build_generate_prompt();
+        assert!(prompt.contains("\"PaymentRequest\""), "missing the mechanically-serialized JSON shape example");
+        assert!(prompt.contains("MUST also carry a separate top-level `validate"), "missing the hand-authored proof_demand field doc");
+        assert!(prompt.contains("screen <Name> {"), "missing the hand-authored screen-needs-a-backing-struct lesson");
+        assert!(prompt.contains("## Current grammar, mechanically derived"), "missing the generated-grammar appendix header");
+        assert!(prompt.contains("workflow_decl ::="), "missing actual generated grammar content -- GENERATED_GRAMMAR may be stale/empty");
+        assert!(prompt.contains(NIR_SYSTEM_PROMPT), "missing the full hand-authored paste-anywhere prompt");
+    }
+
+    /// Ad hoc test run, not part of CI: sends `~/temp3`'s real confirmed
+    /// graph (the dogfood project whose old `units_prompt`-based
+    /// generation gave up after 4 attempts on the `screen` unit ->
+    /// missing-struct failure) through the new JSON-ds + graph-to-nir
+    /// prompt pipeline, one shot, no self-repair, and prints the raw
+    /// response. `#[ignore]`d because it needs a real LLM provider key
+    /// and makes a real network call; run explicitly with:
+    ///   NIRDOSHA_LLM_PROVIDER_KEY=... NIRDOSHA_LLM_PROVIDER_MODEL=... \
+    ///   cargo test -p nirdosha --lib hi_llm::tests::graph_json_first_shot_against_temp3 -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn graph_json_first_shot_against_temp3() {
+        let root = std::path::Path::new("/home/arun/temp3");
+        let conn = crate::hi_graph::open(root).expect("open ~/temp3's .nir/hi.db");
+        let units = crate::hi_graph::confirmed_units(&conn, None).expect("confirmed units");
+        let edges = crate::hi_graph::confirmed_edges(&conn).expect("confirmed edges");
+        let json = graph_to_json(&units, &edges);
+        println!("=== components: {}, relationships: {} ===", units.len(), edges.len());
+        println!("=== JSON sent as the user message ===\n{json}");
+        let system_prompt = build_generate_prompt();
+        println!("=== system prompt length: {} chars ===", system_prompt.len());
+        let activation = resolve_activation(&|k| std::env::var(k).ok()).expect("configure NIRDOSHA_LLM_PROVIDER_KEY+MODEL, or OPENAI_API_KEY");
+        let client = LlmClient::new(activation);
+        let raw = generate_plain(&client, &system_prompt, &json).expect("llm call failed");
+        println!("=== first-shot raw response ===\n{raw}");
+    }
 
     fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let pairs: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();

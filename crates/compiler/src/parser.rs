@@ -7,6 +7,7 @@
 //! wrong.
 
 use crate::ast::*;
+use crate::grammar_trace::{SharedTrace, TraceGuard};
 use crate::token::{Span, Tok, Token};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -26,6 +27,11 @@ pub struct Parser {
     /// `parse_expr` per level). See `MAX_PARSE_DEPTH`'s doc comment for
     /// why this exists at all.
     depth: usize,
+    /// `Some` only for a `Parser` built via `new_traced` -- `crate::
+    /// grammar_gen`'s corpus runner is the only caller. `None` on
+    /// every real `nirdosha build`/`hi generate` parse, so `bump`'s
+    /// tracing check is one `Option::is_none` and nothing else.
+    trace: Option<SharedTrace>,
 }
 
 /// Past this many combined `parse_expr`/`parse_unary` nesting levels,
@@ -68,7 +74,32 @@ type PResult<T> = Result<T, ParseError>;
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, pos: 0, depth: 0 }
+        Parser { toks, pos: 0, depth: 0, trace: None }
+    }
+
+    /// Like `new`, but every `parse_*` call records its rule name and
+    /// the terminals/child rules it observes into `trace` -- see
+    /// `crate::grammar_trace`'s own doc comment for the full mechanism
+    /// and `crate::grammar_gen` for what turns the result into
+    /// rendered EBNF/GBNF. `trace` is a `Rc`, meant to be shared across
+    /// many `Parser`s over a whole corpus of programs, one call to
+    /// `new_traced` per program, so `sequences` accumulates real
+    /// invocations from every one of them.
+    pub fn new_traced(toks: Vec<Token>, trace: SharedTrace) -> Self {
+        Parser { toks, pos: 0, depth: 0, trace: Some(trace) }
+    }
+
+    /// Records that grammar rule `rule` is now being parsed -- a
+    /// one-line, purely additive call at the top of every `parse_*`
+    /// method (see e.g. `parse_qualified_name` just below). Returns an
+    /// RAII guard that closes the rule's frame when it drops, on
+    /// success or on an early `?`-return alike; inert when tracing
+    /// isn't enabled.
+    fn trace_enter(&mut self, rule: &'static str) -> TraceGuard {
+        match &self.trace {
+            Some(t) => TraceGuard::active(t, rule),
+            None => TraceGuard::inactive(),
+        }
     }
 
     /// Shared entry/exit pair for `parse_expr`/`parse_unary` — see
@@ -110,6 +141,14 @@ impl Parser {
 
     fn bump(&mut self) -> Token {
         let t = self.toks[self.pos].clone();
+        // The single choke point every terminal in the grammar passes
+        // through -- see `parser.rs`'s own doc comment: no `parse_*`
+        // function ever advances `pos` except through this method. So
+        // instrumenting only here, once, is enough for `grammar_trace`
+        // to see every token any rule ever actually consumes.
+        if let Some(tr) = &self.trace {
+            tr.borrow_mut().record_token(&t.tok);
+        }
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
         }
@@ -153,6 +192,7 @@ impl Parser {
     /// needed: this returns one plain `String`, the same shape
     /// `expect_ident` always returned, just possibly containing `::`.
     fn parse_qualified_name(&mut self) -> PResult<(String, Span)> {
+        let _g = self.trace_enter("qualified_name");
         let span = self.span();
         let mut out = self.expect_ident()?;
         while self.peek().tok == Tok::ColonColon {
@@ -327,6 +367,7 @@ impl Parser {
 
     // program ::= item*
     pub fn parse_program(&mut self) -> PResult<Program> {
+        let _g = self.trace_enter("program");
         let mut fns = Vec::new();
         // Row 11 layer 7's prelude (`ast::prelude_enums`/`prelude_structs`'
         // doc comments): `Option(T)`/`Result(T, E)`, and `HttpResponse`
@@ -414,6 +455,7 @@ impl Parser {
     /// by `typeck.rs::check_validate` — this layer only parses the
     /// shape.
     fn parse_validate_decl(&mut self) -> PResult<ValidateDecl> {
+        let _g = self.trace_enter("validate_decl");
         let span = self.span();
         self.expect(&Tok::Validate, "`validate`")?;
         let fn_name_span = self.span();
@@ -438,6 +480,7 @@ impl Parser {
     /// `ui_gen.rs`. **`IDENT`** (new, F2) is a real namespace — see
     /// `parse_namespace_module_decl`'s own doc comment.
     fn parse_module_decl(&mut self) -> PResult<(Vec<FnDecl>, Vec<StructDecl>, Vec<EnumDecl>)> {
+        let _g = self.trace_enter("module_decl");
         self.expect(&Tok::Module, "`module`")?;
         if matches!(self.peek().tok, Tok::Ident(_)) {
             return self.parse_namespace_module_decl();
@@ -505,6 +548,7 @@ impl Parser {
     /// Single-level only, same restriction as the legacy form: no
     /// nesting, and `screen`/`dashboard` must stay top-level.
     fn parse_namespace_module_decl(&mut self) -> PResult<(Vec<FnDecl>, Vec<StructDecl>, Vec<EnumDecl>)> {
+        let _g = self.trace_enter("namespace_module_decl");
         let ident = self.expect_ident()?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut nav = ident.clone();
@@ -578,6 +622,7 @@ impl Parser {
     /// alike, with no dedicated value grammar. Typeck later narrows each
     /// key to its expected shape.
     fn parse_kv_entry(&mut self) -> PResult<KvEntry> {
+        let _g = self.trace_enter("kv_entry");
         let key = self.expect_ident()?;
         self.expect(&Tok::Colon, "`:`")?;
         let value = self.parse_expr()?;
@@ -596,6 +641,7 @@ impl Parser {
     /// same division of labor `LayoutNode::Widget`'s `kind` already has.
     /// Caller has already peeked `Tok::Ident("encode")` to get here.
     fn parse_encode_channel_entries(&mut self) -> PResult<Vec<KvEntry>> {
+        let _g = self.trace_enter("encode_channel_entries");
         self.expect_ident()?; // "encode" itself
         let channel = self.expect_ident()?;
         self.expect(&Tok::LBrace, "`{`")?;
@@ -635,6 +681,7 @@ impl Parser {
     /// a parse error, the same "at most one" discipline `dashboard { }`
     /// already holds itself to at the program level.
     fn parse_screen_decl(&mut self) -> PResult<ScreenDecl> {
+        let _g = self.trace_enter("screen_decl");
         let span = self.span();
         self.expect(&Tok::Screen, "`screen`")?;
         let struct_name = self.expect_ident()?;
@@ -681,6 +728,7 @@ impl Parser {
 
     /// `field_override ::= "field" IDENT "{" kv_entry* "}"`
     fn parse_field_override(&mut self) -> PResult<FieldOverride> {
+        let _g = self.trace_enter("field_override");
         let span = self.span();
         let field_name = self.expect_ident()?;
         self.expect(&Tok::LBrace, "`{`")?;
@@ -696,6 +744,7 @@ impl Parser {
     /// The trailing `{ ... }` is optional — `action "Delete" -> delete_product`
     /// alone is a valid, style-less/confirm-less action.
     fn parse_action_decl(&mut self) -> PResult<ActionDecl> {
+        let _g = self.trace_enter("action_decl");
         let span = self.span();
         let label = self.expect_str_lit("an action label")?;
         self.expect(&Tok::Arrow, "`->`")?;
@@ -720,6 +769,7 @@ impl Parser {
     /// authors never have to write a redundant outer `column { }`
     /// just to hold their screen's top-level items.
     fn parse_layout_decl(&mut self) -> PResult<LayoutNode> {
+        let _g = self.trace_enter("layout_decl");
         let span = self.span();
         self.expect(&Tok::LBrace, "`{`")?;
         let mut children = Vec::new();
@@ -758,6 +808,7 @@ impl Parser {
     /// concern `MAX_PARSE_DEPTH` guards against for expressions, sized
     /// for this construct's much shallower realistic ceiling instead).
     fn parse_layout_node(&mut self, depth: usize) -> PResult<LayoutNode> {
+        let _g = self.trace_enter("layout_node");
         let span = self.span();
         if depth > MAX_LAYOUT_DEPTH {
             return Err(ParseError { message: "layout nested too deeply".to_string(), span });
@@ -851,6 +902,7 @@ impl Parser {
     /// `{`/string/bare-ident-then-nothing, matching `row`/`field`/a
     /// widget leaf's own shapes) starts a nested item instead.
     fn parse_layout_container_body(&mut self, depth: usize) -> PResult<(Vec<KvEntry>, Vec<LayoutNode>)> {
+        let _g = self.trace_enter("layout_container_body");
         self.expect(&Tok::LBrace, "`{`")?;
         let mut entries = Vec::new();
         while matches!(self.peek().tok, Tok::Ident(_)) && self.peek2().tok == Tok::Colon {
@@ -879,6 +931,7 @@ impl Parser {
     /// unlike `tile`/`chart`, whose `entries` field always stays empty
     /// since neither has a body at all.
     fn parse_dashboard_decl(&mut self) -> PResult<DashboardDecl> {
+        let _g = self.trace_enter("dashboard_decl");
         let span = self.span();
         self.expect(&Tok::Dashboard, "`dashboard`")?;
         self.expect(&Tok::LBrace, "`{`")?;
@@ -944,6 +997,7 @@ impl Parser {
     /// gate never has). Target resolution against a real `screen` is
     /// `typeck::check_landing`'s job, not this layer's.
     fn parse_landing_decl(&mut self) -> PResult<LandingDecl> {
+        let _g = self.trace_enter("landing_decl");
         let span = self.span();
         self.expect(&Tok::Landing, "`landing`")?;
         self.expect(&Tok::LBrace, "`{`")?;
@@ -992,6 +1046,7 @@ impl Parser {
     /// mutating-exposure rule are `typeck::check_serve_config`'s job, not
     /// this layer's.
     fn parse_serve_config_decl(&mut self) -> PResult<ServeConfigDecl> {
+        let _g = self.trace_enter("serve_config_decl");
         let span = self.span();
         self.expect(&Tok::Serve, "`serve`")?;
         self.expect(&Tok::LBrace, "`{`")?;
@@ -1031,6 +1086,7 @@ impl Parser {
     /// stays LL(1) with no second-token lookahead, mirroring
     /// `parse_screen_decl` production-for-production.
     fn parse_workspace_decl(&mut self) -> PResult<WorkspaceDecl> {
+        let _g = self.trace_enter("workspace_decl");
         let span = self.span();
         self.expect(&Tok::Workspace, "`workspace`")?;
         let name = self.expect_ident()?;
@@ -1063,6 +1119,7 @@ impl Parser {
     /// config a dashboard `visual` already has, folded into this panel's
     /// own flat `entries`.
     fn parse_panel_decl(&mut self) -> PResult<PanelDecl> {
+        let _g = self.trace_enter("panel_decl");
         let span = self.span();
         let title = self.expect_str_lit("a panel title")?;
         self.expect(&Tok::LBrace, "`{`")?;
@@ -1092,6 +1149,7 @@ impl Parser {
     /// does (see `parse_screen_decl`'s doc comment) — no second-token
     /// lookahead anywhere.
     fn parse_workflow_decl(&mut self) -> PResult<WorkflowDecl> {
+        let _g = self.trace_enter("workflow_decl");
         let span = self.span();
         self.expect(&Tok::Workflow, "`workflow`")?;
         let name = self.expect_ident()?;
@@ -1127,6 +1185,7 @@ impl Parser {
 
     // data_block ::= "data" "{" field ("," field)* ","? "}"
     fn parse_workflow_data_block(&mut self) -> PResult<Vec<Field>> {
+        let _g = self.trace_enter("workflow_data_block");
         self.bump(); // "data" (identifier-matched, not a Tok keyword)
         self.expect(&Tok::LBrace, "`{`")?;
         let mut fields = Vec::new();
@@ -1161,6 +1220,7 @@ impl Parser {
     /// token lookahead" shape `parse_screen_decl`'s body already uses, so
     /// `owner`/`label` stay ordinary identifiers everywhere else.
     fn parse_state_decl(&mut self) -> PResult<StateDecl> {
+        let _g = self.trace_enter("state_decl");
         let span = self.span();
         self.expect(&Tok::State, "`state`")?;
         let name = self.expect_ident()?;
@@ -1209,6 +1269,7 @@ impl Parser {
 
     // action_block ::= "{" action_call* "}"
     fn parse_action_block(&mut self) -> PResult<Vec<TransactSlot>> {
+        let _g = self.trace_enter("action_block");
         self.expect(&Tok::LBrace, "`{`")?;
         let mut actions = Vec::new();
         while self.peek().tok != Tok::RBrace {
@@ -1223,6 +1284,7 @@ impl Parser {
     // enforces, reusing `TransactSlot` as the node — see `WorkflowDecl`'s
     // doc comment for why on_entry/on_exit reuse that type.
     fn parse_action_call(&mut self) -> PResult<TransactSlot> {
+        let _g = self.trace_enter("action_call");
         let span = self.span();
         let call = self.parse_call()?;
         match call {
@@ -1237,6 +1299,7 @@ impl Parser {
 
     // transition ::= "on" "link"? IDENT "->" IDENT
     fn parse_transition(&mut self) -> PResult<Transition> {
+        let _g = self.trace_enter("transition");
         let span = self.span();
         self.bump(); // "on"
         let via_link = if matches!(&self.peek().tok, Tok::Ident(s) if s == "link") {
@@ -1257,6 +1320,7 @@ impl Parser {
     // argument-list parsing). Empty `Vec` when absent, same "omitted
     // entirely" convention every other optional Row 11 production uses.
     fn parse_type_param_list(&mut self) -> PResult<Vec<String>> {
+        let _g = self.trace_enter("type_param_list");
         let mut params = Vec::new();
         if self.peek().tok == Tok::LParen {
             self.bump();
@@ -1279,6 +1343,7 @@ impl Parser {
     //                 "{" field ("," field)* ","? "}"
     // field       ::= ident ":" type
     fn parse_struct_decl(&mut self) -> PResult<StructDecl> {
+        let _g = self.trace_enter("struct_decl");
         let span = self.span();
         self.expect(&Tok::Struct, "`struct`")?;
         let name = self.expect_ident()?;
@@ -1313,6 +1378,7 @@ impl Parser {
     /// fn-level form also accepts `requires(public)`, which has no
     /// meaning on a field — an error here, not a silently-ignored no-op).
     fn parse_field_mask_requires(&mut self) -> PResult<Option<Requirement>> {
+        let _g = self.trace_enter("field_mask_requires");
         if self.peek().tok != Tok::Requires {
             return Ok(None);
         }
@@ -1347,6 +1413,7 @@ impl Parser {
     //               "{" variant ("," variant)* ","? "}"
     // variant   ::= ident ("(" type ("," type)* ")")?
     fn parse_enum_decl(&mut self) -> PResult<EnumDecl> {
+        let _g = self.trace_enter("enum_decl");
         let span = self.span();
         self.expect(&Tok::Enum, "`enum`")?;
         let name = self.expect_ident()?;
@@ -1389,6 +1456,7 @@ impl Parser {
 
     // fn_decl ::= "fn" ident "(" params? ")" ("->" type)? block
     fn parse_fn_decl(&mut self) -> PResult<FnDecl> {
+        let _g = self.trace_enter("fn_decl");
         let span = self.span();
         self.expect(&Tok::Fn, "`fn`")?;
         let name = self.expect_ident()?;
@@ -1427,6 +1495,7 @@ impl Parser {
     /// a parse error, not silently "just `io`") — see `ast::FnDecl::
     /// declared_effects`'s doc comment for what an empty set means.
     fn parse_effect_annotation(&mut self) -> PResult<Option<std::collections::BTreeSet<Effect>>> {
+        let _g = self.trace_enter("effect_annotation");
         if self.peek().tok != Tok::Effect {
             return Ok(None);
         }
@@ -1487,6 +1556,7 @@ impl Parser {
     /// returned out-of-band as the second tuple element instead of
     /// through the `Option<Requirement>` slot `role`/`claim` use.
     fn parse_requires_annotation(&mut self) -> PResult<(Option<Requirement>, bool)> {
+        let _g = self.trace_enter("requires_annotation");
         if self.peek().tok != Tok::Requires {
             return Ok((None, false));
         }
@@ -1525,6 +1595,7 @@ impl Parser {
     /// text the same "keyword only within this one slot" way `effect(...)`'s
     /// own names are.
     fn parse_nfr_annotation(&mut self) -> PResult<Option<NfrSpec>> {
+        let _g = self.trace_enter("nfr_annotation");
         if self.peek().tok != Tok::Nfr {
             return Ok(None);
         }
@@ -1657,6 +1728,7 @@ impl Parser {
 
     // block ::= "{" stmt* "}"
     fn parse_block(&mut self) -> PResult<Block> {
+        let _g = self.trace_enter("block");
         self.expect(&Tok::LBrace, "`{`")?;
         let mut stmts = Vec::new();
         while self.peek().tok != Tok::RBrace {
@@ -1668,6 +1740,7 @@ impl Parser {
 
     // stmt ::= let_stmt | return_stmt | while_stmt | expr_stmt
     fn parse_stmt(&mut self) -> PResult<Stmt> {
+        let _g = self.trace_enter("stmt");
         match &self.peek().tok {
             Tok::Let => self.parse_let_stmt(),
             Tok::Return => self.parse_return_stmt(),
@@ -1679,6 +1752,7 @@ impl Parser {
 
     // audited_stmt ::= "audited" str_lit block
     fn parse_audited_stmt(&mut self) -> PResult<Stmt> {
+        let _g = self.trace_enter("audited_stmt");
         let span = self.span();
         self.expect(&Tok::Audited, "`audited`")?;
         let justification = match self.peek().tok.clone() {
@@ -1698,6 +1772,7 @@ impl Parser {
     }
 
     fn parse_let_stmt(&mut self) -> PResult<Stmt> {
+        let _g = self.trace_enter("let_stmt");
         let span = self.span();
         self.expect(&Tok::Let, "`let`")?;
         let name = self.expect_ident()?;
@@ -1709,6 +1784,7 @@ impl Parser {
     }
 
     fn parse_return_stmt(&mut self) -> PResult<Stmt> {
+        let _g = self.trace_enter("return_stmt");
         let span = self.span();
         self.expect(&Tok::Return, "`return`")?;
         let value = if matches!(self.peek().tok, Tok::RBrace) {
@@ -1720,6 +1796,7 @@ impl Parser {
     }
 
     fn parse_while_stmt(&mut self) -> PResult<Stmt> {
+        let _g = self.trace_enter("while_stmt");
         let span = self.span();
         self.expect(&Tok::While, "`while`")?;
         let cond = self.parse_expr()?;
@@ -1729,6 +1806,7 @@ impl Parser {
 
     // expr ::= if_expr | transact_expr | match_expr | assignment
     pub(crate) fn parse_expr(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("expr");
         self.enter_nesting()?;
         let result = if self.peek().tok == Tok::If {
             self.parse_if_expr()
@@ -1752,6 +1830,7 @@ impl Parser {
     // is always `Ident(args)`, never `Ident { .. }` — see `StructDecl`'s
     // doc comment).
     fn parse_match_expr(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("match_expr");
         let span = self.span();
         self.expect(&Tok::Match, "`match`")?;
         let scrutinee = Box::new(self.parse_expr()?);
@@ -1841,6 +1920,7 @@ impl Parser {
     // parsing, keeps this LL(1) the same way every other fixed-arity
     // form in this grammar already is" (docs/TRANSACT.md).
     fn parse_transact_expr(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("transact_expr");
         let span = self.span();
         self.expect(&Tok::Transact, "`transact`")?;
         self.expect(&Tok::LBrace, "`{`")?;
@@ -1861,6 +1941,7 @@ impl Parser {
     // doc comment); plain `int_lit`, no unit suffix, docs/TRANSACT.md's own
     // decision against inventing a duration literal for `timeout`.
     fn parse_optional_int_modifier(&mut self, label: &str) -> PResult<Option<i64>> {
+        let _g = self.trace_enter("optional_int_modifier");
         match &self.peek().tok {
             Tok::Ident(s) if s == label => {
                 self.bump();
@@ -1887,6 +1968,7 @@ impl Parser {
     // (token.rs) already applies to scalar type names, which aren't `Tok`
     // keywords either.
     fn parse_transact_slot(&mut self, label: &str) -> PResult<TransactSlot> {
+        let _g = self.trace_enter("transact_slot");
         let span = self.span();
         match &self.peek().tok {
             Tok::Ident(s) if s == label => {
@@ -1916,6 +1998,7 @@ impl Parser {
     }
 
     fn parse_optional_transact_slot(&mut self, label: &str) -> PResult<Option<TransactSlot>> {
+        let _g = self.trace_enter("optional_transact_slot");
         match &self.peek().tok {
             Tok::Ident(s) if s == label => Ok(Some(self.parse_transact_slot(label)?)),
             _ => Ok(None),
@@ -1927,6 +2010,7 @@ impl Parser {
     // on a bare Ident" is the LL(1)-faithful way to write this, rather than
     // trying `ident "="` as a distinct first alternative.
     fn parse_assignment(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("assignment");
         let lhs = self.parse_logic_or()?;
         if self.peek().tok == Tok::Assign {
             let eq_span = self.span();
@@ -1947,6 +2031,7 @@ impl Parser {
     }
 
     fn parse_if_expr(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("if_expr");
         let span = self.span();
         self.expect(&Tok::If, "`if`")?;
         let cond = Box::new(self.parse_expr()?);
@@ -1967,6 +2052,7 @@ impl Parser {
     // Precedence climbing, lowest to highest — this is what keeps the
     // expression grammar LL(1) without left recursion (docs/GRAMMAR.md).
     fn parse_logic_or(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("logic_or");
         let mut lhs = self.parse_logic_and()?;
         while self.peek().tok == Tok::OrOr {
             let span = self.span();
@@ -1978,6 +2064,7 @@ impl Parser {
     }
 
     fn parse_logic_and(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("logic_and");
         let mut lhs = self.parse_equality()?;
         while self.peek().tok == Tok::AndAnd {
             let span = self.span();
@@ -1989,6 +2076,7 @@ impl Parser {
     }
 
     fn parse_equality(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("equality");
         let mut lhs = self.parse_comparison()?;
         loop {
             let op = match self.peek().tok {
@@ -2005,6 +2093,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("comparison");
         let mut lhs = self.parse_additive()?;
         loop {
             let op = match self.peek().tok {
@@ -2023,6 +2112,7 @@ impl Parser {
     }
 
     fn parse_additive(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("additive");
         let mut lhs = self.parse_multiplicative()?;
         loop {
             let op = match self.peek().tok {
@@ -2039,6 +2129,7 @@ impl Parser {
     }
 
     fn parse_multiplicative(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("multiplicative");
         let mut lhs = self.parse_unary()?;
         loop {
             let op = match self.peek().tok {
@@ -2058,6 +2149,7 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("unary");
         self.enter_nesting()?;
         let result = self.parse_unary_inner();
         self.exit_nesting();
@@ -2065,6 +2157,7 @@ impl Parser {
     }
 
     fn parse_unary_inner(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("unary_inner");
         let span = self.span();
         match self.peek().tok {
             Tok::Bang => {
@@ -2225,6 +2318,7 @@ impl Parser {
     }
 
     fn parse_call(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("call");
         let primary = self.parse_postfix()?;
         if self.peek().tok == Tok::LParen {
             let span = primary.span();
@@ -2268,6 +2362,7 @@ impl Parser {
     // once, on `primary`, before ever seeing a trailing `(` — a real,
     // pre-existing limitation this doesn't newly introduce.
     fn parse_postfix(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("postfix");
         let mut e = self.parse_primary()?;
         loop {
             match self.peek().tok {
@@ -2296,6 +2391,7 @@ impl Parser {
 
     // primary ::= int_lit | float_lit | "true" | "false" | ident | "(" expr ")"
     fn parse_primary(&mut self) -> PResult<Expr> {
+        let _g = self.trace_enter("primary");
         let span = self.span();
         match self.peek().tok.clone() {
             Tok::Int(n) => {

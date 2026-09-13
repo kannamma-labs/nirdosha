@@ -393,6 +393,23 @@ generate *valid* Nirdosha on the first try.
     `json_array_len`/`json_array_get`. Never write `Vector(PaymentRequest, 1)`
     for a variable-length queue.
 
+22. **Every `let` needs a real type and a real name — there is no
+    `let _ = expr` to discard a value.** Nirdosha's grammar requires
+    `let <ident>: <Type> = <expr>` on every binding, with no shorthand
+    for "run this and ignore the result" the way Rust/OCaml allow.
+    `_` is just an ordinary identifier here (unlike a `match` arm,
+    where it isn't even legal — see rule 8), so `let _ = some_call(...)`
+    fails with `expected `:`, found `=``: the parser stopped at the
+    missing type, not at the underscore. There is no unused-binding
+    warning to satisfy either — name it and type it like any other
+    value, whether or not you read it again:
+    ```nirdosha
+    // WRONG -- parse error: expected `:`, found `=`
+    let _ = debit_account(from_acc, amount_cents)
+    // RIGHT -- every let needs its type, even when the value is never read again
+    let debited: bool = debit_account(from_acc, amount_cents)
+    ```
+
 A fast-scan companion to the rules above — every pair below is
 verified against the real compiler, not hypothetical.
 

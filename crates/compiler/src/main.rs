@@ -43,6 +43,7 @@ fn main() -> ExitCode {
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
         "emit-catalog" => cmd_emit_catalog(args),
+        "grammar-export" => cmd_grammar_export(args),
         "roles" => cmd_roles(args),
         "hi" => cmd_hi(args),
         other => {
@@ -116,6 +117,10 @@ fn print_usage() {
     eprintln!("  nirdosha emit-catalog [-o out.json]");
     eprintln!("                                      print the std UI catalog (rfcs/0009 Phase 0) -- the closed");
     eprintln!("                                      layout/control/chart/theme vocabulary emit-ui renders, as data");
+    eprintln!("  nirdosha grammar-export [--root <repo checkout>] [-o out_dir]");
+    eprintln!("                                      mechanically-derived EBNF+GBNF: runs the real parser over");
+    eprintln!("                                      examples/**/*.nir + the capabilities corpus and renders what");
+    eprintln!("                                      it actually walked -- not hand-transcribed from parser.rs");
     eprintln!("  nirdosha roles <file.nir> [-o out.json]");
     eprintln!("                                      every role/claim gate in the program, grouped by role/claim:");
     eprintln!("                                      which fns it gates (requires(role/claim: ...)) and which");
@@ -2088,6 +2093,75 @@ fn cmd_emit_ui(mut args: impl Iterator<Item = String>) -> ExitCode {
 /// a linked plugin (rfcs/0009 Phase B); it is std only, disclosed, not
 /// hidden.
 const STD_CATALOG_JSON: &str = include_str!("../catalog/std/0.1.json");
+
+/// `nirdosha grammar-export` -- the actual, queryable "what is the
+/// current grammar" system: runs the real parser (`nirdosha::
+/// grammar_gen`) over `<root>/examples/**/*.nir` plus every
+/// `nirdosha::capabilities` snippet, traces which productions fired,
+/// and prints (or writes) the resulting EBNF + GBNF. Never hand-
+/// transcribed -- see `grammar_gen.rs`'s own doc comment for exactly
+/// what "mechanical" means here and its one disclosed gap (a handful
+/// of lexical leaf productions the trace can't derive on its own).
+fn cmd_grammar_export(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut root: Option<String> = None;
+    let mut out_dir: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--root" => root = args.next(),
+            "-o" => out_dir = args.next(),
+            other => {
+                eprintln!("unknown argument `{other}` -- usage: nirdosha grammar-export [--root <nirdosha repo checkout>] [-o <out_dir>]");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let root = root.map(std::path::PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let corpus = nirdosha::grammar_gen::default_corpus(&root);
+    if corpus.is_empty() {
+        eprintln!("no corpus found under {}/examples -- pass --root <path to a nirdosha repo checkout>", root.display());
+        return ExitCode::FAILURE;
+    }
+    let report = nirdosha::grammar_gen::generate(&corpus);
+    if !report.parse_errors.is_empty() {
+        eprintln!("warning: {} corpus item(s) failed to parse against the current compiler:", report.parse_errors.len());
+        for (label, err) in &report.parse_errors {
+            eprintln!("  {label}: {err}");
+        }
+    }
+    if !report.uncovered.is_empty() {
+        eprintln!(
+            "note: {} rule(s) this corpus never reached -- their grammar is not in this output (a disclosed gap, not a silent one): {:?}",
+            report.uncovered.len(),
+            report.uncovered
+        );
+    }
+    match out_dir {
+        Some(dir) => {
+            let dir = std::path::PathBuf::from(dir);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!("creating {}: {e}", dir.display());
+                return ExitCode::FAILURE;
+            }
+            let ebnf_path = dir.join("GRAMMAR.generated.md");
+            let gbnf_path = dir.join("nirdosha.generated.gbnf");
+            if let Err(e) = std::fs::write(&ebnf_path, &report.ebnf) {
+                eprintln!("writing {}: {e}", ebnf_path.display());
+                return ExitCode::FAILURE;
+            }
+            if let Err(e) = std::fs::write(&gbnf_path, &report.gbnf) {
+                eprintln!("writing {}: {e}", gbnf_path.display());
+                return ExitCode::FAILURE;
+            }
+            println!("wrote {} ({} rules covered, {} uncovered)", ebnf_path.display(), report.covered.len(), report.uncovered.len());
+            println!("wrote {}", gbnf_path.display());
+        }
+        None => {
+            println!("{}", report.ebnf);
+            println!("{}", report.gbnf);
+        }
+    }
+    ExitCode::SUCCESS
+}
 
 fn cmd_emit_catalog(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut output: Option<String> = None;

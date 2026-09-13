@@ -1,10 +1,13 @@
 pub mod ast;
+pub mod capabilities;
 pub mod codegen;
 pub mod contract_check;
 pub mod crud_gen;
 pub mod effects;
 pub mod explain;
 pub mod extraction_schema;
+pub mod grammar_gen;
+pub mod grammar_trace;
 pub mod hi_api;
 pub mod hi_graph;
 pub mod hi_llm;

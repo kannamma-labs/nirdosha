@@ -390,13 +390,113 @@ impl std::fmt::Display for Tok {
     }
 }
 
+impl Tok {
+    /// The label `grammar_trace::GrammarTrace` records for this token
+    /// kind -- a grammar *terminal*, not a diagnostic (unlike
+    /// `Display` above, this deliberately throws away a literal's own
+    /// value: two different integer literals are the same terminal,
+    /// `INT`, not two different ones). Keywords/punctuation render as
+    /// their own literal spelling in quotes (`"fn"`, `"->"`), matching
+    /// both EBNF and GBNF's usual convention for a fixed-spelling
+    /// terminal; the four literal-bearing/open-ended kinds render as
+    /// an all-caps class name instead. Same "one big exhaustive match,
+    /// no catch-all" discipline as `Display` above, for the same
+    /// reason: a new `Tok` variant must get a label here before it
+    /// compiles, not silently fall through unlabeled.
+    pub fn grammar_terminal_label(&self) -> String {
+        match self {
+            Tok::Int(_) => "INT".to_string(),
+            Tok::Float(_) => "FLOAT".to_string(),
+            Tok::Str(_) => "STR".to_string(),
+            Tok::Ident(_) => "IDENT".to_string(),
+            Tok::TypeName(_) => "TYPE_NAME".to_string(),
+            Tok::LParen => "\"(\"".to_string(),
+            Tok::RParen => "\")\"".to_string(),
+            Tok::LBrace => "\"{\"".to_string(),
+            Tok::RBrace => "\"}\"".to_string(),
+            Tok::LBracket => "\"[\"".to_string(),
+            Tok::RBracket => "\"]\"".to_string(),
+            Tok::Colon => "\":\"".to_string(),
+            Tok::Comma => "\",\"".to_string(),
+            Tok::Dot => "\".\"".to_string(),
+            Tok::Arrow => "\"->\"".to_string(),
+            Tok::FatArrow => "\"=>\"".to_string(),
+            Tok::Assign => "\"=\"".to_string(),
+            Tok::Plus => "\"+\"".to_string(),
+            Tok::Minus => "\"-\"".to_string(),
+            Tok::Star => "\"*\"".to_string(),
+            Tok::Slash => "\"/\"".to_string(),
+            Tok::Percent => "\"%\"".to_string(),
+            Tok::EqEq => "\"==\"".to_string(),
+            Tok::NotEq => "\"!=\"".to_string(),
+            Tok::Lt => "\"<\"".to_string(),
+            Tok::Gt => "\">\"".to_string(),
+            Tok::LtEq => "\"<=\"".to_string(),
+            Tok::GtEq => "\">=\"".to_string(),
+            Tok::AndAnd => "\"&&\"".to_string(),
+            Tok::OrOr => "\"||\"".to_string(),
+            Tok::Bang => "\"!\"".to_string(),
+            Tok::Amp => "\"&\"".to_string(),
+            Tok::DotStar => "\".*\"".to_string(),
+            Tok::DotSlash => "\"./\"".to_string(),
+            Tok::ColonColon => "\"::\"".to_string(),
+            Tok::Eof => "EOF".to_string(),
+            Tok::Fn => "\"fn\"".to_string(),
+            Tok::Let => "\"let\"".to_string(),
+            Tok::Return => "\"return\"".to_string(),
+            Tok::If => "\"if\"".to_string(),
+            Tok::Else => "\"else\"".to_string(),
+            Tok::While => "\"while\"".to_string(),
+            Tok::Box => "\"box\"".to_string(),
+            Tok::Froze => "\"froze\"".to_string(),
+            Tok::Spawn => "\"spawn\"".to_string(),
+            Tok::Join => "\"join\"".to_string(),
+            Tok::Thread => "\"thread\"".to_string(),
+            Tok::Chan => "\"chan\"".to_string(),
+            Tok::Send => "\"send\"".to_string(),
+            Tok::Recv => "\"recv\"".to_string(),
+            Tok::Sandbox => "\"sandbox\"".to_string(),
+            Tok::Stop => "\"stop\"".to_string(),
+            Tok::Connect => "\"connect\"".to_string(),
+            Tok::Listen => "\"listen\"".to_string(),
+            Tok::Accept => "\"accept\"".to_string(),
+            Tok::Open => "\"open\"".to_string(),
+            Tok::Effect => "\"effect\"".to_string(),
+            Tok::Requires => "\"requires\"".to_string(),
+            Tok::Nfr => "\"nfr\"".to_string(),
+            Tok::Acquire => "\"acquire\"".to_string(),
+            Tok::Audited => "\"audited\"".to_string(),
+            Tok::Transact => "\"transact\"".to_string(),
+            Tok::Struct => "\"struct\"".to_string(),
+            Tok::Enum => "\"enum\"".to_string(),
+            Tok::Match => "\"match\"".to_string(),
+            Tok::Screen => "\"screen\"".to_string(),
+            Tok::Dashboard => "\"dashboard\"".to_string(),
+            Tok::Landing => "\"landing\"".to_string(),
+            Tok::Serve => "\"serve\"".to_string(),
+            Tok::Module => "\"module\"".to_string(),
+            Tok::Workflow => "\"workflow\"".to_string(),
+            Tok::State => "\"state\"".to_string(),
+            Tok::Workspace => "\"workspace\"".to_string(),
+            Tok::Validate => "\"validate\"".to_string(),
+            Tok::Pub => "\"pub\"".to_string(),
+            Tok::Use => "\"use\"".to_string(),
+            Tok::VectorKw => "\"Vector\"".to_string(),
+            Tok::MatrixKw => "\"Matrix\"".to_string(),
+            Tok::HandleKw => "\"handle\"".to_string(),
+            Tok::True => "\"true\"".to_string(),
+            Tok::False => "\"false\"".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub tok: Tok,
     pub span: Span,
 }
 
-const TYPE_NAMES: &[&str] = &[
+pub(crate) const TYPE_NAMES: &[&str] = &[
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "f64", "dec128", "bool",
     "unit", "str", "tcp", "tcp_listener", "file", "json", "db", "mq",
 ];
