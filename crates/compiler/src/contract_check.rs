@@ -981,7 +981,13 @@ fn collect_call_names_expr(e: &Expr, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_call_names_stmts(stmts: &[Stmt], out: &mut HashSet<String>) {
+/// `pub(crate)`: `hi_graph::sync_file` reuses this directly, per-fn,
+/// to derive real call-graph edges for the build-mode graph view
+/// (rfcs/0014's 2026-09-14 amendment) -- rather than re-walking
+/// `Stmt`/`Expr` a second time to answer the same "what does this body
+/// call" question `collect_call_names` already answers at the
+/// whole-program level.
+pub(crate) fn collect_call_names_stmts(stmts: &[Stmt], out: &mut HashSet<String>) {
     for s in stmts {
         match s {
             Stmt::Let { value, .. } => collect_call_names_expr(value, out),

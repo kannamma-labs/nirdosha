@@ -256,11 +256,25 @@ const BANKING_V0_JSON: &str = include_str!("../../../agent-skills/nirdosha/packs
 /// profile is genuinely optional even for a banking-domain project
 /// (`compliance_profiles`' own doc comment: "an independent, optional
 /// payload, never implied by a pack's presence"). Installed explicitly:
-/// `nirdosha plugin install agent-skills/nirdosha/packs/fapi-2.0.json`.
-/// `include_str!`-embedded here only so tests (and, if ever wanted, a
-/// future CLI shortcut) don't need to locate the file on disk.
-#[cfg(test)]
+/// `nirdosha plugin install agent-skills/nirdosha/packs/fapi-2.0.json`,
+/// or from `hi`'s own Governing Rules panel (`hi_api::handle_pack_
+/// install`, rfcs/0014's 2026-09-14 amendment) -- no longer test-only,
+/// since that panel needs the same embedded bytes outside a test build.
 const FAPI_2_0_JSON: &str = include_str!("../../../agent-skills/nirdosha/packs/fapi-2.0.json");
+
+/// The fixed, known-safe set of packs `hi`'s own UI can offer to
+/// install -- deliberately not an arbitrary file path from the webview
+/// (this crate has no path-traversal/arbitrary-read surface to expose
+/// this way): `(pack_id-as-shown, one-line description, embedded JSON
+/// bytes)`. Adding a pack here is the only lever this list needs; the
+/// bytes are the same ones `ensure_default_packs`/the CLI install path
+/// already trust.
+pub fn known_installable_packs() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        ("banking-v0", "Whole-cents money math: conservation, non-negative balances.", BANKING_V0_JSON),
+        ("fapi-2.0", "FAPI 2.0 Security Profile: sender-constrained tokens, PAR, PKCE, role-gated mutations.", FAPI_2_0_JSON),
+    ]
+}
 
 /// Where packs live under a project's `.nir/` directory.
 pub fn plugins_dir(root: &Path) -> PathBuf {

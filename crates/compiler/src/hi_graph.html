@@ -8,18 +8,111 @@
   html, body { margin:0; padding:0; width:100%; height:100%; background:#0b0b12; color:#e8e8f0; font-family: ui-monospace, monospace; overflow:hidden; }
 
   /* ---- header: brand mark (top-left) + live status ---- */
-  #header { position:absolute; top:0; left:0; right:0; height:64px; box-sizing:border-box; padding:0 18px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:14px; align-items:center; }
-  #header .logo { width:36px; height:36px; display:block; transition:filter 0.3s; }
-  #header .wordmark { font-weight:bold; font-size:20px; letter-spacing:0.06em; color:#564cbe; }
-  #header .sep { width:1px; height:28px; background:#26263a; }
-  #status { display:flex; gap:8px; align-items:center; font-size:15px; }
-  #status .dot { width:10px; height:10px; border-radius:50%; background:#3ddc84; display:inline-block; }
+  /* `overflow-x:auto; overflow-y:hidden` is load-bearing, not
+     decorative: this is a fixed-height (64px) bar, and at a narrow
+     native window width the wordmark+status+four action buttons don't
+     all fit on one line. Flex's default behavior when children can't
+     shrink enough is to let inline TEXT wrap inside them -- exactly
+     what turned "+ New Screen"/"Governing rules" into two-line button
+     labels, which made the header's real rendered content taller than
+     64px and spill down over whatever rail/panel was open beneath it
+     (field failure, 2026-09-14: reported as "the panel goes behind the
+     header" -- a real screenshot showed the true cause was this, not a
+     stacking-order bug, though the z-index fix alongside this one is
+     still correct defense in depth). `white-space:nowrap` below is the
+     other half: it turns "doesn't fit" into "scrolls," never "wraps
+     and grows taller than its own fixed box." */
+  #header { position:absolute; top:0; left:0; right:0; height:64px; box-sizing:border-box; padding:0 18px; background:rgba(11,11,18,0.85); border-bottom:1px solid #26263a; z-index:5; display:flex; gap:14px; align-items:center; overflow-x:auto; overflow-y:hidden; }
+  #header .logo { width:36px; height:36px; display:block; transition:filter 0.3s; flex:none; }
+  #header .wordmark { font-weight:bold; font-size:20px; letter-spacing:0.06em; color:#564cbe; white-space:nowrap; flex:none; }
+  #header .sep { width:1px; height:28px; background:#26263a; flex:none; }
+  #status { display:flex; gap:8px; align-items:center; font-size:15px; white-space:nowrap; flex:none; }
+  #status .dot { width:10px; height:10px; border-radius:50%; background:#3ddc84; display:inline-block; flex:none; }
+
+  /* ---- header, right side: rfcs/0014's 2026-09-14 amendment --
+     Rebuild replaces the console-only `:generate` with an explicit
+     button plus a "how many changes" count (`updateHeaderState`), and
+     Governing rules toggles the panel a few blocks down. Deliberately
+     NOT a silent/automatic compile -- see that amendment's own
+     reasoning on why continuous background generation isn't viable
+     yet (whole-file regeneration, real LLM cost per pass). */
+  #header-actions { margin-left:auto; display:flex; align-items:center; gap:10px; flex:none; white-space:nowrap; }
+  #pending-count { font-size:12px; color:#a9a9bd; white-space:nowrap; flex:none; }
+  #header-actions button { font:12px ui-monospace, monospace; font-weight:bold; padding:7px 14px; border-radius:5px; border:1px solid #3a3a52; background:transparent; color:#e8e8f0; cursor:pointer; white-space:nowrap; flex:none; }
+  #header-actions button:hover { border-color:#564cbe; }
+  #header-actions button.primary { background:#564cbe; border-color:#564cbe; color:#fff; }
+  #header-actions button:disabled { opacity:0.45; cursor:default; }
+  #header-actions button:disabled:hover { border-color:#3a3a52; }
+  #ask-toggle { background:transparent; border:1px solid #3a3a52; color:#a9a9bd; }
+
+  /* ---- Ask rail: a persistent, collapsible search surface -- present
+     on every screen, not a mode. Wraps the existing, real `/api/ask`
+     (`hi_graph::ask`, FTS5 keyword search over ingested docs plus a
+     substring match over CodeUnit names/driving text -- NOT a
+     conversational answer engine), rendered honestly as matching
+     passages, never as a chat reply the search doesn't actually give. */
+  #ask-rail { position:absolute; top:64px; right:0; bottom:200px; width:280px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; }
+  #ask-rail.open { display:flex; }
+  #ask-rail .ask-head { padding:12px 14px; border-bottom:1px solid #26263a; font-size:11px; letter-spacing:0.06em; text-transform:uppercase; color:#78768e; display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .rail-close { flex:none; background:transparent; border:1px solid #3a3a52; border-radius:4px; color:#a9a9bd; font-size:11px; padding:3px 7px; cursor:pointer; text-transform:none; letter-spacing:normal; }
+  .rail-close:hover { border-color:#564cbe; color:#e8e8f0; }
+  #governing-panel .gov-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:4px; }
+  #governing-panel .gov-head h3 { margin:0; }
+  #ask-results { flex:1; overflow:auto; padding:10px 14px; display:flex; flex-direction:column; gap:8px; }
+  #ask-results .hit { background:#0b0b12; border:1px solid #26263a; border-radius:6px; padding:8px 10px; font-size:12px; line-height:1.5; }
+  #ask-results .hit .doc { color:#ef9f30; font-size:10.5px; margin-bottom:3px; word-break:break-all; }
+  #ask-results .empty { color:#78768e; font-size:12px; padding:8px 2px; }
+  #ask-form { display:flex; gap:6px; padding:10px 14px; border-top:1px solid #26263a; }
+  #ask-input { flex:1; background:#0b0b12; border:1px solid #3a3a52; border-radius:4px; color:#e8e8f0; font:12px ui-monospace, monospace; padding:7px 9px; }
+  #ask-input:focus { outline:none; border-color:#564cbe; }
+  #ask-form button { background:#564cbe; color:#fff; border:none; border-radius:4px; padding:0 12px; font:11px ui-monospace, monospace; font-weight:bold; }
+
+  /* ---- New Screen rail: same frame as Ask, reuses the real /api/prompt
+     route -- no new backend, the same mechanism the very first prompt
+     goes through. */
+  #new-screen-rail { position:absolute; top:64px; right:0; bottom:200px; width:300px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; }
+  #new-screen-rail.open { display:flex; }
+  #new-screen-form { display:flex; flex-direction:column; gap:8px; padding:12px 14px; }
+  #new-screen-input { background:#0b0b12; border:1px solid #3a3a52; border-radius:4px; color:#e8e8f0; font:13px ui-monospace, monospace; padding:8px; resize:vertical; }
+  #new-screen-input:focus { outline:none; border-color:#564cbe; }
+  #new-screen-form button { background:#564cbe; color:#fff; border:none; border-radius:4px; padding:8px; font:12px ui-monospace, monospace; font-weight:bold; align-self:flex-start; padding-left:16px; padding-right:16px; }
+
+  /* ---- Governing rules panel: RFC 0016's sealed-plugin provenance,
+     read from `/api/nodes`' `plugin_origin`/`non_waivable` (previously
+     Rust-internal only) and rendered in plain language, grouped by
+     pack -- the "governing rules" panel named in rfcs/0014's
+     2026-09-14 amendment, step 4. Shows what's real today (unsigned,
+     5a-only, trust-on-first-use); says nothing about signatures this
+     build doesn't have. */
+  #governing-panel { position:absolute; top:64px; right:0; bottom:200px; width:360px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; overflow:auto; padding:16px; }
+  #governing-panel.open { display:flex; }
+  #governing-panel h3 { margin:0 0 4px; font-size:15px; color:#ef9f30; }
+  #governing-panel .sub { font-size:11px; color:#78768e; margin-bottom:14px; line-height:1.5; }
+  .pack-group { background:#0b0b12; border:1px solid #26263a; border-radius:8px; padding:12px 14px; margin-bottom:10px; }
+  .pack-group .name { font-family:ui-monospace, monospace; font-size:12.5px; color:#e8e8f0; display:flex; align-items:center; gap:6px; }
+  .pack-group .count { font-size:11px; color:#78768e; margin-top:3px; }
+  .pack-group .lock { color:#dba829; }
+  .no-pack-note { font-size:12px; color:#78768e; line-height:1.5; }
+
+  /* ---- reusable small chip, shared by the attribute list and the
+     governing-rules panel: `provable`/`unverified` per
+     agent-skills/nirdosha/hi_enhance_phase_ux.md's Option A. */
+  .rulechip { font-family:ui-monospace, monospace; font-size:9.5px; font-weight:bold; letter-spacing:0.03em; padding:2px 7px; border-radius:20px; border:1px solid; white-space:nowrap; }
+  .rulechip.provable { color:#3ddc84; border-color:rgba(61,220,132,0.5); background:rgba(61,220,132,0.12); }
+  .rulechip.unverified { color:#dba829; border-color:rgba(219,168,41,0.55); background:rgba(219,168,41,0.13); }
 
   /* ---- graph surface, between header and console ---- */
   #graph { position:absolute; top:64px; left:0; right:0; bottom:200px; }
   #fallback-canvas { position:absolute; top:64px; left:0; right:0; bottom:200px; display:none; }
 
-  #panel { position:absolute; top:64px; right:0; bottom:200px; width:320px; overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:14px; line-height:1.5; display:none; }
+  /* z-index:6, same as the three right-side rails below it -- all
+     above #header's z-index:5. #panel used to have no z-index at all
+     (auto/0), so on any window where its `top:64px` lands even a
+     hair under the header's real rendered height (font-metric/DPI
+     differences some native windows hit that this dev browser
+     doesn't), the header -- explicitly stacked above everything else
+     -- painted over the panel's top edge instead of the reverse. */
+  #panel { position:absolute; top:64px; right:0; bottom:200px; width:320px; overflow:auto; background:#15151f; border-left:1px solid #26263a; padding:14px; box-sizing:border-box; font-size:14px; line-height:1.5; display:none; z-index:6; }
   #panel h2 { margin:0 0 6px; font-size:17px; color:#ef9f30; word-break:break-all; }
   #panel .row { margin:4px 0; }
   #panel .label { opacity:0.6; margin-right:6px; }
@@ -33,6 +126,32 @@
   #panel button.secondary { background:#26263a; }
   #panel button:disabled { opacity:0.5; cursor:default; }
   #panel .form-status { font-size:12px; color:#a9a9bd; min-height:16px; }
+
+  /* ---- edit affordance (rfcs/0014's 2026-09-14 amendment, step 2):
+     `hi_graph::edit_driving_text`/`/api/edit` is real and has never
+     had a click target -- only the `:edit` console verb reached it. */
+  #panel .title-row { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+  #panel .title-actions { display:flex; gap:6px; flex:none; }
+  #panel .edit-pencil { background:transparent; border:1px solid #3a3a52; border-radius:4px; color:#a9a9bd; font-size:11px; padding:3px 7px; cursor:pointer; flex:none; margin:0; }
+  #panel .edit-pencil:hover { border-color:#564cbe; color:#e8e8f0; }
+  #panel .edit-box { width:100%; box-sizing:border-box; background:#0b0b12; border:1px solid #564cbe; border-radius:4px; color:#e8e8f0; font:13px ui-monospace, monospace; padding:8px; margin:6px 0; resize:vertical; }
+  #panel .edit-hint { font-size:11px; color:#78768e; margin:0 0 6px; line-height:1.5; }
+  #panel .locked-note { font-size:11px; color:#dba829; margin:0 0 6px; line-height:1.5; }
+  /* caution, not a lock -- a different color/shape from the amber
+     sealed-pack refusal above, since this can be edited, unlike that */
+  #panel .sys-badge { display:inline-block; font-size:10.5px; font-weight:bold; letter-spacing:0.02em; color:#8b9bc7; background:rgba(91,157,255,0.12); border:1px solid rgba(91,157,255,0.4); border-radius:20px; padding:3px 10px; margin:0 0 10px; cursor:help; }
+
+  /* ---- quick-add micro-forms (rfcs/0014's 2026-09-14 amendment, step
+     2): task-named buttons instead of the six-item template dropdown
+     as the FIRST thing offered -- the full template list stays, under
+     "more attribute types", for anything these two don't cover. */
+  #panel .quickrow { display:flex; gap:6px; margin-bottom:8px; }
+  #panel .quickbtn { background:transparent; border:1px dashed #3a3a52; color:#8b7ff0; border-radius:20px; font:11px ui-monospace, monospace; font-weight:bold; padding:5px 12px; cursor:pointer; margin:0; }
+  #panel .quickbtn:hover { border-color:#8b7ff0; border-style:solid; }
+  #panel .quickform { background:#0b0b12; border:1px solid #3a3a52; border-radius:6px; padding:10px; margin-bottom:10px; }
+  #panel .quickform .qlabel { font-size:11.5px; color:#a9a9bd; margin-bottom:5px; }
+  #panel details.advanced { margin-top:4px; }
+  #panel details.advanced summary { font-size:11px; color:#78768e; cursor:pointer; margin-bottom:6px; }
 
   #legend { position:absolute; bottom:208px; left:8px; font-size:13px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
   #legend .item { display:flex; align-items:center; gap:6px; margin:2px 0; }
@@ -131,11 +250,40 @@
   <span class="wordmark">NIRDOSHA</span>
   <span class="sep"></span>
   <span id="status"><span class="dot"></span><span id="status-text">loading…</span></span>
+  <div id="header-actions">
+    <span id="pending-count"></span>
+    <button id="rebuild-btn" type="button" title="Send every confirmed piece to the model and compile -- this is real work, not instant">Rebuild</button>
+    <button id="new-screen-toggle" type="button" title="Describe a new screen">+ Screen</button>
+    <button id="governing-toggle" type="button" title="What's enforced, and what sealed packs lock down">Rules</button>
+    <button id="ask-toggle" type="button">Ask</button>
+  </div>
 </div>
 <div id="graph"></div>
 <canvas id="fallback-canvas"></canvas>
 <div id="panel"></div>
 <div id="legend"></div>
+
+<div id="ask-rail">
+  <div class="ask-head"><span>Ask &middot; searches this project's ingested docs and code units (keyword search, not a conversation)</span><button type="button" id="ask-close" class="rail-close" title="close">✕</button></div>
+  <div id="ask-results"><div class="empty">Type a question or a term below.</div></div>
+  <form id="ask-form"><input id="ask-input" type="text" autocomplete="off" placeholder="e.g. what does check_role do"><button type="submit">Go</button></form>
+</div>
+
+<div id="new-screen-rail">
+  <div class="ask-head"><span>New screen &middot; describe it in plain language -- goes through the same model call as the original prompt</span><button type="button" id="new-screen-close" class="rail-close" title="close">✕</button></div>
+  <div class="sub" style="padding:0 14px;font-size:11px;color:#78768e;line-height:1.5;">e.g. "a screen showing every overdue invoice, with a button to send a reminder"</div>
+  <form id="new-screen-form">
+    <textarea id="new-screen-input" rows="4" placeholder="What should this screen show, and to whom?"></textarea>
+    <button type="submit">Add</button>
+  </form>
+  <div id="new-screen-status" class="form-status" style="padding:0 14px 12px;"></div>
+</div>
+
+<div id="governing-panel">
+  <div class="gov-head"><h3>Governing rules</h3><button type="button" id="governing-close" class="rail-close" title="close">✕</button></div>
+  <div class="sub">What's already enforced in this project, and what a sealed domain plugin locks down. Unsigned (5a) trust-on-first-use today -- see rfcs/0016.</div>
+  <div id="governing-body"></div>
+</div>
 
 <div id="console">
   <div id="transcript"></div>
@@ -167,8 +315,34 @@
     return node.kind || 'default';
   }
 
+  // Populated by `prepareGraphData` on every load/reload -- which
+  // nodes appear in at least one edge. A node absent from it (an
+  // "admin fn" with a real `driving_text` but no `RELATES_TO` edge to
+  // anything, a struct nothing else references) is not necessarily
+  // broken -- a standalone helper legitimately has no relationships --
+  // but it used to render identically to a well-linked node, which
+  // reads as "this looks lost, did something fail" rather than "this
+  // is a leaf." Dimmed, not hidden or recolored to a different kind.
+  let connectedNodeIds = new Set();
+
+  function blendTowardBackground(hex, amount) {
+    const bg = { r: 0x0b, g: 0x0b, b: 0x12 };
+    const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    const mix = (c, bgc) => Math.round(c + (bgc - c) * amount);
+    return 'rgb(' + mix(r, bg.r) + ',' + mix(g, bg.g) + ',' + mix(b, bg.b) + ')';
+  }
+
+  // A `serve { expose ... }`d fn, distinct from every other `fn` --
+  // this is the real security boundary (`typeck::check_serve_config`'s
+  // deny-by-default rule: nothing else is externally reachable at
+  // all), so it's the one place a role/claim gate actually matters;
+  // whatever it calls internally doesn't need its own. `hi_graph::
+  // sync_file` sets `status = 'exposed'` for exactly these fns.
+  const EXPOSED_COLOR = '#3ddcdc';
+
   function colorFor(node) {
-    return KIND_COLORS[subKind(node)] || KIND_COLORS.default;
+    const base = node.status === 'exposed' ? EXPOSED_COLOR : (KIND_COLORS[subKind(node)] || KIND_COLORS.default);
+    return connectedNodeIds.has(node.id) ? base : blendTowardBackground(base, 0.55);
   }
 
   function setStatus(text) {
@@ -313,6 +487,113 @@
       .catch(err => reportError('refreshing node panel', err));
   }
 
+  // Shared by every attach path below (the two quick micro-forms and
+  // the full template dropdown) so there's exactly one place that
+  // calls `/api/attach` -- previously the dropdown's own Attach button
+  // was the only caller here; the quick forms reuse it rather than
+  // repeating the same POST/status/refresh dance three times.
+  function doAttach(node, attr, statusEl, button, cb) {
+    if (button) button.disabled = true;
+    postForm('/api/attach', { node: node.id, attr })
+      .then(({ status: httpStatus, body }) => {
+        if (button) button.disabled = false;
+        if (httpStatus !== 200) {
+          statusEl.textContent = body.error || 'request failed: ' + httpStatus;
+          return;
+        }
+        logLine('', 'attached to ' + node.id + ': ' + attr);
+        refreshPanelForNode(node.id);
+        if (cb) cb();
+      })
+      .catch(err => {
+        if (button) button.disabled = false;
+        statusEl.textContent = String(err);
+        reportError('panel attach', err);
+      });
+  }
+
+  // rfcs/0014's 2026-09-14 amendment, step 2: task-named quick-add
+  // forms for the two shapes worth a dedicated button -- "who can do
+  // this" and "how fast/reliable must this be" -- rather than the
+  // six-item ATTR_TEMPLATES dropdown as the FIRST thing offered. The
+  // dropdown stays, collapsed under "more attribute types", for
+  // `effect`/`validate`/`custom` and anyone who wants the raw syntax
+  // directly.
+  function buildQuickRoleForm(panel, node, status) {
+    const form = document.createElement('div');
+    form.className = 'quickform';
+    form.style.display = 'none';
+    const label = document.createElement('div');
+    label.className = 'qlabel';
+    label.textContent = 'Who can do this? (a role name)';
+    form.appendChild(label);
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'admin';
+    form.appendChild(input);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Add';
+    btn.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) { status.textContent = 'enter a role name first.'; return; }
+      doAttach(node, 'requires(role: ' + value + ')', status, btn, () => { form.style.display = 'none'; input.value = ''; });
+    });
+    form.appendChild(btn);
+    const discardBtn = document.createElement('button');
+    discardBtn.type = 'button';
+    discardBtn.className = 'secondary';
+    discardBtn.textContent = 'Discard';
+    discardBtn.addEventListener('click', () => { input.value = ''; status.textContent = ''; form.style.display = 'none'; });
+    form.appendChild(discardBtn);
+    panel.appendChild(form);
+    return form;
+  }
+
+  function buildQuickNfrForm(panel, node, status) {
+    const form = document.createElement('div');
+    form.className = 'quickform';
+    form.style.display = 'none';
+    const label = document.createElement('div');
+    label.className = 'qlabel';
+    label.textContent = 'Performance or reliability target';
+    form.appendChild(label);
+    const kind = document.createElement('select');
+    [
+      ['latency_ms', 'responds within (ms)'],
+      ['error_rate_max', 'error rate at most (0-1)'],
+      ['throughput_min_per_sec', 'handles at least (per second)'],
+      ['concurrency_max', 'at most this many at once'],
+    ].forEach(([value, text]) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = text;
+      kind.appendChild(opt);
+    });
+    form.appendChild(kind);
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '200';
+    form.appendChild(input);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Add';
+    btn.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) { status.textContent = 'enter a target value first.'; return; }
+      doAttach(node, 'nfr(' + kind.value + ': ' + value + ')', status, btn, () => { form.style.display = 'none'; input.value = ''; });
+    });
+    form.appendChild(btn);
+    const discardBtn = document.createElement('button');
+    discardBtn.type = 'button';
+    discardBtn.className = 'secondary';
+    discardBtn.textContent = 'Discard';
+    discardBtn.addEventListener('click', () => { input.value = ''; status.textContent = ''; form.style.display = 'none'; });
+    form.appendChild(discardBtn);
+    panel.appendChild(form);
+    return form;
+  }
+
   function buildAttributeForm(panel, node) {
     const title = document.createElement('div');
     title.className = 'section-title';
@@ -330,6 +611,34 @@
       panel.appendChild(ul);
     }
 
+    const status = document.createElement('div');
+    status.className = 'form-status';
+
+    const quickrow = document.createElement('div');
+    quickrow.className = 'quickrow';
+    panel.appendChild(quickrow);
+    const roleForm = buildQuickRoleForm(panel, node, status);
+    const nfrForm = buildQuickNfrForm(panel, node, status);
+    const roleBtn = document.createElement('button');
+    roleBtn.type = 'button';
+    roleBtn.className = 'quickbtn';
+    roleBtn.textContent = '+ Role';
+    roleBtn.addEventListener('click', () => { nfrForm.style.display = 'none'; roleForm.style.display = roleForm.style.display === 'none' ? 'block' : 'none'; });
+    quickrow.appendChild(roleBtn);
+    const nfrBtn = document.createElement('button');
+    nfrBtn.type = 'button';
+    nfrBtn.className = 'quickbtn';
+    nfrBtn.textContent = '+ NFR';
+    nfrBtn.addEventListener('click', () => { roleForm.style.display = 'none'; nfrForm.style.display = nfrForm.style.display === 'none' ? 'block' : 'none'; });
+    quickrow.appendChild(nfrBtn);
+
+    const advanced = document.createElement('details');
+    advanced.className = 'advanced';
+    const summary = document.createElement('summary');
+    summary.textContent = 'more attribute types';
+    advanced.appendChild(summary);
+    panel.appendChild(advanced);
+
     const select = document.createElement('select');
     Object.keys(ATTR_TEMPLATES).forEach(key => {
       const opt = document.createElement('option');
@@ -337,18 +646,15 @@
       opt.textContent = ATTR_TEMPLATES[key].label;
       select.appendChild(opt);
     });
-    panel.appendChild(select);
+    advanced.appendChild(select);
 
     const input = document.createElement('input');
     input.type = 'text';
-    panel.appendChild(input);
+    advanced.appendChild(input);
 
     const syncPlaceholder = () => { input.placeholder = ATTR_TEMPLATES[select.value].placeholder; };
     select.addEventListener('change', syncPlaceholder);
     syncPlaceholder();
-
-    const status = document.createElement('div');
-    status.className = 'form-status';
 
     const attachBtn = document.createElement('button');
     attachBtn.type = 'button';
@@ -359,25 +665,9 @@
         status.textContent = 'enter a value first.';
         return;
       }
-      const attr = ATTR_TEMPLATES[select.value].build(value);
-      attachBtn.disabled = true;
-      postForm('/api/attach', { node: node.id, attr })
-        .then(({ status: httpStatus, body }) => {
-          attachBtn.disabled = false;
-          if (httpStatus !== 200) {
-            status.textContent = body.error || 'request failed: ' + httpStatus;
-            return;
-          }
-          logLine('', 'attached to ' + node.id + ': ' + attr);
-          refreshPanelForNode(node.id);
-        })
-        .catch(err => {
-          attachBtn.disabled = false;
-          status.textContent = String(err);
-          reportError('panel attach', err);
-        });
+      doAttach(node, ATTR_TEMPLATES[select.value].build(value), status, attachBtn);
     });
-    panel.appendChild(attachBtn);
+    advanced.appendChild(attachBtn);
 
     // Attributes only ever reach Generate mode for a *confirmed*
     // candidate (`hi_graph::confirmed_units`'s own gate) -- surfaced
@@ -418,12 +708,173 @@
   // kicked off is still in flight -- called twice per click, once to
   // show the node's own fields immediately and once to fill in impact
   // once it resolves.
+  // rfcs/0014's 2026-09-14 amendment, step 2: `hi_graph::
+  // edit_driving_text`/`/api/edit` is real and unlocks a previously-
+  // locked unit exactly as its own doc comment says -- surfaced here
+  // as a pencil next to the title instead of only the `:edit` console
+  // verb. Client-side only refuses a plugin-sourced (`non_waivable`)
+  // node -- the backend route itself does not check `non_waivable` the
+  // way `waive_node`/`delete_node` do (a real, separate gap; tracked,
+  // not fixed here -- see docs/FEATURE_WORKFLOW.md, this is exactly
+  // the kind of finding that gets its own issue rather than a silent
+  // fix bundled into an unrelated UI change).
+  // `main` (and, in principle, any other pure-orchestration entry
+  // point) doesn't have an independent "purpose" a driving-text
+  // sentence usefully captures the way `approve_payment` does -- its
+  // job is entirely "call the other confirmed pieces in the right
+  // order," which is a function of THEIR shapes, not its own
+  // description. Editing is not blocked here (that would be a real
+  // capability loss for a legitimate case this heuristic gets wrong),
+  // but the form says so up front rather than silently inviting an
+  // edit that fights the whole-file regenerate model.
+  function isOrchestrationEntryPoint(node) {
+    return node.kind === 'CodeUnit' && (node.title === 'main' || node.id === 'code:fn:main');
+  }
+
+  function buildEditForm(panel, node) {
+    const box = document.createElement('div');
+    box.style.display = 'none';
+    if (isOrchestrationEntryPoint(node)) {
+      const warn = document.createElement('div');
+      warn.className = 'locked-note';
+      warn.textContent = '`main` wires together whatever else is confirmed -- it has no independent purpose of its own to describe. Usually better to edit or add the pieces it calls, and let a rebuild regenerate `main` from those; edit this directly only if you specifically want to change the wiring itself.';
+      box.appendChild(warn);
+    }
+    if (node.locked) {
+      const note = document.createElement('div');
+      note.className = 'locked-note';
+      note.textContent = 'This unit already built successfully -- editing it will unlock it, and it must be rebuilt before it can publish again.';
+      box.appendChild(note);
+    }
+    const hint = document.createElement('div');
+    hint.className = 'edit-hint';
+    // An empty box with no explanation reads as broken, not as "this
+    // came from your existing code, not a prompt, so there's nothing
+    // here yet" -- which is the real, unremarkable reason for most
+    // sync'd functions (`hi sync`'s own doc comment: driving_text is
+    // `None` for anything found in real code, never populated after
+    // the fact).
+    hint.textContent = node.driving_text ? 'What should this do?' : 'No description yet (this came from existing code, not a prompt) -- add one if it'+"'"+'d help, or leave it blank.';
+    box.appendChild(hint);
+    const textarea = document.createElement('textarea');
+    textarea.className = 'edit-box';
+    textarea.rows = 3;
+    textarea.value = node.driving_text || '';
+    textarea.placeholder = 'e.g. debits the sender and credits the receiver, recording both sides in one transaction';
+    box.appendChild(textarea);
+    const status = document.createElement('div');
+    status.className = 'form-status';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', () => {
+      const text = textarea.value.trim();
+      if (!text) { status.textContent = 'enter a description first.'; return; }
+      saveBtn.disabled = true;
+      postForm('/api/edit', { node: node.id, text })
+        .then(({ status: httpStatus, body }) => {
+          saveBtn.disabled = false;
+          if (httpStatus !== 200) { status.textContent = body.error || 'request failed: ' + httpStatus; return; }
+          logLine('', 'edited ' + node.id);
+          refreshPanelForNode(node.id);
+          if (reloadGraph) reloadGraph();
+        })
+        .catch(err => { saveBtn.disabled = false; status.textContent = String(err); reportError('panel edit', err); });
+    });
+    box.appendChild(saveBtn);
+    const discardBtn = document.createElement('button');
+    discardBtn.type = 'button';
+    discardBtn.className = 'secondary';
+    discardBtn.textContent = 'Discard';
+    discardBtn.addEventListener('click', () => {
+      // Actually discards the typed change, not just hides the box --
+      // reopening the pencil later must show the real current text,
+      // never whatever was abandoned mid-edit last time.
+      textarea.value = node.driving_text || '';
+      status.textContent = '';
+      box.style.display = 'none';
+    });
+    box.appendChild(discardBtn);
+    box.appendChild(status);
+    panel.appendChild(box);
+    return box;
+  }
+
   function showPanel(node, impactHits) {
     const panel = document.getElementById('panel');
     panel.replaceChildren();
+    const titleRow = document.createElement('div');
+    titleRow.className = 'title-row';
     const h2 = document.createElement('h2');
-    h2.textContent = node.title || node.id;
-    panel.appendChild(h2);
+    // A bare title is ambiguous the moment two nodes share a name --
+    // real today for anything `hi sync` finds a plain `struct` for
+    // that a prompt/screen decompose already gave a same-named
+    // `screen`-kind node: two separate ids (`code:struct:X` vs
+    // `code:screen:X`), same display name, easy to click the wrong one
+    // and not notice. The kind suffix is cheap disambiguation; merging
+    // them into one node is a real, separate data-model question this
+    // doesn't attempt (RFC 0014 Open Question 11's own "CodeUnit
+    // identity" gap, same family of problem, not the identical case).
+    h2.textContent = (node.title || node.id) + ' · ' + subKind(node);
+    titleRow.appendChild(h2);
+    // The panel had no way to dismiss it at all -- once opened it just
+    // stayed until another node's click replaced its contents. Grouped
+    // with the edit pencil (when present) so both sit together on the
+    // right, rather than `space-between` scattering a third child.
+    const titleActions = document.createElement('div');
+    titleActions.className = 'title-actions';
+    titleRow.appendChild(titleActions);
+    panel.appendChild(titleRow);
+
+    // A distinct badge, not just prose buried inside the edit form --
+    // visible the moment the panel opens, before anyone has reached
+    // for the pencil. Deliberately a different visual language from
+    // the sealed-pack lock note below (amber, "cannot be edited here"
+    // -- a hard refusal): this is "you CAN edit it, be aware it's
+    // structural, not a domain concept" -- caution, not a lock.
+    if (isOrchestrationEntryPoint(node)) {
+      const sysBadge = document.createElement('div');
+      sysBadge.className = 'sys-badge';
+      sysBadge.textContent = '⚙ system-generated entry point';
+      sysBadge.title = 'Compiler-required scaffolding, not something you described -- editing it changes how everything else is wired together.';
+      panel.appendChild(sysBadge);
+    }
+    if (node.status === 'exposed') {
+      const exposedBadge = document.createElement('div');
+      exposedBadge.className = 'sys-badge';
+      exposedBadge.style.color = EXPOSED_COLOR;
+      exposedBadge.style.background = 'rgba(61,220,220,0.12)';
+      exposedBadge.style.borderColor = 'rgba(61,220,220,0.4)';
+      exposedBadge.textContent = '🌐 API-exposed';
+      exposedBadge.title = "Listed in serve { expose ... } -- this is the real access-control boundary. It needs its own requires(role:)/requires(claim:) if it should be gated; whatever it calls internally doesn't need one just because this does.";
+      panel.appendChild(exposedBadge);
+    }
+
+    let editBox = null;
+    if (node.kind === 'CodeUnit' && !node.non_waivable) {
+      const pencil = document.createElement('button');
+      pencil.type = 'button';
+      pencil.className = 'edit-pencil';
+      pencil.textContent = '✎ edit';
+      pencil.title = 'change what this unit should do';
+      pencil.addEventListener('click', () => {
+        if (!editBox) editBox = buildEditForm(panel, node);
+        editBox.style.display = editBox.style.display === 'none' ? 'block' : 'none';
+      });
+      titleActions.appendChild(pencil);
+    } else if (node.non_waivable) {
+      const sealedNote = document.createElement('div');
+      sealedNote.className = 'locked-note';
+      sealedNote.textContent = '🔒 sealed by ' + node.plugin_origin + ' -- cannot be edited, waived, or deleted here';
+      panel.appendChild(sealedNote);
+    }
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'edit-pencil';
+    closeBtn.textContent = '✕';
+    closeBtn.title = 'close';
+    closeBtn.addEventListener('click', () => { panel.style.display = 'none'; });
+    titleActions.appendChild(closeBtn);
 
     row(panel, 'id', node.id);
     row(panel, 'kind', subKind(node));
@@ -453,7 +904,7 @@
     // attach_attribute` works on either, even though only a candidate
     // with `driving_text` actually feeds Generate mode's own prompt
     // (`hi_graph::confirmed_units`'s own filter).
-    if (node.kind === 'CodeUnit') {
+    if (node.kind === 'CodeUnit' && !node.non_waivable) {
       buildAttributeForm(panel, node);
     }
 
@@ -472,9 +923,25 @@
       loading.textContent = 'loading…';
       panel.appendChild(loading);
     } else if (impactHits.length === 0) {
+      // Plain and reassuring rather than a bare "(none)" -- a genuinely
+      // unlinked node reads as broken otherwise ("why is this floating
+      // by itself, did something fail"). It usually hasn't: nothing
+      // declared a relationship to this piece yet, which is normal for
+      // a standalone helper or a fresh project, not an error state.
       const none = document.createElement('div');
       none.style.opacity = '0.6';
-      none.textContent = '(none)';
+      none.style.fontSize = '12px';
+      none.style.lineHeight = '1.5';
+      // `main` genuinely calls everything else in the real, compiled
+      // sense -- but `hi sync` (unlike prompt-mode decomposition's
+      // `depends_on`) never records call-graph edges for real code at
+      // all, so "impact" is always empty here regardless of how
+      // connected the function actually is. Said plainly rather than
+      // the generic "standalone piece" framing, which would be a real
+      // overclaim for the one function that's the LEAST standalone.
+      none.textContent = isOrchestrationEntryPoint(node)
+        ? "empty here even though main calls everything below it -- this view only shows tracked relationship edges, and hi sync doesn't record real call-graph edges for existing code yet."
+        : 'nothing else references this yet -- normal for a standalone piece, not a sign anything is broken.';
       panel.appendChild(none);
     } else {
       const ul = document.createElement('ul');
@@ -503,6 +970,22 @@
       item.appendChild(text);
       legend.appendChild(item);
     });
+    const exposedItem = document.createElement('div');
+    exposedItem.className = 'item';
+    const exposedSwatch = document.createElement('span');
+    exposedSwatch.className = 'swatch';
+    exposedSwatch.style.background = EXPOSED_COLOR;
+    exposedItem.appendChild(exposedSwatch);
+    const exposedText = document.createElement('span');
+    exposedText.textContent = 'fn (API-exposed)';
+    exposedItem.appendChild(exposedText);
+    legend.appendChild(exposedItem);
+    const dimNote = document.createElement('div');
+    dimNote.className = 'item';
+    dimNote.style.opacity = '0.7';
+    dimNote.style.fontSize = '11px';
+    dimNote.textContent = 'dim = nothing links to it yet';
+    legend.appendChild(dimNote);
   }
 
   // Set by whichever of `run3D`/`run2D` actually ran, so a mutating
@@ -525,7 +1008,59 @@
     const links = edges
       .filter(e => nodeIds.has(e.src) && nodeIds.has(e.dst) && !e.kind.endsWith('_BY'))
       .map(e => ({ source: e.src, target: e.dst, kind: e.kind, flag: e.flag }));
+    // Connectivity for `colorFor`'s dimming -- read from the FULL
+    // (unfiltered) edge set, both directions, not just `links` above:
+    // `links` already drops one direction of every pair to avoid
+    // double-drawing, and a node reachable only via the dropped
+    // direction must still count as connected.
+    connectedNodeIds = new Set();
+    edges.forEach(e => { connectedNodeIds.add(e.src); connectedNodeIds.add(e.dst); });
+    // Every path that loads or reloads the graph goes through here --
+    // the one hook point for header state and the governing-rules
+    // panel, both of which need the raw node rows (plugin_origin,
+    // confirmed/locked/waived), not just what the 3D view renders.
+    updateHeaderState(nodes);
     return { nodes, links };
+  }
+
+  // rfcs/0014's 2026-09-14 amendment, step 2: a visible "N changes
+  // since last build" instead of a silent/automatic recompile --
+  // `generate_program` resends every CONFIRMED unit on every pass
+  // regardless of lock state (`hi_graph::confirmed_units`'s own doc
+  // comment), so "pending" here means "confirmed but not yet reflected
+  // in a successful build," i.e. not locked -- the same set
+  // `hi_graph::generatable_units` names, read back from `/api/nodes`
+  // rather than re-querying, since this fires on every graph load.
+  let latestNodes = [];
+  function pendingCount(nodes) {
+    return nodes.filter(n => n.confirmed && !n.locked && !n.waived).length;
+  }
+  function updateHeaderState(nodes) {
+    latestNodes = nodes;
+    const n = pendingCount(nodes);
+    const el = document.getElementById('pending-count');
+    el.textContent = n === 0 ? 'up to date' : n + ' change' + (n === 1 ? '' : 's') + ' since last build';
+    const rebuildBtn = document.getElementById('rebuild-btn');
+    rebuildBtn.disabled = n === 0;
+    rebuildBtn.title = n === 0 ? 'nothing confirmed is waiting on a build' : 'send ' + n + ' confirmed piece(s) to the model and compile -- this is real work, not instant';
+  }
+
+  // Extracted so the header's Rebuild button and the console's
+  // `:generate` verb are the exact same call, not two copies of this
+  // logic that could drift -- see console `initConsole`'s own
+  // `:generate` handler, now a thin wrapper over this.
+  function doRebuild() {
+    logLine('', 'generating from every confirmed candidate (this calls the model, with a bounded self-repair loop, and can take a while)…');
+    document.getElementById('rebuild-btn').disabled = true;
+    return withBusy(postForm('/api/generate', {}))
+      .then(({ status, body }) => {
+        (body.log || []).forEach(l => logLine('', l));
+        if (!body.ok) { logLine('error', body.error || ('request failed: ' + status)); return; }
+        logLine('', 'locked ' + body.locked.length + ' unit(s) -> ' + body.path + (body.not_declared && body.not_declared.length ? '; not declared by the generated program: ' + body.not_declared.join(', ') : ''));
+        return reloadGraph && reloadGraph();
+      })
+      .catch(err => { logLine('error', String(err)); reportError('rebuild', err); })
+      .finally(() => { document.getElementById('rebuild-btn').disabled = pendingCount(latestNodes) === 0; });
   }
 
   function onNodeSelected(node) {
@@ -902,15 +1437,7 @@
     // combined file, not per-unit files) and locks whichever units it
     // actually declared.
     if (line === ':generate') {
-      logLine('', 'generating from every confirmed candidate (this calls the model, with a bounded self-repair loop, and can take a while)…');
-      withBusy(postForm('/api/generate', {}))
-        .then(({ status, body }) => {
-          (body.log || []).forEach(l => logLine('', l));
-          if (!body.ok) { logLine('error', body.error || ('request failed: ' + status)); return; }
-          logLine('', 'locked ' + body.locked.length + ' unit(s) -> ' + body.path + (body.not_declared && body.not_declared.length ? '; not declared by the generated program: ' + body.not_declared.join(', ') : ''));
-          return reloadGraph && reloadGraph();
-        })
-        .catch(err => { logLine('error', String(err)); reportError('console :generate', err); });
+      doRebuild();
       return;
     }
     // rfcs/0014 "4. Publish mode" -- see `hi_api.rs::handle_publish`'s
@@ -1009,40 +1536,75 @@
     document.getElementById('prompt-screen').classList.remove('visible');
   }
 
-  function submitPromptScreen() {
-    const input = document.getElementById('prompt-screen-input');
-    const btn = document.getElementById('prompt-screen-submit');
-    const statusEl = document.getElementById('prompt-screen-status');
-    const text = input.value.trim();
+  // Shared by the very first onboarding prompt and every later
+  // "describe one more thing" entry point (`+ New Screen`, and in
+  // principle any future `+ New ...` affordance) -- one call to the
+  // real `/api/prompt` route, one place that logs/reloads/reports on
+  // it, so a later addition doesn't re-derive this dance a third time.
+  function submitPromptText(text, els) {
+    const { input, btn, statusEl, onSuccess } = els;
     if (!text) {
-      statusEl.textContent = 'describe what you want to build first.';
+      statusEl.textContent = 'describe what you want first.';
       return;
     }
-    input.disabled = true;
-    btn.disabled = true;
-    statusEl.textContent = 'populating the graph from this prompt (this calls the model, and can take a while)…';
+    if (input) input.disabled = true;
+    if (btn) btn.disabled = true;
+    statusEl.textContent = 'sending this to the model (can take a while)…';
     postForm('/api/prompt', { text })
       .then(({ status, body }) => {
         if (status !== 200) {
           statusEl.textContent = body.error || ('request failed: ' + status);
-          input.disabled = false;
-          btn.disabled = false;
+          if (input) input.disabled = false;
+          if (btn) btn.disabled = false;
           return;
         }
         logLine('', 'populated the graph from the prompt: ' + body.nodes_added + ' candidate(s), ' + body.edges_added + ' relation(s) -- review with the click panel, then :confirm <node-id>.');
-        // "the mode should also change to build mode the first time a
-        // prompt is consumed" -- this is that transition; reopening
-        // `hi` later skips straight past this screen (`hasPromptHistory`
-        // above, checked fresh against the database on every load).
-        enterBuildMode();
+        if (input) input.disabled = false;
+        if (btn) btn.disabled = false;
         if (reloadGraph) reloadGraph();
+        if (onSuccess) onSuccess();
       })
       .catch(err => {
         statusEl.textContent = String(err);
-        input.disabled = false;
-        btn.disabled = false;
-        reportError('prompt-screen submit', err);
+        if (input) input.disabled = false;
+        if (btn) btn.disabled = false;
+        reportError('prompt submit', err);
       });
+  }
+
+  function submitPromptScreen() {
+    const input = document.getElementById('prompt-screen-input');
+    const btn = document.getElementById('prompt-screen-submit');
+    const statusEl = document.getElementById('prompt-screen-status');
+    submitPromptText(input.value.trim(), {
+      input, btn, statusEl,
+      // "the mode should also change to build mode the first time a
+      // prompt is consumed" -- this is that transition; reopening `hi`
+      // later skips straight past this screen (`hasPromptHistory`
+      // above, checked fresh against the database on every load).
+      onSuccess: enterBuildMode,
+    });
+  }
+
+  function initNewScreenRail() {
+    const rail = document.getElementById('new-screen-rail');
+    document.getElementById('new-screen-toggle').addEventListener('click', () => {
+      document.getElementById('ask-rail').classList.remove('open');
+      document.getElementById('governing-panel').classList.remove('open');
+      document.getElementById('panel').style.display = 'none';
+      rail.classList.toggle('open');
+      if (rail.classList.contains('open')) document.getElementById('new-screen-input').focus();
+    });
+    document.getElementById('new-screen-close').addEventListener('click', () => rail.classList.remove('open'));
+    document.getElementById('new-screen-form').addEventListener('submit', e => {
+      e.preventDefault();
+      const input = document.getElementById('new-screen-input');
+      const statusEl = document.getElementById('new-screen-status');
+      submitPromptText(input.value.trim(), {
+        input, statusEl,
+        onSuccess: () => { input.value = ''; statusEl.textContent = 'added -- review it with the click panel, then Confirm.'; },
+      });
+    });
   }
 
   function initPromptScreen() {
@@ -1054,6 +1616,191 @@
       }
     });
   }
+
+  // rfcs/0014's 2026-09-14 amendment: Ask as a rail present on every
+  // screen, not a mode -- wraps the real `/api/ask` (`hi_graph::ask`),
+  // rendered as what it actually is (keyword-matched passages), never
+  // as a synthesized conversational answer the endpoint doesn't give.
+  // `/api/ask` (`hi_api.rs::handle_ask`) has three real outcomes, same
+  // as the console's own `:ask` handling: local keyword `hits` (FTS5 +
+  // a CodeUnit name/driving-text match, instant, free), a real LLM
+  // `answer` when nothing local matched and a provider is configured,
+  // or `error`. Rendered here exactly as distinct as the console
+  // already keeps them -- a hit is a passage, an `answer` is a real
+  // model reply, never blurred into one "chat bubble" that overstates
+  // what a plain keyword miss actually is.
+  function renderAskResult(result) {
+    const results = document.getElementById('ask-results');
+    results.replaceChildren();
+    const hits = result.hits || [];
+    if (hits.length) {
+      hits.forEach(hit => {
+        const div = document.createElement('div');
+        div.className = 'hit';
+        const doc = document.createElement('div');
+        doc.className = 'doc';
+        doc.textContent = hit.doc_id;
+        div.appendChild(doc);
+        div.appendChild(document.createTextNode(hit.content));
+        results.appendChild(div);
+      });
+      return;
+    }
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    if (result.answer) {
+      empty.className = 'hit';
+      empty.textContent = result.answer;
+    } else if (result.error) {
+      empty.textContent = result.error;
+    } else {
+      empty.textContent = 'no local matches -- set an LLM provider (e.g. OPENAI_API_KEY) for a real answer when local search finds nothing.';
+    }
+    results.appendChild(empty);
+  }
+
+  function initAskRail() {
+    const rail = document.getElementById('ask-rail');
+    document.getElementById('ask-toggle').addEventListener('click', () => {
+      document.getElementById('governing-panel').classList.remove('open');
+      document.getElementById('new-screen-rail').classList.remove('open');
+      // The node inspector (`#panel`) and this rail occupy the same
+      // right-hand strip -- without hiding one, a narrower rail lets
+      // the wider panel peek out from behind its left edge instead of
+      // cleanly replacing it.
+      document.getElementById('panel').style.display = 'none';
+      rail.classList.toggle('open');
+      if (rail.classList.contains('open')) document.getElementById('ask-input').focus();
+    });
+    document.getElementById('ask-close').addEventListener('click', () => rail.classList.remove('open'));
+    document.getElementById('ask-form').addEventListener('submit', e => {
+      e.preventDefault();
+      const q = document.getElementById('ask-input').value.trim();
+      if (!q) return;
+      withBusy(fetch('/api/ask?q=' + encodeURIComponent(q)).then(r => r.json()))
+        .then(result => renderAskResult(result))
+        .catch(err => reportError('ask rail', err));
+    });
+  }
+
+  // rfcs/0014's 2026-09-14 amendment, step 4: plain-language visibility
+  // into what's already enforced, grouped by sealed pack (`plugin_
+  // origin`, RFC 0016 5a -- unsigned, trust-on-first-use). Pack
+  // manifest prose (what it locks down, in the author's own words)
+  // isn't plumbed to this API yet -- disclosed here rather than
+  // invented, see the group note below and issue #44 for the fuller
+  // pack-gallery version this grows into.
+  function renderGoverningPanel() {
+    const body = document.getElementById('governing-body');
+    body.replaceChildren();
+    const groups = new Map();
+    latestNodes.forEach(n => {
+      if (!n.plugin_origin) return;
+      if (!groups.has(n.plugin_origin)) groups.set(n.plugin_origin, []);
+      groups.get(n.plugin_origin).push(n);
+    });
+    if (groups.size === 0) {
+      const note = document.createElement('div');
+      note.className = 'no-pack-note';
+      note.textContent = 'No sealed domain pack is installed in this project -- everything here came from your own prompt, and can be edited or removed freely.';
+      body.appendChild(note);
+    } else {
+      groups.forEach((nodes, packId) => {
+        const g = document.createElement('div');
+        g.className = 'pack-group';
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.innerHTML = '<span class="lock">&#128274;</span> ' + packId;
+        g.appendChild(name);
+        const count = document.createElement('div');
+        count.className = 'count';
+        count.textContent = nodes.length + ' rule' + (nodes.length === 1 ? '' : 's') + ' sealed -- cannot be waived or deleted here.';
+        g.appendChild(count);
+        body.appendChild(g);
+      });
+    }
+
+    // Install more -- reads the real, embedded pack set
+    // (`hi_plugin::known_installable_packs`) rather than an arbitrary
+    // upload; this is deliberately the whole "pack gallery" for now
+    // (issue #44's fuller browsable version -- trust badges, non-
+    // bundled packs -- is a separate, bigger piece).
+    const installTitle = document.createElement('div');
+    installTitle.className = 'section-title';
+    installTitle.style.marginTop = '16px';
+    installTitle.textContent = 'install more';
+    body.appendChild(installTitle);
+    const installList = document.createElement('div');
+    installList.id = 'pack-install-list';
+    installList.textContent = 'loading…';
+    installList.style.cssText = 'font-size:12px;color:#78768e;';
+    body.appendChild(installList);
+
+    fetch('/api/packs').then(r => r.json()).then(packs => {
+      installList.replaceChildren();
+      packs.forEach(pack => {
+        const card = document.createElement('div');
+        card.className = 'pack-group';
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = pack.id;
+        card.appendChild(name);
+        const desc = document.createElement('div');
+        desc.className = 'count';
+        desc.textContent = pack.description;
+        card.appendChild(desc);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.style.cssText = 'margin-top:8px;font:11px ui-monospace,monospace;font-weight:bold;padding:6px 12px;border-radius:5px;border:none;background:#564cbe;color:#fff;cursor:pointer;';
+        if (pack.installed) {
+          btn.textContent = 'Installed';
+          btn.disabled = true;
+          btn.style.opacity = '0.5';
+          btn.style.cursor = 'default';
+        } else {
+          btn.textContent = 'Install';
+          btn.addEventListener('click', () => {
+            btn.disabled = true;
+            btn.textContent = 'Installing…';
+            postForm('/api/packs/install', { pack_id: pack.id })
+              .then(({ status, body: respBody }) => {
+                if (status !== 200) {
+                  btn.disabled = false;
+                  btn.textContent = 'Install';
+                  logLine('error', respBody.error || ('install failed: ' + status));
+                  return;
+                }
+                logLine('', 'installed pack ' + respBody.pack_id);
+                if (reloadGraph) reloadGraph();
+                renderGoverningPanel();
+              })
+              .catch(err => { btn.disabled = false; btn.textContent = 'Install'; reportError('pack install', err); });
+          });
+        }
+        card.appendChild(btn);
+        installList.appendChild(card);
+      });
+    }).catch(err => { installList.textContent = 'could not load the pack list.'; reportError('packs list', err); });
+  }
+
+  function initGoverningPanel() {
+    document.getElementById('governing-toggle').addEventListener('click', () => {
+      const panel = document.getElementById('governing-panel');
+      document.getElementById('ask-rail').classList.remove('open');
+      document.getElementById('new-screen-rail').classList.remove('open');
+      document.getElementById('panel').style.display = 'none';
+      panel.classList.toggle('open');
+      if (panel.classList.contains('open')) renderGoverningPanel();
+    });
+    document.getElementById('governing-close').addEventListener('click', () => {
+      document.getElementById('governing-panel').classList.remove('open');
+    });
+  }
+
+  document.getElementById('rebuild-btn').addEventListener('click', doRebuild);
+  initAskRail();
+  initGoverningPanel();
+  initNewScreenRail();
 
   runSplash();
   initConsole();

@@ -186,7 +186,7 @@ fn hash_item<T: serde::Serialize>(item: &T) -> Result<String, String> {
 /// it's computed post-parse, the same property
 /// `docs/nirdosha-agent-api.md` E1's `ast_hash` already documents at
 /// the whole-program level.
-fn code_units_in_file(path: &Path) -> Result<Vec<CodeUnit>, String> {
+fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, crate::ast::Program), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let toks = crate::token::Lexer::new(&src)
         .tokenize()
@@ -238,7 +238,7 @@ fn code_units_in_file(path: &Path) -> Result<Vec<CodeUnit>, String> {
     for sc in &program.screens {
         units.push(CodeUnit { qualified_name: sc.struct_name.clone(), kind: "screen", content_hash: hash_item(sc)?, line: sc.span.line, col: sc.span.col });
     }
-    Ok(units)
+    Ok((units, program))
 }
 
 pub fn code_unit_node_id(kind: &str, qualified_name: &str) -> String {
@@ -273,7 +273,7 @@ impl SyncReport {
 /// inferred knowledge stay separate" principle.
 fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
     let mut report = SyncReport { files_scanned: 1, ..Default::default() };
-    let units = code_units_in_file(path)?;
+    let (units, program) = code_units_in_file(path)?;
     report.units_seen = units.len();
     let source_ref = path.display().to_string();
 
@@ -331,6 +331,70 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
             }
         }
     }
+
+    // rfcs/0014's 2026-09-14 amendment, step 5: mark which `fn`s are the
+    // real security boundary. `typeck::check_serve_config`'s deny-by-
+    // default rule already means only a `serve { expose ... }`-listed
+    // fn is externally reachable at all, and `ExposedMutatingFnMissing
+    // Requires` already demands a role/claim gate on exactly those, not
+    // on every internal helper an exposed fn happens to call -- a real
+    // user question ("do I have to add roles to every function
+    // internal ones call?") answered by the compiler's own existing
+    // rule, just never shown anywhere before. Reuses the `nodes.status`
+    // column, unused by any other code path today (every insert site
+    // in this file writes `NULL`) -- the only vocabulary this pass
+    // gives it is the literal string `'exposed'`; a later, unrelated
+    // use of `status` must not silently repurpose that string for
+    // something else.
+    if let Some(serve) = &program.serve_config {
+        for (name, _) in &serve.expose {
+            let fn_id = code_unit_node_id("fn", name);
+            conn.execute("UPDATE nodes SET status = 'exposed' WHERE id = ?1", [&fn_id]).map_err(|e| format!("marking {fn_id} exposed: {e}"))?;
+        }
+    }
+
+    // rfcs/0014's 2026-09-14 amendment: real call-graph edges for
+    // synced code, not just LLM-decompose's own `depends_on` edges
+    // (`add_relation`, `hi_api::handle_prompt`) or `:link`'s manual
+    // requirement<->code pairs. Before this, ANY function found by
+    // `hi sync` -- however heavily it's actually called -- showed
+    // "impact: none" forever, because nothing ever walked a real
+    // function body looking for what it calls (field-failure,
+    // 2026-09-14: `main` reported zero impact despite calling every
+    // other unit in the program). `Expr::Call` also covers struct/
+    // enum-variant construction (`ast.rs`'s own convention -- there is
+    // no bare-identifier construction form), so `main` calling
+    // `Account(...)` records a real edge to `code:struct:Account` too,
+    // not just to other `fn`s.
+    //
+    // Scope, matching this module's own file-at-a-time limitation (no
+    // `use` resolution, this file's own doc comment): a call only
+    // becomes an edge if its target already exists as a `CodeUnit`
+    // node -- either declared in this same file (just upserted above)
+    // or in any other file already synced. A call to something not
+    // yet synced anywhere records no edge; a later sync of that file
+    // fills it in the same way `possibly_stale` flags catch up after
+    // the fact elsewhere in this function, not retroactively.
+    const CALLABLE_KINDS: [&str; 4] = ["fn", "struct", "enum", "screen"];
+    for f in &program.fns {
+        let caller_id = code_unit_node_id("fn", &f.name);
+        let mut called: HashSet<String> = HashSet::new();
+        crate::contract_check::collect_call_names_stmts(&f.body.stmts, &mut called);
+        for name in &called {
+            if name == &f.name {
+                continue; // recursion isn't a graph edge worth drawing to itself
+            }
+            for kind in CALLABLE_KINDS {
+                let callee_id = code_unit_node_id(kind, name);
+                let exists: Option<String> =
+                    conn.query_row("SELECT id FROM nodes WHERE id = ?1", [&callee_id], |r| r.get(0)).optional().map_err(|e| format!("checking call target {callee_id}: {e}"))?;
+                if exists.is_some() {
+                    add_relation(conn, &caller_id, &callee_id)?;
+                }
+            }
+        }
+    }
+
     Ok(report)
 }
 
@@ -1155,7 +1219,7 @@ mod tests {
             }
         }
 
-        let units = code_units_in_file(&path).expect("code_units_in_file parse");
+        let (units, _program) = code_units_in_file(&path).expect("code_units_in_file parse");
         let actual: Vec<(&str, String)> = units.iter().map(|u| (u.kind, u.qualified_name.clone())).collect();
 
         assert_eq!(actual.len(), expected.len(), "expected {expected:?}, got {actual:?}");
@@ -1176,6 +1240,62 @@ mod tests {
         let hit = report.hits.iter().find(|h| h.node_id == "code:fn:second").expect("second should be reachable");
         assert_eq!(hit.line, Some(2), "fn second is declared on line 2");
         assert!(hit.source_ref.as_deref().unwrap_or("").ends_with("a.nir"));
+    }
+
+    /// rfcs/0014's 2026-09-14 amendment: field failure `main` reporting
+    /// zero impact despite calling every other unit in the program --
+    /// `hi sync` used to record no call-graph edges at all for real
+    /// code, only `add_relation`'s LLM-decompose `depends_on` edges and
+    /// `:link`'s manual requirement pairs. `sync_file`'s new pass walks
+    /// each fn body (reusing `contract_check::collect_call_names_stmts`)
+    /// and records a real edge to any call target that's already a
+    /// known `CodeUnit` -- covering both an ordinary fn call and a
+    /// struct construction call (`Expr::Call` covers both, `ast.rs`'s
+    /// own convention).
+    #[test]
+    fn sync_records_real_call_edges_so_main_is_no_longer_falsely_unlinked() {
+        let dir = scratch_dir("call_edges");
+        write_nir(
+            &dir,
+            "a.nir",
+            "struct Account { id: i64 }\n\
+             fn helper(a: Account) -> i64 { return a.id }\n\
+             fn main() -> unit requires(public) {\n\
+                 let acc: Account = Account(1)\n\
+                 let _v: i64 = helper(acc)\n\
+             }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+
+        let report = impact(&conn, "fn:main").expect("impact");
+        let hit_ids: Vec<&str> = report.hits.iter().map(|h| h.node_id.as_str()).collect();
+        assert!(hit_ids.contains(&"code:fn:helper"), "main calls helper -- expected it in impact, got {hit_ids:?}");
+        assert!(hit_ids.contains(&"code:struct:Account"), "main constructs Account -- expected it in impact, got {hit_ids:?}");
+    }
+
+    /// rfcs/0014's 2026-09-14 amendment, step 5: a `serve { expose }`d
+    /// fn is the real security boundary (`typeck::check_serve_config`'s
+    /// deny-by-default rule) -- marked so the build-mode UI can color
+    /// it differently from the internal helpers it calls, which don't
+    /// need their own `requires(role:)` the way the exposed fn does.
+    #[test]
+    fn sync_marks_serve_exposed_fns_as_exposed_but_not_their_internal_callees() {
+        let dir = scratch_dir("serve_exposed");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn internal_helper() -> i64 { return 1 }\n\
+             fn public_action() -> i64 requires(public) { return internal_helper() }\n\
+             serve { expose public_action }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+
+        let exposed_status: Option<String> = conn.query_row("SELECT status FROM nodes WHERE id = 'code:fn:public_action'", [], |r| r.get(0)).expect("read status");
+        assert_eq!(exposed_status.as_deref(), Some("exposed"));
+        let internal_status: Option<String> = conn.query_row("SELECT status FROM nodes WHERE id = 'code:fn:internal_helper'", [], |r| r.get(0)).expect("read status");
+        assert_eq!(internal_status, None, "an internal helper the exposed fn calls must NOT be marked exposed itself");
     }
 
     #[test]

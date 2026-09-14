@@ -92,7 +92,7 @@ impl ApiResponse {
 /// browser-originated requests. POST closes that gap (modern browsers
 /// do send `Origin` on a cross-origin POST) on top of `hi_window.rs`'s
 /// transport already having no network origin to attack at all.
-const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/generate", "/api/publish"];
+const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/packs/install", "/api/generate", "/api/publish"];
 
 /// Routes one request against a fresh connection opened on `root`.
 /// `path` excludes the query string; `query` is the raw, still
@@ -142,6 +142,7 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
             Some(q) => handle_ask(&conn, &q),
             None => ApiResponse::error(400, "missing required query param `q`"),
         },
+        "/api/packs" => handle_packs_list(&conn),
         "/api/prompt" => handle_prompt(root, &conn, body),
         "/api/confirm" => handle_confirm(&conn, body),
         "/api/delete" => handle_delete(&conn, body),
@@ -149,9 +150,47 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         "/api/attach" => handle_attach(&conn, body),
         "/api/waive" => handle_waive(&conn, body),
         "/api/unwaive" => handle_unwaive(&conn, body),
+        "/api/packs/install" => handle_pack_install(root, &conn, body),
         "/api/generate" => handle_generate(root, &conn, body),
         "/api/publish" => handle_publish(root, &conn),
         _ => ApiResponse::error(404, "not found"),
+    }
+}
+
+/// RFC 0014's 2026-09-14 amendment, step 4 (Governing Rules panel):
+/// `known_installable_packs` is the fixed, safe set `hi`'s own UI may
+/// offer -- never an arbitrary file path from the webview. Reports
+/// `installed: true` for anything `installed_pack_ids` already lists,
+/// so the panel can grey out "already installed" rather than letting a
+/// second click silently no-op (`install_pack_from_bytes` upserts by
+/// pack id, harmless but confusing to invite).
+fn handle_packs_list(conn: &Connection) -> ApiResponse {
+    let installed = match crate::hi_plugin::installed_pack_ids(conn) {
+        Ok(ids) => ids,
+        Err(e) => return ApiResponse::error(500, &e),
+    };
+    let packs: Vec<serde_json::Value> = crate::hi_plugin::known_installable_packs()
+        .into_iter()
+        .map(|(id, description, _bytes)| serde_json::json!({ "id": id, "description": description, "installed": installed.contains(&id.to_string()) }))
+        .collect();
+    ApiResponse::json(&packs)
+}
+
+/// Installs one of `known_installable_packs`' fixed, embedded packs by
+/// id -- the webview never supplies pack bytes or a file path itself,
+/// only which known-safe name to install, closing the path-traversal/
+/// arbitrary-content-install surface a raw "install this JSON" route
+/// would otherwise open up to whatever the page's own JS sends.
+fn handle_pack_install(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
+    let Some(pack_id) = body_param(body, "pack_id") else {
+        return ApiResponse::error(400, "missing required field `pack_id`");
+    };
+    let Some((_, _, bytes)) = crate::hi_plugin::known_installable_packs().into_iter().find(|(id, _, _)| *id == pack_id) else {
+        return ApiResponse::error(400, &format!("`{pack_id}` is not one of the packs this UI can install"));
+    };
+    match crate::hi_plugin::install_pack_from_bytes(conn, root, bytes.as_bytes(), &format!("hi UI install: {pack_id}")) {
+        Ok(id) => ApiResponse::json(&serde_json::json!({ "ok": true, "pack_id": id })),
+        Err(e) => ApiResponse::error(500, &e),
     }
 }
 
@@ -477,12 +516,27 @@ struct NodeRow {
     waived: i64,
     waive_reason: Option<String>,
     attributes: Option<String>,
+    /// RFC 0016's "sealed domain plugin" provenance (5a: unsigned,
+    /// trust-on-first-use) -- `None` for anything the user's own
+    /// prompt proposed. Exposed here (previously read only by
+    /// `hi_plugin.rs`'s own Rust-side checks, never serialized to the
+    /// webview) so the build-mode UI can show *which* nodes are sealed
+    /// law rather than leaving `:waive`'s refusal as the only place a
+    /// user ever learns one exists (`hi_graph.rs::waive_node`'s own
+    /// refuse-on-plugin-origin check, RFC 0014's 2026-09-14 amendment,
+    /// "Governing rules" panel).
+    plugin_origin: Option<String>,
+    /// Same RFC 0016 provenance: `true` means `:waive`/`:delete` (and
+    /// this panel's own edit form) refuse outright -- surfaced so a
+    /// refusal reads as "this is sealed law" instead of "the button is
+    /// broken."
+    non_waivable: bool,
 }
 
 fn list_nodes(conn: &Connection) -> Result<Vec<NodeRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, title, status, content_hash, source_ref, line, col, driving_text, created_by, confirmed, locked, waived, waive_reason, attributes FROM nodes LIMIT ?1",
+            "SELECT id, kind, title, status, content_hash, source_ref, line, col, driving_text, created_by, confirmed, locked, waived, waive_reason, attributes, plugin_origin, non_waivable FROM nodes LIMIT ?1",
         )
         .map_err(|e| format!("preparing node listing: {e}"))?;
     let rows = stmt
@@ -503,6 +557,8 @@ fn list_nodes(conn: &Connection) -> Result<Vec<NodeRow>, String> {
                 waived: r.get(12)?,
                 waive_reason: r.get(13)?,
                 attributes: r.get(14)?,
+                plugin_origin: r.get(15)?,
+                non_waivable: r.get::<_, i64>(16)? != 0,
             })
         })
         .map_err(|e| format!("listing nodes: {e}"))?
@@ -599,6 +655,72 @@ mod tests {
         assert_eq!(resp.status, 200);
         let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
         assert!(nodes.iter().any(|n| n["id"] == "code:fn:add"), "expected code:fn:add in {resp:?}", resp = String::from_utf8_lossy(&resp.body));
+        // An ordinary, non-plugin node reports the RFC 0016 provenance
+        // fields as absent/false, not merely omitted -- the build-mode
+        // UI's "governing rules" panel (RFC 0014's 2026-09-14 amendment)
+        // needs to tell "no pack governs this" apart from "the field
+        // wasn't sent."
+        let add = nodes.iter().find(|n| n["id"] == "code:fn:add").unwrap();
+        assert_eq!(add["plugin_origin"], serde_json::Value::Null);
+        assert_eq!(add["non_waivable"], false);
+    }
+
+    /// RFC 0014's 2026-09-14 amendment ("Governing rules" panel) needs
+    /// `/api/nodes` to expose which nodes a sealed domain plugin owns —
+    /// previously read only on the Rust side (`hi_graph::waive_node`'s
+    /// own refuse-on-plugin-origin check), never serialized to the
+    /// webview at all.
+    #[test]
+    fn handle_lists_nodes_reports_plugin_origin_and_non_waivable() {
+        let dir = scratch_dir("nodes_plugin_origin");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        drop(conn);
+
+        let resp = handle(&dir, "GET", "/api/nodes", "", b"");
+        assert_eq!(resp.status, 200);
+        let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
+        let sealed = nodes.iter().find(|n| n["plugin_origin"] != serde_json::Value::Null).unwrap_or_else(|| {
+            panic!("expected at least one plugin-sourced node after ensure_default_packs, got {resp:?}", resp = String::from_utf8_lossy(&resp.body))
+        });
+        assert_eq!(sealed["non_waivable"], true, "a plugin-sourced node must report non_waivable: true, got {sealed:?}");
+    }
+
+    /// RFC 0014's 2026-09-14 amendment, step 4: the Governing Rules
+    /// panel needs to list what it can offer to install, and know
+    /// what's already there.
+    #[test]
+    fn handle_packs_list_reports_known_packs_and_installed_state() {
+        let dir = scratch_dir("packs_list");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        drop(conn);
+
+        let resp = handle(&dir, "GET", "/api/packs", "", b"");
+        assert_eq!(resp.status, 200);
+        let packs: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
+        let banking = packs.iter().find(|p| p["id"] == "banking-v0").expect("banking-v0 should be a known pack");
+        assert_eq!(banking["installed"], true, "ensure_default_packs already installed it: {banking:?}");
+        let fapi = packs.iter().find(|p| p["id"] == "fapi-2.0").expect("fapi-2.0 should be a known pack");
+        assert_eq!(fapi["installed"], false, "fapi-2.0 is never auto-installed: {fapi:?}");
+    }
+
+    #[test]
+    fn handle_pack_install_installs_a_known_pack_and_refuses_an_unknown_one() {
+        let dir = scratch_dir("pack_install");
+        crate::hi_graph::open(&dir).expect("open"); // scaffold only, no default packs
+
+        let resp = handle(&dir, "POST", "/api/packs/install", "", b"pack_id=fapi-2.0");
+        assert_eq!(resp.status, 200, "install should succeed: {}", String::from_utf8_lossy(&resp.body));
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
+        assert_eq!(body["pack_id"], "fapi-2.0");
+
+        let conn = crate::hi_graph::open(&dir).expect("reopen");
+        let installed = crate::hi_plugin::installed_pack_ids(&conn).expect("list installed packs");
+        assert!(installed.contains(&"fapi-2.0".to_string()), "expected fapi-2.0 among installed packs: {installed:?}");
+
+        let refused = handle(&dir, "POST", "/api/packs/install", "", b"pack_id=not-a-real-pack");
+        assert_eq!(refused.status, 400, "an unknown pack id must be refused, not silently accepted");
     }
 
     #[test]
