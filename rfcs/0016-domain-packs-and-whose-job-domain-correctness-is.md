@@ -985,3 +985,21 @@ fail at load, not at generate") — and that case needs a compiler
 change first (the same category of work as extending compiled
 `serve` Stage 1's JSON encoding for a new type shape), before any
 pack can use it.
+- **UX for all of the above (2026-09-14, tracked in RFC 0014, not
+here).** Everything above is specified against the sealed-plugin
+format and the console/CLI (`nirdosha plugin install`); nothing
+renders a pack for a non-expert to browse, install, or read an
+attestation from. `rfcs/0014-generative-build-console.md`'s
+2026-09-14 amendment scopes the front-of-house side of this — a
+plain-language "governing rules" panel over today's real, unsigned
+5a data first (no new route needed), a browsable pack gallery/
+install-from-UI second (needs a new listing/install route this RFC
+doesn't define), and defers real trust badges/"Get certificate"
+output until 5b's signatures exist. The `static_rule` requirement
+kind gains one concrete near-term instance out of that same
+session's findings: "every `requires(role:)`-demanding unit's
+generated body actually calls `check_role`" is exactly solution 4's
+coverage-gate shape, scoped in `agent-skills/nirdosha/
+hi_enhance_phase_ux.md`'s Option B, and belongs in this RFC's
+solution 4 the day it's implemented — it is a `static_rule` instance,
+not a new mechanism.

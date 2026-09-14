@@ -1076,3 +1076,118 @@ implementation spike, a benchmark — not just that it's open.
     question here) — *resolves via a design session*, since both
     answers have a real cost and neither is obviously safer by
     default.
+15. **Live preview (Option 3, below) needs the editor and the served
+    app to be the same running process; today they are two.**
+    `hi_api::handle_publish` produces a standalone binary under
+    `.nir/generated/` — a separate process from the `hi` window itself.
+    Editing-by-clicking-the-running-app requires the preview surface
+    and the write path (`/api/attach`/`/api/edit`) to share one
+    process, or at minimum one live connection between them. *Resolves
+    via an implementation spike* once Option 4 below has shipped enough
+    that a preview mode is worth building against a settled canvas
+    rather than a moving one.
+16. **Role-coverage has no gate; screen-derivation now does.**
+    2026-09-13's `hi_llm::check_screen_derivation_coverage` closes "a
+    `screen` block with no backing data" (a compile-fails-nothing bug —
+    it silently disappears from the served manifest instead). The
+    sibling bug — `requires(role: X)` attached and never actually
+    checked by the generated body — has no equivalent gate yet; see
+    `agent-skills/nirdosha/hi_enhance_phase_ux.md`'s Option B for the
+    scoped design (a new `CoverageFailureClass`, a structural AST walk
+    for a `check_role` call site, wired into the same self-repair
+    budget as contract coverage). *Resolves via implementation* — the
+    design is written, this is real engineering work, not a decision.
+
+## Amendment 2026-09-14: a viable UX flow, and where live preview gets its identity
+
+Three working documents this date narrowed a wide options space down
+to one recommended, sequenced flow — kept as the detailed record
+rather than repeated here in full:
+
+- `agent-skills/nirdosha/hi_enhance_phase_ux.md` — three interaction
+  designs for the "attribute attached, never verified" gap (Options
+  A/B/C), grounded in the current attach flow's real file:line
+  behavior.
+- `agent-skills/nirdosha/hi_ux_redesign_options.md` — four candidate
+  base experiences for the whole prompt→build→generate→publish
+  console (conversational thread, guided stepper, live-preview-first,
+  unified canvas), plus options for making role/NFR/screen attachment
+  intuitive and for surfacing RFC 0016's domain-pack/certification
+  machinery to a non-expert.
+- `agent-skills/nirdosha/hi_viable_flow.md` — the converged
+  recommendation below, checked against what's real in the code today
+  rather than left as an options menu.
+
+**The recommendation: Option 4 (unified canvas) as the surface, with
+two corrections a feasibility pass against the actual code forced.**
+Mode boundaries dissolve into one canvas — confirm is a click on
+`/api/confirm`, not a `:confirm` console verb; every node gets the
+pencil (`/api/edit`, real today, never had a click target),
+Attach (unchanged), and hover-revealed `+role`/`+nfr`/`+screen`
+buttons opening plain-language micro-forms instead of the six-item
+template dropdown. Two things the original pitch got wrong, corrected
+by reading `hi_graph.rs`/`hi_llm.rs` rather than assuming:
+
+1. **"Generate becomes continuous background compilation" is not
+   viable today and should not be attempted before it is.**
+   `hi_llm::generate_program` resends *the whole confirmed set* to the
+   model on every pass (`hi_graph::confirmed_units`'s own doc comment:
+   "what a regenerate pass needs to send the LLM so an already-locked
+   unit's code stays represented in the one combined file this v1
+   slice regenerates each time" — not `generatable_units`, the
+   locked-excluded subset, which is `generate_program`'s to use once
+   incremental per-unit generation exists and isn't today). Silent,
+   automatic recompilation on every keystroke would mean a real,
+   costly, sometimes-slow LLM call the user never asked for, and a
+   real risk of the model quietly rewriting unrelated working code on
+   a pass it didn't need to make. The corrected design: an explicit
+   **Rebuild** button with a visible "N changes since last build"
+   count. Revisit "continuous" only once generation is genuinely
+   incremental — a compiler change, not a UI one, already named as
+   future work in "Generate mode" above.
+2. **Ask is not one of the competing base experiences — it is a rail
+   present on every screen.** `hi_graph::ask`/`/api/ask` is real today
+   and has never had anything but the `:ask` console verb pointing at
+   it (same gap `edit_driving_text` has). A small persistent, expandable
+   rail — canvas, certification panel, wherever — answers this without
+   making "chat" and "canvas" competing options a user has to pick
+   between.
+
+**Live preview's identity question, answered against what's already
+built, not designed fresh:** confirmed correct — live preview renders
+the actual app being built, not a static mockup, and the same holds
+for role gates and NFRs, because there is nothing else honest to
+preview against. The identity mechanism this needs already exists and
+needs no new design:
+
+- The compiled serve layer (`crates/compiled-serve/src/identity.rs`,
+  `ui_gen.rs`'s `demo_mode`/`production_mode` split) already
+  distinguishes exactly this: **demo mode** self-service-issues a
+  real, locally-verified token for a chosen role/claim set
+  (`AuthConfig::demo()`, `/api/_demo_login`, `mock_issue_token`) —
+  "simulate a user and see the app as they'd see it," precisely the
+  live-preview interaction — versus **production mode**, where a real
+  external identity/rights-management server (`--oidc-*`,
+  `--jwks-file`/`--issuer`/`--audience`) issues the token instead.
+  Both paths feed the identical `requires(role:)`/`check_role`-gated
+  code in the generated app; nothing in that code, or in `hi`, knows
+  or cares which mode issued the token it's holding.
+- So live preview is **zero new identity work**: run the app being
+  built in demo mode, let the user pick "preview as employee" /
+  "preview as finance director" the same way `demoAvatarCard` already
+  does in the generated app's own login screen today, and the roles/
+  screens/redirects that render are the real, compiled behavior —
+  not a simulation of it. Swapping to a real external IdP for
+  production is a `nirdosha serve` flag change, never a code or
+  preview-logic change, by construction — this is precisely the "zero
+  friction with the production identity/rights-management server"
+  property, and it is already true of the compiler today, not
+  something this RFC needs to build.
+- NFRs do not share this property and the amendment says so plainly:
+  `nfr(latency_ms:)`/`nfr(throughput_min_per_sec:)` etc. have no
+  visual shape a live preview can show by rendering a screen — "does
+  this hold" needs a measurement (a load run), not a simulated login.
+  Live preview covers roles and screens fully; NFRs stay a
+  plain-language, unverified-until-measured line in the same panel
+  (`hi_enhance_phase_ux.md`'s Option A chip language), not something
+  Option 3's interaction model can ever make visually self-evident.

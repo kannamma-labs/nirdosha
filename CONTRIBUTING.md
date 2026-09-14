@@ -32,7 +32,9 @@ triage, or design feedback — helps.
 2. For anything non-trivial, open an issue first so we can agree on
    direction before you sink time into an implementation. **Exception:**
    an issue already labeled `good first issue` is pre-scoped — just send
-   the PR, no need to ask.
+   the PR, no need to ask. See [`docs/FEATURE_WORKFLOW.md`](./docs/FEATURE_WORKFLOW.md)
+   for the full issue → RFC → commit → close cycle this project follows,
+   including how a multi-part idea splits into separate issues.
 3. Keep changes minimal and focused — a bug fix doesn't need drive-by
    refactoring bundled in.
 
