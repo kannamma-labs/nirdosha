@@ -53,7 +53,15 @@
      passages, never as a chat reply the search doesn't actually give. */
   #ask-rail { position:absolute; top:64px; right:0; bottom:200px; width:280px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; }
   #ask-rail.open { display:flex; }
-  #ask-rail .ask-head { padding:12px 14px; border-bottom:1px solid #26263a; font-size:11px; letter-spacing:0.06em; text-transform:uppercase; color:#78768e; display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  /* Shared by every right-hand rail's head row (`#ask-rail`,
+     `#new-screen-rail`, `#suggest-rail`, `#preview-rail` all reuse this
+     same `class="ask-head"` markup) -- previously scoped to
+     `#ask-rail .ask-head` only, so the other three rails' head rows
+     rendered with none of this: no padding, no border-bottom
+     separator, no uppercase/gray treatment, and no flex layout to push
+     the close button to the far side, leaving it crowded against
+     whatever text preceded it. */
+  .ask-head { padding:12px 14px; border-bottom:1px solid #26263a; font-size:11px; letter-spacing:0.06em; text-transform:uppercase; color:#78768e; display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
   .rail-close { flex:none; background:transparent; border:1px solid #3a3a52; border-radius:4px; color:#a9a9bd; font-size:11px; padding:3px 7px; cursor:pointer; text-transform:none; letter-spacing:normal; }
   .rail-close:hover { border-color:#564cbe; color:#e8e8f0; }
   #governing-panel .gov-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:4px; }
@@ -1650,7 +1658,21 @@
   // `zoom:1`. The graph's own contents were never what "bigger text"
   // was asking for anyway -- that's a camera-level concern, not a CSS
   // one, and stays untouched here.
-  const ZOOM_TARGETS = '#header, #console, #panel, #legend, #prompt-screen';
+  //
+  // The right-hand rails/panels (`#ask-rail` and siblings) MUST be
+  // included too, not just `#header`: every one of them hardcodes
+  // `top:64px` in CSS to sit flush under the header's unzoomed 64px
+  // height. `zoom` scales an element's own offset properties along
+  // with its box (confirmed empirically: a zoomed element's `top`
+  // scales by the same factor), so a rail zoomed by the same factor as
+  // `#header` keeps `64px` scaling in lockstep with the header's real
+  // rendered height and stays flush against it at any zoom level. Zoom
+  // `#header` alone and at zoom != 1 the header's true height drifts
+  // away from the rails' fixed 64px assumption -- narrow-window field
+  // report, 2026-09-14: the open rail rendered overlapping the header
+  // instead of below it, with the header's own right-side action
+  // buttons left inaccessible underneath the rail's higher z-index.
+  const ZOOM_TARGETS = '#header, #console, #panel, #legend, #prompt-screen, #ask-rail, #new-screen-rail, #governing-panel, #suggest-rail, #preview-rail';
   let uiZoom = 1;
   const ZOOM_MIN = 0.6, ZOOM_MAX = 2.2, ZOOM_STEP = 0.1;
   function applyZoom() {

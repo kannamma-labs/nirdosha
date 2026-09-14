@@ -776,6 +776,39 @@ fn require_node_exists(conn: &Connection, id: &str) -> Result<(), String> {
     }
 }
 
+/// Resolves either a real node `id` (`code:{kind}:{name}`) or a bare
+/// CodeUnit `title` to its real id -- github #49's suggestion rail is
+/// the reason this exists: `suggestion_context` only ever shows the
+/// LLM a unit's bare title (never its `code:`-prefixed id, see that
+/// function's own doc comment), so an accepted `attribute` suggestion's
+/// `target` arrives here as a title, not an id. A literal id match
+/// wins first (every other `/api/attach` caller -- `+Role`/`+NFR`/
+/// `+Screen` -- already passes a real id from a clicked graph node, so
+/// this stays a no-op detour for them); only on a miss does this fall
+/// back to a title lookup, erroring instead of guessing if the title
+/// is ambiguous across more than one unit.
+///
+/// Deliberately distinct from `resolve_code_unit_id` above (the CLI's
+/// `hi link`/`hi impact` resolver, for user-typed `kind:name`
+/// shorthand): that one never tries a literal id match first, so
+/// feeding it an already-real id like `code:fn:x` sends it down the
+/// bare-title branch, where it won't match anything and errors. This
+/// version's id-first check is what keeps `/api/attach`'s existing
+/// real-id callers working unchanged.
+fn resolve_attach_target_id(conn: &Connection, id_or_title: &str) -> Result<String, String> {
+    let exists: bool = conn.prepare("SELECT 1 FROM nodes WHERE id = ?1").and_then(|mut s| s.exists([id_or_title])).map_err(|e| e.to_string())?;
+    if exists {
+        return Ok(id_or_title.to_string());
+    }
+    let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1").map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt.query_map([id_or_title], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    match ids.as_slice() {
+        [single] => Ok(single.clone()),
+        [] => Err(format!("no node `{id_or_title}` in the hi graph")),
+        _ => Err(format!("`{id_or_title}` matches more than one unit -- use its full id")),
+    }
+}
+
 /// Prompt mode's own write path (rfcs/0014's "Build mode — the
 /// interactive Hi graph"): inserts (or, on a name collision with a node
 /// that already exists, refines the driving text of) one `CodeUnit`
@@ -875,9 +908,22 @@ pub fn edit_driving_text(conn: &Connection, id: &str, text: &str) -> Result<(), 
 /// unbuilt work) -- Generate mode's own compile step is what actually
 /// proves an attribute is legal, by rejecting a generated program that
 /// misuses one.
+///
+/// A no-op when `attr` is already present verbatim: callers that
+/// re-attach the same line on every run (`load_domain_pack`'s own doc
+/// comment calls repeat-loading a pack "idempotent") must actually get
+/// idempotence, not an ever-growing list of identical lines -- e.g. a
+/// domain pack re-installed on every `hi serve`/`hi sync` used to pile
+/// up dozens of copies of the same `PROOF DEMAND` line in the Generate
+/// prompt, one per prior run.
 pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), String> {
-    require_node_exists(conn, id)?;
+    let id = &resolve_attach_target_id(conn, id)?;
     let existing: Option<String> = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [id], |r| r.get(0)).map_err(|e| format!("reading {id}: {e}"))?;
+    if let Some(s) = &existing {
+        if s.lines().any(|line| line == attr) {
+            return Ok(());
+        }
+    }
     let merged = match existing {
         Some(s) if !s.is_empty() => format!("{s}\n{attr}"),
         _ => attr.to_string(),
@@ -1464,6 +1510,71 @@ mod tests {
 
         let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
         assert_eq!(attrs, "requires(role: admin)\nnfr(latency_ms: 200)");
+    }
+
+    #[test]
+    fn attach_attribute_is_a_no_op_when_the_exact_line_is_already_present() {
+        // Regression: `load_domain_pack` re-attaches every invariant's
+        // attributes on every run and calls that "idempotent" -- it
+        // only actually is if re-attaching the same line twice doesn't
+        // grow the list. Before this fix, a pack reinstalled/reloaded
+        // N times (every `hi serve`/`hi sync`) piled up N identical
+        // copies of its `PROOF DEMAND` line in the Generate prompt.
+        let dir = scratch_dir("candidate_attach_dedupe");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 1");
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 2, same line again");
+        attach_attribute(&conn, &id, "nfr(latency_ms: 200)").expect("attach 3, a genuinely new line");
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 4, same line a third time");
+
+        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
+        assert_eq!(attrs, "requires(role: admin)\nnfr(latency_ms: 200)", "re-attaching an identical line must not duplicate it, got:\n{attrs}");
+    }
+
+    #[test]
+    fn attach_attribute_resolves_a_bare_title_since_suggestion_context_never_shows_the_llm_a_real_id() {
+        // github #49 regression: `suggestion_context` sends the LLM only
+        // a unit's bare title (e.g. `apply_interest`), never its real
+        // `code:fn:apply_interest` id -- so an accepted suggestion's
+        // `target` arrives at `/api/attach` as that bare title. Before
+        // `resolve_attach_target_id`, this always failed with "no node
+        // `apply_interest` in the hi graph" even though the unit existed.
+        let dir = scratch_dir("attach_by_bare_title");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+
+        attach_attribute(&conn, "apply_interest", "requires(role: FinanceDirector)").expect("attach by bare title should resolve to the real id");
+
+        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
+        assert_eq!(attrs, "requires(role: FinanceDirector)");
+    }
+
+    #[test]
+    fn attach_attribute_still_accepts_a_real_id_directly() {
+        // The graph's own `+Role`/`+NFR`/`+Screen` affordances already
+        // pass a real id (from a clicked graph node) -- the bare-title
+        // fallback above must stay a no-op detour for them, not change
+        // their behavior.
+        let dir = scratch_dir("attach_by_real_id");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach by real id");
+
+        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
+        assert_eq!(attrs, "requires(role: admin)");
+    }
+
+    #[test]
+    fn attach_attribute_rejects_a_title_shared_by_more_than_one_unit_rather_than_guessing() {
+        let dir = scratch_dir("attach_ambiguous_title");
+        let conn = open(&dir).expect("open");
+        add_candidate(&conn, "fn", "process", "processes a payment", "llm-prompt-mode").expect("add_candidate fn");
+        add_candidate(&conn, "struct", "process", "a process record", "llm-prompt-mode").expect("add_candidate struct");
+
+        let err = attach_attribute(&conn, "process", "requires(role: admin)").expect_err("an ambiguous bare title must error, not guess");
+        assert!(err.contains("more than one unit"), "expected an ambiguity error, got: {err}");
     }
 
     #[test]
