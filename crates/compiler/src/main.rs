@@ -6,7 +6,7 @@ use std::process::ExitCode;
 // binary's CLI subcommands and stdio server all share one
 // implementation, one wire shape, and one call log.
 use nirdosha::mcp_tools::{
-    build_certificate, run_verify_pipeline, sha256_hex, sign_certificate, tools_call, tools_list, write_auto_patches,
+    build_certificate, isolation_violations_from_anomalies, run_verify_pipeline, sha256_hex, sign_certificate, tools_call, tools_list, write_auto_patches,
     Certificate, FixReport, McpCallLog, ProofVerdict,
 };
 
@@ -31,6 +31,7 @@ fn main() -> ExitCode {
         "fix" => cmd_fix(args),
         "explain" => cmd_explain(args),
         "certify" => cmd_certify(args),
+        "check-isolation" => cmd_check_isolation(args),
         "keygen" => cmd_keygen(args),
         "verify-certificate" => cmd_verify_certificate(args),
         "equivalence" => cmd_equivalence(args),
@@ -78,11 +79,19 @@ fn print_usage() {
     eprintln!("                                      --apply writes every `auto` patch to the file in place");
     eprintln!("  nirdosha explain [<code>]           print the machine-learnable error index (JSON on stdout);");
     eprintln!("                                      with no <code>, lists every NIR-code and its title");
-    eprintln!("  nirdosha certify <file.nir> [--sign <key.pk8>] [--in-toto]");
+    eprintln!("  nirdosha certify <file.nir> [--sign <key.pk8>] [--isolation-log <ops.json>] [--in-toto]");
     eprintln!("                                      same checks as verify, wrapped in a deterministic, hash-pinned");
     eprintln!("                                      Certificate v0/v1 (source_hash/grammar_hash/evidence_tier/...;");
-    eprintln!("                                      --sign adds a real Ed25519 signature, see `nirdosha keygen`)");
+    eprintln!("                                      --sign adds a real Ed25519 signature, see `nirdosha keygen`;");
+    eprintln!("                                      --isolation-log attaches real observed transaction-isolation");
+    eprintln!("                                      anomalies from a saved op-history log, see `check-isolation`)");
     eprintln!("  nirdosha keygen [-o <key.pk8>]      generate an Ed25519 keypair for `nirdosha certify --sign`");
+    eprintln!("  nirdosha check-isolation <ops.json> [--in-toto]");
+    eprintln!("                                      run the transaction-isolation anomaly detector");
+    eprintln!("                                      (`crates/isolation-core`, the same algorithm `transact`'s");
+    eprintln!("                                      live db-op tracking uses) over a saved operation-history");
+    eprintln!("                                      log on demand -- JSON array of {{txn,resource,kind,seq}};");
+    eprintln!("                                      exit 0 (clean) / 1 (anomaly found) / 2 (bad input)");
     eprintln!("  nirdosha verify-certificate <certificate.json>");
     eprintln!("                                      check a signed certificate's signature against its own");
     eprintln!("                                      embedded public key");
@@ -975,12 +984,20 @@ fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut path: Option<String> = None;
     let mut sign_key_path: Option<String> = None;
     let mut in_toto = false;
+    let mut isolation_log_path: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--sign" => {
                 sign_key_path = args.next();
                 if sign_key_path.is_none() {
-                    eprintln!("--sign needs a private-key path -- usage: nirdosha certify <file.nir> [--sign <key.pk8>] [--in-toto]");
+                    eprintln!("--sign needs a private-key path -- usage: nirdosha certify <file.nir> [--sign <key.pk8>] [--isolation-log <ops.json>] [--in-toto]");
+                    return ExitCode::FAILURE;
+                }
+            }
+            "--isolation-log" => {
+                isolation_log_path = args.next();
+                if isolation_log_path.is_none() {
+                    eprintln!("--isolation-log needs a path -- usage: nirdosha certify <file.nir> [--sign <key.pk8>] [--isolation-log <ops.json>] [--in-toto]");
                     return ExitCode::FAILURE;
                 }
             }
@@ -989,7 +1006,7 @@ fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: nirdosha certify <file.nir> [--sign <key.pk8>] [--in-toto]");
+        eprintln!("usage: nirdosha certify <file.nir> [--sign <key.pk8>] [--isolation-log <ops.json>] [--in-toto]");
         return ExitCode::FAILURE;
     };
     let source_bytes = match std::fs::read(&path) {
@@ -1001,7 +1018,24 @@ fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
     };
     let pipeline = run_verify_pipeline(&path);
     let verdict = pipeline.verdict;
-    let certificate = build_certificate(&source_bytes, pipeline);
+    let mut certificate = build_certificate(&source_bytes, pipeline);
+    // `Certificate::isolation_violations`'s own doc comment: this is
+    // what makes a certificate "re-attestable over time" real, not just
+    // a schema field -- a caller holding a saved operation-history log
+    // (`nirdosha_isolation_core::Op`, JSON array) can re-issue the
+    // certificate with real, observed violations attached. Exactly the
+    // same log format/check `nirdosha check-isolation` runs standalone
+    // (see that command for why there's no *live* log-producing
+    // mechanism yet -- a real, disclosed, separate gap).
+    if let Some(log_path) = &isolation_log_path {
+        match load_and_check_isolation_log(log_path) {
+            Ok(anomalies) => certificate.isolation_violations = isolation_violations_from_anomalies(&anomalies),
+            Err(e) => {
+                eprintln!("error reading --isolation-log {log_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let evidence_tier = certificate.evidence_tier.clone();
     let source_hash = certificate.source_hash.clone();
 
@@ -1031,6 +1065,88 @@ fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
             eprintln!("UNKNOWN: certificate issued for {path}, evidence_tier={evidence_tier}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Parses a saved operation-history log (a JSON array of
+/// `nirdosha_isolation_core::Op` -- `{"txn":str,"resource":str,
+/// "kind":"read"|"write","seq":u64}` per element) and runs the real
+/// detector over it. Shared by `cmd_certify`'s `--isolation-log` and
+/// `cmd_check_isolation` below, so both attach/report the identical
+/// verdict for the identical log format -- one implementation, not two
+/// that could quietly drift apart.
+fn load_and_check_isolation_log(path: &str) -> Result<Vec<nirdosha_isolation_core::Anomaly>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let ops: Vec<nirdosha_isolation_core::Op> = serde_json::from_slice(&bytes).map_err(|e| format!("not a valid ops-log JSON array: {e}"))?;
+    let mut checker = nirdosha_isolation_core::Checker::new();
+    checker.load(ops);
+    Ok(checker.check())
+}
+
+/// `nirdosha check-isolation <ops.json>` -- the CLI enforcement surface
+/// `crates/runtime-kernels/src/kernel/isolation_check.rs`'s own module
+/// doc has named as a real gap since RFC 0016 Phase 2 landed: the
+/// checker was detection-only, wired into the live `db`/`transact`
+/// path with no way to run it over a saved log on demand. This is that
+/// command -- same detector (`nirdosha-isolation-core`, shared
+/// verbatim with the live path, not a reimplementation), a real
+/// 3-valued exit code matching `verify`'s own convention.
+///
+/// **What this does not (yet) do, disclosed rather than implied**:
+/// there is still no mechanism that *produces* an ops-log from a live
+/// compiled `.nir` process -- `Checker::ops()`/`load()` exist, but
+/// nothing wires a running binary's own in-memory history out to a
+/// file today. A log for this command to check has to come from a
+/// caller's own tooling (a test harness, a future live-dump feature)
+/// that captures `Op` values in this exact JSON shape. This command is
+/// the on-demand *checking* half of the disclosed gap; the *capture*
+/// half is real, separate follow-up work.
+fn cmd_check_isolation(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut path: Option<String> = None;
+    let mut in_toto = false;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--in-toto" => in_toto = true,
+            other => path = Some(other.to_string()),
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: nirdosha check-isolation <ops.json> [--in-toto]");
+        return ExitCode::FAILURE;
+    };
+    let anomalies = match load_and_check_isolation_log(&path) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error reading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let clean = anomalies.is_empty();
+    let verdict = if clean { "clean" } else { "anomaly_found" };
+    let predicate = serde_json::json!({
+        "verdict": verdict,
+        "evidence_tier": nirdosha::mcp_tools::IsolationViolation::EVIDENCE_TIER,
+        "anomalies": isolation_violations_from_anomalies(&anomalies),
+    });
+    let output = if in_toto {
+        let source_hash = match std::fs::read(&path) {
+            Ok(bytes) => sha256_hex(&bytes),
+            Err(e) => {
+                eprintln!("error reading {path} to compute its subject digest: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        wrap_in_toto(&path, &source_hash, "check-isolation/v1", predicate)
+    } else {
+        predicate
+    };
+    println!("{}", serde_json::to_string_pretty(&output).expect("this JSON value always serializes"));
+    if clean {
+        eprintln!("CLEAN: {path} -- no isolation anomaly detected in this log");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("ANOMALY_FOUND: {path} -- {} anomal{} detected (evidence_tier=monitored: conclusive that these happened, not proof no others exist)", anomalies.len(), if anomalies.len() == 1 { "y" } else { "ies" });
+        ExitCode::FAILURE
     }
 }
 

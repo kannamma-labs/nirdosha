@@ -1,0 +1,10 @@
+[package]
+name = "nirdosha-isolation-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Pure, dependency-light transaction-isolation-anomaly detection (Direct Serialization Graph over WW/WR/RW edges, Adya/Elle-style) -- the shared algorithm behind runtime-kernels::isolation_check's live FFI path and the compiler's `nirdosha check-isolation` CLI. No FFI, no threads, no I/O: just the graph logic, so both a heavy, native-dependency-laden runtime crate and a lightweight compiler-tooling crate can depend on the identical detector without either pulling in the other's dependency tree."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

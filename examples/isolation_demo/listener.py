@@ -42,6 +42,25 @@ def make_handler(log_path):
             self.send_response(200)
             self.end_headers()
 
+        def handle_one_request(self):
+            # At the real demo's full 8x250 scale, thousands of these
+            # fire-and-forget connections (`post_json_fire_and_forget`
+            # never reads a response, closes immediately) land on this
+            # listener in a tight window; a handful genuinely do reset
+            # before this thread gets to read them (a real, benign OS-
+            # level race under that much concurrent connection churn,
+            # confirmed by it costing a small, roughly-constant fraction
+            # of requests regardless of which run) -- swallowed here
+            # rather than left to print a `ConnectionResetError`
+            # traceback per occurrence, which drowned out `run.sh`'s own
+            # output the first time this ran at full scale. A dropped
+            # connection here only ever means one escalation this
+            # listener didn't get to log, never a wrong log entry.
+            try:
+                super().handle_one_request()
+            except ConnectionError:
+                pass
+
     return Handler
 
 
@@ -49,6 +68,14 @@ def main():
     port = int(sys.argv[1])
     log_path = sys.argv[2]
     open(log_path, "w").close()  # truncate/create fresh for this run
+    # `allow_reuse_address` (SO_REUSEADDR) -- without it, re-running
+    # `run.sh` back to back (exactly what gathering this directory's own
+    # RESULTS.md three-run tables does) can hit a real `OSError: Address
+    # already in use` from the previous run's socket still draining
+    # TIME_WAIT, killing the whole run for a reason that has nothing to
+    # do with the isolation checker itself. Found for real doing exactly
+    # that, not a defensive guess.
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("127.0.0.1", port), make_handler(log_path)) as httpd:
         httpd.serve_forever()
 

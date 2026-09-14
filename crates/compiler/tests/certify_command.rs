@@ -124,3 +124,71 @@ fn certificate_never_embeds_the_source_file_path() {
     assert!(!text.contains(path.to_str().unwrap()), "certificate must not embed the source file's own path: {cert}");
     let _ = std::fs::remove_file(&path);
 }
+
+fn scratch_ops_log(name: &str, json: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("nirdosha_certify_command_test_{}_{}_{name}.json", std::process::id(), unique_suffix()));
+    std::fs::write(&p, json).expect("scratch ops-log file should write");
+    p
+}
+
+/// `--isolation-log` -- RFC 0016 Phase 4's "surface it in the
+/// certificate over time" (`docs/research/2026-09-pending-
+/// verification-differentiation-work.md`), built for real 2026-09-14.
+/// `Certificate::isolation_violations` starts empty for a plain
+/// `certify` (no operation history to check against a bare source
+/// file); a caller with a saved log can re-issue the certificate with
+/// real, observed violations attached.
+#[test]
+fn isolation_log_with_a_real_anomaly_attaches_it_to_the_certificate() {
+    let path = scratch_file("isolation_anomaly", "fn add(a: i64, b: i64) -> i64 {\n    return a + b\n}\n");
+    let log = scratch_ops_log(
+        "isolation_anomaly",
+        r#"[
+            {"txn":"a","resource":"balance:acct1","kind":"read","seq":0},
+            {"txn":"b","resource":"balance:acct1","kind":"read","seq":1},
+            {"txn":"a","resource":"balance:acct1","kind":"write","seq":2},
+            {"txn":"b","resource":"balance:acct1","kind":"write","seq":3}
+        ]"#,
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha")).arg("certify").arg(&path).arg("--isolation-log").arg(&log).output().expect("certify --isolation-log should run");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let cert: serde_json::Value = serde_json::from_str(&stdout).expect("certify should still print valid JSON");
+    let violations = cert["isolation_violations"].as_array().expect("isolation_violations should be an array");
+    assert_eq!(violations.len(), 1, "cert: {cert}");
+    assert_eq!(violations[0]["evidence_tier"], "monitored", "cert: {cert}");
+    let cycle: Vec<String> = violations[0]["cycle"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    assert!(cycle.contains(&"a".to_string()) && cycle.contains(&"b".to_string()), "cycle should name both racing txns: {cert}");
+    // A real Z3-proved fact about the source is completely unaffected
+    // by an attached runtime observation about an unrelated run --
+    // `isolation_violations` must never leak into `verdict_summary`.
+    assert_eq!(cert["verdict_summary"]["verdict"], "PROVED", "cert: {cert}");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&log);
+}
+
+#[test]
+fn isolation_log_with_a_clean_history_attaches_nothing() {
+    let path = scratch_file("isolation_clean", "fn add(a: i64, b: i64) -> i64 {\n    return a + b\n}\n");
+    let log = scratch_ops_log(
+        "isolation_clean",
+        r#"[
+            {"txn":"a","resource":"balance:acct1","kind":"read","seq":0},
+            {"txn":"a","resource":"balance:acct1","kind":"write","seq":1}
+        ]"#,
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha")).arg("certify").arg(&path).arg("--isolation-log").arg(&log).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let cert: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(cert["isolation_violations"].as_array().unwrap().len(), 0, "cert: {cert}");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&log);
+}
+
+#[test]
+fn a_missing_isolation_log_fails_cleanly_not_a_panic() {
+    let path = scratch_file("isolation_missing_log", "fn add(a: i64, b: i64) -> i64 {\n    return a + b\n}\n");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha")).arg("certify").arg(&path).arg("--isolation-log").arg("/nonexistent/path/does/not/exist.json").output().unwrap();
+    assert!(!output.status.success(), "a missing --isolation-log file must fail the command, not silently succeed");
+    let _ = std::fs::remove_file(&path);
+}

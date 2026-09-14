@@ -794,6 +794,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-isolation-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nirdosha-runtime-kernels"
 version = "0.1.0"
 dependencies = [
@@ -802,6 +810,7 @@ dependencies = [
  "flate2",
  "jsonwebtoken",
  "native-tls",
+ "nirdosha-isolation-core",
  "openssl",
  "postgres",
  "postgres-native-tls",

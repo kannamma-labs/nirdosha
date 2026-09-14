@@ -928,6 +928,60 @@ pub struct Certificate {
     /// `Program` to walk for `nfr` attributes.
     #[serde(default)]
     pub nfr_commitments: Vec<NfrCommitment>,
+    /// A real, observed transaction-isolation anomaly (`crates/
+    /// isolation-core`'s Direct Serialization Graph detector, shared
+    /// verbatim with `runtime-kernels::kernel::isolation_check`'s live
+    /// FFI path), attached after the fact via `nirdosha certify
+    /// --isolation-log <ops.json>`. Named as a real possibility in
+    /// `isolation_check.rs`'s own module doc (RFC 0016 Phase 4, "surface
+    /// it in the certificate over time"), built for real 2026-09-14.
+    /// Deliberately **not** folded into `verdict_summary`/
+    /// `proof_obligations`: those are Z3-*proved* facts about this
+    /// artifact's source; a detected isolation anomaly is an
+    /// a-posteriori *observation* about one run's actual operation
+    /// history, the same "runtime-tracked, not solver-proved" split
+    /// `nfr_commitments` above already holds itself to (own
+    /// `evidence_tier`, `"monitored"`, per entry). Empty at plain
+    /// `certify`/`verify` time -- a bare source file has no operation
+    /// history to check; a caller wanting to attest an observed
+    /// anomaly re-issues the certificate with `--isolation-log`. This
+    /// is genuinely a *point-in-time snapshot of what one log
+    /// contained*, not a live, continuously-updating claim -- a
+    /// certificate is still a static, re-issued artifact each time,
+    /// not a subscription; "over time" means "re-attestable as new
+    /// evidence arrives," not "auto-updating."
+    #[serde(default)]
+    pub isolation_violations: Vec<IsolationViolation>,
+}
+
+/// One detected isolation anomaly, carried into the certificate
+/// verbatim -- see `Certificate::isolation_violations`'s own doc
+/// comment for why this is a distinct field with its own tier rather
+/// than folded into the Z3-proved `verdict_summary`.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct IsolationViolation {
+    /// The `txn_id`s involved, in encounter order (the cycle's first
+    /// txn repeats as the last element) -- `nirdosha_isolation_core::
+    /// Anomaly::cycle`, carried through unchanged.
+    pub cycle: Vec<String>,
+    /// Always `"monitored"` -- see `NfrCommitment::evidence_tier`'s own
+    /// doc comment for why this is a real per-value field, not just
+    /// inferred from the struct's presence.
+    pub evidence_tier: String,
+}
+
+impl IsolationViolation {
+    pub const EVIDENCE_TIER: &'static str = "monitored";
+}
+
+/// Maps every anomaly a real `Checker::check()` run found to the
+/// certificate-carried shape -- the one place `evidence_tier` gets
+/// stamped onto an observed isolation anomaly, so every call site
+/// (`cmd_certify`'s `--isolation-log`, and any future one) gets it
+/// right the same way `nfr_commitments_from_program` is the one place
+/// that happens for NFR commitments.
+pub fn isolation_violations_from_anomalies(anomalies: &[nirdosha_isolation_core::Anomaly]) -> Vec<IsolationViolation> {
+    anomalies.iter().map(|a| IsolationViolation { cycle: a.cycle.clone(), evidence_tier: IsolationViolation::EVIDENCE_TIER.to_string() }).collect()
 }
 
 /// One function's declared non-functional requirements, carried into
@@ -1116,6 +1170,13 @@ pub fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certif
         // comments).
         governing_packs: Vec::new(),
         nfr_commitments: Vec::new(),
+        // Empty here too -- see `Certificate::isolation_violations`'s
+        // own doc comment: a bare source file has no operation history
+        // to check against. `cmd_certify`'s `--isolation-log` flag
+        // fills this in after calling `build_certificate`, the same
+        // "populated by the one call site with the extra context"
+        // shape `governing_packs`/`nfr_commitments` already use.
+        isolation_violations: Vec::new(),
     }
 }
 

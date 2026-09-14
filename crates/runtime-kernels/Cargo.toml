@@ -51,6 +51,18 @@ edition = "2024"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+# The pure isolation-anomaly-detection algorithm (Direct Serialization
+# Graph), extracted 2026-09-14 so `crates/compiler`'s tooling
+# (`nirdosha check-isolation`, certificate attachment) can share the
+# identical detector without linking this crate's own heavy native
+# deps (postgres, native-tls, rusqlite below). A plain sibling-
+# directory path dependency, not a member of this crate's own
+# `[workspace]` above -- `isolation-core` has no `[workspace]` table of
+# its own, so it isn't a foreign workspace *root* the way a
+# `path = "../runtime-kernels"` dependency from the root workspace
+# would be (this crate's own top-of-file comment on why that specific
+# shape is a hard `cargo` error) -- just an ordinary external crate.
+nirdosha-isolation-core = { path = "../isolation-core" }
 # The actual point of this whole crate split (rfcs/0005-plugin-boundary-
 # safety-and-performance.md's own Dec128 finding: the old bare-`rustc`
 # build had zero Cargo dependency resolution, so `rust_decimal` — already

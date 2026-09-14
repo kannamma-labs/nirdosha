@@ -19,6 +19,17 @@ serde_json = "1"
 
 [dependencies]
 z3 = "0.20.2"
+# The pure isolation-anomaly-detection algorithm (Direct Serialization
+# Graph), shared verbatim with `crates/runtime-kernels`'s own live FFI
+# wiring (`kernel::isolation_check`) -- an ordinary root-workspace
+# member (no `[workspace]` table of its own), so this and runtime-
+# kernels' separate nested workspace can each depend on it via a plain
+# sibling path without either becoming a foreign workspace's root the
+# way a direct `path = "../runtime-kernels"` dependency would (that
+# crate's own Cargo.toml comment on the real `cargo` error that shape
+# hits). Backs `nirdosha check-isolation` and certificate isolation-
+# violation attachment (`mcp_tools::Certificate::isolation_violations`).
+nirdosha-isolation-core = { path = "../isolation-core" }
 # Used by `hi_server.rs`'s own test suite to make real HTTP requests
 # against its `tiny_http` server (blocking -- this CLI has no async
 # runtime; `rustls-tls` needs no new system TLS dependency). Same

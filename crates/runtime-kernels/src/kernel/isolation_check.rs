@@ -1,10 +1,23 @@
-//! Black-box transaction-isolation anomaly detection over `transact`'s
-//! own `db` operations -- Nirdosha's answer to the `killer_demo` gap
-//! (`docs/research/2026-09-competitive-verification-and-signing-
-//! landscape.md` §6): "no data races" today covers `chan`/`spawn`
-//! only, and the same lost-update corruption `killer_demo` shows in
-//! Python is equally possible through `db` inside a `transact` block,
-//! with no guarantee at all today.
+//! Live FFI wiring for transaction-isolation anomaly detection over
+//! `transact`'s own `db` operations -- Nirdosha's answer to the
+//! `killer_demo` gap (`docs/research/2026-09-competitive-verification-
+//! and-signing-landscape.md` §6): "no data races" today covers
+//! `chan`/`spawn` only, and the same lost-update corruption
+//! `killer_demo` shows in Python is equally possible through `db`
+//! inside a `transact` block, with no guarantee at all otherwise.
+//!
+//! **The actual detection algorithm (the Direct Serialization Graph,
+//! Adya's WW/WR/RW edges, cycle detection) lives in
+//! `nirdosha-isolation-core`** (`crates/isolation-core`), extracted out
+//! of this module 2026-09-14 so `crates/compiler`'s tooling (`nirdosha
+//! check-isolation`, certificate isolation-violation attachment) can
+//! depend on the identical, pure detector without linking this crate's
+//! own heavy native deps (postgres, native-tls, rusqlite) it needs for
+//! everything else. This module is now specifically the *live* half:
+//! hooking `db.rs`'s two funnel points (`nir_db_execute`/
+//! `nir_db_query`), attributing each call to the `transact` site
+//! active on its own thread, holding the one process-wide `Checker`,
+//! and firing the async escalation.
 //!
 //! **Why this is a *detector*, not a *prover*, and why that's the
 //! honest answer, not a lesser one.** None of the field's static
@@ -31,15 +44,8 @@
 //! **Real, disclosed simplifications (this module's own honesty
 //! obligation, matching every other "v1 scope" in this codebase):**
 //! - **Resource identity is coarse: normalized SQL text + bind-value
-//!   JSON, not a parsed row/column set.** Parsing arbitrary SQL to
-//!   derive the exact row set a statement touches is a research-grade
-//!   problem on its own; this instead treats "same normalized
-//!   statement, same bind values" as the same resource -- which is
-//!   exactly what `killer_demo`'s own `UPDATE accounts SET balance = ?
-//!   WHERE id = ?` pattern needs (the account id is a bind value), but
-//!   can both under- and over-approximate real conflicts for anything
-//!   fancier (a range `WHERE balance > ?` isn't modeled as touching
-//!   every row it could match).
+//!   JSON, not a parsed row/column set** -- see `isolation-core::
+//!   resource_key`'s own doc comment for the full reasoning.
 //! - **Only `db` operations that happen while a `transact` site is
 //!   active are tracked at all** (`current_txn()` below) -- a bare
 //!   `db` call outside any `transact` block is invisible to this
@@ -60,281 +66,42 @@
 //!   detected cycle is never a soundness guarantee that one can't
 //!   happen, the same honest asymmetry `evidence_tier`'s `PROVED`/
 //!   `DISPROVED`/`UNKNOWN` three-way split already models for Z3.
+//! - **No windowing yet: the shared `Checker`'s history is never
+//!   rotated on size alone.** `record_and_check` below calls `check()`
+//!   on every single tracked `db` op -- `nirdosha-isolation-core::
+//!   Checker::check`'s own doc comment already discloses this is meant
+//!   for "a bounded checking window." Two real, disclosed fixes landed
+//!   2026-09-14, found and measured building `examples/isolation_demo/`
+//!   (its own RESULTS.md has the numbers for both): `find_cycles`'s
+//!   rewrite fixed the *algorithmic* blowup that used to hit at
+//!   ~24-28 concurrent transacts on one resource; `MAX_TRACKED_OPS`
+//!   below (`clear_shared()`, which already existed, now actually
+//!   gets called) bounds the checker's history so `check()`'s own
+//!   still-real `O(ops²)`-ish per-call cost never grows past a fixed
+//!   ceiling no matter how long the process runs. **Real, disclosed
+//!   cost of that bound**: a WR/RW dependency whose two ops land in
+//!   different windows (the older one already cleared by the time the
+//!   newer one is recorded) is invisible to this checker -- a false
+//!   negative, never a false positive. `evidence_tier: "monitored"`
+//!   already carries exactly this asymmetry for the *whole* checker,
+//!   not just this one cause of it (this module's own top doc comment).
+
+/// How many ops the shared checker keeps before `record_and_check`
+/// rotates it out from under itself (`Checker::clear`). Picked from a
+/// real measurement, not guessed: `examples/isolation_demo/RESULTS.md`
+/// found `check()` comfortably fast (low seconds) through several
+/// hundred tracked ops and measurably slow well before a few thousand;
+/// 300 leaves real margin on the fast side while still spanning many
+/// times over the handful of ops one `transact` site's own `commit`
+/// slot performs (`killer_demo`'s own shape: ~5 ops per transfer), so
+/// a genuine same-window conflict between concurrently racing transacts
+/// stays visible in the overwhelmingly common case.
+const MAX_TRACKED_OPS: usize = 300;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
-/// One recorded `db` operation, attributed to the `transact` site that
-/// was active when it ran.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Op {
-    pub txn: String,
-    /// Coarse resource identity -- see this module's own doc comment.
-    pub resource: String,
-    pub kind: OpKind,
-    /// Global, monotonically increasing sequence number -- process
-    /// order across every tracked operation, the only ordering
-    /// information this checker has (no wall-clock/real-time edges).
-    pub seq: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OpKind {
-    Read,
-    Write,
-}
-
-/// One detected anomaly: a cycle in the dependency graph, named by the
-/// `txn_id`s involved in encounter order (the cycle's first txn repeats
-/// as the last element, so the loop is visible without a reader having
-/// to know cycle-detection conventions).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Anomaly {
-    pub cycle: Vec<String>,
-}
-
-/// The checker's own state: every recorded op, in recording order.
-/// Kept as a flat `Vec`, not a live graph -- `check()` rebuilds the
-/// graph from scratch each time, which is the right tradeoff for a
-/// detector meant to run periodically/on-demand over a bounded window,
-/// not per-operation.
-#[derive(Default)]
-pub struct Checker {
-    ops: Vec<Op>,
-    next_seq: u64,
-}
-
-impl Checker {
-    pub fn new() -> Self {
-        Checker::default()
-    }
-
-    pub fn record(&mut self, txn: String, resource: String, kind: OpKind) {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.ops.push(Op { txn, resource, kind, seq });
-    }
-
-    /// Every recorded op, oldest first -- for tests and for a caller
-    /// that wants to inspect/persist the raw history, not just the
-    /// checker's own verdict.
-    pub fn ops(&self) -> &[Op] {
-        &self.ops
-    }
-
-    /// Clears every recorded op -- used between checking windows so a
-    /// long-running process doesn't grow this unboundedly; anomalies
-    /// already found by a prior `check()` call are unaffected (the
-    /// caller owns what it does with a returned `Anomaly`).
-    pub fn clear(&mut self) {
-        self.ops.clear();
-    }
-
-    /// Builds the Direct Serialization Graph (Adya's WW/WR/RW edges,
-    /// this module's own doc comment on why no others) over every
-    /// recorded op and returns one [`Anomaly`] per simple cycle found.
-    /// `O(ops² )` in the worst case (per-resource version history is
-    /// linear in that resource's own op count) -- fine for a bounded
-    /// checking window; not meant to run over an unbounded, unrotated
-    /// history.
-    pub fn check(&self) -> Vec<Anomaly> {
-        // Per-resource, ops in seq order -- gives us both "which write
-        // installed which version" and "what a read at seq S observed"
-        // (the last write to that resource at a seq strictly before S).
-        let mut by_resource: HashMap<&str, Vec<&Op>> = HashMap::new();
-        for op in &self.ops {
-            by_resource.entry(op.resource.as_str()).or_default().push(op);
-        }
-        for ops in by_resource.values_mut() {
-            ops.sort_by_key(|o| o.seq);
-        }
-
-        let mut edges: HashSet<(String, String)> = HashSet::new();
-        for ops in by_resource.values() {
-            let mut writes: Vec<&&Op> = ops.iter().filter(|o| o.kind == OpKind::Write).collect();
-            writes.sort_by_key(|o| o.seq);
-
-            // WW: consecutive writes to the same resource order their
-            // own txns -- writer(v_i) -> writer(v_{i+1}).
-            for pair in writes.windows(2) {
-                let (a, b) = (pair[0], pair[1]);
-                if a.txn != b.txn {
-                    edges.insert((a.txn.clone(), b.txn.clone()));
-                }
-            }
-
-            for read in ops.iter().filter(|o| o.kind == OpKind::Read) {
-                // The version a read observed: the last write to this
-                // resource strictly before the read's own seq (process
-                // order is the only ordering signal available).
-                let observed = writes.iter().filter(|w| w.seq < read.seq).max_by_key(|w| w.seq);
-                // WR: the writer whose version this read observed
-                // precedes the reader.
-                if let Some(w) = observed {
-                    if w.txn != read.txn {
-                        edges.insert((w.txn.clone(), read.txn.clone()));
-                    }
-                }
-                // RW (anti-dependency): the writer of the *next*
-                // version after what this read observed didn't have
-                // its write seen by this read -- the reader must
-                // precede that writer.
-                let next_write = match observed {
-                    Some(w) => writes.iter().find(|x| x.seq > w.seq),
-                    None => writes.first(),
-                };
-                if let Some(next) = next_write {
-                    if next.txn != read.txn {
-                        edges.insert((read.txn.clone(), next.txn.clone()));
-                    }
-                }
-            }
-        }
-
-        find_cycles(&edges)
-    }
-}
-
-/// Simple-cycle detection over a directed edge set via DFS with a
-/// recursion stack -- standard textbook approach (no need for
-/// Tarjan/Johnson's more elaborate all-cycles algorithms here: this
-/// checker only needs to report *that* a txn is caught in a
-/// non-serializable cycle and show one witness path, not enumerate
-/// every cycle through it). Returns at most one anomaly per distinct
-/// cycle start found by the outer loop; a txn already reported inside
-/// an earlier cycle is skipped as a fresh start to avoid duplicate
-/// reports of the same underlying cycle from a different offset.
-fn find_cycles(edges: &HashSet<(String, String)>) -> Vec<Anomaly> {
-    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut nodes: Vec<&str> = Vec::new();
-    for (a, b) in edges {
-        adjacency.entry(a.as_str()).or_default().push(b.as_str());
-        for n in [a.as_str(), b.as_str()] {
-            if !nodes.contains(&n) {
-                nodes.push(n);
-            }
-        }
-    }
-    nodes.sort_unstable();
-
-    let mut anomalies = Vec::new();
-    let mut globally_reported: HashSet<&str> = HashSet::new();
-
-    for &start in &nodes {
-        if globally_reported.contains(start) {
-            continue;
-        }
-        let mut stack: Vec<&str> = vec![start];
-        let mut on_stack: HashSet<&str> = HashSet::from([start]);
-        if let Some(cycle) = dfs_find_cycle(start, &adjacency, &mut stack, &mut on_stack) {
-            for n in &cycle {
-                globally_reported.insert(n);
-            }
-            anomalies.push(Anomaly { cycle: cycle.into_iter().map(str::to_string).collect() });
-        }
-    }
-    anomalies
-}
-
-fn dfs_find_cycle<'a>(node: &'a str, adjacency: &HashMap<&'a str, Vec<&'a str>>, stack: &mut Vec<&'a str>, on_stack: &mut HashSet<&'a str>) -> Option<Vec<&'a str>> {
-    let Some(neighbors) = adjacency.get(node) else { return None };
-    for &next in neighbors {
-        if next == stack[0] && stack.len() > 1 {
-            // Closed a cycle back to this search's own start.
-            let mut cycle: Vec<&str> = stack.clone();
-            cycle.push(next);
-            return Some(cycle);
-        }
-        if on_stack.contains(next) {
-            continue; // a cycle not involving `stack[0]` -- a later start will find it.
-        }
-        stack.push(next);
-        on_stack.insert(next);
-        if let Some(cycle) = dfs_find_cycle(next, adjacency, stack, on_stack) {
-            return Some(cycle);
-        }
-        stack.pop();
-        on_stack.remove(next);
-    }
-    None
-}
-
-/// The coarse resource identity this module's own doc comment
-/// discloses: **table name + only the last bound value**, not the
-/// normalized SQL statement text and not the full bind list, and not a
-/// parsed row/column set.
-///
-/// **Why not the statement text** (this module's own first attempt,
-/// caught by `isolation_checker_catches_a_real_concurrent_lost_update_
-/// through_the_ffi_surface` in `lib.rs` -- an end-to-end test against
-/// the real FFI surface, not just this module's own unit tests, is
-/// exactly what caught it): a read and the write that conflicts with
-/// it are almost always two *different* statements by construction
-/// (`SELECT balance FROM accounts WHERE id = ?` vs. `UPDATE accounts
-/// SET balance = ? WHERE id = ?`) -- keying on statement text made a
-/// read and its own conflicting write look like two unrelated
-/// resources, silently missing every WR/RW edge, which is to say
-/// silently missing the lost-update pattern this module exists to
-/// catch. The table name is stable across both statement shapes;
-/// that's the correlating key.
-///
-/// **Why the last bind value, not all of them, and not none**: the
-/// near-universal `UPDATE t SET col = ? [, col2 = ?...] WHERE key = ?`
-/// / `SELECT ... WHERE key = ?` shape binds its row-selecting predicate
-/// *last*, after every `SET`-clause payload value -- exactly the shape
-/// `killer_demo`'s own `UPDATE accounts SET balance = ? WHERE id = ?`
-/// pattern (and every `balance_cents`/`account_id`-keyed example in
-/// `examples/fintech-canon/`) uses. Including every bind value would
-/// make two *conflicting* writes to the same row look like different
-/// resources whenever they write different new values -- the same
-/// silent-miss failure mode as above. Including no bind values at all
-/// would correctly catch it but over-flag any two unrelated rows in
-/// the same table as conflicting.
-///
-/// **Real, disclosed weaknesses of both heuristics, not hidden**: a
-/// composite-key `WHERE` clause, or any statement where the row
-/// selector isn't the final placeholder, gets an identity that doesn't
-/// actually track the row; a table-name extraction that isn't a real
-/// SQL parser (`extract_table_name` below, a `FROM`/`UPDATE`/`INTO`
-/// token scan) can misfire on a statement shape it doesn't recognize
-/// (a subquery, a JOIN naming more than one table, a quoted/backticked
-/// identifier). Both are real, scoped simplifications, not silent
-/// gaps -- a proper SQL parser deriving an exact predicate-column set
-/// per statement is the honest fix, genuinely out of scope for this
-/// pass (this module's own top doc comment on why).
-pub(crate) fn resource_key(sql: &str, binds_json: &str) -> String {
-    let table = extract_table_name(sql).unwrap_or_else(|| "?".to_string());
-    let last_bind = serde_json::from_str::<serde_json::Value>(binds_json)
-        .ok()
-        .and_then(|v| v.as_array().and_then(|a| a.last().cloned()))
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| binds_json.to_string());
-    format!("{table}|{last_bind}")
-}
-
-/// A token scan, not a parser: the identifier immediately after the
-/// first `from`/`update`/`into` keyword (case-insensitive), covering
-/// `SELECT ... FROM t`, `UPDATE t SET ...`, `DELETE FROM t`, and
-/// `INSERT INTO t`. Strips surrounding punctuation (backticks, quotes,
-/// a trailing comma or paren) so `INSERT INTO t (col) VALUES (?)`
-/// still extracts `t`, not `t(col)`. Returns `None` for anything this
-/// scan doesn't recognize -- `resource_key` falls back to a fixed
-/// placeholder rather than guessing further.
-fn extract_table_name(sql: &str) -> Option<String> {
-    let lower = sql.to_lowercase();
-    let tokens: Vec<&str> = lower.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if matches!(*tok, "from" | "update" | "into") {
-            let raw = tokens.get(i + 1)?;
-            let name: String = raw.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-    }
-    None
-}
+pub use nirdosha_isolation_core::{Anomaly, Checker, OpKind, resource_key};
 
 /// The process-wide checker every `db` call inside an active
 /// `transact` site feeds (`db.rs`'s `nir_db_execute`/`nir_db_query`)
@@ -380,7 +147,15 @@ pub(crate) fn record_and_check(txn: Option<String>, resource: String, kind: OpKi
     let anomalies = {
         let mut checker = shared().lock().unwrap_or_else(|e| e.into_inner());
         checker.record(txn, resource, kind);
-        checker.check()
+        let anomalies = checker.check();
+        // Rotated *after* this op's own `check()` already ran against
+        // it -- an op is always checked against its own window at
+        // least once before it can be cleared, so this never misses
+        // the anomaly the op that triggers rotation is itself part of.
+        if checker.ops().len() >= MAX_TRACKED_OPS {
+            checker.clear();
+        }
+        anomalies
     };
     for anomaly in anomalies {
         escalate(&anomaly);
@@ -397,6 +172,14 @@ pub fn snapshot_anomalies() -> Vec<Anomaly> {
 /// history (not its escalation state, which is stateless per call).
 pub fn clear_shared() {
     shared().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// Test/tooling entry point: how many ops the shared checker currently
+/// holds -- mainly so `MAX_TRACKED_OPS` rotation is directly observable
+/// (`record_and_check`'s own tests below), not something a caller has
+/// to infer indirectly.
+pub fn tracked_ops_count() -> usize {
+    shared().lock().unwrap_or_else(|e| e.into_inner()).ops().len()
 }
 
 /// Fires one escalation, asynchronously, reusing `nfr.rs`'s own
@@ -428,126 +211,6 @@ fn unix_time_ms() -> u128 {
 mod tests {
     use super::*;
 
-    /// The `killer_demo` shape itself: two transacts (`a`, `b`) both
-    /// read the same balance before either writes it, then both write
-    /// -- the classic lost-update anomaly, and exactly the pattern
-    /// `killer_demo`'s own README shows corrupting the ledger. Must be
-    /// caught.
-    #[test]
-    fn detects_the_killer_demo_lost_update_pattern() {
-        let mut checker = Checker::new();
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Read); // a reads 10000
-        checker.record("b".to_string(), "balance:acct1".to_string(), OpKind::Read); // b reads 10000 (stale for b's eventual write)
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Write); // a writes 9000
-        checker.record("b".to_string(), "balance:acct1".to_string(), OpKind::Write); // b writes 10300, clobbering a's write
-        let anomalies = checker.check();
-        assert!(!anomalies.is_empty(), "the lost-update pattern must be reported as an anomaly");
-        let involved: HashSet<&str> = anomalies.iter().flat_map(|a| a.cycle.iter().map(String::as_str)).collect();
-        assert!(involved.contains("a") && involved.contains("b"), "both transacts must appear in the reported cycle: {anomalies:?}");
-    }
-
-    /// The same two transacts, properly serialized -- `b` only reads
-    /// after `a`'s write completes, so `b` sees `a`'s real balance and
-    /// no update is lost. Must NOT be reported as an anomaly: a
-    /// detector that flags correctly-serialized histories would be
-    /// useless (unusable false-positive rate), the same "never cry wolf"
-    /// discipline `self_repair_hint`'s own arms already hold themselves to.
-    #[test]
-    fn does_not_flag_a_properly_serialized_history() {
-        let mut checker = Checker::new();
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Read);
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Write);
-        checker.record("b".to_string(), "balance:acct1".to_string(), OpKind::Read); // b reads AFTER a's write
-        checker.record("b".to_string(), "balance:acct1".to_string(), OpKind::Write);
-        let anomalies = checker.check();
-        assert!(anomalies.is_empty(), "a correctly serialized history must not be flagged: {anomalies:?}");
-    }
-
-    /// Two transacts touching disjoint resources (different accounts)
-    /// concurrently -- no shared resource, no possible conflict, must
-    /// never be flagged regardless of interleaving.
-    #[test]
-    fn does_not_flag_disjoint_resources() {
-        let mut checker = Checker::new();
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Read);
-        checker.record("b".to_string(), "balance:acct2".to_string(), OpKind::Read);
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Write);
-        checker.record("b".to_string(), "balance:acct2".to_string(), OpKind::Write);
-        assert!(checker.check().is_empty());
-    }
-
-    /// A single transact touching a resource more than once must never
-    /// be reported as conflicting with itself -- every edge-insertion
-    /// path explicitly skips same-txn pairs; this pins that no
-    /// self-loop ever survives into a reported cycle.
-    #[test]
-    fn a_single_transact_never_conflicts_with_itself() {
-        let mut checker = Checker::new();
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Read);
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Write);
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Read);
-        checker.record("a".to_string(), "balance:acct1".to_string(), OpKind::Write);
-        assert!(checker.check().is_empty());
-    }
-
-    /// A three-way cycle (a -> b -> c -> a), not just the two-txn case
-    /// -- confirms `find_cycles` isn't accidentally special-cased to
-    /// pairs.
-    #[test]
-    fn detects_a_three_way_cycle() {
-        let mut checker = Checker::new();
-        // a reads x (initial), b reads y (initial), c reads z (initial)
-        checker.record("a".to_string(), "x".to_string(), OpKind::Read);
-        checker.record("b".to_string(), "y".to_string(), OpKind::Read);
-        checker.record("c".to_string(), "z".to_string(), OpKind::Read);
-        // a writes y (a -> b via RW, since b's read of y's initial version precedes a's write)
-        checker.record("a".to_string(), "y".to_string(), OpKind::Write);
-        // b writes z (b -> c via RW)
-        checker.record("b".to_string(), "z".to_string(), OpKind::Write);
-        // c writes x (c -> a via RW)
-        checker.record("c".to_string(), "x".to_string(), OpKind::Write);
-        let anomalies = checker.check();
-        assert!(!anomalies.is_empty(), "the three-way cycle must be detected: {anomalies:?}");
-    }
-
-    #[test]
-    fn resource_key_ignores_set_payload_but_tracks_the_trailing_predicate() {
-        // Same statement shape, same WHERE-clause id (`1`, last bind),
-        // different SET payload (the new balance) -- must be the SAME
-        // resource: this is exactly killer_demo's own conflicting-write
-        // shape, and the whole point of using only the last bind.
-        let a = resource_key("UPDATE accounts SET balance = ? WHERE id = ?", "[9000,1]");
-        let b = resource_key("UPDATE accounts SET balance = ? WHERE id = ?", "[10300,1]");
-        assert_eq!(a, b, "same row (id=1), different new balance -- must resolve to one resource");
-
-        // Same statement shape, different WHERE-clause id -- must be
-        // DIFFERENT resources: genuinely unrelated rows.
-        let c = resource_key("UPDATE accounts SET balance = ? WHERE id = ?", "[9000,2]");
-        assert_ne!(a, c, "different accounts must not be conflated");
-    }
-
-    /// The bug the end-to-end FFI test (`lib.rs`) originally caught: a
-    /// `SELECT` and the `UPDATE` that conflicts with it are two
-    /// different statements by construction, so keying on statement
-    /// TEXT (this module's first attempt) made them look like
-    /// unrelated resources, silently losing every WR/RW edge. Keying
-    /// on table name instead must correlate them.
-    #[test]
-    fn resource_key_correlates_a_read_and_the_write_that_conflicts_with_it() {
-        let read = resource_key("SELECT balance FROM accounts WHERE id = ?", "[1]");
-        let write = resource_key("UPDATE accounts SET balance = ? WHERE id = ?", "[9000,1]");
-        assert_eq!(read, write, "a read and the write it conflicts with must resolve to the same resource");
-    }
-
-    #[test]
-    fn extract_table_name_covers_select_update_delete_insert() {
-        assert_eq!(extract_table_name("SELECT balance FROM accounts WHERE id = ?"), Some("accounts".to_string()));
-        assert_eq!(extract_table_name("UPDATE accounts SET balance = ? WHERE id = ?"), Some("accounts".to_string()));
-        assert_eq!(extract_table_name("DELETE FROM accounts WHERE id = ?"), Some("accounts".to_string()));
-        assert_eq!(extract_table_name("INSERT INTO accounts (id, balance) VALUES (?, ?)"), Some("accounts".to_string()));
-        assert_eq!(extract_table_name("not sql at all"), None);
-    }
-
     #[test]
     fn current_txn_thread_local_round_trips() {
         assert_eq!(current_txn(), None);
@@ -562,5 +225,54 @@ mod tests {
         clear_shared();
         record_and_check(None, "balance:acct1".to_string(), OpKind::Write);
         assert!(snapshot_anomalies().is_empty());
+    }
+
+    /// The `killer_demo` shape, driven through this module's own live
+    /// entry point (`record_and_check`/`snapshot_anomalies`), not
+    /// `isolation-core`'s lower-level `Checker` API directly -- pins
+    /// that the thin FFI-facing wrapper around the shared crate still
+    /// behaves correctly, not just the algorithm it delegates to.
+    #[test]
+    fn record_and_check_detects_the_killer_demo_lost_update_pattern_through_this_modules_own_entry_point() {
+        clear_shared();
+        record_and_check(Some("a".to_string()), "balance:acct1".to_string(), OpKind::Read);
+        record_and_check(Some("b".to_string()), "balance:acct1".to_string(), OpKind::Read);
+        record_and_check(Some("a".to_string()), "balance:acct1".to_string(), OpKind::Write);
+        record_and_check(Some("b".to_string()), "balance:acct1".to_string(), OpKind::Write);
+        let anomalies = snapshot_anomalies();
+        assert!(!anomalies.is_empty(), "the lost-update pattern must be reported as an anomaly");
+        let involved: std::collections::HashSet<&str> = anomalies.iter().flat_map(|a| a.cycle.iter().map(String::as_str)).collect();
+        assert!(involved.contains("a") && involved.contains("b"), "both transacts must appear in the reported cycle: {anomalies:?}");
+    }
+
+    /// `record_and_check` must actually rotate the shared checker once
+    /// `MAX_TRACKED_OPS` is reached -- the real fix this session's
+    /// `examples/isolation_demo/RESULTS.md` scaling section names,
+    /// pinned here so a future regression that silently drops the
+    /// rotation call fails a fast unit test instead of only ever
+    /// showing up as an unexplained slowdown running the real demo.
+    #[test]
+    fn record_and_check_rotates_the_shared_history_once_max_tracked_ops_is_reached() {
+        clear_shared();
+        for i in 0..(MAX_TRACKED_OPS * 2) {
+            record_and_check(Some(format!("txn{i}")), format!("resource{i}"), OpKind::Write);
+            assert!(tracked_ops_count() <= MAX_TRACKED_OPS, "tracked op count {} exceeded MAX_TRACKED_OPS={MAX_TRACKED_OPS} at i={i}", tracked_ops_count());
+        }
+    }
+
+    /// The rotation above must never cost a same-window anomaly its own
+    /// detection -- two ops close enough together to both land in the
+    /// same window (the overwhelmingly common real case: a lost-update
+    /// pair is typically a handful of ops apart, not hundreds) must
+    /// still be caught, exactly as if no rotation existed at all.
+    #[test]
+    fn rotation_does_not_cost_a_same_window_anomaly_its_own_detection() {
+        clear_shared();
+        record_and_check(Some("a".to_string()), "balance:acct1".to_string(), OpKind::Read);
+        record_and_check(Some("b".to_string()), "balance:acct1".to_string(), OpKind::Read);
+        record_and_check(Some("a".to_string()), "balance:acct1".to_string(), OpKind::Write);
+        record_and_check(Some("b".to_string()), "balance:acct1".to_string(), OpKind::Write);
+        let anomalies = snapshot_anomalies();
+        assert!(!anomalies.is_empty(), "a same-window anomaly must still be caught after the windowing fix");
     }
 }

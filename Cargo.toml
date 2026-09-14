@@ -2,6 +2,18 @@
 resolver = "2"
 members = [
     "crates/compiler",
+    # Pure, dependency-light transaction-isolation-anomaly detection
+    # (the Direct Serialization Graph algorithm), shared verbatim by
+    # `crates/runtime-kernels` (the live FFI-hooked path, via its own
+    # separate nested workspace's own path dependency on this same
+    # crate -- see `crates/runtime-kernels/Cargo.toml`'s own comment on
+    # why it can't join *this* workspace, mirroring `compiled-serve`'s
+    # identical reasoning) and `crates/compiler` (`nirdosha check-
+    # isolation` and certificate isolation-violation attachment). No
+    # `[workspace]` table of its own, so it stays an ordinary member
+    # here, not a workspace root the way `runtime-kernels`/
+    # `compiled-serve` had to become to solve the reverse problem.
+    "crates/isolation-core",
     "crates/grammar_check",
     "crates/grammar_export",
     "crates/presence-gateway",

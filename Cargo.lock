@@ -1934,6 +1934,7 @@ dependencies = [
  "flate2",
  "hmac 0.12.1",
  "native-tls",
+ "nirdosha-isolation-core",
  "nirdosha-ui-plugin-example-sparkline",
  "postgres",
  "postgres-native-tls",
@@ -1979,6 +1980,14 @@ version = "0.1.0"
 dependencies = [
  "llama-cpp-gbnf",
  "nirdosha",
+]
+
+[[package]]
+name = "nirdosha-isolation-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

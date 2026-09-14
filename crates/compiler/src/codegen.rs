@@ -1179,6 +1179,29 @@ impl Codegen<'_> {
                     return Ok(());
                 }
                 let val = self.expr(value, scopes)?; // i64 (or i1 for bool)
+                if matches!(ty, Ty::Unit) {
+                    // `let x: unit = <unit-returning call>()` — `val` is
+                    // just `call_dispatch.rs`'s own "0" placeholder ("unit
+                    // result; never read by a well-typed caller"), and
+                    // `ty`'s own `llvm_ty` is `void`: `alloca void`/`store
+                    // void ...` is invalid LLVM IR, so this can't go
+                    // through the ordinary alloca/store path below at all
+                    // (found compiling `examples/killer_demo/race_probe.
+                    // nir`'s own `let slept: unit = sleep_ms(2)` for real,
+                    // mirroring the identical, already-fixed `return
+                    // <unit-typed call>` case just above in `Stmt::
+                    // Return`). `value` is still evaluated above — its
+                    // side effect (the actual call) already happened —
+                    // there's just nothing left to store. `name` is
+                    // registered with a placeholder address that's never
+                    // dereferenced: `Expr::Ident`'s own `ty == Ty::Unit`
+                    // arm (`control_flow.rs`) already short-circuits to
+                    // the same "0" placeholder before ever touching the
+                    // pointer, so a later `slept` reference (however
+                    // pointless) resolves without needing real storage.
+                    scopes.define(name, ty.clone(), "undef".to_string());
+                    return Ok(());
+                }
                 let val = self.guard_in_range(&val, ty, *span)?; // checked at i64 width, before narrowing
                 let val = if ty.is_integer() { self.narrow_from_i64(&val, ty)? } else { val };
                 let llty = self.llvm_ty(ty)?;

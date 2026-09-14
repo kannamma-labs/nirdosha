@@ -15,34 +15,65 @@
 |---|---|---|
 | 1 — Research | Study Polonius/Dafny/Prusti/Imandra/Sigstore/Elle | ✅ Done |
 | 2 — Close gaps | db-serializability checker, inter-procedural VC gen (found already done), borrow-checker liveness, Sigstore-pattern signing | ✅ Done |
-| 3 — Externalize evidence | Publish methodology, invite outside reproduction, an adversarial demo for the new capability | 🟡 Item 1 done (below); items 2-3 not started |
-| 4 — Close the APM loop | Feed real runtime data back into the proof/generation loop | 🟡 Partially real (see below) |
+| 3 — Externalize evidence | Publish methodology, invite outside reproduction, an adversarial demo for the new capability | ✅ Items 1 and 3 done; item 2 as done as this environment allows (below) |
+| 4 — Close the APM loop | Feed real runtime data back into the proof/generation loop | 🟡 Item 3 done; items 1-2 still design-only (see below) |
 | 5 — Domain translation stretch | Pick a new failure class, idealize → build → wire in | ◻️ Not started, deliberately |
 
 ## Phase 3 — externalize evidence (next up)
 
-1. ✅ **Done (this session, 2026-09-14): adversarial demo for the
-   db-isolation checker.** `examples/isolation_demo/` — the exact
-   `killer_demo` corrupting transfer, wrapped in a real `transact { }`
-   block, run through the real compiled binary with
-   `NIRDOSHA_OBSERVABILITY_URL` pointed at a real local listener. Three
-   real runs, all three escalating real anomalies over a real HTTP POST
-   (274-436 escalations per run); see `examples/isolation_demo/
-   RESULTS.md`. **It also surfaced a real, unplanned second finding,
-   now itself a new follow-on item below**: the checker doesn't scale
-   to `killer_demo`'s own 8×250 workload at all — it hangs, measured
-   and root-caused to `find_cycles`'s DFS-based cycle enumeration
-   blowing up on the dense conflict graph this exact race produces,
-   well before that scale (cliff measured at ~24-28 total concurrent
-   transacts on one contended resource, two independent sweeps agree).
-   This demo runs at 8×3 instead, with the cliff itself documented as
-   part of the result, not hidden.
-2. **Publish the benchmark methodology gap.** `crates/bench/RESULTS.md`
-   already admits it's not the full comparison the roadmap calls for —
-   write and publish the actual methodology.
-3. **Invite outside reproduction** of the four new Phase-2 capabilities
-   via `SECURITY.md`'s existing open-invitation posture, for real, not
-   just as a standing badge.
+1. ✅ **Done (2026-09-14/15): adversarial demo for the db-isolation
+   checker — and both real bugs it surfaced, also fixed.**
+   `examples/isolation_demo/` — the exact `killer_demo` corrupting
+   transfer, wrapped in a real `transact { }` block, run through the
+   real compiled binary with `NIRDOSHA_OBSERVABILITY_URL` pointed at a
+   real local listener, **now at `killer_demo`'s own literal 8×250
+   (2,000-transfer) scale**. Three real runs, all three escalating real
+   anomalies over a real HTTP POST (24,000+ escalations per run at this
+   scale); see `examples/isolation_demo/RESULTS.md`.
+   **Building it at 8×250 from the start surfaced two real, sequential
+   bugs, both root-caused and fixed the same session, not just found**:
+   (1) `find_cycles`'s DFS-based cycle enumeration was exponential on
+   the dense conflict graph this exact race produces (cliff was ~24-28
+   total concurrent transacts) — rewritten as plain graph reachability,
+   now strictly `O(V+E)`; (2) the checker's history was never rotated,
+   so its still-real `O(ops²)`-ish per-call cost grew unbounded over a
+   long run — fixed with `MAX_TRACKED_OPS`-based windowing. With only
+   fix 1, the full 2,000-transfer scale still didn't finish in 15
+   minutes; with both, it finishes in ~23s. Both fixes landed in a new
+   shared crate, `crates/isolation-core`, extracted out of
+   `isolation_check.rs` so the same detector backs the live FFI path
+   *and* two new tooling surfaces built the same session — see Phase 4
+   item 3 and the disclosed-gaps list below. Full before/after numbers
+   for both bugs: `examples/isolation_demo/RESULTS.md`'s "Part 2."
+2. 🟡 **Mostly already done, checked directly rather than assumed.**
+   `crates/bench/RESULTS.md` turns out to already publish real
+   methodology, in depth: a "Why three tasks, and why these three"
+   section explaining task-design decisions, per-task rationale for two
+   independent model runs, a real cross-language (TypeScript/Rust)
+   plain-LLM baseline with committed generated-source artifacts, and a
+   "Reproduce it" section with exact commands for both a cloud-API-key
+   provider and a local-daemon one. What's genuinely still missing is
+   the master plan's full six-column comparison matrix (Nirdosha /
+   TypeScript / Rust / plain-LLM / LLM+XGrammar / LLM+Imandra, plus
+   AlgoVeri/Vericoding) — three of those six columns are done, and the
+   other three are named with real, checked-not-assumed blockers in the
+   file's own "What this is *not*" section (LLM+XGrammar needs raw
+   logit access this environment's Ollama-proxied setup doesn't expose;
+   LLM+Imandra needs a commercial license not available here;
+   AlgoVeri/Vericoding needs quantifier/loop-invariant reasoning
+   `contract_check.rs` was never built to attempt — confirmed by
+   reading one real task's spec, not inferred). Nothing left to
+   "write and publish" that isn't already there; the remaining gap is
+   external resources (an Imandra license, a raw-logit inference stack)
+   this environment doesn't have, not missing documentation.
+3. ✅ **Done (this session, 2026-09-14).** `SECURITY.md`'s "Areas most
+   worth scrutiny" now names the four new Phase-2 capabilities by name
+   — Sigstore-pattern pack signing, the isolation checker,
+   `primitive_exclusivity` — as fresh, not-yet-externally-scrutinized
+   surface, with concrete examples of what a real finding against each
+   would look like, and points at this session's own isolation-checker
+   scaling fix as a worked example of the invitation actually being
+   honored (found, fixed, and the record kept, same day).
 
 ## Phase 4 — close the APM loop (partially real)
 
@@ -64,13 +95,26 @@ What's still just a design, not code:
    same way a `:generate`-time failure already does
    (`hint_cache::HintCache`) — right now the two systems don't talk to
    each other at all.
-3. **Surface it in the certificate over time.** `mcp_tools::Certificate`
-   already has `nfr_commitments` (declared, `evidence_tier: "monitored"`)
-   as of this session's Phase 4 work. A natural sibling field,
-   `isolation_violations` or similar, would let a certificate become a
-   living, re-attestable claim instead of a point-in-time one — named as
-   a real possibility in `isolation_check.rs`'s own module doc, not yet
-   built.
+
+Now real, not just a design (2026-09-15):
+
+3. ✅ **Surface it in the certificate over time.**
+   `mcp_tools::Certificate::isolation_violations` (a `Vec<
+   IsolationViolation>`, `evidence_tier: "monitored"` per entry, same
+   discipline `nfr_commitments` already holds itself to) is real, and
+   `nirdosha certify <file.nir> --isolation-log <ops.json>` actually
+   populates it from a saved operation-history log, re-issuing the
+   certificate with the observed violations attached. Tested end to end
+   (`crates/compiler/tests/certify_command.rs`'s `isolation_log_*`
+   tests). **What "over time" honestly means here, not oversold**: each
+   certificate is still a static, re-issued artifact — attaching a new
+   log re-issues a new certificate, it doesn't mutate an old one in
+   place or auto-update a standing claim. There is also still no
+   mechanism that *produces* an ops-log from a live running process —
+   `--isolation-log` consumes a log; nothing yet captures one from a
+   real `.nir` binary's own in-memory checker state. That capture half
+   is real, separate follow-up work, disclosed in `cmd_check_isolation`'s
+   own doc comment (`main.rs`), not implied to already exist.
 
 ## Phase 5 — domain translation stretch (not started)
 
@@ -85,29 +129,43 @@ before Phase 3 lands — no candidate failure class has been chosen.
 Named in the code/docs at the time each was built, not hidden — pick up
 opportunistically, not urgently:
 
-- **Isolation checker has no enforcement surface.** Detection-only today
-  (an async escalation after the fact) — no CI gate, no way to run it
-  over a saved log on demand. A `nirdosha check-isolation <log>` CLI
-  would close this.
-- **Isolation checker doesn't scale to real contention (new, found
-  building the Phase 3 item 1 demo above).** `record_and_check` calls
-  `check()` — a full `O(ops²)` graph rebuild, `check()`'s own doc
-  comment already discloses this — on *every single* `db` operation,
-  over the entire history of the process's run, never rotated. On the
-  dense conflict graph many concurrent transacts racing one resource
-  produce (exactly the case this checker exists for), `find_cycles`'s
-  DFS-based simple-cycle enumeration measurably blows up past roughly
-  24-28 total concurrent transacts on that resource — see
-  `examples/isolation_demo/RESULTS.md`'s "Part 2" for the measured
-  cliff (two independent sweeps agree) and the root-causing that ruled
-  out the durability log and thread count first. The real fix is
-  windowing (`clear_shared()` on a timer/op-count threshold, wired into
-  the live `db.rs` path — `clear_shared()` already exists but nothing
-  calls it today) or replacing `find_cycles` with an algorithm that
-  doesn't degrade like this on dense graphs; neither attempted here.
-  Worth prioritizing above the CLI-surface item above it, since a
-  checker that hangs the program it's attached to under real contention
-  is a correctness risk of its own, not just a missing convenience.
+- ✅ **Isolation checker has no enforcement surface — fixed 2026-09-15.**
+  Used to be detection-only (an async escalation after the fact only),
+  no way to run it over a saved log on demand. `nirdosha check-
+  isolation <ops.json>` (`main.rs::cmd_check_isolation`) closes this: a
+  real 3-valued exit code (0 clean / 1 anomaly found / 2 reserved for
+  a genuinely inconclusive case, matching `verify`'s own convention),
+  `--in-toto` wrapping, using `crates/isolation-core`'s detector
+  directly (the identical algorithm the live path runs, not a
+  reimplementation). Tested end to end
+  (`crates/compiler/tests/check_isolation_command.rs`). **What's still
+  genuinely missing, disclosed in that command's own doc comment**: no
+  mechanism yet *produces* an ops-log from a live compiled `.nir`
+  process — a log has to come from a caller's own tooling. The
+  *checking* half of this gap is closed; the *capture* half is real,
+  separate follow-up work.
+- ✅ **Isolation checker didn't scale to real contention — fixed
+  2026-09-14/15, in two parts.** Used to call `check()` — a graph
+  rebuild — on *every single* `db` operation, over the entire history
+  of the process's run, never rotated, and the cycle-detection
+  algorithm itself was exponential on a dense conflict graph. Both
+  fixed: `find_cycles` rewritten as plain graph reachability
+  (`crates/isolation-core`, strictly `O(V+E)` per start node, not
+  exponential), and `MAX_TRACKED_OPS`-based windowing bounds `check()`'s
+  own still-real `O(ops²)`-ish per-call cost to a fixed ceiling
+  regardless of run length (`isolation_check.rs`, `clear_shared()` now
+  actually gets called automatically). `examples/isolation_demo/
+  RESULTS.md`'s "Part 2" has the complete measured before/after for
+  both fixes, including the cliff that only the first fix alone still
+  left (the full 2,000-transfer scale didn't finish in 15 minutes with
+  just fix 1; with both, ~23s). Both fixes are pinned at the unit-test
+  level too (`crates/isolation-core::tests::
+  dense_conflict_graph_does_not_blow_up`, `isolation_check.rs`'s two
+  rotation tests), not just "it worked when tried." **Real, disclosed
+  remaining limit, not a new gap**: windowing trades recall (a
+  cross-window anomaly is invisible) for the bound — a real tradeoff,
+  not a perfect fix; `MAX_TRACKED_OPS = 300` is a measured-comfortable
+  value, not a proven-optimal one.
 - **Pack signing has no UI.** `agent-skills/nirdosha/hi_ux_redesign_options.md`'s
   "trust indicator" mockup was never wired to `hi_plugin::
   pack_signer_identity`. Live Fulcio/Rekor integration remains
@@ -118,25 +176,25 @@ opportunistically, not urgently:
   section) — rejects some programs a full last-use liveness analysis
   would accept. Worth revisiting only if it bites real generated code in
   practice, not worth pre-emptively building out.
-- **`let x: unit = <call>()` doesn't compile (new, found building the
-  Phase 3 item 1 demo above)** — `layout::llvm_ty` maps `Ty::Unit` to
-  LLVM `void`, and the generic let-with-type-annotation codegen path
-  unconditionally allocas whatever `llvm_ty` returns; `alloca void` is
-  illegal LLVM IR, so `clang` rejects the emitted module outright. Real
-  today, at HEAD, independent of anything in this session's own working
-  changes — confirmed by rebuilding `nirdosha` clean and trying to
-  build `examples/killer_demo/race_probe.nir` itself, unmodified: it no
-  longer compiles, because its own `let slept: unit = sleep_ms(2)`
-  hits exactly this. (`examples/features/20_sandbox.nir` and
-  `examples/features/54_compiled_workflow_escalation.nir` avoid it by
-  calling `sleep_ms(...)` as a bare statement instead of binding it —
-  that's the correct idiom and the workaround this session used for
-  `examples/isolation_demo/`'s own `.nir` file, but `race_probe.nir`
-  itself was not touched.) `killer_demo/RESULTS.md`'s own "every number
-  below is from an actual run of the actual code" claim can no longer
-  be reproduced as written until either that file drops the `let`
-  binding or codegen special-cases `Ty::Unit` (skip the alloca/store
-  entirely, matching how a bare-statement call is already handled).
+- ✅ **`let x: unit = <call>()` didn't compile — fixed 2026-09-14.**
+  `layout::llvm_ty` maps `Ty::Unit` to LLVM `void`, and the generic
+  let-with-type-annotation codegen path unconditionally alloca'd
+  whatever `llvm_ty` returned; `alloca void` is illegal LLVM IR, so
+  `clang` rejected the emitted module outright — real at HEAD,
+  independent of anything else in flight, confirmed by rebuilding
+  `nirdosha` clean and finding `examples/killer_demo/race_probe.nir`
+  itself, unmodified, no longer compiled (its own `let slept: unit =
+  sleep_ms(2)`). Fixed in `codegen.rs`'s `Stmt::Let` scalar arm,
+  mirroring the identical fix `Stmt::Return` already had for a `return
+  <unit-typed call>`: evaluate the expression for its side effect, skip
+  the alloca/store, register the binding with a placeholder address
+  that's never dereferenced (`Expr::Ident`'s own `ty == Ty::Unit` arm
+  already short-circuits to a placeholder before ever loading). Full
+  `nirdosha` test suite (217 lib tests, 128/129 codegen integration
+  tests — the one failure is a pre-existing, unrelated live-MQ-broker
+  dependency) passes; `race_probe.nir` itself, unmodified, compiles and
+  reproduces the race again (3/3 runs, nonzero drift), restoring
+  `killer_demo/RESULTS.md`'s own "actual run of the actual code" claim.
 - **`governing_packs` is pack IDs only**, no per-invariant attribution.
   Already named by an existing test comment
   (`hi_api.rs::fintech_app_under_the_banking_pack_publishes_...`) as
@@ -144,15 +202,39 @@ opportunistically, not urgently:
 
 ## Recommendation
 
-~~Start with Phase 3 item 1 (the adversarial demo)~~ — done this
-session; see `examples/isolation_demo/`. It paid off exactly as
-expected (the checker really does catch the race, live, three real
-runs) *and* surfaced a real correctness-adjacent scaling bug the
-project didn't know it had. Given that finding, the next highest-value
-move is no longer Phase 3 item 2/3 — it's the new "isolation checker
-doesn't scale to real contention" item just added to the disclosed-gaps
-list above: a checker that can hang a `transact`-using program under
-genuine concurrent contention, with no opt-out today, is a real risk
-sitting in already-shipped Phase 2 work, not a documentation gap.
-Publishing the benchmark methodology (item 2) and inviting outside
-reproduction (item 3) are still real, still next after that.
+~~Start with Phase 3 item 1 (the adversarial demo)~~ — done, along with
+items 2 and 3, and every disclosed gap it surfaced along the way
+(the `find_cycles`/windowing scaling bugs, the CLI enforcement surface,
+the `let x: unit` codegen bug) — all fixed, not just found, each with
+its own before/after measurement or passing test, not asserted.
+Phase 4 item 3 (certificate attachment) is real now too. Everything
+in this doc that was reachable without either new external resources
+(an Imandra license, raw-logit model access) or a fresh, deliberately-
+deferred design decision (Phase 5's failure class) is done as of
+2026-09-15.
+
+What's left, in order of real remaining value:
+
+1. **Phase 4 items 1-2** (drift detection triggering re-verification;
+   feeding real incidents into `hint_cache`) — both still genuinely
+   design-only, both bigger lifts than anything closed this session
+   (drift detection needs a real place to compare a compile-time
+   `nfr(...)` assumption against an observed APM value and decide what
+   "diverged enough to re-verify" means; `hint_cache` integration needs
+   a real schema for a runtime-observed lesson, not just a
+   `:generate`-time one). Worth scoping properly before starting,
+   not sized here.
+2. **`governing_packs` per-invariant attribution** (the one remaining
+   disclosed smaller gap) — a real, bounded, well-named piece of work:
+   turn a flat `Vec<String>` of pack IDs into something that also says
+   *which* invariant each pack actually contributed, per the existing
+   test comment already naming this as "generation audit and
+   governing-set snapshot" future work.
+3. **Pack signing's UI** stays genuinely blocked on the registry-
+   governance question (RFC 0016's own unchanged position) — not
+   picked up until that's resolved, same as before.
+4. **Phase 5** (a new failure class, idealized → built → wired in) is
+   no longer premature on Phase 3's own account (Phase 3 is done) — but
+   still needs a real candidate failure class chosen first, a decision
+   this doc has deliberately left open rather than picked under time
+   pressure.

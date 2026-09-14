@@ -86,10 +86,21 @@ violation of a claim the project actually makes.
 
 Three specific things the project does **not** currently claim, named
 here so a report against them is triaged as a known gap rather than a
-new finding: `&` references have no `&mut`-style liveness/exclusivity
-enforcement beyond "the referent isn't already moved" (only `box`'s
-affine tracking is fully enforced — see `ownership.rs`'s own doc
-comment); there is no built-in audit-trail feature; and the built-in
+new finding: `&` references get a real, compiler-enforced liveness
+check as of 2026-09 (`ownership.rs`'s "Borrow liveness (v1, lexical)"
+doc section) — a genuine use-after-free the checker used to miss
+entirely (moving a `box` while a `let`-bound reference to it was still
+live) is now a compile error — but it is *not* a full Rust-style borrow
+checker: it's lexical (a borrow is protected for its own enclosing
+block, not tracked to a true last use the way Rust's NLL does), and it
+only tracks a borrow created by a `let` initializer — a borrow that's
+reassigned via `=`, reached through a field/index expression, or
+crosses a function-call boundary is not tracked at all, and
+`typeck.rs`'s pre-existing `CannotMoveOutOfReference` is the only
+protection there. A report showing a use-after-free through one of
+those *uncovered* shapes is a known, disclosed gap; a report showing
+one through a plain `let r = &b` — the shape now covered — is a real
+finding. There is no built-in audit-trail feature; and the built-in
 crypto (`hmac`/`sha2`/`ring`) is standard RustCrypto, not a NIST
 CMVP-validated module, so FIPS 140-3 is not met.
 
@@ -140,6 +151,25 @@ Areas most worth scrutiny:
 - Anything that would let untrusted `.nir` source (e.g. LLM-generated
   code fed through the agent-facing tooling) bypass a `requires(role:
   ...)`/`acquire` gate in a compiled binary
+- **New surface as of 2026-09 (RFC 0016 Phase 2/4), not yet scrutinized
+  by anyone outside this project — start here if you want the freshest
+  attack surface**: `hi_plugin.rs`'s Sigstore-pattern pack signing
+  (`sign_pack`/`verify_and_install_signed_pack`/`TrustAnchor`) — a
+  forged signature, a trust-anchor confusion, or a TOFU-vs-configured-
+  anchor precedence bug that lets an unsigned or wrongly-signed pack
+  install as if verified would be a real finding; `crates/runtime-
+  kernels/src/kernel/isolation_check.rs`'s transaction-isolation
+  detector — a real concurrent lost-update that it fails to report (a
+  false negative) inside an active `transact` site would undercut its
+  one actual claim (`evidence_tier: "monitored"`); and
+  `primitive_exclusivity` (`hi_plugin.rs`) — two installed packs both
+  claiming exclusive ownership of the same primitive without either
+  being refused is a real policy-enforcement bug, not a documentation
+  gap. `isolation_check.rs`'s own scaling behavior (fixed 2026-09-14,
+  see `examples/isolation_demo/RESULTS.md`) is exactly the shape of
+  finding this invitation wants — reported and fixed the same session
+  it was found, the record kept rather than quietly folded away, same
+  treatment A10/A11/A18 above already got.
 
 Out of scope: findings that require local code execution with the same
 privileges as the `nirdosha` process itself, or that target the

@@ -16,28 +16,31 @@
 // (`network`/`verify` are stubs; `precheck`/`compensate`/`log` are
 // omitted, all three optional per `docs/TRANSACT.md`).
 //
-// **3 transfers per thread (24 total), not `race_probe.nir`'s own
-// 250.** Not a stylistic choice -- measured, not assumed (this
-// directory's own RESULTS.md has the numbers): past roughly 26-28
-// total concurrent transfers, `isolation_check.rs`'s `find_cycles`
-// (a DFS-based simple-cycle enumeration over the conflict graph, no
-// memoization beyond "already reported") blows up on exactly the
-// dense, heavily-overlapping conflict graph this workload produces --
-// every racing transfer on the same two accounts adds edges to nearly
-// every other one -- and the program hangs well past any reasonable
-// timeout. 24 is comfortably under that cliff (~1.5s); running this
-// file at `race_probe.nir`'s literal 8x250 scale is not currently
-// possible at all.
+// **Now runs at `race_probe.nir`'s own literal 8x250 scale (2,000
+// concurrent transfers) -- it didn't used to.** The first version of
+// this file ran at 8x3 (24 total) because past ~26-28 total concurrent
+// transfers, `isolation_check.rs`'s `find_cycles` (a DFS-based
+// simple-cycle enumeration, no memoization) blew up exponentially on
+// the dense conflict graph this exact workload produces, and the
+// program simply never finished. Two real fixes landed the same
+// session (both in `crates/isolation-core`, now shared by the live FFI
+// path and `nirdosha check-isolation`): `find_cycles` rewritten as
+// plain graph reachability (provably `O(V+E)`, not exponential), and
+// `MAX_TRACKED_OPS`-based windowing so `check()`'s own still-real
+// `O(ops²)`-ish per-call cost never grows unbounded across a long
+// process lifetime either. This file's own directory's RESULTS.md has
+// the full before/after measurements, including the exact cliff the
+// first fix alone still left, that the second fix closes.
 //
 // This is Phase 3 item 1 of `docs/research/2026-09-pending-
 // verification-differentiation-work.md`: the adversarial demo
 // `isolation_check.rs` didn't have yet, run end to end through the
 // real compiled binary and its real async escalation path -- not a
 // Rust unit test, not a synthetic FFI-level history. What actually
-// came out is not just "the checker catches it" (it does, at this
-// scale) but a real, previously-undisclosed scaling failure in the
-// checker itself -- see this directory's own RESULTS.md for the full
-// story and the measurements, and `run.sh` for how it's driven (a
+// came out is not just "the checker catches it" (it does) but a real,
+// previously-undisclosed scaling failure in the checker itself, found,
+// measured, and fixed the same session -- see this directory's own
+// RESULTS.md for the full story and `run.sh` for how it's driven (a
 // real `NIRDOSHA_OBSERVABILITY_URL` listener has to be running to see
 // the escalations; the ledger corruption itself shows up either way).
 //
@@ -236,19 +239,20 @@ fn main() {
         Err(e) => print("setup error"),
     }
 
-    // 8 real OS threads, 3 transfers each -- 24 concurrent transfers
-    // total (this file's own top comment on why 3, not `race_probe.
-    // nir`'s 250), every one of them now running as its own `transact`
-    // site (its own `txn_id`), against the same pooled SQLite
-    // connection `db_connect` shares process-wide.
-    let t1: thread i64 = spawn worker(1, 2, 3)
-    let t2: thread i64 = spawn worker(2, 1, 3)
-    let t3: thread i64 = spawn worker(1, 2, 3)
-    let t4: thread i64 = spawn worker(2, 1, 3)
-    let t5: thread i64 = spawn worker(1, 2, 3)
-    let t6: thread i64 = spawn worker(2, 1, 3)
-    let t7: thread i64 = spawn worker(1, 2, 3)
-    let t8: thread i64 = spawn worker(2, 1, 3)
+    // 8 real OS threads, 250 transfers each -- 2,000 concurrent
+    // transfers total, matching `race_probe.nir`'s own scale exactly
+    // (this file's own top comment on why that wasn't always true),
+    // every one of them now running as its own `transact` site (its
+    // own `txn_id`), against the same pooled SQLite connection
+    // `db_connect` shares process-wide.
+    let t1: thread i64 = spawn worker(1, 2, 250)
+    let t2: thread i64 = spawn worker(2, 1, 250)
+    let t3: thread i64 = spawn worker(1, 2, 250)
+    let t4: thread i64 = spawn worker(2, 1, 250)
+    let t5: thread i64 = spawn worker(1, 2, 250)
+    let t6: thread i64 = spawn worker(2, 1, 250)
+    let t7: thread i64 = spawn worker(1, 2, 250)
+    let t8: thread i64 = spawn worker(2, 1, 250)
 
     let s1: i64 = join t1
     let s2: i64 = join t2
