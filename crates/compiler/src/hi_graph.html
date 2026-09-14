@@ -347,6 +347,18 @@
   </div>
 </div>
 
+<!-- github #57: MUST load before 3d-force-graph.min.js, not just
+     alongside it -- that bundle checks `typeof window.THREE` once, at
+     its own (synchronous, classic-script) load time, and either uses
+     what's already on `window` or falls back to its own internal,
+     unexported copy for good. Loading this after would be too late:
+     the bundle would already have locked in its internal copy, and
+     `run3D`'s own `nodeThreeObject` custom shapes below would have no
+     real `THREE` constructor to build from either. See hi_api.rs's
+     `THREE_JS` for how this file exists at all (vendored, not a CDN
+     load -- rfcs/0014's own rule -- and why it isn't a ready-made
+     download the way 3d-force-graph.min.js is). -->
+<script src="/assets/three.min.js"></script>
 <script src="/assets/3d-force-graph.min.js"></script>
 <script>
 (function () {
@@ -425,23 +437,33 @@
     // blend of a previous blend's output.
     const disconnectedAmount = connectedNodeIds.has(node.id) ? 0 : 0.55;
     // github #40's "dashed ring = still reviewing, solid = confirmed"
-    // for the 3D view specifically: the vendored `3d-force-graph`
-    // bundle never exposes a `window.THREE` for building a real torus
-    // ring mesh (checked -- it only *reads* a page-supplied THREE if
-    // one already exists, falling back to its own internal, unexported
-    // copy otherwise), and its own `nodeOpacity` prop is a single
-    // scalar multiplied across every node's material, not a per-node
-    // accessor (confirmed against the bundle's own `e.nodeOpacity *
-    // mf(c)` material-opacity line) -- so per-node alpha isn't
-    // reachable that way either. `nodeColor`'s per-node function
-    // accessor *is* real and already relied on for `colorFor` itself,
-    // so reviewing state (and, github #57, pending-build state) rides
-    // the same, proven mechanism: a further blend toward the
-    // background, layered on top of (not replacing) the existing
-    // connected/disconnected dimming above. The 2D fallback (`run2D`'s
-    // `draw()`) draws an actual dashed/solid stroked ring instead
-    // (amber-dashed/green-dashed/green-solid, github #57), since a
-    // plain canvas needs no extra library for that.
+    // for the 3D view specifically: at the time this was written, the
+    // vendored `3d-force-graph` bundle never exposed a `window.THREE`
+    // for building a real ring mesh (checked -- it only *read* a
+    // page-supplied THREE if one already existed, falling back to its
+    // own internal, unexported copy otherwise), and its own
+    // `nodeOpacity` prop is a single scalar multiplied across every
+    // node's material, not a per-node accessor (confirmed against the
+    // bundle's own `e.nodeOpacity * mf(c)` material-opacity line) -- so
+    // per-node alpha wasn't reachable that way either. `nodeColor`'s
+    // per-node function accessor *was* real and already relied on for
+    // `colorFor` itself, so reviewing state rode that one proven
+    // mechanism instead: a further blend toward the background, layered
+    // on top of (not replacing) the existing connected/disconnected
+    // dimming above.
+    //
+    // github #57 changed the premise: `hi_api.rs`'s `THREE_JS` now
+    // vendors a real, page-supplied `THREE` specifically so a page-
+    // reachable constructor exists (see that const's own doc comment) --
+    // `run3D`'s `nodeThreeObject` uses it to give a pending-build node
+    // an actual distinct shape (an octahedron, not a sphere), not just a
+    // subtler color. This dim blend still applies underneath that shape
+    // too (its material is colored via this same function), as a second,
+    // redundant cue, not a replacement for the shape. Reviewing state
+    // (still a solid vs. dashed *ring* in the 2D fallback below) is left
+    // on the blend-only treatment for this pass -- disclosed as a choice
+    // now, not a hard limitation, since a real THREE is available for it
+    // too whenever that's worth doing.
     const reviewingAmount = isReviewing(node) ? 0.35 : 0;
     // Deliberately lighter than `reviewingAmount`: pending-build is a
     // real signal ("this no longer matches what was last built"), but
@@ -457,6 +479,42 @@
     // connected+confirmed+built node (every amount 0) is untouched.
     const amount = 1 - (1 - disconnectedAmount) * (1 - reviewingAmount) * (1 - pendingAmount);
     return amount === 0 ? base : blendTowardBackground(base, amount);
+  }
+
+  // github #57: a real, distinct 3D *shape* for a pending-build node --
+  // the color-blend alone (`pendingAmount` above) proved too subtle to
+  // actually notice in the live graph. `3d-force-graph`'s own
+  // `nodeThreeObject` accessor (confirmed present in the vendored
+  // bundle) takes a real `THREE.Object3D` per node; returning one here
+  // *replaces* that node's usual auto-managed sphere (see `hi_api.rs`'s
+  // `THREE_JS` for how a page-reachable `THREE` constructor exists at
+  // all to build one from). Returning `undefined` for every other node
+  // is deliberate, not an oversight -- per the bundle's own dispatch
+  // logic (`s&&!a?n=s:(...)` in the minified source: a falsy accessor
+  // result with `nodeThreeObjectExtend` also unset falls through to the
+  // library's own default sphere, auto-colored/auto-sized exactly as
+  // before), so every already-built/reviewing/plain node keeps its
+  // existing look completely unchanged.
+  //
+  // An octahedron, not a sphere: faceted and angular reads as "still
+  // rough, not finished" against every other node's smooth sphere,
+  // legible at a glance and at any camera distance -- unlike the dim
+  // blend, which only differs by a hard-to-judge shade of the same
+  // color. Colored via `colorFor` itself (the auto-material path a
+  // default sphere gets doesn't apply to a custom object at all -- see
+  // the same dispatch logic above), so it stays visually consistent
+  // with the rest of the kind-colored/dimmed palette, just a different
+  // shape. Sized to roughly match a default node's own radius formula
+  // (`Math.cbrt(nodeVal) * nodeRelSize`, confirmed against the bundle's
+  // `onUpdateObj` source -- this graph never sets a per-node `val`, so
+  // that's always `Math.cbrt(1) * 4 = 4` in practice) so it doesn't
+  // read as oddly bigger or smaller than its neighbors.
+  function nodeThreeObjectFor(node) {
+    if (typeof THREE === 'undefined' || !isPendingBuild(node)) return undefined;
+    const radius = Math.cbrt(node.val || 1) * 4;
+    const geometry = new THREE.OctahedronGeometry(radius, 0);
+    const material = new THREE.MeshLambertMaterial({ color: new THREE.Color(colorFor(node)), transparent: true, opacity: 0.85 });
+    return new THREE.Mesh(geometry, material);
   }
 
   function setStatus(text) {
@@ -1137,16 +1195,33 @@
     dimNote.style.fontSize = '11px';
     dimNote.textContent = 'dim = nothing links to it yet';
     legend.appendChild(dimNote);
-    // github #57: spells out the ring ladder `colorFor`/`draw()` now
-    // render (dashed-amber -> dashed-green -> solid-green), so "which
-    // units are already built" is answered here instead of only by
-    // clicking each node open one at a time.
-    const ringNote = document.createElement('div');
-    ringNote.className = 'item';
-    ringNote.style.opacity = '0.7';
-    ringNote.style.fontSize = '11px';
-    ringNote.textContent = 'ring: dashed amber = reviewing, dashed green = pending build, solid green = built';
-    legend.appendChild(ringNote);
+    // github #57: one line explaining "which units are already built,"
+    // matching whichever renderer `hasWebGL()` actually picks below (the
+    // same check, repeated here rather than threading the choice through
+    // as a parameter -- cheap and side-effect-free, and it keeps
+    // `buildLegend` callable on its own before that choice is even made).
+    // Showing BOTH a ring note and a shape note unconditionally would
+    // describe a visual cue that doesn't exist in whichever mode is
+    // actually running -- real user confusion, not just clutter (spotted
+    // live: a WebGL session was shown the 2D ring's wording despite
+    // never rendering a ring at all).
+    const note = document.createElement('div');
+    note.className = 'item';
+    note.style.opacity = '0.7';
+    note.style.fontSize = '11px';
+    if (hasWebGL() && typeof ForceGraph3D === 'function') {
+      // `nodeThreeObjectFor` gives a pending-build node a real distinct
+      // shape (the color blend alone proved too subtle to actually
+      // notice), rather than a ring, which the vendored bundle has no
+      // torus-mesh API for.
+      note.textContent = '3D shape: octahedron = pending build, sphere = everything else';
+    } else {
+      // `colorFor`/`draw()`'s ring ladder (dashed-amber -> dashed-green
+      // -> solid-green) -- the 2D fallback's own version of the same
+      // signal.
+      note.textContent = 'ring: dashed amber = reviewing, dashed green = pending build, solid green = built';
+    }
+    legend.appendChild(note);
   }
 
   // Set by whichever of `run3D`/`run2D` actually ran, so a mutating
@@ -1271,6 +1346,7 @@
       .backgroundColor('#0b0b12')
       .graphData(data)
       .nodeColor(colorFor)
+      .nodeThreeObject(nodeThreeObjectFor)
       .nodeLabel(buildTooltip)
       .nodeRelSize(4)
       .linkColor(() => '#3a3a52')

@@ -47,10 +47,29 @@ fn logo_data_uri() -> String {
 /// Vendored per rfcs/0014's own rule ("`three.js`/`3d-force-graph` ship
 /// vendored into the generated page, never loaded from a CDN") —
 /// `crates/compiler/src/vendor/3d-force-graph.LICENSE` carries its MIT
-/// license. This one file is genuinely self-contained: `3d-force-graph`
-/// bundles `three.js` (WebGLRenderer, OrbitControls, etc.) internally
-/// via its own UMD build, so nothing else needs vendoring alongside it.
+/// license. `3d-force-graph` bundles `three.js` (WebGLRenderer,
+/// OrbitControls, etc.) internally via its own UMD build for everything
+/// it does on its own -- but github #57's per-node custom 3D shapes
+/// (`run3D`'s `nodeThreeObject`) need a real `THREE` constructor
+/// reachable from *our own* code too, which the bundle's internal copy
+/// never exposes (see `THREE_JS` just below). "Nothing else needs
+/// vendoring alongside it" is no longer true; see that const instead.
 const FORCE_GRAPH_JS: &str = include_str!("vendor/3d-force-graph.min.js");
+
+/// A real `THREE` global, vendored (not CDN-loaded, same rfcs/0014
+/// rule as `FORCE_GRAPH_JS` above) and served *before*
+/// `FORCE_GRAPH_JS` in `hi_graph.html` so that bundle's own
+/// `typeof window.THREE !== 'undefined' ? window.THREE : <internal
+/// copy>` check (confirmed against its source -- see `hi_graph.html`'s
+/// `colorFor` comment) picks this one up and uses it for everything,
+/// rather than its internal, unexported copy -- letting this same
+/// `THREE` also be used directly by `run3D`'s own `nodeThreeObject`
+/// accessor. `crates/compiler/src/vendor/three.LICENSE` carries its
+/// MIT license; that vendored file's own header comment has the exact
+/// `npm install`/`esbuild` invocation this was built with -- modern
+/// `three.js` only publishes ESM builds, no classic global/window
+/// script, so unlike `FORCE_GRAPH_JS` this isn't a ready-made download.
+const THREE_JS: &str = include_str!("vendor/three.min.js");
 
 /// A transport-neutral HTTP-shaped response. Each transport module
 /// converts this to its own native response type at the edge.
@@ -115,6 +134,7 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
     // with it (the page's own fetches to /api/* report that separately).
     match path {
         "/" => return ApiResponse::html(&BUILD_MODE_HTML.replace("__NIRDOSHA_LOGO__", &logo_data_uri())),
+        "/assets/three.min.js" => return ApiResponse::javascript(THREE_JS),
         "/assets/3d-force-graph.min.js" => return ApiResponse::javascript(FORCE_GRAPH_JS),
         _ => {}
     }
@@ -713,6 +733,10 @@ mod tests {
         let body = String::from_utf8_lossy(&resp.body);
         assert!(body.contains("Nirdosha Hi"));
         assert!(body.contains("/assets/3d-force-graph.min.js"), "page should load the vendored graph library");
+        assert!(body.contains("/assets/three.min.js"), "page should load the vendored THREE global");
+        let three_idx = body.find("/assets/three.min.js").expect("checked above");
+        let force_graph_idx = body.find("/assets/3d-force-graph.min.js").expect("checked above");
+        assert!(three_idx < force_graph_idx, "three.min.js must load BEFORE 3d-force-graph.min.js -- that bundle picks its internal-vs-page-supplied THREE once, at its own script-execution time (github #57)");
         assert!(!body.contains("__NIRDOSHA_LOGO__"), "the logo placeholder must be substituted, not leaked verbatim");
         assert!(body.contains("data:image/png;base64,"), "the brand logo should be inlined as a data: URI");
         assert!(body.contains("id=\"console-input\""), "build mode should have a bottom text-entry console, matching hi's own front ends");
@@ -733,6 +757,14 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.content_type, "application/javascript; charset=utf-8");
         assert!(String::from_utf8_lossy(&resp.body).contains("ForceGraph3D"));
+
+        let three_resp = handle(&dir, "GET", "/assets/three.min.js", "", b"");
+        assert_eq!(three_resp.status, 200);
+        assert_eq!(three_resp.content_type, "application/javascript; charset=utf-8");
+        let three_body = String::from_utf8_lossy(&three_resp.body);
+        assert!(three_body.contains("var THREE="), "must assign a classic global THREE, not just export an ES module");
+        assert!(three_body.contains("REVISION"), "sanity: this is really three.js, not an empty/placeholder file");
+
         assert!(!dir.join(".nir").exists(), "static assets must not scaffold .nir/");
     }
 
