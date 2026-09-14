@@ -718,6 +718,33 @@ pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
 /// project can't blow an LLM prompt past a reasonable size.
 const PROJECT_CONTEXT_MAX_UNITS: u32 = 200;
 
+/// A richer per-node summary than `project_context`'s bare "name:
+/// description" -- github #49's proactive-suggestion LLM call needs
+/// enough to actually spot a gap ("no role check on this exposed fn",
+/// "no create_ counterpart for this screen"), which needs each unit's
+/// sub-kind (parsed from its id, same `code:<kind>:<name>` convention
+/// `hi_graph.html`'s own `subKind` reads client-side), exposure status,
+/// and already-attached attributes -- none of which `project_context`
+/// carries. Still name/description-shaped, still capped at
+/// `PROJECT_CONTEXT_MAX_UNITS`, still network-free (the LLM call itself
+/// lives in `hi_llm::suggest_gaps`, not here).
+pub fn suggestion_context(conn: &Connection) -> Result<String, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, title, status, attributes FROM nodes WHERE kind = 'CodeUnit' ORDER BY id LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
+        stmt.query_map([PROJECT_CONTEXT_MAX_UNITS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let mut out = String::new();
+    for (id, title, status, attributes) in rows {
+        let sub_kind = id.splitn(3, ':').nth(1).unwrap_or("fn");
+        let name = title.unwrap_or_else(|| id.clone());
+        let exposed = if status.as_deref() == Some("exposed") { " [API-exposed]" } else { "" };
+        let attrs = attributes.filter(|a| !a.trim().is_empty()).map(|a| a.replace('\n', "; ")).unwrap_or_else(|| "(none)".to_string());
+        out.push_str(&format!("- {sub_kind} {name}{exposed} -- attributes: {attrs}\n"));
+    }
+    Ok(out)
+}
+
 pub fn project_context(conn: &Connection) -> Result<String, String> {
     let mut stmt = conn.prepare("SELECT id, title, driving_text, source_ref FROM nodes WHERE kind = 'CodeUnit' ORDER BY id LIMIT ?1").map_err(|e| e.to_string())?;
     let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
@@ -1437,6 +1464,29 @@ mod tests {
 
         let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
         assert_eq!(attrs, "requires(role: admin)\nnfr(latency_ms: 200)");
+    }
+
+    #[test]
+    fn suggestion_context_reports_sub_kind_exposure_and_attributes() {
+        // github #49: this is the one input `hi_llm::suggest_gaps` reads
+        // to spot an exposed fn with no role/claim gate -- so the exact
+        // markers it needs (sub-kind, `[API-exposed]`, attribute text)
+        // have to actually survive into the summary line.
+        let dir = scratch_dir("suggestion_context");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn internal_helper() -> i64 { return 1 }\n\
+             fn public_action() -> i64 requires(public) { return internal_helper() }\n\
+             serve { expose public_action }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+        attach_attribute(&conn, "code:fn:internal_helper", "requires(role: admin)").expect("attach");
+
+        let context = suggestion_context(&conn).expect("suggestion_context");
+        assert!(context.contains("fn public_action [API-exposed] -- attributes: (none)"), "got: {context}");
+        assert!(context.contains("fn internal_helper -- attributes: requires(role: admin)"), "got: {context}");
     }
 
     #[test]

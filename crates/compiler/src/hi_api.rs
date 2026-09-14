@@ -92,7 +92,7 @@ impl ApiResponse {
 /// browser-originated requests. POST closes that gap (modern browsers
 /// do send `Origin` on a cross-origin POST) on top of `hi_window.rs`'s
 /// transport already having no network origin to attack at all.
-const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/packs/install", "/api/generate", "/api/publish"];
+const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/packs/install", "/api/generate", "/api/publish", "/api/preview/start", "/api/preview/stop"];
 
 /// Routes one request against a fresh connection opened on `root`.
 /// `path` excludes the query string; `query` is the raw, still
@@ -142,6 +142,7 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
             Some(q) => handle_ask(&conn, &q),
             None => ApiResponse::error(400, "missing required query param `q`"),
         },
+        "/api/suggest" => handle_suggest(&conn),
         "/api/packs" => handle_packs_list(&conn),
         "/api/prompt" => handle_prompt(root, &conn, body),
         "/api/confirm" => handle_confirm(&conn, body),
@@ -153,6 +154,15 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         "/api/packs/install" => handle_pack_install(root, &conn, body),
         "/api/generate" => handle_generate(root, &conn, body),
         "/api/publish" => handle_publish(root, &conn),
+        "/api/preview/start" => handle_preview_start(root, &conn),
+        "/api/preview/stop" => {
+            crate::hi_preview::stop();
+            ok_response()
+        }
+        "/api/preview/status" => {
+            let port = crate::hi_preview::status();
+            ApiResponse::json(&serde_json::json!({ "running": port.is_some(), "port": port }))
+        }
         _ => ApiResponse::error(404, "not found"),
     }
 }
@@ -236,6 +246,31 @@ fn handle_ask(conn: &Connection, q: &str) -> ApiResponse {
     match crate::hi_llm::answer_question(&client, q, &context) {
         Ok(answer) => ApiResponse::json(&serde_json::json!({ "hits": [], "answer": answer })),
         Err(e) => ApiResponse::json(&serde_json::json!({ "hits": [], "answer": null, "error": e })),
+    }
+}
+
+/// Github #49's proactive-suggestions route: a read-only LLM pass over
+/// the confirmed graph (`hi_graph::suggestion_context`,
+/// `hi_llm::suggest_gaps`), returning what looks missing without
+/// writing anything to `hi.db` -- deliberately GET, not in
+/// `MUTATING_PATHS`, since this call itself never mutates state; only
+/// a later, explicit Accept click (replayed through the already-
+/// mutating `/api/attach`+`/api/confirm` or `/api/prompt`) does. No LLM
+/// configured is the same graceful "nothing to show" `handle_ask`
+/// already gives its own fallback, never a hard error -- a project
+/// with no model configured just sees an empty suggestion rail instead
+/// of a broken one.
+fn handle_suggest(conn: &Connection) -> ApiResponse {
+    let Ok(client) = require_llm_client() else {
+        return ApiResponse::json(&serde_json::json!({ "suggestions": [] }));
+    };
+    let context = match crate::hi_graph::suggestion_context(conn) {
+        Ok(c) => c,
+        Err(e) => return ApiResponse::error(500, &e),
+    };
+    match crate::hi_llm::suggest_gaps(&client, &context) {
+        Ok(items) => ApiResponse::json(&serde_json::json!({ "suggestions": items })),
+        Err(e) => ApiResponse::json(&serde_json::json!({ "suggestions": [], "error": e })),
     }
 }
 
@@ -443,6 +478,57 @@ fn handle_publish(root: &Path, conn: &Connection) -> ApiResponse {
     })();
     match result {
         Ok(out_path) => ApiResponse::json(&serde_json::json!({ "ok": true, "binary": out_path.display().to_string() })),
+        Err(e) => ApiResponse::json(&serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// Github #45's "ship now" half: build a real *servable* binary
+/// (`codegen::build_serve`, `main.rs::cmd_build`'s own `--serve`
+/// pipeline -- unlike `handle_publish` above, which calls the plain,
+/// non-serving `codegen::build`) and hand it to `hi_preview::restart`
+/// to run. Same typecheck/ownership/RFC-0016-coverage re-check as
+/// Publish, over the same `hi_llm::generated_source_path` file, so a
+/// preview never shows something that wouldn't actually pass Publish
+/// either -- "preview" here means "run the real thing," not a mockup.
+/// Demo-mode identity is the served app's own already-real login
+/// screen (see `hi_preview.rs`'s own doc comment) -- nothing new here
+/// has to know about roles/claims at all.
+fn handle_preview_start(root: &Path, conn: &Connection) -> ApiResponse {
+    let source_path = crate::hi_llm::generated_source_path(root);
+    if !source_path.exists() {
+        return ApiResponse::error(400, "nothing generated yet -- run :generate first");
+    }
+    let result: Result<u16, String> = (|| {
+        let path_str = source_path.to_str().ok_or_else(|| format!("generated source path {} is not valid UTF-8", source_path.display()))?;
+        let (program, _src): (crate::ast::Program, String) = crate::loader::load_program(path_str)?;
+        if let Err(errors) = crate::typeck::typecheck(&program) {
+            return Err(errors.iter().map(|e| format!("type error: {e}")).collect::<Vec<_>>().join("\n"));
+        }
+        if let Err(errors) = crate::ownership::check_ownership(&program) {
+            return Err(errors.iter().map(|e| format!("ownership error: {e}")).collect::<Vec<_>>().join("\n"));
+        }
+        let units = crate::hi_graph::confirmed_units(conn, None)?;
+        if let Err(failure) = crate::hi_llm::contract_coverage_check_program(&program, &units) {
+            return Err(format!("preview refused -- the file fails the contract coverage re-check (RFC 0016): {}", failure.diagnostic));
+        }
+        let smt_report = crate::smt::analyze(&program);
+        // Same UI-generation call `cmd_build --serve` makes: `demo_mode:
+        // true`, `production_mode: false` -- a compiled process has no
+        // `Program` AST left at runtime, so the UI is generated now and
+        // baked into the binary as bytes (`ServeCodegenOptions::ui_html`).
+        let registry = crate::ast::TypeRegistry::build(&program);
+        let effects = crate::effects::infer_effects(&program, &registry);
+        let ui_html = crate::ui_gen::generate(&program, &effects, None, false, true, false, None).into_bytes();
+        let require_sender_constrained_tokens = crate::hi_plugin::wiring_requires_sender_constrained_tokens(conn, root).unwrap_or(false);
+        let port = crate::hi_preview::pick_free_port()?;
+        let opts = crate::codegen::ServeCodegenOptions { port, ui_html, require_sender_constrained_tokens };
+        let out_path = crate::hi_graph::hi_dir(root).join("generated").join("hi_preview");
+        crate::codegen::build_serve(&program, &smt_report, &out_path, crate::codegen::OptLevel::O2, &opts)?;
+        crate::hi_preview::restart(&out_path, port)?;
+        Ok(port)
+    })();
+    match result {
+        Ok(port) => ApiResponse::json(&serde_json::json!({ "ok": true, "port": port })),
         Err(e) => ApiResponse::json(&serde_json::json!({ "ok": false, "error": e })),
     }
 }
@@ -978,5 +1064,80 @@ fn main() requires(public) {
         let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
         assert!(body["hits"].as_array().unwrap().is_empty());
         assert!(body["answer"].is_null());
+    }
+
+    #[test]
+    fn suggest_degrades_to_an_empty_list_rather_than_erroring_when_no_llm_configured() {
+        // github #49: an unconfigured project must see an empty
+        // suggestion rail, not a broken one -- same "GET never hard-
+        // fails on a missing LLM" posture `handle_ask` already has.
+        let dir = scratch_dir("suggest_no_llm");
+        crate::hi_graph::open(&dir).expect("open");
+
+        let resp = handle(&dir, "GET", "/api/suggest", "", b"");
+        assert_eq!(resp.status, 200, "an unconfigured LLM must degrade, not error: {}", String::from_utf8_lossy(&resp.body));
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
+        assert!(body["suggestions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn preview_start_refuses_before_anything_has_been_generated() {
+        // Same "run :generate first" gate `handle_publish` has, over the
+        // same `hi_llm::generated_source_path` file -- preview builds
+        // from that file too, it just uses `codegen::build_serve`
+        // instead of `codegen::build` once it exists.
+        let dir = scratch_dir("preview_nothing_generated");
+        crate::hi_graph::open(&dir).expect("open");
+        let resp = handle(&dir, "POST", "/api/preview/start", "", b"");
+        assert_eq!(resp.status, 400);
+        assert!(String::from_utf8_lossy(&resp.body).contains("nothing generated"));
+    }
+
+    #[test]
+    fn preview_start_builds_and_runs_a_real_server_then_stop_tears_it_down() {
+        // github #45's "ship now" half, end to end: a real
+        // `codegen::build_serve` binary, actually spawned, actually
+        // bound to a real port -- not a mock of any of that. Ensures
+        // `hi_preview::stop()` afterward regardless of how the
+        // assertions below turn out, so this test never leaves a real
+        // child process (and a bound TCP port) behind for the rest of
+        // the test binary's run.
+        let _g = crate::hi_preview::PREVIEW_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch_dir("preview_start_real_server");
+        crate::hi_graph::open(&dir).expect("open");
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(&out_path, "fn public_action() -> i64 requires(public) { return 1 }\nserve { expose public_action }\nfn main() requires(public) { }\n").expect("write");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let resp = handle(&dir, "POST", "/api/preview/start", "", b"");
+            let body = String::from_utf8_lossy(&resp.body).into_owned();
+            let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+            assert_eq!(json["ok"], serde_json::json!(true), "a servable program must start a preview: {body}");
+            let port = json["port"].as_u64().expect("a successful start reports a port");
+            assert_ne!(port, 0);
+
+            let status_resp = handle(&dir, "GET", "/api/preview/status", "", b"");
+            let status: serde_json::Value = serde_json::from_slice(&status_resp.body).expect("valid JSON");
+            assert_eq!(status["running"], serde_json::json!(true));
+            assert_eq!(status["port"].as_u64(), Some(port));
+        }));
+
+        let stop_resp = handle(&dir, "POST", "/api/preview/stop", "", b"");
+        assert_eq!(stop_resp.status, 200);
+        let status_resp = handle(&dir, "GET", "/api/preview/status", "", b"");
+        let status: serde_json::Value = serde_json::from_slice(&status_resp.body).expect("valid JSON");
+        assert_eq!(status["running"], serde_json::json!(false), "stop must actually tear the preview down");
+
+        result.expect("assertions inside the guarded block");
+    }
+
+    #[test]
+    fn suggest_is_a_get_route_not_in_the_mutating_allowlist() {
+        // github #49's own route doc comment: this call never writes to
+        // `hi.db` itself, so it must stay outside `MUTATING_PATHS` --
+        // a regression here would silently start requiring POST for a
+        // route that has nothing to protect with that check.
+        assert!(!MUTATING_PATHS.contains(&"/api/suggest"));
     }
 }

@@ -554,6 +554,93 @@ fn is_legal_identifier(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+const SUGGEST_GAPS_SYSTEM_PROMPT: &str = "You review a project's confirmed design graph for the person building it, for the Nirdosha programming language, and point out gaps -- never fix them. \
+Read the summary of existing units (kind, name, whether it's API-exposed, and its already-attached attributes) and propose what plainly looks missing: a struct with a `list_`/`get_` fn but no matching `create_`/`update_` counterpart, a `screen`-worthy struct with no screen mentioned anywhere, or -- the single most important case -- an [API-exposed] fn with no `requires(role:` or `requires(claim:` in its attributes at all. \
+Do not propose anything for a unit that already looks handled; do not invent units unrelated to what's shown. Propose at most 8 items, ranked most-important first. \
+Reply with ONLY a JSON array (no prose, no markdown fence) of objects shaped exactly like: \
+{\"kind\": \"attribute\", \"target\": \"<existing unit name from the summary>\", \"reason\": \"one plain sentence explaining the gap\", \"draft\": \"requires(role: ...)\"} \
+for a missing attribute on an EXISTING unit, or: \
+{\"kind\": \"new_unit\", \"target\": \"<new unit name>\", \"unit_kind\": \"fn|struct|enum|screen\", \"reason\": \"one plain sentence explaining the gap\", \"draft\": \"one or two sentences describing what this new unit must do\"} \
+for a unit that looks missing entirely. Never mix the two shapes in one object.";
+
+/// One AI-proposed gap in the confirmed graph (github #49, "proactive
+/// suggestions ... surfaced as distinctly-marked 'suggested' nodes/
+/// lines the user accepts or dismisses, never auto-applied"). Plain
+/// data, parsed from the model's own JSON response -- exactly like
+/// `PromptCandidate`, this function's sibling in every other way.
+/// Deliberately never written to `hi.db` by this call: `hi_api.rs`'s
+/// `/api/suggest` route (the only caller) returns these straight back
+/// to the webview, which replays an *accepted* one through the
+/// existing `/api/attach`+`/api/confirm` (an `attribute` suggestion)
+/// or the existing `/api/prompt` candidate path (a `new_unit`
+/// suggestion) -- a real, visible write the user triggered by clicking
+/// Accept, never something this call performs on its own. That's the
+/// whole of the "never auto-applied" boundary: it's structural (no
+/// write path from this function at all), not a policy this function
+/// has to remember to honor.
+#[derive(Deserialize, Serialize)]
+pub struct SuggestedItem {
+    /// `"attribute"` (a gap on an existing unit) or `"new_unit"` (a
+    /// unit that looks missing entirely).
+    pub kind: String,
+    /// For `"attribute"`: the existing unit's name this targets. For
+    /// `"new_unit"`: the proposed new unit's own name.
+    pub target: String,
+    /// Only meaningful for `"new_unit"` -- one of `CANDIDATE_KINDS`.
+    /// Absent (and ignored) for `"attribute"`.
+    #[serde(default)]
+    pub unit_kind: Option<String>,
+    /// Plain-language "why" -- shown in the suggestion rail regardless
+    /// of kind, so a user can judge Accept/Dismiss without reading the
+    /// draft's raw syntax.
+    pub reason: String,
+    /// For `"attribute"`: the attribute text to attach on accept
+    /// (replayed through `/api/attach`, same as `+Role`/`+NFR`/
+    /// `+Screen`). For `"new_unit"`: the draft `driving_text` to seed
+    /// the new candidate with on accept (replayed through
+    /// `/api/prompt`'s existing candidate path).
+    pub draft: String,
+}
+
+/// Github #49's own LLM call: a read-only gap-analysis pass over the
+/// confirmed graph (`hi_graph::suggestion_context`), never a write.
+/// Same shape as `populate_candidates` -- one `client.complete` turn,
+/// `extract_json_array` grabbing the response's JSON array even if the
+/// model wrapped it in prose/a markdown fence -- deliberately not
+/// `complete_with_tools`: this reviews already-known project state, it
+/// doesn't need `get_grammar`/`verify_code`/etc.'s live compiler access
+/// the way Generate mode's self-repair loop does.
+pub fn suggest_gaps(client: &LlmClient, project_context: &str) -> Result<Vec<SuggestedItem>, String> {
+    if project_context.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let history = [ChatMessage::system(SUGGEST_GAPS_SYSTEM_PROMPT), ChatMessage::user(format!("Existing units:\n{project_context}"))];
+    let raw = client.complete(&history)?;
+    let json = extract_json_array(&raw);
+    let items: Vec<SuggestedItem> = serde_json::from_str(&json)
+        .map_err(|e| format!("the model's response wasn't the expected JSON array of suggestions: {e} (raw response: {})", sanitize_for_log(&raw)))?;
+    validate_suggested_items(&items)?;
+    Ok(items)
+}
+
+/// The same cheap, purely syntactic validation `validate_candidates`
+/// runs for Prompt mode's output, for `suggest_gaps`'s own two-shape
+/// JSON -- a free function so it's testable without a real `LlmClient`.
+fn validate_suggested_items(items: &[SuggestedItem]) -> Result<(), String> {
+    for item in items {
+        if item.kind != "attribute" && item.kind != "new_unit" {
+            return Err(format!("the model proposed an illegal suggestion kind `{}` for `{}` -- expected `attribute` or `new_unit`", item.kind, item.target));
+        }
+        if item.kind == "new_unit" {
+            match &item.unit_kind {
+                Some(k) if CANDIDATE_KINDS.contains(&k.as_str()) => {}
+                other => return Err(format!("the model proposed a `new_unit` suggestion for `{}` with illegal or missing unit_kind {other:?} -- expected one of {CANDIDATE_KINDS:?}", item.target)),
+            }
+        }
+    }
+    Ok(())
+}
+
 const ANSWER_QUESTION_SYSTEM_PROMPT: &str = "You answer questions about a software project for the person building it. \
 You are given a plain-text summary of the project's own components (name: description, one per line) -- use ONLY that summary, never outside knowledge about unrelated software. \
 If the summary doesn't actually contain enough information to answer, say so plainly rather than guessing or inventing detail.";
@@ -2193,6 +2280,43 @@ mod tests {
 
     fn candidate(kind: &str, name: &str) -> PromptCandidate {
         PromptCandidate { kind: kind.to_string(), name: name.to_string(), driving_text: "does something".to_string(), depends_on: vec![] }
+    }
+
+    fn suggested_attribute(target: &str, draft: &str) -> SuggestedItem {
+        SuggestedItem { kind: "attribute".to_string(), target: target.to_string(), unit_kind: None, reason: "no role check on an exposed fn".to_string(), draft: draft.to_string() }
+    }
+
+    fn suggested_new_unit(target: &str, unit_kind: &str) -> SuggestedItem {
+        SuggestedItem { kind: "new_unit".to_string(), target: target.to_string(), unit_kind: Some(unit_kind.to_string()), reason: "no create_ counterpart".to_string(), draft: "creates one".to_string() }
+    }
+
+    #[test]
+    fn validate_suggested_items_accepts_both_real_shapes() {
+        let items = vec![suggested_attribute("transfer_funds", "requires(role: admin)"), suggested_new_unit("create_invoice", "fn")];
+        validate_suggested_items(&items).expect("both shapes are legal");
+    }
+
+    #[test]
+    fn validate_suggested_items_rejects_an_illegal_kind() {
+        let mut item = suggested_attribute("transfer_funds", "requires(role: admin)");
+        item.kind = "delete".to_string();
+        let err = validate_suggested_items(&[item]).unwrap_err();
+        assert!(err.contains("illegal suggestion kind"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_suggested_items_rejects_a_new_unit_with_no_unit_kind() {
+        let mut item = suggested_new_unit("create_invoice", "fn");
+        item.unit_kind = None;
+        let err = validate_suggested_items(&[item]).unwrap_err();
+        assert!(err.contains("illegal or missing unit_kind"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_suggested_items_rejects_a_new_unit_with_an_illegal_unit_kind() {
+        let item = suggested_new_unit("create_invoice", "Requirement");
+        let err = validate_suggested_items(&[item]).unwrap_err();
+        assert!(err.contains("illegal or missing unit_kind"), "got: {err}");
     }
 
     #[test]

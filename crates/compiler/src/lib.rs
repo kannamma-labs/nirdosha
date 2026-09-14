@@ -12,6 +12,7 @@ pub mod hi_api;
 pub mod hi_graph;
 pub mod hi_llm;
 pub mod hi_plugin;
+pub mod hi_preview;
 pub mod hi_server;
 pub mod hi_window;
 pub mod init;

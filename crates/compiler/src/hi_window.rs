@@ -96,6 +96,12 @@ pub fn open(root: &Path) -> Result<(), String> {
             *control_flow = ControlFlow::Exit;
         }
     });
+    // github #45: whatever preview server this session started
+    // (`hi_preview::restart`, via `/api/preview/start`) must not
+    // outlive the window that started it -- otherwise closing `hi`
+    // leaves an orphaned server bound to a port with nothing left to
+    // stop it from here.
+    crate::hi_preview::stop();
     Ok(())
 }
 

@@ -93,6 +93,32 @@
   .pack-group .count { font-size:11px; color:#78768e; margin-top:3px; }
   .pack-group .lock { color:#dba829; }
   .no-pack-note { font-size:12px; color:#78768e; line-height:1.5; }
+  /* github #44's gallery cards -- same .pack-group shell, a bit more
+     breathing room for the extra "can't guarantee"/trust lines. */
+  .pack-card .count { line-height:1.5; margin-top:4px; }
+  .pack-trust { font-size:10.5px; color:#dba829; margin-top:6px; letter-spacing:0.02em; }
+  /* github #49's suggestion rail -- same right-hand-strip shape as
+     #ask-rail/#governing-panel above, deliberately, so it reads as a
+     sibling surface rather than a new UI language. */
+  #suggest-rail { position:absolute; top:64px; right:0; bottom:200px; width:320px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; overflow:auto; }
+  #suggest-rail.open { display:flex; }
+  #suggest-body { padding:12px 14px; }
+  .suggest-list { list-style:none; margin:0; padding:0; }
+  .suggest-item { background:#0b0b12; border:1px solid #26263a; border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .suggest-reason { font-size:12px; color:#e8e8f0; line-height:1.5; margin-bottom:6px; }
+  .suggest-draft { font-family:ui-monospace, monospace; font-size:11.5px; color:#a9a9bd; background:#000; border-radius:4px; padding:6px 8px; margin-bottom:8px; white-space:pre-wrap; word-break:break-word; }
+  .suggest-actions { display:flex; align-items:center; gap:8px; }
+  #suggest-body .empty { font-size:12px; color:#78768e; line-height:1.5; }
+  /* github #45's preview rail -- deliberately much wider than the
+     text-only rails above (it hosts a real running app, not a list),
+     but still the same right-hand-strip/`.open` shape so it reads as
+     a sibling surface. */
+  #preview-rail { position:absolute; top:64px; right:0; bottom:0; width:min(78vw, 1100px); background:#15151f; border-left:1px solid #26263a; z-index:7; display:none; flex-direction:column; box-sizing:border-box; }
+  #preview-rail.open { display:flex; }
+  #preview-body { display:flex; flex-direction:column; flex:1; min-height:0; }
+  #preview-controls button { font:11px ui-monospace, monospace; font-weight:bold; padding:6px 12px; border-radius:5px; border:none; background:#564cbe; color:#fff; cursor:pointer; }
+  #preview-controls button.secondary { background:transparent; border:1px solid #3a3a52; color:#a9a9bd; }
+  #preview-frame { flex:1; min-height:0; width:100%; border:none; background:#fff; }
 
   /* ---- reusable small chip, shared by the attribute list and the
      governing-rules panel: `provable`/`unverified` per
@@ -255,6 +281,8 @@
     <button id="rebuild-btn" type="button" title="Send every confirmed piece to the model and compile -- this is real work, not instant">Rebuild</button>
     <button id="new-screen-toggle" type="button" title="Describe a new screen">+ Screen</button>
     <button id="governing-toggle" type="button" title="What's enforced, and what sealed packs lock down">Rules</button>
+    <button id="suggest-toggle" type="button" title="AI-suggested gaps in the confirmed graph -- drafts only, nothing here is ever applied without you clicking Accept">Suggest</button>
+    <button id="preview-toggle" type="button" title="Run the real compiled app locally and preview it as a chosen role">Preview</button>
     <button id="ask-toggle" type="button">Ask</button>
   </div>
 </div>
@@ -283,6 +311,24 @@
   <div class="gov-head"><h3>Governing rules</h3><button type="button" id="governing-close" class="rail-close" title="close">✕</button></div>
   <div class="sub">What's already enforced in this project, and what a sealed domain plugin locks down. Unsigned (5a) trust-on-first-use today -- see rfcs/0016.</div>
   <div id="governing-body"></div>
+</div>
+
+<div id="suggest-rail">
+  <div class="ask-head"><span>Suggested by hi &middot; drafts over the confirmed graph -- never applied until you click Accept</span><button type="button" id="suggest-close" class="rail-close" title="close">✕</button></div>
+  <div id="suggest-body"><div class="empty">Loading…</div></div>
+</div>
+
+<div id="preview-rail">
+  <div class="ask-head"><span>Preview &middot; the real compiled app, running locally -- not a mockup</span><button type="button" id="preview-close" class="rail-close" title="close">✕</button></div>
+  <div id="preview-body">
+    <div class="sub" style="padding:12px 14px 0;">Builds and runs `.nir/generated/hi_preview` -- the exact code the confirmed graph would Publish, minus the deploy step. Runs in demo mode: the app's own login screen lets you pick a role/claim to preview as, real role gates included.</div>
+    <div id="preview-status" class="form-status" style="padding:8px 14px;"></div>
+    <div id="preview-controls" style="padding:0 14px 12px;display:flex;gap:8px;">
+      <button type="button" id="preview-start-btn">Start Preview</button>
+      <button type="button" id="preview-stop-btn" class="secondary" style="display:none;">Stop</button>
+    </div>
+    <iframe id="preview-frame" style="display:none;" title="live app preview"></iframe>
+  </div>
 </div>
 
 <div id="console">
@@ -340,9 +386,44 @@
   // sync_file` sets `status = 'exposed'` for exactly these fns.
   const EXPOSED_COLOR = '#3ddcdc';
 
+  // github #40's "still reviewing" state for a candidate that has
+  // driving text but hasn't been confirmed yet.
+  function isReviewing(node) {
+    return !node.confirmed && !!node.driving_text;
+  }
+
   function colorFor(node) {
     const base = node.status === 'exposed' ? EXPOSED_COLOR : (KIND_COLORS[subKind(node)] || KIND_COLORS.default);
-    return connectedNodeIds.has(node.id) ? base : blendTowardBackground(base, 0.55);
+    // `blendTowardBackground` only parses a `#rrggbb` hex input (it
+    // returns an `rgb(...)` string, which isn't re-parseable) -- so
+    // the disconnected- and reviewing-dimming amounts below compose
+    // into ONE blend of the original hex `base`, never a blend of a
+    // previous blend's output.
+    const disconnectedAmount = connectedNodeIds.has(node.id) ? 0 : 0.55;
+    // github #40's "dashed ring = still reviewing, solid = confirmed"
+    // for the 3D view specifically: the vendored `3d-force-graph`
+    // bundle never exposes a `window.THREE` for building a real torus
+    // ring mesh (checked -- it only *reads* a page-supplied THREE if
+    // one already exists, falling back to its own internal, unexported
+    // copy otherwise), and its own `nodeOpacity` prop is a single
+    // scalar multiplied across every node's material, not a per-node
+    // accessor (confirmed against the bundle's own `e.nodeOpacity *
+    // mf(c)` material-opacity line) -- so per-node alpha isn't
+    // reachable that way either. `nodeColor`'s per-node function
+    // accessor *is* real and already relied on for `colorFor` itself,
+    // so reviewing state rides the same, proven mechanism: a further
+    // blend toward the background, layered on top of (not replacing)
+    // the existing connected/disconnected dimming above. The 2D
+    // fallback (`run2D`'s `draw()`) draws an actual dashed/solid
+    // stroked ring instead, since a plain canvas needs no extra
+    // library for that.
+    const reviewingAmount = isReviewing(node) ? 0.35 : 0;
+    // Compose two independent blends of the same background target as
+    // one: `1 - (1-a)*(1-b)`, so a disconnected+reviewing node ends up
+    // more dimmed than either alone, and a connected+confirmed node
+    // (both amounts 0) is untouched.
+    const amount = 1 - (1 - disconnectedAmount) * (1 - reviewingAmount);
+    return amount === 0 ? base : blendTowardBackground(base, amount);
   }
 
   function setStatus(text) {
@@ -594,6 +675,51 @@
     return form;
   }
 
+  // github #40, third quick-add micro-form: acknowledges "screen" as a
+  // thing you can ask for directly on a node, instead of only ever
+  // appearing as an invisible naming-convention side effect of
+  // list_/create_/update_/delete_ fn names (`ui_gen.rs`'s own
+  // CRUD-convention derivation, `docs/LANGUAGE.md` §11). Unlike
+  // +Role/+NFR, there's no single-line inline attribute grammar for
+  // "this needs a screen" (`screen <Struct> { ... }` is a top-level
+  // block, not something `requires(...)`-shaped) -- so this attaches
+  // plain-language advisory text, same honesty tier as the dropdown's
+  // own "custom (raw attribute text)" entry: Generate mode's prompt
+  // renders any non-`validate` attribute verbatim as "attribute to
+  // attach: <text>" (`hi_llm.rs`'s prompt builder), for the model to
+  // turn into a real `screen`/`action` block, never inserted into the
+  // compiled source unchecked.
+  function buildQuickScreenForm(panel, node, status) {
+    const form = document.createElement('div');
+    form.className = 'quickform';
+    form.style.display = 'none';
+    const label = document.createElement('div');
+    label.className = 'qlabel';
+    label.textContent = 'What should this look like as a screen?';
+    form.appendChild(label);
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'a table with a Restock button';
+    form.appendChild(input);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Add';
+    btn.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) { status.textContent = 'describe the screen first.'; return; }
+      doAttach(node, 'screen: ' + value, status, btn, () => { form.style.display = 'none'; input.value = ''; });
+    });
+    form.appendChild(btn);
+    const discardBtn = document.createElement('button');
+    discardBtn.type = 'button';
+    discardBtn.className = 'secondary';
+    discardBtn.textContent = 'Discard';
+    discardBtn.addEventListener('click', () => { input.value = ''; status.textContent = ''; form.style.display = 'none'; });
+    form.appendChild(discardBtn);
+    panel.appendChild(form);
+    return form;
+  }
+
   function buildAttributeForm(panel, node) {
     const title = document.createElement('div');
     title.className = 'section-title';
@@ -619,18 +745,25 @@
     panel.appendChild(quickrow);
     const roleForm = buildQuickRoleForm(panel, node, status);
     const nfrForm = buildQuickNfrForm(panel, node, status);
+    const screenForm = buildQuickScreenForm(panel, node, status);
     const roleBtn = document.createElement('button');
     roleBtn.type = 'button';
     roleBtn.className = 'quickbtn';
     roleBtn.textContent = '+ Role';
-    roleBtn.addEventListener('click', () => { nfrForm.style.display = 'none'; roleForm.style.display = roleForm.style.display === 'none' ? 'block' : 'none'; });
+    roleBtn.addEventListener('click', () => { nfrForm.style.display = 'none'; screenForm.style.display = 'none'; roleForm.style.display = roleForm.style.display === 'none' ? 'block' : 'none'; });
     quickrow.appendChild(roleBtn);
     const nfrBtn = document.createElement('button');
     nfrBtn.type = 'button';
     nfrBtn.className = 'quickbtn';
     nfrBtn.textContent = '+ NFR';
-    nfrBtn.addEventListener('click', () => { roleForm.style.display = 'none'; nfrForm.style.display = nfrForm.style.display === 'none' ? 'block' : 'none'; });
+    nfrBtn.addEventListener('click', () => { roleForm.style.display = 'none'; screenForm.style.display = 'none'; nfrForm.style.display = nfrForm.style.display === 'none' ? 'block' : 'none'; });
     quickrow.appendChild(nfrBtn);
+    const screenBtn = document.createElement('button');
+    screenBtn.type = 'button';
+    screenBtn.className = 'quickbtn';
+    screenBtn.textContent = '+ Screen';
+    screenBtn.addEventListener('click', () => { roleForm.style.display = 'none'; nfrForm.style.display = 'none'; screenForm.style.display = screenForm.style.display === 'none' ? 'block' : 'none'; });
+    quickrow.appendChild(screenBtn);
 
     const advanced = document.createElement('details');
     advanced.className = 'advanced';
@@ -669,36 +802,21 @@
     });
     advanced.appendChild(attachBtn);
 
-    // Attributes only ever reach Generate mode for a *confirmed*
-    // candidate (`hi_graph::confirmed_units`'s own gate) -- surfaced
-    // here too, not just in the console, so attaching one and reviewing
-    // it can both happen from the same click without switching back to
-    // the console for the second half.
+    // github #40: Confirm is no longer a button buried in this form --
+    // attributes only ever reach Generate mode for a *confirmed*
+    // candidate (`hi_graph::confirmed_units`'s own gate), and the node
+    // itself now carries that state as a dashed ("still reviewing") vs.
+    // solid ("confirmed") ring/dimming, per `colorFor`/`isReviewing`.
+    // Clicking the node again while its panel is already open is the
+    // confirm gesture (`confirmSelectedIfReviewing`, wired from
+    // `onNodeSelected`) -- the first click always just opens/refreshes
+    // the panel, so plain inspection never accidentally confirms.
     if (!node.confirmed && node.driving_text) {
-      const confirmBtn = document.createElement('button');
-      confirmBtn.type = 'button';
-      confirmBtn.className = 'secondary';
-      confirmBtn.textContent = 'Confirm';
-      confirmBtn.addEventListener('click', () => {
-        confirmBtn.disabled = true;
-        postForm('/api/confirm', { node: node.id })
-          .then(({ status: httpStatus, body }) => {
-            if (httpStatus !== 200) {
-              status.textContent = body.error || 'request failed: ' + httpStatus;
-              confirmBtn.disabled = false;
-              return;
-            }
-            logLine('', 'confirmed ' + node.id);
-            refreshPanelForNode(node.id);
-            if (reloadGraph) reloadGraph();
-          })
-          .catch(err => {
-            confirmBtn.disabled = false;
-            status.textContent = String(err);
-            reportError('panel confirm', err);
-          });
-      });
-      panel.appendChild(confirmBtn);
+      const hint = document.createElement('div');
+      hint.className = 'form-status';
+      hint.style.opacity = '0.7';
+      hint.textContent = 'still reviewing (dashed ring) -- click this node again to confirm.';
+      panel.appendChild(hint);
     }
 
     panel.appendChild(status);
@@ -1057,13 +1175,41 @@
         (body.log || []).forEach(l => logLine('', l));
         if (!body.ok) { logLine('error', body.error || ('request failed: ' + status)); return; }
         logLine('', 'locked ' + body.locked.length + ' unit(s) -> ' + body.path + (body.not_declared && body.not_declared.length ? '; not declared by the generated program: ' + body.not_declared.join(', ') : ''));
+        refreshPreviewIfRunning();
         return reloadGraph && reloadGraph();
       })
       .catch(err => { logLine('error', String(err)); reportError('rebuild', err); })
       .finally(() => { document.getElementById('rebuild-btn').disabled = pendingCount(latestNodes) === 0; });
   }
 
+  // github #40: which node's panel is currently open -- lets a second
+  // click on the SAME node (while its panel is already showing) mean
+  // "confirm" rather than "open/refresh the panel again". A first
+  // click always just selects/inspects, exactly as before, so plain
+  // browsing never accidentally confirms a candidate.
+  let selectedNodeId = null;
+
+  function confirmSelectedIfReviewing(node) {
+    postForm('/api/confirm', { node: node.id })
+      .then(({ status: httpStatus, body }) => {
+        if (httpStatus !== 200) {
+          reportError('node-click confirm', body.error || ('request failed: ' + httpStatus));
+          return;
+        }
+        logLine('', 'confirmed ' + node.id);
+        refreshPanelForNode(node.id);
+        if (reloadGraph) reloadGraph();
+      })
+      .catch(err => reportError('node-click confirm', err));
+  }
+
   function onNodeSelected(node) {
+    const reclick = selectedNodeId === node.id;
+    selectedNodeId = node.id;
+    if (reclick && !node.confirmed && node.driving_text) {
+      confirmSelectedIfReviewing(node);
+      return;
+    }
     showPanel(node, null);
     fetch('/api/impact?target=' + encodeURIComponent(node.id))
       .then(r => r.json())
@@ -1204,6 +1350,20 @@
         ctx.arc(n.x, n.y, 5, 0, Math.PI * 2);
         ctx.fillStyle = colorFor(n);
         ctx.fill();
+        // github #40: a literal dashed/solid ring is cheap on a plain
+        // 2D canvas (unlike the 3D path, which has no THREE to build a
+        // ring mesh from -- see `colorFor`'s own comment) -- only drawn
+        // for a real candidate at all (created_by/driving_text), so a
+        // plain synced fn without any candidate state gets no ring.
+        if (n.created_by || n.driving_text) {
+          ctx.beginPath();
+          ctx.setLineDash(isReviewing(n) ? [3, 3] : []);
+          ctx.strokeStyle = n.confirmed ? '#7fffa0' : '#c9a84c';
+          ctx.lineWidth = 1.5;
+          ctx.arc(n.x, n.y, 8, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
       });
       ctx.restore();
     }
@@ -1591,6 +1751,8 @@
     document.getElementById('new-screen-toggle').addEventListener('click', () => {
       document.getElementById('ask-rail').classList.remove('open');
       document.getElementById('governing-panel').classList.remove('open');
+      document.getElementById('suggest-rail').classList.remove('open');
+      document.getElementById('preview-rail').classList.remove('open');
       document.getElementById('panel').style.display = 'none';
       rail.classList.toggle('open');
       if (rail.classList.contains('open')) document.getElementById('new-screen-input').focus();
@@ -1664,6 +1826,8 @@
     document.getElementById('ask-toggle').addEventListener('click', () => {
       document.getElementById('governing-panel').classList.remove('open');
       document.getElementById('new-screen-rail').classList.remove('open');
+      document.getElementById('suggest-rail').classList.remove('open');
+      document.getElementById('preview-rail').classList.remove('open');
       // The node inspector (`#panel`) and this rail occupy the same
       // right-hand strip -- without hiding one, a narrower rail lets
       // the wider panel peek out from behind its left edge instead of
@@ -1720,16 +1884,30 @@
       });
     }
 
-    // Install more -- reads the real, embedded pack set
-    // (`hi_plugin::known_installable_packs`) rather than an arbitrary
-    // upload; this is deliberately the whole "pack gallery" for now
-    // (issue #44's fuller browsable version -- trust badges, non-
-    // bundled packs -- is a separate, bigger piece).
+    // github #44: a fuller browsable gallery over the same real,
+    // embedded pack set (`hi_plugin::known_installable_packs`, still no
+    // arbitrary upload -- the webview only ever sends a known pack id,
+    // never bytes/a path) -- each card now states in plain language
+    // what it locks down AND what it can't guarantee, plus an honest
+    // trust indicator, rather than the earlier bare id+description+
+    // button. Still just these 2 bundled packs (banking-v0, fapi-2.0);
+    // adding HIPAA/aerospace/IoT packs is real domain-content authoring
+    // this pass deliberately doesn't attempt -- each pack asserts real
+    // compliance claims that need a domain reviewer, not a model
+    // guessing at HIPAA/DO-178C text. Signed "registry-issued" trust
+    // badges stay out of this UI entirely (not just disabled) until RFC
+    // 0016 5b actually ships code -- rendering a fake-looking disabled
+    // badge would overclaim how close that is.
     const installTitle = document.createElement('div');
     installTitle.className = 'section-title';
     installTitle.style.marginTop = '16px';
-    installTitle.textContent = 'install more';
+    installTitle.textContent = 'pack gallery';
     body.appendChild(installTitle);
+    const installSub = document.createElement('div');
+    installSub.className = 'sub';
+    installSub.style.marginBottom = '10px';
+    installSub.textContent = 'Installing a pack is like adding a dependency -- it seals real rules into this project that can\'t be waived or deleted from the graph.';
+    body.appendChild(installSub);
     const installList = document.createElement('div');
     installList.id = 'pack-install-list';
     installList.textContent = 'loading…';
@@ -1740,15 +1918,28 @@
       installList.replaceChildren();
       packs.forEach(pack => {
         const card = document.createElement('div');
-        card.className = 'pack-group';
+        card.className = 'pack-group pack-card';
         const name = document.createElement('div');
         name.className = 'name';
         name.textContent = pack.id;
         card.appendChild(name);
-        const desc = document.createElement('div');
-        desc.className = 'count';
-        desc.textContent = pack.description;
-        card.appendChild(desc);
+        const locksDown = document.createElement('div');
+        locksDown.className = 'count';
+        locksDown.textContent = 'Locks down: ' + pack.description;
+        card.appendChild(locksDown);
+        // RFC 0016's own "honest scoping" -- generic, not pack-specific
+        // prose this UI would otherwise have to invent per pack: today
+        // every installable pack is 5a-only (unsigned, trust-on-first-
+        // use), so none of them can back this with anything beyond
+        // "the bytes you installed match what shipped in this build."
+        const cant = document.createElement('div');
+        cant.className = 'count';
+        cant.textContent = "Can't guarantee: real-world identity/authorization-server behavior, or any legal compliance certification -- see rfcs/0016's own scoping.";
+        card.appendChild(cant);
+        const trust = document.createElement('div');
+        trust.className = 'pack-trust';
+        trust.textContent = '🔓 unsigned (trust-on-first-use)';
+        card.appendChild(trust);
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.style.cssText = 'margin-top:8px;font:11px ui-monospace,monospace;font-weight:bold;padding:6px 12px;border-radius:5px;border:none;background:#564cbe;color:#fff;cursor:pointer;';
@@ -1788,6 +1979,8 @@
       const panel = document.getElementById('governing-panel');
       document.getElementById('ask-rail').classList.remove('open');
       document.getElementById('new-screen-rail').classList.remove('open');
+      document.getElementById('suggest-rail').classList.remove('open');
+      document.getElementById('preview-rail').classList.remove('open');
       document.getElementById('panel').style.display = 'none';
       panel.classList.toggle('open');
       if (panel.classList.contains('open')) renderGoverningPanel();
@@ -1797,10 +1990,204 @@
     });
   }
 
+  // github #49: proactive AI suggestions over the confirmed graph.
+  // `/api/suggest` (`hi_api::handle_suggest`) is read-only -- this rail
+  // is the ONLY place any of it can be written anywhere, and only ever
+  // by a real click: Accept on an `attribute` suggestion replays it
+  // through the exact same `/api/attach` `doAttach` already uses for
+  // +Role/+NFR/+Screen, then `/api/confirm` (a two-step write the user
+  // triggered, identical in kind to typing it in by hand); Accept on a
+  // `new_unit` suggestion replays it through `/api/prompt`'s own
+  // candidate path, landing `confirmed = 0` exactly like any other
+  // prompt-mode candidate -- still needs an ordinary node-click confirm
+  // afterward, same as everything else `/api/prompt` ever produces.
+  // Dismiss never touches the server at all; it's purely this list
+  // forgetting an item client-side.
+  function renderSuggestItem(item, onGone) {
+    const li = document.createElement('li');
+    li.className = 'suggest-item';
+    const reason = document.createElement('div');
+    reason.className = 'suggest-reason';
+    const kindLabel = item.kind === 'new_unit' ? ('missing ' + (item.unit_kind || 'unit') + ': ' + item.target) : ('gap on ' + item.target);
+    reason.textContent = kindLabel + ' -- ' + item.reason;
+    li.appendChild(reason);
+    const draft = document.createElement('div');
+    draft.className = 'suggest-draft';
+    draft.textContent = item.draft;
+    li.appendChild(draft);
+    const row = document.createElement('div');
+    row.className = 'suggest-actions';
+    const status = document.createElement('span');
+    status.className = 'form-status';
+    const acceptBtn = document.createElement('button');
+    acceptBtn.type = 'button';
+    acceptBtn.textContent = 'Accept';
+    acceptBtn.addEventListener('click', () => {
+      acceptBtn.disabled = true;
+      const accepted = item.kind === 'attribute'
+        ? postForm('/api/attach', { node: item.target, attr: item.draft })
+        : postForm('/api/prompt', { text: item.target + ': ' + item.draft });
+      accepted.then(({ status: httpStatus, body }) => {
+        if (httpStatus !== 200 || (body && body.error)) {
+          status.textContent = (body && body.error) || 'request failed: ' + httpStatus;
+          acceptBtn.disabled = false;
+          return;
+        }
+        logLine('', 'accepted suggestion: ' + kindLabel);
+        if (reloadGraph) reloadGraph();
+        onGone();
+      }).catch(err => {
+        acceptBtn.disabled = false;
+        status.textContent = String(err);
+        reportError('suggest accept', err);
+      });
+    });
+    row.appendChild(acceptBtn);
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'secondary';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', onGone);
+    row.appendChild(dismissBtn);
+    row.appendChild(status);
+    li.appendChild(row);
+    return li;
+  }
+
+  function loadSuggestions() {
+    const body = document.getElementById('suggest-body');
+    body.replaceChildren();
+    const loading = document.createElement('div');
+    loading.className = 'empty';
+    loading.textContent = 'Asking hi what looks missing…';
+    body.appendChild(loading);
+    fetch('/api/suggest')
+      .then(r => r.json())
+      .then(result => {
+        body.replaceChildren();
+        const items = result.suggestions || [];
+        if (items.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = result.error ? ('could not get suggestions: ' + result.error) : 'nothing looks missing right now.';
+          body.appendChild(empty);
+          return;
+        }
+        const ul = document.createElement('ul');
+        ul.className = 'suggest-list';
+        items.forEach(item => {
+          const li = renderSuggestItem(item, () => li.remove());
+          ul.appendChild(li);
+        });
+        body.appendChild(ul);
+      })
+      .catch(err => reportError('loading suggestions', err));
+  }
+
+  function initSuggestRail() {
+    const rail = document.getElementById('suggest-rail');
+    document.getElementById('suggest-toggle').addEventListener('click', () => {
+      document.getElementById('ask-rail').classList.remove('open');
+      document.getElementById('governing-panel').classList.remove('open');
+      document.getElementById('new-screen-rail').classList.remove('open');
+      document.getElementById('preview-rail').classList.remove('open');
+      document.getElementById('panel').style.display = 'none';
+      rail.classList.toggle('open');
+      if (rail.classList.contains('open')) loadSuggestions();
+    });
+    document.getElementById('suggest-close').addEventListener('click', () => rail.classList.remove('open'));
+  }
+
+  // github #45's "ship now" half: `/api/preview/*` (`hi_api::handle_
+  // preview_start`/`_stop`, `hi_preview.rs`) builds a real *servable*
+  // binary and runs it as a process `hi` itself owns -- this rail is
+  // just a thin client over that: a Start/Stop button and an iframe,
+  // nothing here talks to identity/roles at all. The served app's own
+  // demo-mode login screen (already real, `ui_gen.rs`'s generated
+  // output) is what lets someone pick a role to preview as -- see
+  // `hi_preview.rs`'s own doc comment for why that needed zero new
+  // work here.
+  function setPreviewStatus(text) {
+    document.getElementById('preview-status').textContent = text;
+  }
+
+  function showPreviewRunning(port) {
+    document.getElementById('preview-start-btn').textContent = 'Restart Preview';
+    document.getElementById('preview-stop-btn').style.display = '';
+    const frame = document.getElementById('preview-frame');
+    frame.style.display = 'block';
+    frame.src = 'http://127.0.0.1:' + port + '/';
+    setPreviewStatus('running on http://127.0.0.1:' + port + ' -- use the app\'s own login screen to pick a role.');
+  }
+
+  function showPreviewStopped(message) {
+    document.getElementById('preview-start-btn').textContent = 'Start Preview';
+    document.getElementById('preview-stop-btn').style.display = 'none';
+    const frame = document.getElementById('preview-frame');
+    frame.style.display = 'none';
+    frame.src = 'about:blank';
+    setPreviewStatus(message || 'not running.');
+  }
+
+  function refreshPreviewStatusOnOpen() {
+    fetch('/api/preview/status').then(r => r.json()).then(status => {
+      if (status.running) showPreviewRunning(status.port);
+      else showPreviewStopped('not running -- click Start Preview to build and run the confirmed graph\'s current generated code.');
+    }).catch(err => reportError('preview status', err));
+  }
+
+  // Called after every successful Rebuild (`doRebuild`) -- but ONLY
+  // when a preview is already running, so opening Rebuild never
+  // silently starts a server nobody asked for; it just keeps one
+  // that's already open in sync with the newly generated code, the
+  // same "explicit action, not magic" posture `doRebuild` itself
+  // already holds (a real Rebuild click, not continuous compilation).
+  function refreshPreviewIfRunning() {
+    fetch('/api/preview/status').then(r => r.json()).then(status => {
+      if (status.running) startPreview();
+    }).catch(() => {});
+  }
+
+  function startPreview() {
+    const btn = document.getElementById('preview-start-btn');
+    btn.disabled = true;
+    setPreviewStatus('building and starting…');
+    withBusy(postForm('/api/preview/start', {}))
+      .then(({ body }) => {
+        btn.disabled = false;
+        if (!body.ok) {
+          showPreviewStopped('failed to start: ' + (body.error || 'unknown error'));
+          return;
+        }
+        showPreviewRunning(body.port);
+      })
+      .catch(err => { btn.disabled = false; showPreviewStopped(String(err)); reportError('preview start', err); });
+  }
+
+  function initPreviewRail() {
+    const rail = document.getElementById('preview-rail');
+    document.getElementById('preview-toggle').addEventListener('click', () => {
+      document.getElementById('ask-rail').classList.remove('open');
+      document.getElementById('governing-panel').classList.remove('open');
+      document.getElementById('new-screen-rail').classList.remove('open');
+      document.getElementById('suggest-rail').classList.remove('open');
+      document.getElementById('panel').style.display = 'none';
+      rail.classList.toggle('open');
+      if (rail.classList.contains('open')) refreshPreviewStatusOnOpen();
+    });
+    document.getElementById('preview-close').addEventListener('click', () => rail.classList.remove('open'));
+    document.getElementById('preview-start-btn').addEventListener('click', startPreview);
+    document.getElementById('preview-stop-btn').addEventListener('click', () => {
+      postForm('/api/preview/stop', {}).then(() => showPreviewStopped('stopped.')).catch(err => reportError('preview stop', err));
+    });
+  }
+
   document.getElementById('rebuild-btn').addEventListener('click', doRebuild);
   initAskRail();
   initGoverningPanel();
   initNewScreenRail();
+  initSuggestRail();
+  initPreviewRail();
 
   runSplash();
   initConsole();
