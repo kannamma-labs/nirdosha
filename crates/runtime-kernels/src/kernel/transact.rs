@@ -43,7 +43,11 @@ enum ArgValue {
     B(bool),
 }
 
-unsafe fn encode_binds_json(binds_ptr: *const crate::NirBindValue, binds_len: i64) -> String {
+/// `pub(crate)`, not private: `isolation_check.rs`'s `db.rs`
+/// instrumentation reuses this exact encoding to build a resource
+/// identity from a `db` call's real bound values -- same shape, same
+/// tag numbering, one implementation instead of a second copy.
+pub(crate) unsafe fn encode_binds_json(binds_ptr: *const crate::NirBindValue, binds_len: i64) -> String {
     if binds_len == 0 {
         return "[]".to_string();
     }
@@ -179,6 +183,16 @@ fn with_log<R>(f: impl FnOnce(&Connection) -> R) -> Option<R> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_transact_begin(txn_id_ptr: *const u8, txn_id_len: i64, site_id: i64) -> i32 {
     let Some(txn_id) = (unsafe { crate::str_from_raw(txn_id_ptr, txn_id_len) }) else { return 0 };
+    // Marks this thread as "inside `txn_id`" for `isolation_check.rs`'s
+    // own benefit, regardless of whether the durability-log insert
+    // below succeeds -- the `transact` site is beginning either way,
+    // and a `db` call in its `network`/`verify`/`commit` body still
+    // deserves attribution even if this log write fails. Set
+    // unconditionally so a prior transact's forgotten clear (there
+    // shouldn't be one, but `isolation_check`'s own doc comment on
+    // `CURRENT_TXN` treats this as a defensive self-healing point) can
+    // never leak this thread's isolation tracking into the wrong txn.
+    super::isolation_check::set_current_txn(Some(txn_id.to_string()));
     let now = now_unix_secs();
     with_log(|conn| {
         conn.execute(
@@ -255,12 +269,18 @@ pub unsafe extern "C" fn nir_transact_mark_compensate_pending(txn_id_ptr: *const
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_transact_mark_committed(txn_id_ptr: *const u8, txn_id_len: i64) -> i32 {
     let Some(txn_id) = (unsafe { crate::str_from_raw(txn_id_ptr, txn_id_len) }) else { return 0 };
+    // The transact site is over -- clear this thread's isolation
+    // attribution so a `db` call made later on this same thread,
+    // outside any `transact`, is correctly untracked rather than
+    // silently mis-attributed to a txn that already finished.
+    super::isolation_check::set_current_txn(None);
     mark_state(txn_id, "committed") as i32
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nir_transact_mark_compensated(txn_id_ptr: *const u8, txn_id_len: i64) -> i32 {
     let Some(txn_id) = (unsafe { crate::str_from_raw(txn_id_ptr, txn_id_len) }) else { return 0 };
+    super::isolation_check::set_current_txn(None);
     mark_state(txn_id, "compensated") as i32
 }
 

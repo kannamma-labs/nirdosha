@@ -11,8 +11,10 @@
 //! discipline, just retargeted at populating/materializing graph nodes
 //! instead of a single whole-program request.
 
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -745,8 +747,20 @@ pub fn answer_question(client: &LlmClient, question: &str, project_context: &str
 /// own `[`/`]` characters are tracked too, so one inside a JSON string
 /// value never desyncs the depth count.
 fn extract_json_array(raw: &str) -> String {
+    extract_bracketed(raw, '[', ']')
+}
+
+/// Shared bracket-depth-matching scanner behind [`extract_json_array`]
+/// and [`extract_json_object`]: finds `open`'s first occurrence and
+/// returns the slice out to its matching `close`, string-literal
+/// `open`/`close` characters (and escapes) tracked too so one inside a
+/// JSON string value never desyncs the depth count. Falls back to
+/// `trimmed[start..]` if the brackets never balance -- a truncated
+/// response is already going to fail to parse either way, and the
+/// caller's own error message is what actually reports that.
+fn extract_bracketed(raw: &str, open: char, close: char) -> String {
     let trimmed = raw.trim();
-    let Some(start) = trimmed.find('[') else { return trimmed.to_string() };
+    let Some(start) = trimmed.find(open) else { return trimmed.to_string() };
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escaped = false;
@@ -761,22 +775,17 @@ fn extract_json_array(raw: &str) -> String {
             }
             continue;
         }
-        match c {
-            '"' => in_string = true,
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return trimmed[start..start + i + 1].to_string();
-                }
+        if c == '"' {
+            in_string = true;
+        } else if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return trimmed[start..start + i + 1].to_string();
             }
-            _ => {}
         }
     }
-    // No properly matched close found -- fall back to the old
-    // best-effort slice rather than nothing at all, since a truncated
-    // response is already going to fail to parse either way and the
-    // caller's own error message is what actually reports that.
     trimmed[start..].to_string()
 }
 
@@ -1182,6 +1191,39 @@ pub fn check_mandatory_primitive_coverage(source: &str, mandatory_fns: &std::col
     Ok(())
 }
 
+/// RFC 0016 Phase 3's other half: `primitive_exclusivity`
+/// (`contract_check::check_primitive_exclusivity`'s own doc comment for
+/// the full reasoning, including why "constructs the protected struct"
+/// is this language's complete reading of the RFC's "any write...
+/// outside certified primitive units", not a narrowed stand-in for it).
+/// A no-op when no active pack declares any `protected_structs` --
+/// same "no demand, no gate" contract every other Phase-3 gate here has.
+pub fn check_primitive_exclusivity_coverage(source: &str, protected_structs: &std::collections::HashSet<String>, mandatory_fns: &std::collections::HashSet<String>) -> Result<(), CoverageFailure> {
+    if protected_structs.is_empty() {
+        return Ok(());
+    }
+    let toks = crate::token::Lexer::new(source).tokenize().map_err(|e| CoverageFailure {
+        class: CoverageFailureClass::ContractViolated,
+        diagnostic: format!("contract coverage failure: the source no longer lexes, so primitive-exclusivity coverage cannot be checked: {e:?}"),
+    })?;
+    let program = crate::parser::Parser::new(toks).parse_program().map_err(|e| CoverageFailure {
+        class: CoverageFailureClass::ContractViolated,
+        diagnostic: format!("contract coverage failure: the source no longer parses, so primitive-exclusivity coverage cannot be checked: {e:?}"),
+    })?;
+
+    let violations = crate::contract_check::check_primitive_exclusivity(&program, protected_structs, mandatory_fns);
+    if let Some(msg) = violations.first() {
+        return Err(CoverageFailure {
+            class: CoverageFailureClass::ContractViolated,
+            diagnostic: format!(
+                "contract coverage failure: {msg}\nmachine-readable errors: [{}]",
+                machine_error("primitive_exclusivity", None, None, msg)
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Screen-derivation coverage: a confirmed `screen`-kind unit whose
 /// backing struct has none of the `list_<snake>`/`create_<snake>`/
 /// `update_<snake>`/`delete_<snake>`/`get_<snake>` convention fns (and no
@@ -1399,6 +1441,9 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
         } else if diagnostic.contains("may violate a mandatory certified primitive's own precondition") {
             // RFC 0016 Phase 3: call-site precondition obligations.
             " Guard the call site so the primitive's own precondition is provably established first (e.g. `if amount > 0 { transfer(...) }` when `transfer` requires `amount > 0`) -- an unconditional call whose arguments the precondition can't be proven to satisfy is a real gate failure, not a style note."
+        } else if diagnostic.contains("is a pack-protected type") {
+            // RFC 0016 Phase 3: primitive_exclusivity.
+            " Delete the direct construction and call the certified primitive instead -- a pack-protected struct may only be constructed inside one of the pack's own certified primitive fns, never re-derived by hand elsewhere in the draft, even when the arithmetic looks identical to what the primitive already does."
         } else {
             " The fn genuinely breaks the demanded contract at the counterexample input shown -- fix the code, or fix the contract if it misstates the unit's demand; never loosen a predicate just to make it pass."
         }
@@ -1492,6 +1537,247 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
         " Rename that identifier: a reserved keyword can never be a variable, field, parameter, or function name in Nirdosha (there is no quoting/escaping mechanism), so pick a different word -- `state` -> `app_state`, `open` -> `open_order`, and so on."
     } else {
         ""
+    }
+}
+
+/// The language reference, embedded at compile time so hint synthesis
+/// (`relevant_doc_excerpt`) never depends on a project directory being
+/// around to read it from -- `generate_from_task_prompt` (the bench
+/// harness) has no project `root` at all, and even where one exists
+/// the docs describe the LANGUAGE, not the project, so reading them
+/// from a repo checkout at runtime would be reading the wrong copy on
+/// a machine that only has the compiled binary installed.
+const LANGUAGE_DOC: &str = include_str!("../../../docs/LANGUAGE.md");
+
+fn doc_tokens(s: &str) -> std::collections::HashSet<String> {
+    s.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|t| t.len() > 2).map(|t| t.to_lowercase()).collect()
+}
+
+/// `LANGUAGE_DOC` split into `(body-token-set, section text)` pairs on
+/// top-level-ish markdown headings (`#`/`##`/`###`), computed once per
+/// process and reused by every `relevant_doc_excerpt` call. The doc is
+/// `include_str!`-embedded -- its content can never change at runtime
+/// -- but `synthesize_hints` calls `relevant_doc_excerpt` once per
+/// uncovered pattern in a single self-repair round, and re-splitting
+/// and re-tokenizing all ~2000 lines from scratch on every one of
+/// those calls was pure repeated work with nothing to show for it.
+fn language_doc_sections() -> &'static [(std::collections::HashSet<String>, &'static str)] {
+    static SECTIONS: OnceLock<Vec<(std::collections::HashSet<String>, &'static str)>> = OnceLock::new();
+    SECTIONS.get_or_init(|| {
+        // Byte offset where each line starts, so a section (a run of
+        // lines between two headings) can be sliced back out of
+        // `LANGUAGE_DOC` as one contiguous `&str` once its span is known.
+        let lines: Vec<&str> = LANGUAGE_DOC.lines().collect();
+        let mut line_offsets = Vec::with_capacity(lines.len());
+        let mut off = 0usize;
+        for l in &lines {
+            line_offsets.push(off);
+            off += l.len() + 1;
+        }
+
+        let mut sections = Vec::new();
+        let mut section_start = 0usize;
+        let mut body_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let flush = |start: usize, end: usize, body_tokens: &std::collections::HashSet<String>, sections: &mut Vec<(std::collections::HashSet<String>, &'static str)>| {
+            if body_tokens.is_empty() {
+                return;
+            }
+            let end_off = line_offsets.get(end).copied().unwrap_or(LANGUAGE_DOC.len());
+            sections.push((body_tokens.clone(), &LANGUAGE_DOC[line_offsets[start]..end_off]));
+        };
+        for (i, line) in lines.iter().enumerate() {
+            if line.starts_with('#') && i != section_start {
+                flush(section_start, i, &body_tokens, &mut sections);
+                section_start = i;
+                body_tokens.clear();
+            }
+            body_tokens.extend(doc_tokens(line));
+        }
+        flush(section_start, lines.len(), &body_tokens, &mut sections);
+        sections
+    })
+}
+
+/// Scores every precomputed `language_doc_sections()` entry by
+/// keyword-token overlap with `pattern` and returns the 1-2 highest
+/// scorers -- a cheap keyword-overlap retrieval, no embeddings model
+/// needed for a ~2000-line reference doc. Used to ground
+/// `synthesize_hints` in the real spec instead of the model's own
+/// (sometimes wrong, per the very bug this exists to catch) beliefs
+/// about the language.
+fn relevant_doc_excerpt(pattern: &str) -> String {
+    let wanted = doc_tokens(pattern);
+    if wanted.is_empty() {
+        return String::new();
+    }
+    let mut scored: Vec<(usize, &'static str)> =
+        language_doc_sections().iter().map(|(tokens, text)| (tokens.intersection(&wanted).count(), *text)).filter(|(score, _)| *score > 0).collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().take(2).map(|(_, text)| if text.len() > 4000 { text[..4000].to_string() } else { text.to_string() }).collect::<Vec<_>>().join("\n---\n")
+}
+
+/// Pulls the machine-readable per-error messages back out of a
+/// diagnostic string built by `attach_source_lines`/`machine_error`
+/// (`"...\nmachine-readable errors: [{...}, ...]\n  the source line..."`)
+/// -- reusing that JSON tail rather than re-deriving structured errors
+/// from `typecheck_and_build_check`'s callers, which only ever hand
+/// this loop the already-flattened `String`. Returns an empty `Vec` for
+/// any diagnostic with no such tail (contract-coverage/pack-injection
+/// failures, `codegen::build`'s own raw `String` errors) -- callers
+/// treat that as "this diagnostic doesn't decompose, treat it as one
+/// pattern", which is exactly `self_repair_hint`'s existing whole-
+/// string-match behavior for those classes, left unchanged.
+fn extract_diagnostic_messages(diagnostic: &str) -> Vec<String> {
+    let Some(idx) = diagnostic.find("machine-readable errors:") else { return Vec::new() };
+    let tail = &diagnostic[idx + "machine-readable errors:".len()..];
+    let array_text = extract_json_array(tail);
+    match serde_json::from_str::<Vec<serde_json::Value>>(&array_text) {
+        Ok(entries) => entries.iter().filter_map(|e| e.get("message").and_then(|m| m.as_str()).map(str::to_string)).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Brace-matched counterpart to `extract_json_array`, for a JSON
+/// *object* response (`synthesize_hints`'s pattern -> hint map) rather
+/// than an array -- both are just `extract_bracketed` with a different
+/// bracket character.
+fn extract_json_object(raw: &str) -> String {
+    extract_bracketed(raw, '{', '}')
+}
+
+/// One-shot, best-effort synthesis call: for each diagnostic pattern
+/// neither `self_repair_hint`'s table nor the persistent
+/// `hint_cache::HintCache` already covers, asks the model to explain
+/// the mistake and how to fix it, grounded in the real spec
+/// (`relevant_doc_excerpt`) rather than the model's own unaided
+/// recollection -- the same unaided recollection that produced the
+/// mistake in the first place. Batches every uncovered pattern into
+/// ONE request (not one per pattern) to keep this cheap even on a
+/// diagnostic with many distinct novel error classes.
+///
+/// Never propagates an error: any transport failure, malformed JSON,
+/// or a response simply missing an entry for some pattern all resolve
+/// to that pattern getting no synthesized hint this round (the same as
+/// today's behavior before this module existed -- a bare diagnostic,
+/// no hint) rather than aborting the self-repair loop. This is an
+/// accelerator, never a dependency.
+fn synthesize_hints(client: &LlmClient, patterns: &[String]) -> HashMap<String, String> {
+    if patterns.is_empty() {
+        return HashMap::new();
+    }
+    let mut prompt = String::from(
+        "You are helping debug a Nirdosha compiler diagnostic that a code-generation self-repair loop hit and has no canned advice for yet. \
+For EACH pattern below, write ONE short, concrete, actionable sentence (or two) telling a model what it did wrong and exactly how to rewrite its code -- the same style as an experienced reviewer's inline comment, grounded ONLY in the attached Nirdosha language reference excerpt(s), never invented. \
+Reply with ONLY a JSON object (no prose, no markdown fence) mapping each pattern's exact text (as given) to its hint string.\n\n",
+    );
+    for p in patterns {
+        prompt.push_str(&format!("Pattern: {p}\nRelevant language reference:\n{}\n\n", relevant_doc_excerpt(p)));
+    }
+    let history = vec![ChatMessage::system("You are a precise Nirdosha language expert. Answer only from the reference text given; never guess."), ChatMessage::user(prompt)];
+    let Ok(raw) = client.complete(&history) else { return HashMap::new() };
+    let json_text = extract_json_object(&raw);
+    serde_json::from_str::<HashMap<String, String>>(&json_text).unwrap_or_default()
+}
+
+/// The orchestration point: given a failed attempt's flattened
+/// diagnostic, builds the corrective-message suffix to send back to
+/// the model (the same role `self_repair_hint(&diagnostic)`'s return
+/// value played on its own before this existed), now layering three
+/// sources in order of trust -- `self_repair_hint`'s hand-authored,
+/// test-pinned table; the persistent, empirically-validated
+/// `HintCache`; and finally live synthesis for whatever's left. Also
+/// returns the `(pattern, hint)` pairs freshly synthesized THIS round,
+/// which the caller must carry into the next attempt and hand to
+/// `promote_validated_hints` -- they are not cached yet.
+fn corrective_hint_for(diagnostic: &str, cache: &Mutex<crate::hint_cache::HintCache>, client: &LlmClient) -> (String, Vec<(String, String)>) {
+    let messages = extract_diagnostic_messages(diagnostic);
+    let patterns: Vec<String> = if messages.is_empty() {
+        vec![diagnostic.to_string()]
+    } else {
+        let mut seen = std::collections::HashSet::new();
+        messages.iter().map(|m| crate::hint_cache::normalize_pattern(m)).filter(|p| seen.insert(p.clone())).collect()
+    };
+
+    // Every piece is trimmed before collecting: `self_repair_hint`'s
+    // arms are string literals that each start with a leading space
+    // (so the original single-hint `"...only.{}"` formatting read as
+    // one sentence), which would double up once more than one piece is
+    // joined here. Trimming first and adding exactly one leading space
+    // back at the end (only if there's anything to say at all) keeps
+    // both the single-pattern case (today's exact output) and the
+    // multi-pattern case readable.
+    let mut hints: Vec<String> = Vec::new();
+    let mut uncovered: Vec<String> = Vec::new();
+    {
+        // Locked only for this lookup pass, never across the
+        // `synthesize_hints` network call below -- `cache` may be the
+        // process-wide shared cache (`hint_cache::shared`), and holding
+        // its lock across a blocking HTTP round trip would serialize
+        // every other thread's concurrent `:generate` call behind it
+        // for no reason (a cache lookup itself is never what's slow).
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        for p in &patterns {
+            let table_hint = self_repair_hint(p);
+            if !table_hint.is_empty() {
+                hints.push(table_hint.trim().to_string());
+                continue;
+            }
+            if let Some(cached) = guard.lookup(p) {
+                hints.push(cached.trim().to_string());
+                continue;
+            }
+            uncovered.push(p.clone());
+        }
+    }
+
+    let mut provisional = Vec::new();
+    if !uncovered.is_empty() {
+        let synthesized = synthesize_hints(client, &uncovered);
+        for p in &uncovered {
+            if let Some(hint) = synthesized.get(p) {
+                let hint = hint.trim().to_string();
+                hints.push(hint.clone());
+                provisional.push((p.clone(), hint));
+            }
+        }
+    }
+
+    // `Vec::dedup` only removes *consecutive* duplicates -- two equal
+    // hints separated by a distinct one in between (a table hint and a
+    // cached hint happening to read the same, say) would both survive
+    // it. A seen-set filter catches every duplicate regardless of
+    // position while preserving first-seen order.
+    let mut seen_hints = std::collections::HashSet::new();
+    hints.retain(|h| seen_hints.insert(h.clone()));
+    let joined = hints.join(" ");
+    if joined.is_empty() { (joined, provisional) } else { (format!(" {joined}"), provisional) }
+}
+
+/// Checks last round's provisional (synthesized-but-unproven) hints
+/// against THIS round's fresh diagnostic -- one is promoted into the
+/// persistent cache only if the pattern it addressed is genuinely gone
+/// from this new failure, i.e. the fix actually worked. A pattern that
+/// survived unchanged (the hint was wrong, unhelpful, or the model
+/// ignored it) is silently dropped: never written, so it gets
+/// resynthesized fresh next time it comes up rather than poisoning
+/// future runs with bad advice. Call with `new_diagnostic: ""` on a
+/// successful attempt (no errors left at all trivially clears every
+/// pattern).
+fn promote_validated_hints(provisional: &[(String, String)], new_diagnostic: &str, cache: &Mutex<crate::hint_cache::HintCache>) {
+    if provisional.is_empty() {
+        return;
+    }
+    let new_messages = extract_diagnostic_messages(new_diagnostic);
+    let still_present: std::collections::HashSet<String> = if new_messages.is_empty() {
+        if new_diagnostic.is_empty() { std::collections::HashSet::new() } else { std::iter::once(new_diagnostic.to_string()).collect() }
+    } else {
+        new_messages.iter().map(|m| crate::hint_cache::normalize_pattern(m)).collect()
+    };
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    for (pattern, hint) in provisional {
+        if !still_present.contains(pattern) {
+            guard.record_success(pattern, hint);
+        }
     }
 }
 
@@ -1804,6 +2090,17 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
     // escalation/give-up messages below can say what actually landed
     // on disk instead of unconditionally promising it did.
     let mut all_attempts_persisted = true;
+    // `hint_cache`'s empirically-gated fallback for whatever
+    // `self_repair_hint`'s hand-authored table doesn't cover yet
+    // (`corrective_hint_for`/`promote_validated_hints`'s own doc
+    // comments). `provisional` carries last round's freshly-synthesized-
+    // but-unproven hints forward so they can be checked against THIS
+    // round's fresh diagnostic before being overwritten. `shared`
+    // loads (and JSON-parses) the cache file at most once per process,
+    // not once per `:generate` call -- `hi_window.rs` runs each call on
+    // its own thread inside one long-running process.
+    let hint_cache = crate::hint_cache::shared(on_log);
+    let mut provisional_hints: Vec<(String, String)> = Vec::new();
     while violation_budget > 0 {
         attempt += 1;
         let raw = client.complete_with_tools(&mut history, &mut mcp_log).map_err(|e| format!("couldn't reach the model: {e}"))?;
@@ -1828,6 +2125,7 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
             Ok(s) => s,
             Err(failure) => {
                 let diagnostic = failure.diagnostic;
+                promote_validated_hints(&provisional_hints, &diagnostic, hint_cache);
                 last_diagnostic = diagnostic.clone();
                 let class = failure.class;
                 match charge_budget(
@@ -1844,7 +2142,9 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
                         // rather than a compile/coverage check.
                         on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed pack-injection, asking the model to fix it..."));
                         history.push(ChatMessage::assistant(source));
-                        history.push(ChatMessage::user(format!("That attempt failed with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}", self_repair_hint(&diagnostic))));
+                        let (hint, new_provisional) = corrective_hint_for(&diagnostic, hint_cache, client);
+                        provisional_hints = new_provisional;
+                        history.push(ChatMessage::user(format!("That attempt failed with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{hint}")));
                     }
                     BudgetCharge::StopGiveUp => break,
                     BudgetCharge::StopEscalate => {
@@ -1893,7 +2193,12 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
         // coverage gate on the compiled draft (RFC 0016 Phase 1) -- a
         // program that typechecks but proves nothing about its money math
         // no longer passes, which is the demonstrated seam this closes --
-        // then mandatory-primitive coverage, then screen-derivation
+        // then mandatory-primitive coverage, then primitive-exclusivity
+        // (RFC 0016 Phase 3's other half: a call site can satisfy
+        // `transfer`'s own precondition and the model can *still* have
+        // hand-rolled a second, unguarded `Account` construction
+        // elsewhere in the same draft -- these are independent failure
+        // modes, not a subset of each other), then screen-derivation
         // coverage (field failure 2026-09-13: a `screen` block with no
         // backing `list_`/`get_`/etc. fn compiles and proves everything
         // demanded of it, but the served app silently drops the screen).
@@ -1905,9 +2210,15 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
                     Err(e) => Err((format!("could not determine this project's mandatory primitives: {e}"), None)),
                     Ok(mandatory_fns) => match check_mandatory_primitive_coverage(&source, &mandatory_fns) {
                         Err(failure) => Err((failure.diagnostic, Some(failure.class))),
-                        Ok(()) => match check_screen_derivation_coverage(&source, units) {
-                            Err(failure) => Err((failure.diagnostic, Some(failure.class))),
-                            Ok(()) => Ok(()),
+                        Ok(()) => match crate::hi_plugin::active_protected_struct_names(conn, root) {
+                            Err(e) => Err((format!("could not determine this project's protected structs: {e}"), None)),
+                            Ok(protected_structs) => match check_primitive_exclusivity_coverage(&source, &protected_structs, &mandatory_fns) {
+                                Err(failure) => Err((failure.diagnostic, Some(failure.class))),
+                                Ok(()) => match check_screen_derivation_coverage(&source, units) {
+                                    Err(failure) => Err((failure.diagnostic, Some(failure.class))),
+                                    Ok(()) => Ok(()),
+                                },
+                            },
                         },
                     },
                 },
@@ -1915,6 +2226,13 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
         };
         match outcome {
             Ok(()) => {
+                // This attempt has zero errors, so trivially clears
+                // whatever pattern(s) last round's provisional hints
+                // (if any) were synthesized for -- credit them before
+                // returning, the same "next attempt no longer shows the
+                // pattern" signal `promote_validated_hints` uses on a
+                // failing attempt, just via the empty-diagnostic case.
+                promote_validated_hints(&provisional_hints, "", hint_cache);
                 let out_path = generated_source_path(root);
                 std::fs::create_dir_all(out_path.parent().expect("generated_source_path always has a parent")).map_err(|e| format!("creating {}: {e}", out_path.display()))?;
                 std::fs::write(&out_path, &source).map_err(|e| format!("writing {}: {e}", out_path.display()))?;
@@ -1922,6 +2240,7 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
                 return Ok(out_path);
             }
             Err((diagnostic, class)) => {
+                promote_validated_hints(&provisional_hints, &diagnostic, hint_cache);
                 last_diagnostic = diagnostic.clone();
                 let class = class.unwrap_or(CoverageFailureClass::ContractViolated);
                 match charge_budget(&mut violation_budget, &mut engine_limit_simplifications, class.clone()) {
@@ -1938,7 +2257,13 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
                         // (`self_repair_hint`'s own doc comment) -- never a
                         // generic "fix it" that just re-sends whatever
                         // ambiguity caused the failure in the first place.
-                        history.push(ChatMessage::user(format!("That attempt failed with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}", self_repair_hint(&diagnostic))));
+                        // `corrective_hint_for` layers the empirically-gated
+                        // `hint_cache` and live synthesis in as a fallback
+                        // for whatever `self_repair_hint`'s table misses
+                        // (`hint_cache.rs`'s own doc comment).
+                        let (hint, new_provisional) = corrective_hint_for(&diagnostic, hint_cache, client);
+                        provisional_hints = new_provisional;
+                        history.push(ChatMessage::user(format!("That attempt failed with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{hint}")));
                     }
                     BudgetCharge::StopGiveUp => {
                         break;
@@ -2001,24 +2326,38 @@ pub fn generate_from_task_prompt(client: &LlmClient, task_prompt: &str, on_log: 
     let mut history = vec![ChatMessage::system(HI_PROMPT), ChatMessage::user(task_prompt)];
     let mut mcp_log = crate::mcp_tools::McpCallLog::new("hi-generate-llm");
     let mut last_diagnostic = String::new();
+    // Same empirically-gated fallback `generate_program` uses -- see
+    // `hint_cache.rs`'s doc comment. Reused here rather than
+    // duplicated, matching this function's own existing "reuses every
+    // piece of `generate_program`'s already-tested retry discipline"
+    // stance: `self_repair_hint` is already part of what this
+    // function's pass@1/self-repair-rate measurement captures (a bare
+    // "fix it" is not the counterfactual being benchmarked), so a
+    // better hint source belongs in that same measured loop, not
+    // bypassed for it.
+    let hint_cache = crate::hint_cache::shared(on_log);
+    let mut provisional_hints: Vec<(String, String)> = Vec::new();
     for attempt in 1..=MAX_SELF_REPAIR_ATTEMPTS {
         let raw = client.complete_with_tools(&mut history, &mut mcp_log).map_err(|e| format!("couldn't reach the model: {e}"))?;
         let source = extract_nir_source(&raw);
         match typecheck_and_build_check(&source) {
             Ok(()) => {
+                promote_validated_hints(&provisional_hints, "", hint_cache);
                 on_log(&format!("compiled on attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS}"));
                 return Ok((source, attempt));
             }
             Err(diagnostic) => {
+                promote_validated_hints(&provisional_hints, &diagnostic, hint_cache);
                 last_diagnostic = diagnostic.clone();
                 if attempt == MAX_SELF_REPAIR_ATTEMPTS {
                     break;
                 }
                 on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed to compile, asking the model to fix it..."));
                 history.push(ChatMessage::assistant(source));
+                let (hint, new_provisional) = corrective_hint_for(&diagnostic, hint_cache, client);
+                provisional_hints = new_provisional;
                 history.push(ChatMessage::user(format!(
-                    "That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{}",
-                    self_repair_hint(&diagnostic)
+                    "That failed to compile with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{hint}"
                 )));
             }
         }
@@ -2170,6 +2509,119 @@ fn typecheck_and_build_check(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact diagnostic shape from the 2026-09-14 field failure
+    /// (`RoleView`/`acquire` misuse + `EnumName.Variant` dotted access)
+    /// that motivated `corrective_hint_for`/`hint_cache` existing at
+    /// all: pins that the machine-readable JSON tail decomposes back
+    /// into the individual per-error `message` strings, not the whole
+    /// blob as one opaque pattern.
+    #[test]
+    fn extract_diagnostic_messages_recovers_individual_errors_from_the_machine_readable_tail() {
+        let diagnostic = "type error: 16:58: expected `RoleView`, found `str`\n\
+type error: 16:37: expected `fn(i64, i64) -> i64`, found `Result(fn(i64, i64) -> i64, str)`\n\
+type error: 115:43: unknown variable `UserRole`\n\
+machine-readable errors: [{\"col\":58,\"line\":16,\"message\":\"16:58: expected `RoleView`, found `str`\",\"stage\":\"typecheck\"}, {\"col\":37,\"line\":16,\"message\":\"16:37: expected `fn(i64, i64) -> i64`, found `Result(fn(i64, i64) -> i64, str)`\",\"stage\":\"typecheck\"}, {\"col\":43,\"line\":115,\"message\":\"115:43: unknown variable `UserRole`\",\"stage\":\"typecheck\"}]\n  the source line that points at (line 16) is: `    let cap: fn (i64, i64) -> i64 = acquire credit_cents(\"FinanceDirector\")`";
+        let messages = extract_diagnostic_messages(diagnostic);
+        assert_eq!(messages, vec![
+            "16:58: expected `RoleView`, found `str`".to_string(),
+            "16:37: expected `fn(i64, i64) -> i64`, found `Result(fn(i64, i64) -> i64, str)`".to_string(),
+            "115:43: unknown variable `UserRole`".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn extract_diagnostic_messages_is_empty_for_a_diagnostic_with_no_machine_readable_tail() {
+        // Contract-coverage/pack-injection failures build their own
+        // prose diagnostic with no `machine-readable errors:` tail --
+        // `corrective_hint_for` must fall back to treating the whole
+        // string as one pattern for these, unchanged from before this
+        // module existed.
+        assert!(extract_diagnostic_messages("contract coverage failure: the demanded contract on `charge_cents` was violated").is_empty());
+    }
+
+    #[test]
+    fn extract_json_object_finds_the_object_despite_surrounding_prose() {
+        let raw = "Sure, here you go:\n```json\n{\"a\": \"one\", \"b\": \"two, with a brace } inside a string\"}\n```\nHope that helps!";
+        let extracted = extract_json_object(raw);
+        let parsed: HashMap<String, String> = serde_json::from_str(&extracted).expect("should parse");
+        assert_eq!(parsed.get("a").map(String::as_str), Some("one"));
+        assert_eq!(parsed.get("b").map(String::as_str), Some("two, with a brace } inside a string"));
+    }
+
+    #[test]
+    fn relevant_doc_excerpt_for_role_view_finds_the_acquire_section() {
+        let excerpt = relevant_doc_excerpt("expected `RoleView`, found `str`");
+        assert!(!excerpt.is_empty(), "LANGUAGE.md should have SOME section mentioning RoleView");
+        assert!(excerpt.contains("check_role") || excerpt.contains("acquire"), "excerpt should ground the real mechanism, got: {excerpt}");
+    }
+
+    /// The core promotion contract: a hint only gets written to the
+    /// persistent cache once the pattern it addressed is actually gone
+    /// from a later attempt's diagnostics -- one that's still present
+    /// (the fix didn't work) is dropped, never cached.
+    #[test]
+    fn promote_validated_hints_only_caches_a_hint_that_actually_cleared_its_pattern() {
+        let dir = std::env::temp_dir().join(format!("nir_hint_promote_test_{}_{}", std::process::id(), line!()));
+        unsafe { std::env::set_var("NIRDOSHA_HINT_CACHE_PATH", dir.join("cache.json")) };
+        let mut log = |_: &str| {};
+        // A local `Mutex`, not `hint_cache::shared` -- this test wants
+        // its own isolated cache (scoped to its own temp `dir` via
+        // `NIRDOSHA_HINT_CACHE_PATH` above), and `shared`'s whole point
+        // is a *process*-wide singleton loaded at most once, which
+        // would ignore that env var on every test after the first one
+        // to touch it in this process. `corrective_hint_for`/
+        // `promote_validated_hints` only need `&Mutex<HintCache>`, not
+        // `&'static`, so a plain local one works.
+        let cache = Mutex::new(crate::hint_cache::HintCache::load(&mut log));
+
+        let provisional = vec![
+            ("expected `RoleView`, found `str`".to_string(), "use check_role, not a string literal".to_string()),
+            ("unknown variable `UserRole`".to_string(), "enum variants are bare constructors".to_string()),
+        ];
+        // The next attempt's diagnostic still contains the RoleView
+        // pattern (unfixed) but no longer contains the UserRole one
+        // (fixed).
+        let next_diagnostic = "type error: 20:10: expected `RoleView`, found `str`\nmachine-readable errors: [{\"col\":10,\"line\":20,\"message\":\"20:10: expected `RoleView`, found `str`\",\"stage\":\"typecheck\"}]";
+        promote_validated_hints(&provisional, next_diagnostic, &cache);
+
+        let guard = cache.lock().unwrap();
+        assert_eq!(guard.lookup("expected `RoleView`, found `str`"), None, "unfixed pattern must not be cached");
+        assert_eq!(guard.lookup("unknown variable `UserRole`"), Some("enum variants are bare constructors"), "fixed pattern must be cached");
+        drop(guard);
+
+        unsafe { std::env::remove_var("NIRDOSHA_HINT_CACHE_PATH") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End-to-end without a network call: every pattern in the
+    /// diagnostic is already covered by `self_repair_hint`'s table, so
+    /// `corrective_hint_for` must never touch `uncovered`/`synthesize_
+    /// hints` at all -- pins that the static table is genuinely
+    /// consulted FIRST, ahead of any synthesis.
+    #[test]
+    fn corrective_hint_for_never_synthesizes_when_the_static_table_already_covers_every_pattern() {
+        let dir = std::env::temp_dir().join(format!("nir_hint_static_test_{}_{}", std::process::id(), line!()));
+        unsafe { std::env::set_var("NIRDOSHA_HINT_CACHE_PATH", dir.join("cache.json")) };
+        let mut log = |_: &str| {};
+        let cache = Mutex::new(crate::hint_cache::HintCache::load(&mut log));
+        // A client pointed at an address nothing listens on: if
+        // `corrective_hint_for` tried to synthesize, `complete()` would
+        // fail (not panic) and the hint would just come back empty --
+        // this only proves "didn't crash", so the real assertion below
+        // is on `provisional` being empty, which is only true if
+        // `synthesize_hints` was never called.
+        let activation = Activation { api_key: "unused".to_string(), model: "unused".to_string(), base_url: "http://127.0.0.1:1".to_string(), timeout_secs: 1 };
+        let client = LlmClient::new(activation).expect("building the client itself never touches the network");
+
+        let diagnostic = "codegen doesn't support `print` on a Vector argument\nmachine-readable errors: [{\"col\":1,\"line\":1,\"message\":\"codegen doesn't support `print` on a Vector argument\",\"stage\":\"codegen\"}]";
+        let (hint, provisional) = corrective_hint_for(diagnostic, &cache, &client);
+        assert!(provisional.is_empty(), "every pattern was covered statically, nothing should have been synthesized");
+        assert!(hint.contains("scalars only"), "should still return the static table's hint, got: {hint}");
+
+        unsafe { std::env::remove_var("NIRDOSHA_HINT_CACHE_PATH") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The drift guard `JSON_COMPONENT_FIELD_DOCS`'/`JSON_RELATIONSHIP_
     /// FIELD_DOCS`'s own doc comments promise: serializes a real
@@ -2672,6 +3124,69 @@ fn pay(amount: i64) -> i64 {
 fn main() requires(public) { }
 "#;
         check_mandatory_primitive_coverage(source, &mandatory).expect("the guard establishes transfer's own precondition before the call");
+    }
+
+    /// RFC 0016 Phase 3's `primitive_exclusivity`: a protected struct
+    /// constructed only inside its own certified primitive passes.
+    #[test]
+    fn primitive_exclusivity_coverage_passes_when_only_the_primitive_constructs_the_protected_struct() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mandatory = std::collections::HashSet::new();
+        mandatory.insert("charge_cents".to_string());
+        let mut protected = std::collections::HashSet::new();
+        protected.insert("Account".to_string());
+        let source = r#"
+struct Account {
+    balance_cents: i64,
+}
+
+fn charge_cents(balance_cents: i64, amount: i64) -> Account {
+    return Account(balance_cents - amount)
+}
+
+fn main() requires(public) { }
+"#;
+        check_primitive_exclusivity_coverage(source, &protected, &mandatory).expect("only the certified primitive constructs Account");
+    }
+
+    /// The bypass this gate exists to catch: a second fn hand-derives
+    /// the same struct instead of calling the certified primitive --
+    /// "the model wires the ledger; it does not write it" (RFC 0016)
+    /// fails the moment a second construction site exists outside it,
+    /// even though `bad_charge`'s own arithmetic looks identical to
+    /// `charge_cents`'s.
+    #[test]
+    fn primitive_exclusivity_coverage_flags_a_second_construction_site_outside_the_primitive() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mandatory = std::collections::HashSet::new();
+        mandatory.insert("charge_cents".to_string());
+        let mut protected = std::collections::HashSet::new();
+        protected.insert("Account".to_string());
+        let source = r#"
+struct Account {
+    balance_cents: i64,
+}
+
+fn charge_cents(balance_cents: i64, amount: i64) -> Account {
+    return Account(balance_cents - amount)
+}
+
+fn bad_charge(balance_cents: i64, amount: i64) -> Account {
+    return Account(balance_cents - amount)
+}
+
+fn main() requires(public) { }
+"#;
+        let failure = check_primitive_exclusivity_coverage(source, &protected, &mandatory).expect_err("bad_charge bypasses the certified primitive");
+        assert_eq!(failure.class, CoverageFailureClass::ContractViolated);
+        assert!(failure.diagnostic.contains("bad_charge"), "must name the offending fn: {}", failure.diagnostic);
+        assert!(failure.diagnostic.contains("is a pack-protected type"), "got: {}", failure.diagnostic);
+    }
+
+    #[test]
+    fn primitive_exclusivity_coverage_passes_when_nothing_is_protected() {
+        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        check_primitive_exclusivity_coverage("fn main() requires(public) { }", &std::collections::HashSet::new(), &std::collections::HashSet::new()).expect("empty protected set is always a no-op");
     }
 
     #[test]

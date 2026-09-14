@@ -118,6 +118,7 @@ pub mod db;
 pub mod http;
 pub mod identity;
 pub mod instance_lock;
+pub mod isolation_check;
 pub mod mailbox;
 pub mod nfr;
 pub mod plugin_provider;

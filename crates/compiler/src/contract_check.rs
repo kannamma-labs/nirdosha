@@ -370,6 +370,62 @@ pub fn check_mandatory_primitive_call_sites(program: &Program, mandatory_fns: &H
         .collect()
 }
 
+/// RFC 0016 Phase 3's `primitive_exclusivity` -- the RFC's own words:
+/// "For every plugin-declared protected type/field (`Account`,
+/// `Ledger`, `balance_cents`), any read, write, or mutation outside
+/// certified primitive units fails the generate gate."
+///
+/// **A real, disclosed scope decision, not a partial implementation of
+/// that sentence**: Nirdosha has no in-place field mutation at all --
+/// `ast::Stmt` has no field-assignment form, and `ast::Expr::Assign`
+/// only ever targets a plain variable name, never a field path.
+/// `docs/LANGUAGE.md`'s struct model is construct-once: the only way a
+/// `balance_cents` field ever takes on a new value is by constructing a
+/// whole new struct value carrying it. So "any write... outside
+/// certified primitive units" reduces exactly to "constructing a value
+/// of the protected struct type outside a certified primitive" -- not
+/// a narrower stand-in for the RFC's field-level language, but the
+/// literal, complete set of ways a write to that field can happen in
+/// this language at all. A **read** (`Expr::FieldAccess`) is
+/// deliberately never flagged -- the RFC's own risk is generated code
+/// re-deriving the domain law by constructing a new value by hand, not
+/// code that merely looks at an existing one.
+///
+/// Struct construction and an ordinary fn call share one AST node
+/// (`Expr::Call`, disambiguated only at typecheck time by whether the
+/// name resolves to a struct or a function) -- so this reuses
+/// `collect_call_names_stmts`, the exact same call-collecting walker
+/// `collect_call_names` already exhaustively maintains against
+/// `ast::Expr`'s full variant set, once per function, rather than a
+/// second, parallel AST walk that could drift from it.
+///
+/// Returns one message per violation (a protected struct constructed
+/// outside a certified primitive), naming the offending fn and struct
+/// -- empty when nothing is protected (`protected_structs.is_empty()`,
+/// the common case: no active pack declares any) or nothing violates.
+pub fn check_primitive_exclusivity(program: &Program, protected_structs: &HashSet<String>, mandatory_fns: &HashSet<String>) -> Vec<String> {
+    if protected_structs.is_empty() {
+        return Vec::new();
+    }
+    let mut violations = Vec::new();
+    for f in &program.fns {
+        if mandatory_fns.contains(&f.name) {
+            continue; // a certified primitive is exactly where this construction belongs.
+        }
+        let mut called: HashSet<String> = HashSet::new();
+        collect_call_names_stmts(&f.body.stmts, &mut called);
+        let mut offending: Vec<&String> = protected_structs.intersection(&called).collect();
+        offending.sort(); // deterministic message order, not hash-order.
+        for struct_name in offending {
+            violations.push(format!(
+                "fn `{}` constructs `{struct_name}` directly -- `{struct_name}` is a pack-protected type; only a certified primitive may construct it, generated code must call one instead of re-deriving the domain law by hand",
+                f.name
+            ));
+        }
+    }
+    violations
+}
+
 /// The build-time "self-check and fail" gate (`docs/ROADMAP.md` Track F, F3
 /// — called once from `main.rs::typecheck_and_own_impl`, right after
 /// `typeck`/`ownership` both pass, so it runs for every command that

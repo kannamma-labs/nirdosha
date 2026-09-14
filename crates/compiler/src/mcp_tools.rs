@@ -535,16 +535,23 @@ pub fn typecheck_and_check_ownership(program: crate::ast::Program, require_main:
             ownership.errors = errs
                 .iter()
                 .map(|e| {
-                    // `OwnershipErrorKind` has exactly one variant today
-                    // -- still matched explicitly, not a bare `Some`,
-                    // so a future second variant doesn't silently
-                    // inherit this rationale.
+                    // Matched explicitly per variant, not a bare
+                    // `Some`/wildcard, so a future new variant fails to
+                    // compile here until it gets its own real rationale
+                    // instead of silently inheriting someone else's.
                     let fix = match &e.kind {
                         crate::ownership::OwnershipErrorKind::UseAfterMove { name } => Some(Fix {
                             applicability: Applicability::Manual,
                             patch: None,
                             rationale: format!(
                                 "`box` values are affine -- borrow with `&{name}` to reuse it without moving, or restructure so it's consumed once."
+                            ),
+                        }),
+                        crate::ownership::OwnershipErrorKind::MoveWhileBorrowed { name, borrower } => Some(Fix {
+                            applicability: Applicability::Manual,
+                            patch: None,
+                            rationale: format!(
+                                "moving `{name}` while `{borrower}` still borrows it would leave `{borrower}` pointing at freed memory -- use `{name}` through `{borrower}` instead, or move `{name}` only after `{borrower}`'s own scope ends."
                             ),
                         }),
                     };
@@ -893,6 +900,164 @@ pub struct Certificate {
     pub evidence_tier: String,
     pub verdict_summary: VerdictSummary,
     pub proof_obligations: ProofObligations,
+    /// RFC 0016 Phase 4 (`rfcs/0016-implementation-plan.md`): the
+    /// installed domain packs (`hi_plugin::installed_pack_ids`) that
+    /// governed this artifact's confirmed graph, if any. Empty for
+    /// every certificate `cmd_certify`/`certify_code` issue today --
+    /// neither has a project graph to attribute against, only a bare
+    /// source file -- populated only by `hi_api::handle_publish`, the
+    /// one call site that has an open project connection. `#[serde(
+    /// default)]` so a pre-Phase-4 certificate JSON (no such field at
+    /// all) still deserializes through `verify-certificate`'s round
+    /// trip instead of failing on an unknown-but-required field.
+    #[serde(default)]
+    pub governing_packs: Vec<String>,
+    /// This artifact's declared `nfr(...)` commitments (`ast::NfrSpec`
+    /// per fn), attached at publish time. Deliberately **not** folded
+    /// into `verdict_summary`/`proof_obligations` above: those are Z3-
+    /// *proved* facts about this exact artifact; an NFR threshold is
+    /// *monitored* at runtime by the APM kernel (`rfcs/0007-apm-
+    /// runtime-kernel.md`) and was never any solver's business to
+    /// begin with -- keeping it a separate field with its own
+    /// evidence_tier (`NfrCommitment::EVIDENCE_TIER`, always
+    /// `"monitored"`) is what stops a runtime-tracked claim from ever
+    /// reading as a compile-time proof inside the same certificate,
+    /// the same discipline "Compliance profiles"' `external_conformance`
+    /// requirement kind already holds itself to. Empty for the same
+    /// reason `governing_packs` is: only `handle_publish` has a parsed
+    /// `Program` to walk for `nfr` attributes.
+    #[serde(default)]
+    pub nfr_commitments: Vec<NfrCommitment>,
+}
+
+/// One function's declared non-functional requirements, carried into
+/// the certificate verbatim -- see `Certificate::nfr_commitments`'s own
+/// doc comment for why this is a distinct field with its own tier
+/// rather than folded into the Z3-proved `verdict_summary`.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct NfrCommitment {
+    pub fn_name: String,
+    pub nfr: crate::ast::NfrSpec,
+    /// Always `"monitored"` -- a `const fn`-shaped constant would be
+    /// tidier, but this field must actually serialize per-value (not
+    /// be inferred from the struct's mere presence), so a real string
+    /// field keeps the JSON self-describing for a reader who only has
+    /// the certificate, not this struct's source.
+    pub evidence_tier: String,
+}
+
+impl NfrCommitment {
+    pub const EVIDENCE_TIER: &'static str = "monitored";
+}
+
+/// Walks every `fn` in `program` carrying a non-empty `nfr(...)` and
+/// returns one `NfrCommitment` per match, sorted by `fn_name` --
+/// deterministic order, matching `Certificate`'s own "no timestamp, no
+/// random nonce, always the same bytes for the same input" discipline.
+/// `NfrSpec::is_empty` filters out a `None`/all-`None` spec (the
+/// grammar can't actually produce a bare `nfr()` with nothing inside,
+/// but this stays defensive rather than assuming that of every future
+/// caller).
+pub fn nfr_commitments_from_program(program: &crate::ast::Program) -> Vec<NfrCommitment> {
+    let mut commitments: Vec<NfrCommitment> = program
+        .fns
+        .iter()
+        .filter_map(|f| f.nfr.filter(|spec| !spec.is_empty()).map(|nfr| NfrCommitment { fn_name: f.name.clone(), nfr, evidence_tier: NfrCommitment::EVIDENCE_TIER.to_string() }))
+        .collect();
+    commitments.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
+    commitments
+}
+
+/// Certificate v1 (`nirdosha-master-plan.md` Part 3 Nov 2026, "Signed
+/// certificates (v1) -- key-pinned verdicts", parity target: Velvet)
+/// -- Certificate v0 plus a real Ed25519 signature (`ring`, already a
+/// dependency; no hand-rolled crypto) over v0's own canonical bytes.
+/// `#[serde(flatten)]` puts every v0 field back at the top level
+/// (additive over v0, per `docs/STABILITY_AND_RELEASES.md`'s own rule
+/// for this schema -- a v0-only consumer reading a v1 certificate
+/// still finds every field it expects, plus three it can ignore).
+/// "Key-pinned": the public key travels with the certificate so a
+/// verifier never needs external key discovery to check the
+/// signature -- trust is established by the *verifier* pinning which
+/// public keys it accepts in advance (an operational policy, not
+/// something this format enforces), the same model TLS certificate
+/// pinning uses for the same reason.
+///
+/// Lives here, not in `main.rs`, for the same reason every other
+/// verify/fix/certify pipeline function does (this module's own doc
+/// comment) -- `hi_api::handle_publish`'s optional publish-time
+/// signing (RFC 0016 Phase 4) needs it from the library side, not just
+/// `main.rs::cmd_certify`'s CLI `--sign` flag.
+#[derive(serde::Serialize)]
+pub struct SignedCertificate {
+    #[serde(flatten)]
+    pub certificate: Certificate,
+    pub signature_algorithm: &'static str,
+    pub public_key: String,
+    pub signature: String,
+}
+
+/// Signs `certificate`'s own canonical byte serialization
+/// (`serde_json::to_vec` on the plain `Certificate` struct --
+/// `Certificate` derives `Serialize` with no `#[serde(rename_all)]`
+/// alphabetizing pass, so this is always the same bytes for the same
+/// values, independent of what order any particular JSON *source*
+/// text happened to list fields in) with the Ed25519 private key at
+/// `key_path` (raw PKCS#8, as `nirdosha keygen` writes). Verification
+/// (`cmd_verify_certificate`) does the mirror operation: parse the
+/// signed JSON back into a plain `Certificate` (ignoring the three
+/// signature-related fields, which `Certificate` doesn't declare),
+/// re-serialize *that*, and check the signature against those exact
+/// bytes -- so the two sides never need to agree on a JSON
+/// canonicalization scheme beyond "both go through the same Rust
+/// struct's own `Serialize` impl."
+pub fn sign_certificate(certificate: &Certificate, key_path: &str) -> Result<SignedCertificate, String> {
+    let canonical = serde_json::to_vec(certificate).expect("Certificate always serializes");
+    let (public_key, signature) = sign_bytes(&canonical, key_path)?;
+    Ok(SignedCertificate {
+        certificate: serde_json::from_slice(&canonical).expect("re-parsing what was just serialized cannot fail"),
+        signature_algorithm: "ed25519",
+        public_key,
+        signature,
+    })
+}
+
+/// Ed25519-signs arbitrary `bytes` with the PKCS#8 private key at
+/// `key_path` (raw DER, as `nirdosha keygen` writes) -- the primitive
+/// behind both `sign_certificate` above and `hi_plugin`'s pack-signing
+/// layer (RFC 0016 Phase 4, Sigstore-*pattern* trust for packs): one
+/// Ed25519 signing implementation in this crate, not a hand-rolled copy
+/// per signer. Returns `(public_key_base64, signature_base64)`.
+pub fn sign_bytes(bytes: &[u8], key_path: &str) -> Result<(String, String), String> {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use ring::signature::KeyPair;
+
+    let pkcs8 = std::fs::read(key_path).map_err(|e| format!("reading private key {key_path}: {e}"))?;
+    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}"))?;
+    let signature = keypair.sign(bytes);
+    Ok((BASE64_STANDARD.encode(keypair.public_key().as_ref()), BASE64_STANDARD.encode(signature.as_ref())))
+}
+
+/// The verify-side mirror of [`sign_bytes`]: checks `signature_b64`
+/// against `bytes` under `public_key_b64`, both base64 exactly as
+/// `sign_bytes`/`nirdosha keygen` produce them. Returns `Ok(false)`,
+/// not `Err`, for a well-formed but non-matching signature -- "checked,
+/// and it didn't match" is a real, distinct outcome from "couldn't even
+/// attempt the check" (malformed base64/key bytes), which stays `Err`.
+/// Says nothing about whether `public_key_b64` is a key the *caller*
+/// should trust -- pinning acceptable keys is the caller's own
+/// operational policy (`SignedCertificate`'s own doc comment on this
+/// same point; `hi_plugin`'s trust-anchor list is that policy for
+/// packs).
+pub fn verify_bytes(bytes: &[u8], public_key_b64: &str, signature_b64: &str) -> Result<bool, String> {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+
+    let signature_bytes = BASE64_STANDARD.decode(signature_b64).map_err(|e| format!("signature is not valid base64: {e}"))?;
+    let public_key_bytes = BASE64_STANDARD.decode(public_key_b64).map_err(|e| format!("public_key is not valid base64: {e}"))?;
+    let public_key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public_key_bytes);
+    Ok(public_key.verify(bytes, &signature_bytes).is_ok())
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -943,6 +1108,14 @@ pub fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certif
             contracts_failed: contracts.failed,
         },
         proof_obligations,
+        // Empty here -- neither `cmd_certify` nor `certify_code` has a
+        // project graph or a parsed `Program` to attribute against, only
+        // a bare source file. `hi_api::handle_publish` fills both in
+        // after calling this, the one call site with the extra context
+        // (`Certificate::governing_packs`/`nfr_commitments`'s own doc
+        // comments).
+        governing_packs: Vec::new(),
+        nfr_commitments: Vec::new(),
     }
 }
 

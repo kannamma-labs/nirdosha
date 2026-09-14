@@ -1,0 +1,254 @@
+//! A small persistent, *empirically-gated* cache of corrective self-
+//! repair hints, for diagnostic patterns `hi_llm.rs`'s hand-authored
+//! `self_repair_hint` table doesn't (yet) cover.
+//!
+//! Context (2026-09-14 field failure): a fintech `:generate` run burned
+//! all `MAX_SELF_REPAIR_ATTEMPTS` on `acquire fn("Role")`/`EnumName.
+//! Variant` misuse -- two diagnostic shapes `self_repair_hint` had no
+//! arm for, so every retry got back the bare compiler diagnostic with
+//! an empty hint appended and repeated the identical mistake. Adding a
+//! hand-authored arm per field failure (the existing discipline --
+//! every arm's `// Field failure <date>` comment) is real but reactive:
+//! it only grows after a human notices a give-up, reads the log, and
+//! ships a patched arm. This module closes that gap *live*, inside the
+//! self-repair loop itself, without giving up the safety a hand-
+//! authored, test-pinned arm has:
+//!
+//! - `self_repair_hint`'s table is still consulted FIRST for every
+//!   diagnostic pattern (`hi_llm.rs::corrective_hint_for`) -- free,
+//!   deterministic, code-reviewed, pinned by
+//!   `self_repair_hints_cover_every_field_failure_class`. This cache is
+//!   only ever a fallback for what that table misses.
+//! - A miss triggers ONE synthesis call to the model itself
+//!   (`hi_llm.rs::synthesize_hints`), grounded in the real language
+//!   docs -- but that synthesized hint is *provisional*, never written
+//!   here directly. It rides along into the very next self-repair
+//!   attempt un-cached.
+//! - Only after that next attempt's diagnostics no longer contain the
+//!   pattern the hint was for (`hi_llm.rs::promote_validated_hints`) is
+//!   the hint considered PROVEN and written here. A hint that doesn't
+//!   clear the pattern -- wrong, misleading, or just unhelpful -- is
+//!   silently dropped and re-synthesized fresh next time, never
+//!   persisted.
+//!
+//! So every entry that ever lands in this file carries real evidence it
+//! worked at least once, which is a different (weaker, but non-zero)
+//! guarantee than a hand-authored arm's code review + regression test
+//! -- worth keeping visibly separate, hence a distinct file and a
+//! distinct, append-only audit log (`promotions.log` next to the cache
+//! file) rather than folding straight into `self_repair_hint`'s own
+//! match arms.
+//!
+//! Scoped globally (one file under the user's home directory), not per
+//! project: a hint about how `acquire`/`RoleView` actually work is a
+//! fact about the LANGUAGE, true in every project, and
+//! `generate_from_task_prompt` (the bench harness) has no project
+//! directory at all to scope one to.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+/// Strips a leading `<line>:<col>: ` location prefix, if present, so the
+/// same underlying mistake at two different call sites (`16:58: ...`
+/// vs `26:62: ...`) normalizes to one cache key. Mirrors what
+/// `self_repair_hint`'s own `.contains(...)` substring checks already
+/// do implicitly by matching text *after* the location -- this just
+/// makes that same location-independence explicit for a key used in
+/// exact lookups, where a substring match isn't available.
+pub fn normalize_pattern(message: &str) -> String {
+    let trimmed = message.trim();
+    let mut chars = trimmed.char_indices();
+    let mut first_colon = None;
+    let mut second_colon = None;
+    for (i, c) in chars.by_ref() {
+        if c == ':' {
+            first_colon = Some(i);
+            break;
+        }
+        if !c.is_ascii_digit() {
+            return trimmed.to_string();
+        }
+    }
+    let Some(fc) = first_colon else { return trimmed.to_string() };
+    if fc == 0 {
+        return trimmed.to_string();
+    }
+    for (i, c) in chars.by_ref() {
+        if c == ':' {
+            second_colon = Some(i);
+            break;
+        }
+        if !c.is_ascii_digit() {
+            return trimmed.to_string();
+        }
+    }
+    let Some(sc) = second_colon else { return trimmed.to_string() };
+    if sc == fc + 1 {
+        // `N::` -- an empty column field, not the `N:N:` shape this
+        // targets. Leave it alone rather than guess.
+        return trimmed.to_string();
+    }
+    trimmed[sc + 1..].trim_start().to_string()
+}
+
+/// Where the cache (and its sibling audit log) lives. Overridable via
+/// `NIRDOSHA_HINT_CACHE_PATH` so tests, and the bench harness, never
+/// touch a real developer's `$HOME` -- unset, corrupt, or unreadable
+/// all fall back to a fresh, empty, process-local cache rather than
+/// erroring: this is a nice-to-have accelerator for the self-repair
+/// loop, never a dependency the loop can fail over.
+fn cache_path() -> PathBuf {
+    if let Ok(p) = std::env::var("NIRDOSHA_HINT_CACHE_PATH") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    PathBuf::from(home).join(".nirdosha").join("self_repair_hint_cache.json")
+}
+
+fn log_path(cache: &std::path::Path) -> PathBuf {
+    cache.with_file_name("self_repair_hint_promotions.log")
+}
+
+/// The cache itself: pattern -> hint. Kept as a plain `HashMap` in
+/// memory for the lifetime of one generate call; `load`/`save` are the
+/// only points that touch disk, both best-effort.
+pub struct HintCache {
+    path: PathBuf,
+    entries: HashMap<String, String>,
+}
+
+impl HintCache {
+    /// Never fails: a missing, corrupt, or unreadable file all resolve
+    /// to an empty cache (with a log line explaining which, for
+    /// visibility) -- the self-repair loop must never be blocked by
+    /// this being unavailable.
+    pub fn load(on_log: &mut dyn FnMut(&str)) -> Self {
+        let path = cache_path();
+        let entries = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<HashMap<String, String>>(&text) {
+                Ok(map) => map,
+                Err(e) => {
+                    on_log(&format!("hint cache at {} is not valid JSON ({e}) -- starting empty", path.display()));
+                    HashMap::new()
+                }
+            },
+            Err(_) => HashMap::new(),
+        };
+        HintCache { path, entries }
+    }
+
+    pub fn lookup(&self, pattern: &str) -> Option<&str> {
+        self.entries.get(pattern).map(String::as_str)
+    }
+
+    /// Writes the hint in (only reachable after the caller has already
+    /// confirmed it cleared the pattern on a real attempt -- see the
+    /// module doc comment) and persists immediately: a long-running
+    /// `hi_window`/`hi_api` process serves many independent generate
+    /// calls, and a promotion from one should be visible to the next
+    /// without restarting. Write-temp-then-rename keeps a concurrent
+    /// reader (another in-flight generate call loading its own
+    /// `HintCache`) from ever observing a half-written file; two
+    /// concurrent promotions can still race and one can lose its entry
+    /// to the other's overwrite of the whole map, which is fine -- the
+    /// losing entry just gets re-synthesized and re-proven next time it
+    /// comes up, the same as any other cache miss.
+    pub fn record_success(&mut self, pattern: &str, hint: &str) {
+        self.entries.insert(pattern.to_string(), hint.to_string());
+        if let Some(parent) = self.path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        let Ok(json) = serde_json::to_string_pretty(&self.entries) else { return };
+        let tmp = self.path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &json).is_err() {
+            return;
+        }
+        let _ = std::fs::rename(&tmp, &self.path);
+        // Best-effort audit trail: unlike a hand-authored `self_repair_
+        // hint` arm, nobody reviewed this hint before it started being
+        // served to future runs -- an append-only, human-readable log
+        // of every promotion (pattern + the hint text + when) is the
+        // minimum needed for someone to periodically skim what this
+        // loop has been teaching itself and spot a bad one.
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path(&self.path)) {
+            let _ = writeln!(f, "{{\"promoted_at\": {}, \"pattern\": {}, \"hint\": {}}}", now_unix(), json_escape(pattern), json_escape(hint));
+        }
+    }
+}
+
+/// Process-wide, lazily-loaded-once shared cache. `hi_window.rs` runs
+/// every `:generate`/`:prompt` call on its own thread inside one long-
+/// running process, so this module's own promise -- a promotion from
+/// one call is visible to the next without restarting -- previously
+/// still meant every call re-read and re-parsed the same file from
+/// disk from scratch (`hi_llm.rs`'s `generate_program`/
+/// `generate_from_task_prompt` each called `HintCache::load` fresh).
+/// A `Mutex`-guarded singleton gives that same visibility within one
+/// process for free, and turns "load from disk" into a once-per-
+/// process cost instead of a once-per-call one. `on_log` is only
+/// consulted by whichever call actually wins the race to initialize
+/// it (a corrupt-file warning, say) -- later callers share the
+/// already-loaded cache silently, same as any other `OnceLock`.
+///
+/// Deliberately not used by this module's own tests, which each want
+/// a fresh, isolated cache scoped to their own `NIRDOSHA_HINT_CACHE_
+/// PATH` -- a `shared` singleton loaded once per process would ignore
+/// that env var for every test after the first one to touch it. Tests
+/// construct their own local `Mutex::new(HintCache::load(...))`
+/// instead; `corrective_hint_for`/`promote_validated_hints` only need
+/// `&Mutex<HintCache>`, not `&'static`, so both shapes work.
+pub fn shared(on_log: &mut dyn FnMut(&str)) -> &'static Mutex<HintCache> {
+    static CACHE: OnceLock<Mutex<HintCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HintCache::load(on_log)))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn json_escape(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_pattern_strips_line_col_prefix() {
+        assert_eq!(normalize_pattern("16:58: expected `RoleView`, found `str`"), "expected `RoleView`, found `str`");
+        assert_eq!(normalize_pattern("145:33: expected `fn() -> i64`, found `Result(fn() -> i64, str)`"), "expected `fn() -> i64`, found `Result(fn() -> i64, str)`");
+    }
+
+    #[test]
+    fn normalize_pattern_leaves_prefix_free_messages_alone() {
+        assert_eq!(normalize_pattern("codegen doesn't support `print` on a Vector argument"), "codegen doesn't support `print` on a Vector argument");
+        // A leading word that merely contains digits/colons in an
+        // unrelated shape must not be mistaken for a location prefix.
+        assert_eq!(normalize_pattern("unknown variable `RequestStatus`"), "unknown variable `RequestStatus`");
+    }
+
+    #[test]
+    fn record_success_then_lookup_round_trips_through_disk() {
+        let dir = std::env::temp_dir().join(format!("nir_hint_cache_test_{}", std::process::id()));
+        let path = dir.join("cache.json");
+        // SAFETY (test-only): `HintCache` reads this env var once per
+        // `cache_path()` call; scoping every read to right after the
+        // write and inside this single test keeps it from racing other
+        // tests in this same process, which `cargo test`'s default
+        // multi-threaded runner would otherwise allow.
+        unsafe { std::env::set_var("NIRDOSHA_HINT_CACHE_PATH", &path) };
+        let mut log = |_: &str| {};
+        let mut cache = HintCache::load(&mut log);
+        assert_eq!(cache.lookup("expected `RoleView`, found `str`"), None);
+        cache.record_success("expected `RoleView`, found `str`", "use check_role, not a string literal");
+        let reloaded = HintCache::load(&mut log);
+        assert_eq!(reloaded.lookup("expected `RoleView`, found `str`"), Some("use check_role, not a string literal"));
+        unsafe { std::env::remove_var("NIRDOSHA_HINT_CACHE_PATH") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

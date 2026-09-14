@@ -117,6 +117,64 @@ RFC's fail-closed/non-vacuous/fuel semantics must live there first.
 
 *Estimate: 1–2+ weeks for the scoped version.*
 
+## Phase 4 — certificate wiring: mandatory certificate, optional signature (issue #59)
+
+The demonstrated seam this phase closes: `hi_api.rs::handle_publish` runs
+typecheck → ownership → the Phase 1 coverage gate → `codegen::build` and
+never calls `build_certificate` at all — a project can `:publish` a real
+binary today with zero certificate produced. Same *shape* of gap Phase 1
+closed for contracts (proved 0/0, nobody looked), one layer up. Scoped
+to stay entirely inside what's already shippable — nothing here is
+blocked on 5b's registry governance.
+
+1. **`handle_publish` calls `build_certificate`.** Right after the
+   existing coverage-gate check passes, build a `Certificate` from the
+   published source and write it alongside the binary
+   (`<out>.certificate.json`). No new CLI surface — `nirdosha certify`
+   keeps working standalone for anyone who wants to re-derive one.
+2. **Extend `Certificate` (`mcp_tools.rs`) additively** — this is
+   "What certification emits" (the main RFC doc, above) actually
+   implemented, not a new schema:
+   - `governing_packs: Vec<PackAttribution>` — `{pack_id, invariants:
+     Vec<String>}` for every 5a pack whose confirmed units fed this
+     artifact's coverage-gate pass. Available today (Phase 2's packs
+     already carry `pack_id`); does **not** wait on 5b signing — an
+     unsigned pack is still real attribution, labeled as such (same
+     "trust on first use" honesty 5a already uses for the pack pin
+     itself).
+   - `nfr_commitments: Vec<NfrCommitment>` — `{fn_name, latency_ms,
+     error_rate_max, throughput_min_per_sec, concurrency_max}` (each
+     field optional, mirroring `nfr(...)`'s own all-optional
+     thresholds), sourced from the AST's `nfr` attributes at publish
+     time. **`evidence_tier: "monitored"`, distinct from
+     `verdict_summary`'s `"proved"`/`"unknown"`** — an NFR claim is
+     APM-kernel-tracked at runtime (`rfcs/0007`), never Z3-proved, and
+     must not be allowed to read as a compile-time proof inside the
+     same certificate. This is the same discipline "Compliance
+     profiles" already enforces for `external_conformance` — a
+     runtime/external fact stays visibly a different kind of evidence
+     from a proof, never blended into one undifferentiated "passed."
+3. **Mandatory certificate, optional signature.** Certificate emission
+   at publish is unconditional (deterministic, no key required — same
+   cost class as the coverage gate it rides on). An actual **signature**
+   stays gated behind an explicit opt-in (e.g.
+   `NIRDOSHA_PUBLISH_SIGNING_KEY`, mirroring `certify --sign`'s existing
+   `key.pk8` argument) for deployments with an operator key and a
+   governance story — never on by default, and never something
+   `generate_program`/the model can reach (unchanged from 5b's existing
+   "AI never gets signing" line). This is the RFC's own "5b must not
+   gate 5a/4" principle applied one layer up: don't let governance-
+   blocked work (real signing) block something shippable (the
+   certificate itself).
+4. Tests: `handle_publish` produces a certificate file whenever publish
+   succeeds; `governing_packs` names the banking-pack fixture from
+   Phase 2's acceptance test; `nfr_commitments` round-trips a real
+   `nfr(...)` fn and carries `evidence_tier: "monitored"`, never
+   `"proved"`; publish still succeeds with `NIRDOSHA_PUBLISH_SIGNING_KEY`
+   unset (no signature, certificate still written).
+
+*Estimate: 2–3 days.*
+
 ## Blocked — post-approval / governance-gated, do not start
 
 - **5b sealing** (Ed25519, JCS, certificates, transparency logs,
@@ -140,5 +198,8 @@ RFC's fail-closed/non-vacuous/fuel semantics must live there first.
   invariants (the domain law — domain-expert sign-off); packs living
   in `.nir/plugins/`; CLI naming.
 - **Phase 3:** the v1 scope bounds (caller-local obligations only).
+- **Phase 4:** the `Certificate` schema additions (`governing_packs`/
+  `nfr_commitments` field shapes); the signing-key env var name and
+  default-off posture.
 - **Blocked items:** registry governance (5b), profile content
   authorship (7), operator identity design.

@@ -58,6 +58,89 @@ fn moving_affine_content_out_through_a_shared_reference_is_rejected() {
     assert_eq!(kind, TypeErrorKind::CannotMoveOutOfReference { content: nirdosha::ast::Ty::Box(Box::new(nirdosha::ast::Ty::I64)) });
 }
 
+// ---- borrow liveness (v1, lexical) — ownership.rs's own "Borrow
+// liveness" doc section explains the real use-after-free this closes
+// and exactly what it does/doesn't cover -----------------------------
+
+#[test]
+fn moving_a_let_bound_borrows_referent_is_rejected() {
+    // The real bug this closes: `r` still holds `b`'s own address after
+    // `consume(b)` frees it (`codegen.rs` hands out the same address
+    // twice) -- accepting this would compile a genuine, live
+    // use-after-free, not a theoretical one.
+    let kind = first_ownership_error(
+        r#"
+        fn consume(b: box i64) -> i64 { return *b }
+        fn main() -> i64 {
+            let b: box i64 = box 7
+            let r: &box i64 = &b
+            let used: i64 = consume(b)
+            return used
+        }
+    "#,
+    );
+    assert_eq!(kind, OwnershipErrorKind::MoveWhileBorrowed { name: "b".to_string(), borrower: "r".to_string() });
+}
+
+#[test]
+fn moving_after_the_borrows_own_scope_ends_is_allowed() {
+    // `r` is declared inside the `if` block, so its own lexical scope
+    // (and, in v1's model, the borrow's entire tracked lifetime) ends
+    // when that block closes -- `consume(b)` after the `if` sees no
+    // live borrow of `b` at all and must be allowed. This is the
+    // regression case for the "lexical, not a true liveness analysis"
+    // scope-cut `ownership.rs`'s own doc comment discloses: a real
+    // NLL-style checker would additionally accept `r` used *inside* the
+    // block after `b` is later moved outside it (still impossible
+    // here) -- but must never *reject* this strictly simpler case.
+    // `hold` merely takes the reference and never reads through it --
+    // `&box T` is borrow-and-pass-around-only in this language today,
+    // not read-through (`ownership.rs`'s own module doc, "Known
+    // limitation: no place-expression semantics"), so `*r` for `r:
+    // &box i64` is a *type* error regardless of this feature, unrelated
+    // to what this test is actually proving.
+    let program = parse_ok(
+        r#"
+        fn hold(r: &box i64) -> bool { return true }
+        fn consume(b: box i64) -> i64 { return *b }
+        fn main() -> i64 {
+            let b: box i64 = box 7
+            let cond: bool = true
+            if cond {
+                let r: &box i64 = &b
+                let held: bool = hold(r)
+            }
+            let used: i64 = consume(b)
+            return used
+        }
+    "#,
+    );
+    check_ownership(&program).expect("the borrow's own scope already ended before the move");
+}
+
+#[test]
+fn a_borrow_taken_only_as_a_bare_call_argument_does_not_block_a_later_move() {
+    // v1 only tracks a borrow created by a `let` initializer
+    // (`Stmt::Let`'s own handler) -- `hold(&b)` here is a temporary,
+    // never bound to a name, so it creates nothing for `is_borrowed` to
+    // find. This is the same "real, disclosed limitation, not a false
+    // positive" this module's own doc comment names -- must keep
+    // passing cleanly, exactly as it did before this feature existed.
+    let program = parse_ok(
+        r#"
+        fn hold(r: &box i64) -> bool { return true }
+        fn consume(b: box i64) -> i64 { return *b }
+        fn main() -> i64 {
+            let b: box i64 = box 7
+            let x: bool = hold(&b)
+            let used: i64 = consume(b)
+            return used
+        }
+    "#,
+    );
+    check_ownership(&program).expect("a bare call-argument borrow must never block a later move");
+}
+
 // ---- `froze` — RFC 0006 Pillar 1's `Froze<T>` -------------------------
 
 #[test]

@@ -6,7 +6,7 @@ use std::process::ExitCode;
 // binary's CLI subcommands and stdio server all share one
 // implementation, one wire shape, and one call log.
 use nirdosha::mcp_tools::{
-    build_certificate, run_verify_pipeline, sha256_hex, tools_call, tools_list, write_auto_patches,
+    build_certificate, run_verify_pipeline, sha256_hex, sign_certificate, tools_call, tools_list, write_auto_patches,
     Certificate, FixReport, McpCallLog, ProofVerdict,
 };
 
@@ -103,7 +103,8 @@ fn print_usage() {
     eprintln!("                                      exposes verify_code/get_grammar/fix/describe/certify_code/");
     eprintln!("                                      get_nirdosha_constructs/get_ui_conventions as MCP tools;");
     eprintln!("                                      launch via an MCP client's config, not interactively");
-    eprintln!("  nirdosha plugin install [--dry-run] <pack.json>");
+    eprintln!("  nirdosha plugin install [--dry-run] <pack.json>  (also accepts a signed envelope from `plugin sign`)");
+    eprintln!("  nirdosha plugin sign <pack.json> --key <key.pk8> --identity <name> [-o <signed-pack.json>]");
     eprintln!("                                      install or refresh a 5a domain plugin; --dry-run checks");
     eprintln!("                                      the manifest and proves its own contracts against a stub");
     eprintln!("  nirdosha plugin list                list installed/available domain plugins");
@@ -1033,62 +1034,6 @@ fn cmd_certify(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-/// Certificate v1 (`nirdosha-master-plan.md` Part 3 Nov 2026, "Signed
-/// certificates (v1) -- key-pinned verdicts", parity target: Velvet)
-/// -- Certificate v0 plus a real Ed25519 signature (`ring`, already a
-/// dependency; no hand-rolled crypto) over v0's own canonical bytes.
-/// `#[serde(flatten)]` puts every v0 field back at the top level
-/// (additive over v0, per `docs/STABILITY_AND_RELEASES.md`'s own rule
-/// for this schema -- a v0-only consumer reading a v1 certificate
-/// still finds every field it expects, plus three it can ignore).
-/// "Key-pinned": the public key travels with the certificate so a
-/// verifier never needs external key discovery to check the
-/// signature -- trust is established by the *verifier* pinning which
-/// public keys it accepts in advance (an operational policy, not
-/// something this format enforces), the same model TLS certificate
-/// pinning uses for the same reason.
-#[derive(serde::Serialize)]
-struct SignedCertificate {
-    #[serde(flatten)]
-    certificate: Certificate,
-    signature_algorithm: &'static str,
-    public_key: String,
-    signature: String,
-}
-
-/// Signs `certificate`'s own canonical byte serialization
-/// (`serde_json::to_vec` on the plain `Certificate` struct --
-/// `Certificate` derives `Serialize` with no `#[serde(rename_all)]`
-/// alphabetizing pass, so this is always the same bytes for the same
-/// values, independent of what order any particular JSON *source*
-/// text happened to list fields in) with the Ed25519 private key at
-/// `key_path` (raw PKCS#8, as `nirdosha keygen` writes). Verification
-/// (`cmd_verify_certificate`) does the mirror operation: parse the
-/// signed JSON back into a plain `Certificate` (ignoring the three
-/// signature-related fields, which `Certificate` doesn't declare),
-/// re-serialize *that*, and check the signature against those exact
-/// bytes -- so the two sides never need to agree on a JSON
-/// canonicalization scheme beyond "both go through the same Rust
-/// struct's own `Serialize` impl."
-fn sign_certificate(certificate: &Certificate, key_path: &str) -> Result<SignedCertificate, String> {
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use base64::Engine;
-    use ring::signature::KeyPair;
-
-    let pkcs8 = std::fs::read(key_path).map_err(|e| format!("reading private key {key_path}: {e}"))?;
-    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}"))?;
-
-    let canonical = serde_json::to_vec(certificate).expect("Certificate always serializes");
-    let signature = keypair.sign(&canonical);
-
-    Ok(SignedCertificate {
-        certificate: serde_json::from_slice(&canonical).expect("re-parsing what was just serialized cannot fail"),
-        signature_algorithm: "ed25519",
-        public_key: BASE64_STANDARD.encode(keypair.public_key().as_ref()),
-        signature: BASE64_STANDARD.encode(signature.as_ref()),
-    })
-}
-
 /// `nirdosha keygen [-o <path>]` -- generates a real Ed25519 keypair
 /// (`ring::rand::SystemRandom`, the OS CSPRNG, not a fixed/test seed)
 /// for `nirdosha certify --sign`. Writes the private key as raw
@@ -1165,9 +1110,6 @@ fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
 /// into a generic success/failure exit code a caller might
 /// misconstrue as "and therefore this key is trustworthy."
 fn cmd_verify_certificate(mut args: impl Iterator<Item = String>) -> ExitCode {
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use base64::Engine;
-
     let Some(path) = args.next() else {
         eprintln!("usage: nirdosha verify-certificate <certificate.json>");
         return ExitCode::FAILURE;
@@ -1199,23 +1141,13 @@ fn cmd_verify_certificate(mut args: impl Iterator<Item = String>) -> ExitCode {
     };
     let canonical = serde_json::to_vec(&certificate).expect("Certificate always serializes");
 
-    let signature_bytes = match BASE64_STANDARD.decode(signature_b64) {
-        Ok(b) => b,
+    let valid = match nirdosha::mcp_tools::verify_bytes(&canonical, public_key_b64, signature_b64) {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("`signature` is not valid base64: {e}");
+            eprintln!("{path}'s signature/public_key: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let public_key_bytes = match BASE64_STANDARD.decode(public_key_b64) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("`public_key` is not valid base64: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let public_key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public_key_bytes);
-    let valid = public_key.verify(&canonical, &signature_bytes).is_ok();
 
     println!(
         "{}",
@@ -1795,9 +1727,20 @@ fn cmd_mcp(_args: impl Iterator<Item = String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `nirdosha plugin install`'s shape-based dispatch: a signed envelope
+/// (`nirdosha plugin sign`'s own output) is a JSON object carrying
+/// `manifest_json`/`signature`/`public_key` at the top level, which no
+/// plain pack manifest does (a `PackManifest` has `id`/`name`/
+/// `invariants`/... instead) -- `None` for anything that doesn't parse
+/// as that exact shape, so a plain manifest falls straight through to
+/// the existing unsigned install path unchanged.
+fn parse_signed_pack_envelope(bytes: &[u8]) -> Option<nirdosha::hi_plugin::SignedPackEnvelope> {
+    serde_json::from_slice(bytes).ok()
+}
+
 fn cmd_plugin(mut args: impl Iterator<Item = String>) -> ExitCode {
     let Some(sub) = args.next() else {
-        eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json> | list | revoke <pack-id>");
+        eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json> | sign <pack.json> --key <key.pk8> --identity <name> | list | revoke <pack-id>");
         return ExitCode::FAILURE;
     };
     let cwd = match std::env::current_dir() {
@@ -1851,6 +1794,24 @@ fn cmd_plugin(mut args: impl Iterator<Item = String>) -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
+            } else if let Some(envelope) = parse_signed_pack_envelope(&bytes) {
+                // RFC 0016 Phase 4: a signed envelope (`nirdosha plugin
+                // sign`'s own output) installs through the verify-then-
+                // install path instead of the plain one -- detected by
+                // shape (this file carries `manifest_json`/`signature`/
+                // `public_key` at the top level, which no plain pack
+                // manifest does), not by a separate flag the caller has
+                // to remember to pass.
+                match nirdosha::hi_plugin::verify_and_install_signed_pack(&conn, &cwd, &envelope, &path) {
+                    Ok(id) => {
+                        println!("installed signed pack {id} from {path}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(msg) => {
+                        eprintln!("install failed: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
             } else {
                 match nirdosha::hi_plugin::install_pack_from_bytes(&conn, &cwd, &bytes, &path,
                 ) {
@@ -1862,6 +1823,51 @@ fn cmd_plugin(mut args: impl Iterator<Item = String>) -> ExitCode {
                         eprintln!("install failed: {msg}");
                         ExitCode::FAILURE
                     }
+                }
+            }
+        }
+        "sign" => {
+            let mut key_path: Option<String> = None;
+            let mut identity: Option<String> = None;
+            let mut out: Option<String> = None;
+            let mut manifest_path: Option<String> = None;
+            while let Some(a) = args.next() {
+                match a.as_str() {
+                    "--key" => key_path = args.next(),
+                    "--identity" => identity = args.next(),
+                    "-o" => out = args.next(),
+                    other if manifest_path.is_none() => manifest_path = Some(other.to_string()),
+                    other => {
+                        eprintln!("unknown argument `{other}` -- usage: nirdosha plugin sign <pack.json> --key <key.pk8> --identity <name> [-o <signed-pack.json>]");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            let (Some(manifest_path), Some(key_path), Some(identity)) = (manifest_path, key_path, identity) else {
+                eprintln!("usage: nirdosha plugin sign <pack.json> --key <key.pk8> --identity <name> [-o <signed-pack.json>]");
+                return ExitCode::FAILURE;
+            };
+            let bytes = match std::fs::read(&manifest_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("reading {manifest_path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match nirdosha::hi_plugin::sign_pack(&bytes, &key_path, identity) {
+                Ok(envelope) => {
+                    let json = serde_json::to_string_pretty(&envelope).expect("SignedPackEnvelope always serializes");
+                    let out_path = out.unwrap_or_else(|| format!("{manifest_path}.signed.json"));
+                    if let Err(e) = std::fs::write(&out_path, &json) {
+                        eprintln!("writing {out_path}: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    println!("wrote {out_path} -- install it with `nirdosha plugin install {out_path}`");
+                    ExitCode::SUCCESS
+                }
+                Err(msg) => {
+                    eprintln!("signing failed: {msg}");
+                    ExitCode::FAILURE
                 }
             }
         }
@@ -1891,7 +1897,7 @@ fn cmd_plugin(mut args: impl Iterator<Item = String>) -> ExitCode {
             }
         }
         other => {
-            eprintln!("unknown plugin subcommand `{other}` -- use install, list, or revoke");
+            eprintln!("unknown plugin subcommand `{other}` -- use install, sign, list, or revoke");
             ExitCode::FAILURE
         }
     }

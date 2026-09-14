@@ -125,6 +125,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("creating plugins table: {e}"))?;
+    // RFC 0016 Phase 4 (Sigstore-pattern pack signing, `hi_plugin::
+    // pack_signing`): `NULL` for every 5a-installed (unsigned, TOFU)
+    // pack, same as before this column existed -- populated only when
+    // `verify_and_install_signed_pack` accepts a real signature against
+    // a trust-anchor identity.
+    add_column_if_missing(conn, "plugins", "signer_identity", "TEXT")?;
     // rfcs/0014's prompt/build/generate/publish pipeline: the text layer
     // a `CodeUnit` node carries *before* any `.nir` exists
     // (`driving_text`), who/what put it there (`created_by` --

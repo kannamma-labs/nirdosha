@@ -2678,6 +2678,16 @@ pub unsafe extern "C" fn nir_db_execute(
         unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
         return 0;
     };
+    // `isolation_check.rs`: every `db_execute` is a Write for whatever
+    // `transact` site (if any) is active on this thread -- a no-op,
+    // cheaply, the instant `current_txn()` is `None` (a `db` call
+    // outside any `transact` is out of scope, that module's own doc
+    // comment explains why).
+    {
+        let binds_json = unsafe { kernel::transact::encode_binds_json(binds_ptr, binds_len) };
+        let resource = kernel::isolation_check::resource_key(sql, &binds_json);
+        kernel::isolation_check::record_and_check(kernel::isolation_check::current_txn(), resource, kernel::isolation_check::OpKind::Write);
+    }
     let result: Option<Result<i64, String>> = db_table().with(handle, |conn| {
         if let Some(sqlite) = conn.as_sqlite_mut() {
             let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
@@ -2755,6 +2765,13 @@ pub unsafe extern "C" fn nir_db_query(
         unsafe { write_str_out(out_err, "sql is not valid UTF-8".to_string()) };
         return 0;
     };
+    // `isolation_check.rs`: every `db_query` is a Read -- see
+    // `nir_db_execute`'s own identical hook just above.
+    {
+        let binds_json = unsafe { kernel::transact::encode_binds_json(binds_ptr, binds_len) };
+        let resource = kernel::isolation_check::resource_key(sql, &binds_json);
+        kernel::isolation_check::record_and_check(kernel::isolation_check::current_txn(), resource, kernel::isolation_check::OpKind::Read);
+    }
     let result: Option<Result<String, String>> = db_table().with(handle, |conn| {
         if let Some(sqlite) = conn.as_sqlite_mut() {
             let binds = unsafe { bind_values_from_raw(binds_ptr, binds_len) };
@@ -2944,6 +2961,62 @@ mod db_kernel_tests {
             nir_db_stop(conn2);
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// End-to-end proof that `isolation_check.rs`'s *wiring* (not just
+    /// its algorithm in isolation, already covered by that module's own
+    /// unit tests) actually catches `killer_demo`'s own lost-update
+    /// pattern when driven through the real FFI surface a compiled
+    /// `.nir` program calls: `nir_transact_begin` /
+    /// `nir_db_query`/`nir_db_execute` / `nir_transact_mark_committed`,
+    /// nothing mocked. Two real OS threads, one real shared SQLite
+    /// connection, and a `Barrier` forcing the exact interleaving
+    /// (both threads read the stale balance before either writes)
+    /// deterministically -- not hoping a race shows up under normal
+    /// scheduling, the same "force it, don't hope for it" discipline
+    /// `thread_pool.rs`'s own adversarial tests already use.
+    #[test]
+    fn isolation_checker_catches_a_real_concurrent_lost_update_through_the_ffi_surface() {
+        use std::sync::{Arc, Barrier};
+        unsafe {
+            let conn = connect(":memory:").expect("in-memory sqlite should always open");
+            execute(conn, "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)", &[]).expect("DDL should succeed");
+            execute(conn, "INSERT INTO accounts (id, balance) VALUES (1, 10000)", &[]).expect("seed row should succeed");
+
+            kernel::isolation_check::clear_shared();
+            let barrier = Arc::new(Barrier::new(2));
+
+            let (b1, b2) = (barrier.clone(), barrier.clone());
+            let t1 = std::thread::spawn(move || {
+                let txn_id = "isolation-ffi-test-txn-a";
+                kernel::transact::nir_transact_begin(txn_id.as_ptr(), txn_id.len() as i64, 9001);
+                let rows = query(conn, "SELECT balance FROM accounts WHERE id = ?", &[i64_bind(1)]).expect("read should succeed");
+                let balance = serde_json::from_str::<serde_json::Value>(&rows).unwrap()[0]["balance"].as_i64().unwrap();
+                b1.wait(); // both threads have now read the same stale balance
+                execute(conn, "UPDATE accounts SET balance = ? WHERE id = ?", &[i64_bind(balance - 1000), i64_bind(1)]).expect("write a should succeed");
+                kernel::transact::nir_transact_mark_committed(txn_id.as_ptr(), txn_id.len() as i64);
+            });
+            let t2 = std::thread::spawn(move || {
+                let txn_id = "isolation-ffi-test-txn-b";
+                kernel::transact::nir_transact_begin(txn_id.as_ptr(), txn_id.len() as i64, 9002);
+                let rows = query(conn, "SELECT balance FROM accounts WHERE id = ?", &[i64_bind(1)]).expect("read should succeed");
+                let balance = serde_json::from_str::<serde_json::Value>(&rows).unwrap()[0]["balance"].as_i64().unwrap();
+                b2.wait();
+                execute(conn, "UPDATE accounts SET balance = ? WHERE id = ?", &[i64_bind(balance + 300), i64_bind(1)]).expect("write b should succeed");
+                kernel::transact::nir_transact_mark_committed(txn_id.as_ptr(), txn_id.len() as i64);
+            });
+            t1.join().expect("thread a must not panic");
+            t2.join().expect("thread b must not panic");
+
+            let anomalies = kernel::isolation_check::snapshot_anomalies();
+            let involved: std::collections::HashSet<String> = anomalies.iter().flat_map(|a| a.cycle.iter().cloned()).collect();
+            assert!(
+                involved.contains("isolation-ffi-test-txn-a") && involved.contains("isolation-ffi-test-txn-b"),
+                "the real concurrent lost-update, driven through the actual compiled-program FFI surface, must be reported: {anomalies:?}"
+            );
+
+            nir_db_stop(conn);
+        }
     }
 
     /// Real, opt-in, `#[ignore]`d Postgres coverage — same convention

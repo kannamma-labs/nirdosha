@@ -50,6 +50,55 @@
 //! Reading a box's content still works fine through an *owned* box (the
 //! existing `box`/`*` tests), just not through a `&` to one.
 //!
+//! **Borrow liveness (v1, lexical, 2026-09).** The gap this closes,
+//! stated plainly because it's a real one, not hypothetical: until now,
+//! `let r = &b; some_fn(b); use(*r)` typechecked and ownership-checked
+//! clean — `some_fn(b)` moves `b` (freeing it, via `codegen.rs`'s real
+//! `nir_free`, the moment `b`'s scope closes or immediately if it's
+//! affine-consumed sooner), and `r` still holds `b`'s own address
+//! (`codegen.rs` hands out the same address twice, module doc above) —
+//! so `*r` then dereferences freed memory. A real, compiled-path
+//! use-after-free, not a theoretical gap; the README's own "what these
+//! guarantees do not cover" section named exactly this ("no `&mut`-
+//! style liveness/exclusivity enforcement... a Rust-style borrow
+//! checker doesn't exist yet").
+//!
+//! **The fix, deliberately scoped, not a full NLL/Polonius port.**
+//! Nirdosha has no in-place field mutation and no `&mut` at all (only
+//! shared `&`, always freely copyable) — so there is no *exclusivity*
+//! rule to enforce between references the way Rust needs (two `&mut`,
+//! or a `&mut` alongside a `&`, to the same place). The only real risk
+//! is a reference **outliving what it points at**. v1's rule: `let r =
+//! &place` (`place` a bare identifier — `Stmt::Let`'s own handler,
+//! `OwnScopes::define_borrow`) records that `r` borrows `place` for
+//! exactly `r`'s own lexical scope; moving `place` by name while
+//! anything still in scope borrows it (`OwnScopes::is_borrowed`,
+//! checked in `touch_ident` before a move takes effect) is
+//! `OwnershipErrorKind::MoveWhileBorrowed`. Lexical, not a true
+//! liveness analysis (a real NLL/Polonius-style checker — the exact
+//! prior art this was scoped against, see `docs/research/2026-09-
+//! competitive-verification-and-signing-landscape.md` §3 — tracks a
+//! borrow only until its *last actual use*, accepting strictly more
+//! programs); this is the older, simpler, still fully sound model Rust
+//! itself shipped for years before NLL landed in 2018 — a real,
+//! disclosed precision cost (rejects some programs a full liveness
+//! analysis would accept), never a soundness one.
+//!
+//! **What v1 does NOT cover, named directly:** only a `Stmt::Let`
+//! initializer creates a tracked borrow — `Expr::Assign`ing an existing
+//! reference variable to a new `&place` does not (avoids a real,
+//! separate hard problem: merging *which* place two different branches'
+//! reassignments each borrow, `merge_moved`'s own doc comment on why
+//! that's not attempted here); a borrow reached only through a field or
+//! index expression, or one crossing a function-call boundary (an
+//! interprocedural borrow), is not tracked at all — `typeck.rs`'s
+//! existing `CannotMoveOutOfReference` remains the only protection
+//! there, unchanged. This can only ever *reject* a program a true
+//! liveness/interprocedural analysis would also reject (or, for the
+//! uncovered shapes, simply not catch a bug those shapes could hide) —
+//! it never accepts something genuinely unsound within the shapes it
+//! does check.
+//!
 //! **Loops get checked twice.** A `while` body might run more than once,
 //! and a variable the body moves on iteration 1 is gone by iteration 2 —
 //! checking the body only once, from the state *before* the loop, would
@@ -76,6 +125,16 @@ use crate::token::Span;
 pub enum OwnershipErrorKind {
     /// The variable was already moved from earlier on this path.
     UseAfterMove { name: String },
+    /// `name` is moved (by name — a `let` initializer, assignment RHS,
+    /// call argument, or `return`) while `borrower` still holds a live
+    /// `&name` taken earlier on this path and not yet out of scope.
+    /// Real, not theoretical: `codegen.rs` hands a `&`-reference the
+    /// *same address* the box itself lives at (module doc) — moving
+    /// `name` frees that address (`emit_affine_free`), so `borrower`
+    /// would dereference freed memory the moment it's next used. See
+    /// this module's own doc comment ("Borrow liveness (v1, lexical,
+    /// 2026-09)") for the exact scope this closes and what it doesn't.
+    MoveWhileBorrowed { name: String, borrower: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +153,12 @@ impl std::fmt::Display for OwnershipError {
                     "{line}:{col}: use of `{name}` after it was moved -- `box` values are affine: using one by name (as a `let` initializer, assignment RHS, call argument, or `return`) moves it away. Borrow with `&{name}` to reuse it without moving, or restructure so it's consumed once"
                 )
             }
+            OwnershipErrorKind::MoveWhileBorrowed { name, borrower } => {
+                write!(
+                    f,
+                    "{line}:{col}: cannot move `{name}` because `{borrower}` still borrows it (`let {borrower} = &{name}`, still in scope here) -- moving `{name}` would leave `{borrower}` pointing at freed memory. Use `{name}` through `{borrower}` instead, or move `{name}` only after `{borrower}`'s own scope ends"
+                )
+            }
         }
     }
 }
@@ -103,8 +168,13 @@ impl std::fmt::Display for OwnershipError {
 /// (rather than reusing typeck's) because this pass needs to *snapshot and
 /// merge* whole scope stacks for branch/loop analysis — see module doc —
 /// which is easiest to reason about with a type this pass owns outright.
+/// `(declared type, moved-from, borrows)` -- `borrows` is `Some(place)`
+/// only for a binding created by `let r = &place` (v1's deliberately
+/// narrow trigger, this module's "Borrow liveness" doc section), naming
+/// the plain identifier `r` borrows. `None` for everything else,
+/// including every binding that existed before this field did.
 #[derive(Clone)]
-struct OwnScopes(Vec<HashMap<String, (Ty, bool)>>);
+struct OwnScopes(Vec<HashMap<String, (Ty, bool, Option<String>)>>);
 
 impl OwnScopes {
     fn new() -> Self {
@@ -117,9 +187,18 @@ impl OwnScopes {
         self.0.pop();
     }
     fn define(&mut self, name: &str, ty: Ty) {
-        self.0.last_mut().unwrap().insert(name.to_string(), (ty, false));
+        self.0.last_mut().unwrap().insert(name.to_string(), (ty, false, None));
     }
-    fn lookup(&self, name: &str) -> Option<(Ty, bool)> {
+    /// `let r = &place` -- `r`'s own binding, this time carrying which
+    /// place it borrows. See `Checker::is_borrowed`'s own doc comment
+    /// for how that's later used, and this module's "Borrow liveness"
+    /// doc section for why `r`'s *lexical scope* (this binding, popped
+    /// like any other when its enclosing block ends) is exactly this
+    /// v1's notion of the borrow's own lifetime.
+    fn define_borrow(&mut self, name: &str, ty: Ty, borrows: String) {
+        self.0.last_mut().unwrap().insert(name.to_string(), (ty, false, Some(borrows)));
+    }
+    fn lookup(&self, name: &str) -> Option<(Ty, bool, Option<String>)> {
         self.0.iter().rev().find_map(|s| s.get(name)).cloned()
     }
     /// Sets the moved-flag on the innermost scope that declares `name`.
@@ -135,6 +214,18 @@ impl OwnScopes {
             }
         }
     }
+    /// Is `place` currently borrowed by anything still in scope? Scans
+    /// every *currently live* frame (`OwnScopes::pop` already dropped
+    /// anything out of scope, so there's nothing further to prune here)
+    /// for a binding whose own `borrows` field names `place` — returns
+    /// that binding's name (the borrower) for the error message. `O(live
+    /// bindings)`, not indexed: v1 scope, real functions are small
+    /// enough that this is cheap, and a second, borrower-side index
+    /// would be one more piece of state to keep in sync with `define_
+    /// borrow`/scope pop for a cost this doesn't need to pay yet.
+    fn is_borrowed(&self, place: &str) -> Option<String> {
+        self.0.iter().flat_map(|scope| scope.iter()).find(|(_, (_, _, borrows))| borrows.as_deref() == Some(place)).map(|(name, _)| name.clone())
+    }
 }
 
 /// After checking two branches independently from the same starting
@@ -143,15 +234,23 @@ impl OwnScopes {
 /// scope depth, same keys per scope) because both started from an
 /// identical clone and every block pushes and pops exactly the scope it
 /// opened — see the module doc's branch-merge note.
-fn merge_moved(a: Vec<HashMap<String, (Ty, bool)>>, b: Vec<HashMap<String, (Ty, bool)>>) -> Vec<HashMap<String, (Ty, bool)>> {
+fn merge_moved(a: Vec<HashMap<String, (Ty, bool, Option<String>)>>, b: Vec<HashMap<String, (Ty, bool, Option<String>)>>) -> Vec<HashMap<String, (Ty, bool, Option<String>)>> {
     a.into_iter()
         .zip(b)
         .map(|(a_scope, b_scope)| {
             a_scope
                 .into_iter()
-                .map(|(name, (ty, a_moved))| {
-                    let b_moved = b_scope.get(&name).map(|(_, m)| *m).unwrap_or(a_moved);
-                    (name, (ty, a_moved || b_moved))
+                .map(|(name, (ty, a_moved, a_borrows))| {
+                    let (b_moved, b_borrows) = b_scope.get(&name).map(|(_, m, br)| (*m, br.clone())).unwrap_or((a_moved, a_borrows.clone()));
+                    // v1 never sets `borrows` on an *existing* binding
+                    // (only `define_borrow`, itself only reachable from
+                    // a fresh `let`, ever does) -- an outer-scope name
+                    // reaching this merge with a real, differing
+                    // `borrows` on each side isn't a shape v1 produces.
+                    // `a_borrows.or(b_borrows)` is the conservative
+                    // choice if that ever changes: keep tracking
+                    // *something* rather than silently drop the borrow.
+                    (name, (ty, a_moved || b_moved, a_borrows.or(b_borrows)))
                 })
                 .collect()
         })
@@ -219,10 +318,10 @@ pub struct FreeMap {
 /// `FreeMap` field except `at_return` (which needs every open frame at
 /// once, since a `return` unwinds them all simultaneously — see
 /// `all_still_owned_affine`).
-fn still_owned_affine(scope: &HashMap<String, (Ty, bool)>, registry: &TypeRegistry<'_>) -> Vec<String> {
+fn still_owned_affine(scope: &HashMap<String, (Ty, bool, Option<String>)>, registry: &TypeRegistry<'_>) -> Vec<String> {
     scope
         .iter()
-        .filter(|(_, (ty, moved))| registry.is_affine(ty) && !moved)
+        .filter(|(_, (ty, moved, _))| registry.is_affine(ty) && !moved)
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -384,7 +483,20 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::Let { name, ty, value, .. } => {
                 self.touch_expr(value, true);
-                self.scopes.define(name, ty.clone());
+                // Borrow liveness (v1, lexical): `let r = &place` records
+                // that `r` borrows `place` for `r`'s own lexical scope —
+                // see `OwnScopes::define_borrow`/`is_borrowed`'s own doc
+                // comments and this module's "Borrow liveness" doc
+                // section for the full picture (why `place` must be a
+                // bare identifier, why this is `Stmt::Let`-only, and what
+                // v1 deliberately doesn't cover).
+                match value {
+                    Expr::Ref(inner, _) => match inner.as_ref() {
+                        Expr::Ident(place, _) => self.scopes.define_borrow(name, ty.clone(), place.clone()),
+                        _ => self.scopes.define(name, ty.clone()),
+                    },
+                    _ => self.scopes.define(name, ty.clone()),
+                }
             }
             Stmt::Return { value, span } => {
                 if let Some(e) = value {
@@ -489,7 +601,7 @@ impl<'a> Checker<'a> {
 
         let concrete_args: Option<Vec<Ty>> = match scrutinee {
             Expr::Ident(name, _) => match pre.lookup(name) {
-                Some((Ty::Named(_, args), _)) => Some(args),
+                Some((Ty::Named(_, args), _, _)) => Some(args),
                 _ => None,
             },
             Expr::Call(name, _, _) => match self.fn_rets.get(name).cloned().or_else(|| builtin_return_ty(name)) {
@@ -500,7 +612,7 @@ impl<'a> Checker<'a> {
         };
         let sentinel = Ty::Box(Box::new(Ty::Unit));
 
-        let mut merged: Option<Vec<HashMap<String, (Ty, bool)>>> = None;
+        let mut merged: Option<Vec<HashMap<String, (Ty, bool, Option<String>)>>> = None;
 
         for (arm_idx, arm) in arms.iter().enumerate() {
             self.scopes = pre.clone();
@@ -687,12 +799,20 @@ impl<'a> Checker<'a> {
             Expr::Box(inner, _) | Expr::Froze(inner, _) => self.touch_expr(inner, true),
             Expr::Ref(inner, _) => {
                 // Borrowing is, definitionally, not moving — that's the
-                // entire point of `&`. No liveness/exclusivity tracking
-                // is needed here yet because there's no `&mut`: unlimited
-                // simultaneous shared borrows are always sound, so the
-                // only thing to check is that the referent isn't already
-                // moved, which `touch_expr(inner, false)` already does via
-                // `touch_ident`'s existing moved-check.
+                // entire point of `&`. Unlimited simultaneous shared
+                // borrows are always sound (there's no `&mut` to
+                // conflict with), so nothing here needs to check
+                // *other* live borrows of the same place the way a real
+                // exclusivity check would. What this arm alone still
+                // doesn't cover: whether the referent stays valid for
+                // as long as the resulting reference is used — that's
+                // `Stmt::Let`'s job (recording the borrow when `&inner`
+                // is a `let` initializer) and `touch_ident`'s job
+                // (checking it before a later move) once this call
+                // returns; see the module's own "Borrow liveness" doc
+                // section. `touch_expr(inner, false)` here only ever
+                // checks that the referent isn't *already* moved *at
+                // this point* — a necessary check, not a sufficient one.
                 self.touch_expr(inner, false);
             }
             Expr::Deref(inner, _) => {
@@ -709,7 +829,7 @@ impl<'a> Checker<'a> {
                     let extracting_affine_content = self
                         .scopes
                         .lookup(name)
-                        .map(|(ty, _)| matches!(ty, Ty::Box(inner_ty) if self.registry.is_affine(&inner_ty)))
+                        .map(|(ty, _, _)| matches!(ty, Ty::Box(inner_ty) if self.registry.is_affine(&inner_ty)))
                         .unwrap_or(false);
                     self.touch_ident(name, *span, extracting_affine_content);
                 } else {
@@ -832,7 +952,7 @@ impl<'a> Checker<'a> {
                     let extracting_affine_field = self
                         .scopes
                         .lookup(name)
-                        .and_then(|(ty, _)| match ty {
+                        .and_then(|(ty, _, _)| match ty {
                             Ty::Named(struct_name, args) => self.registry.struct_fields(&struct_name).and_then(|fields| {
                                 let type_params = self.registry.struct_type_params(&struct_name).unwrap_or(&[]);
                                 let subst = zip_type_params(type_params, &args);
@@ -861,7 +981,7 @@ impl<'a> Checker<'a> {
     }
 
     fn touch_ident(&mut self, name: &str, span: Span, consume: bool) {
-        let Some((ty, moved)) = self.scopes.lookup(name) else {
+        let Some((ty, moved, _)) = self.scopes.lookup(name) else {
             return; // typeck.rs already reports unknown variables
         };
         if !self.registry.is_affine(&ty) {
@@ -872,6 +992,19 @@ impl<'a> Checker<'a> {
             return;
         }
         if consume {
+            // Borrow liveness (v1, lexical) — checked *before* the move
+            // actually takes effect: moving `name` while a `let borrower
+            // = &name` taken earlier is still in scope would leave
+            // `borrower` pointing at memory `codegen.rs`'s `nir_free`
+            // just released (`OwnershipErrorKind::MoveWhileBorrowed`'s
+            // own doc comment). `is_borrowed` only ever finds a match
+            // for a binding `define_borrow` created (`Stmt::Let`'s own
+            // handler) — see this module's "Borrow liveness" doc
+            // section for exactly what v1 does and doesn't cover.
+            if let Some(borrower) = self.scopes.is_borrowed(name) {
+                self.error(OwnershipErrorKind::MoveWhileBorrowed { name: name.to_string(), borrower }, span);
+                return;
+            }
             self.scopes.set_moved(name, true);
         }
     }

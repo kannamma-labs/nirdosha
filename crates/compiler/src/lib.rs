@@ -15,6 +15,7 @@ pub mod hi_plugin;
 pub mod hi_preview;
 pub mod hi_server;
 pub mod hi_window;
+pub mod hint_cache;
 pub mod init;
 pub mod loader;
 pub mod mcp_tools;

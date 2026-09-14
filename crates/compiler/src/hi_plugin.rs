@@ -55,6 +55,17 @@ pub struct PackManifest {
     /// independent, optional payload, never implied by a pack's presence.
     #[serde(default)]
     pub compliance_profiles: Vec<ComplianceProfile>,
+    /// RFC 0016 Phase 3's `primitive_exclusivity`: struct names this
+    /// pack protects -- generated code may not construct a value of any
+    /// of these outside a `mandatory_fns` certified primitive
+    /// (`contract_check::check_primitive_exclusivity`'s own doc comment
+    /// on why "construct" is the complete, not merely narrower, reading
+    /// of the RFC's "any write... outside certified primitive units"
+    /// for this language). Empty for every pack that doesn't need it
+    /// (banking-v0/fapi-2.0 today -- neither declares struct-based state
+    /// at all yet).
+    #[serde(default)]
+    pub protected_structs: Vec<String>,
 }
 
 /// One named, versioned compliance profile.
@@ -211,6 +222,15 @@ pub fn prepend_pack_primitives(conn: &rusqlite::Connection, root: &Path, source:
 pub fn active_mandatory_primitive_names(conn: &rusqlite::Connection, root: &Path) -> Result<std::collections::HashSet<String>, String> {
     let packs = active_pack_manifests(conn, root)?;
     Ok(packs.iter().flat_map(|m| m.mandatory_fns.iter().cloned()).collect())
+}
+
+/// Every active pack's `protected_structs` -- the set
+/// `contract_check::check_primitive_exclusivity` gates on. Same shape
+/// and same underlying `active_pack_manifests` helper as
+/// `active_mandatory_primitive_names` just above.
+pub fn active_protected_struct_names(conn: &rusqlite::Connection, root: &Path) -> Result<std::collections::HashSet<String>, String> {
+    let packs = active_pack_manifests(conn, root)?;
+    Ok(packs.iter().flat_map(|m| m.protected_structs.iter().cloned()).collect())
 }
 
 /// One invariant unit contributed by a pack.
@@ -901,6 +921,213 @@ pub fn check_static_rules(program: &crate::ast::Program, profile: &CompliancePro
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
+// ===========================================================================
+// RFC 0016 Phase 4 (issue #59, `docs/research/2026-09-competitive-
+// verification-and-signing-landscape.md` §5): Sigstore-*pattern* pack
+// signing -- the local mechanics 5b actually needs, without waiting on
+// "who runs the registry" (RFC 0016's own honest blocker for 5b).
+//
+// **What this is, and isn't.** Sigstore's real insight, applied here:
+// trust shouldn't rest on a bare, unattributed public key ("here is a
+// key, trust it because someone pinned it") -- it should rest on a
+// *known identity* the key is bound to, recorded in an auditable,
+// append-only log. This module gives packs exactly that shape --
+// `TrustAnchor` binds a public key to a human-readable identity
+// (`hi_plugin::pack_signing::TrustAnchor`, an operator-configured local
+// list), and `pack_signing_log()` is an append-only, human-readable
+// record of every accepted signature, mirroring Rekor's role. What it
+// is **not**: a live Fulcio/OIDC short-lived-certificate issuer or a
+// public, cross-organization Rekor transparency log -- those need a
+// registry operator this project doesn't have (RFC 0016's own point).
+// Standing up live Sigstore infrastructure is real, separate follow-up
+// work; the trust-anchor-list shape here is deliberately the same
+// shape Sigstore verification itself reduces to once a certificate is
+// checked (a public key bound to an identity), so swapping in real
+// Fulcio/Rekor later is a matter of how a `TrustAnchor` gets populated,
+// not a redesign of anything that consumes it -- the exact "5b swaps
+// signatures in without re-architecture" property RFC 0016 asks for.
+//
+// **Unsigned (5a) installs are completely unchanged** --
+// `install_pack_from_bytes` above still exists, still works exactly as
+// before, still the default `nirdosha plugin install <path>` path. This
+// module is a new, additive, opt-in layer alongside it, not a
+// replacement -- signing a pack is something an author chooses to do,
+// verifying one is something an operator chooses to require.
+
+/// One signed pack, ready to install or to write to disk -- the pack
+/// analogue of `mcp_tools::SignedCertificate`, same shape, same
+/// `#[serde(flatten)]`-free plain-fields style (a pack has no existing
+/// unsigned JSON shape to stay compatible with the way `Certificate`
+/// does, so there's nothing to flatten onto). `manifest_bytes` is the
+/// pack's raw JSON exactly as `install_pack_from_bytes` already accepts
+/// it -- signed as opaque bytes, not re-derived from a parsed
+/// `PackManifest`, so a signature always covers exactly what gets
+/// installed, byte for byte.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SignedPackEnvelope {
+    /// The pack manifest's raw JSON text, verbatim.
+    pub manifest_json: String,
+    /// `String`, not `&'static str`: this struct derives `Deserialize`
+    /// (`main.rs`'s own install-side parse) -- `mcp_tools::Certificate::
+    /// evidence_tier`'s own doc comment is the precedent for exactly
+    /// this choice, and its own reasoning applies verbatim here.
+    pub signature_algorithm: String,
+    pub public_key: String,
+    pub signature: String,
+    /// A human-readable label for who signed this pack (e.g. `"banking-
+    /// domain-experts@kannamma-labs"`) -- carried alongside the raw key
+    /// so a trust-anchor list (below) and the transparency log can both
+    /// show *who*, not just a base64 blob. Not itself verified against
+    /// anything (an OIDC-bound identity, the way Fulcio actually proves
+    /// this, is exactly the live-infrastructure piece this module
+    /// doesn't have) -- an unauthenticated claim the signer makes about
+    /// themselves, same as a git commit's own `Author` line.
+    pub signer_identity: String,
+}
+
+/// Author-side: signs `manifest_bytes` (a pack's raw JSON, exactly as
+/// `install_pack_from_bytes` accepts it) with the Ed25519 private key
+/// at `key_path`, reusing `mcp_tools::sign_bytes` -- the same primitive
+/// `nirdosha certify --sign` uses, one Ed25519 implementation in this
+/// crate for both certificates and packs.
+pub fn sign_pack(manifest_bytes: &[u8], key_path: &str, signer_identity: String) -> Result<SignedPackEnvelope, String> {
+    let manifest_json = String::from_utf8(manifest_bytes.to_vec()).map_err(|e| format!("pack manifest is not valid UTF-8: {e}"))?;
+    // Round-trips through `PackManifest` first so a malformed manifest
+    // fails here, at signing time, with a real parse error -- not
+    // silently produce a validly-signed envelope around garbage that
+    // only fails later, at someone else's install time.
+    let _: PackManifest = serde_json::from_str(&manifest_json).map_err(|e| format!("not a valid pack manifest: {e}"))?;
+    let (public_key, signature) = crate::mcp_tools::sign_bytes(manifest_bytes, key_path)?;
+    Ok(SignedPackEnvelope { manifest_json, signature_algorithm: "ed25519".to_string(), public_key, signature, signer_identity })
+}
+
+/// One operator-accepted signing identity: a public key this
+/// deployment trusts, and the human-readable identity it's bound to.
+/// This *is* the trust root, in exactly the sense Sigstore's Fulcio
+/// certificate is -- "this key speaks for this identity" -- just
+/// configured locally by an operator instead of issued by a live CA
+/// against a verified OIDC login. Real, disclosed weaker guarantee than
+/// live Sigstore (this module's own top doc comment says so); a real,
+/// non-zero one compared to today's 5a (no signature layer at all).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrustAnchor {
+    pub public_key: String,
+    pub identity: String,
+}
+
+/// Where the trust-anchor list lives -- overridable via
+/// `NIRDOSHA_PACK_TRUST_ANCHORS` for tests and for an operator who
+/// wants it somewhere other than the default, mirroring
+/// `hint_cache::cache_path`'s own env-var-override convention.
+fn trust_anchors_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("NIRDOSHA_PACK_TRUST_ANCHORS") {
+        return std::path::PathBuf::from(p);
+    }
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    std::path::PathBuf::from(home).join(".nirdosha").join("pack_trust_anchors.json")
+}
+
+/// Loads the configured trust-anchor list -- `Ok(vec![])`, never an
+/// error, for a missing file: **no configured trust anchors means
+/// trust-on-first-use, not "nothing can ever install,"** the same
+/// posture 5a's own sha256 pin already takes for unsigned packs
+/// (`hi_plugin.rs`'s own top doc comment: "TOFU -- named as such").
+/// A malformed (present but unparseable) file IS a real error, though
+/// -- unlike "absent," that's a configuration mistake worth surfacing
+/// rather than silently downgrading to TOFU.
+fn load_trust_anchors() -> Result<Vec<TrustAnchor>, String> {
+    let path = trust_anchors_path();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{} is not a valid trust-anchor list: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("reading {}: {e}", path.display())),
+    }
+}
+
+fn pack_signing_log_path() -> std::path::PathBuf {
+    trust_anchors_path().with_file_name("pack_signing_log.jsonl")
+}
+
+/// Appends one accepted-signature record -- best-effort, exactly like
+/// `hint_cache::HintCache::record_success`'s own audit log: a signing
+/// decision that couldn't be durably logged must never be the reason a
+/// legitimate pack install fails, but the log itself is real (append-
+/// only, human-readable JSON Lines) whenever the write succeeds. This
+/// is the local, single-organization analogue of Rekor -- see this
+/// module's own top doc comment on exactly what that does and doesn't
+/// claim.
+fn append_pack_signing_log(pack_id: &str, sha256: &str, signer_identity: &str, trust_basis: &str) {
+    use std::io::Write;
+    let path = pack_signing_log_path();
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let line = serde_json::json!({ "installed_at": now, "pack_id": pack_id, "sha256": sha256, "signer_identity": signer_identity, "trust_basis": trust_basis }).to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Install-side: verifies `envelope`'s signature, then delegates to the
+/// existing `install_pack_from_bytes` for the actual install mechanics
+/// (reused, not duplicated). Three real outcomes, named honestly rather
+/// than folded into one boolean:
+/// - the signature doesn't verify at all -- refused, regardless of
+///   trust anchors (a broken signature is never installable, full stop);
+/// - it verifies, and the public key is in the configured trust-anchor
+///   list -- installed, `signer_identity` recorded as that anchor's
+///   *configured* identity (not the envelope's own self-claimed one --
+///   the operator's own record of who that key belongs to is the
+///   trustworthy one, an unauthenticated self-claim isn't);
+/// - it verifies, but no trust anchors are configured at all --
+///   installed anyway, **trust-on-first-use** (`load_trust_anchors`'s
+///   own doc comment), `signer_identity` recorded as the envelope's own
+///   self-claimed identity, logged plainly as `"tofu"` so an operator
+///   auditing the log later can see exactly which installs rested on
+///   TOFU versus a real configured anchor.
+///
+/// **Real, disclosed gap this does NOT cover**: a verified signature
+/// from a public key that IS in the trust-anchor list but whose
+/// *envelope* self-claims a different identity than the anchor's own
+/// configured one -- handled by simply ignoring the envelope's claim in
+/// that case (the anchor's own identity always wins when one exists),
+/// not by refusing the install. A key present in the trust-anchor list
+/// under multiple identities, or removed/rotated mid-flight, is an
+/// operator-side list-hygiene question this module doesn't referee.
+pub fn verify_and_install_signed_pack(conn: &rusqlite::Connection, root: &Path, envelope: &SignedPackEnvelope, source_desc: &str) -> Result<String, String> {
+    let manifest_bytes = envelope.manifest_json.as_bytes();
+    let valid = crate::mcp_tools::verify_bytes(manifest_bytes, &envelope.public_key, &envelope.signature)?;
+    if !valid {
+        return Err(format!("{source_desc}: signature does not verify against the embedded public key -- refusing to install"));
+    }
+
+    let anchors = load_trust_anchors()?;
+    let (identity, trust_basis) = match anchors.iter().find(|a| a.public_key == envelope.public_key) {
+        Some(anchor) => (anchor.identity.clone(), "trust_anchor"),
+        None => (envelope.signer_identity.clone(), "tofu"),
+    };
+
+    let sha256 = crate::hi_graph::sha256_hex(manifest_bytes);
+    let pack_id = install_pack_from_bytes(conn, root, manifest_bytes, source_desc)?;
+    conn.execute("UPDATE plugins SET signer_identity = ?1 WHERE id = ?2", rusqlite::params![identity, pack_id]).map_err(|e| format!("recording signer_identity for {pack_id}: {e}"))?;
+    append_pack_signing_log(&pack_id, &sha256, &identity, trust_basis);
+    Ok(pack_id)
+}
+
+/// The signer identity recorded for an installed pack, if it was
+/// installed through `verify_and_install_signed_pack` -- `None` for
+/// every 5a, unsigned install (this column's own migration default).
+/// `mcp_tools::Certificate::governing_packs`'s natural next extension
+/// (attributing not just *which* packs governed an artifact but who
+/// sealed them) once a caller wants it; not wired in yet.
+pub fn pack_signer_identity(conn: &rusqlite::Connection, pack_id: &str) -> Result<Option<String>, String> {
+    conn.query_row("SELECT signer_identity FROM plugins WHERE id = ?1", [pack_id], |r| r.get::<_, Option<String>>(0))
+        .map_err(|e| format!("reading signer_identity for {pack_id}: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,6 +1246,31 @@ validate transfer {
 
         revoke_pack(&conn, &dir, &id).expect("revoke");
         assert!(active_mandatory_primitive_names(&conn, &dir).expect("check").is_empty(), "a revoked pack's mandatory_fns must no longer count");
+    }
+
+    /// Same shape as `active_mandatory_primitive_names_reflects_only_
+    /// active_packs` just above, for the sibling `protected_structs`
+    /// field (RFC 0016 Phase 3's `primitive_exclusivity`).
+    #[test]
+    fn active_protected_struct_names_reflects_only_active_packs() {
+        let dir = scratch_dir("protected_struct_names");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        assert!(active_protected_struct_names(&conn, &dir).expect("check").is_empty());
+
+        let bytes = serde_json::json!({
+            "id": "ledger-v0-protected",
+            "name": "test pack with a protected struct",
+            "mandatory_fns": ["transfer"],
+            "primitives_nir": TRANSFER_PRIMITIVE_NIR,
+            "protected_structs": ["Account"],
+        })
+        .to_string();
+        let id = install_pack_from_bytes(&conn, &dir, bytes.as_bytes(), "test").expect("install");
+        let names = active_protected_struct_names(&conn, &dir).expect("check");
+        assert!(names.contains("Account"), "got: {names:?}");
+
+        revoke_pack(&conn, &dir, &id).expect("revoke");
+        assert!(active_protected_struct_names(&conn, &dir).expect("check").is_empty(), "a revoked pack's protected_structs must no longer count");
     }
 
     #[test]
@@ -1279,6 +1531,121 @@ serve {
             external_conformance: Vec::new(),
         };
         check_static_rules(&program, &profile).expect("a clean program must pass every checked static rule");
+    }
+
+    /// A fresh Ed25519 keypair for pack-signing tests, mirroring
+    /// `nirdosha keygen`'s own `generate_pkcs8` call -- written to a
+    /// real file since `sign_pack`/`mcp_tools::sign_bytes` both take a
+    /// key *path*, the same interface `nirdosha certify --sign` uses.
+    fn generate_test_key(dir: &std::path::Path) -> std::path::PathBuf {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
+        let path = dir.join("signer.pk8");
+        std::fs::write(&path, pkcs8.as_ref()).expect("write key");
+        path
+    }
+
+    /// `NIRDOSHA_PACK_TRUST_ANCHORS` is a process-global env var, and
+    /// three separate tests below each set/read/clear it -- `cargo
+    /// test`'s default multi-threaded runner would otherwise let one
+    /// test's write race another's read (confirmed the hard way: this
+    /// lock was added after `verify_and_install_signed_pack_prefers_
+    /// the_configured_anchor_identity_over_the_envelopes_own_claim`
+    /// failed under real parallel execution, reading a sibling test's
+    /// path instead of its own). Every test that touches the env var
+    /// acquires this for its whole body, serializing them against each
+    /// other without needing `--test-threads=1` for the whole suite --
+    /// the same `TEST_LOCK` pattern `runtime-kernels/src/kernel/
+    /// recorder.rs`'s own tests already use for an identical class of
+    /// process-global-state hazard.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Scopes `NIRDOSHA_PACK_TRUST_ANCHORS` to a path under `dir` for
+    /// the duration of one test body -- same "isolate the global env
+    /// var to one test's own scratch dir" discipline
+    /// `hint_cache.rs::tests::record_success_then_lookup_round_trips_
+    /// through_disk` already established for the same class of problem
+    /// (a process-global path resolved from an env var). Callers must
+    /// hold `ENV_TEST_LOCK` for their whole test body, not just this call.
+    fn point_trust_anchors_at(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("trust_anchors.json");
+        unsafe { std::env::set_var("NIRDOSHA_PACK_TRUST_ANCHORS", &path) };
+        path
+    }
+
+    /// End-to-end: sign the real embedded banking-v0 pack, install it
+    /// with no trust anchors configured at all -- must succeed via
+    /// trust-on-first-use, recording the envelope's own self-claimed
+    /// identity (`load_trust_anchors`'s own doc comment on why absent
+    /// is TOFU, not refusal).
+    #[test]
+    fn verify_and_install_signed_pack_accepts_an_unconfigured_key_via_tofu() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch_dir("sign_tofu");
+        point_trust_anchors_at(&dir); // points at a path that doesn't exist -- no anchors configured
+        let key = generate_test_key(&dir);
+        let envelope = sign_pack(BANKING_V0_JSON.as_bytes(), key.to_str().unwrap(), "banking-domain-experts@kannamma-labs".to_string()).expect("signing must succeed");
+
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let id = verify_and_install_signed_pack(&conn, &dir, &envelope, "test").expect("TOFU install must succeed");
+        assert_eq!(id, "banking-v0");
+        assert_eq!(pack_signer_identity(&conn, &id).unwrap(), Some("banking-domain-experts@kannamma-labs".to_string()));
+
+        unsafe { std::env::remove_var("NIRDOSHA_PACK_TRUST_ANCHORS") };
+    }
+
+    /// A key present in the configured trust-anchor list installs the
+    /// same way, but records the *anchor's own* configured identity,
+    /// not the envelope's self-claimed one -- an operator's own record
+    /// of who a key belongs to is the trustworthy source, not an
+    /// unauthenticated claim inside the envelope itself
+    /// (`verify_and_install_signed_pack`'s own doc comment).
+    #[test]
+    fn verify_and_install_signed_pack_prefers_the_configured_anchor_identity_over_the_envelopes_own_claim() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch_dir("sign_trust_anchor");
+        let anchors_path = point_trust_anchors_at(&dir);
+        let key = generate_test_key(&dir);
+        let envelope = sign_pack(BANKING_V0_JSON.as_bytes(), key.to_str().unwrap(), "self-claimed-identity".to_string()).expect("signing must succeed");
+
+        std::fs::write(&anchors_path, serde_json::to_string(&[TrustAnchor { public_key: envelope.public_key.clone(), identity: "Configured Anchor Identity".to_string() }]).unwrap()).expect("write trust anchors");
+
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let id = verify_and_install_signed_pack(&conn, &dir, &envelope, "test").expect("install under a configured anchor must succeed");
+        assert_eq!(pack_signer_identity(&conn, &id).unwrap(), Some("Configured Anchor Identity".to_string()), "the anchor's own configured identity must win over the envelope's self-claim");
+
+        unsafe { std::env::remove_var("NIRDOSHA_PACK_TRUST_ANCHORS") };
+    }
+
+    /// A tampered manifest (the signature no longer matches) must be
+    /// refused outright, regardless of trust anchors -- a broken
+    /// signature is never installable.
+    #[test]
+    fn verify_and_install_signed_pack_refuses_a_tampered_manifest() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch_dir("sign_tampered");
+        point_trust_anchors_at(&dir);
+        let key = generate_test_key(&dir);
+        let mut envelope = sign_pack(BANKING_V0_JSON.as_bytes(), key.to_str().unwrap(), "someone".to_string()).expect("signing must succeed");
+        envelope.manifest_json = envelope.manifest_json.replace("Banking domain law v0", "TAMPERED");
+
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let err = verify_and_install_signed_pack(&conn, &dir, &envelope, "test").expect_err("a tampered manifest must be refused");
+        assert!(err.contains("does not verify"), "the refusal must name the real reason: {err}");
+
+        unsafe { std::env::remove_var("NIRDOSHA_PACK_TRUST_ANCHORS") };
+    }
+
+    /// `sign_pack` itself refuses a manifest that doesn't even parse as
+    /// a `PackManifest` -- caught at signing time, not left to surprise
+    /// whoever tries to install the resulting envelope later
+    /// (`sign_pack`'s own doc comment on why).
+    #[test]
+    fn sign_pack_refuses_a_manifest_that_does_not_parse() {
+        let dir = scratch_dir("sign_bad_manifest");
+        let key = generate_test_key(&dir);
+        let err = sign_pack(b"{\"not\": \"a real pack manifest\"}", key.to_str().unwrap(), "someone".to_string()).expect_err("a non-PackManifest JSON blob must be refused");
+        assert!(err.contains("not a valid pack manifest"), "got: {err}");
     }
 }
 

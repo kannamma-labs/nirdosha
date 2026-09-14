@@ -464,6 +464,20 @@ fn handle_generate(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
     ApiResponse::json(&serde_json::json!({ "ok": true, "path": path.display().to_string(), "locked": locked, "not_declared": not_declared, "log": log_lines }))
 }
 
+/// The env var that opts a deployment into real Ed25519 signing of the
+/// certificate every publish now emits (RFC 0016 Phase 4). Unset by
+/// default, and never something `generate_program`/the model can reach
+/// -- reading process environment happens only here, in a route the
+/// LLM has no path to invoke on itself -- mirroring 5b's existing "AI
+/// never gets signing" line and `certify --sign`'s own explicit
+/// `key.pk8` CLI argument. A deployment with an operator key and a
+/// governance story sets this; everyone else still gets a certificate,
+/// just an unsigned one -- "mandatory certificate, optional signature,"
+/// per the RFC's own "5b must not gate 5a/4" principle applied one
+/// layer up: don't let governance-blocked work (real signing) block
+/// something shippable (the certificate itself).
+const PUBLISH_SIGNING_KEY_VAR: &str = "NIRDOSHA_PUBLISH_SIGNING_KEY";
+
 /// Publish mode (rfcs/0014's "4. Publish mode"), scoped down hard: RFC
 /// 0014's own `deployment_provider` abstraction and credential storage
 /// are explicitly undecided ("a real decision this RFC doesn't make" --
@@ -480,7 +494,7 @@ fn handle_publish(root: &Path, conn: &Connection) -> ApiResponse {
     if !source_path.exists() {
         return ApiResponse::error(400, "nothing generated yet -- run :generate first");
     }
-    let result: Result<std::path::PathBuf, String> = (|| {
+    let result: Result<(std::path::PathBuf, std::path::PathBuf, bool), String> = (|| {
         let path_str = source_path.to_str().ok_or_else(|| format!("generated source path {} is not valid UTF-8", source_path.display()))?;
         let (program, _src): (crate::ast::Program, String) = crate::loader::load_program(path_str)?;
         if let Err(errors) = crate::typeck::typecheck(&program) {
@@ -501,11 +515,59 @@ fn handle_publish(root: &Path, conn: &Connection) -> ApiResponse {
         let smt_report = crate::smt::analyze(&program);
         let out_path = crate::hi_graph::hi_dir(root).join("generated").join("hi_build");
         crate::codegen::build(&program, &smt_report, &out_path, crate::codegen::OptLevel::O2)?;
-        Ok(out_path)
+
+        // RFC 0016 Phase 4 (issue #59): every successful publish also
+        // emits a certificate, closing the gap where a project could
+        // `:publish` a real binary with zero certificate ever produced.
+        // Additive to, not a replacement for, `nirdosha certify`'s
+        // standalone CLI path -- this just means nobody has to remember
+        // to run it separately. `run_verify_pipeline` re-derives the
+        // same load/typecheck/ownership/contract-check verdict `certify`
+        // itself would over this exact file; `governing_packs`/
+        // `nfr_commitments` are the two fields only this call site can
+        // fill in (a bare `cmd_certify`/`certify_code` call has no
+        // project graph or parsed `Program` to attribute against -- see
+        // `Certificate`'s own doc comments).
+        let source_bytes = std::fs::read(&source_path).map_err(|e| format!("reading {} to certify it: {e}", source_path.display()))?;
+        let pipeline = crate::mcp_tools::run_verify_pipeline(path_str);
+        let mut certificate = crate::mcp_tools::build_certificate(&source_bytes, pipeline);
+        certificate.governing_packs = crate::hi_plugin::installed_pack_ids(conn)?;
+        certificate.nfr_commitments = crate::mcp_tools::nfr_commitments_from_program(&program);
+
+        let cert_path = out_path.with_extension("certificate.json");
+        let signing_key_path = std::env::var(PUBLISH_SIGNING_KEY_VAR).ok();
+        let (json, signed) = certificate_json_for_publish(&certificate, signing_key_path.as_deref())?;
+        std::fs::write(&cert_path, json).map_err(|e| format!("writing {}: {e}", cert_path.display()))?;
+
+        Ok((out_path, cert_path, signed))
     })();
     match result {
-        Ok(out_path) => ApiResponse::json(&serde_json::json!({ "ok": true, "binary": out_path.display().to_string() })),
+        Ok((out_path, cert_path, signed)) => {
+            ApiResponse::json(&serde_json::json!({ "ok": true, "binary": out_path.display().to_string(), "certificate": cert_path.display().to_string(), "signed": signed }))
+        }
         Err(e) => ApiResponse::json(&serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// The publish-time certificate write, factored out of `handle_publish`
+/// as a pure function of `(certificate, signing_key_path)` -- reading
+/// `PUBLISH_SIGNING_KEY_VAR` stays in `handle_publish` itself, so this
+/// function never touches real process environment and is directly
+/// exercisable by tests for both the signed and unsigned branches
+/// without racing every other test in this file that publishes
+/// concurrently (`cargo test`'s default multi-threaded runner would
+/// otherwise let one test's env mutation leak into another's assertion
+/// -- the same hazard `hi_llm::resolve_activation`'s own injected-`env`
+/// pattern exists to avoid, applied here as an injected argument
+/// instead since `handle_publish`'s signature is fixed by the route
+/// dispatcher).
+fn certificate_json_for_publish(certificate: &crate::mcp_tools::Certificate, signing_key_path: Option<&str>) -> Result<(String, bool), String> {
+    match signing_key_path {
+        Some(key_path) => {
+            let signed_cert = crate::mcp_tools::sign_certificate(certificate, key_path)?;
+            Ok((serde_json::to_string_pretty(&signed_cert).expect("SignedCertificate always serializes"), true))
+        }
+        None => Ok((serde_json::to_string_pretty(certificate).expect("Certificate always serializes"), false)),
     }
 }
 
@@ -978,6 +1040,163 @@ mod tests {
         let body = String::from_utf8_lossy(&resp.body);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
         assert_eq!(json["ok"], serde_json::json!(true), "a demanded, proving contract must publish: {body}");
+    }
+
+    /// RFC 0016 Phase 4 (issue #59): a successful publish now also
+    /// writes a certificate alongside the binary, unconditionally --
+    /// this closes the gap where `:publish` produced a real binary with
+    /// zero certificate ever produced. No signing key is configured in
+    /// this test, so it must come back unsigned (`signed: false`), and
+    /// the certificate itself must carry a `"proved"` evidence tier for
+    /// this exact fixture (the same proving contract
+    /// `publish_succeeds_when_the_demanded_contract_proves` uses).
+    /// `governing_packs` must be empty -- this scratch project never
+    /// installs a pack.
+    #[test]
+    fn publish_writes_an_unsigned_certificate_by_default() {
+        let dir = scratch_dir("publish_certificate_unsigned");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let id = crate::hi_graph::add_candidate(&conn, "fn", "charge_cents", "charges money", "test").expect("add");
+        crate::hi_graph::attach_attribute(&conn, &id, "validate contract balance_nonnegative: result >= 0").expect("attach");
+        crate::hi_graph::confirm_node(&conn, &id).expect("confirm");
+        drop(conn);
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(
+            &out_path,
+            "fn charge_cents(amount_cents: i64, balance_cents: i64) -> i64 {\n    return balance_cents - amount_cents\n}\n\nvalidate charge_cents {\n    pre: amount_cents >= 0 && amount_cents <= balance_cents\n    post: result >= 0\n}\n\nfn main() requires(public) {\n    print(\"charge\", charge_cents(100, 500))\n}\n",
+        ).expect("write");
+
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(true), "publish must succeed: {body}");
+        assert_eq!(json["signed"], serde_json::json!(false), "no signing key is configured in this test: {body}");
+
+        let cert_path = json["certificate"].as_str().expect("certificate path in the response");
+        let cert_bytes = std::fs::read(cert_path).expect("the certificate file must actually exist on disk");
+        let cert: serde_json::Value = serde_json::from_slice(&cert_bytes).expect("the certificate file must be valid JSON");
+        assert_eq!(cert["evidence_tier"], serde_json::json!("proved"), "this fixture's contract proves: {cert}");
+        assert_eq!(cert["governing_packs"], serde_json::json!([]), "no pack is installed in this scratch project: {cert}");
+        assert_eq!(cert["nfr_commitments"], serde_json::json!([]), "this fixture declares no nfr(...): {cert}");
+        // An unsigned certificate must carry none of `SignedCertificate`'s
+        // three extra fields -- a plain `Certificate`, not a signed one
+        // that merely lacks a valid signature.
+        assert!(cert.get("signature").is_none(), "unsigned certificate must not carry a signature field: {cert}");
+    }
+
+    /// RFC 0016 Phase 4: `certificate_json_for_publish` is the pure core
+    /// `handle_publish` calls after resolving `PUBLISH_SIGNING_KEY_VAR`
+    /// -- exercised directly here (a real, freshly generated Ed25519
+    /// keypair, mirroring `nirdosha keygen`'s own `generate_pkcs8` call)
+    /// so this test never has to mutate real process environment and
+    /// race every other test in this file that publishes concurrently
+    /// (the function's own doc comment explains why).
+    #[test]
+    fn certificate_json_for_publish_signs_when_given_a_real_key() {
+        let dir = scratch_dir("certificate_signing");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let key_path = dir.join("signing_key.pk8");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
+        std::fs::write(&key_path, pkcs8.as_ref()).expect("write key");
+
+        let source_path = dir.join("cert_fixture.nir");
+        let source_bytes = b"fn main() requires(public) {\n    print(\"hello\", 1)\n}\n";
+        std::fs::write(&source_path, source_bytes).expect("write fixture source");
+        let pipeline = crate::mcp_tools::run_verify_pipeline(source_path.to_str().unwrap());
+        let certificate = crate::mcp_tools::build_certificate(source_bytes, pipeline);
+
+        let (unsigned_json, unsigned) = certificate_json_for_publish(&certificate, None).expect("unsigned branch never fails");
+        assert!(!unsigned, "no key path given");
+        let unsigned_value: serde_json::Value = serde_json::from_str(&unsigned_json).expect("valid JSON");
+        assert!(unsigned_value.get("signature").is_none(), "unsigned certificate must carry no signature field: {unsigned_value}");
+
+        let (signed_json, signed) = certificate_json_for_publish(&certificate, Some(key_path.to_str().unwrap())).expect("signing with a real key must succeed");
+        assert!(signed, "a key path was given");
+        let signed_value: serde_json::Value = serde_json::from_str(&signed_json).expect("valid JSON");
+        assert_eq!(signed_value["signature_algorithm"], serde_json::json!("ed25519"));
+        assert!(signed_value["signature"].as_str().is_some_and(|s| !s.is_empty()), "must carry a real, non-empty signature: {signed_value}");
+        assert!(signed_value["public_key"].as_str().is_some_and(|s| !s.is_empty()), "must carry the public key alongside it: {signed_value}");
+        // The signed form is additive over the plain certificate -- every
+        // v0 field the unsigned form has must still be present verbatim.
+        assert_eq!(signed_value["source_hash"], unsigned_value["source_hash"]);
+        assert_eq!(signed_value["evidence_tier"], unsigned_value["evidence_tier"]);
+    }
+
+    /// RFC 0016 Phase 4: `governing_packs`/`nfr_commitments` are the two
+    /// fields only a publish (not a bare `cmd_certify`) can fill in --
+    /// this drives the same banking-pack fixture the RFC's own Phase 2
+    /// acceptance test uses, then checks the certificate names the pack.
+    #[test]
+    fn publish_certificate_names_the_governing_pack() {
+        let dir = scratch_dir("publish_certificate_governing_pack");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let draft = r#"
+fn charge_cents(balance_cents: i64, amount_cents: i64) -> i64 {
+    return balance_cents - amount_cents
+}
+
+fn credit_cents(balance_cents: i64, amount_cents: i64) -> i64 {
+    return balance_cents + amount_cents
+}
+
+fn net_change_cents(credits: i64, debits: i64) -> i64 {
+    return credits - debits
+}
+
+fn main() requires(public) {
+    let after_charge: i64 = charge_cents(10000, 1200)
+    let after_credit: i64 = credit_cents(after_charge, 300)
+    print("balance", after_credit)
+    print("net change", net_change_cents(300, 1200))
+}
+"#;
+        let injected = crate::hi_plugin::inject_pack_validates_into_source(&dir, draft).expect("pack injection must succeed over a signature-matching draft");
+        drop(conn);
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(&out_path, &injected).expect("write generated source");
+
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(true), "the pack-governed draft must publish: {body}");
+
+        let cert_path = json["certificate"].as_str().expect("certificate path in the response");
+        let cert: serde_json::Value = serde_json::from_slice(&std::fs::read(cert_path).expect("read certificate")).expect("valid JSON");
+        assert_eq!(cert["governing_packs"], serde_json::json!(["banking-v0"]), "the banking pack must be named in the certificate: {cert}");
+    }
+
+    /// RFC 0016 Phase 4: an `nfr(...)` commitment must land in the
+    /// certificate tagged `"monitored"`, never `"proved"` -- it's an
+    /// APM-kernel-tracked runtime claim, not a Z3 proof, and must not
+    /// read as one just because it rode along in the same certificate.
+    #[test]
+    fn publish_certificate_tiers_nfr_commitments_as_monitored_not_proved() {
+        let dir = scratch_dir("publish_certificate_nfr");
+        crate::hi_graph::open(&dir).expect("open"); // scaffold .nir/ so /api/publish's own `hi_graph::open` succeeds
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(
+            &out_path,
+            "fn slow_lookup(id: i64) -> i64 nfr(latency_ms: 50, concurrency_max: 10) {\n    return id\n}\n\nfn main() requires(public) {\n    print(\"lookup\", slow_lookup(1))\n}\n",
+        ).expect("write");
+
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(true), "a program with an nfr(...) fn must still publish: {body}");
+
+        let cert_path = json["certificate"].as_str().expect("certificate path in the response");
+        let cert: serde_json::Value = serde_json::from_slice(&std::fs::read(cert_path).expect("read certificate")).expect("valid JSON");
+        let commitments = cert["nfr_commitments"].as_array().expect("nfr_commitments array");
+        assert_eq!(commitments.len(), 1, "exactly one fn declares nfr(...): {cert}");
+        assert_eq!(commitments[0]["fn_name"], serde_json::json!("slow_lookup"));
+        assert_eq!(commitments[0]["evidence_tier"], serde_json::json!("monitored"), "an NFR claim is runtime-monitored, never Z3-proved: {commitments:?}");
+        assert_eq!(commitments[0]["nfr"]["latency_ms"], serde_json::json!(50));
+        assert_eq!(commitments[0]["nfr"]["concurrency_max"], serde_json::json!(10));
     }
 
     /// RFC 0016 implementation plan, Phase 2 item 7: "the fintech v4 run
