@@ -1,0 +1,271 @@
+// The exact killer_demo corrupting transfer (`examples/killer_demo/
+// race_probe.nir`) -- same naive read/sleep/write, same 2ms sleep,
+// same two-account ledger, same 8 real OS threads -- but this time the
+// durable read+write sequence runs as the `commit` slot of a real
+// `transact { ... }` block instead of three bare `db_*` calls. That's
+// not cosmetic: `isolation_check.rs`'s own doc comment scopes the
+// checker to "only `db` operations that happen while a `transact` site
+// is active," and `nir_transact_begin`/`nir_transact_mark_committed`
+// (`transact.rs`) only bracket the `commit`/`compensate` slot's own
+// call -- NOT `network`/`verify` (see `control_flow.rs`'s
+// `emit_transact`: `nir_transact_begin` is emitted after `network` and
+// `verify` already ran). So the entire naive read/sleep/write sequence
+// has to live inside one `commit`-slot function call for the checker
+// to see any of it at all -- `transfer_commit_inner` below is that
+// function, and `transfer` wraps it in the minimal legal `transact`
+// (`network`/`verify` are stubs; `precheck`/`compensate`/`log` are
+// omitted, all three optional per `docs/TRANSACT.md`).
+//
+// **3 transfers per thread (24 total), not `race_probe.nir`'s own
+// 250.** Not a stylistic choice -- measured, not assumed (this
+// directory's own RESULTS.md has the numbers): past roughly 26-28
+// total concurrent transfers, `isolation_check.rs`'s `find_cycles`
+// (a DFS-based simple-cycle enumeration over the conflict graph, no
+// memoization beyond "already reported") blows up on exactly the
+// dense, heavily-overlapping conflict graph this workload produces --
+// every racing transfer on the same two accounts adds edges to nearly
+// every other one -- and the program hangs well past any reasonable
+// timeout. 24 is comfortably under that cliff (~1.5s); running this
+// file at `race_probe.nir`'s literal 8x250 scale is not currently
+// possible at all.
+//
+// This is Phase 3 item 1 of `docs/research/2026-09-pending-
+// verification-differentiation-work.md`: the adversarial demo
+// `isolation_check.rs` didn't have yet, run end to end through the
+// real compiled binary and its real async escalation path -- not a
+// Rust unit test, not a synthetic FFI-level history. What actually
+// came out is not just "the checker catches it" (it does, at this
+// scale) but a real, previously-undisclosed scaling failure in the
+// checker itself -- see this directory's own RESULTS.md for the full
+// story and the measurements, and `run.sh` for how it's driven (a
+// real `NIRDOSHA_OBSERVABILITY_URL` listener has to be running to see
+// the escalations; the ledger corruption itself shows up either way).
+//
+// Run it:
+//   ./run.sh
+// (`run.sh` builds this file, starts the listener, runs the binary,
+// and reports both the ledger drift and the anomalies the listener
+// actually received.)
+
+enum ErrorCode {
+    DbError(str),
+    NotFound(str),
+    InsufficientFunds(str),
+}
+
+struct Text {
+    value: str,
+}
+
+fn reset_ledger_inner(conn: db) -> Result(Text, ErrorCode) {
+    let created: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY, name TEXT, balance_cents INTEGER)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let cleared: Result(i64, ErrorCode) = match db_execute(conn, "DELETE FROM account") {
+        Ok(n) => Ok(n),
+        Err(e) => Err(DbError(e)),
+    }
+    let seeded_a: Result(i64, ErrorCode) = match cleared {
+        Ok(_) => match db_execute(conn, "INSERT INTO account (id, name, balance_cents) VALUES (1, ?, 1000000)", "alice") {
+            Ok(n) => Ok(n),
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(e),
+    }
+    let seeded_b: Result(Text, ErrorCode) = match seeded_a {
+        Ok(_) => match db_execute(conn, "INSERT INTO account (id, name, balance_cents) VALUES (2, ?, 1000000)", "bob") {
+            Ok(n) => Ok(Text("reset")),
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(e),
+    }
+    stop conn
+    return seeded_b
+}
+
+fn reset_ledger() -> Result(Text, ErrorCode) {
+    return match db_connect("examples/isolation_demo/isolation_probe.db") {
+        Ok(conn) => reset_ledger_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn total_inner(conn: db) -> Result(i64, ErrorCode) {
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COALESCE(SUM(balance_cents), 0) as s FROM account") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "s") {
+                Ok(s) => Ok(s),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn total() -> Result(i64, ErrorCode) {
+    return match db_connect("examples/isolation_demo/isolation_probe.db") {
+        Ok(conn) => total_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+// Naive by design, byte-for-byte the same shape as `race_probe.nir`'s
+// own `transfer_inner`: read both balances, `sleep_ms` to model a DB
+// round trip, write both back -- no lock, no transaction, no version
+// check. The only difference from `race_probe.nir` is that this whole
+// sequence now runs *as* a `transact` `commit` slot's own function
+// body, so `isolation_check.rs`'s thread-local `current_txn()` is
+// `Some` for the entire read/sleep/write window on this thread.
+fn transfer_commit_inner(conn: db, from_id: i64, to_id: i64, amount_cents: i64) -> bool {
+    let created: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY, name TEXT, balance_cents INTEGER)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let from_balance: Result(i64, ErrorCode) = match db_query(conn, "SELECT balance_cents FROM account WHERE id = ?", from_id) {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "balance_cents") {
+                Ok(bal) => Ok(bal),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(NotFound("from account")),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    let checked: Result(i64, ErrorCode) = match from_balance {
+        Ok(bal) => if bal >= amount_cents {
+            Ok(bal)
+        } else {
+            Err(InsufficientFunds("not enough funds"))
+        },
+        Err(e) => Err(e),
+    }
+    let to_balance: Result(i64, ErrorCode) = match checked {
+        Ok(_) => match db_query(conn, "SELECT balance_cents FROM account WHERE id = ?", to_id) {
+            Ok(rows) => match json_array_get(rows, 0) {
+                Ok(row) => match json_get_i64(row, "balance_cents") {
+                    Ok(bal) => Ok(bal),
+                    Err(e) => Err(DbError(e)),
+                },
+                Err(e) => Err(NotFound("to account")),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(e),
+    }
+    sleep_ms(2)
+    let debited: Result(i64, ErrorCode) = match checked {
+        Ok(bal) => match to_balance {
+            Ok(_) => match db_execute(conn, "UPDATE account SET balance_cents = ? WHERE id = ?", bal - amount_cents, from_id) {
+                Ok(n) => Ok(n),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    }
+    let credited: Result(i64, ErrorCode) = match debited {
+        Ok(_) => match to_balance {
+            Ok(tb) => match db_execute(conn, "UPDATE account SET balance_cents = ? WHERE id = ?", tb + amount_cents, to_id) {
+                Ok(n) => Ok(n),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    }
+    stop conn
+    return match credited {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+fn transfer_commit(from_id: i64, to_id: i64, amount_cents: i64) -> bool {
+    return match db_connect("examples/isolation_demo/isolation_probe.db") {
+        Ok(conn) => transfer_commit_inner(conn, from_id, to_id, amount_cents),
+        Err(e) => false,
+    }
+}
+
+// `network`/`verify` stubs -- this demo has no real external call to
+// make, so `network` is a no-op returning a dummy `i64` and `verify`
+// unconditionally approves, always routing to `commit`. Nothing about
+// the checker cares what `network`/`verify` do; only `commit`'s own
+// body is where the tracked `db` operations live (see this file's own
+// top comment).
+fn network_probe(txn_id: str) -> i64 {
+    return 0
+}
+
+fn verify_ok(network: i64) -> bool {
+    return true
+}
+
+fn transfer(from_id: i64, to_id: i64, amount_cents: i64) -> bool {
+    return transact {
+        network: network_probe(txn_id)
+        verify:  verify_ok(network)
+        commit:  transfer_commit(from_id, to_id, amount_cents)
+    }
+}
+
+// Same shape as `race_probe.nir`'s own `worker` -- `iterations`
+// transfers `from_id -> to_id`, back to back, on whatever real OS
+// thread this got `spawn`ed onto.
+fn worker(from_id: i64, to_id: i64, iterations: i64) -> i64 {
+    let i: i64 = 0
+    let successes: i64 = 0
+    while i < iterations {
+        let ok: bool = transfer(from_id, to_id, 1)
+        if ok {
+            successes = successes + 1
+        }
+        i = i + 1
+    }
+    return successes
+}
+
+fn main() {
+    let setup: Result(Text, ErrorCode) = reset_ledger()
+    match setup {
+        Ok(n) => print("ledger reset"),
+        Err(e) => print("setup error"),
+    }
+
+    // 8 real OS threads, 3 transfers each -- 24 concurrent transfers
+    // total (this file's own top comment on why 3, not `race_probe.
+    // nir`'s 250), every one of them now running as its own `transact`
+    // site (its own `txn_id`), against the same pooled SQLite
+    // connection `db_connect` shares process-wide.
+    let t1: thread i64 = spawn worker(1, 2, 3)
+    let t2: thread i64 = spawn worker(2, 1, 3)
+    let t3: thread i64 = spawn worker(1, 2, 3)
+    let t4: thread i64 = spawn worker(2, 1, 3)
+    let t5: thread i64 = spawn worker(1, 2, 3)
+    let t6: thread i64 = spawn worker(2, 1, 3)
+    let t7: thread i64 = spawn worker(1, 2, 3)
+    let t8: thread i64 = spawn worker(2, 1, 3)
+
+    let s1: i64 = join t1
+    let s2: i64 = join t2
+    let s3: i64 = join t3
+    let s4: i64 = join t4
+    let s5: i64 = join t5
+    let s6: i64 = join t6
+    let s7: i64 = join t7
+    let s8: i64 = join t8
+
+    print("successful transfers:")
+    print(s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8)
+
+    let final_total: Result(i64, ErrorCode) = total()
+    print("final total (expected 2000000):")
+    match final_total {
+        Ok(n) => print(n),
+        Err(e) => print("error reading total"),
+    }
+}
