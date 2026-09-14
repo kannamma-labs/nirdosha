@@ -524,14 +524,15 @@ fn handle_publish(root: &Path, conn: &Connection) -> ApiResponse {
         // to run it separately. `run_verify_pipeline` re-derives the
         // same load/typecheck/ownership/contract-check verdict `certify`
         // itself would over this exact file; `governing_packs`/
-        // `nfr_commitments` are the two fields only this call site can
-        // fill in (a bare `cmd_certify`/`certify_code` call has no
-        // project graph or parsed `Program` to attribute against -- see
-        // `Certificate`'s own doc comments).
+        // `governing_invariants`/`nfr_commitments` are the three fields
+        // only this call site can fill in (a bare `cmd_certify`/
+        // `certify_code` call has no project graph or parsed `Program`
+        // to attribute against -- see `Certificate`'s own doc comments).
         let source_bytes = std::fs::read(&source_path).map_err(|e| format!("reading {} to certify it: {e}", source_path.display()))?;
         let pipeline = crate::mcp_tools::run_verify_pipeline(path_str);
         let mut certificate = crate::mcp_tools::build_certificate(&source_bytes, pipeline);
         certificate.governing_packs = crate::hi_plugin::installed_pack_ids(conn)?;
+        certificate.governing_invariants = crate::hi_plugin::governing_invariants(conn, root, &program)?;
         certificate.nfr_commitments = crate::mcp_tools::nfr_commitments_from_program(&program);
 
         let cert_path = out_path.with_extension("certificate.json");
@@ -1050,8 +1051,8 @@ mod tests {
     /// the certificate itself must carry a `"proved"` evidence tier for
     /// this exact fixture (the same proving contract
     /// `publish_succeeds_when_the_demanded_contract_proves` uses).
-    /// `governing_packs` must be empty -- this scratch project never
-    /// installs a pack.
+    /// `governing_packs`/`governing_invariants` must both be empty --
+    /// this scratch project never installs a pack.
     #[test]
     fn publish_writes_an_unsigned_certificate_by_default() {
         let dir = scratch_dir("publish_certificate_unsigned");
@@ -1078,6 +1079,7 @@ mod tests {
         let cert: serde_json::Value = serde_json::from_slice(&cert_bytes).expect("the certificate file must be valid JSON");
         assert_eq!(cert["evidence_tier"], serde_json::json!("proved"), "this fixture's contract proves: {cert}");
         assert_eq!(cert["governing_packs"], serde_json::json!([]), "no pack is installed in this scratch project: {cert}");
+        assert_eq!(cert["governing_invariants"], serde_json::json!([]), "no pack is installed, so no invariant can be attributed to one: {cert}");
         assert_eq!(cert["nfr_commitments"], serde_json::json!([]), "this fixture declares no nfr(...): {cert}");
         // An unsigned certificate must carry none of `SignedCertificate`'s
         // three extra fields -- a plain `Certificate`, not a signed one
@@ -1267,15 +1269,32 @@ fn main() requires(public) {
             assert_eq!(outcome.result, crate::contract_check::ContractCheckResult::Proved, "{} must be PROVED", outcome.fn_name);
         }
 
-        // 3. The governing pack named -- `nirdosha verify`/`certify_code`
-        // do not yet surface this in their own output (that's the RFC's
-        // separate, unimplemented "generation audit and the governing-
-        // set snapshot" feature, not a Phase 2 item), so this checks the
-        // fact the RFC requires be nameable: exactly one active pack
+        // 3. The governing pack named -- exactly one active pack
         // governed this graph, and it is `banking-v0`.
         let conn = crate::hi_graph::open(&dir).expect("reopen");
         let governing = crate::hi_plugin::installed_pack_ids(&conn).expect("list installed packs");
         assert_eq!(governing, vec!["banking-v0".to_string()], "the banking pack must be the sole governing pack");
+
+        // 4. Real per-invariant attribution (`hi_plugin::
+        // governing_invariants`, built 2026-09-15 -- this used to be the
+        // RFC's own named-but-unimplemented "generation audit and
+        // governing-set snapshot" gap): all three pack-demanded
+        // contracts, each attributed to `banking-v0` by name, not just
+        // "some active pack governs this graph somehow."
+        let invariants = crate::hi_plugin::governing_invariants(&conn, &dir, &program).expect("compute governing invariants");
+        let mut fn_names: Vec<&str> = invariants.iter().map(|i| i.fn_name.as_str()).collect();
+        fn_names.sort_unstable();
+        assert_eq!(fn_names, vec!["charge_cents", "credit_cents", "net_change_cents"], "every pack-demanded contract must be attributed by fn name: {fn_names:?}");
+        assert!(invariants.iter().all(|i| i.pack_id == "banking-v0"), "every attribution must name banking-v0 as the governing pack: {invariants:?}");
+
+        // 5. The certificate a real `/api/publish` call issues carries
+        // the identical attribution -- not just something a direct
+        // `governing_invariants` call happens to compute correctly.
+        let cert_path = crate::hi_graph::hi_dir(&dir).join("generated").join("hi_build.certificate.json");
+        let cert_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cert_path).expect("read the real certificate /api/publish wrote")).expect("valid certificate JSON");
+        let cert_invariants = cert_json["governing_invariants"].as_array().expect("governing_invariants should be an array");
+        assert_eq!(cert_invariants.len(), 3, "cert: {cert_json}");
+        assert!(cert_invariants.iter().all(|i| i["pack_id"] == "banking-v0"), "cert: {cert_json}");
     }
 
     #[test]

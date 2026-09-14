@@ -912,6 +912,17 @@ pub struct Certificate {
     /// trip instead of failing on an unknown-but-required field.
     #[serde(default)]
     pub governing_packs: Vec<String>,
+    /// Real per-invariant attribution: which *specific* active pack
+    /// demanded which *specific* proved contract, not just "these packs
+    /// are active" (`governing_packs` above). Named by an existing test
+    /// comment (`hi_api.rs::fintech_app_under_the_banking_pack_
+    /// publishes_...`) as separate "generation audit and governing-set
+    /// snapshot" future work; built for real 2026-09-15
+    /// (`hi_plugin::governing_invariants`). Same "only `handle_publish`
+    /// has the extra context" shape `governing_packs`/`nfr_commitments`
+    /// already use -- empty for a bare `certify`/`verify`.
+    #[serde(default)]
+    pub governing_invariants: Vec<GoverningInvariant>,
     /// This artifact's declared `nfr(...)` commitments (`ast::NfrSpec`
     /// per fn), attached at publish time. Deliberately **not** folded
     /// into `verdict_summary`/`proof_obligations` above: those are Z3-
@@ -982,6 +993,20 @@ impl IsolationViolation {
 /// that happens for NFR commitments.
 pub fn isolation_violations_from_anomalies(anomalies: &[nirdosha_isolation_core::Anomaly]) -> Vec<IsolationViolation> {
     anomalies.iter().map(|a| IsolationViolation { cycle: a.cycle.clone(), evidence_tier: IsolationViolation::EVIDENCE_TIER.to_string() }).collect()
+}
+
+/// One `validate`-covered fn, attributed to the specific active pack
+/// that demanded it -- see `Certificate::governing_invariants`'s own
+/// doc comment for why this is a distinct field from the flat
+/// `governing_packs` list. Built by `hi_plugin::governing_invariants`
+/// (the one place with both the parsed `Program` and the active-pack
+/// manifests to compute this against), not here -- this struct is just
+/// the certificate-carried shape, matching `NfrCommitment`/
+/// `IsolationViolation`'s own pattern.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct GoverningInvariant {
+    pub fn_name: String,
+    pub pack_id: String,
 }
 
 /// One function's declared non-functional requirements, carried into
@@ -1169,6 +1194,7 @@ pub fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certif
         // (`Certificate::governing_packs`/`nfr_commitments`'s own doc
         // comments).
         governing_packs: Vec::new(),
+        governing_invariants: Vec::new(),
         nfr_commitments: Vec::new(),
         // Empty here too -- see `Certificate::isolation_violations`'s
         // own doc comment: a bare source file has no operation history

@@ -7,10 +7,20 @@
 //! `nirdosha plugin install <path>`.
 //!
 //! **5a scope, disclosed:** the manifest's SHA-256 is pinned at install
-//! (TOFU) and re-checked on every load, but there is NO signature layer
-//! yet -- that is RFC 0016's blocked Phase 5b, gated on registry
-//! governance. The SHA-256 is still valuable: it detects accidental
-//! mutation and gives 5b a stable canonical-bytes hook later.
+//! (TOFU) and re-checked on every load. This used to be the whole
+//! story -- "no signature layer yet, that's blocked Phase 5b" -- but as
+//! of RFC 0016 Phase 4 (issue #59) that's stale: the **local** signing
+//! mechanics 5b actually needs now exist below (`sign_pack`/
+//! `verify_and_install_signed_pack`/`TrustAnchor`, Sigstore-*pattern*:
+//! Ed25519 signatures, an operator-configured trust-anchor list, a
+//! local append-only signing log mirroring Rekor's role). **What
+//! remains genuinely blocked, unchanged**: live Fulcio/OIDC short-lived
+//! certificate issuance and a public, cross-organization Rekor
+//! transparency log -- both need a registry operator this project
+//! doesn't have, RFC 0016's own honest position. Plain, unsigned
+//! `install_pack_from_bytes` below is still the default path and still
+//! works exactly as it always has; signing is additive and opt-in, on
+//! both the author and operator sides.
 
 use std::path::{Path, PathBuf};
 
@@ -800,6 +810,51 @@ fn active_pack_manifests(conn: &rusqlite::Connection, root: &Path) -> Result<Vec
     let active_ids = installed_pack_ids(conn)?;
     let all = list_installed_pack_manifests(root)?;
     Ok(all.into_iter().filter(|(m, _)| active_ids.contains(&m.id)).map(|(m, _)| m).collect())
+}
+
+/// Real per-invariant attribution: which *specific* active pack
+/// demanded which *specific* proved contract in `program` -- RFC 0016's
+/// "generation audit and governing-set snapshot," previously only a
+/// flat `Certificate::governing_packs` (which pack(s) are active, not
+/// which one demanded which proved contract). Named by an existing
+/// test comment (`hi_api.rs::fintech_app_under_the_banking_pack_
+/// publishes_...`) as separate future work; built for real 2026-09-15.
+///
+/// **Computed post-hoc from the final published `program`, not
+/// injection-time provenance -- deliberately.** Whether a `validate`
+/// block for a pack-demanded fn was actually written by `inject_pack_
+/// validates_into_source` or independently authored by the model to
+/// match that pack's own demanded signature, the pack's invariant is
+/// equally satisfied and equally real to attribute: this answers
+/// "which pack governed this artifact" (the RFC's own question), not
+/// "which pack's own injector literally wrote this text" (a narrower,
+/// less useful question this function deliberately doesn't ask).
+///
+/// **Real, disclosed edge case, not hidden**: if two active packs both
+/// declare a `kind: "fn"` invariant for the identically-named fn, this
+/// returns one entry per pack (not deduplicated) -- an unusual but real
+/// governance fact (two packs both claiming the same contract) worth
+/// keeping visible, matching this RFC's own `primitive_exclusivity`
+/// discipline of surfacing a collision rather than silently picking one
+/// winner.
+pub fn governing_invariants(conn: &rusqlite::Connection, root: &Path, program: &crate::ast::Program) -> Result<Vec<crate::mcp_tools::GoverningInvariant>, String> {
+    let packs = active_pack_manifests(conn, root)?;
+    let mut out: Vec<crate::mcp_tools::GoverningInvariant> = Vec::new();
+    for manifest in &packs {
+        for inv in &manifest.invariants {
+            if inv.kind != "fn" {
+                continue;
+            }
+            if program.validates.iter().any(|v| v.fn_name == inv.name) {
+                out.push(crate::mcp_tools::GoverningInvariant { fn_name: inv.name.clone(), pack_id: manifest.id.clone() });
+            }
+        }
+    }
+    // Deterministic order -- matches `Certificate`'s own "no timestamp,
+    // no random nonce, always the same bytes for the same input"
+    // discipline (`nfr_commitments_from_program`'s own doc comment).
+    out.sort_by(|a, b| (a.pack_id.as_str(), a.fn_name.as_str()).cmp(&(b.pack_id.as_str(), b.fn_name.as_str())));
+    Ok(out)
 }
 
 /// RFC 0016's FAPI wiring: `true` if any active pack's compliance

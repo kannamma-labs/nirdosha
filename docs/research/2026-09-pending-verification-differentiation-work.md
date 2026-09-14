@@ -195,10 +195,21 @@ opportunistically, not urgently:
   dependency) passes; `race_probe.nir` itself, unmodified, compiles and
   reproduces the race again (3/3 runs, nonzero drift), restoring
   `killer_demo/RESULTS.md`'s own "actual run of the actual code" claim.
-- **`governing_packs` is pack IDs only**, no per-invariant attribution.
-  Already named by an existing test comment
-  (`hi_api.rs::fintech_app_under_the_banking_pack_publishes_...`) as
-  separate "generation audit and governing-set snapshot" future work.
+- ✅ **`governing_packs` per-invariant attribution — fixed 2026-09-15.**
+  Used to be pack IDs only (`Vec<String>`, which packs are active, not
+  which one demanded which proved contract). `Certificate::
+  governing_invariants` (`Vec<GoverningInvariant { fn_name, pack_id }>`,
+  `hi_plugin::governing_invariants`) is real now: computed post-hoc
+  from the final published `Program` against every active pack's own
+  declared `fn` invariants, so it answers "which pack governed this
+  artifact" correctly regardless of whether a `validate` block was
+  actually injected by the pack or independently authored by the model
+  to match its demanded signature. Wired into `handle_publish`
+  alongside `governing_packs`/`nfr_commitments`. The existing test this
+  gap was named from (`hi_api.rs::fintech_app_under_the_banking_pack_
+  publishes_...`) now asserts the real per-fn attribution, both from a
+  direct call and from the certificate a real `/api/publish` call
+  writes to disk.
 
 ## Recommendation
 
@@ -207,33 +218,27 @@ items 2 and 3, and every disclosed gap it surfaced along the way
 (the `find_cycles`/windowing scaling bugs, the CLI enforcement surface,
 the `let x: unit` codegen bug) — all fixed, not just found, each with
 its own before/after measurement or passing test, not asserted.
-Phase 4 item 3 (certificate attachment) is real now too. Everything
-in this doc that was reachable without either new external resources
-(an Imandra license, raw-logit model access) or a fresh, deliberately-
-deferred design decision (Phase 5's failure class) is done as of
-2026-09-15.
+Phase 4 item 3 (certificate attachment) and `governing_packs`
+per-invariant attribution are both real now too. Every item in this doc
+that was reachable without either new external resources (an Imandra
+license, raw-logit model access) or a fresh, deliberately-deferred
+design decision (Phase 5's failure class) is done as of 2026-09-15.
 
 What's left, in order of real remaining value:
 
 1. **Phase 4 items 1-2** (drift detection triggering re-verification;
    feeding real incidents into `hint_cache`) — both still genuinely
-   design-only, both bigger lifts than anything closed this session
-   (drift detection needs a real place to compare a compile-time
+   design-only, and now the largest remaining reachable items in this
+   doc (drift detection needs a real place to compare a compile-time
    `nfr(...)` assumption against an observed APM value and decide what
    "diverged enough to re-verify" means; `hint_cache` integration needs
    a real schema for a runtime-observed lesson, not just a
-   `:generate`-time one). Worth scoping properly before starting,
-   not sized here.
-2. **`governing_packs` per-invariant attribution** (the one remaining
-   disclosed smaller gap) — a real, bounded, well-named piece of work:
-   turn a flat `Vec<String>` of pack IDs into something that also says
-   *which* invariant each pack actually contributed, per the existing
-   test comment already naming this as "generation audit and
-   governing-set snapshot" future work.
-3. **Pack signing's UI** stays genuinely blocked on the registry-
+   `:generate`-time one). Worth scoping properly before starting, not
+   sized here.
+2. **Pack signing's UI** stays genuinely blocked on the registry-
    governance question (RFC 0016's own unchanged position) — not
    picked up until that's resolved, same as before.
-4. **Phase 5** (a new failure class, idealized → built → wired in) is
+3. **Phase 5** (a new failure class, idealized → built → wired in) is
    no longer premature on Phase 3's own account (Phase 3 is done) — but
    still needs a real candidate failure class chosen first, a decision
    this doc has deliberately left open rather than picked under time
