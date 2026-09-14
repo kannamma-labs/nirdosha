@@ -218,34 +218,41 @@ fn require_llm_client() -> Result<crate::hi_llm::LlmClient, String> {
 }
 
 /// `hi_graph::ask`'s local keyword search first, always -- fast, free,
-/// no network call, and it's the right answer for "what does tick do"-
-/// shaped questions naming something real in the graph. Only when that
-/// finds *nothing at all*, and only when an LLM is already configured
-/// (`require_llm_client` failing here just means "no matches," the
-/// same result an unconfigured session already gave before this
-/// fallback existed -- never a hard error), does this fall through to
-/// `hi_llm::answer_question` for a real answer to a question that was
-/// never about any one node ("what is this project about"). See that
-/// function's own doc comment for why this doesn't violate RFC 0014's
-/// "semantic search stays opt-in" posture.
+/// no network call, and always returned as supporting evidence. **No
+/// longer a gate on the LLM answer** (github "Ask relevance" fix,
+/// 2026-09-14): the old version returned local `hits` alone and never
+/// even asked the model the instant *any* hit existed, even one
+/// matching on a single generic 3+ character word buried in some
+/// unrelated unit's driving text -- a weak match won by default, with
+/// no chance at a better answer. Now, whenever an LLM is already
+/// configured (`require_llm_client` failing here just means "local
+/// hits only," the same result an unconfigured session already gave
+/// before this fallback existed -- never a hard error), `hits` and a
+/// real `answer` both come back together: `hi_llm::answer_question`
+/// runs regardless of whether local search found anything, and can
+/// search the project itself (`search_project`, as many times as it
+/// needs) before answering, so it's grounded rather than guessing from
+/// one flattened summary. See that function's own doc comment for why
+/// this doesn't violate RFC 0014's "semantic search stays opt-in"
+/// posture. The two are still rendered as distinct as ever client-side
+/// (`hi_graph.html`'s `renderAskResult`) -- a hit is a passage, an
+/// answer is a real model reply, never blurred into one bubble that
+/// overstates what either actually is.
 fn handle_ask(conn: &Connection, q: &str) -> ApiResponse {
     let hits = match crate::hi_graph::ask(conn, q) {
         Ok(h) => h,
         Err(e) => return ApiResponse::error(500, &e),
     };
-    if !hits.is_empty() {
-        return ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": null }));
-    }
     let Ok(client) = require_llm_client() else {
-        return ApiResponse::json(&serde_json::json!({ "hits": [], "answer": null }));
+        return ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": null }));
     };
     let context = match crate::hi_graph::project_context(conn) {
         Ok(c) => c,
         Err(e) => return ApiResponse::error(500, &e),
     };
-    match crate::hi_llm::answer_question(&client, q, &context) {
-        Ok(answer) => ApiResponse::json(&serde_json::json!({ "hits": [], "answer": answer })),
-        Err(e) => ApiResponse::json(&serde_json::json!({ "hits": [], "answer": null, "error": e })),
+    match crate::hi_llm::answer_question(&client, q, &context, conn) {
+        Ok(answer) => ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": answer })),
+        Err(e) => ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": null, "error": e })),
     }
 }
 
@@ -1042,6 +1049,14 @@ fn main() requires(public) {
 
     #[test]
     fn ask_finds_a_local_keyword_hit_without_ever_needing_an_llm() {
+        // No LLM is configured in this test process, so `answer` stays
+        // null here -- but as of the github "Ask relevance" fix
+        // (2026-09-14), that's only because no client is configured,
+        // not because a local hit rules an LLM answer out by design.
+        // When a client *is* configured, `hits` and a real `answer`
+        // are both returned together (see `handle_ask`'s own doc
+        // comment) -- a weak local hit no longer silently wins over a
+        // real, grounded answer the way it used to.
         let dir = scratch_dir("ask_local_hit");
         let conn = crate::hi_graph::open(&dir).expect("open");
         crate::hi_graph::add_candidate(&conn, "fn", "tick", "advances the game clock", "llm-prompt-mode").expect("add_candidate");
@@ -1051,7 +1066,7 @@ fn main() requires(public) {
         assert_eq!(resp.status, 200);
         let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
         assert_eq!(body["hits"].as_array().unwrap().len(), 1);
-        assert!(body["answer"].is_null(), "a real local hit should never also carry an LLM answer");
+        assert!(body["answer"].is_null(), "no LLM is configured in this test process, so answer must stay null");
     }
 
     #[test]

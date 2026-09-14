@@ -705,6 +705,59 @@ pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
     Ok(hits)
 }
 
+/// The tool surface `hi_llm::answer_question` hands the model via its
+/// own tool-calling loop (`LlmClient::complete_with_ask_tools`) --
+/// deliberately separate from `mcp_tools.rs`'s public Nirdosha-
+/// *language* MCP server (`get_grammar`/`verify_code`/`describe`/...,
+/// also advertised externally over `nirdosha mcp` stdio). That server
+/// answers "how do I write Nirdosha"; this one answers "what does
+/// *this project's own graph* actually say" -- private project data
+/// that has no business being handed to an arbitrary externally-
+/// connected MCP client, so it stays local to this one call instead of
+/// joining the public tool list.
+///
+/// One tool, `search_project`, wrapping this exact module's own `ask`
+/// -- the same local, free, network-free keyword search the `/api/ask`
+/// fast path already runs, just callable by the model itself, as many
+/// times and with as many rephrasings as it needs, instead of trusting
+/// a single search picked from the raw user question text plus one
+/// static context dump (the previous design, and the reason "Ask"
+/// answers could come back irrelevant -- a weak fast-path hit was
+/// treated as good enough and the model never got a turn to look
+/// further).
+pub fn ask_tools_list() -> serde_json::Value {
+    serde_json::json!({
+        "tools": [
+            {
+                "name": "search_project",
+                "title": "Search this project's graph",
+                "description": "Keyword-searches this project's ingested docs and code units (by title/driving text), same search the Ask rail's own fast path runs. Call this as many times as you need, rephrasing the query, before answering -- ground your answer only in what it actually returns.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "query": { "type": "string", "description": "search terms" } },
+                    "required": ["query"],
+                },
+            },
+        ],
+    })
+}
+
+/// Dispatches one `ask_tools_list` tool call by name -- the local
+/// analog of `mcp_tools::tools_call`, kept in this module (rather than
+/// `hi_llm.rs`) so the actual query stays next to `ask` itself and
+/// this whole surface stays offline-testable without a real
+/// `LlmClient`.
+pub fn ask_tools_call(conn: &Connection, name: &str, arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+    match name {
+        "search_project" => {
+            let query = arguments.get("query").and_then(|v| v.as_str()).ok_or_else(|| "missing required argument `query`".to_string())?;
+            let hits = ask(conn, query)?;
+            Ok(serde_json::json!({ "hits": hits }))
+        }
+        other => Err(format!("unknown tool `{other}` -- expected `search_project`")),
+    }
+}
+
 /// A bounded plain-text summary of the whole graph's `CodeUnit`
 /// content (name: driving text, or source location when there's no
 /// driving text) -- context for a project-level question `ask`'s own
@@ -916,6 +969,19 @@ pub fn edit_driving_text(conn: &Connection, id: &str, text: &str) -> Result<(), 
 /// domain pack re-installed on every `hi serve`/`hi sync` used to pile
 /// up dozens of copies of the same `PROOF DEMAND` line in the Generate
 /// prompt, one per prior run.
+///
+/// A genuine (non-duplicate) attribute write also unlocks the node --
+/// github #57: this used to leave `locked` untouched, so accepting a
+/// Suggest-rail `attribute` suggestion against an already-`locked`
+/// unit silently changed what it requires without ever showing up as
+/// "N changes since last build" (`hi_graph.html`'s `pendingCount`
+/// reads `locked` straight off `/api/nodes`) -- the Rebuild button
+/// stayed disabled over a unit that had, in fact, drifted from what
+/// was last actually built. Mirrors `edit_driving_text`, which already
+/// unlocks on a real change for the exact same reason. Skipped on the
+/// dedupe no-op path above on purpose: a pack reinstalled on every `hi
+/// serve` re-attaching lines it already attached must stay side-effect
+/// free, not spuriously unlock every unit it touches on every restart.
 pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), String> {
     let id = &resolve_attach_target_id(conn, id)?;
     let existing: Option<String> = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [id], |r| r.get(0)).map_err(|e| format!("reading {id}: {e}"))?;
@@ -928,7 +994,7 @@ pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), S
         Some(s) if !s.is_empty() => format!("{s}\n{attr}"),
         _ => attr.to_string(),
     };
-    conn.execute("UPDATE nodes SET attributes = ?2 WHERE id = ?1", params![id, merged]).map_err(|e| format!("attaching an attribute to {id}: {e}"))?;
+    conn.execute("UPDATE nodes SET attributes = ?2, locked = 0 WHERE id = ?1", params![id, merged]).map_err(|e| format!("attaching an attribute to {id}: {e}"))?;
     Ok(())
 }
 
@@ -1567,6 +1633,50 @@ mod tests {
     }
 
     #[test]
+    fn attach_attribute_unlocks_a_locked_unit_on_a_real_change() {
+        // github #57: accepting a Suggest-rail `attribute` suggestion
+        // against an already-built unit must make it "N changes since
+        // last build" again (`hi_graph.html`'s `pendingCount`/Rebuild
+        // reactivation reads `locked` straight off `/api/nodes`), the
+        // same way editing a locked unit's driving text already does.
+        let dir = scratch_dir("attach_unlocks_locked");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+        write_nir(&dir, "a.nir", "fn apply_interest() {}\n");
+        sync(&conn, &dir, &[]).expect("sync");
+        lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
+        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "sanity: starts locked");
+
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)").expect("attach");
+
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(units.len(), 1, "a genuine attribute change must unlock the unit for regeneration");
+    }
+
+    #[test]
+    fn attach_attribute_re_attaching_the_same_line_does_not_unlock_a_locked_unit() {
+        // The dedupe no-op path (`attach_attribute_is_a_no_op_when_the_
+        // exact_line_is_already_present` above) must stay side-effect
+        // free -- a domain pack re-installed on every `hi serve`
+        // re-attaching identical invariant lines must not spuriously
+        // unlock every unit it touches on every restart.
+        let dir = scratch_dir("attach_dedupe_does_not_unlock");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+        write_nir(&dir, "a.nir", "fn apply_interest() {}\n");
+        sync(&conn, &dir, &[]).expect("sync");
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)").expect("attach 1, a real change");
+        lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
+        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "sanity: starts locked");
+
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)").expect("attach 2, an identical re-attach");
+
+        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "re-attaching an identical line must not unlock the unit");
+    }
+
+    #[test]
     fn attach_attribute_rejects_a_title_shared_by_more_than_one_unit_rather_than_guessing() {
         let dir = scratch_dir("attach_ambiguous_title");
         let conn = open(&dir).expect("open");
@@ -1575,6 +1685,34 @@ mod tests {
 
         let err = attach_attribute(&conn, "process", "requires(role: admin)").expect_err("an ambiguous bare title must error, not guess");
         assert!(err.contains("more than one unit"), "expected an ambiguity error, got: {err}");
+    }
+
+    #[test]
+    fn ask_tools_call_search_project_wraps_ask_and_returns_real_hits() {
+        let dir = scratch_dir("ask_tools_search");
+        let conn = open(&dir).expect("open");
+        add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+
+        let result = ask_tools_call(&conn, "search_project", &serde_json::json!({ "query": "interest" })).expect("search_project");
+        let hits = result["hits"].as_array().expect("hits array");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["doc_id"], "code:fn:apply_interest");
+    }
+
+    #[test]
+    fn ask_tools_call_search_project_requires_a_query_argument() {
+        let dir = scratch_dir("ask_tools_missing_query");
+        let conn = open(&dir).expect("open");
+        let err = ask_tools_call(&conn, "search_project", &serde_json::json!({})).expect_err("missing `query` must error, not panic");
+        assert!(err.contains("query"), "expected a `query`-shaped error, got: {err}");
+    }
+
+    #[test]
+    fn ask_tools_call_rejects_an_unknown_tool_name() {
+        let dir = scratch_dir("ask_tools_unknown");
+        let conn = open(&dir).expect("open");
+        let err = ask_tools_call(&conn, "delete_everything", &serde_json::json!({})).expect_err("an unknown tool name must error, not silently no-op");
+        assert!(err.contains("unknown tool"), "expected an unknown-tool error, got: {err}");
     }
 
     #[test]

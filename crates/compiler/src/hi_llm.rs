@@ -236,12 +236,32 @@ struct ChoiceMessage {
 /// entry must fail that one Generate call, never take the whole
 /// process down.
 fn openai_tool_defs() -> Result<Vec<serde_json::Value>, String> {
-    let list = crate::mcp_tools::tools_list();
-    let tools = list["tools"].as_array().ok_or_else(|| "mcp_tools::tools_list did not return a `tools` array -- the MCP tool surface is unavailable".to_string())?;
+    reshape_tools_to_openai(&crate::mcp_tools::tools_list(), "mcp_tools::tools_list")
+}
+
+/// `hi_graph::ask_tools_list`'s tool (currently just `search_project`)
+/// reshaped the same way `openai_tool_defs` reshapes `mcp_tools`'s --
+/// a separate function, not a shared list, because this is a distinct
+/// tool surface (see `hi_graph::ask_tools_list`'s own doc comment for
+/// why it isn't folded into the public `mcp_tools` server).
+fn openai_ask_tool_defs() -> Result<Vec<serde_json::Value>, String> {
+    reshape_tools_to_openai(&crate::hi_graph::ask_tools_list(), "hi_graph::ask_tools_list")
+}
+
+/// Shared by `openai_tool_defs`/`openai_ask_tool_defs`: reshapes an MCP
+/// `tools/list`-shaped `{"tools": [{name, description, inputSchema}]}`
+/// value into the OpenAI-compatible `tools[]` request shape
+/// (`{"type": "function", "function": {name, description, parameters}}`
+/// -- `parameters` being plain JSON Schema, exactly what `inputSchema`
+/// already is, no translation needed beyond the rename). `source_fn`
+/// is only for the error message, so a malformed list from either
+/// surface says which one broke.
+fn reshape_tools_to_openai(list: &serde_json::Value, source_fn: &str) -> Result<Vec<serde_json::Value>, String> {
+    let tools = list["tools"].as_array().ok_or_else(|| format!("{source_fn} did not return a `tools` array -- the tool surface is unavailable"))?;
     tools
         .iter()
         .map(|t| {
-            let name = t["name"].as_str().ok_or_else(|| format!("a tool entry from mcp_tools::tools_list has no string `name`: {t}"))?;
+            let name = t["name"].as_str().ok_or_else(|| format!("a tool entry from {source_fn} has no string `name`: {t}"))?;
             Ok(serde_json::json!({ "type": "function", "function": { "name": name, "description": t["description"], "parameters": t["inputSchema"] } }))
         })
         .collect()
@@ -423,6 +443,41 @@ impl LlmClient {
                 let result_text = match crate::mcp_tools::tools_call(&params, log) {
                     Ok(result) => serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string()),
                     Err((_code, error_message)) => serde_json::json!({ "error": error_message }).to_string(),
+                };
+                history.push(ChatMessage::tool_result(call.id, result_text));
+            }
+        }
+        Err(format!("the model called tools for {MAX_TOOL_ROUNDS} rounds in a row without ever producing a final answer -- giving up this attempt"))
+    }
+
+    /// `complete_with_tools`'s counterpart for `hi_graph::ask_tools_*`
+    /// instead of `mcp_tools`: same round-robin shape (offer the tools,
+    /// dispatch every `tool_calls` response in-process, stop once a
+    /// round comes back with plain content), dispatching to
+    /// `hi_graph::ask_tools_call` instead of `mcp_tools::tools_call`.
+    /// A separate method rather than a generalized one because the two
+    /// tool surfaces are dispatched differently at the root:
+    /// `mcp_tools::tools_call` takes a `{name, arguments}` params value
+    /// and its own `McpCallLog`; `hi_graph::ask_tools_call` takes the
+    /// open `rusqlite::Connection` this call needs to actually search
+    /// the project's own graph, and deliberately does not join the
+    /// shared `McpCallLog` (`hi_graph::ask_tools_list`'s own doc
+    /// comment covers why this stays a separate, local-only surface --
+    /// wiring it into that shared, cross-surface call log is real,
+    /// disclosed follow-on work this first pass doesn't attempt).
+    fn complete_with_ask_tools(&self, history: &mut Vec<ChatMessage>, conn: &rusqlite::Connection) -> Result<String, String> {
+        let tools = openai_ask_tool_defs()?;
+        for _round in 0..MAX_TOOL_ROUNDS {
+            let message = self.send(history, Some(tools.clone()))?;
+            let Some(calls) = message.tool_calls.filter(|c| !c.is_empty()) else {
+                return Ok(message.content.unwrap_or_default());
+            };
+            history.push(ChatMessage::assistant_tool_calls(message.content, calls.clone()));
+            for call in calls {
+                let arguments: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| serde_json::json!({}));
+                let result_text = match crate::hi_graph::ask_tools_call(conn, &call.function.name, &arguments) {
+                    Ok(result) => serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string()),
+                    Err(error_message) => serde_json::json!({ "error": error_message }).to_string(),
                 };
                 history.push(ChatMessage::tool_result(call.id, result_text));
             }
@@ -642,26 +697,40 @@ fn validate_suggested_items(items: &[SuggestedItem]) -> Result<(), String> {
 }
 
 const ANSWER_QUESTION_SYSTEM_PROMPT: &str = "You answer questions about a software project for the person building it. \
-You are given a plain-text summary of the project's own components (name: description, one per line) -- use ONLY that summary, never outside knowledge about unrelated software. \
-If the summary doesn't actually contain enough information to answer, say so plainly rather than guessing or inventing detail.";
+You are given a brief project summary (name: description, one per line) as a starting point, and a `search_project` tool that keyword-searches this project's own ingested docs and code units -- call it as many times as you need, rephrasing the query, before answering; a single search picked straight from the question's own wording often misses the actually-relevant unit. \
+Ground your answer ONLY in the project summary plus whatever search_project actually returns -- never outside knowledge about unrelated software, and never invented detail neither of those actually gave you. \
+If your searches genuinely don't turn up enough to answer, say so plainly rather than guessing.";
 
-/// The whole-project fallback `hi_api.rs`'s `/api/ask` route reaches
-/// for once `hi_graph::ask`'s own local keyword search comes up empty
-/// -- "what is this project about" matches no single `CodeUnit`'s name
-/// or driving text, because it was never really about any one node.
+/// `hi_api.rs`'s `/api/ask` route's LLM-backed half -- run *alongside*
+/// `hi_graph::ask`'s own local keyword search now (github "Ask
+/// relevance" fix, 2026-09-14), not only as a fallback after it comes
+/// up empty. That gating used to mean: the instant the fast path found
+/// *anything at all*, even a single weak/off-topic keyword or
+/// substring match, this never ran -- so a loosely-matching hit could
+/// win over a real answer with no chance to do better. Now it always
+/// runs whenever an LLM is configured, and -- the actual fix for
+/// relevance, not just the gating -- it can call `search_project`
+/// itself (`LlmClient::complete_with_ask_tools`,
+/// `hi_graph::ask_tools_call`) as many times as it needs, instead of
+/// trusting one search the caller already ran plus a single flattened
+/// project summary, before answering.
+///
 /// **A deliberate, bounded exception to RFC 0014's "semantic search
 /// stays opt-in, not a default" posture (Open Question 8), not a
 /// silent violation of it:** that open question is about *embedding-
 /// based* similarity search running proactively over every query; this
-/// is a plain chat completion, triggered only as a fallback after local
-/// search already found nothing, and only when an LLM is already
-/// configured -- the same one `:prompt`/`:generate` already send
-/// driving text to, so this adds no new category of external exposure,
-/// just a second use of the same already-opted-into channel.
-pub fn answer_question(client: &LlmClient, question: &str, project_context: &str) -> Result<String, String> {
+/// is a plain chat completion (now with tool access, still no
+/// embeddings), and only runs when an LLM is already configured -- the
+/// same one `:prompt`/`:generate` already send driving text to, so
+/// this adds no new category of external exposure, just a second use
+/// of the same already-opted-into channel. `search_project` itself
+/// never leaves the process (`hi_graph::ask` is network-free); the
+/// only network calls this makes are the same chat-completion round
+/// trips `:prompt`/`:generate` already send project text over.
+pub fn answer_question(client: &LlmClient, question: &str, project_context: &str, conn: &rusqlite::Connection) -> Result<String, String> {
     let context = if project_context.is_empty() { "(no code units in this project's graph yet)".to_string() } else { format!("Project summary (component: description):\n{project_context}") };
-    let history = [ChatMessage::system(ANSWER_QUESTION_SYSTEM_PROMPT), ChatMessage::user(format!("{context}\nQuestion: {question}"))];
-    client.complete(&history)
+    let mut history = vec![ChatMessage::system(ANSWER_QUESTION_SYSTEM_PROMPT), ChatMessage::user(format!("{context}\nQuestion: {question}"))];
+    client.complete_with_ask_tools(&mut history, conn)
 }
 
 /// The model's response can (and often does) wrap the JSON array in

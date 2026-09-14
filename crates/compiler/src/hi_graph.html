@@ -400,13 +400,29 @@
     return !node.confirmed && !!node.driving_text;
   }
 
+  // github #57: "confirmed, but not reflected in the last successful
+  // build" -- the exact same predicate `updateHeaderState`'s
+  // `pendingCount` already uses to decide "N changes since last
+  // build"/whether Rebuild is enabled, applied per-node instead of
+  // counted. Before this, a node's `locked` status was only visible by
+  // clicking it open and reading the panel's `locked: yes/no` row one
+  // at a time -- nothing in the graph itself showed which units were
+  // already reflected in the last build and which were waiting on one.
+  // Gated on `created_by || driving_text`, same as the 2D ring below,
+  // so a plain synced unit that was never a candidate (and so never
+  // goes through the lock/unlock lifecycle at all) doesn't get
+  // recolored as "pending" just for lacking `locked`.
+  function isPendingBuild(node) {
+    return !!(node.created_by || node.driving_text) && !!node.confirmed && !node.locked && !node.waived;
+  }
+
   function colorFor(node) {
     const base = node.status === 'exposed' ? EXPOSED_COLOR : (KIND_COLORS[subKind(node)] || KIND_COLORS.default);
     // `blendTowardBackground` only parses a `#rrggbb` hex input (it
     // returns an `rgb(...)` string, which isn't re-parseable) -- so
-    // the disconnected- and reviewing-dimming amounts below compose
-    // into ONE blend of the original hex `base`, never a blend of a
-    // previous blend's output.
+    // the disconnected-, reviewing-, and pending-build-dimming amounts
+    // below compose into ONE blend of the original hex `base`, never a
+    // blend of a previous blend's output.
     const disconnectedAmount = connectedNodeIds.has(node.id) ? 0 : 0.55;
     // github #40's "dashed ring = still reviewing, solid = confirmed"
     // for the 3D view specifically: the vendored `3d-force-graph`
@@ -419,18 +435,27 @@
     // mf(c)` material-opacity line) -- so per-node alpha isn't
     // reachable that way either. `nodeColor`'s per-node function
     // accessor *is* real and already relied on for `colorFor` itself,
-    // so reviewing state rides the same, proven mechanism: a further
-    // blend toward the background, layered on top of (not replacing)
-    // the existing connected/disconnected dimming above. The 2D
-    // fallback (`run2D`'s `draw()`) draws an actual dashed/solid
-    // stroked ring instead, since a plain canvas needs no extra
-    // library for that.
+    // so reviewing state (and, github #57, pending-build state) rides
+    // the same, proven mechanism: a further blend toward the
+    // background, layered on top of (not replacing) the existing
+    // connected/disconnected dimming above. The 2D fallback (`run2D`'s
+    // `draw()`) draws an actual dashed/solid stroked ring instead
+    // (amber-dashed/green-dashed/green-solid, github #57), since a
+    // plain canvas needs no extra library for that.
     const reviewingAmount = isReviewing(node) ? 0.35 : 0;
-    // Compose two independent blends of the same background target as
-    // one: `1 - (1-a)*(1-b)`, so a disconnected+reviewing node ends up
-    // more dimmed than either alone, and a connected+confirmed node
-    // (both amounts 0) is untouched.
-    const amount = 1 - (1 - disconnectedAmount) * (1 - reviewingAmount);
+    // Deliberately lighter than `reviewingAmount`: pending-build is a
+    // real signal ("this no longer matches what was last built"), but
+    // a milder one than "not even confirmed yet" -- the two states
+    // read as different intensities of the same "not final" idea, not
+    // duplicates of each other. Mutually exclusive with reviewing in
+    // practice (`isReviewing` requires `!confirmed`, `isPendingBuild`
+    // requires `confirmed`), so this never double-applies for one node.
+    const pendingAmount = isPendingBuild(node) ? 0.18 : 0;
+    // Compose three independent blends of the same background target
+    // as one: `1 - (1-a)*(1-b)*(1-c)`, so amounts stack (each on top
+    // of the others) rather than the largest alone winning, and a
+    // connected+confirmed+built node (every amount 0) is untouched.
+    const amount = 1 - (1 - disconnectedAmount) * (1 - reviewingAmount) * (1 - pendingAmount);
     return amount === 0 ? base : blendTowardBackground(base, amount);
   }
 
@@ -1112,6 +1137,16 @@
     dimNote.style.fontSize = '11px';
     dimNote.textContent = 'dim = nothing links to it yet';
     legend.appendChild(dimNote);
+    // github #57: spells out the ring ladder `colorFor`/`draw()` now
+    // render (dashed-amber -> dashed-green -> solid-green), so "which
+    // units are already built" is answered here instead of only by
+    // clicking each node open one at a time.
+    const ringNote = document.createElement('div');
+    ringNote.className = 'item';
+    ringNote.style.opacity = '0.7';
+    ringNote.style.fontSize = '11px';
+    ringNote.textContent = 'ring: dashed amber = reviewing, dashed green = pending build, solid green = built';
+    legend.appendChild(ringNote);
   }
 
   // Set by whichever of `run3D`/`run2D` actually ran, so a mutating
@@ -1358,15 +1393,22 @@
         ctx.arc(n.x, n.y, 5, 0, Math.PI * 2);
         ctx.fillStyle = colorFor(n);
         ctx.fill();
-        // github #40: a literal dashed/solid ring is cheap on a plain
-        // 2D canvas (unlike the 3D path, which has no THREE to build a
-        // ring mesh from -- see `colorFor`'s own comment) -- only drawn
-        // for a real candidate at all (created_by/driving_text), so a
-        // plain synced fn without any candidate state gets no ring.
+        // github #40/#57: a literal dashed/solid ring is cheap on a
+        // plain 2D canvas (unlike the 3D path, which has no THREE to
+        // build a ring mesh from -- see `colorFor`'s own comment) --
+        // only drawn for a real candidate at all (created_by/driving_
+        // text), so a plain synced fn without any candidate state gets
+        // no ring. Three rungs on one ladder, dash and color both
+        // advancing together: dashed amber = still reviewing (not
+        // confirmed); dashed green = confirmed, but pending a build
+        // (github #57 -- previously indistinguishable from the solid
+        // state below, the actual "which are already built" gap);
+        // solid green = confirmed AND locked, i.e. actually reflected
+        // in the last successful build.
         if (n.created_by || n.driving_text) {
           ctx.beginPath();
-          ctx.setLineDash(isReviewing(n) ? [3, 3] : []);
-          ctx.strokeStyle = n.confirmed ? '#7fffa0' : '#c9a84c';
+          ctx.setLineDash(isReviewing(n) || isPendingBuild(n) ? [3, 3] : []);
+          ctx.strokeStyle = isReviewing(n) ? '#c9a84c' : '#7fffa0';
           ctx.lineWidth = 1.5;
           ctx.arc(n.x, n.y, 8, 0, Math.PI * 2);
           ctx.stroke();
@@ -1460,17 +1502,19 @@
     if (line === ':ask' || line.startsWith(':ask ')) {
       const q = line.slice(':ask'.length).trim();
       if (!q) { logLine('error', 'usage: :ask <question>'); return; }
-      // Wrapped in withBusy: local keyword search is instant, but a
-      // question that falls through to hi_llm::answer_question (see
-      // hi_api.rs::handle_ask) is a real, potentially slow model call.
+      // Wrapped in withBusy: local keyword search is instant, but
+      // hi_llm::answer_question (see hi_api.rs::handle_ask) now always
+      // runs alongside it when an LLM is configured -- a real,
+      // potentially slow model call, not just a fallback for a
+      // keyword miss (github "Ask relevance" fix, 2026-09-14).
       withBusy(fetch('/api/ask?q=' + encodeURIComponent(q)).then(r => r.json()))
         .then(result => {
           const hits = result.hits || [];
-          if (hits.length) {
-            hits.forEach(h => logLine('', h.doc_id + ': ' + h.content));
-          } else if (result.answer) {
-            logLine('', result.answer);
-          } else if (result.error) {
+          let logged = false;
+          if (result.answer) { logLine('', result.answer); logged = true; }
+          if (hits.length) { hits.forEach(h => logLine('', h.doc_id + ': ' + h.content)); logged = true; }
+          if (logged) return;
+          if (result.error) {
             logLine('error', result.error);
           } else {
             logLine('', '(no matches -- set an LLM provider, e.g. OPENAI_API_KEY, for a real answer when local search finds nothing)');
@@ -1802,22 +1846,37 @@
   }
 
   // rfcs/0014's 2026-09-14 amendment: Ask as a rail present on every
-  // screen, not a mode -- wraps the real `/api/ask` (`hi_graph::ask`),
-  // rendered as what it actually is (keyword-matched passages), never
-  // as a synthesized conversational answer the endpoint doesn't give.
-  // `/api/ask` (`hi_api.rs::handle_ask`) has three real outcomes, same
-  // as the console's own `:ask` handling: local keyword `hits` (FTS5 +
-  // a CodeUnit name/driving-text match, instant, free), a real LLM
-  // `answer` when nothing local matched and a provider is configured,
-  // or `error`. Rendered here exactly as distinct as the console
-  // already keeps them -- a hit is a passage, an `answer` is a real
-  // model reply, never blurred into one "chat bubble" that overstates
-  // what a plain keyword miss actually is.
+  // screen, not a mode -- wraps the real `/api/ask` (`hi_graph::ask`
+  // plus, github "Ask relevance" fix, 2026-09-14, `hi_llm::
+  // answer_question`), rendered as what each actually is: a hit is a
+  // keyword-matched passage, an `answer` is a real, tool-grounded
+  // model reply -- never blurred into one "chat bubble" that overstates
+  // what either is. `/api/ask` (`hi_api.rs::handle_ask`) now returns
+  // `hits` and `answer` *together* whenever an LLM is configured
+  // (previously either/or -- any local hit, however weak, used to
+  // suppress the LLM call entirely, which was the actual cause of
+  // irrelevant-looking Ask answers: a loose match won by default with
+  // no chance at a better one). The answer renders first, since it's
+  // the one actually meant to address the question; hits render below
+  // it as supporting evidence, same as the console's own `:ask`.
   function renderAskResult(result) {
     const results = document.getElementById('ask-results');
     results.replaceChildren();
     const hits = result.hits || [];
+    let rendered = false;
+    if (result.answer) {
+      rendered = true;
+      const div = document.createElement('div');
+      div.className = 'hit';
+      const label = document.createElement('div');
+      label.className = 'doc';
+      label.textContent = "hi's answer";
+      div.appendChild(label);
+      div.appendChild(document.createTextNode(result.answer));
+      results.appendChild(div);
+    }
     if (hits.length) {
+      rendered = true;
       hits.forEach(hit => {
         const div = document.createElement('div');
         div.className = 'hit';
@@ -1828,18 +1887,11 @@
         div.appendChild(document.createTextNode(hit.content));
         results.appendChild(div);
       });
-      return;
     }
+    if (rendered) return;
     const empty = document.createElement('div');
     empty.className = 'empty';
-    if (result.answer) {
-      empty.className = 'hit';
-      empty.textContent = result.answer;
-    } else if (result.error) {
-      empty.textContent = result.error;
-    } else {
-      empty.textContent = 'no local matches -- set an LLM provider (e.g. OPENAI_API_KEY) for a real answer when local search finds nothing.';
-    }
+    empty.textContent = result.error || 'no local matches -- set an LLM provider (e.g. OPENAI_API_KEY) for a real answer when local search finds nothing.';
     results.appendChild(empty);
   }
 
