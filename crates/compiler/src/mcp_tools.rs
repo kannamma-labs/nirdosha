@@ -1047,6 +1047,88 @@ pub fn nfr_commitments_from_program(program: &crate::ast::Program) -> Vec<NfrCom
     commitments
 }
 
+/// One real, observed NFR-threshold crossing -- the *exact* wire shape
+/// `runtime-kernels::kernel::nfr`'s own `send_escalation` already POSTs
+/// to `NIRDOSHA_OBSERVABILITY_URL` (`{"function":...,"nfr":...,
+/// "threshold":...,"actual":...,"timestamp_ms":...}`), reused verbatim
+/// as `nirdosha check-drift`'s own input format rather than inventing a
+/// second one. Practical consequence: an operator whose observability
+/// endpoint already logs every incoming escalation POST body to a file
+/// (`examples/isolation_demo/listener.py`'s own pattern, generalized)
+/// has a valid `check-drift` input with zero new capture code --
+/// unlike `check-isolation`'s own ops-log, which nothing produces yet,
+/// this one's producer already exists and already ships.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NfrEscalation {
+    pub function: String,
+    /// `"latency_ms"` | `"error_rate_max"` | `"throughput_min_per_sec"`
+    /// | `"concurrency_max"` -- `ast::NfrSpec`'s own four field names,
+    /// exactly as `nfr.rs`'s `check_and_escalate` names them.
+    pub nfr: String,
+    pub threshold: f64,
+    pub actual: f64,
+    #[serde(default)]
+    pub timestamp_ms: u128,
+}
+
+/// One compile-time `nfr(...)` assumption a real, observed escalation
+/// log shows was actually crossed in practice -- Phase 4 item 1 of
+/// `docs/research/2026-09-pending-verification-differentiation-
+/// work.md`: "detect when a compile-time nfr(...) assumption diverges
+/// from what the APM kernel actually observes in production."
+#[derive(Debug, serde::Serialize)]
+pub struct DriftFinding {
+    pub fn_name: String,
+    pub nfr_kind: String,
+    pub declared_threshold: f64,
+    /// The single worst observed value among every matching escalation
+    /// -- highest `actual` for a must-stay-under kind (`latency_ms`/
+    /// `error_rate_max`/`concurrency_max`), lowest for the one
+    /// must-stay-over kind (`throughput_min_per_sec`).
+    pub worst_observed: f64,
+    pub violation_count: usize,
+}
+
+/// Compares every declared `nfr(...)` field (a fn can declare more than
+/// one -- `latency_ms` *and* `concurrency_max` together, say) against a
+/// real observed escalation log, one `DriftFinding` per `(fn_name,
+/// nfr_kind)` pair with at least one matching escalation.
+///
+/// **No extra "is this actually past threshold" logic here, on
+/// purpose**: `nfr.rs`'s own `escalate()` only ever fires once a real
+/// per-call check already confirmed a crossing (`check_and_escalate`),
+/// so any escalation naming a given `(function, nfr)` pair is already
+/// conclusive evidence that commitment drifted in practice -- this
+/// function's whole job is matching declared assumptions against
+/// confirmed observations, not re-deriving the threshold logic `nfr.rs`
+/// already owns.
+pub fn nfr_drift(commitments: &[NfrCommitment], escalations: &[NfrEscalation]) -> Vec<DriftFinding> {
+    let mut findings = Vec::new();
+    for c in commitments {
+        let declared: [(&str, Option<f64>); 4] = [
+            ("latency_ms", c.nfr.latency_ms.map(|v| v as f64)),
+            ("error_rate_max", c.nfr.error_rate_max),
+            ("throughput_min_per_sec", c.nfr.throughput_min_per_sec.map(|v| v as f64)),
+            ("concurrency_max", c.nfr.concurrency_max.map(|v| v as f64)),
+        ];
+        for (kind, threshold) in declared {
+            let Some(declared_threshold) = threshold else { continue };
+            let matching: Vec<&NfrEscalation> = escalations.iter().filter(|e| e.function == c.fn_name && e.nfr == kind).collect();
+            if matching.is_empty() {
+                continue;
+            }
+            let worst_observed = if kind == "throughput_min_per_sec" {
+                matching.iter().map(|e| e.actual).fold(f64::INFINITY, f64::min)
+            } else {
+                matching.iter().map(|e| e.actual).fold(f64::NEG_INFINITY, f64::max)
+            };
+            findings.push(DriftFinding { fn_name: c.fn_name.clone(), nfr_kind: kind.to_string(), declared_threshold, worst_observed, violation_count: matching.len() });
+        }
+    }
+    findings.sort_by(|a, b| (a.fn_name.as_str(), a.nfr_kind.as_str()).cmp(&(b.fn_name.as_str(), b.nfr_kind.as_str())));
+    findings
+}
+
 /// Certificate v1 (`nirdosha-master-plan.md` Part 3 Nov 2026, "Signed
 /// certificates (v1) -- key-pinned verdicts", parity target: Velvet)
 /// -- Certificate v0 plus a real Ed25519 signature (`ring`, already a
@@ -2013,5 +2095,84 @@ mod tests {
         assert_eq!(&ts[19..20], ".");
         assert!(ts.ends_with('Z'));
         assert_eq!(ts.len(), 24);
+    }
+
+    fn commitment(fn_name: &str, nfr: crate::ast::NfrSpec) -> NfrCommitment {
+        NfrCommitment { fn_name: fn_name.to_string(), nfr, evidence_tier: NfrCommitment::EVIDENCE_TIER.to_string() }
+    }
+
+    fn escalation(function: &str, nfr: &str, threshold: f64, actual: f64) -> NfrEscalation {
+        NfrEscalation { function: function.to_string(), nfr: nfr.to_string(), threshold, actual, timestamp_ms: 0 }
+    }
+
+    #[test]
+    fn nfr_drift_finds_a_real_crossing_for_a_declared_field() {
+        let commitments = vec![commitment("slow_lookup", crate::ast::NfrSpec { latency_ms: Some(50), error_rate_max: None, throughput_min_per_sec: None, concurrency_max: None })];
+        let escalations = vec![escalation("slow_lookup", "latency_ms", 50.0, 87.0)];
+        let findings = nfr_drift(&commitments, &escalations);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].fn_name, "slow_lookup");
+        assert_eq!(findings[0].nfr_kind, "latency_ms");
+        assert_eq!(findings[0].declared_threshold, 50.0);
+        assert_eq!(findings[0].worst_observed, 87.0);
+        assert_eq!(findings[0].violation_count, 1);
+    }
+
+    #[test]
+    fn nfr_drift_reports_the_worst_of_several_escalations() {
+        let commitments = vec![commitment("hot_path", crate::ast::NfrSpec { latency_ms: Some(50), error_rate_max: None, throughput_min_per_sec: None, concurrency_max: None })];
+        let escalations = vec![escalation("hot_path", "latency_ms", 50.0, 60.0), escalation("hot_path", "latency_ms", 50.0, 200.0), escalation("hot_path", "latency_ms", 50.0, 75.0)];
+        let findings = nfr_drift(&commitments, &escalations);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].worst_observed, 200.0, "the highest actual latency, not the first or last escalation");
+        assert_eq!(findings[0].violation_count, 3);
+    }
+
+    #[test]
+    fn nfr_drift_uses_the_lowest_observed_for_a_throughput_minimum() {
+        // throughput_min_per_sec is a "must stay over" bound -- the
+        // *worst* real observation is the lowest one, the opposite of
+        // every other kind's "must stay under."
+        let commitments = vec![commitment("ingest", crate::ast::NfrSpec { latency_ms: None, error_rate_max: None, throughput_min_per_sec: Some(100), concurrency_max: None })];
+        let escalations = vec![escalation("ingest", "throughput_min_per_sec", 100.0, 80.0), escalation("ingest", "throughput_min_per_sec", 100.0, 40.0)];
+        let findings = nfr_drift(&commitments, &escalations);
+        assert_eq!(findings[0].worst_observed, 40.0, "the lowest observed rate is the worst violation of a minimum");
+    }
+
+    #[test]
+    fn nfr_drift_ignores_an_escalation_for_an_undeclared_nfr_kind_on_the_same_fn() {
+        // `hot_path` only declares `latency_ms` -- an escalation naming
+        // a *different* kind for the same function (nothing declared
+        // it) must not be reported as drift against a commitment that
+        // was never made.
+        let commitments = vec![commitment("hot_path", crate::ast::NfrSpec { latency_ms: Some(50), error_rate_max: None, throughput_min_per_sec: None, concurrency_max: None })];
+        let escalations = vec![escalation("hot_path", "concurrency_max", 10.0, 15.0)];
+        assert!(nfr_drift(&commitments, &escalations).is_empty());
+    }
+
+    #[test]
+    fn nfr_drift_ignores_an_escalation_for_a_different_function() {
+        let commitments = vec![commitment("fn_a", crate::ast::NfrSpec { latency_ms: Some(50), error_rate_max: None, throughput_min_per_sec: None, concurrency_max: None })];
+        let escalations = vec![escalation("fn_b", "latency_ms", 50.0, 200.0)];
+        assert!(nfr_drift(&commitments, &escalations).is_empty());
+    }
+
+    #[test]
+    fn nfr_drift_finds_every_declared_field_independently_on_a_multi_nfr_fn() {
+        let commitments = vec![commitment(
+            "busy_endpoint",
+            crate::ast::NfrSpec { latency_ms: Some(50), error_rate_max: None, throughput_min_per_sec: None, concurrency_max: Some(10) },
+        )];
+        let escalations = vec![escalation("busy_endpoint", "latency_ms", 50.0, 90.0), escalation("busy_endpoint", "concurrency_max", 10.0, 14.0)];
+        let findings = nfr_drift(&commitments, &escalations);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        let kinds: Vec<&str> = findings.iter().map(|f| f.nfr_kind.as_str()).collect();
+        assert!(kinds.contains(&"latency_ms") && kinds.contains(&"concurrency_max"), "{kinds:?}");
+    }
+
+    #[test]
+    fn nfr_drift_with_no_escalations_at_all_is_empty() {
+        let commitments = vec![commitment("quiet_fn", crate::ast::NfrSpec { latency_ms: Some(50), error_rate_max: None, throughput_min_per_sec: None, concurrency_max: None })];
+        assert!(nfr_drift(&commitments, &[]).is_empty());
     }
 }

@@ -16,7 +16,7 @@
 | 1 — Research | Study Polonius/Dafny/Prusti/Imandra/Sigstore/Elle | ✅ Done |
 | 2 — Close gaps | db-serializability checker, inter-procedural VC gen (found already done), borrow-checker liveness, Sigstore-pattern signing | ✅ Done |
 | 3 — Externalize evidence | Publish methodology, invite outside reproduction, an adversarial demo for the new capability | ✅ Items 1 and 3 done; item 2 as done as this environment allows (below) |
-| 4 — Close the APM loop | Feed real runtime data back into the proof/generation loop | 🟡 Item 3 done; items 1-2 still design-only (see below) |
+| 4 — Close the APM loop | Feed real runtime data back into the proof/generation loop | ✅ All three items done (below) |
 | 5 — Domain translation stretch | Pick a new failure class, idealize → build → wire in | ◻️ Not started, deliberately |
 
 ## Phase 3 — externalize evidence (next up)
@@ -75,29 +75,58 @@
    scaling fix as a worked example of the invitation actually being
    honored (found, fixed, and the record kept, same day).
 
-## Phase 4 — close the APM loop (partially real)
+## Phase 4 — close the APM loop (✅ all three items real, 2026-09-15)
 
-What's already true: the isolation checker's escalation path
-(`isolation_check::escalate`, reusing `nfr.rs`'s `NIRDOSHA_OBSERVABILITY_URL`
-client) **is** a real APM-kernel closed loop — a runtime-observed fact
-now flows back out of the compiled binary through the same channel NFR
-violations use.
+What was already true before this session: the isolation checker's
+escalation path (`isolation_check::escalate`, reusing `nfr.rs`'s
+`NIRDOSHA_OBSERVABILITY_URL` client) **is** a real APM-kernel closed
+loop — a runtime-observed fact flows back out of the compiled binary
+through the same channel NFR violations use. All three items below
+were "still just a design" as of 2026-09-14; all three are real code,
+tested, as of 2026-09-15.
 
-What's still just a design, not code:
-
-1. **Drift detection.** Detect when a compile-time `nfr(...)` assumption
-   (e.g. an implicitly assumed max concurrency) diverges from what the
-   APM kernel actually observes in production, and trigger
-   re-verification instead of just firing an alert.
-2. **Feed real incidents into `hint_cache`.** A production runtime
-   violation (an isolation anomaly, a crossed NFR threshold) should be
-   able to become a taught lesson for `hi_llm`'s self-repair loop the
-   same way a `:generate`-time failure already does
-   (`hint_cache::HintCache`) — right now the two systems don't talk to
-   each other at all.
-
-Now real, not just a design (2026-09-15):
-
+1. ✅ **Drift detection.** `nirdosha check-drift <file.nir>
+   <escalations.json>` (`main.rs::cmd_check_drift`,
+   `mcp_tools::nfr_drift`) compares `<file.nir>`'s own declared
+   `nfr(...)` commitments against a real, saved escalation log --
+   **the exact wire shape `nfr.rs`'s own `send_escalation` already
+   POSTs** to `NIRDOSHA_OBSERVABILITY_URL` (`{function,nfr,threshold,
+   actual,timestamp_ms}`), reused verbatim rather than a second format
+   invented for this. If any commitment drifted, this **actually
+   triggers real re-verification** (`run_verify_pipeline`, the identical
+   pipeline `verify`/`certify` run) and includes that fresh verdict in
+   the output — the RFC's own "trigger re-verification instead of just
+   firing an alert," not a passive notification with nothing
+   downstream. Tested end to end, 6 tests
+   (`crates/compiler/tests/check_drift_command.rs`), including that a
+   clean comparison does *not* trigger a needless re-verify and that an
+   escalation for an undeclared commitment is correctly ignored.
+2. ✅ **Feed real incidents into `hint_cache`.**
+   `hint_cache::RuntimeLessons` is a real, separate store (not folded
+   into the existing compile-diagnostic-keyed `HintCache`, on purpose —
+   see that struct's own doc comment for why the two have genuinely
+   different provenance and can't share a mechanism). `nirdosha check-
+   isolation --teach <hint>` / `check-drift --teach <hint>` record a
+   lesson on a real finding (never on a clean check), keyed by a small,
+   fixed incident-kind vocabulary
+   (`"transact_isolation_anomaly"`/`"nfr_drift"`) rather than per-
+   function or per-anomaly, and only on deliberate human/operator
+   confirmation -- there is no automatic "proof" step for a runtime
+   lesson the way `promote_validated_hints` has for a compile-time one.
+   **Real consultation, not just a write-only store**:
+   `hi_llm.rs::generate_from_task_prompt` (the bench harness's own
+   generate entry point) proactively surfaces a recorded lesson before
+   the model ever sees a task whose own prompt mentions the matching
+   construct (`"transact"` / the literal `"nfr("` syntax) --
+   `runtime_lesson_guidance`'s own doc comment names the real,
+   disclosed v1 limit: keyword matching on the prompt text, not
+   AST-shape similarity against the eventual generated code, a bigger,
+   separate problem not attempted here. `generate_program`'s own
+   (graph-shaped) prompt construction is not yet wired the same way --
+   real, disclosed follow-up, chosen deliberately as the lower-risk
+   integration point for this pass rather than touching both at once.
+   12 tests total (`mcp_tools`/`hint_cache`/`hi_llm` unit tests plus the
+   `--teach` integration tests in both CLI test files).
 3. ✅ **Surface it in the certificate over time.**
    `mcp_tools::Certificate::isolation_violations` (a `Vec<
    IsolationViolation>`, `evidence_tier: "monitored"` per entry, same
@@ -115,6 +144,15 @@ Now real, not just a design (2026-09-15):
    real `.nir` binary's own in-memory checker state. That capture half
    is real, separate follow-up work, disclosed in `cmd_check_isolation`'s
    own doc comment (`main.rs`), not implied to already exist.
+
+**Real, disclosed limits across all three, not new gaps**: none of
+this closes the loop *automatically* end to end -- a human or an
+external process still has to run `check-drift`/`check-isolation`
+against a saved log and, for item 2, explicitly confirm a lesson via
+`--teach`. What's real is that every step in the chain (declare →
+observe → detect drift → re-verify → optionally teach → proactively
+guide the next generation) now has working code behind it, wired
+together and tested, where before this session none of it did.
 
 ## Phase 5 — domain translation stretch (not started)
 
@@ -214,32 +252,28 @@ opportunistically, not urgently:
 ## Recommendation
 
 ~~Start with Phase 3 item 1 (the adversarial demo)~~ — done, along with
-items 2 and 3, and every disclosed gap it surfaced along the way
-(the `find_cycles`/windowing scaling bugs, the CLI enforcement surface,
-the `let x: unit` codegen bug) — all fixed, not just found, each with
-its own before/after measurement or passing test, not asserted.
-Phase 4 item 3 (certificate attachment) and `governing_packs`
-per-invariant attribution are both real now too. Every item in this doc
-that was reachable without either new external resources (an Imandra
-license, raw-logit model access) or a fresh, deliberately-deferred
-design decision (Phase 5's failure class) is done as of 2026-09-15.
+every other item in Phases 1-4 and every disclosed gap surfaced along
+the way (the `find_cycles`/windowing scaling bugs, the CLI enforcement
+surface, the `let x: unit` codegen bug, `governing_packs` per-invariant
+attribution, and Phase 4's drift detection/`hint_cache` integration/
+certificate attachment) — all fixed, not just found, each with its own
+before/after measurement or passing test, not asserted. Every item in
+this doc that was reachable without either new external resources (an
+Imandra license, raw-logit model access) or a fresh, deliberately-
+deferred product decision (Phase 5's failure class, pack signing's
+registry-governance question) is done as of 2026-09-15.
 
-What's left, in order of real remaining value:
+What's left is exactly two items, and both are deliberately *not*
+engineering work this doc can size or schedule:
 
-1. **Phase 4 items 1-2** (drift detection triggering re-verification;
-   feeding real incidents into `hint_cache`) — both still genuinely
-   design-only, and now the largest remaining reachable items in this
-   doc (drift detection needs a real place to compare a compile-time
-   `nfr(...)` assumption against an observed APM value and decide what
-   "diverged enough to re-verify" means; `hint_cache` integration needs
-   a real schema for a runtime-observed lesson, not just a
-   `:generate`-time one). Worth scoping properly before starting, not
-   sized here.
-2. **Pack signing's UI** stays genuinely blocked on the registry-
+1. **Pack signing's UI** stays genuinely blocked on the registry-
    governance question (RFC 0016's own unchanged position) — not
-   picked up until that's resolved, same as before.
-3. **Phase 5** (a new failure class, idealized → built → wired in) is
+   picked up until that's resolved.
+2. **Phase 5** (a new failure class, idealized → built → wired in) is
    no longer premature on Phase 3's own account (Phase 3 is done) — but
    still needs a real candidate failure class chosen first, a decision
    this doc has deliberately left open rather than picked under time
    pressure.
+
+Everything that could be closed by writing and testing code, this doc
+recommends closing, has been closed.

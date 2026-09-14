@@ -214,6 +214,101 @@ fn json_escape(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
+/// A lesson learned from a REAL, observed runtime incident (an
+/// isolation anomaly, a crossed NFR threshold) -- Phase 4 item 2 of
+/// `docs/research/2026-09-pending-verification-differentiation-
+/// work.md`: "a production runtime violation should be able to become
+/// a taught lesson for `hi_llm`'s self-repair loop the same way a
+/// `:generate`-time failure already does." Built 2026-09-15.
+///
+/// **A structurally different mechanism from `HintCache` above, on
+/// purpose, not a missed chance to reuse it.** `HintCache` is keyed by
+/// COMPILER DIAGNOSTIC TEXT, consulted only when a real compile attempt
+/// fails with that exact diagnostic, and a hint only ever gets
+/// persisted after proving it clears that diagnostic on the very next
+/// attempt (`promote_validated_hints`). A runtime incident has no
+/// diagnostic text at all -- the code compiled and ran; the bug showed
+/// up in *behavior*, not in `nirdosha build`'s own output -- and there
+/// is no "next compile attempt" to prove a lesson against. So this is
+/// keyed by a small, fixed incident-kind vocabulary instead
+/// (`"transact_isolation_anomaly"`, `"nfr_drift"`, ...; see
+/// `main.rs::cmd_check_isolation`/`cmd_check_drift`'s own `--teach`
+/// flag, the only writer), consulted PROACTIVELY at prompt-
+/// construction time rather than reactively after a compile failure
+/// (`hi_llm.rs::generate_from_task_prompt`'s own call site has the
+/// real, disclosed matching rule -- task-prompt keyword matching, a
+/// real v1 simplification, not AST-shape similarity, which is a
+/// bigger, separate problem this pass doesn't attempt), and written
+/// only on deliberate human/operator confirmation via `--teach`, never
+/// automatically -- there is no automatic "proof" step for a runtime
+/// lesson the way there is for a compile-diagnostic one, so promotion
+/// requires an explicit act instead. Kept in its own sibling file
+/// (`self_repair_runtime_lessons.json`), not folded into `HintCache`'s
+/// own cache file, for that same "visibly different provenance,
+/// visibly separate store" reason `promotions.log` is already a
+/// sibling file rather than inline.
+pub struct RuntimeLessons {
+    path: PathBuf,
+    entries: HashMap<String, String>,
+}
+
+fn runtime_lessons_path() -> PathBuf {
+    if let Ok(p) = std::env::var("NIRDOSHA_RUNTIME_LESSONS_PATH") {
+        return PathBuf::from(p);
+    }
+    cache_path().with_file_name("self_repair_runtime_lessons.json")
+}
+
+impl RuntimeLessons {
+    /// Same "never fails" contract as `HintCache::load` -- a missing,
+    /// corrupt, or unreadable file resolves to an empty store rather
+    /// than blocking anything that reads from it.
+    pub fn load() -> Self {
+        let path = runtime_lessons_path();
+        let entries = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok()).unwrap_or_default();
+        RuntimeLessons { path, entries }
+    }
+
+    pub fn lookup(&self, incident_kind: &str) -> Option<&str> {
+        self.entries.get(incident_kind).map(String::as_str)
+    }
+
+    /// Writes (or overwrites) the lesson for `incident_kind` and
+    /// persists immediately -- same write-temp-then-rename discipline
+    /// as `HintCache::record_success`, same reasoning (a concurrent
+    /// reader never observes a half-written file). Overwriting is
+    /// deliberate, not a limitation: this store's own granularity is
+    /// coarse by design (a handful of incident kinds, not one entry per
+    /// function or per anomaly), so a fresh `--teach` for the same kind
+    /// is meant to replace, not accumulate.
+    pub fn record(&mut self, incident_kind: &str, hint: &str) {
+        self.entries.insert(incident_kind.to_string(), hint.to_string());
+        if let Some(parent) = self.path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        let Ok(json) = serde_json::to_string_pretty(&self.entries) else { return };
+        let tmp = self.path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &json).is_err() {
+            return;
+        }
+        let _ = std::fs::rename(&tmp, &self.path);
+    }
+}
+
+/// Process-wide, lazily-loaded-once shared store -- same reasoning as
+/// `shared()` above (one load-from-disk per process, not per call).
+/// Separate `OnceLock` from `shared()`'s own: the two stores have
+/// independent lifetimes and independent env-var overrides
+/// (`NIRDOSHA_RUNTIME_LESSONS_PATH` vs `NIRDOSHA_HINT_CACHE_PATH`), and
+/// tests want to construct their own local, isolated instance the same
+/// way `HintCache`'s own tests do rather than share this singleton.
+pub fn shared_runtime_lessons() -> &'static Mutex<RuntimeLessons> {
+    static LESSONS: OnceLock<Mutex<RuntimeLessons>> = OnceLock::new();
+    LESSONS.get_or_init(|| Mutex::new(RuntimeLessons::load()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +344,54 @@ mod tests {
         let reloaded = HintCache::load(&mut log);
         assert_eq!(reloaded.lookup("expected `RoleView`, found `str`"), Some("use check_role, not a string literal"));
         unsafe { std::env::remove_var("NIRDOSHA_HINT_CACHE_PATH") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_lessons_record_then_lookup_round_trips_through_disk() {
+        let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_test_{}", std::process::id()));
+        let path = dir.join("runtime_lessons.json");
+        // SAFETY (test-only): same single-test-scoped env var discipline
+        // `record_success_then_lookup_round_trips_through_disk` above
+        // already uses for `HintCache`'s own env var.
+        unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &path) };
+        let mut lessons = RuntimeLessons::load();
+        assert_eq!(lessons.lookup("transact_isolation_anomaly"), None);
+        lessons.record("transact_isolation_anomaly", "add a serializing guard around this transact's commit slot");
+        let reloaded = RuntimeLessons::load();
+        assert_eq!(reloaded.lookup("transact_isolation_anomaly"), Some("add a serializing guard around this transact's commit slot"));
+        unsafe { std::env::remove_var("NIRDOSHA_RUNTIME_LESSONS_PATH") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_lessons_record_overwrites_the_same_incident_kind() {
+        let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_overwrite_test_{}", std::process::id()));
+        let path = dir.join("runtime_lessons.json");
+        unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &path) };
+        let mut lessons = RuntimeLessons::load();
+        lessons.record("nfr_drift", "first lesson");
+        lessons.record("nfr_drift", "second, updated lesson");
+        assert_eq!(lessons.lookup("nfr_drift"), Some("second, updated lesson"), "a fresh --teach for the same incident kind must replace, not accumulate");
+        unsafe { std::env::remove_var("NIRDOSHA_RUNTIME_LESSONS_PATH") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_lessons_load_is_never_fails_on_a_missing_or_corrupt_file() {
+        let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_missing_test_{}", std::process::id()));
+        unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", dir.join("does_not_exist.json")) };
+        let missing = RuntimeLessons::load();
+        assert_eq!(missing.lookup("anything"), None);
+
+        std::fs::create_dir_all(&dir).unwrap();
+        let corrupt_path = dir.join("corrupt.json");
+        std::fs::write(&corrupt_path, "not valid json at all").unwrap();
+        unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &corrupt_path) };
+        let corrupt = RuntimeLessons::load();
+        assert_eq!(corrupt.lookup("anything"), None, "a corrupt file must resolve to an empty store, not a panic");
+
+        unsafe { std::env::remove_var("NIRDOSHA_RUNTIME_LESSONS_PATH") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

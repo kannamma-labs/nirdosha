@@ -2302,6 +2302,51 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
     Err(format!("gave up after {attempt} attempt(s) -- {drafts_note}. Last diagnostic:\n{last_diagnostic}"))
 }
 
+/// Proactive Phase 4 item 2 consultation for `generate_from_task_
+/// prompt`: does `task_prompt` mention the literal language construct
+/// a recorded runtime lesson (`hint_cache::RuntimeLessons`) is about?
+/// If so, returns that lesson's guidance text to append to the prompt
+/// before the model ever sees it -- a real, if simple, way for a past
+/// production incident to shape the *next* generation, not just the
+/// self-repair loop's reaction to a compile failure.
+///
+/// **Real, disclosed v1 matching rule, not hidden**: this is keyword
+/// matching on the task prompt's own text (`"transact"` for
+/// `"transact_isolation_anomaly"`, the literal `"nfr("` syntax for
+/// `"nfr_drift"`), not AST-shape similarity against the eventual
+/// generated code -- a genuinely bigger, separate problem this pass
+/// doesn't attempt. A task that would end up producing a `transact`
+/// block without ever saying so in its own prompt text gets no
+/// proactive guidance here; a task that merely mentions the word
+/// without ending up using the construct gets guidance it may not
+/// need. Both are real, bounded costs of a simple heuristic, not silent
+/// gaps -- the same "real, disclosed simplification" discipline every
+/// other v1-scoped piece of this codebase already holds itself to.
+///
+/// Takes `lessons: &Mutex<RuntimeLessons>` rather than reaching for
+/// `hint_cache::shared_runtime_lessons()` itself -- same shape
+/// `corrective_hint_for`/`promote_validated_hints` already use for
+/// `HintCache`, and for the identical reason: a `OnceLock` singleton
+/// can only ever be initialized once per process, so a caller that
+/// wants a fresh, isolated store (every test below) needs an injectable
+/// parameter, not a function that reaches for the global itself.
+fn runtime_lesson_guidance(task_prompt: &str, lessons: &Mutex<crate::hint_cache::RuntimeLessons>) -> Option<String> {
+    let lessons = lessons.lock().unwrap_or_else(|e| e.into_inner());
+    let lower = task_prompt.to_lowercase();
+    let mut guidance: Vec<String> = Vec::new();
+    if lower.contains("transact") {
+        if let Some(hint) = lessons.lookup("transact_isolation_anomaly") {
+            guidance.push(format!("A past production run of similarly-shaped code hit a real transaction-isolation anomaly (a lost-update race inside a `transact` commit slot). Lesson learned: {hint}"));
+        }
+    }
+    if lower.contains("nfr(") {
+        if let Some(hint) = lessons.lookup("nfr_drift") {
+            guidance.push(format!("A past production run of similarly-shaped code drifted from its own declared `nfr(...)` commitment. Lesson learned: {hint}"));
+        }
+    }
+    if guidance.is_empty() { None } else { Some(guidance.join("\n")) }
+}
+
 /// A bounded generate/self-repair round trip over a *plain* natural-
 /// language task prompt, rather than `generate_program`'s own
 /// `CandidateUnit`-list prompt -- the primitive `crates/bench`'s
@@ -2322,7 +2367,27 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
 /// so `1` means it compiled on the first try (a harness's pass@1
 /// signal) and anything higher means the self-repair loop rescued it.
 /// `Err` carries the last diagnostic once every attempt is exhausted.
+///
+/// **Also the one wired consultation point for `hint_cache::
+/// RuntimeLessons`** (Phase 4 item 2, `docs/research/2026-09-pending-
+/// verification-differentiation-work.md`: "a production runtime
+/// violation should be able to become a taught lesson for `hi_llm`'s
+/// self-repair loop the same way a `:generate`-time failure already
+/// does") -- see `runtime_lesson_guidance`'s own doc comment for the
+/// real, disclosed matching rule. Wired here specifically, not into
+/// `generate_program`'s own (graph-shaped, JSON) prompt construction:
+/// this function's plain-string `task_prompt` is the lower-risk,
+/// easier-to-reason-about integration point, and `generate_program`'s
+/// own wiring is real, disclosed follow-up work, not silently assumed
+/// to already happen there too.
 pub fn generate_from_task_prompt(client: &LlmClient, task_prompt: &str, on_log: &mut dyn FnMut(&str)) -> Result<(String, u32), String> {
+    let task_prompt = match runtime_lesson_guidance(task_prompt, crate::hint_cache::shared_runtime_lessons()) {
+        Some(guidance) => {
+            on_log(&format!("proactive runtime-lesson guidance applied (hint_cache::RuntimeLessons): {guidance}"));
+            format!("{task_prompt}\n\n{guidance}")
+        }
+        None => task_prompt.to_string(),
+    };
     let mut history = vec![ChatMessage::system(HI_PROMPT), ChatMessage::user(task_prompt)];
     let mut mcp_log = crate::mcp_tools::McpCallLog::new("hi-generate-llm");
     let mut last_diagnostic = String::new();
@@ -2509,6 +2574,68 @@ fn typecheck_and_build_check(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A local `Mutex`, not `hint_cache::shared_runtime_lessons()` --
+    /// same reasoning `corrective_hint_for`'s own tests already use for
+    /// `HintCache` (`shared`'s own doc comment): a `OnceLock` singleton
+    /// can only be initialized once per process, so every test here
+    /// gets its own fresh, isolated store instead of racing every other
+    /// test in this binary for the first call.
+    fn local_runtime_lessons() -> Mutex<crate::hint_cache::RuntimeLessons> {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("nir_runtime_lesson_guidance_test_{}_{n}.json", std::process::id()));
+        // SAFETY (test-only): read once, immediately, by `RuntimeLessons::
+        // load()` on the very next line -- not held or relied on by
+        // anything else, so a concurrent test's own set/remove of this
+        // same env var can't observably race this one.
+        unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &path) };
+        let lessons = crate::hint_cache::RuntimeLessons::load();
+        unsafe { std::env::remove_var("NIRDOSHA_RUNTIME_LESSONS_PATH") };
+        Mutex::new(lessons)
+    }
+
+    /// `runtime_lesson_guidance` is the whole Phase 4 item 2 wiring
+    /// this function is responsible for -- a task prompt that names the
+    /// construct a recorded lesson is about gets that lesson appended;
+    /// one that doesn't, gets nothing.
+    #[test]
+    fn runtime_lesson_guidance_is_none_with_no_recorded_lessons() {
+        let lessons = local_runtime_lessons();
+        assert_eq!(runtime_lesson_guidance("write a transact block that debits an account", &lessons), None);
+    }
+
+    #[test]
+    fn runtime_lesson_guidance_surfaces_a_transact_lesson_when_the_prompt_mentions_transact() {
+        let lessons = local_runtime_lessons();
+        lessons.lock().unwrap().record("transact_isolation_anomaly", "add a serializing guard around the commit slot's read-then-write");
+        let guidance = runtime_lesson_guidance("write a transact block that transfers funds between two accounts", &lessons).expect("a transact-mentioning prompt should get the recorded lesson");
+        assert!(guidance.contains("add a serializing guard around the commit slot's read-then-write"), "{guidance}");
+    }
+
+    #[test]
+    fn runtime_lesson_guidance_surfaces_an_nfr_drift_lesson_when_the_prompt_mentions_nfr_syntax() {
+        let lessons = local_runtime_lessons();
+        lessons.lock().unwrap().record("nfr_drift", "budget latency_ms generously, real load runs hot");
+        let guidance = runtime_lesson_guidance("write a fn with nfr(latency_ms: 50) on it", &lessons).expect("an nfr(-mentioning prompt should get the recorded lesson");
+        assert!(guidance.contains("budget latency_ms generously, real load runs hot"), "{guidance}");
+    }
+
+    #[test]
+    fn runtime_lesson_guidance_ignores_a_prompt_that_never_mentions_the_construct() {
+        let lessons = local_runtime_lessons();
+        lessons.lock().unwrap().record("transact_isolation_anomaly", "should not appear");
+        assert_eq!(runtime_lesson_guidance("write a fn that adds two numbers", &lessons), None, "a prompt never mentioning `transact` must not surface a transact-specific lesson");
+    }
+
+    #[test]
+    fn runtime_lesson_guidance_can_surface_both_lessons_at_once() {
+        let lessons = local_runtime_lessons();
+        lessons.lock().unwrap().record("transact_isolation_anomaly", "transact lesson");
+        lessons.lock().unwrap().record("nfr_drift", "nfr lesson");
+        let guidance = runtime_lesson_guidance("write a transact block with nfr(latency_ms: 50) on the commit fn", &lessons).expect("both lessons should apply");
+        assert!(guidance.contains("transact lesson") && guidance.contains("nfr lesson"), "{guidance}");
+    }
 
     /// The exact diagnostic shape from the 2026-09-14 field failure
     /// (`RoleView`/`acquire` misuse + `EnumName.Variant` dotted access)

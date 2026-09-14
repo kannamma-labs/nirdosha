@@ -6,8 +6,8 @@ use std::process::ExitCode;
 // binary's CLI subcommands and stdio server all share one
 // implementation, one wire shape, and one call log.
 use nirdosha::mcp_tools::{
-    build_certificate, isolation_violations_from_anomalies, run_verify_pipeline, sha256_hex, sign_certificate, tools_call, tools_list, write_auto_patches,
-    Certificate, FixReport, McpCallLog, ProofVerdict,
+    build_certificate, isolation_violations_from_anomalies, nfr_commitments_from_program, nfr_drift, run_verify_pipeline, sha256_hex, sign_certificate, tools_call, tools_list, write_auto_patches,
+    Certificate, FixReport, McpCallLog, NfrEscalation, ProofVerdict,
 };
 
 fn main() -> ExitCode {
@@ -32,6 +32,7 @@ fn main() -> ExitCode {
         "explain" => cmd_explain(args),
         "certify" => cmd_certify(args),
         "check-isolation" => cmd_check_isolation(args),
+        "check-drift" => cmd_check_drift(args),
         "keygen" => cmd_keygen(args),
         "verify-certificate" => cmd_verify_certificate(args),
         "equivalence" => cmd_equivalence(args),
@@ -86,12 +87,21 @@ fn print_usage() {
     eprintln!("                                      --isolation-log attaches real observed transaction-isolation");
     eprintln!("                                      anomalies from a saved op-history log, see `check-isolation`)");
     eprintln!("  nirdosha keygen [-o <key.pk8>]      generate an Ed25519 keypair for `nirdosha certify --sign`");
-    eprintln!("  nirdosha check-isolation <ops.json> [--in-toto]");
+    eprintln!("  nirdosha check-isolation <ops.json> [--teach <hint>] [--in-toto]");
     eprintln!("                                      run the transaction-isolation anomaly detector");
     eprintln!("                                      (`crates/isolation-core`, the same algorithm `transact`'s");
     eprintln!("                                      live db-op tracking uses) over a saved operation-history");
     eprintln!("                                      log on demand -- JSON array of {{txn,resource,kind,seq}};");
-    eprintln!("                                      exit 0 (clean) / 1 (anomaly found) / 2 (bad input)");
+    eprintln!("                                      exit 0 (clean) / 1 (anomaly found) / 2 (bad input);");
+    eprintln!("                                      --teach records a runtime lesson hi_llm's generate loop");
+    eprintln!("                                      proactively consults for a future transact-shaped task");
+    eprintln!("  nirdosha check-drift <file.nir> <escalations.json> [--teach <hint>] [--in-toto]");
+    eprintln!("                                      compare <file.nir>'s declared nfr(...) commitments");
+    eprintln!("                                      against a real saved NIRDOSHA_OBSERVABILITY_URL escalation");
+    eprintln!("                                      log (JSON array of {{function,nfr,threshold,actual}} --");
+    eprintln!("                                      nfr.rs's own escalation wire shape) and, if any commitment");
+    eprintln!("                                      drifted, re-run real verification on <file.nir> and report");
+    eprintln!("                                      both; exit 0 (no drift) / 1 (drift found); --teach as above");
     eprintln!("  nirdosha verify-certificate <certificate.json>");
     eprintln!("                                      check a signed certificate's signature against its own");
     eprintln!("                                      embedded public key");
@@ -1101,17 +1111,35 @@ fn load_and_check_isolation_log(path: &str) -> Result<Vec<nirdosha_isolation_cor
 /// that captures `Op` values in this exact JSON shape. This command is
 /// the on-demand *checking* half of the disclosed gap; the *capture*
 /// half is real, separate follow-up work.
+///
+/// **`--teach <hint>`**: Phase 4 item 2, "feed real incidents into
+/// `hint_cache`" -- on a real anomaly found, records `<hint>` as this
+/// process's `"transact_isolation_anomaly"` runtime lesson
+/// (`hint_cache::RuntimeLessons`, `--teach`'s own doc comment there for
+/// why this is a deliberate, human-confirmed act, not automatic
+/// synthesis). `hi_llm.rs::generate_from_task_prompt` consults it
+/// proactively for a future task whose own prompt looks `transact`-
+/// shaped -- see that function's own doc comment for the real,
+/// disclosed matching rule.
 fn cmd_check_isolation(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut path: Option<String> = None;
     let mut in_toto = false;
+    let mut teach: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--in-toto" => in_toto = true,
+            "--teach" => {
+                teach = args.next();
+                if teach.is_none() {
+                    eprintln!("--teach needs a hint string -- usage: nirdosha check-isolation <ops.json> [--teach <hint>] [--in-toto]");
+                    return ExitCode::FAILURE;
+                }
+            }
             other => path = Some(other.to_string()),
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: nirdosha check-isolation <ops.json> [--in-toto]");
+        eprintln!("usage: nirdosha check-isolation <ops.json> [--teach <hint>] [--in-toto]");
         return ExitCode::FAILURE;
     };
     let anomalies = match load_and_check_isolation_log(&path) {
@@ -1122,11 +1150,17 @@ fn cmd_check_isolation(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
     };
     let clean = anomalies.is_empty();
+    if !clean {
+        if let Some(hint) = &teach {
+            nirdosha::hint_cache::shared_runtime_lessons().lock().unwrap_or_else(|e| e.into_inner()).record("transact_isolation_anomaly", hint);
+        }
+    }
     let verdict = if clean { "clean" } else { "anomaly_found" };
     let predicate = serde_json::json!({
         "verdict": verdict,
         "evidence_tier": nirdosha::mcp_tools::IsolationViolation::EVIDENCE_TIER,
         "anomalies": isolation_violations_from_anomalies(&anomalies),
+        "taught": teach.is_some() && !clean,
     });
     let output = if in_toto {
         let source_hash = match std::fs::read(&path) {
@@ -1147,6 +1181,112 @@ fn cmd_check_isolation(mut args: impl Iterator<Item = String>) -> ExitCode {
     } else {
         eprintln!("ANOMALY_FOUND: {path} -- {} anomal{} detected (evidence_tier=monitored: conclusive that these happened, not proof no others exist)", anomalies.len(), if anomalies.len() == 1 { "y" } else { "ies" });
         ExitCode::FAILURE
+    }
+}
+
+/// `nirdosha check-drift <file.nir> <escalations.json>` -- Phase 4 item
+/// 1 of `docs/research/2026-09-pending-verification-differentiation-
+/// work.md`: "detect when a compile-time `nfr(...)` assumption diverges
+/// from what the APM kernel actually observes in production, and
+/// trigger re-verification instead of just firing an alert." Built for
+/// real 2026-09-15.
+///
+/// Compares `<file.nir>`'s own declared `nfr(...)` commitments
+/// (`nfr_commitments_from_program`) against a real, saved
+/// `NIRDOSHA_OBSERVABILITY_URL` escalation log -- `<escalations.json>`
+/// is a JSON array of `nfr.rs`'s own `send_escalation` wire shape
+/// (`mcp_tools::NfrEscalation`), the *identical* format that channel
+/// already POSTs, not a new one invented for this command. If any
+/// commitment drifted (`mcp_tools::nfr_drift`), this **actually
+/// re-verifies** `<file.nir>` (`run_verify_pipeline`, the same pipeline
+/// `verify`/`certify` run) and includes that fresh verdict in the
+/// output -- the "trigger re-verification instead of just firing an
+/// alert" the RFC asks for, not a passive notification with nothing
+/// downstream of it.
+///
+/// **`--teach <hint>`**: same Phase 4 item 2 mechanism `check-
+/// isolation --teach` uses, recording `<hint>` as this process's
+/// `"nfr_drift"` runtime lesson on a real finding.
+fn cmd_check_drift(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut path: Option<String> = None;
+    let mut log_path: Option<String> = None;
+    let mut in_toto = false;
+    let mut teach: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--in-toto" => in_toto = true,
+            "--teach" => {
+                teach = args.next();
+                if teach.is_none() {
+                    eprintln!("--teach needs a hint string -- usage: nirdosha check-drift <file.nir> <escalations.json> [--teach <hint>] [--in-toto]");
+                    return ExitCode::FAILURE;
+                }
+            }
+            other if path.is_none() => path = Some(other.to_string()),
+            other => log_path = Some(other.to_string()),
+        }
+    }
+    let (Some(path), Some(log_path)) = (path, log_path) else {
+        eprintln!("usage: nirdosha check-drift <file.nir> <escalations.json> [--teach <hint>] [--in-toto]");
+        return ExitCode::FAILURE;
+    };
+    let source_bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error reading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (program, _src) = match nirdosha::loader::load_program(&path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error loading {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let escalations: Vec<NfrEscalation> = match std::fs::read(&log_path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("not a valid escalations JSON array: {e}"))) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error reading {log_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let commitments = nfr_commitments_from_program(&program);
+    let findings = nfr_drift(&commitments, &escalations);
+    let drifted = !findings.is_empty();
+
+    if drifted {
+        if let Some(hint) = &teach {
+            nirdosha::hint_cache::shared_runtime_lessons().lock().unwrap_or_else(|e| e.into_inner()).record("nfr_drift", hint);
+        }
+    }
+
+    // The actual "trigger re-verification" half -- only run when there
+    // is real drift to react to; a clean comparison has nothing to
+    // re-verify against that `verify`/`certify` wouldn't already cover
+    // on their own.
+    let reverification = if drifted { Some(run_verify_pipeline(&path)) } else { None };
+
+    let verdict = if drifted { "drift_found" } else { "no_drift" };
+    let predicate = serde_json::json!({
+        "verdict": verdict,
+        "declared_commitments": commitments.len(),
+        "findings": findings,
+        "reverification": reverification,
+        "taught": teach.is_some() && drifted,
+    });
+    let output = if in_toto {
+        wrap_in_toto(&path, &sha256_hex(&source_bytes), "check-drift/v1", predicate)
+    } else {
+        predicate
+    };
+    println!("{}", serde_json::to_string_pretty(&output).expect("this JSON value always serializes"));
+    if drifted {
+        eprintln!("DRIFT_FOUND: {path} -- {} declared nfr(...) commitment(s) diverged from observed reality in {log_path}; re-verification ran, see \"reverification\" above", findings.len());
+        ExitCode::FAILURE
+    } else {
+        eprintln!("NO_DRIFT: {path} -- every declared nfr(...) commitment checked against {log_path} holds");
+        ExitCode::SUCCESS
     }
 }
 

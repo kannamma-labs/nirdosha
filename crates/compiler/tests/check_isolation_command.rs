@@ -119,6 +119,56 @@ fn no_argument_prints_usage_and_fails() {
     assert!(stderr.contains("usage:"), "stderr: {stderr}");
 }
 
+/// `--teach <hint>` -- Phase 4 item 2 ("feed real incidents into
+/// `hint_cache`"), only ever records a lesson on a real finding, never
+/// on a clean log.
+#[test]
+fn teach_records_a_runtime_lesson_only_on_a_real_anomaly() {
+    let log = scratch_ops_log(
+        "teach_anomaly",
+        r#"[
+            {"txn":"a","resource":"balance:acct1","kind":"read","seq":0},
+            {"txn":"b","resource":"balance:acct1","kind":"read","seq":1},
+            {"txn":"a","resource":"balance:acct1","kind":"write","seq":2},
+            {"txn":"b","resource":"balance:acct1","kind":"write","seq":3}
+        ]"#,
+    );
+    let lessons_path = std::env::temp_dir().join(format!("nirdosha_check_isolation_teach_test_{}_{}.json", std::process::id(), unique_suffix()));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha"))
+        .arg("check-isolation")
+        .arg(&log)
+        .arg("--teach")
+        .arg("guard the commit slot's read-then-write against a concurrent racer")
+        .env("NIRDOSHA_RUNTIME_LESSONS_PATH", &lessons_path)
+        .output()
+        .expect("nirdosha check-isolation --teach should run");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["taught"], serde_json::json!(true), "result: {result}");
+    let lessons: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&lessons_path).expect("the runtime lessons file should exist")).expect("valid JSON");
+    assert_eq!(lessons["transact_isolation_anomaly"], serde_json::json!("guard the commit slot's read-then-write against a concurrent racer"), "lessons: {lessons}");
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(&lessons_path);
+}
+
+#[test]
+fn teach_does_not_record_anything_on_a_clean_log() {
+    let log = scratch_ops_log(
+        "teach_clean",
+        r#"[
+            {"txn":"a","resource":"balance:acct1","kind":"read","seq":0},
+            {"txn":"a","resource":"balance:acct1","kind":"write","seq":1}
+        ]"#,
+    );
+    let lessons_path = std::env::temp_dir().join(format!("nirdosha_check_isolation_teach_clean_test_{}_{}.json", std::process::id(), unique_suffix()));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nirdosha")).arg("check-isolation").arg(&log).arg("--teach").arg("should not be recorded").env("NIRDOSHA_RUNTIME_LESSONS_PATH", &lessons_path).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["taught"], serde_json::json!(false), "result: {result}");
+    assert!(!lessons_path.exists(), "a clean log must never write a runtime lesson file at all");
+    let _ = std::fs::remove_file(&log);
+}
+
 /// `--in-toto` wraps the same verdict as an in-toto v1 Statement --
 /// same convention `verify --in-toto`/`certify --in-toto` already use.
 #[test]
