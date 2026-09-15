@@ -1,0 +1,20 @@
+[package]
+name = "nirdosha-driver"
+version = "0.1.0"
+edition = "2024"
+description = "Stage 2: the Nirdosha rustc driver — MIR-level interprocedural effects verification with real name resolution. A pure claim must survive the whole call graph, not just one body. Requires nightly + the rustc-dev component."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "nirdosha-driver"
+path = "src/main.rs"
+
+[dependencies]
+nirdosha-contract-core = { path = "../nirdosha-contract-core" }
+
+# The dialect's own toolchain: explicitly exempt from itself (the
+# verifier does not lint its own implementation — see
+# docs/nirdosha-rt-dialect.md §5).
+[package.metadata.nirdosha-rt]
+toolchain = true

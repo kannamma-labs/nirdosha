@@ -63,9 +63,15 @@ fn main() -> ExitCode {
         }
         "bench" => bench_cli(rest),
         s if matches!(s, "build" | "check" | "run" | "test" | "bench" | "doc") => {
+            // `--deep` opts this build into Stage 2: the rustc driver
+            // (MIR-level interprocedural effects) rides along as
+            // RUSTC_WORKSPACE_WRAPPER. Strip it — cargo doesn't know it.
+            let deep = rest.iter().any(|a| a == "--deep");
+            let cargo_args: Vec<String> =
+                rest.iter().filter(|a| *a != "--deep").cloned().collect();
             // `cargo nirdosha check --workspace` gates every in-dialect
             // crate (strict) before delegating the workspace-wide cargo.
-            if rest.iter().any(|a| a == "--workspace" || a == "--all") {
+            if cargo_args.iter().any(|a| a == "--workspace" || a == "--all") {
                 let exit = verify_ws_cli();
                 if exit != ExitCode::SUCCESS {
                     eprintln!(
@@ -73,7 +79,7 @@ fn main() -> ExitCode {
                     );
                     return exit;
                 }
-                return delegate(s, rest);
+                return delegate_with(s, &cargo_args, deep);
             }
             let summary = match verify_cwd() {
                 Ok(s) => s,
@@ -84,7 +90,7 @@ fn main() -> ExitCode {
             };
             if summary.violations().is_empty() {
                 report(&summary, &[]);
-                delegate(s, rest)
+                delegate_with(s, &cargo_args, deep)
             } else {
                 report(&summary, &[s]);
                 ExitCode::FAILURE
@@ -386,6 +392,46 @@ fn bench_cli(rest: &[String]) -> ExitCode {
             ExitCode::FAILURE
         } else {
             ExitCode::SUCCESS
+        }
+    }
+}
+
+/// The Stage-2 driver binary, expected next to this executable (same
+/// target dir). Build it with `cargo build -p nirdosha-driver`.
+fn driver_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("nirdosha-driver");
+    dir.is_file().then_some(dir)
+}
+
+/// Delegate to cargo, optionally with the Stage-2 rustc driver attached
+/// as RUSTC_WORKSPACE_WRAPPER (`--deep`).
+fn delegate_with(sub: &str, rest: &[String], deep: bool) -> ExitCode {
+    let mut command = Command::new("cargo");
+    command.arg(sub).args(rest);
+    if deep {
+        let Some(driver) = driver_path() else {
+            eprintln!(
+                "nirdosha: --deep needs the Stage-2 driver next to cargo-nirdosha \
+                 — run `cargo build -p nirdosha-driver` first (nightly + rustc-dev)"
+            );
+            return ExitCode::FAILURE;
+        };
+        eprintln!(
+            "nirdosha: deep verification active — MIR effects lattice via {}",
+            driver.display()
+        );
+        command.env("NIRDOSHA_DRIVER", "1");
+        command.env("RUSTC_WORKSPACE_WRAPPER", &driver);
+    }
+    match command.status() {
+        Ok(status) => status
+            .code()
+            .map(|code| ExitCode::from(code as u8))
+            .unwrap_or(ExitCode::SUCCESS),
+        Err(e) => {
+            eprintln!("nirdosha: cannot run cargo {sub}: {e}");
+            ExitCode::FAILURE
         }
     }
 }

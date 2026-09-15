@@ -1,0 +1,11 @@
+[package]
+name = "rt-payroll-pure-chain"
+version = "0.1.0"
+edition = "2024"
+description = "Stage 2 demo: a program that lies indirectly — every pure-claiming body is locally clean, but one claim reaches file I/O through the call graph. Stage 1 cannot see through calls; the Stage 2 rustc driver resolves the whole graph and refuses."
+publish = false
+
+# Zero dependencies: this is a plain Rust program to the external world,
+# gated into the dialect the same way rt-payroll-lying is.
+[package.metadata.nirdosha-rt]
+dialect = true

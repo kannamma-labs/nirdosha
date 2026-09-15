@@ -60,8 +60,14 @@ members = [
     "crates/nirdosha-macros",
     "crates/nirdosha-rt",
     "crates/cargo-nirdosha",
+    # Stage 2: the rustc driver — MIR-level interprocedural effects
+    # verification. Nightly + rustc-dev only; the driver is invoked as
+    # RUSTC_WORKSPACE_WRAPPER by `cargo nirdosha build --deep` and is a
+    # pass-through for crates without Nirdosha contracts.
+    "crates/nirdosha-driver",
     "examples/rt-payroll",
     "examples/rt-payroll-lying",
+    "examples/rt-payroll-pure-chain",
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

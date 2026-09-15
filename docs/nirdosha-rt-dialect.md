@@ -53,13 +53,53 @@ cargo nirdosha build                   # (in that package) REFUSED: 3 violations
    (`crates/cargo-nirdosha`), Stage 1: a source-scanning verifier that
    runs *in front of* cargo. Verifies both authoring forms (attribute
    and hand-written doc), enforces dialect-wide restrictions, refuses
-   to delegate on any violation, and writes the certificate.
+   to delegate on any violation, and writes the certificate. Stage 1.5
+   adds the workspace gate: `cargo nirdosha verify --workspace` runs
+   strict verification over every *in-dialect* crate (explicit opt-in:
+   a dependency on `nirdosha-rt`, or
+   `[package.metadata.nirdosha-rt] dialect = true`; the dialect's own
+   toolchain crates are exempt via `toolchain = true`) and emits the
+   aggregate certificate
+   `target/nirdosha/contract-report-workspace.json`.
 
-Stage 2 replaces the path-based scan with a rustc driver (HIR/MIR):
-interprocedural effects, real name resolution, Z3 discharge of numeric
-bounds, proof elision ("verified code runs faster"), and binding of the
-NFR record into bench gates. The CLI and certificate artifact stay
-identical, so Stage 2 is an upgrade, not a rewrite.
+4. **The rustc driver** — Stage 2 (`crates/nirdosha-driver`, invoked by
+   `--deep`): the Clippy architecture. The full rustc pipeline runs, and
+   afterwards contract claims are verified over **MIR**:
+
+   - **Interprocedural purity** — `effects(pure)` is checked against
+     the transitive closure of the call graph, with the full chain
+     named in the error (`net_total -> ledger_overrides -> read_ledger
+     -> std::fs::read_to_string`).
+   - **Real name resolution** — `std::fs::read_to_string` is recognized
+     because it resolves to that `DefId`, not because its text looks
+     like a path. Stage 1's over-approximate string matching is
+     retired for anything compiled through the driver.
+   - **Totality at MIR level** — `unwrap`/`expect`/bounds checks/
+     division-by-zero compile to `assert` terminators, flagged with
+     zero false positives; arithmetic-overflow checks are allowed
+     (checked arithmetic is the dialect's documented runtime guard);
+     recursion is sound (back-edges contribute nothing to the effect
+     lattice).
+   - **Default-deny third party** — a call into a crate outside
+     `core`/`std`/`alloc`/`nirdosha_rt` makes the caller impure unless
+     that crate is contract-carrying/verified: an unverified dependency
+     cannot launder effects.
+   - **Pass-through for non-dialect crates** — the driver no-ops when a
+     crate has no Nirdosha contracts anywhere, so dependencies and the
+     `.nir` toolchain build byte-identical under the wrapper.
+
+   The injected NFR guard is *trusted infrastructure*: `nirdosha_rt`
+   sits in the pure-by-default set because the `#[contract]` macro
+   injects `nirdosha_rt::nfr::enter` into any fn with an `nfr(..)`
+   clause — `effects(pure)` describes the user's body, and the guard's
+   clock/semaphore behavior is declared honestly by the separate
+   `nfr(..)` clause.
+
+   Stage 2 is nightly + `rustc-dev` only (it links `rustc_private`);
+   Stage 1 verification is stable and works everywhere. `cargo
+   nirdosha build --deep` wires the driver in as
+   `RUSTC_WORKSPACE_WRAPPER`. Z3 discharge of numeric bounds and
+   proof-elision ("verified code runs faster") remain Stage 2.5.
 
 ## 3. Two authoring forms, one encoding
 
@@ -86,63 +126,92 @@ no-op. Role names in contracts resolve to same-named types declared by
 `nirdosha_rt::roles!`; an undeclared role fails to compile because the
 injected proof parameter does not resolve.
 
-## 4. Honesty notes (what Stage 1 deliberately is not)
+## 4. Honesty notes (what each stage deliberately is not)
 
-- **`effects(pure)` checking is over-approximate and local.** It is
-  path-based (`std::fs`, `Instant`, `.spawn()`, `unwrap`…) without full
-  name resolution, and it does not follow calls across functions. Stage
-  2's driver closes both gaps; until then, false positives are possible
-  and preferable to false negatives.
+- **Stage 1's `effects(pure)` checking is over-approximate and
+  body-local.** It is path-based (`std::fs`, `Instant`, `.spawn()`,
+  `unwrap`…) without full name resolution, and it cannot see through
+  calls — `rt-payroll-pure-chain` passes Stage 1 and is refused by
+  Stage 2, on purpose, in the repo. False positives are possible in
+  Stage 1 and preferable to false negatives; `--deep` replaces the
+  guessing with real resolution.
 - **NFRs are enforced, not proven.** `latency_ms` is measured per call
-  (flight recorder, `NIRDOSHA_NFR_LOG=1` for JSON lines on stderr);
-  `concurrency_max` is a blocking gate. No solver proves wall-clock
+  (flight recorder, `NIRDOSHA_NFR_LOG=1` for JSON lines on stderr,
+  `NIRDOSHA_NFR_LOG_FILE=…` as the harness sink); `concurrency_max`
+  is a blocking gate; `cargo nirdosha bench` gates the p95 under the
+  package's own test workload. No solver proves wall-clock
   performance, and we never claim otherwise.
-- **`Auth` is demo-grade in Stage 1** — the session asserts its roles.
-  The enforcement invariant that matters is unchanged: only `Auth`
-  mints proofs, every mint consults the session, and the proof is a
-  type. Row-12 identity (`check_role` → unforgeable views) wires under
-  this same interface in Stage 2.
-- **Async fns and generic-heavy code** are not yet contract-verified
-  (macro refuses async; generics pass through). Trait-decl contracts are
-  recorded with a warning; impl-block checking is Stage 2.
+- **`Auth` is demo-grade** — the session asserts its roles. The
+  enforcement invariant that matters is unchanged: only `Auth` mints
+  proofs, every mint consults the session, and the proof is a type.
+  Row-12 identity (`check_role` → unforgeable views) wires under this
+  same interface in Stage 2.5.
+- **Async fns are not yet contract-verified** (the macro refuses them;
+  a hand-written doc contract on an async fn sees only the
+  coroutine-construction body — the deep analysis of async work is
+  Stage 2.5). Generics pass through both stages.
+- **The driver is nightly + `rustc-dev` only** (it links
+  `rustc_private`, pinned to the toolchain it was built against — the
+  Clippy/Miri maintenance model). Stage 1 verification and everything
+  the runtime enforces by types are stable and work everywhere.
 
-## 5. Crate map
+## 5. What each surface catches (the honest matrix)
+
+| Lie | plain cargo | `cargo nirdosha build` (Stage 1) | `--deep` (Stage 2) |
+|---|---|---|---|
+| pure claim, direct `std::fs` call | runs | **compile_error** (macro scan) + verify refusal | **rustc error** |
+| pure claim, file I/O 3 calls away | runs | passes (out of sight) | **rustc error, chain named** |
+| `unwrap()` inside a pure fn | runs | flagged | flagged (exact, via MIR asserts) |
+| typo'd contract key | runs | **refused** | **refused** |
+| undeclared role in `requires` | fails to compile (type resolves nowhere) | same | same |
+| unverified third-party call in a pure fn | runs | passes (string scan can't know) | **refused (default-deny)** |
+| recursion + checked arithmetic in a pure fn | runs | passes | **passes** (back-edges contribute nothing; overflow is the documented guard) |
+| unsafe / raw threads | runs | **refused** | refused (same rules, spans from MIR) |
+| SLA breach (`nfr(latency_ms)`) | invisible | `cargo nirdosha bench` gates p95 under the real workload | same (Stage 2.5 binds Z3-guided synthetic benches) |
+
+## 6. Crate map
 
 | Crate | Job |
 |---|---|
-| `crates/nirdosha-contract-core` | contract model + JSON encoding, attribute parser, impure/dialect scanners (shared by macro and compiler) |
+| `crates/nirdosha-contract-core` | contract model + JSON encoding, attribute parser, impure/dialect scanners (shared by macro, compiler, driver) |
 | `crates/nirdosha-macros` | `#[contract]`: parse, honesty-check locally, inject proof param + NFR guard, emit doc encoding |
 | `crates/nirdosha-rt` | runtime: `roles!`, `RoleProof`, `Auth`, NFR guard + flight recorder; re-exports `contract` |
-| `crates/cargo-nirdosha` | the Nirdosha compiler CLI: verify → refuse-or-delegate → certificate |
-| `examples/rt-payroll` | compliant program; all three forms on display |
+| `crates/cargo-nirdosha` | the Nirdosha compiler CLI: verify → refuse-or-delegate → certificates; `--workspace` strict gate; `bench` SLA gate; `--deep` wires in the driver |
+| `crates/nirdosha-driver` | Stage 2 rustc driver: MIR interprocedural effects, real name resolution, totality checks, default-deny third party |
+| `examples/rt-payroll` | compliant program; all contract forms on display; passes `--deep` |
 | `examples/rt-payroll-lying` | zero-dependency lying program; plain cargo runs it, nirdosha refuses it |
+| `examples/rt-payroll-pure-chain` | the *indirect* lie: Stage 1 passes it, Stage 2 refuses with the chain |
 
 Usage:
 
 ```
 cargo build && cargo install --path crates/cargo-nirdosha   # or PATH=target/debug
-cargo nirdosha build | check | run | test | verify          # per-package
-NIRDOSHA_STRICT=1 cargo nirdosha build                      # every pub fn must carry a contract
+cargo nirdosha build | check | run | test | verify          # per-package verification
+NIRDOSHA_STRICT=1 cargo nirdosha build                       # strict: every pub fn carries a contract
+cargo nirdosha verify --workspace                           # strict gate over all in-dialect crates
+cargo nirdosha bench                                        # nfr(latency_ms) CI gate, real workload
+cargo build -p nirdosha-driver && cargo nirdosha build --deep   # Stage 2 (nightly + rustc-dev)
 ```
 
-## 6. What this borrows from the `.nir` compiler (and what replaces it)
+## 7. What this borrows from the `.nir` compiler (and what replaces it)
 
-`effects.rs` semantics (the effect vocabulary and the idea of
-declared-vs-actual checking) move onto Rust syntax;
-`smt.rs`/Z3, contract checking, and identity land in Stage 2 as HIR/MIR
-passes. The `.nir` frontend (token/parser/ast) is *replaced by rustc
-itself* — that is the point: we stop maintaining a grammar and start
-inheriting the entire Rust ecosystem, LLM training priors included.
+`effects.rs` semantics (the effect vocabulary, declared-vs-actual
+checking) now live over Rust syntax as the MIR effect lattice;
+`smt.rs`/Z3 discharge of numeric bounds, contract checking on impl
+blocks, and Row-12 identity remain Stage 2.5 on the driver's MIR pass.
+The `.nir` frontend (token/parser/ast) is *replaced by rustc itself* —
+that is the point: we stop maintaining a grammar and start inheriting
+the entire Rust ecosystem, LLM training priors included.
 
-## 7. Relationship to the strategy
+## 8. Relationship to the strategy
 
 - **The category claim, sharpened:** "guarantees about the language, not
   the model" now applies to the language agents already write. The
   VeraBench-style benchmark for us becomes: *constrained-Rust beats
   constrained-new-language* for agent correctness, because the priors
   are free.
-- **The certificate** is the commercial artifact: per-package JSON now,
-  proof-carrying and hash-bound in Stage 2.
-- **The demo** (`rt-payroll-lying`) is the visceral one from the action
-  plan: same source, two compilers, refusal with exact lines — 30
-  seconds long, no setup beyond a `cargo install`.
+- **The certificate** is the commercial artifact: per-package and
+  workspace JSON today, proof-carrying and hash-bound in Stage 2.5.
+- **The demo** (`scripts/rt-dialect-demo.sh`) is the visceral one from
+  the action plan: same source, two compilers, refusal with exact
+  lines — 30 seconds, no setup beyond a `cargo build`.
