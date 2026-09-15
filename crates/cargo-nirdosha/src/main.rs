@@ -47,6 +47,9 @@ fn main() -> ExitCode {
             if workspace {
                 return verify_ws_cli();
             }
+            if rest.iter().any(|a| a == "--audit") {
+                return audit_cli(rest.iter().find(|a| !a.starts_with("--")).cloned());
+            }
             let summary = match verify_cwd() {
                 Ok(s) => s,
                 Err(e) => {
@@ -172,6 +175,87 @@ fn verify_cwd() -> Result<ScanSummary, String> {
         report_path.display()
     );
     Ok(summary)
+}
+
+/// `cargo nirdosha verify --audit [path]` — re-check a certificate
+/// against the sources it attests to: is the binding intact (nobody
+/// edited the claims), and do the source hashes still match (nobody
+/// edited the code since it was verified)? Exit 0 only when both hold.
+fn audit_cli(path: Option<String>) -> ExitCode {
+    let loc = match locate() {
+        Ok(loc) => loc,
+        Err(e) => {
+            eprintln!("nirdosha: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = path.unwrap_or_else(|| {
+        loc.target_dir
+            .join("nirdosha")
+            .join("contract-report-<unknown-package>.json")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let path = if path.contains("<unknown-package>") {
+        // no explicit path: <target>/nirdosha/contract-report-<pkg>.json,
+        // pkg from the manifest in the cwd
+        let package = std::fs::read_to_string(loc.manifest_dir.join("Cargo.toml"))
+            .ok()
+            .and_then(|t| t.lines().find_map(|l| {
+                let l = l.trim();
+                l.starts_with("name")
+                    .then(|| l.split('"').nth(1).map(str::to_string))
+                    .flatten()
+            }))
+            .unwrap_or_default();
+        loc.target_dir
+            .join("nirdosha")
+            .join(format!("contract-report-{package}.json"))
+    } else {
+        std::path::PathBuf::from(path)
+    };
+    let cert: nirdosha_contract_core::certificate::Certificate =
+        match std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+            Some(cert) => cert,
+            None => {
+                eprintln!(
+                    "nirdosha: cannot read certificate {} — run `cargo nirdosha verify` first",
+                    path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+    let mut ok = true;
+    if cert.binding_valid() {
+        eprintln!("nirdosha: audit binding OK — claims are as minted ({})", cert.binding);
+    } else {
+        eprintln!("nirdosha: audit FAILED — binding mismatch; this certificate was edited");
+        ok = false;
+    }
+    let audit = cert.check_sources(&loc.manifest_dir);
+    if audit.ok() {
+        eprintln!(
+            "nirdosha: audit sources OK — {} file(s) match their verified hashes",
+            audit.matched
+        );
+    } else {
+        for path in &audit.changed {
+            eprintln!("nirdosha: audit FAILED — {path} changed since it was verified");
+        }
+        for path in &audit.missing {
+            eprintln!("nirdosha: audit FAILED — {path} is missing since it was verified");
+        }
+        ok = false;
+    }
+    if ok {
+        eprintln!("nirdosha: certificate holds — the verified code is exactly what was attested");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!(
+            "nirdosha: refusing to trust this certificate — plain `cargo build` would have accepted this code; that difference is the product"
+        );
+        ExitCode::FAILURE
+    }
 }
 
 fn report(summary: &ScanSummary, refused_for: &[&str]) {

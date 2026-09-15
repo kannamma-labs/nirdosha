@@ -10,7 +10,7 @@ fn fixture(name: &str) -> PathBuf {
 
 fn run(names: &[&str]) -> cargo_nirdosha::ScanSummary {
     let files: Vec<PathBuf> = names.iter().map(|n| fixture(n)).collect();
-    verify_sources("fixture-pkg", &files, false)
+    verify_sources("fixture-pkg", std::path::Path::new("."), &files, false)
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn dialect_restrictions_hold_without_contracts() {
 #[test]
 fn strict_mode_demands_contracts_on_pub_fns() {
     let files = vec![fixture("uncontracted.rs")];
-    let s = verify_sources("fixture-pkg", &files, true);
+    let s = verify_sources("fixture-pkg", std::path::Path::new("."), &files, true);
     assert!(
         s.violations()
             .iter()
@@ -105,7 +105,7 @@ fn strict_mode_demands_contracts_on_pub_fns() {
         "strict mode must flag uncontracted pub fns"
     );
     // and non-strict stays silent for the same file
-    let s = verify_sources("fixture-pkg", &files, false);
+    let s = verify_sources("fixture-pkg", std::path::Path::new("."), &files, false);
     assert!(s.violations().is_empty());
 }
 

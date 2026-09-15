@@ -182,11 +182,40 @@ injected proof parameter does not resolve.
 | `examples/rt-payroll-lying` | zero-dependency lying program; plain cargo runs it, nirdosha refuses it |
 | `examples/rt-payroll-pure-chain` | the *indirect* lie: Stage 1 passes it, Stage 2 refuses with the chain |
 
+### Certificates: `nirdosha.certificate/v1`
+
+Every verification mints a certificate at
+`target/nirdosha/contract-report-<package>.json` (workspace gate also
+writes `contract-report-workspace.json`). The envelope is shared by
+design with the proprietary tier: `subject` (package), `tool` (which
+surface verified — `source_scan` never invokes rustc and says so),
+`sources` (every verified file, package-relative, SHA-256), `proofs`
+(reserved for Stage 2.5's Z3 discharge objects — empty means
+*enforced*, not *proven*), `signature` (reserved for the signed-plugin
+trust chain), and `binding` — SHA-256 over all bound content.
+
+Two deliberate properties: **determinism** (no timestamps, no ambient
+state — same sources + tool give byte-identical certificates, so
+re-verification is a diff, and zero diff means zero drift), and
+**auditable claims**:
+
+```
+$ cargo nirdosha verify --audit
+nirdosha: audit binding OK — claims are as minted (5a6067…)
+nirdosha: audit sources OK — 1 file(s) match their verified hashes
+nirdosha: certificate holds — the verified code is exactly what was attested
+```
+
+Edit the source after verification, or edit the certificate's claims
+themselves — both are refused with a nonzero exit. That is the trust
+half of the register's entry #13 before any signing arrives.
+
 Usage:
 
 ```
 cargo build && cargo install --path crates/cargo-nirdosha   # or PATH=target/debug
 cargo nirdosha build | check | run | test | verify          # per-package verification
+cargo nirdosha verify --audit                               # re-check a certificate (tamper-proofing)
 NIRDOSHA_STRICT=1 cargo nirdosha build                       # strict: every pub fn carries a contract
 cargo nirdosha verify --workspace                           # strict gate over all in-dialect crates
 cargo nirdosha bench                                        # nfr(latency_ms) CI gate, real workload

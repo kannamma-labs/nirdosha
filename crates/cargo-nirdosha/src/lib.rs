@@ -57,6 +57,9 @@ pub struct ContractInfo {
 
 pub struct ScanSummary {
     pub package: String,
+    /// The package root — the base the certificate's source paths are
+    /// relative to.
+    pub package_dir: PathBuf,
     pub files: Vec<PathBuf>,
     pub contracts: Vec<ContractInfo>,
     pub findings: Vec<Finding>,
@@ -72,6 +75,11 @@ impl ScanSummary {
 
     /// Write the Stage-1 certificate next to the build artifacts:
     /// `<target>/nirdosha/contract-report-<package>.json`.
+    ///
+    /// `nirdosha.certificate/v1`: the report payload rides inside a
+    /// hash-bound envelope — every verified file's SHA-256, the tool
+    /// identity, and a binding over the whole content. Deterministic by
+    /// construction (no timestamps), so re-verification is a byte-diff.
     pub fn write_report(&self, target_dir: &Path) -> std::io::Result<PathBuf> {
         let dir = target_dir.join("nirdosha");
         fs::create_dir_all(&dir)?;
@@ -86,9 +94,52 @@ impl ScanSummary {
             "findings": self.findings,
             "violations": self.violations().len(),
         });
-        fs::write(&path, serde_json::to_vec_pretty(&payload)?)?;
+        let certificate = cc::certificate::Certificate::new(
+            cc::certificate::Subject {
+                package: self.package.clone(),
+                version: package_version(&self.package_dir),
+            },
+            cc::certificate::Tool {
+                name: "cargo-nirdosha".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                mode: cc::certificate::Mode::SourceScan,
+                // None is honest: the source scan never invokes rustc.
+                toolchain: None,
+            },
+            cc::certificate::scan_sources(&self.package_dir, &self.files)?,
+            payload,
+        );
+        fs::write(&path, serde_json::to_vec_pretty(&certificate)?)?;
         Ok(path)
     }
+}
+
+/// The package's declared version, for the certificate subject.
+fn package_version(manifest_dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(manifest_dir.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "[package]" {
+            in_package = true;
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if line.starts_with('[') {
+            // a new section: past [package]; version not declared here
+            // (workspace-inherited versions read as None — the honest
+            // answer for a scan that never resolves workspace metadata)
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("version") {
+            if let Some(v) = rest.trim_start().strip_prefix('=') {
+                return Some(v.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Verify the package rooted at `manifest_dir` (its `src/` tree,
@@ -106,13 +157,19 @@ pub fn verify_package(manifest_dir: &Path, strict: bool) -> Result<ScanSummary, 
     let mut files = Vec::new();
     collect_rs_files(&src, &mut files);
     files.sort();
-    Ok(verify_sources(&package, &files, strict))
+    Ok(verify_sources(&package, manifest_dir, &files, strict))
 }
 
 /// Verify a fixed list of `.rs` files (the unit of testing).
-pub fn verify_sources(package: &str, files: &[PathBuf], strict: bool) -> ScanSummary {
+pub fn verify_sources(
+    package: &str,
+    package_dir: &Path,
+    files: &[PathBuf],
+    strict: bool,
+) -> ScanSummary {
     let mut summary = ScanSummary {
         package: package.to_string(),
+        package_dir: package_dir.to_path_buf(),
         files: files.to_vec(),
         contracts: Vec::new(),
         findings: Vec::new(),
@@ -468,7 +525,33 @@ impl WorkspaceSummary {
             "findings": findings,
             "violations": self.violations(),
         });
-        fs::write(&path, serde_json::to_vec_pretty(&payload)?)?;
+        // Aggregate certificate: every in-dialect package's sources,
+        // prefixed `<package>/<path>` so paths stay unambiguous.
+        let sources = self
+            .packages
+            .iter()
+            .flat_map(|summary| {
+                cc::certificate::scan_sources(&summary.package_dir, &summary.files)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|source| cc::certificate::SourceFile {
+                        path: format!("{}/{}", summary.package, source.path),
+                        sha256: source.sha256,
+                    })
+            })
+            .collect();
+        let certificate = cc::certificate::Certificate::new(
+            cc::certificate::Subject { package: "workspace".into(), version: None },
+            cc::certificate::Tool {
+                name: "cargo-nirdosha".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                mode: cc::certificate::Mode::SourceScan,
+                toolchain: None,
+            },
+            sources,
+            payload,
+        );
+        fs::write(&path, serde_json::to_vec_pretty(&certificate)?)?;
         Ok(path)
     }
 }

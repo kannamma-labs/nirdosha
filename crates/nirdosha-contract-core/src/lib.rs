@@ -19,6 +19,7 @@
 //! plain rustc; under `cargo nirdosha` they stop being comments and become
 //! checks.
 
+pub mod certificate;
 pub mod docparse;
 pub mod model;
 pub mod parse;

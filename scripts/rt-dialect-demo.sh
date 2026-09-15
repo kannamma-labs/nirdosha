@@ -35,9 +35,11 @@ bold "2. same source, the Nirdosha compiler — the claims become checks"
 bold "3. the compliant program: plain cargo runs it"
 (cd examples/rt-payroll && cargo run -q 2>/dev/null)
 
-bold "4. …and the Nirdosha compiler certifies it"
+bold "4. …and the Nirdosha compiler certifies it — hash-bound, auditable"
 (cd examples/rt-payroll && cargo nirdosha verify) \
     && echo "(3 contracts verified, certificate in target/nirdosha/)"
+(cd examples/rt-payroll && cargo nirdosha verify --audit) \
+    && echo "(audit holds: the verified code is exactly what was attested)"
 
 bold "5. NFRs are enforced, not proven: cargo nirdosha bench (your test suite is the workload)"
 (cd examples/rt-payroll && cargo nirdosha bench) \
