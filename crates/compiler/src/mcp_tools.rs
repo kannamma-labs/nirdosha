@@ -852,11 +852,12 @@ pub fn write_auto_patches(path: &str, before: &VerifyVerdict) -> Result<Vec<Appl
     Ok(applied)
 }
 
+/// `crypto_backend::sha256` (2026-09) -- `fips`-feature-aware, same
+/// swap point `hi_graph::sha256_hex`/`audit_chain.rs` use, not a third
+/// independent direct `sha2` call left un-swapped.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    let hex: String = crate::crypto_backend::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex}")
 }
 
 /// Certificate v0 (`nirdosha-master-plan.md` Part 3 Sprint 1, parity
@@ -963,6 +964,83 @@ pub struct Certificate {
     /// evidence arrives," not "auto-updating."
     #[serde(default)]
     pub isolation_violations: Vec<IsolationViolation>,
+    /// RFC 0016's "Compliance profiles" section ("What certification
+    /// emits") -- the piece that was designed and built (`hi_plugin.rs`'s
+    /// `ComplianceProfile`/`check_static_rules`/`SUPPORTED_WIRING_
+    /// REQUIREMENT_KINDS`, a real FAPI 2.0 pack fixture, all real and
+    /// tested) but never actually surfaced into a `Certificate` --
+    /// `check_static_rules` had no caller outside its own unit tests
+    /// before this field existed. Built for real 2026-09-15 (`hi_plugin::
+    /// compliance_profile_reports`, the one place with both the parsed
+    /// `Program` and the active-pack manifests, same shape as
+    /// `governing_invariants`). Empty for the same reason `governing_
+    /// packs` is: only `handle_publish` has a parsed `Program` to check
+    /// profiles against.
+    #[serde(default)]
+    pub compliance_profiles: Vec<ComplianceProfileReport>,
+}
+
+/// One active pack's compliance profile, as attested against *this*
+/// published artifact -- RFC 0016's four requirement kinds, each with
+/// its own honest `evidence_tier` rather than one blanket "compliant"
+/// bit. `validate_contract` isn't a separate field here: it's exactly
+/// `Certificate::verdict_summary`/`governing_invariants` already are,
+/// for a profile that layers no additional requirement on top of an
+/// already-proved `validate` block.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ComplianceProfileReport {
+    pub pack_id: String,
+    pub profile_name: String,
+    pub profile_version: String,
+    /// A real AST-level check the toolchain ran against this exact
+    /// `Program` (`hi_plugin::check_static_rules`) -- present here only
+    /// if it passed; `hi_plugin::compliance_profile_reports`'own doc
+    /// comment on why a failure refuses the whole publish rather than
+    /// silently recording an unsatisfied claim (RFC 0016's own "not a
+    /// checkbox in a wiki" framing).
+    pub static_rules: Vec<ComplianceRequirementReport>,
+    /// Declared, not verified here -- RFC 0016's own scoping: nirdosha
+    /// never runs an authorization server, so most of these (`par`,
+    /// `pkce_s256`, `iss_check`, `par_request_uri_lifetime`) have no
+    /// resource-server enforcement point this toolchain could check
+    /// against. `sender_constrained_tokens` is the one exception with
+    /// real runtime enforcement (`compiled_serve`'s DPoP check, wired
+    /// separately via `wiring_requires_sender_constrained_tokens`) --
+    /// still reported as `"declared"` here, not `"checked"`, because
+    /// this report is a static fact about the pack's own declaration,
+    /// not a live attestation that a particular running deployment
+    /// actually enforced it.
+    pub wiring_requirements: Vec<ComplianceRequirementReport>,
+    /// RFC 0016's own "NOT provable by us" category verbatim: AS-runtime
+    /// behavior and OIDF certification are external/legal acts. Carried
+    /// here as the pack's own declared requirement text; whether a real
+    /// conformance report has been attached and verified against its
+    /// issuer is real, separate follow-up (RFC 0016's own note: "the
+    /// attachment must be verifiable against the issuer... not merely
+    /// content-hashed").
+    pub external_conformance: Vec<ExternalConformanceReport>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ComplianceRequirementReport {
+    pub kind: String,
+    pub evidence_tier: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExternalConformanceReport {
+    pub kind: String,
+    pub description: String,
+    pub evidence_tier: String,
+}
+
+impl ComplianceRequirementReport {
+    pub const STATIC_RULE_EVIDENCE_TIER: &'static str = "checked";
+    pub const WIRING_REQUIREMENT_EVIDENCE_TIER: &'static str = "declared";
+}
+
+impl ExternalConformanceReport {
+    pub const EVIDENCE_TIER: &'static str = "external";
 }
 
 /// One detected isolation anomaly, carried into the certificate
@@ -1192,10 +1270,10 @@ pub fn sign_certificate(certificate: &Certificate, key_path: &str) -> Result<Sig
 pub fn sign_bytes(bytes: &[u8], key_path: &str) -> Result<(String, String), String> {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
-    use ring::signature::KeyPair;
+    use crate::crypto_backend::signature::KeyPair;
 
     let pkcs8 = std::fs::read(key_path).map_err(|e| format!("reading private key {key_path}: {e}"))?;
-    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}"))?;
+    let keypair = crate::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}"))?;
     let signature = keypair.sign(bytes);
     Ok((BASE64_STANDARD.encode(keypair.public_key().as_ref()), BASE64_STANDARD.encode(signature.as_ref())))
 }
@@ -1217,7 +1295,7 @@ pub fn verify_bytes(bytes: &[u8], public_key_b64: &str, signature_b64: &str) -> 
 
     let signature_bytes = BASE64_STANDARD.decode(signature_b64).map_err(|e| format!("signature is not valid base64: {e}"))?;
     let public_key_bytes = BASE64_STANDARD.decode(public_key_b64).map_err(|e| format!("public_key is not valid base64: {e}"))?;
-    let public_key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public_key_bytes);
+    let public_key = crate::crypto_backend::signature::UnparsedPublicKey::new(&crate::crypto_backend::signature::ED25519, &public_key_bytes);
     Ok(public_key.verify(bytes, &signature_bytes).is_ok())
 }
 
@@ -1285,6 +1363,10 @@ pub fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certif
         // "populated by the one call site with the extra context"
         // shape `governing_packs`/`nfr_commitments` already use.
         isolation_violations: Vec::new(),
+        // Empty here too, same reason as `governing_invariants`: only
+        // `hi_api::handle_publish` has both a parsed `Program` and the
+        // active-pack manifests to check compliance profiles against.
+        compliance_profiles: Vec::new(),
     }
 }
 

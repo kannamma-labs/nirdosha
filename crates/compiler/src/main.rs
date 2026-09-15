@@ -1513,7 +1513,7 @@ fn cmd_verify_binary(mut args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 /// `nirdosha keygen [-o <path>]` -- generates a real Ed25519 keypair
-/// (`ring::rand::SystemRandom`, the OS CSPRNG, not a fixed/test seed)
+/// (`nirdosha::crypto_backend::rand::SystemRandom`, the OS CSPRNG, not a fixed/test seed)
 /// for `nirdosha certify --sign`. Writes the private key as raw
 /// PKCS#8 DER to `<path>` (default `nirdosha_signing_key.pk8`) --
 /// **keep this file secret**, anyone holding it can sign certificates
@@ -1522,7 +1522,7 @@ fn cmd_verify_binary(mut args: impl Iterator<Item = String>) -> ExitCode {
 fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
-    use ring::signature::KeyPair;
+    use nirdosha::crypto_backend::signature::KeyPair;
 
     let mut out: Option<String> = None;
     while let Some(a) = args.next() {
@@ -1542,8 +1542,8 @@ fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
     let out_path = out.unwrap_or_else(|| "nirdosha_signing_key.pk8".to_string());
 
-    let rng = ring::rand::SystemRandom::new();
-    let pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+    let rng = nirdosha::crypto_backend::rand::SystemRandom::new();
+    let pkcs8 = match nirdosha::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("key generation failed: {e}");
@@ -1554,7 +1554,7 @@ fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
         eprintln!("error writing {out_path}: {e}");
         return ExitCode::FAILURE;
     }
-    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("a key this function just generated always parses");
+    let keypair = nirdosha::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("a key this function just generated always parses");
     let public_key_b64 = BASE64_STANDARD.encode(keypair.public_key().as_ref());
     let pub_path = format!("{out_path}.pub");
     if let Err(e) = std::fs::write(&pub_path, format!("{public_key_b64}\n")) {
@@ -1839,7 +1839,7 @@ fn cmd_attest(mut args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let keypair = match ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8) {
+    let keypair = match nirdosha::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(&pkcs8) {
         Ok(k) => k,
         Err(e) => {
             eprintln!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}");
@@ -1895,7 +1895,7 @@ fn audit_one_attestation(attestation: &Attestation, trust_config: &TrustConfig, 
     let valid = (|| -> Option<bool> {
         let public_key_bytes = BASE64_STANDARD.decode(&identity.public_key).ok()?;
         let signature_bytes = BASE64_STANDARD.decode(&attestation.signature).ok()?;
-        let public_key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public_key_bytes);
+        let public_key = nirdosha::crypto_backend::signature::UnparsedPublicKey::new(&nirdosha::crypto_backend::signature::ED25519, &public_key_bytes);
         Some(public_key.verify(&canonical, &signature_bytes).is_ok())
     })()
     .unwrap_or(false);

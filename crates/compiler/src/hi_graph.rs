@@ -25,7 +25,6 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 
 /// `NIRDOSHA_HI_DISABLE=1` skips the auto-scaffold and auto-sync
 /// `hi` would otherwise run on startup -- same `NIRDOSHA_`-prefixed,
@@ -46,10 +45,12 @@ pub fn hi_dir(root: &Path) -> PathBuf {
     root.join(".nir")
 }
 
+/// `crypto_backend::sha256` (2026-09) -- `fips`-feature-aware, so pack/
+/// content integrity hashing goes through the same CMVP-validatable
+/// swap point as this crate's Ed25519 signing, not a separate plain
+/// `sha2` call left behind.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    crate::crypto_backend::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Creates `.nir/` and `.nir/content/` if absent, opens (or creates)

@@ -44,6 +44,22 @@ base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
 ring = "0.17"
+# `crypto_backend.rs`'s FIPS swap (2026-09) -- `SECURITY.md`/`ROADMAP.md`'s
+# disclosed gap: `ring` is not a NIST CMVP-validated cryptographic
+# module, so a government/regulated deployment requiring FIPS-140-3-
+# validated crypto for Ed25519 pack/certificate signing (`hi_plugin.rs`,
+# `mcp_tools.rs`) can't use it as-is. `aws-lc-rs` mirrors `ring`'s own
+# `rand`/`signature` API closely enough that `crypto_backend.rs` is a
+# pure re-export shim, not a rewrite -- confirmed with a real scratch
+# build in this environment before touching this file: `cmake`/`go`/
+# `clang` (aws-lc-fips-sys's real build-time requirement) are present,
+# and `Ed25519KeyPair::generate_pkcs8`/`sign`/`UnparsedPublicKey::verify`
+# plus a SHA-256 test vector all work identically under the `fips`
+# feature. Optional and off by default -- a normal build is completely
+# unaffected; `cargo build --features fips` (or `--no-default-features
+# --features fips` in `runtime-kernels`, see that crate's own Cargo.toml)
+# opts a regulated deployment in.
+aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
 redis = "0.27"
 tiny_http = "0.12"
@@ -84,6 +100,11 @@ tao = "0.37.0"
 # system z3 via pkg-config since the vendored build is much slower.
 [features]
 dist = ["z3/vendored"]
+# See `aws-lc-rs`'s own comment above and `crypto_backend.rs`'s module
+# doc. `cargo build --features fips` swaps Ed25519 pack/certificate
+# signing from `ring` to `aws-lc-rs`'s CMVP-validatable module; every
+# other dependency, and the default (non-`fips`) build, is unaffected.
+fips = ["dep:aws-lc-rs"]
 
 # rfcs/0009-ui-catalog-extensibility.md Phase B's real, separately-
 # compiled reference UI component -- `tests/ui_plugin_examples.rs`'s

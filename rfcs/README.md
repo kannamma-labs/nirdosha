@@ -30,6 +30,7 @@ this list.
 | [0016](./0016-domain-packs-and-whose-job-domain-correctness-is.md) | Sealed domain plugins — pre-baked, non-waivable, cryptographically attested invariants (and compliance profiles) |
 | [0017](./0017-security-guarantee-manifest.md) | Security guarantee manifests — per-module policy contracts checked at compile time and enforced by the APM kernel |
 | [0018](./0018-llm-reflex-syntax-try-operator-string-quoting-or-patterns.md) | LLM-reflex syntax — a real `?` try-operator, single-quoted strings, and `\|` or-patterns in `match` (speculative, nothing built) |
+| [0019](./0019-omniscope-unified-static-analysis-engine.md) | OMNISCOPE — a unified static analysis engine synthesizing mypy/Pyright/ESLint/SonarQube/Semgrep/CodeQL/Snyk/Coverity/Dafny/Prusti/Kani into one product-lattice kernel (speculative, nothing built) |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a

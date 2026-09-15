@@ -12,12 +12,18 @@
 //! types admit, or produce a concrete counterexample.
 //!
 //! **Scope, deliberately narrow — the same boundary §7.5 already named,
-//! not loosened here:** integer parameters and an integer return value
-//! only (no `f64`, no `bool` return, no `struct`/`enum`); no loops, no
-//! calls, no division (truncation semantics would need separate,
-//! careful modeling — the same reason `smt.rs` never asserts division's
-//! *result* as an equality either); no interprocedural reasoning (a
-//! predicate can only talk about the one function's own params/return).
+//! narrowed further here in one real way:** integer parameters and an
+//! integer return value only (no `f64`, no `bool` return, no
+//! `struct`/`enum`); no loops, no calls beyond an already-proven
+//! callee's summary (below); no interprocedural reasoning (a predicate
+//! can only talk about the one function's own params/return). Division
+//! and remainder *are* modeled (2026-09, `smt::div_rem`, shared with
+//! `smt.rs`) — truncating-toward-zero semantics via a fresh, permanently
+//! asserted quotient/remainder relation, not an `Unsupported` bailout
+//! anymore; see `int_expr`'s `BinOp::Div`/`BinOp::Rem` arms and
+//! `div_rem`'s own doc for the encoding and its honest limit
+//! (nonlinear arithmetic — not every such obligation is guaranteed to
+//! resolve within one solver call).
 //! Anything outside that shape is `Unsupported`, reported honestly, not
 //! silently approximated — approximating an unmodelable sub-expression
 //! with a fresh unconstrained value would be sound for a *proof*
@@ -48,6 +54,8 @@ use std::collections::{HashMap, HashSet};
 
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
+
+use crate::smt::div_rem;
 
 // ---------------------------------------------------------------------------
 // RFC 0016 Phase 0: deterministic solver fuel.
@@ -1345,10 +1353,29 @@ impl Eval<'_> {
             Expr::Binary(BinOp::Add, l, r, _) => Ok(self.int_expr(l, scopes)? + self.int_expr(r, scopes)?),
             Expr::Binary(BinOp::Sub, l, r, _) => Ok(self.int_expr(l, scopes)? - self.int_expr(r, scopes)?),
             Expr::Binary(BinOp::Mul, l, r, _) => Ok(self.int_expr(l, scopes)? * self.int_expr(r, scopes)?),
-            Expr::Binary(BinOp::Div, _, _, _) => {
-                Err("Tier 1 doesn't model division's result (integer-truncation semantics, same conservative choice smt.rs makes)".to_string())
+            // Division/remainder are modeled now (2026-09), sharing
+            // `smt.rs::div_rem`'s exact truncating-quotient/remainder
+            // relation rather than a second copy of it — see that
+            // function's own doc for the encoding and why asserting it
+            // permanently (not scoped to this one obligation) is still
+            // sound even without a separate nonzero-divisor proof
+            // first: a `b == 0` world is excluded because it's
+            // unsatisfiable by construction, the correct partial-
+            // correctness reading (a real zero divisor traps at
+            // runtime before any `post_logic` check is ever reached).
+            // This closes the exact gap `crates/bench/RESULTS.md`
+            // documents (`average_no_float_confusion`'s `UNKNOWN`
+            // verdict) for the shapes it can express.
+            Expr::Binary(BinOp::Div, l, r, _) => {
+                let (lt, rt) = (self.int_expr(l, scopes)?, self.int_expr(r, scopes)?);
+                let (q, _rem) = div_rem(self.solver, &lt, &rt);
+                Ok(q)
             }
-            Expr::Binary(BinOp::Rem, _, _, _) => Err("Tier 1 doesn't model remainder's result (same conservative choice smt.rs/refine.rs make for `%`)".to_string()),
+            Expr::Binary(BinOp::Rem, l, r, _) => {
+                let (lt, rt) = (self.int_expr(l, scopes)?, self.int_expr(r, scopes)?);
+                let (_q, rem) = div_rem(self.solver, &lt, &rt);
+                Ok(rem)
+            }
             Expr::If { cond, then_block, else_block, .. } => {
                 let cond_term = self.bool_expr(cond, scopes)?;
                 self.solver.push();

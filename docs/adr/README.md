@@ -50,3 +50,4 @@ honest downside, not just the win.
 | [0009](./0009-transact-durability-and-replay.md) | `transact` — durability log, bounded retry, and crash replay | accepted |
 | [0010](./0010-runtime-kernels-rlib-for-compiled-serve.md) | `runtime-kernels` also builds as an `rlib`, for `compiled-serve` | accepted |
 | [0011](./0011-keep-readable-reserved-words-reject-dunder-prefix.md) | Keep reserved words readable — reject the `__`-prefix collision-elimination proposal | accepted |
+| [0012](./0012-fips-140-3-crypto-backend-swap.md) | A CMVP-validatable crypto backend behind a `fips` feature flag | accepted |

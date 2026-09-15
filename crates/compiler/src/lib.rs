@@ -1,8 +1,10 @@
 pub mod ast;
+pub mod audit_chain;
 pub mod capabilities;
 pub mod codegen;
 pub mod contract_check;
 pub mod crud_gen;
+pub mod crypto_backend;
 pub mod effects;
 pub mod explain;
 pub mod extraction_schema;

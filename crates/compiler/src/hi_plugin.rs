@@ -870,6 +870,82 @@ pub fn wiring_requires_sender_constrained_tokens(conn: &rusqlite::Connection, ro
     Ok(packs.iter().any(|m| m.compliance_profiles.iter().any(|p| p.wiring_requirements.iter().any(|w| w.kind == "sender_constrained_tokens"))))
 }
 
+/// RFC 0016's "What certification emits" — real for the first time
+/// 2026-09-15. `check_static_rules`/`ComplianceProfile` were built and
+/// unit-tested against a real FAPI 2.0 pack fixture, but nothing in the
+/// actual generate/publish/certify pipeline ever called
+/// `check_static_rules`, and `Certificate` had no field to carry the
+/// result even if it had — the RFC's own worked example (`packs: ...`,
+/// `compliance: fapi-2.0-security-profile ...`) was aspirational, not
+/// produced by any real code path. This is that missing wiring: every
+/// active pack's compliance profile, checked for real against the
+/// program actually being published.
+///
+/// **A failed `static_rule` refuses the whole call, it does not get
+/// silently omitted or recorded as unsatisfied** — mirrors `hi_api::
+/// handle_publish`'s own `contract_coverage_check_program` "publish
+/// refused" discipline just above it, for the same reason: RFC 0016
+/// says a `static_rule` "turns compiler behavior into an *attested
+/// claim*" for this specific artifact — attesting a claim you already
+/// know is false would be strictly worse than never having built this
+/// feature at all. `wiring_requirement`/`external_conformance` are
+/// never behaviorally checkable at publish time by design (see
+/// `ComplianceProfileReport`'s own doc comments in `mcp_tools.rs` for
+/// exactly what each tier does and doesn't claim), so they're always
+/// reported, never a refusal reason.
+pub fn compliance_profile_reports(conn: &rusqlite::Connection, root: &Path, program: &crate::ast::Program) -> Result<Vec<crate::mcp_tools::ComplianceProfileReport>, String> {
+    let packs = active_pack_manifests(conn, root)?;
+    let mut out: Vec<crate::mcp_tools::ComplianceProfileReport> = Vec::new();
+    for manifest in &packs {
+        for profile in &manifest.compliance_profiles {
+            if let Err(errors) = check_static_rules(program, profile) {
+                return Err(format!(
+                    "publish refused -- pack `{}`'s compliance profile `{}` v{} declares a static_rule that does not hold for this artifact: {}",
+                    manifest.id,
+                    profile.name,
+                    profile.version,
+                    errors.join("; ")
+                ));
+            }
+            out.push(crate::mcp_tools::ComplianceProfileReport {
+                pack_id: manifest.id.clone(),
+                profile_name: profile.name.clone(),
+                profile_version: profile.version.clone(),
+                static_rules: profile
+                    .static_rules
+                    .iter()
+                    .map(|r| crate::mcp_tools::ComplianceRequirementReport {
+                        kind: r.kind.clone(),
+                        evidence_tier: crate::mcp_tools::ComplianceRequirementReport::STATIC_RULE_EVIDENCE_TIER.to_string(),
+                    })
+                    .collect(),
+                wiring_requirements: profile
+                    .wiring_requirements
+                    .iter()
+                    .map(|w| crate::mcp_tools::ComplianceRequirementReport {
+                        kind: w.kind.clone(),
+                        evidence_tier: crate::mcp_tools::ComplianceRequirementReport::WIRING_REQUIREMENT_EVIDENCE_TIER.to_string(),
+                    })
+                    .collect(),
+                external_conformance: profile
+                    .external_conformance
+                    .iter()
+                    .map(|e| crate::mcp_tools::ExternalConformanceReport {
+                        kind: e.kind.clone(),
+                        description: e.description.clone(),
+                        evidence_tier: crate::mcp_tools::ExternalConformanceReport::EVIDENCE_TIER.to_string(),
+                    })
+                    .collect(),
+            });
+        }
+    }
+    // Deterministic order -- matches `governing_invariants`'s own
+    // "no timestamp, no random nonce, always the same bytes for the
+    // same input" discipline.
+    out.sort_by(|a, b| (a.pack_id.as_str(), a.profile_name.as_str()).cmp(&(b.pack_id.as_str(), b.profile_name.as_str())));
+    Ok(out)
+}
+
 /// The config-sidecar half of `wiring_requirement`: every active pack's
 /// `par`/`pkce_s256`/`iss_check`/`par_request_uri_lifetime` requirements,
 /// rendered as one JSON object -- "rendered into generated config" per
@@ -1600,8 +1676,8 @@ serve {
     /// real file since `sign_pack`/`mcp_tools::sign_bytes` both take a
     /// key *path*, the same interface `nirdosha certify --sign` uses.
     fn generate_test_key(dir: &std::path::Path) -> std::path::PathBuf {
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
+        let rng = crate::crypto_backend::rand::SystemRandom::new();
+        let pkcs8 = crate::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
         let path = dir.join("signer.pk8");
         std::fs::write(&path, pkcs8.as_ref()).expect("write key");
         path

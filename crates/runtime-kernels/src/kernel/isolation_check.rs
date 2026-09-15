@@ -236,10 +236,32 @@ pub(crate) fn current_txn() -> Option<String> {
 /// `NIRDOSHA_OBSERVABILITY_URL` posture exactly) if it just completed a
 /// cycle. Never on the calling thread, and never allowed to affect the
 /// `db` call's own return value -- an anomaly detector must not become
-/// a new way for `db` operations to fail. A no-op if `txn` is `None`
-/// (nothing to attribute the op to).
+/// a new way for `db` operations to fail.
+///
+/// **`txn == None` is no longer a silent no-op for a write (2026-09).**
+/// This module's own top doc comment already names the honest scope
+/// choice: a bare `db` call outside any `transact` site can't be
+/// *attributed* to a txn, so it can't be fed into cycle detection --
+/// that reasoning doesn't change here. What changes is that an
+/// untracked *write* used to vanish with zero observable trace, the
+/// same "invisible" gap `README.md`/`docs/CONCURRENT_STATE_PATTERNS.md`
+/// disclose for the race-freedom guarantee as a whole (`killer_demo`
+/// corrupts a ledger through exactly this path). `escalate_untracked_
+/// write` below fires the identical `NIRDOSHA_OBSERVABILITY_URL`
+/// channel a real anomaly uses, so an operator monitoring that channel
+/// sees "a write happened here with no isolation guarantee at all",
+/// not silence -- the checked-vs-unchecked boundary becomes a
+/// *monitored* fact instead of one only visible by reading source. A
+/// bare *read* stays untracked and silent: on its own it can't
+/// participate in a lost-update/write-skew cycle the way an untracked
+/// write can.
 pub(crate) fn record_and_check(txn: Option<String>, resource: String, kind: OpKind) {
-    let Some(txn) = txn else { return };
+    let Some(txn) = txn else {
+        if kind == OpKind::Write {
+            escalate_untracked_write(&resource);
+        }
+        return;
+    };
     maybe_start_capture();
     let anomalies = {
         let mut checker = shared().lock().unwrap_or_else(|e| e.into_inner());
@@ -300,6 +322,36 @@ fn escalate(anomaly: &Anomaly) {
     });
 }
 
+/// The new half of the fix: a `db` write with no active `transact` on
+/// this thread used to be entirely invisible (`record_and_check`'s old
+/// unconditional early return); now it fires the same fire-and-forget
+/// HTTP POST `escalate` uses, tagged `"untracked_db_write"` rather than
+/// `"isolation_anomaly"` so a consumer can tell "no guarantee was even
+/// possible here" apart from "a guarantee was checked and violated".
+/// Same asynchrony/never-affects-the-call's-own-return-value posture as
+/// `escalate`, for the same reason: an observability hook must never
+/// become a new way for a `db` call to fail or slow down.
+fn escalate_untracked_write(resource: &str) {
+    let Some((host, port, path)) = super::nfr::observability_target() else { return };
+    let host = host.clone();
+    let port = *port;
+    let path = path.clone();
+    let body = untracked_write_body(resource, unix_time_ms());
+    std::thread::spawn(move || {
+        super::nfr::post_json_fire_and_forget(&host, port, &path, &body);
+    });
+}
+
+/// Pulled out as a pure function -- same reason `nfr.rs`'s `json_escape`/
+/// `parse_http_url` are pure and tested directly rather than through the
+/// thread-spawn/`OnceLock`-cached-env-var machinery around them: a
+/// per-process-cached `NIRDOSHA_OBSERVABILITY_URL` can't be flipped on
+/// mid-test-binary-run, so the wire format is the part worth pinning.
+fn untracked_write_body(resource: &str, timestamp_ms: u128) -> String {
+    let resource_json = resource.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(r#"{{"kind":"untracked_db_write","resource":"{resource_json}","timestamp_ms":{timestamp_ms}}}"#)
+}
+
 fn unix_time_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
@@ -307,6 +359,22 @@ fn unix_time_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `shared()` is one process-wide `Mutex<Checker>` -- correct for a
+    /// real compiled binary (exactly one process-wide checker is the
+    /// point), but `cargo test` runs this file's tests concurrently in
+    /// that same process by default, so two tests both calling
+    /// `clear_shared()`/`record_and_check`/`snapshot_anomalies()` can
+    /// interleave and see each other's ops (a real, pre-existing test-
+    /// isolation gap, not introduced by this session's new tests, but
+    /// worth actually closing rather than working around by hand every
+    /// time a new test needs the shared state). Every test below that
+    /// touches `shared()` holds this for its own duration.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_shared_for_test() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn current_txn_thread_local_round_trips() {
@@ -319,9 +387,41 @@ mod tests {
 
     #[test]
     fn record_and_check_is_a_noop_with_no_active_txn() {
+        let _guard = lock_shared_for_test();
         clear_shared();
         record_and_check(None, "balance:acct1".to_string(), OpKind::Write);
         assert!(snapshot_anomalies().is_empty());
+    }
+
+    /// A bare read with no active `transact` stays exactly as silent as
+    /// before this session's fix -- only an untracked *write* gets the
+    /// new observability escalation (`record_and_check`'s own doc
+    /// comment for why). Same assertion shape as the write case above:
+    /// the shared checker's own state is untouched either way, since
+    /// checking it is the thing this test would notice a regression in.
+    #[test]
+    fn record_and_check_is_still_a_noop_for_an_untracked_read() {
+        let _guard = lock_shared_for_test();
+        clear_shared();
+        record_and_check(None, "balance:acct1".to_string(), OpKind::Read);
+        assert!(snapshot_anomalies().is_empty());
+    }
+
+    /// `escalate_untracked_write`'s wire format, pinned directly against
+    /// the pure function -- the same reason `nfr.rs`'s `json_escape`/
+    /// `parse_http_url` are tested this way rather than through the
+    /// thread-spawn/env-var-cached path around them (see
+    /// `untracked_write_body`'s own doc comment).
+    #[test]
+    fn untracked_write_body_shape_and_escaping() {
+        assert_eq!(
+            untracked_write_body("balance:acct1", 12345),
+            r#"{"kind":"untracked_db_write","resource":"balance:acct1","timestamp_ms":12345}"#
+        );
+        assert_eq!(
+            untracked_write_body(r#"table with "quotes" and \backslash"#, 0),
+            r#"{"kind":"untracked_db_write","resource":"table with \"quotes\" and \\backslash","timestamp_ms":0}"#
+        );
     }
 
     /// The `killer_demo` shape, driven through this module's own live
@@ -331,6 +431,7 @@ mod tests {
     /// behaves correctly, not just the algorithm it delegates to.
     #[test]
     fn record_and_check_detects_the_killer_demo_lost_update_pattern_through_this_modules_own_entry_point() {
+        let _guard = lock_shared_for_test();
         clear_shared();
         record_and_check(Some("a".to_string()), "balance:acct1".to_string(), OpKind::Read);
         record_and_check(Some("b".to_string()), "balance:acct1".to_string(), OpKind::Read);
@@ -350,6 +451,7 @@ mod tests {
     /// showing up as an unexplained slowdown running the real demo.
     #[test]
     fn record_and_check_rotates_the_shared_history_once_max_tracked_ops_is_reached() {
+        let _guard = lock_shared_for_test();
         clear_shared();
         for i in 0..(MAX_TRACKED_OPS * 2) {
             record_and_check(Some(format!("txn{i}")), format!("resource{i}"), OpKind::Write);
@@ -364,6 +466,7 @@ mod tests {
     /// still be caught, exactly as if no rotation existed at all.
     #[test]
     fn rotation_does_not_cost_a_same_window_anomaly_its_own_detection() {
+        let _guard = lock_shared_for_test();
         clear_shared();
         record_and_check(Some("a".to_string()), "balance:acct1".to_string(), OpKind::Read);
         record_and_check(Some("b".to_string()), "balance:acct1".to_string(), OpKind::Read);

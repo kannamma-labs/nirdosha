@@ -27,12 +27,20 @@
 //! 1. An arithmetic expression's value fits its declared target type.
 //! 2. A division's divisor is never zero.
 //!
-//! Division's *result* value is still not modeled as a symbolic term at
-//! all (division isn't asserted as an equality the way +/-/* are) —
-//! that decision in `refine.rs` was about avoiding integer-truncation
-//! edge cases, not about solver power, so a stronger solver doesn't
-//! change the reasoning. No interprocedural summaries either: a call's
-//! result is a fresh symbolic value bounded only by the callee's
+//! **Division's result is now modeled too (2026-09), unlike `refine.rs`.**
+//! A division/remainder's operands get a fresh `(q, rem)` pair with
+//! Rust's actual truncating-toward-zero semantics asserted as their
+//! defining relation (`div_rem`, below) — not the SMT-LIB-native
+//! Euclidean `div`/`mod` the underlying solver also exposes, which
+//! would silently disagree with `i64`'s runtime behavior whenever the
+//! operands' signs differ. This closes the gap `crates/bench/RESULTS.md`
+//! documents (`average_no_float_confusion`'s `UNKNOWN` verdict, and a
+//! plain-LLM Rust baseline beating this pass on the identical task
+//! purely via `i64`'s static typing) for the shapes it can express —
+//! see `div_rem`'s own doc for the honest limit (nonlinear arithmetic;
+//! not every such obligation is guaranteed to resolve quickly, or at
+//! all, within one solver call). No interprocedural summaries either: a
+//! call's result is a fresh symbolic value bounded only by the callee's
 //! declared return type, same limitation, same reason (no per-function
 //! pre/postcondition inference exists yet).
 //!
@@ -162,6 +170,54 @@ fn prove_nonzero(solver: &Solver, term: &Int) -> bool {
     let result = solver.check();
     solver.pop(1);
     result == SatResult::Unsat
+}
+
+/// Rust's actual `/`/`%` semantics for `i64`: truncating toward zero,
+/// remainder's sign matching the dividend's (or zero). **Not** SMT-LIB's
+/// native `div`/`mod` (`Z3_mk_div`/`Z3_mk_mod`), which are Euclidean —
+/// remainder always `>= 0` — and would silently mismodel any case where
+/// the operands' signs differ and the division isn't exact (e.g. Rust's
+/// `-7 / 2 == -3`, `-7 % 2 == -1`; Euclidean division gives `-4` and
+/// `1`). Introduces a fresh quotient/remainder pair and asserts the
+/// defining relation permanently into `solver` (like `assert_bounds`,
+/// not a `push`/`pop` probe) so every later proof in this function body
+/// can see it. Whether `b` can be zero is proven/guarded separately by
+/// `prove_nonzero` -- this relation is satisfiable either way when
+/// `b == 0` (no unique `(q, rem)` pins the quotient down), so nothing
+/// sound is claimed here about that case; a divide-by-zero is still a
+/// runtime trap, unaffected by this modeling.
+///
+/// **Why asserting this permanently (not push/pop-scoped) is still
+/// sound even when `b` isn't proven nonzero first:** when `b == 0`, the
+/// `|rem| < |b|` constraint collapses to `rem < 0 && rem > 0` --
+/// contradictory for *any* `rem`, so no witness exists and the whole
+/// solver context becomes unsatisfiable in exactly (and only) the
+/// states where `b == 0`. That's the *correct* partial-correctness
+/// reading, not an accidental "assume the divisor is nonzero" cheat:
+/// a real `b == 0` traps at runtime (`codegen.rs::guard_nonzero_divisor`)
+/// before this program point is ever reached normally, so a
+/// postcondition proof -- which only has to hold for executions that
+/// reach `return` -- is entitled to exclude that world exactly the way
+/// this assertion does. Same standard SPARK/Dafny/Why3 treatment of a
+/// partial operation's proof obligation as separate from reasoning
+/// about its result.
+///
+/// `pub(crate)` — `contract_check.rs`'s Hoare-predicate walker
+/// (`int_expr`'s `BinOp::Div`/`BinOp::Rem` arms) uses this exact same
+/// relation rather than a second, possibly-drifting copy of it.
+pub(crate) fn div_rem(solver: &Solver, a: &Int, b: &Int) -> (Int, Int) {
+    let q = Int::fresh_const("div_q");
+    let rem = Int::fresh_const("div_r");
+    solver.assert(a.eq(b * &q + &rem));
+
+    let zero = Int::from_i64(0);
+    let abs_b = b.lt(&zero).ite(&(-b), b);
+    solver.assert(rem.lt(&abs_b));
+    solver.assert(rem.gt(&(-abs_b)));
+    // `rem == 0`, or `rem`'s sign matches `a`'s -- truncation toward
+    // zero, not floor.
+    solver.assert(rem.eq(&zero) | a.lt(&zero).eq(&rem.lt(&zero)));
+    (q, rem)
 }
 
 /// Same technique as `prove_in_range`, against a literal `[0, dim)`
@@ -525,22 +581,26 @@ impl Checker<'_> {
                 }
             }
             BinOp::Div | BinOp::Rem => {
-                // Dividend is still visited (for its own nested proofs —
-                // e.g. a division inside it), just not bound to a named
-                // term: division's (and remainder's) result is
-                // deliberately never modeled (module doc), so there's
-                // nothing to combine it with. `codegen.rs::
-                // guard_nonzero_divisor` keys off the same span either
-                // way -- a `%` by a provably-nonzero divisor skips its
-                // runtime trap check exactly like a `/` does.
-                self.expr(lhs, scopes);
+                // Both operands are now bound to real terms: division's
+                // (and remainder's) result *is* modeled, as of this
+                // session, via `div_rem`'s truncating-quotient/remainder
+                // relation -- see that function's own doc for why a
+                // fresh, permanently-asserted `(q, rem)` pair rather
+                // than Z3's native (Euclidean) `div`/`mod`.
+                // `codegen.rs::guard_nonzero_divisor` keys off the same
+                // span either way -- a `%` by a provably-nonzero divisor
+                // skips its runtime trap check exactly like a `/` does.
+                let l = self.expr(lhs, scopes);
                 let r = self.expr(rhs, scopes);
                 if prove_nonzero(self.solver, &r) {
                     self.report.proven_nonzero_divisor.insert(span);
                 }
-                // Deliberately not asserted as an equality — see module
-                // doc's "what didn't change" note.
-                Int::fresh_const("div_result")
+                let (q, rem) = div_rem(self.solver, &l, &r);
+                match op {
+                    BinOp::Div => q,
+                    BinOp::Rem => rem,
+                    _ => unreachable!(),
+                }
             }
             BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or
             | BinOp::ElemMul | BinOp::ElemDiv => {

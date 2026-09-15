@@ -204,16 +204,19 @@ impl HintCache {
             return;
         }
         let _ = std::fs::rename(&tmp, &self.path);
-        // Best-effort audit trail: unlike a hand-authored `self_repair_
-        // hint` arm, nobody reviewed this hint before it started being
-        // served to future runs -- an append-only, human-readable log
-        // of every promotion (pattern + the hint text + when) is the
-        // minimum needed for someone to periodically skim what this
-        // loop has been teaching itself and spot a bad one.
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path(&self.path)) {
-            let _ = writeln!(f, "{{\"promoted_at\": {}, \"pattern\": {}, \"hint\": {}}}", now_unix(), json_escape(pattern), json_escape(hint));
-        }
+        // Tamper-evident audit trail (2026-09, `audit_chain.rs`):
+        // unlike a hand-authored `self_repair_hint` arm, nobody reviewed
+        // this hint before it started being served to future runs -- a
+        // hash-chained log of every promotion (pattern + the hint text
+        // + when) is the minimum needed for someone to periodically
+        // audit what this loop has been teaching itself, *and know the
+        // record itself hasn't been quietly edited* -- this is exactly
+        // `docs/API_TRUST_MODEL.md` §9 (T14)'s proposed "code-generation
+        // event" audit trail, for the one self-modifying event this
+        // codebase already had a log for. Was a flat, non-chained JSONL
+        // append before this session; see `audit_chain.rs`'s own module
+        // doc for why this call site, not a bigger rewrite.
+        crate::audit_chain::append_entry(&log_path(&self.path), serde_json::json!({ "pattern": pattern, "hint": hint }), now_unix());
     }
 }
 
@@ -245,10 +248,6 @@ pub fn shared(on_log: &mut dyn FnMut(&str)) -> &'static Mutex<HintCache> {
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn json_escape(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 /// A lesson learned from a REAL, observed runtime incident (an
@@ -331,6 +330,14 @@ impl RuntimeLessons {
             return;
         }
         let _ = std::fs::rename(&tmp, &self.path);
+        // Tamper-evident audit trail (2026-09, `audit_chain.rs`) -- a
+        // human-confirmed `--teach` overwrite of what the self-repair
+        // loop believes about an incident kind is at least as audit-
+        // worthy as an automatically-promoted `HintCache` entry
+        // (`record_success`'s own identical trail, just above), arguably
+        // more so: it's an explicit override with no automatic "proof"
+        // step behind it at all.
+        crate::audit_chain::append_entry(&self.path.with_file_name("self_repair_runtime_lessons_audit.jsonl"), serde_json::json!({ "incident_kind": incident_kind, "hint": hint }), now_unix());
     }
 }
 
@@ -349,6 +356,24 @@ pub fn shared_runtime_lessons() -> &'static Mutex<RuntimeLessons> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `NIRDOSHA_HINT_CACHE_PATH`/`NIRDOSHA_RUNTIME_LESSONS_PATH` are
+    /// process-wide env vars, and `cargo test` runs this file's tests
+    /// concurrently in that one process by default -- a real, pre-
+    /// existing test-isolation gap (every test below that sets one of
+    /// these already commented on scoping the *read* to right after the
+    /// *write*, but never actually serialized against a sibling test
+    /// doing the same dance on the same var name at the same time).
+    /// Widening `record`/`record_success`'s own critical section with
+    /// this session's `audit_chain` read+append made the pre-existing
+    /// race meaningfully more likely to actually manifest, which is
+    /// what surfaced it -- closing it here rather than leaving it to
+    /// flake, same fix shape as `isolation_check.rs`'s own `TEST_LOCK`.
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env_for_test() -> std::sync::MutexGuard<'static, ()> {
+        TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn normalize_pattern_strips_line_col_prefix() {
@@ -407,6 +432,7 @@ mod tests {
 
     #[test]
     fn record_success_then_lookup_round_trips_through_disk() {
+        let _guard = lock_env_for_test();
         let dir = std::env::temp_dir().join(format!("nir_hint_cache_test_{}", std::process::id()));
         let path = dir.join("cache.json");
         // SAFETY (test-only): `HintCache` reads this env var once per
@@ -427,6 +453,7 @@ mod tests {
 
     #[test]
     fn runtime_lessons_record_then_lookup_round_trips_through_disk() {
+        let _guard = lock_env_for_test();
         let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_test_{}", std::process::id()));
         let path = dir.join("runtime_lessons.json");
         // SAFETY (test-only): same single-test-scoped env var discipline
@@ -444,6 +471,7 @@ mod tests {
 
     #[test]
     fn runtime_lessons_record_overwrites_the_same_incident_kind() {
+        let _guard = lock_env_for_test();
         let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_overwrite_test_{}", std::process::id()));
         let path = dir.join("runtime_lessons.json");
         unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &path) };
@@ -457,6 +485,7 @@ mod tests {
 
     #[test]
     fn runtime_lessons_load_is_never_fails_on_a_missing_or_corrupt_file() {
+        let _guard = lock_env_for_test();
         let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_missing_test_{}", std::process::id()));
         unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", dir.join("does_not_exist.json")) };
         let missing = RuntimeLessons::load();

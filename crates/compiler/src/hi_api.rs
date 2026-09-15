@@ -564,6 +564,11 @@ fn handle_publish(root: &Path, conn: &Connection) -> ApiResponse {
         certificate.governing_packs = crate::hi_plugin::installed_pack_ids(conn)?;
         certificate.governing_invariants = crate::hi_plugin::governing_invariants(conn, root, &program)?;
         certificate.nfr_commitments = crate::mcp_tools::nfr_commitments_from_program(&program);
+        // RFC 0016's "Compliance profiles" -- real for the first time
+        // 2026-09-15 (`hi_plugin::compliance_profile_reports`'s own doc
+        // comment). Same "refuse the publish rather than certify a false
+        // claim" posture as `contract_coverage_check_program` above.
+        certificate.compliance_profiles = crate::hi_plugin::compliance_profile_reports(conn, root, &program)?;
 
         let cert_path = out_path.with_extension("certificate.json");
         let signing_key_path = std::env::var(PUBLISH_SIGNING_KEY_VAR).ok();
@@ -1138,8 +1143,8 @@ mod tests {
         let dir = scratch_dir("certificate_signing");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let key_path = dir.join("signing_key.pk8");
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
+        let rng = crate::crypto_backend::rand::SystemRandom::new();
+        let pkcs8 = crate::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
         std::fs::write(&key_path, pkcs8.as_ref()).expect("write key");
 
         let source_path = dir.join("cert_fixture.nir");
@@ -1208,6 +1213,101 @@ fn main() requires(public) {
         let cert_path = json["certificate"].as_str().expect("certificate path in the response");
         let cert: serde_json::Value = serde_json::from_slice(&std::fs::read(cert_path).expect("read certificate")).expect("valid JSON");
         assert_eq!(cert["governing_packs"], serde_json::json!(["banking-v0"]), "the banking pack must be named in the certificate: {cert}");
+    }
+
+    /// RFC 0016's "Compliance profiles" -- real for the first time
+    /// 2026-09-15 (`hi_plugin::compliance_profile_reports`). The real
+    /// `fapi-2.0.json` pack (`hi_plugin::known_installable_packs`),
+    /// installed for real, checked against a real published program with
+    /// no `serve`/`expose` block at all -- every static rule trivially
+    /// holds (nothing exposed to violate them), so this pins the whole
+    /// shape landing in the certificate: pack id, profile name/version,
+    /// and each requirement kind's own `evidence_tier` matching exactly
+    /// what `ComplianceProfileReport`'s own doc comments promise
+    /// (`"checked"` for static rules, `"declared"` for wiring
+    /// requirements, `"external"` for the OIDF conformance-suite slot).
+    #[test]
+    fn publish_certificate_reports_the_fapi_2_0_compliance_profile() {
+        let dir = scratch_dir("publish_certificate_fapi_compliance");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let (_, _, fapi_json) = crate::hi_plugin::known_installable_packs()
+            .into_iter()
+            .find(|(id, _, _)| *id == "fapi-2.0")
+            .expect("fapi-2.0 must be in the known-installable-packs list");
+        crate::hi_plugin::install_pack_from_bytes(&conn, &dir, fapi_json.as_bytes(), "fapi-2.0 test").expect("install fapi-2.0");
+        drop(conn);
+
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        std::fs::write(&out_path, "fn main() requires(public) {\n    print(\"ok\")\n}\n").expect("write generated source");
+
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(true), "a program with nothing exposed must publish clean under fapi-2.0: {body}");
+
+        let cert_path = json["certificate"].as_str().expect("certificate path in the response");
+        let cert: serde_json::Value = serde_json::from_slice(&std::fs::read(cert_path).expect("read certificate")).expect("valid JSON");
+        let profiles = cert["compliance_profiles"].as_array().expect("compliance_profiles array");
+        assert_eq!(profiles.len(), 1, "exactly one active pack declares a compliance profile: {cert}");
+        let profile = &profiles[0];
+        assert_eq!(profile["pack_id"], serde_json::json!("fapi-2.0"));
+        assert_eq!(profile["profile_name"], serde_json::json!("fapi-2.0-security-profile"));
+        assert_eq!(profile["profile_version"], serde_json::json!("2025-02-final"));
+
+        let static_rules = profile["static_rules"].as_array().expect("static_rules array");
+        assert_eq!(static_rules.len(), 3, "the real fapi-2.0.json pack declares exactly 3 static_rules: {static_rules:?}");
+        for rule in static_rules {
+            assert_eq!(rule["evidence_tier"], serde_json::json!("checked"), "a static_rule that made it into the report must be tiered `checked`: {rule}");
+        }
+
+        let wiring = profile["wiring_requirements"].as_array().expect("wiring_requirements array");
+        assert_eq!(wiring.len(), 5, "the real fapi-2.0.json pack declares exactly 5 wiring_requirements: {wiring:?}");
+        for w in wiring {
+            assert_eq!(w["evidence_tier"], serde_json::json!("declared"), "a wiring_requirement is declared, not behaviorally checked by this report: {w}");
+        }
+
+        let external = profile["external_conformance"].as_array().expect("external_conformance array");
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0]["kind"], serde_json::json!("oidf_conformance_suite"));
+        assert_eq!(external[0]["evidence_tier"], serde_json::json!("external"), "OIDF conformance is RFC 0016's own 'NOT provable by us' category: {external:?}");
+    }
+
+    /// The refusal half: RFC 0016 says a `static_rule` "turns compiler
+    /// behavior into an *attested claim*" -- a profile that demands
+    /// `no_plaintext_secret_params` and gets a real violation must refuse
+    /// the publish outright, not certify a false claim or silently drop
+    /// the unsatisfied profile from the report.
+    #[test]
+    fn publish_is_refused_when_an_active_packs_static_rule_is_violated() {
+        let dir = scratch_dir("publish_refused_fapi_static_rule");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let (_, _, fapi_json) = crate::hi_plugin::known_installable_packs()
+            .into_iter()
+            .find(|(id, _, _)| *id == "fapi-2.0")
+            .expect("fapi-2.0 must be in the known-installable-packs list");
+        crate::hi_plugin::install_pack_from_bytes(&conn, &dir, fapi_json.as_bytes(), "fapi-2.0 test").expect("install fapi-2.0");
+        drop(conn);
+
+        let out_path = crate::hi_llm::generated_source_path(&dir);
+        std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
+        // Same shape `check_static_rules_flags_a_plaintext_secret_
+        // parameter_on_an_exposed_fn` (`hi_plugin.rs`) already pins in
+        // isolation -- here driven through the real `/api/publish` path
+        // end to end, under the real installed pack, not a hand-built
+        // `ComplianceProfile`.
+        std::fs::write(
+            &out_path,
+            "struct Text { value: str }\n\nfn login(username: Text, password: Text) -> bool {\n    return true\n}\n\nfn main() requires(public) { }\n\nserve {\n    expose login\n}\n",
+        ).expect("write generated source");
+
+        let resp = handle(&dir, "POST", "/api/publish", "", b"");
+        let body = String::from_utf8_lossy(&resp.body);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
+        assert_eq!(json["ok"], serde_json::json!(false), "a real no_plaintext_secret_params violation must refuse the publish: {body}");
+        let error = json["error"].as_str().expect("error string");
+        assert!(error.contains("publish refused"), "got: {error}");
+        assert!(error.contains("password"), "the refusal must name the actual violating parameter: {error}");
     }
 
     /// RFC 0016 Phase 4: an `nfr(...)` commitment must land in the

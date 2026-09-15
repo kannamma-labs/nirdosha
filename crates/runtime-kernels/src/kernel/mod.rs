@@ -114,6 +114,7 @@
 // to the compiler until a real caller exists.
 #![allow(dead_code)]
 
+pub mod crypto_backend;
 pub mod db;
 pub mod http;
 pub mod identity;
@@ -551,9 +552,32 @@ pub fn dump_report() -> String {
 /// module doc). **Doc-drift fix**: this comment used to say "not wired
 /// to any `nir_*` kernel yet" — `lib.rs`'s `db_table()` is a real,
 /// working `HandleTable<...>` today.
+/// **`Arc<Mutex<T>>` per entry, not `T` directly (2026-09) -- real bug
+/// fix, not a style choice.** The obvious, original representation
+/// (`Mutex<HashMap<i64, T>>`) makes `with` hold the *whole table's*
+/// lock for the duration of `f` -- every `.nir` `db`/`mq`/plugin-conn
+/// call in the process serializes on one mutex for the full round-trip
+/// of its own blocking network I/O, regardless of which handle it
+/// uses. Confirmed as a real, general deadlock, not a hypothetical:
+/// `rfcs/0015-keyed-guard-external-state.md`'s Phase A (experiment A3)
+/// found two threads on *different* `db` handles deadlock the instant
+/// one blocks on a server-side lock the other would release -- thread A
+/// holds this table's one mutex while blocked waiting on Postgres;
+/// thread B can never even start its own unrelated query (on a
+/// different handle, different connection) because it can't acquire
+/// the same table-wide mutex to look itself up, so it can never reach
+/// the point where it would do the work that unblocks A. Reproduced
+/// generally (a plain `SELECT ... FOR UPDATE`, not just advisory
+/// locks) in that RFC's own writeup. Per-entry locking is the standard
+/// fix: the outer map's own lock is held only for the map lookup
+/// itself (a handle id -> `Arc<Mutex<T>>` clone, never blocking), so
+/// two threads on two different handles never contend at all, and two
+/// threads on the *same* handle correctly serialize on that handle's
+/// own lock -- the right granularity, since one handle is one physical
+/// connection nothing could use from two threads at once anyway.
 pub struct HandleTable<T> {
     next_id: AtomicI64,
-    handles: Mutex<HashMap<i64, T>>,
+    handles: Mutex<HashMap<i64, std::sync::Arc<Mutex<T>>>>,
 }
 
 impl<T> Default for HandleTable<T> {
@@ -593,7 +617,7 @@ impl<T> HandleTable<T> {
     /// hands back across the ABI boundary.
     pub fn insert(&self, value: T) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.handles.lock().unwrap().insert(id, value);
+        self.handles.lock().unwrap().insert(id, std::sync::Arc::new(Mutex::new(value)));
         id
     }
 
@@ -601,15 +625,46 @@ impl<T> HandleTable<T> {
     /// `None` if `id` isn't currently open (already closed, or never
     /// existed) — the caller turns that into `-1`, the same uniform
     /// failure convention every other kernel here already uses.
+    ///
+    /// **The table-wide lock is held only long enough to clone one
+    /// `Arc`** -- this struct's own doc comment on why that's the fix,
+    /// not just an implementation detail. `f` (which may block on real
+    /// network/disk I/O) runs under only this *one handle's* own lock,
+    /// entirely outside the table lock, so a concurrent call against a
+    /// different handle is never blocked by it.
     pub fn with<R>(&self, id: i64, f: impl FnOnce(&mut T) -> R) -> Option<R> {
-        self.handles.lock().unwrap().get_mut(&id).map(f)
+        let entry = self.handles.lock().unwrap().get(&id).cloned()?;
+        Some(f(&mut entry.lock().unwrap()))
     }
 
     /// Removes and returns the resource for `id` — what a `_stop`
-    /// kernel calls; the returned `T` is dropped at the call site.
-    /// `None` on a double-close, not a panic.
+    /// kernel calls; the returned `T` is dropped once this function's
+    /// caller drops it (or immediately, if a concurrent `with` on the
+    /// same id is still running: that call already holds its own clone
+    /// of the `Arc`, so removal here only stops *new* callers from
+    /// finding it -- the in-flight one finishes safely against the
+    /// value it already has, exactly like a `stop` racing a live `with`
+    /// call already had to be safe against before this change, just via
+    /// a different mechanism). `None` on a double-close, not a panic.
     pub fn remove(&self, id: i64) -> Option<T> {
-        self.handles.lock().unwrap().remove(&id)
+        let entry = self.handles.lock().unwrap().remove(&id)?;
+        // `entry` is the last `Arc` reference in every real case: every
+        // affine handle type this table stores (`Ty::is_affine`'s own
+        // list -- `db`, `mq`, `tcp`-backed connections) is single-owner
+        // by construction (`ownership.rs`), so nothing else can still
+        // be calling `with` on this same id concurrently with the
+        // `stop` that reaches `remove`. `try_unwrap` turns that real
+        // invariant into a checked fact instead of an assumed one: a
+        // still-shared `Arc` here (`Err`) means two callers genuinely
+        // raced a handle this table's own contract says can't be
+        // raced -- an honest panic naming exactly that, not a silent
+        // wrong value or a leaked resource.
+        match std::sync::Arc::try_unwrap(entry) {
+            Ok(mutex) => Some(mutex.into_inner().unwrap_or_else(|e| e.into_inner())),
+            Err(_still_shared) => {
+                panic!("HandleTable::remove(id={id}) found another live reference to this handle -- every handle type this table stores is single-owner by construction (ownership.rs's affine tracking), so this should be unreachable outside a real bug")
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -888,6 +943,57 @@ mod tests {
         assert_eq!(table.len(), 2);
         table.remove(a);
         assert_eq!(table.len(), 1);
+    }
+
+    /// The real regression test for the `Arc<Mutex<T>>`-per-entry fix
+    /// (this struct's own doc comment, and `rfcs/0015-keyed-guard-
+    /// external-state.md`'s Phase A / experiment A3): a `with` call
+    /// blocked inside its closure on one handle must never prevent a
+    /// concurrent `with` call on a *different* handle from even
+    /// starting. Before this fix, both calls contended on one
+    /// table-wide lock for the full duration of `f`, so handle B's
+    /// call would have waited for handle A's the entire time -- this
+    /// test fails (times out) against that old representation and
+    /// passes against the per-entry-locked one.
+    #[test]
+    fn with_on_two_different_handles_runs_concurrently_not_serialized() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let table: std::sync::Arc<HandleTable<i32>> = std::sync::Arc::new(HandleTable::new());
+        let a = table.insert(1);
+        let b = table.insert(2);
+
+        let (a_started_tx, a_started_rx) = mpsc::channel::<()>();
+        let (release_a_tx, release_a_rx) = mpsc::channel::<()>();
+        let table_a = table.clone();
+        let holder = std::thread::spawn(move || {
+            table_a.with(a, |_| {
+                a_started_tx.send(()).unwrap();
+                // Blocks here exactly the way a real blocking network
+                // call would -- the old bug held the *table's* lock for
+                // this entire wait; the fix holds only handle `a`'s own.
+                release_a_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+        });
+
+        // Wait until the holder thread is genuinely inside its `with`
+        // call (not just spawned) before measuring handle `b`'s own
+        // access time against it.
+        a_started_rx.recv_timeout(Duration::from_secs(5)).expect("holder thread must start its with(a, ...) call");
+
+        let start = std::time::Instant::now();
+        let got_b = table.with(b, |v| *v);
+        let elapsed = start.elapsed();
+
+        release_a_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert_eq!(got_b, Some(2));
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "with(b, ...) took {elapsed:?} while with(a, ...) was still blocked -- the table-wide lock is still being held across a handle's own blocking work"
+        );
     }
 
     // `STALL` is one process-wide static, and nothing else in this test

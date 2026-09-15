@@ -451,126 +451,26 @@ fn kf_update(
 
 // ---- sha256_hex kernel ----------------------------------------------------
 //
-// A from-scratch FIPS 180-4 SHA-256 implementation, not a binding to the
-// `sha2` crate `interpreter.rs`'s own `sha256_hex`/`sha256_hex_chain`
-// use — this file is compiled as an isolated `rustc --crate-type
-// staticlib` invocation with no `--extern` flags (`build.rs`'s doc
-// comment), so it has no access to Cargo dependencies at all, only
-// `std`. Verified bit-for-bit against `interpreter.rs`'s `sha2`-backed
-// output for the empty string, ASCII text, and the exact two-part
-// chained form `sha256_hex_chain` uses (`crates/compiler/tests/sha256_hex.rs`),
-// not just against the standard's own published test vectors.
-
-const SHA256_H0: [u32; 8] =
-    [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
-    0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8,
-    0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
-    0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
-];
-
-/// One 64-byte block's worth of compression, updating `state` in place —
-/// the algorithm's actual core (message-schedule expansion, 64 mixing
-/// rounds), everything else in this section is padding/framing around
-/// this.
-fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
-    let mut w = [0u32; 64];
-    for i in 0..16 {
-        w[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
-    }
-    for i in 16..64 {
-        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
-    }
-
-    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-    for i in 0..64 {
-        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-        let ch = (e & f) ^ ((!e) & g);
-        let temp1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA256_K[i]).wrapping_add(w[i]);
-        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-        let maj = (a & b) ^ (a & c) ^ (b & c);
-        let temp2 = s0.wrapping_add(maj);
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(temp1);
-        d = c;
-        c = b;
-        b = a;
-        a = temp1.wrapping_add(temp2);
-    }
-
-    state[0] = state[0].wrapping_add(a);
-    state[1] = state[1].wrapping_add(b);
-    state[2] = state[2].wrapping_add(c);
-    state[3] = state[3].wrapping_add(d);
-    state[4] = state[4].wrapping_add(e);
-    state[5] = state[5].wrapping_add(f);
-    state[6] = state[6].wrapping_add(g);
-    state[7] = state[7].wrapping_add(h);
-}
-
-/// Hashes `a` followed by `b` as one continuous message (`b` empty is
-/// the 1-arg `sha256_hex(s)` case; `b` non-empty is the 2-arg
-/// `sha256_hex(prev_hash, payload)` chained form) — streaming both
-/// buffers through the same padding/block state the way multiple
-/// `Sha256::update` calls on one hasher already do in
-/// `interpreter.rs`, since hashing "a then b" one block at a time is
-/// mathematically identical to hashing the concatenation `a ++ b` in
-/// one pass; there's no need to actually concatenate them into a new
-/// buffer first (which `str`'s lack of a concatenation operator
-/// wouldn't let calling Nirdosha code do anyway — this streaming
-/// approach is what makes that a non-issue at the kernel level too).
+// **Was a from-scratch FIPS 180-4 SHA-256 implementation until 2026-09,
+// on a premise that stopped being true.** The old doc comment here said
+// this file "is compiled as an isolated `rustc --crate-type staticlib`
+// invocation with no `--extern` flags... so it has no access to Cargo
+// dependencies at all, only `std`" -- checked directly against
+// `crates/compiler/build.rs`'s own current top comment, not assumed:
+// the real build path is `cargo rustc` (full Cargo dependency
+// resolution), not a dependency-free bare `rustc` call; that switch
+// predates this fix and simply never propagated back to this comment.
+// Proven false by this exact file's own `dpop_jwk_thumbprint` (below),
+// which already calls `sha2::Sha256::digest` successfully in the
+// identical compiled staticlib. An unaudited, hand-rolled primitive
+// backing the most load-bearing crypto builtin in the language
+// (`sha256_hex` -- pack/content integrity hashing, and this session's
+// own `audit_chain.rs`) was never something a real dependency
+// constraint justified; replaced with a real, vetted implementation,
+// `fips`-feature-aware via `crypto_backend.rs` (2026-09) the same way
+// `crates/compiler`'s Ed25519 signing is.
 fn sha256(a: &[u8], b: &[u8]) -> [u8; 32] {
-    let mut state = SHA256_H0;
-    let total_len = (a.len() + b.len()) as u64;
-
-    let mut block = [0u8; 64];
-    let mut filled = 0usize;
-    for &byte in a.iter().chain(b.iter()) {
-        block[filled] = byte;
-        filled += 1;
-        if filled == 64 {
-            sha256_compress(&mut state, &block);
-            filled = 0;
-        }
-    }
-
-    // Padding: a single `1` bit (0x80, since messages here are always a
-    // whole number of bytes), then zero bits, then the original message
-    // length in bits as a big-endian 64-bit integer -- padded so the
-    // total is a multiple of 64 bytes, with the length always the final
-    // 8 bytes of the final block, same as every other SHA-256
-    // implementation's framing (FIPS 180-4 §5.1.1).
-    block[filled] = 0x80;
-    filled += 1;
-    if filled > 56 {
-        for b in &mut block[filled..64] {
-            *b = 0;
-        }
-        sha256_compress(&mut state, &block);
-        filled = 0;
-    }
-    for b in &mut block[filled..56] {
-        *b = 0;
-    }
-    let bit_len = total_len.wrapping_mul(8);
-    block[56..64].copy_from_slice(&bit_len.to_be_bytes());
-    sha256_compress(&mut state, &block);
-
-    let mut out = [0u8; 32];
-    for (i, word) in state.iter().enumerate() {
-        out[4 * i..4 * i + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
+    crate::kernel::crypto_backend::sha256_concat(a, b)
 }
 
 /// RFC 2104 HMAC-SHA256, built on the [`sha256`] primitive above —
@@ -1784,14 +1684,14 @@ struct RawJwk {
     k: Option<String>,
 }
 
-fn decoding_key_for(jwk: &RawJwk) -> Result<(jsonwebtoken::DecodingKey, jsonwebtoken::Algorithm), String> {
+fn decoding_key_for(jwk: &RawJwk) -> Result<(crate::kernel::crypto_backend::jsonwebtoken::DecodingKey, crate::kernel::crypto_backend::jsonwebtoken::Algorithm), String> {
     use base64::Engine as _;
     match jwk.kty.as_str() {
         "RSA" => {
             let n = jwk.n.as_deref().ok_or("JWK is missing required field `n`")?;
             let e = jwk.e.as_deref().ok_or("JWK is missing required field `e`")?;
-            let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(n, e).map_err(|err| format!("invalid RSA key material: {err}"))?;
-            Ok((decoding_key, jsonwebtoken::Algorithm::RS256))
+            let decoding_key = crate::kernel::crypto_backend::jsonwebtoken::DecodingKey::from_rsa_components(n, e).map_err(|err| format!("invalid RSA key material: {err}"))?;
+            Ok((decoding_key, crate::kernel::crypto_backend::jsonwebtoken::Algorithm::RS256))
         }
         "EC" => {
             let crv = jwk.crv.clone().unwrap_or_default();
@@ -1800,13 +1700,13 @@ fn decoding_key_for(jwk: &RawJwk) -> Result<(jsonwebtoken::DecodingKey, jsonwebt
             }
             let x = jwk.x.as_deref().ok_or("JWK is missing required field `x`")?;
             let y = jwk.y.as_deref().ok_or("JWK is missing required field `y`")?;
-            let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(x, y).map_err(|err| format!("invalid EC key material: {err}"))?;
-            Ok((decoding_key, jsonwebtoken::Algorithm::ES256))
+            let decoding_key = crate::kernel::crypto_backend::jsonwebtoken::DecodingKey::from_ec_components(x, y).map_err(|err| format!("invalid EC key material: {err}"))?;
+            Ok((decoding_key, crate::kernel::crypto_backend::jsonwebtoken::Algorithm::ES256))
         }
         "oct" => {
             let k = jwk.k.as_deref().ok_or("JWK is missing required field `k`")?;
             let raw_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(k).map_err(|_| "JWK field `k` is not valid base64url".to_string())?;
-            Ok((jsonwebtoken::DecodingKey::from_secret(&raw_secret), jsonwebtoken::Algorithm::HS256))
+            Ok((crate::kernel::crypto_backend::jsonwebtoken::DecodingKey::from_secret(&raw_secret), crate::kernel::crypto_backend::jsonwebtoken::Algorithm::HS256))
         }
         other => Err(format!("unsupported JWK `kty`: `{other}` (only RSA, EC/P-256, and oct are supported)")),
     }
@@ -1823,7 +1723,7 @@ struct VerifiedClaims {
 
 fn validate_oidc_token_inner(token: &str, expected_issuer: &str, expected_audience: &str, jwks_json: &str) -> Result<VerifiedClaims, String> {
     let jwks: RawJwks = serde_json::from_str(jwks_json).map_err(|e| format!("malformed JWKS: {e}"))?;
-    let header = jsonwebtoken::decode_header(token).map_err(|e| format!("malformed token: {e}"))?;
+    let header = crate::kernel::crypto_backend::jsonwebtoken::decode_header(token).map_err(|e| format!("malformed token: {e}"))?;
     let kid = header.kid.ok_or_else(|| "token header has no `kid`".to_string())?;
     let jwk = jwks.keys.iter().find(|k| k.kid == kid).ok_or_else(|| format!("token references unknown key id `{kid}`"))?;
     let (decoding_key, algorithm) = decoding_key_for(jwk)?;
@@ -1832,12 +1732,12 @@ fn validate_oidc_token_inner(token: &str, expected_issuer: &str, expected_audien
     // valid for (never the token's own `alg` header) — the actual
     // algorithm-confusion guard, decided entirely by `decoding_key_for`'s
     // `kty` match above, same as `jwt.rs::verify`.
-    let mut validation = jsonwebtoken::Validation::new(algorithm);
+    let mut validation = crate::kernel::crypto_backend::jsonwebtoken::Validation::new(algorithm);
     validation.set_issuer(&[expected_issuer]);
     validation.set_audience(&[expected_audience]);
     validation.validate_exp = false; // see this section's own doc comment
 
-    let data = jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation).map_err(|e| format!("token verification failed: {e}"))?;
+    let data = crate::kernel::crypto_backend::jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation).map_err(|e| format!("token verification failed: {e}"))?;
     let claims = data.claims;
 
     let subject = claims.get("sub").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1964,7 +1864,7 @@ fn issue_mock_token_inner(
     let raw_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(k)
         .map_err(|_| "JWK field `k` is not valid base64url".to_string())?;
-    let encoding_key = jsonwebtoken::EncodingKey::from_secret(&raw_secret);
+    let encoding_key = crate::kernel::crypto_backend::jsonwebtoken::EncodingKey::from_secret(&raw_secret);
 
     // `claims_json`'s own fields (e.g. a `"roles"` array `check_role`
     // reads back out later) are preserved -- only the six standard claims
@@ -1982,10 +1882,10 @@ fn issue_mock_token_inner(
     obj.insert("iat".to_string(), serde_json::Value::from(issued_at));
     obj.insert("exp".to_string(), serde_json::Value::from(issued_at.saturating_add(ttl_secs)));
 
-    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    let mut header = crate::kernel::crypto_backend::jsonwebtoken::Header::new(crate::kernel::crypto_backend::jsonwebtoken::Algorithm::HS256);
     header.kid = Some(jwk.kid.clone());
 
-    jsonwebtoken::encode(&header, &claims, &encoding_key).map_err(|e| format!("failed to sign token: {e}"))
+    crate::kernel::crypto_backend::jsonwebtoken::encode(&header, &claims, &encoding_key).map_err(|e| format!("failed to sign token: {e}"))
 }
 
 /// `1` (with `out_token` populated) on success, `0` (with `out_err`
@@ -2123,10 +2023,10 @@ pub unsafe extern "C" fn nir_extract_claim(claims_json_ptr: *const u8, claims_js
 /// member ordering with no insignificant whitespace*, which is exactly
 /// what building the literal object in this field order and serializing
 /// it compactly gives, with no separate canonicalization pass needed.
-fn dpop_jwk_thumbprint(ec: &jsonwebtoken::jwk::EllipticCurveKeyParameters) -> Result<String, String> {
+fn dpop_jwk_thumbprint(ec: &crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurveKeyParameters) -> Result<String, String> {
     use base64::Engine as _;
     let crv = match ec.curve {
-        jsonwebtoken::jwk::EllipticCurve::P256 => "P-256",
+        crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurve::P256 => "P-256",
         _ => return Err("unsupported DPoP JWK curve (only P-256/ES256 is supported)".to_string()),
     };
     let canonical = serde_json::json!({ "crv": crv, "kty": "EC", "x": ec.x, "y": ec.y });
@@ -2135,8 +2035,10 @@ fn dpop_jwk_thumbprint(ec: &jsonwebtoken::jwk::EllipticCurveKeyParameters) -> Re
     // own required member order for an EC key, so no manual reordering
     // is needed on top of `to_string`'s already-compact output.
     let bytes = serde_json::to_vec(&canonical).map_err(|e| format!("failed to canonicalize DPoP JWK: {e}"))?;
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(&bytes);
+    // `crypto_backend::sha256_concat` (2026-09) -- `fips`-feature-aware,
+    // same swap point `sha256()`/`nir_sha256_hex` use, not a separate
+    // direct `sha2` call left un-swapped.
+    let digest = crate::kernel::crypto_backend::sha256_concat(&bytes, &[]);
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest))
 }
 
@@ -2162,27 +2064,27 @@ fn dpop_verify_inner(
     max_age_secs: i64,
     now: i64,
 ) -> Result<DpopVerified, String> {
-    let header = jsonwebtoken::decode_header(proof).map_err(|e| format!("malformed DPoP proof: {e}"))?;
+    let header = crate::kernel::crypto_backend::jsonwebtoken::decode_header(proof).map_err(|e| format!("malformed DPoP proof: {e}"))?;
     if header.typ.as_deref() != Some("dpop+jwt") {
         return Err(format!("DPoP proof header `typ` must be `dpop+jwt`, got {:?}", header.typ));
     }
-    // `header.jwk` is already `jsonwebtoken::jwk::Jwk`, parsed by
+    // `header.jwk` is already `crate::kernel::crypto_backend::jsonwebtoken::jwk::Jwk`, parsed by
     // `decode_header` itself -- no separate deserialize step needed, and
     // no risk of this kernel's own JWK parsing disagreeing with the
     // library's about what a well-formed one looks like.
     let jwk = header.jwk.ok_or("DPoP proof header is missing the required embedded `jwk`")?;
-    let jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(ec) = &jwk.algorithm else {
+    let crate::kernel::crypto_backend::jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(ec) = &jwk.algorithm else {
         return Err("DPoP proof's embedded key must be EC/P-256 (ES256) -- no other algorithm is supported yet".to_string());
     };
-    if ec.curve != jsonwebtoken::jwk::EllipticCurve::P256 {
+    if ec.curve != crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurve::P256 {
         return Err("DPoP proof's embedded key must use the P-256 curve -- no other curve is supported yet".to_string());
     }
-    let decoding_key = jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y).map_err(|e| format!("invalid DPoP proof key material: {e}"))?;
+    let decoding_key = crate::kernel::crypto_backend::jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y).map_err(|e| format!("invalid DPoP proof key material: {e}"))?;
 
-    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+    let mut validation = crate::kernel::crypto_backend::jsonwebtoken::Validation::new(crate::kernel::crypto_backend::jsonwebtoken::Algorithm::ES256);
     validation.required_spec_claims.clear();
     validation.validate_exp = false;
-    let data = jsonwebtoken::decode::<serde_json::Value>(proof, &decoding_key, &validation).map_err(|e| format!("DPoP proof signature verification failed: {e}"))?;
+    let data = crate::kernel::crypto_backend::jsonwebtoken::decode::<serde_json::Value>(proof, &decoding_key, &validation).map_err(|e| format!("DPoP proof signature verification failed: {e}"))?;
     let claims = data.claims;
 
     let htm = claims.get("htm").and_then(|v| v.as_str()).ok_or("DPoP proof is missing the required `htm` claim")?;
@@ -2375,7 +2277,7 @@ mod identity_kernel_tests {
     // truth, not against itself.
     // PKCS#8 (`-----BEGIN PRIVATE KEY-----`), not the older SEC1 `EC
     // PRIVATE KEY` form `openssl ecparam -genkey` emits by default --
-    // `jsonwebtoken::EncodingKey::from_ec_pem` (via `ring`) parses
+    // `crate::kernel::crypto_backend::jsonwebtoken::EncodingKey::from_ec_pem` (via `ring`) parses
     // PKCS#8 only; converted with `openssl pkcs8 -topk8 -nocrypt`.
     const DPOP_TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgzvUAj7DFAlncvF+5\nKh1PaOnplTGaH4VKUbad2SJZRc2hRANCAAT4Fgvuc92G/Tlx3tdInAnryMO+cPO4\nZ77MvnaJskfNgdVa75Dkb9ta42OPIVpSYfDdWMIEg01aGaWsmssB/6vQ\n-----END PRIVATE KEY-----\n";
     const DPOP_TEST_X: &str = "-BYL7nPdhv05cd7XSJwJ68jDvnDzuGe-zL52ibJHzYE";
@@ -2386,19 +2288,19 @@ mod identity_kernel_tests {
     /// above -- `header.typ = "dpop+jwt"`, the embedded `jwk` (no `kid`,
     /// per RFC 9449), and whatever claims the caller supplies.
     fn make_dpop_proof(claims: serde_json::Value) -> String {
-        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        let mut header = crate::kernel::crypto_backend::jsonwebtoken::Header::new(crate::kernel::crypto_backend::jsonwebtoken::Algorithm::ES256);
         header.typ = Some("dpop+jwt".to_string());
-        header.jwk = Some(jsonwebtoken::jwk::Jwk {
-            common: jsonwebtoken::jwk::CommonParameters::default(),
-            algorithm: jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(jsonwebtoken::jwk::EllipticCurveKeyParameters {
-                key_type: jsonwebtoken::jwk::EllipticCurveKeyType::EC,
-                curve: jsonwebtoken::jwk::EllipticCurve::P256,
+        header.jwk = Some(crate::kernel::crypto_backend::jsonwebtoken::jwk::Jwk {
+            common: crate::kernel::crypto_backend::jsonwebtoken::jwk::CommonParameters::default(),
+            algorithm: crate::kernel::crypto_backend::jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurveKeyParameters {
+                key_type: crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurveKeyType::EC,
+                curve: crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurve::P256,
                 x: DPOP_TEST_X.to_string(),
                 y: DPOP_TEST_Y.to_string(),
             }),
         });
-        let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(DPOP_TEST_PRIVATE_KEY_PEM.as_bytes()).expect("fixed test key must parse");
-        jsonwebtoken::encode(&header, &claims, &encoding_key).expect("signing a well-formed proof must succeed")
+        let encoding_key = crate::kernel::crypto_backend::jsonwebtoken::EncodingKey::from_ec_pem(DPOP_TEST_PRIVATE_KEY_PEM.as_bytes()).expect("fixed test key must parse");
+        crate::kernel::crypto_backend::jsonwebtoken::encode(&header, &claims, &encoding_key).expect("signing a well-formed proof must succeed")
     }
 
     fn dpop_claims(htm: &str, htu: &str, iat: i64, jti: &str) -> serde_json::Value {
@@ -2454,18 +2356,18 @@ mod identity_kernel_tests {
         // `dpop+jwt` must not be accepted as a DPoP proof -- confusing an
         // ordinary signed JWT for a proof-of-possession artifact would
         // defeat the entire point of the `typ` header.
-        let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(DPOP_TEST_PRIVATE_KEY_PEM.as_bytes()).unwrap();
-        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
-        header.jwk = Some(jsonwebtoken::jwk::Jwk {
-            common: jsonwebtoken::jwk::CommonParameters::default(),
-            algorithm: jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(jsonwebtoken::jwk::EllipticCurveKeyParameters {
-                key_type: jsonwebtoken::jwk::EllipticCurveKeyType::EC,
-                curve: jsonwebtoken::jwk::EllipticCurve::P256,
+        let encoding_key = crate::kernel::crypto_backend::jsonwebtoken::EncodingKey::from_ec_pem(DPOP_TEST_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+        let mut header = crate::kernel::crypto_backend::jsonwebtoken::Header::new(crate::kernel::crypto_backend::jsonwebtoken::Algorithm::ES256);
+        header.jwk = Some(crate::kernel::crypto_backend::jsonwebtoken::jwk::Jwk {
+            common: crate::kernel::crypto_backend::jsonwebtoken::jwk::CommonParameters::default(),
+            algorithm: crate::kernel::crypto_backend::jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurveKeyParameters {
+                key_type: crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurveKeyType::EC,
+                curve: crate::kernel::crypto_backend::jsonwebtoken::jwk::EllipticCurve::P256,
                 x: DPOP_TEST_X.to_string(),
                 y: DPOP_TEST_Y.to_string(),
             }),
         });
-        let proof = jsonwebtoken::encode(&header, &dpop_claims("GET", "https://api.example.com/x", 1_000_000, "proof-7"), &encoding_key).unwrap();
+        let proof = crate::kernel::crypto_backend::jsonwebtoken::encode(&header, &dpop_claims("GET", "https://api.example.com/x", 1_000_000, "proof-7"), &encoding_key).unwrap();
         assert!(dpop_verify_inner(&proof, "GET", "https://api.example.com/x", "", "", 300, 1_000_010).is_err());
     }
 

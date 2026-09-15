@@ -150,3 +150,74 @@ fn an_empty_mandatory_fns_set_sweeps_nothing() {
     let program = build_program(PRIMITIVE_AND_CALLERS_NIR);
     assert!(check_mandatory_primitive_call_sites(&program, &HashSet::new()).is_empty());
 }
+
+/// The exact function `crates/bench/RESULTS.md`'s `average_no_float_
+/// confusion` task benchmarked (both providers' generated `.nir`,
+/// `results/*/average_no_float_confusion.nir`) -- `total_points /
+/// num_students` was `Unsupported` (`contracts_unsupported: 1`,
+/// `evidence_tier: unknown`) before `smt::div_rem` modeled division's
+/// result. Pins that this exact documented gap is closed, not just a
+/// smaller synthetic division example.
+const AVERAGE_NO_FLOAT_CONFUSION_NIR: &str = r#"
+    fn average_score(total_points: i64, num_students: i64) -> i64 {
+        return total_points / num_students
+    }
+"#;
+
+#[test]
+fn average_no_float_confusion_now_proves_instead_of_unsupported() {
+    let program = build_program(AVERAGE_NO_FLOAT_CONFUSION_NIR);
+    let result = check_fn_contract(
+        &program,
+        "average_score",
+        &["total_points >= 0 && num_students >= 1".to_string()],
+        &["result <= total_points".to_string()],
+        &HashMap::new(),
+    );
+    assert_eq!(result, ContractCheckResult::Proved, "unexpected result: {result:?}");
+}
+
+/// The negative-dividend case a naive (Euclidean, floor-style) division
+/// encoding would get wrong -- pins that `div_rem` really matches
+/// Rust's truncating `/` (`-7 / 2 == -3`) and not SMT-LIB's native
+/// `div` (which would give `-4`).
+const TRUNCATING_DIVISION_NIR: &str = r#"
+    fn truncating_divide(a: i64, b: i64) -> i64 {
+        return a / b
+    }
+"#;
+
+#[test]
+fn division_result_is_truncating_not_euclidean() {
+    let program = build_program(TRUNCATING_DIVISION_NIR);
+    // Rust's `/` always truncates toward zero, so a negative dividend
+    // paired with a positive divisor always yields a result `>= -6`
+    // when `-7 <= a <= 0` and `b == 2` (i.e. never as low as `-4`,
+    // which is what floor/Euclidean division would give for `a == -7`).
+    // Proving `result >= -4` would be a false positive under a
+    // Euclidean encoding pretending to be truncating.
+    let result = check_fn_contract(
+        &program,
+        "truncating_divide",
+        &["a == -7 && b == 2".to_string()],
+        &["result == -3".to_string()],
+        &HashMap::new(),
+    );
+    assert_eq!(result, ContractCheckResult::Proved, "truncating division must give -7 / 2 == -3: {result:?}");
+}
+
+#[test]
+fn division_result_rejects_the_euclidean_answer_as_a_real_counterexample() {
+    let program = build_program(TRUNCATING_DIVISION_NIR);
+    // The Euclidean/floor answer for -7 / 2 is -4, not Rust's -3 -- a
+    // postcondition asserting the wrong (Euclidean) answer must be
+    // disproved, not vacuously proved by an under-constrained model.
+    let result = check_fn_contract(
+        &program,
+        "truncating_divide",
+        &["a == -7 && b == 2".to_string()],
+        &["result == -4".to_string()],
+        &HashMap::new(),
+    );
+    assert!(matches!(result, ContractCheckResult::Counterexample { .. }), "expected a counterexample disproving the Euclidean answer, got: {result:?}");
+}

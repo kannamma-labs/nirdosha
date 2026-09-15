@@ -106,7 +106,20 @@ crossbeam-channel = "0.5"
 # verify under (never trusting the token's own `alg` header -- closes the
 # classic algorithm-confusion attack). Same dependency set, same guard,
 # ported here so the compiled path can link it too.
-jsonwebtoken = "9"
+jsonwebtoken = { version = "9", optional = true, default-features = true }
+# `crypto_backend.rs`'s FIPS swap (2026-09), mirroring `crates/compiler/
+# Cargo.toml`'s own identical story for Ed25519 signing: `jsonwebtoken`
+# defaults to `ring` internally (not a NIST CMVP-validated module).
+# `jsonwebtoken-aws-lc` is a maintained fork at the same 9.x version,
+# API-compatible enough to need zero call-site changes (confirmed with a
+# real scratch build in this environment: `encode`/`decode`/`Header`/
+# `Algorithm`/`EncodingKey`/`DecodingKey` all work identically) -- only
+# `crypto_backend.rs`'s `jsonwebtoken` re-export needs to point at it.
+# Mutually exclusive with the plain `jsonwebtoken` dep above via the
+# `fips` feature below (`cargo build --no-default-features --features
+# fips`), not additive -- a build only ever links one JWT/crypto stack.
+jsonwebtoken-aws-lc = { package = "jsonwebtoken-aws-lc", version = "9", optional = true }
+aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -161,6 +174,21 @@ openssl = { version = "0.10", features = ["vendored"] }
 r2d2_postgres = "0.18.2"
 postgres = "0.19.14"
 postgres-native-tls = "0.5.3"
+
+[features]
+default = ["jsonwebtoken"]
+# `crypto_backend.rs`'s FIPS swap -- see `jsonwebtoken`/`jsonwebtoken-
+# aws-lc`/`aws-lc-rs`'s own comments above. `cargo build --no-default-
+# features --features fips` links `jsonwebtoken-aws-lc` + `aws-lc-rs`'s
+# CMVP-validatable digest/signature backend instead of `jsonwebtoken`
+# (`ring`-backed) + the plain `sha2` crate, for `nir_oidc_validate_
+# token`/`nir_dpop_verify`/`nir_sha256_hex`. `--no-default-features` is
+# required alongside `--features fips`, not optional: `jsonwebtoken` and
+# `jsonwebtoken-aws-lc` both provide the same `jsonwebtoken::` items
+# `crypto_backend.rs` re-exports one of, and having both linked at once
+# would be redundant, never a real conflict this feature flag needs to
+# resolve for you silently.
+fips = ["dep:jsonwebtoken-aws-lc", "dep:aws-lc-rs"]
 
 [profile.release]
 # `unwind` (the default -- kept explicit here as a record of a real
