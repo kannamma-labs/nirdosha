@@ -17,7 +17,7 @@
 | 2 — Close gaps | db-serializability checker, inter-procedural VC gen (found already done), borrow-checker liveness, Sigstore-pattern signing | ✅ Done |
 | 3 — Externalize evidence | Publish methodology, invite outside reproduction, an adversarial demo for the new capability | ✅ Items 1 and 3 done; item 2 as done as this environment allows (below) |
 | 4 — Close the APM loop | Feed real runtime data back into the proof/generation loop | ✅ All three items done (below) |
-| 5 — Domain translation stretch | Pick a new failure class, idealize → build → wire in | ◻️ Not started, deliberately |
+| 5 — Domain translation stretch | Pick a new failure class, idealize → build → wire in | ✅ Real minimal version, 2026-09-15 (below) |
 
 ## Phase 3 — externalize evidence (next up)
 
@@ -121,12 +121,19 @@ tested, as of 2026-09-15.
    `runtime_lesson_guidance`'s own doc comment names the real,
    disclosed v1 limit: keyword matching on the prompt text, not
    AST-shape similarity against the eventual generated code, a bigger,
-   separate problem not attempted here. `generate_program`'s own
-   (graph-shaped) prompt construction is not yet wired the same way --
-   real, disclosed follow-up, chosen deliberately as the lower-risk
-   integration point for this pass rather than touching both at once.
-   12 tests total (`mcp_tools`/`hint_cache`/`hi_llm` unit tests plus the
-   `--teach` integration tests in both CLI test files).
+   separate problem not attempted here (still real, still not
+   attempted). **✅ `generate_program`'s own (graph-shaped) prompt
+   construction wired 2026-09-15** — the "real, disclosed follow-up"
+   this item used to name: `generate_program` now consults the
+   identical `runtime_lesson_guidance`/`RuntimeLessons` store against
+   `graph_task_message`'s own JSON prompt text, the same call shared
+   with `generate_from_task_prompt` rather than a second copy of the
+   matching rule. 12 tests total (`mcp_tools`/`hint_cache`/`hi_llm` unit
+   tests plus the `--teach` integration tests in both CLI test files) --
+   `generate_program`'s own wiring reuses `runtime_lesson_guidance`'s
+   existing tests rather than adding new ones (it's a thin, mechanical
+   call-site addition around already-tested logic, no new behavior to
+   pin beyond what those tests already cover).
 3. ✅ **Surface it in the certificate over time.**
    `mcp_tools::Certificate::isolation_violations` (a `Vec<
    IsolationViolation>`, `evidence_tier: "monitored"` per entry, same
@@ -138,12 +145,19 @@ tested, as of 2026-09-15.
    tests). **What "over time" honestly means here, not oversold**: each
    certificate is still a static, re-issued artifact — attaching a new
    log re-issues a new certificate, it doesn't mutate an old one in
-   place or auto-update a standing claim. There is also still no
-   mechanism that *produces* an ops-log from a live running process —
-   `--isolation-log` consumes a log; nothing yet captures one from a
-   real `.nir` binary's own in-memory checker state. That capture half
-   is real, separate follow-up work, disclosed in `cmd_check_isolation`'s
-   own doc comment (`main.rs`), not implied to already exist.
+   place or auto-update a standing claim. **✅ The capture half is real
+   now too, 2026-09-15** — `runtime-kernels`' `isolation_check::
+   maybe_start_capture` (opt-in via `NIRDOSHA_ISOLATION_LOG_PATH`, same
+   env-var-gated posture `nfr.rs`'s own `NIRDOSHA_OBSERVABILITY_URL`
+   already uses) periodically writes the live process's own `Checker::
+   ops()` window to a file, atomically (write-to-temp-then-rename), in
+   the identical `Vec<Op>` JSON shape `--isolation-log`/`check-
+   isolation` already read — a real producer now exists, closing what
+   this bullet used to name as still-missing. Real, disclosed choice:
+   periodic (every 2s), not per-op, to avoid reintroducing the exact
+   per-call cost `MAX_TRACKED_OPS` was built to bound; a crash between
+   two snapshots loses at most one interval's worth of ops, never a
+   torn file. Tested (`isolation_check.rs`'s own capture tests).
 
 **Real, disclosed limits across all three, not new gaps**: none of
 this closes the loop *automatically* end to end -- a human or an
@@ -154,13 +168,54 @@ observe → detect drift → re-verify → optionally teach → proactively
 guide the next generation) now has working code behind it, wired
 together and tested, where before this session none of it did.
 
-## Phase 5 — domain translation stretch (not started)
+## Phase 5 — domain translation stretch (✅ real minimal version, 2026-09-15)
 
 Pick one more failure class nobody solves well for LLM-generated code,
 design the idealized solution, build a real minimal version, then wire
 it into the existing graph/pack/certificate machinery the same way a
-domain pack talks to the coverage gate today. Explicitly premature
-before Phase 3 lands — no candidate failure class has been chosen.
+domain pack talks to the coverage gate today.
+
+**Chosen failure class: the artifact-boundary gap named in
+`docs/research/2026-09-generated-code-guarantee-evaluation.md`.** This
+project could verify/certify a `.nir` *source* file, but had no
+checkable artifact that travels with the *generated* code — an
+operator or auditor handed only a binary had no Nirdosha-provided way
+to ask "does this still satisfy the guarantees the source claimed?"
+Idealized in `rfcs/0017-security-guarantee-manifest.md` (per-module
+JSON policy contracts, `guarantee_check` compile-time pass, an emitted
+guarantee bundle, `verify-binary` as the binary-side dual of `verify`).
+
+**Built, real, tested — the RFC's own explicit v1 scope cut, not
+hidden**: `crates/compiler/src/guarantee_manifest.rs` implements 3 of
+the RFC's 6 `guarantee_check` items (capability ceiling, exported
+`requires`/`public` contract, role/claim vocabulary) — the other 3
+(resource-budget static bounding, network/file literal allowlists,
+import-boundary checking) need call-graph/codegen-level plumbing or
+multi-file manifest threading this pass doesn't reach into yet, real
+disclosed follow-up, not silently assumed done. Wired in for real, not
+just unit-tested in isolation:
+- `nirdosha build` fails the build outright on a real violation when
+  `<file.nir>.guarantees.json` exists next to the source, and always
+  emits `<out>.guarantees.json` (the RFC §4 bundle: inferred effects,
+  gated/public exports, source hash) whether or not a manifest is
+  present.
+- `nirdosha check-guarantees <file.nir> [--manifest <path>]` — the
+  on-demand check without building.
+- `nirdosha verify-binary <bundle.guarantees.json> --against
+  <policy.json>` — the RFC §6 binary-side dual of `verify`: checks an
+  already-built bundle against an operator policy with **no
+  recompilation**, the actual "give me the generated code and I'll
+  tell you whether it satisfies these guarantees" answer this whole
+  doc's Phase 3/4 work was building toward.
+
+All four paths (clean build, build-time hard failure, `check-
+guarantees`, `verify-binary` both satisfying and violating a policy)
+were run end to end against real compiled output, not just asserted in
+unit tests — see the 13 `guarantee_manifest` unit tests plus the manual
+smoke run this session recorded. Runtime enforcement (RFC §5 — manifest-
+derived resource ceilings/network policy baked into `runtime-kernels`)
+is real, separate follow-up work: this phase is the compile-time check
++ emitted bundle + policy check, not the full runtime story.
 
 ## Smaller, explicitly disclosed follow-on gaps (lower priority)
 
@@ -204,16 +259,31 @@ opportunistically, not urgently:
   cross-window anomaly is invisible) for the bound — a real tradeoff,
   not a perfect fix; `MAX_TRACKED_OPS = 300` is a measured-comfortable
   value, not a proven-optimal one.
-- **Pack signing has no UI.** `agent-skills/nirdosha/hi_ux_redesign_options.md`'s
-  "trust indicator" mockup was never wired to `hi_plugin::
-  pack_signer_identity`. Live Fulcio/Rekor integration remains
-  genuinely blocked on the registry-governance question (RFC 0016's own
-  position, unchanged).
-- **Borrow liveness is lexical, not true NLL.** A real, disclosed
-  precision cost (`ownership.rs`'s "Borrow liveness (v1, lexical)"
-  section) — rejects some programs a full last-use liveness analysis
-  would accept. Worth revisiting only if it bites real generated code in
-  practice, not worth pre-emptively building out.
+- ✅ **Pack signing UI — the local half wired 2026-09-15; the live half
+  stays genuinely blocked.** `agent-skills/nirdosha/
+  hi_ux_redesign_options.md`'s "trust indicator" mockup is now wired to
+  `hi_plugin::pack_signer_identity`: `hi_api::handle_packs_list`'s
+  `/api/packs` response carries a real `signer_identity`/
+  `trust_indicator` ("signed"/"unsigned") per pack, sourced from the
+  same DB column `verify_and_install_signed_pack` already writes — no
+  new mechanism, just the read side that was missing. **Real, disclosed
+  scope cut**: this exposes *who* signed a pack, not *how*
+  (`trust_anchor` vs `tofu` — that distinction lives only in the local
+  append-only signing log, which has no reader yet, real separate
+  follow-up). Live Fulcio/Rekor integration (the registry-issued-
+  identity trust tier) remains genuinely blocked on the registry-
+  governance question (RFC 0016's own position, unchanged) — that part
+  of this gap was never touched, because it can't be.
+- **Borrow liveness is lexical, not true NLL — deliberately left as is
+  this session.** A real, disclosed precision cost (`ownership.rs`'s
+  "Borrow liveness (v1, lexical)" section) — rejects some programs a
+  full last-use liveness analysis would accept. Considered for this
+  session and deliberately not attempted: a real CFG-based last-use
+  liveness analysis is a substantial, research-grade rewrite of
+  `ownership.rs`'s borrow tracking, not a bounded bugfix, and this
+  project's own prior position (unchanged) is that it's worth
+  revisiting only if it bites real generated code in practice — no such
+  case is on record. Flagged here rather than silently skipped.
 - ✅ **`let x: unit = <call>()` didn't compile — fixed 2026-09-14.**
   `layout::llvm_ty` maps `Ty::Unit` to LLVM `void`, and the generic
   let-with-type-annotation codegen path unconditionally alloca'd
@@ -252,28 +322,40 @@ opportunistically, not urgently:
 ## Recommendation
 
 ~~Start with Phase 3 item 1 (the adversarial demo)~~ — done, along with
-every other item in Phases 1-4 and every disclosed gap surfaced along
-the way (the `find_cycles`/windowing scaling bugs, the CLI enforcement
-surface, the `let x: unit` codegen bug, `governing_packs` per-invariant
-attribution, and Phase 4's drift detection/`hint_cache` integration/
-certificate attachment) — all fixed, not just found, each with its own
-before/after measurement or passing test, not asserted. Every item in
-this doc that was reachable without either new external resources (an
-Imandra license, raw-logit model access) or a fresh, deliberately-
-deferred product decision (Phase 5's failure class, pack signing's
-registry-governance question) is done as of 2026-09-15.
+every other item in Phases 1-4, Phase 5 (below), and every disclosed
+gap surfaced along the way (the `find_cycles`/windowing scaling bugs,
+the CLI enforcement surface, the `let x: unit` codegen bug,
+`governing_packs` per-invariant attribution, Phase 4's drift
+detection/`hint_cache` integration/certificate attachment, the
+`hint_cache`↔`generate_program` graph-shaped-prompt wiring, live
+isolation ops-log capture, and the pack-signing UI's local half) — all
+fixed, not just found, each with its own before/after measurement or
+passing test, not asserted.
 
-What's left is exactly two items, and both are deliberately *not*
-engineering work this doc can size or schedule:
+**2026-09-15, later the same day — the two items this doc previously
+called "not engineering work" turned out to have real, buildable
+halves after all**, and both are done:
 
-1. **Pack signing's UI** stays genuinely blocked on the registry-
-   governance question (RFC 0016's own unchanged position) — not
-   picked up until that's resolved.
-2. **Phase 5** (a new failure class, idealized → built → wired in) is
-   no longer premature on Phase 3's own account (Phase 3 is done) — but
-   still needs a real candidate failure class chosen first, a decision
-   this doc has deliberately left open rather than picked under time
-   pressure.
+1. **Phase 5's failure class was chosen and built, real minimal
+   version** (see its own section above) — the artifact-boundary gap
+   (`docs/research/2026-09-generated-code-guarantee-evaluation.md`),
+   idealized as `rfcs/0017-security-guarantee-manifest.md`, built as
+   `guarantee_manifest.rs` + `nirdosha build`'s bundle emission/hard-
+   enforcement + `check-guarantees`/`verify-binary` — 3 of the RFC's 6
+   `guarantee_check` items, the bundle, and the binary-side policy
+   check; the other 3 items and runtime enforcement are real, disclosed
+   follow-up, not this session's claim.
+2. **Pack signing's UI had an unblocked half**: exposing the *already-
+   real* `signer_identity` DB column through `/api/packs` needed no
+   registry-governance decision at all — only the live Fulcio/Rekor
+   trust tier was ever blocked on that. Wired, tested.
+
+**Borrow liveness (lexical → true NLL) was considered and deliberately
+left alone** — a real CFG-based rewrite, not a bounded fix, and this
+project's own standing position (no real generated code has hit the
+gap yet) hasn't changed. The only genuinely remaining, correctly-
+unscheduled item is the live Fulcio/Rekor registry-governance question
+itself — not UI work, an organizational one.
 
 Everything that could be closed by writing and testing code, this doc
 recommends closing, has been closed.

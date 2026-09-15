@@ -33,6 +33,8 @@ fn main() -> ExitCode {
         "certify" => cmd_certify(args),
         "check-isolation" => cmd_check_isolation(args),
         "check-drift" => cmd_check_drift(args),
+        "check-guarantees" => cmd_check_guarantees(args),
+        "verify-binary" => cmd_verify_binary(args),
         "keygen" => cmd_keygen(args),
         "verify-certificate" => cmd_verify_certificate(args),
         "equivalence" => cmd_equivalence(args),
@@ -69,7 +71,11 @@ fn print_usage() {
     eprintln!("                                      field_labels per entity, plus a flat kpis list) --");
     eprintln!("                                      real db_connect/db_execute/db_query bodies, no LLM");
     eprintln!("  nirdosha build <file.nir> -o <out> [--opt0]");
-    eprintln!("                                      compile to a native binary (LLVM, -O2 by default)");
+    eprintln!("                                      compile to a native binary (LLVM, -O2 by default); also");
+    eprintln!("                                      emits <out>.guarantees.json (RFC 0017's guarantee bundle --");
+    eprintln!("                                      inferred effects/gated exports, for `verify-binary` to check");
+    eprintln!("                                      later with no recompilation); if <file.nir>.guarantees.json");
+    eprintln!("                                      exists, the build also fails on any guarantee violation");
     eprintln!("  nirdosha verify <file.nir> [--in-toto]");
     eprintln!("                                      typecheck/ownership/contract-check only, no LLVM/clang");
     eprintln!("                                      needed -- 3-valued JSON verdict on stdout, exit 0/1/2;");
@@ -102,6 +108,16 @@ fn print_usage() {
     eprintln!("                                      nfr.rs's own escalation wire shape) and, if any commitment");
     eprintln!("                                      drifted, re-run real verification on <file.nir> and report");
     eprintln!("                                      both; exit 0 (no drift) / 1 (drift found); --teach as above");
+    eprintln!("  nirdosha check-guarantees <file.nir> [--manifest <file.nir.guarantees.json>] [--in-toto]");
+    eprintln!("                                      RFC 0017: check <file.nir> against a security guarantee");
+    eprintln!("                                      manifest's capability ceiling/exported-contract/role-");
+    eprintln!("                                      vocabulary rules (--manifest defaults to <file.nir>.guarantees.json");
+    eprintln!("                                      next to it); exit 0 (clean, or no manifest present) / 1 (violation)");
+    eprintln!("  nirdosha verify-binary <bundle.guarantees.json> --against <policy.json> [--in-toto]");
+    eprintln!("                                      RFC 0017: check an already-emitted guarantee bundle (written");
+    eprintln!("                                      by `nirdosha build`) against an operator policy -- same manifest");
+    eprintln!("                                      JSON shape as --manifest above -- with no recompilation; the");
+    eprintln!("                                      binary-side dual of `verify`; exit 0 (satisfies) / 1 (violation)");
     eprintln!("  nirdosha verify-certificate <certificate.json>");
     eprintln!("                                      check a signed certificate's signature against its own");
     eprintln!("                                      embedded public key");
@@ -464,6 +480,33 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // RFC 0017, real minimal version (Phase 5,
+    // `docs/research/2026-09-pending-verification-differentiation-
+    // work.md`): if `<path>.guarantees.json` exists, `guarantee_check`
+    // runs before codegen and a violation fails the build outright --
+    // matching the RFC's own pipeline position (after typeck/ownership,
+    // before codegen::build) and its "hard error" semantics for a
+    // capability-ceiling/exported-contract/vocabulary violation. No
+    // manifest present is not an error -- RFC 0017's own "additive
+    // only" compatibility rule.
+    let guarantee_registry = nirdosha::ast::TypeRegistry::build(&program);
+    let guarantee_manifest = match nirdosha::guarantee_manifest::load(std::path::Path::new(&path)) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(manifest) = &guarantee_manifest {
+        let violations = nirdosha::guarantee_manifest::check(&program, &guarantee_registry, manifest);
+        if !violations.is_empty() {
+            eprintln!("build failed: {} guarantee-manifest violation(s) against {}:", violations.len(), nirdosha::guarantee_manifest::manifest_path_for(std::path::Path::new(&path)).display());
+            for v in &violations {
+                eprintln!("  - {}", v.describe());
+            }
+            return ExitCode::FAILURE;
+        }
+    }
     let smt_report = nirdosha::smt::analyze(&program);
     let result = match serve {
         Some(port) => {
@@ -534,6 +577,30 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
     match result {
         Ok(()) => {
             println!("wrote {out}");
+            // RFC 0017 §4's emitted guarantee bundle -- always written,
+            // manifest or not (a manifest only adds the hard-error
+            // enforcement above; the bundle itself is this project's
+            // answer to "give me the generated code and I'll tell you
+            // whether it satisfies these guarantees," so it travels
+            // with every build, not only a manifest-governed one).
+            // Best-effort like the FAPI sidecar above: a write failure
+            // here is a warning, not a build failure -- the binary
+            // already compiled successfully.
+            match std::fs::read(&path) {
+                Ok(source_bytes) => {
+                    let source_hash = sha256_hex(&source_bytes);
+                    let bundle = nirdosha::guarantee_manifest::build_bundle(&program, &guarantee_registry, &source_hash, guarantee_manifest.as_ref());
+                    let bundle_path = format!("{out}.guarantees.json");
+                    match serde_json::to_string_pretty(&bundle) {
+                        Ok(text) => match std::fs::write(&bundle_path, text) {
+                            Ok(()) => println!("wrote {bundle_path}"),
+                            Err(e) => eprintln!("warning: failed to write {bundle_path}: {e}"),
+                        },
+                        Err(e) => eprintln!("warning: failed to render guarantee bundle: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("warning: could not re-read {path} to hash it for the guarantee bundle: {e}"),
+            }
             ExitCode::SUCCESS
         }
         Err(msg) => {
@@ -1102,15 +1169,17 @@ fn load_and_check_isolation_log(path: &str) -> Result<Vec<nirdosha_isolation_cor
 /// verbatim with the live path, not a reimplementation), a real
 /// 3-valued exit code matching `verify`'s own convention.
 ///
-/// **What this does not (yet) do, disclosed rather than implied**:
-/// there is still no mechanism that *produces* an ops-log from a live
-/// compiled `.nir` process -- `Checker::ops()`/`load()` exist, but
-/// nothing wires a running binary's own in-memory history out to a
-/// file today. A log for this command to check has to come from a
-/// caller's own tooling (a test harness, a future live-dump feature)
-/// that captures `Op` values in this exact JSON shape. This command is
-/// the on-demand *checking* half of the disclosed gap; the *capture*
-/// half is real, separate follow-up work.
+/// **The capture half is real now too (2026-09-15), closing what used
+/// to be this doc comment's own disclosed gap**: a live compiled
+/// `.nir` process can produce an ops-log for this command to check --
+/// `runtime-kernels`' `isolation_check::maybe_start_capture` (opt-in
+/// via `NIRDOSHA_ISOLATION_LOG_PATH`, same env-var-gated posture
+/// `nfr.rs`'s own `NIRDOSHA_OBSERVABILITY_URL` already uses) writes the
+/// running process's own `Checker::ops()` window to a file in this
+/// exact `Vec<Op>` JSON shape, periodically, atomically. A saved log
+/// can still come from any other caller's own tooling too (a test
+/// harness, `certify --isolation-log`'s existing callers) -- this adds
+/// a real producer, it doesn't require one.
 ///
 /// **`--teach <hint>`**: Phase 4 item 2, "feed real incidents into
 /// `hint_cache`" -- on a real anomaly found, records `<hint>` as this
@@ -1287,6 +1356,159 @@ fn cmd_check_drift(mut args: impl Iterator<Item = String>) -> ExitCode {
     } else {
         eprintln!("NO_DRIFT: {path} -- every declared nfr(...) commitment checked against {log_path} holds");
         ExitCode::SUCCESS
+    }
+}
+
+/// `nirdosha check-guarantees <file.nir> [--manifest <path>]` -- RFC
+/// 0017's on-demand check, `cmd_build`'s own hard-error enforcement
+/// pulled out into its own command for a caller that wants the verdict
+/// without actually building (mirrors `verify` existing alongside
+/// `build`'s own typecheck/ownership gate for the identical reason).
+/// `--manifest` defaults to `guarantee_manifest::manifest_path_for`'s
+/// convention (`<file.nir>.guarantees.json`) when omitted; no manifest
+/// found either way is reported as clean, never an error -- RFC 0017's
+/// own "additive only" compatibility rule.
+fn cmd_check_guarantees(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut path: Option<String> = None;
+    let mut manifest_path: Option<String> = None;
+    let mut in_toto = false;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--in-toto" => in_toto = true,
+            "--manifest" => {
+                manifest_path = args.next();
+                if manifest_path.is_none() {
+                    eprintln!("--manifest needs a path -- usage: nirdosha check-guarantees <file.nir> [--manifest <path>] [--in-toto]");
+                    return ExitCode::FAILURE;
+                }
+            }
+            other => path = Some(other.to_string()),
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: nirdosha check-guarantees <file.nir> [--manifest <path>] [--in-toto]");
+        return ExitCode::FAILURE;
+    };
+    let (program, source) = match typecheck_and_own(&path) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let manifest = match &manifest_path {
+        Some(explicit) => match std::fs::read(explicit) {
+            Ok(bytes) => match serde_json::from_slice::<nirdosha::guarantee_manifest::GuaranteeManifest>(&bytes) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    eprintln!("{explicit} is not a valid guarantee manifest: {e}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("error reading {explicit}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => match nirdosha::guarantee_manifest::load(std::path::Path::new(&path)) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let registry = nirdosha::ast::TypeRegistry::build(&program);
+    let violations = match &manifest {
+        Some(m) => nirdosha::guarantee_manifest::check(&program, &registry, m),
+        None => Vec::new(),
+    };
+    let clean = violations.is_empty();
+    let verdict = if manifest.is_none() { "no_manifest" } else if clean { "clean" } else { "violation_found" };
+    let predicate = serde_json::json!({
+        "verdict": verdict,
+        "violations": violations.iter().map(|v| v.describe()).collect::<Vec<_>>(),
+    });
+    let output = if in_toto { wrap_in_toto(&path, &sha256_hex(source.as_bytes()), "check-guarantees/v1", predicate) } else { predicate };
+    println!("{}", serde_json::to_string_pretty(&output).expect("this JSON value always serializes"));
+    if clean {
+        eprintln!(
+            "{}",
+            if manifest.is_none() { format!("NO_MANIFEST: {path} has no guarantee manifest -- nothing to check (RFC 0017 is additive-only)") } else { format!("CLEAN: {path} satisfies its guarantee manifest") }
+        );
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("VIOLATION_FOUND: {path} -- {} guarantee-manifest violation(s)", violations.len());
+        ExitCode::FAILURE
+    }
+}
+
+/// `nirdosha verify-binary <bundle.guarantees.json> --against <policy.json>`
+/// -- RFC 0017 §6, the dual of `verify`: checks an already-emitted
+/// guarantee bundle (`nirdosha build`'s own `<out>.guarantees.json`)
+/// against an operator-supplied policy (the identical manifest JSON
+/// shape `check-guarantees --manifest` reads) **with no recompilation**
+/// -- the real "give me the generated code and I'll tell you whether it
+/// satisfies these guarantees" answer for the binary side, not just the
+/// source side `verify`/`certify` already covered.
+fn cmd_verify_binary(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut bundle_path: Option<String> = None;
+    let mut policy_path: Option<String> = None;
+    let mut in_toto = false;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--in-toto" => in_toto = true,
+            "--against" => {
+                policy_path = args.next();
+                if policy_path.is_none() {
+                    eprintln!("--against needs a policy path -- usage: nirdosha verify-binary <bundle.guarantees.json> --against <policy.json> [--in-toto]");
+                    return ExitCode::FAILURE;
+                }
+            }
+            other => bundle_path = Some(other.to_string()),
+        }
+    }
+    let (Some(bundle_path), Some(policy_path)) = (bundle_path, policy_path) else {
+        eprintln!("usage: nirdosha verify-binary <bundle.guarantees.json> --against <policy.json> [--in-toto]");
+        return ExitCode::FAILURE;
+    };
+    let bundle_bytes = match std::fs::read(&bundle_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error reading {bundle_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let bundle: serde_json::Value = match serde_json::from_slice(&bundle_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{bundle_path} is not valid JSON: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let policy: nirdosha::guarantee_manifest::GuaranteeManifest = match std::fs::read(&policy_path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("not a valid guarantee manifest: {e}"))) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error reading {policy_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let violations = nirdosha::guarantee_manifest::check_bundle_against_policy(&bundle, &policy);
+    let clean = violations.is_empty();
+    let predicate = serde_json::json!({
+        "verdict": if clean { "satisfies_policy" } else { "violation_found" },
+        "bundle": bundle_path,
+        "policy": policy_path,
+        "violations": violations.iter().map(|v| v.describe()).collect::<Vec<_>>(),
+    });
+    let output = if in_toto { wrap_in_toto(&bundle_path, &sha256_hex(&bundle_bytes), "verify-binary/v1", predicate) } else { predicate };
+    println!("{}", serde_json::to_string_pretty(&output).expect("this JSON value always serializes"));
+    if clean {
+        eprintln!("SATISFIES_POLICY: {bundle_path} satisfies {policy_path}");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("VIOLATION_FOUND: {bundle_path} -- {} violation(s) against {policy_path}", violations.len());
+        ExitCode::FAILURE
     }
 }
 

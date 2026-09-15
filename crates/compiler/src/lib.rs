@@ -8,6 +8,7 @@ pub mod explain;
 pub mod extraction_schema;
 pub mod grammar_gen;
 pub mod grammar_trace;
+pub mod guarantee_manifest;
 pub mod hi_api;
 pub mod hi_graph;
 pub mod hi_llm;

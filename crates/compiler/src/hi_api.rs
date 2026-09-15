@@ -194,6 +194,25 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
 /// so the panel can grey out "already installed" rather than letting a
 /// second click silently no-op (`install_pack_from_bytes` upserts by
 /// pack id, harmless but confusing to invite).
+/// **Real trust-indicator wiring (2026-09-15) -- previously the
+/// disclosed gap `pack_signer_identity`'s own doc comment named ("not
+/// wired in yet") and `agent-skills/nirdosha/hi_ux_redesign_options.md`'s
+/// "trust indicator (who signed it...)" mockup asked for.** Every
+/// installed pack now carries its real `signer_identity` (from
+/// `hi_plugin::pack_signer_identity`, `None` for a plain 5a unsigned
+/// install -- this column's own migration default) and a derived
+/// `trust_indicator` ("signed" / "unsigned") a caller can render
+/// directly, no client-side inference needed. **Real, disclosed scope
+/// cut, not the RFC 0016 mockup's full richness**: this exposes *who*
+/// signed a pack, not *how* (`trust_anchor` vs `tofu` -- that
+/// distinction currently lives only in the local append-only signing
+/// log `append_pack_signing_log` writes, which has no reader yet; a
+/// real, separate follow-up, not silently assumed done here). The live
+/// Fulcio/OIDC-issued-identity half (RFC 0016's own "registry-governed"
+/// trust tier) stays genuinely blocked on the registry-governance
+/// question this doc's own position hasn't changed
+/// (`rfcs/0016-implementation-plan.md`'s "Blocked" section) -- this is
+/// the local-signing-only half that was never actually blocked on it.
 fn handle_packs_list(conn: &Connection) -> ApiResponse {
     let installed = match crate::hi_plugin::installed_pack_ids(conn) {
         Ok(ids) => ids,
@@ -201,7 +220,18 @@ fn handle_packs_list(conn: &Connection) -> ApiResponse {
     };
     let packs: Vec<serde_json::Value> = crate::hi_plugin::known_installable_packs()
         .into_iter()
-        .map(|(id, description, _bytes)| serde_json::json!({ "id": id, "description": description, "installed": installed.contains(&id.to_string()) }))
+        .map(|(id, description, _bytes)| {
+            let is_installed = installed.contains(&id.to_string());
+            let signer_identity = if is_installed { crate::hi_plugin::pack_signer_identity(conn, id).unwrap_or(None) } else { None };
+            let trust_indicator = if signer_identity.is_some() { "signed" } else { "unsigned" };
+            serde_json::json!({
+                "id": id,
+                "description": description,
+                "installed": is_installed,
+                "signer_identity": signer_identity,
+                "trust_indicator": trust_indicator,
+            })
+        })
         .collect();
     ApiResponse::json(&packs)
 }
@@ -891,6 +921,15 @@ mod tests {
         assert_eq!(banking["installed"], true, "ensure_default_packs already installed it: {banking:?}");
         let fapi = packs.iter().find(|p| p["id"] == "fapi-2.0").expect("fapi-2.0 should be a known pack");
         assert_eq!(fapi["installed"], false, "fapi-2.0 is never auto-installed: {fapi:?}");
+        // `ensure_default_packs` installs banking-v0 as a plain 5a
+        // unsigned install -- the real trust-indicator wiring must say
+        // so honestly, not claim a signer that was never recorded.
+        assert_eq!(banking["signer_identity"], serde_json::Value::Null, "an unsigned 5a install must not claim a signer: {banking:?}");
+        assert_eq!(banking["trust_indicator"], "unsigned", "an unsigned 5a install's trust indicator must say so: {banking:?}");
+        // A pack never installed at all has nothing to report either --
+        // same "not applicable" shape as an unsigned one, not an error.
+        assert_eq!(fapi["signer_identity"], serde_json::Value::Null, "{fapi:?}");
+        assert_eq!(fapi["trust_indicator"], "unsigned", "{fapi:?}");
     }
 
     #[test]

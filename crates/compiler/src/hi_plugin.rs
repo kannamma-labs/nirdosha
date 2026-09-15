@@ -1175,9 +1175,16 @@ pub fn verify_and_install_signed_pack(conn: &rusqlite::Connection, root: &Path, 
 /// The signer identity recorded for an installed pack, if it was
 /// installed through `verify_and_install_signed_pack` -- `None` for
 /// every 5a, unsigned install (this column's own migration default).
-/// `mcp_tools::Certificate::governing_packs`'s natural next extension
-/// (attributing not just *which* packs governed an artifact but who
-/// sealed them) once a caller wants it; not wired in yet.
+/// **Wired into the UI's trust indicator (2026-09-15)**:
+/// `hi_api::handle_packs_list`'s `/api/packs` response carries this
+/// verbatim, plus a derived `trust_indicator` ("signed"/"unsigned") --
+/// `agent-skills/nirdosha/hi_ux_redesign_options.md`'s "trust indicator
+/// (who signed it...)" mockup, previously never wired to this function
+/// (this doc comment's own prior text said so). `mcp_tools::
+/// Certificate::governing_packs` attributing not just *which* packs
+/// governed an artifact but who sealed them is still real, separate
+/// follow-up work -- this wiring is the UI-facing half, not the
+/// certificate-facing one.
 pub fn pack_signer_identity(conn: &rusqlite::Connection, pack_id: &str) -> Result<Option<String>, String> {
     conn.query_row("SELECT signer_identity FROM plugins WHERE id = ?1", [pack_id], |r| r.get::<_, Option<String>>(0))
         .map_err(|e| format!("reading signer_identity for {pack_id}: {e}"))

@@ -49,16 +49,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-/// Strips a leading `<line>:<col>: ` location prefix, if present, so the
-/// same underlying mistake at two different call sites (`16:58: ...`
-/// vs `26:62: ...`) normalizes to one cache key. Mirrors what
-/// `self_repair_hint`'s own `.contains(...)` substring checks already
-/// do implicitly by matching text *after* the location -- this just
-/// makes that same location-independence explicit for a key used in
-/// exact lookups, where a substring match isn't available.
-pub fn normalize_pattern(message: &str) -> String {
-    let trimmed = message.trim();
-    let mut chars = trimmed.char_indices();
+/// If `s` starts with a bare `<line>:<col>: ` location prefix (both
+/// fields plain ASCII digits, a real column present, not `N::`), returns
+/// everything after it; `None` for anything else, including a message
+/// with no location at all -- the caller decides what "no match" means.
+fn try_strip_leading_line_col(s: &str) -> Option<&str> {
+    let mut chars = s.char_indices();
     let mut first_colon = None;
     let mut second_colon = None;
     for (i, c) in chars.by_ref() {
@@ -67,12 +63,12 @@ pub fn normalize_pattern(message: &str) -> String {
             break;
         }
         if !c.is_ascii_digit() {
-            return trimmed.to_string();
+            return None;
         }
     }
-    let Some(fc) = first_colon else { return trimmed.to_string() };
+    let fc = first_colon?;
     if fc == 0 {
-        return trimmed.to_string();
+        return None;
     }
     for (i, c) in chars.by_ref() {
         if c == ':' {
@@ -80,16 +76,57 @@ pub fn normalize_pattern(message: &str) -> String {
             break;
         }
         if !c.is_ascii_digit() {
-            return trimmed.to_string();
+            return None;
         }
     }
-    let Some(sc) = second_colon else { return trimmed.to_string() };
+    let sc = second_colon?;
     if sc == fc + 1 {
         // `N::` -- an empty column field, not the `N:N:` shape this
         // targets. Leave it alone rather than guess.
-        return trimmed.to_string();
+        return None;
     }
-    trimmed[sc + 1..].trim_start().to_string()
+    Some(s[sc + 1..].trim_start())
+}
+
+/// Strips a `<line>:<col>: ` location marker, if present, so the same
+/// underlying mistake at two different call sites (`16:58: ...` vs
+/// `26:62: ...`) normalizes to one cache key. Mirrors what
+/// `self_repair_hint`'s own `.contains(...)` substring checks already
+/// do implicitly by matching text *after* the location -- this just
+/// makes that same location-independence explicit for a key used in
+/// exact lookups, where a substring match isn't available.
+///
+/// Checks two shapes, in order:
+/// 1. The message starts with the bare marker (`typecheck`/`ownership`
+///    diagnostics already look like this -- `"16:58: expected ..."`).
+/// 2. The message contains `" at <line>:<col>: "` anywhere, and
+///    everything after it is stripped (a lex/parse error's raw text
+///    looks like `"lex error in <path> at 28:69: unexpected character
+///    ...\`"` -- issue #64: the `<path>` component is a per-self-repair-
+///    attempt-unique scratch file, so leaving it in the cache key meant
+///    a lex/parse-stage hint could never be looked up again, and
+///    `promote_validated_hints`'s "did this fix it" check was
+///    comparing two paths that always differ regardless of whether the
+///    actual mistake was fixed). Splits on the FIRST `" at "`, not the
+///    last -- same reasoning as `hi_llm.rs::first_span_in`: a message
+///    whose own prose or a quoted path contains a *later* `" at "` must
+///    not steal this one.
+///
+/// A message matching neither shape (no location at all -- e.g.
+/// `"codegen doesn't support \`print\` on a Vector argument"`) is
+/// returned unchanged: it has nothing volatile to strip, and is already
+/// a stable, reusable cache key as-is.
+pub fn normalize_pattern(message: &str) -> String {
+    let trimmed = message.trim();
+    if let Some(stripped) = try_strip_leading_line_col(trimmed) {
+        return stripped.to_string();
+    }
+    if let Some((_, rest)) = trimmed.split_once(" at ") {
+        if let Some(stripped) = try_strip_leading_line_col(rest) {
+            return stripped.to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 /// Where the cache (and its sibling audit log) lives. Overridable via
@@ -325,6 +362,47 @@ mod tests {
         // A leading word that merely contains digits/colons in an
         // unrelated shape must not be mistaken for a location prefix.
         assert_eq!(normalize_pattern("unknown variable `RequestStatus`"), "unknown variable `RequestStatus`");
+    }
+
+    /// Issue #64: a lex/parse error's raw text is `"lex error in <path>
+    /// at <line>:<col>: <description>"` -- the leading digit-prefix
+    /// check alone can't strip this (the string starts with `l`, not a
+    /// digit), so before this fix the embedded scratch path (unique on
+    /// every self-repair attempt, `hi_llm.rs::typecheck_and_build_check`'s
+    /// own `SCRATCH_COUNTER`) rode straight through into the cache key,
+    /// meaning the SAME real mistake at two different attempts/runs
+    /// normalized to two DIFFERENT patterns and could never share a
+    /// cache entry. This pins that two such messages, differing only in
+    /// their embedded path, now normalize identically.
+    #[test]
+    fn normalize_pattern_strips_a_lex_error_prefix_regardless_of_the_embedded_scratch_path() {
+        let a = normalize_pattern("lex error in /tmp/nirdosha_hi_generate_check_2739298_3.nir at 28:69: unexpected character `?`");
+        let b = normalize_pattern("lex error in /tmp/nirdosha_hi_generate_check_9911205_0.nir at 3:1: unexpected character `?`");
+        assert_eq!(a, "unexpected character `?`", "got: {a}");
+        assert_eq!(a, b, "the same underlying mistake at two different scratch paths must normalize to one cache key");
+    }
+
+    /// Same shape for `parse error in <path> at ...`, not just `lex
+    /// error in <path> at ...` -- both loader error kinds share this
+    /// text convention (`hi_llm.rs::typecheck_and_build_check`'s own
+    /// error-mapping closure builds both from the same `&e`).
+    #[test]
+    fn normalize_pattern_strips_a_parse_error_prefix_regardless_of_the_embedded_scratch_path() {
+        let a = normalize_pattern("parse error in /tmp/nirdosha_hi_generate_check_111_1.nir at 154:19: expected an expression, found the reserved keyword `return`");
+        let b = normalize_pattern("parse error in /tmp/nirdosha_hi_generate_check_222_7.nir at 9:4: expected an expression, found the reserved keyword `return`");
+        assert_eq!(a, "expected an expression, found the reserved keyword `return`", "got: {a}");
+        assert_eq!(a, b);
+    }
+
+    /// The "first ` at `, not the last" rule matters: a message whose
+    /// own description contains a later `" at "` (quoted prose, a
+    /// second location mentioned in passing) must still resolve using
+    /// the FIRST one, matching `hi_llm.rs::first_span_in`'s identical
+    /// reasoning for the identical raw text.
+    #[test]
+    fn normalize_pattern_uses_the_first_at_marker_not_a_later_one() {
+        let got = normalize_pattern("lex error in /tmp/x_1.nir at 5:2: unexpected token, expected the keyword at line 9");
+        assert_eq!(got, "unexpected token, expected the keyword at line 9");
     }
 
     #[test]

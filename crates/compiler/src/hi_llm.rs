@@ -1514,6 +1514,14 @@ fn self_repair_hint(diagnostic: &str) -> &'static str {
         // the teaching prompt itself (fixed there too) -- models
         // coming from C-family languages add separators by reflex.
         " Nirdosha has no statement separators at all: delete the `;` and put each statement on its own line."
+    } else if diagnostic.contains("unexpected character `?`") {
+        // Field-failure 2026-09-15 (issue #63): `let proof_fd: RoleView =
+        // check_role(identity, "FinanceDirector")?` -- Rust's try-
+        // operator reflex, on a real `Result`-returning builtin
+        // (`docs/LANGUAGE.md` §9's own `check_role` entry). A sibling of
+        // the `;` arm just above, same root cause (a model reaching for
+        // C-family/Rust syntax Nirdosha doesn't have), same fix shape.
+        " Nirdosha has no `?` try-operator and no implicit error propagation at all: delete it and `match` the `Result` explicitly -- `match check_role(identity, \"FinanceDirector\") { Ok(proof_fd) => { ... } Err(e) => { ... } }` -- every `Result`-returning call must be matched at the call site."
     } else if diagnostic.contains("codegen doesn't support `workflow") {
         // Field-failure class from the first v4 attempt: a workflow
         // written with a non-empty `data { ... }` block, which parses
@@ -2069,7 +2077,25 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
     if units.is_empty() {
         return Err("nothing confirmed and unlocked to generate -- `:confirm <node>` at least one candidate first".to_string());
     }
-    let mut history = vec![ChatMessage::system(build_generate_prompt()), ChatMessage::user(graph_task_message(units, edges))];
+    // Phase 4 item 2's other, previously-undone integration point
+    // (`docs/research/2026-09-pending-verification-differentiation-
+    // work.md`): `generate_from_task_prompt`'s plain-string prompt was
+    // the first, lower-risk wiring; this graph-shaped JSON prompt is
+    // the real follow-up, not left undone. Same keyword-matching rule,
+    // same `RuntimeLessons` store -- `runtime_lesson_guidance` takes
+    // any prompt text, and `graph_task_message`'s JSON (unit driving
+    // text/attributes) is exactly the text a task would have mentioned
+    // `transact`/`nfr(` in, so no separate matching logic is needed
+    // here.
+    let graph_message = graph_task_message(units, edges);
+    let graph_message = match runtime_lesson_guidance(&graph_message, crate::hint_cache::shared_runtime_lessons()) {
+        Some(guidance) => {
+            on_log(&format!("proactive runtime-lesson guidance applied (hint_cache::RuntimeLessons): {guidance}"));
+            format!("{graph_message}\n\n{guidance}")
+        }
+        None => graph_message,
+    };
+    let mut history = vec![ChatMessage::system(build_generate_prompt()), ChatMessage::user(graph_message)];
     let mut mcp_log = crate::mcp_tools::McpCallLog::new("hi-generate-llm");
     let mut last_diagnostic = String::new();
     // RFC 0016 Phase 1's budget discipline: `violation_budget` counts only
@@ -2374,12 +2400,12 @@ fn runtime_lesson_guidance(task_prompt: &str, lessons: &Mutex<crate::hint_cache:
 /// violation should be able to become a taught lesson for `hi_llm`'s
 /// self-repair loop the same way a `:generate`-time failure already
 /// does") -- see `runtime_lesson_guidance`'s own doc comment for the
-/// real, disclosed matching rule. Wired here specifically, not into
-/// `generate_program`'s own (graph-shaped, JSON) prompt construction:
-/// this function's plain-string `task_prompt` is the lower-risk,
-/// easier-to-reason-about integration point, and `generate_program`'s
-/// own wiring is real, disclosed follow-up work, not silently assumed
-/// to already happen there too.
+/// real, disclosed matching rule. Wired here first, as the lower-risk,
+/// easier-to-reason-about integration point; `generate_program`'s own
+/// (graph-shaped, JSON) prompt construction now consults the identical
+/// lesson store the same way (see its own doc comment) -- both call
+/// sites share `runtime_lesson_guidance`, not two copies of the
+/// matching rule.
 pub fn generate_from_task_prompt(client: &LlmClient, task_prompt: &str, on_log: &mut dyn FnMut(&str)) -> Result<(String, u32), String> {
     let task_prompt = match runtime_lesson_guidance(task_prompt, crate::hint_cache::shared_runtime_lessons()) {
         Some(guidance) => {
@@ -2535,7 +2561,22 @@ fn typecheck_and_build_check(source: &str) -> Result<(), String> {
                 Some((line, col)) => (Some(line), Some(col)),
                 None => (None, None),
             };
-            let machine = vec![machine_error("parse", line, col, &e)];
+            // Issue #64: `e`'s own human-readable text is `"lex/parse
+            // error in <scratch-path> at <line>:<col>: <description>"` --
+            // the scratch path is unique per self-repair attempt
+            // (`SCRATCH_COUNTER` above), so passing `&e` straight through
+            // as this machine-readable entry's own `message` field used
+            // to make `hint_cache::normalize_pattern`'s cache key unique
+            // per attempt too, defeating both cache reuse and the "did
+            // this hint actually fix it" check for every lex/parse
+            // diagnostic. `machine_error`'s `message` here is normalized
+            // to the same path-free `"<line>:<col>: <description>"` shape
+            // `typecheck`/`ownership` diagnostics already use below (their
+            // own `d.message` never had a path in it to begin with) --
+            // `e` itself, path included, is unchanged in the human-facing
+            // text `attach_source_lines` builds right after.
+            let normalized_message = e.split_once(" at ").map(|(_, rest)| rest).unwrap_or(&e);
+            let machine = vec![machine_error("parse", line, col, normalized_message)];
             attach_source_lines(source, &format!("{e}\nmachine-readable errors: [{}]", machine.join(", ")))
         })?;
         // Generate mode's own typecheck+ownership check, via the exact
@@ -3044,6 +3085,10 @@ machine-readable errors: [{\"col\":58,\"line\":16,\"message\":\"16:58: expected 
             (
                 "lex error in /tmp/x.nir at 20:63: unexpected character `;`",
                 "no statement separators",
+            ),
+            (
+                "lex error in /tmp/nirdosha_hi_generate_check_2739298_3.nir at 28:69: unexpected character `?`",
+                "no `?` try-operator",
             ),
             (
                 "codegen doesn't support `workflow Approval` yet — its `data { ... }` block is non-empty",
