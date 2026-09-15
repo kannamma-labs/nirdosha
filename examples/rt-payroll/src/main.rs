@@ -123,14 +123,25 @@ mod tests {
 
     #[test]
     fn nfr_guard_records_latency() {
-        nirdosha_rt::reset_events();
+        // Tests share one process-wide flight recorder and run in
+        // parallel — so count *this* function's events, not totals.
+        let count_before = nirdosha_rt::events()
+            .iter()
+            .filter(|e| e.function == "compute_payroll")
+            .count();
         let records = vec![PayRecord { employee: 1, gross_cents: 100 }];
         let session = Auth::login("sita", &["hr_staff"]);
         let proof = session.prove::<nirdosha_roles::HrStaff>().unwrap();
         let _ = compute_payroll(&proof, &records);
         let log = nirdosha_rt::events();
-        assert_eq!(log.len(), 1, "compute_payroll is NFR-guarded: exactly one event");
-        assert_eq!(log[0].function, "compute_payroll");
-        assert_eq!(log[0].limit_ms, Some(250.0));
+        let mine: Vec<_> = log
+            .iter()
+            .filter(|e| e.function == "compute_payroll")
+            .collect();
+        assert!(
+            mine.len() > count_before,
+            "compute_payroll is NFR-guarded: this call must record an event"
+        );
+        assert_eq!(mine[0].limit_ms, Some(250.0));
     }
 }

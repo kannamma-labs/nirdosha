@@ -380,3 +380,217 @@ fn package_name(manifest: &Path) -> Option<String> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// Workspace mode (Stage 1.5): verify every *in-dialect* crate in the
+// workspace, strict by default.
+// ---------------------------------------------------------------------------
+
+/// A crate is in-dialect when it opts in by any of:
+/// - depending on `nirdosha-rt` (the runtime is the dialect's own crate),
+/// - declaring `[package.metadata.nirdosha-rt] dialect = true` (the
+///   zero-dependency form — see `examples/rt-payroll-lying`),
+/// and is never in-dialect when it declares
+/// `[package.metadata.nirdosha-rt] toolchain = true` (the dialect's own
+/// implementation crates — the verifier doesn't lint itself).
+///
+/// Note this deliberately does NOT look for contract strings inside
+/// sources: the toolchain's own crates mention `nirdosha:contract` in
+/// their docs and tests, and the `.nir` plugin crates already use a
+/// colliding `[package.metadata.nirdosha]` section for plugin discovery.
+/// Opt-in is explicit, adoption is per crate.
+pub fn in_dialect(manifest_dir: &Path) -> bool {
+    let Ok(manifest) = fs::read_to_string(manifest_dir.join("Cargo.toml")) else {
+        return false;
+    };
+    if manifest.contains("[package.metadata.nirdosha-rt]") {
+        if manifest.contains("toolchain = true") {
+            return false;
+        }
+        if manifest.contains("dialect = true") {
+            return true;
+        }
+    }
+    // A real dependency entry (not a package *name* containing the
+    // substring — the pattern `nirdosha-rt =` only matches dep lines).
+    manifest.contains("nirdosha-rt =")
+}
+
+pub struct WorkspaceSummary {
+    /// In-dialect packages that were verified (in metadata order).
+    pub packages: Vec<ScanSummary>,
+    /// In-dialect packages, in metadata order, for reporting.
+    pub all_packages: Vec<String>,
+}
+
+impl WorkspaceSummary {
+    pub fn violations(&self) -> usize {
+        self.packages
+            .iter()
+            .map(|s| s.violations().len())
+            .sum()
+    }
+
+    pub fn contracts(&self) -> usize {
+        self.packages.iter().map(|s| s.contracts.len()).sum()
+    }
+
+    /// Write each package's report plus the aggregate workspace certificate.
+    pub fn write_reports(&self, target_dir: &Path) -> std::io::Result<PathBuf> {
+        for summary in &self.packages {
+            summary.write_report(target_dir)?;
+        }
+        let dir = target_dir.join("nirdosha");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("contract-report-workspace.json");
+        let mut contracts = Vec::new();
+        let mut findings = Vec::new();
+        for summary in &self.packages {
+            for c in &summary.contracts {
+                contracts.push(serde_json::json!({
+                    "package": summary.package,
+                    "file": c.file,
+                    "line": c.line,
+                    "function": c.function,
+                    "form": c.form,
+                    "contract": c.contract,
+                }));
+            }
+            findings.extend(summary.findings.iter().cloned());
+        }
+        let payload = serde_json::json!({
+            "tool": "cargo-nirdosha",
+            "dialect": "nirdosha-rt",
+            "stage": 1.5,
+            "mode": "workspace",
+            "in_dialect_packages": self.all_packages,
+            "contracts": contracts,
+            "findings": findings,
+            "violations": self.violations(),
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&payload)?)?;
+        Ok(path)
+    }
+}
+
+/// Verify every in-dialect crate in the current workspace. `strict` is
+/// on by default in workspace mode: the workspace gate is the strict
+/// one; per-crate `verify` stays lenient unless NIRDOSHA_STRICT is set.
+pub fn verify_workspace(strict: bool) -> Result<WorkspaceSummary, String> {
+    let out = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .map_err(|e| format!("cannot run cargo metadata: {e}"))?;
+    if !out.status.success() {
+        return Err("cargo metadata failed — is this a cargo workspace?".into());
+    }
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    let target_dir = meta
+        .get("target_directory")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .ok_or("cargo metadata has no target_directory")?;
+    let packages = meta
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .ok_or("cargo metadata has no packages")?;
+    let mut all = Vec::new();
+    let mut summaries = Vec::new();
+    for package in packages {
+        let Some(manifest) = package.get("manifest_path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let manifest_dir = PathBuf::from(manifest)
+            .parent()
+            .ok_or("manifest has no parent")?
+            .to_path_buf();
+        if !in_dialect(&manifest_dir) {
+            continue;
+        }
+        all.push(package_name(&manifest_dir.join("Cargo.toml")).unwrap_or_default());
+        summaries.push(verify_package(&manifest_dir, strict)?);
+    }
+    let _ = target_dir; // located again by the CLI for report writing
+    Ok(WorkspaceSummary {
+        packages: summaries,
+        all_packages: all,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Bench gates (Stage 1.5): nfr(latency_ms) becomes a CI gate driven by
+// the real workload (the package's own test run), not a synthetic one.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BenchEvent {
+    pub function: String,
+    pub latency_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchVerdict {
+    pub function: String,
+    pub limit_ms: Option<f64>,
+    pub calls: usize,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub max_ms: f64,
+    pub ok: bool,
+}
+
+/// Compare observed flight-recorder events against every declared
+/// `nfr(latency_ms)`. The p95 is the verdict; a pure-fn's tests are its
+/// load generator — honest, measured, never claimed as proven.
+pub fn evaluate_bench(events: &[BenchEvent], contracts: &[ContractInfo]) -> Vec<BenchVerdict> {
+    let mut verdicts: Vec<BenchVerdict> = Vec::new();
+    for contract in contracts {
+        let Some(nfr) = contract.contract.nfr else { continue };
+        let mut latencies: Vec<f64> = events
+            .iter()
+            .filter(|e| e.function == contract.function)
+            .map(|e| e.latency_ms)
+            .collect();
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let (calls, p50, p95, max) = if latencies.is_empty() {
+            (0, 0.0, 0.0, 0.0)
+        } else {
+            let pick = |q: f64| {
+                let idx = ((latencies.len() as f64 - 1.0) * q).round() as usize;
+                latencies[idx.min(latencies.len() - 1)]
+            };
+            (
+                latencies.len(),
+                pick(0.50),
+                pick(0.95),
+                latencies[latencies.len() - 1],
+            )
+        };
+        let ok = match nfr.latency_ms {
+            Some(limit) => calls > 0 && p95 <= limit,
+            None => true,
+        };
+        verdicts.push(BenchVerdict {
+            function: contract.function.clone(),
+            limit_ms: nfr.latency_ms,
+            calls,
+            p50_ms: p50,
+            p95_ms: p95,
+            max_ms: max,
+            ok,
+        });
+    }
+    verdicts
+}
+
+/// Read a flight-recorder ndjson sink back into events.
+pub fn read_bench_events(path: &Path) -> Vec<BenchEvent> {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<BenchEvent>(line).ok())
+        .collect()
+}

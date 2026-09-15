@@ -116,11 +116,25 @@ impl Drop for Guard {
             concurrency_max: self.concurrency_max,
         };
         let mut log = flight_recorder().lock().unwrap();
-        // Flight recorder: machine-readable JSON lines on stderr when
-        // NIRDOSHA_NFR_LOG is set (any non-empty value).
-        if std::env::var_os("NIRDOSHA_NFR_LOG").is_some_and(|v| !v.is_empty()) {
-            if let Ok(line) = serde_json::to_string(&event) {
+        // Flight recorder, two sinks (both best-effort):
+        // - NIRDOSHA_NFR_LOG=1      JSON lines on stderr (human watch)
+        // - NIRDOSHA_NFR_LOG_FILE=p append JSON lines to a file (harness sink:
+        //   `cargo nirdosha bench` points this at target/nirdosha/ and
+        //   gates the SLA from what it reads back)
+        let line = serde_json::to_string(&event).ok();
+        if let Some(line) = &line {
+            if std::env::var_os("NIRDOSHA_NFR_LOG").is_some_and(|v| !v.is_empty()) {
                 eprintln!("{line}");
+            }
+            if let Some(path) = std::env::var_os("NIRDOSHA_NFR_LOG_FILE") {
+                if !path.is_empty() {
+                    use std::io::Write as _;
+                    if let Ok(mut file) =
+                        std::fs::OpenOptions::new().create(true).append(true).open(path)
+                    {
+                        let _ = writeln!(file, "{line}");
+                    }
+                }
             }
         }
         log.push(event);
@@ -145,7 +159,6 @@ mod tests {
 
     #[test]
     fn latency_violations_are_recorded() {
-        reset_events();
         {
             let _g = enter("slow_fn", &Limits {
                 latency_ms: Some(0.0),
@@ -153,10 +166,12 @@ mod tests {
             });
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        // Tests run in parallel on one shared recorder: always filter
+        // by function name, never assert on total counts.
         let log = events();
-        assert_eq!(log.len(), 1);
-        assert!(!log[0].latency_ok, "0ms limit + 2ms sleep must violate");
-        assert_eq!(log[0].function, "slow_fn");
+        let mine: Vec<_> = log.iter().filter(|e| e.function == "slow_fn").collect();
+        assert!(!mine.is_empty(), "guarding slow_fn must record an event");
+        assert!(!mine[0].latency_ok, "0ms limit + 2ms sleep must violate");
     }
 
     #[test]
