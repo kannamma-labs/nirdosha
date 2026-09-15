@@ -238,6 +238,18 @@ no answer yet. **5b therefore must not gate 5a or 4**: the
 motivating domain's correctness fix is coupled to an organization
 that does not exist, and this split says so in the text.
 
+  > **Update (2026-09-14, `rfcs/0016-implementation-plan.md` Phase 4,
+  > issue #59).** The registry-anchored half above (Fulcio/OIDC,
+  > public cross-org Rekor, `domain_class: regulated`'s mandatory
+  > registry anchor) is still blocked exactly as described. What's no
+  > longer blocked: the local signing mechanics this section's own
+  > machinery would eventually sit behind — real Ed25519 pack
+  > signing, an operator-configured trust-anchor list, and a local
+  > append-only signing log — shipped as `hi_plugin::sign_pack`/
+  > `verify_and_install_signed_pack`/`TrustAnchor`, Sigstore-*pattern*
+  > rather than live Sigstore. Unsigned 5a installs are unchanged and
+  > remain the default.
+
 The short form of 5 as a whole:
 
 - **Plugin shape:** a canonicalized document — manifest, invariant

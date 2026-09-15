@@ -100,24 +100,56 @@ RFC's fail-closed/non-vacuous/fuel semantics must live there first.
 
 ## Phase 3 — solution 6, scoped v1 (certified primitives prelude)
 
-1. Primitives as `pack.invariants.nir`, parsed + typechecked at
-   install (never executed), `ValidateDecl`s proven at install and
-   re-proven at generate; `generate_program` prepends the prelude
-   before typecheck.
-2. **Mandatory call-site coverage** — every primitive the pack marks
-   mandatory must have a real call site (cheap half of "uses the
-   ledger correctly").
-3. **Reserved namespace** — generated code cannot redeclare or shadow
-   primitive names (cheap half of `primitive_exclusivity`); field
-   ownership exclusivity is the expensive half and is staged after.
-4. **Call-site precondition obligations, v1 scope:** provable from
-   caller-local facts only. Cross-function summaries and loop
-   invariants are the research-grade remainder — an explicit scope
-   decision recorded in code comments, not a quiet promise.
+**Status (2026-09-14): done, including the item this doc once staged as
+follow-up work (item 3's field-ownership half).** Recorded here so this
+plan doesn't keep reading as a future estimate for work that already
+shipped — see each item below for what's actually built and where.
 
-*Estimate: 1–2+ weeks for the scoped version.*
+1. **Done.** Primitives as `pack.invariants.nir`, parsed + typechecked
+   at install (never executed), `ValidateDecl`s proven at install and
+   re-proven at generate; `generate_program`/`hi_plugin::
+   prepend_pack_primitives` prepends the prelude before typecheck.
+2. **Done.** Mandatory call-site coverage — every primitive the pack
+   marks mandatory must have a real call site
+   (`hi_llm::check_mandatory_primitive_coverage`).
+3. **Done, both halves — the "expensive half" wasn't staged after all.**
+   Reserved namespace (generated code cannot redeclare or shadow
+   primitive names) falls out of `typeck.rs`'s existing `DuplicateFn`
+   check for free (`prepend_pack_primitives`'s own doc comment).
+   `primitive_exclusivity`'s other half — no construction of a pack-
+   protected struct outside a certified primitive — is
+   `contract_check::check_primitive_exclusivity` /
+   `hi_llm::check_primitive_exclusivity_coverage` /
+   `PackManifest.protected_structs`: this language has no in-place
+   field mutation at all (struct fields only ever get a new value by
+   constructing a whole new struct value), so "any write... outside
+   certified primitive units" reduces exactly to "constructs the
+   protected struct outside a certified primitive" — the complete
+   reading for this language, not a narrower stand-in for the
+   originally-envisioned field-level tracking.
+4. **Done.** Call-site precondition obligations, real interprocedural
+   Z3 verification-condition generation (`contract_check.rs`'s `Expr::
+   Call` arm, `Summary`-backed, Dafny/Boogie-style: never inlines a
+   proven callee, discharges its precondition from caller-local facts,
+   assumes its postcondition) — scoped exactly as planned, caller-local
+   facts only, no cross-function summaries or loop invariants beyond
+   that.
 
 ## Phase 4 — certificate wiring: mandatory certificate, optional signature (issue #59)
+
+**Status (2026-09-14): done, with one shape correction against the plan
+below** — `governing_packs` shipped as `Vec<String>` (pack IDs only),
+not `Vec<PackAttribution>` naming each pack's individual invariants.
+Per-invariant attribution turned out to be a separate, larger feature
+(`hi_api.rs`'s own `fintech_app_under_the_banking_pack_publishes_...`
+test explicitly calls this out as unimplemented "generation audit and
+governing-set snapshot" work, not a Phase 4 item) — `governing_packs`
+matches exactly what that same test already established as "governing"
+means (`hi_plugin::installed_pack_ids` at publish time), not a new,
+weaker definition invented for this phase. `sign_certificate`/
+`SignedCertificate` also moved from `main.rs` into `mcp_tools.rs` as
+part of this work, so `hi_api`'s publish-time signing and `nirdosha
+certify --sign` share one Ed25519 implementation instead of two.
 
 The demonstrated seam this phase closes: `hi_api.rs::handle_publish` runs
 typecheck → ownership → the Phase 1 coverage gate → `codegen::build` and
@@ -177,11 +209,21 @@ blocked on 5b's registry governance.
 
 ## Blocked — post-approval / governance-gated, do not start
 
-- **5b sealing** (Ed25519, JCS, certificates, transparency logs,
-  registries) — blocked on "who runs the registry" (RFC 0016's own
-  honest position). The only permitted groundwork is exactly what 5a
-  builds — pack ID as hash of canonical bytes, verification pipeline
-  shape — so 5b swaps signatures in without re-architecture.
+- **5b sealing, the live-infrastructure half** (Fulcio/OIDC short-lived
+  certificate issuance, a public cross-organization Rekor transparency
+  log, JCS canonicalization against a real registry) — still blocked on
+  "who runs the registry" (RFC 0016's own honest position), unchanged.
+  **What's no longer blocked, done 2026-09-14**: the *local* mechanics
+  that live infrastructure would eventually sit behind — real Ed25519
+  pack signing (`hi_plugin::sign_pack`/`verify_and_install_signed_
+  pack`), an operator-configured trust-anchor list standing in for
+  Fulcio's identity binding, and a local append-only signing log
+  standing in for Rekor — shipped without waiting on the registry
+  question, exactly per the "5b swaps signatures in without re-
+  architecture" property this bullet originally called for: a
+  `TrustAnchor` today is operator-configured locally; swapping it for
+  one populated by a real Fulcio/Rekor integration later changes how
+  it's populated, not anything that consumes it.
 - **Solution 7 compliance profiles** — needs Phase 3's machinery plus
   the wiring emitter; FAPI profile content authoring needs a
   regulation-literate author and external-verification decisions.
