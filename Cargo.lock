@@ -268,6 +268,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-nirdosha"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-contract-core",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1966,6 +1976,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-contract-core"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "nirdosha-grammar-check"
 version = "0.1.0"
 dependencies = [
@@ -1979,6 +2000,16 @@ version = "0.1.0"
 dependencies = [
  "llama-cpp-gbnf",
  "nirdosha",
+]
+
+[[package]]
+name = "nirdosha-macros"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-contract-core",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2008,6 +2039,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "nirdosha-rt"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-macros",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2976,6 +3016,17 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "rt-payroll"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-rt",
+]
+
+[[package]]
+name = "rt-payroll-lying"
+version = "0.1.0"
 
 [[package]]
 name = "rusqlite"

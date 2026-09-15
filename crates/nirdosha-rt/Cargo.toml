@@ -1,0 +1,12 @@
+[package]
+name = "nirdosha-rt"
+version = "0.1.0"
+edition = "2024"
+description = "The Nirdosha runtime: unforgeable role proofs, NFR guards (latency + concurrency), and the flight recorder. A plain Rust crate — the enforcement code the dialect injects is ordinary Rust that runs under any toolchain."
+license = "MIT"
+publish = false
+
+[dependencies]
+nirdosha-macros = { path = "../nirdosha-macros" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

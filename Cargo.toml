@@ -47,6 +47,21 @@ members = [
     # the compiled-path ABI above instead of the deleted trait) is worth
     # rebuilding — rfcs/0008 Phase 4 names this as the real remaining
     # proof, not yet done.
+
+    # ── The Nirdosha Rust dialect (Stage 1) ──────────────────────────────
+    # To the external world, Nirdosha-dialect code is just another Rust
+    # program: it compiles and runs under plain `cargo` with zero
+    # Nirdosha tooling. Hand the same source to the Nirdosha compiler
+    # (`cargo nirdosha build`) and the contract claims riding in its
+    # attributes/doc comments stop being comments and become checks —
+    # lying becomes a build error. See docs/nirdosha-rt-dialect.md for
+    # the design and the two demo crates below for the story.
+    "crates/nirdosha-contract-core",
+    "crates/nirdosha-macros",
+    "crates/nirdosha-rt",
+    "crates/cargo-nirdosha",
+    "examples/rt-payroll",
+    "examples/rt-payroll-lying",
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for
