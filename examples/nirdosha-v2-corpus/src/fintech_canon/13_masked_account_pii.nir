@@ -1,0 +1,80 @@
+//! v2 of `examples/fintech-canon/13_masked_account_pii.nir` — a
+//! customer record returned from a lookup masks its sensitive
+//! financial PII (account number) unless the caller separately proves
+//! a compliance role — the same real, compiler-enforced mechanism
+//! `examples/nirdosha-v2-corpus/src/50_field_masking_and_check_role.nir`
+//! demonstrates in full, trimmed here to the one pattern most fintech
+//! APIs need: "who can call this" and "what does a successful caller
+//! see back" are two independent gates, neither expressible as a
+//! runtime `if` a caller (or an attacker) could argue past.
+
+use nirdosha_v2::{auth_from_identity, identity_with_roles, mask_unless, VerifiedIdentity};
+
+nirdosha_rt::roles! {
+    SupportAgent = "support_agent";
+    Compliance = "compliance";
+}
+
+struct Text {
+    value: String,
+}
+
+struct CustomerRecord {
+    display_name: String,
+    account_number: String,
+}
+
+/// nirdosha:field {"struct":"CustomerRecord","field":"account_number","requires":{"role":"compliance"}}
+#[nirdosha_rt::contract(requires(role = "support_agent"))]
+fn lookup_customer(
+    compliance_proof: Option<&nirdosha_rt::RoleProof<nirdosha_roles::Compliance>>,
+    display_name: Text,
+    account_number: Text,
+) -> CustomerRecord {
+    CustomerRecord {
+        display_name: display_name.value,
+        account_number: mask_unless(compliance_proof, account_number.value),
+    }
+}
+
+fn main() {
+    // A support agent who is *also* compliance-cleared sees the real
+    // account number.
+    let compliance_identity: VerifiedIdentity = identity_with_roles("alice", "support_agent,compliance");
+    let compliance_auth = auth_from_identity(&compliance_identity);
+    let compliance_view = match compliance_auth.prove::<nirdosha_roles::SupportAgent>() {
+        Err(_e) => CustomerRecord { display_name: String::new(), account_number: String::new() },
+        Ok(support_proof) => {
+            let compliance_proof = compliance_auth.prove::<nirdosha_roles::Compliance>().ok();
+            lookup_customer(
+                &support_proof,
+                compliance_proof.as_ref(),
+                Text { value: "Dana Support".into() },
+                Text { value: "ACC-000123456".into() },
+            )
+        }
+    };
+    println!("{}", compliance_view.account_number); // ACC-000123456 — caller proved "compliance"
+
+    // An ordinary support agent (not compliance-cleared) can still look
+    // the customer up — the function-level gate only requires
+    // "support_agent" — but the account number masks to "" on the way
+    // out, because the *field*-level gate is a separate proof this
+    // caller never obtained.
+    let plain_identity: VerifiedIdentity = identity_with_roles("bob", "support_agent");
+    let plain_auth = auth_from_identity(&plain_identity);
+    let plain_view = match plain_auth.prove::<nirdosha_roles::SupportAgent>() {
+        Err(_e) => CustomerRecord { display_name: String::new(), account_number: String::new() },
+        Ok(support_proof) => {
+            let compliance_proof = plain_auth.prove::<nirdosha_roles::Compliance>().ok();
+            lookup_customer(
+                &support_proof,
+                compliance_proof.as_ref(),
+                Text { value: "Dana Support".into() },
+                Text { value: "ACC-000123456".into() },
+            )
+        }
+    };
+    println!("{}", plain_view.account_number); // "" — masked
+    println!("{}", plain_view.display_name); // Dana Support — unmasked fields still pass through
+}

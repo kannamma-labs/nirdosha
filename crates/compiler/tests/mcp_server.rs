@@ -118,26 +118,40 @@ fn tools_list_advertises_exactly_the_five_master_plan_tools_plus_constructs_and_
     }
 }
 
+/// A v2 candidate that builds cleanly under plain `cargo` (the comment
+/// is inert to rustc) but carries a `nirdosha:contract` doc with an
+/// unknown JSON key -- `cc::model::Contract`'s `deny_unknown_fields`
+/// makes that a real finding under `cargo-nirdosha`'s scanner, the v2
+/// analogue of the retired native tests' `DISPROVED` fixture (a source
+/// that's fine by one reader and flagged by the other).
+const V2_CANDIDATE_WITH_CONTRACT_VIOLATION: &str = "/// nirdosha:contract {\"effects\":[\"pure\"],\"bogus_field\":true}\nfn bad(a: i64) -> i64 {\n    a - 1\n}\n\nfn main() {\n    println!(\"{}\", bad(1));\n}\n";
+
+const V2_CLEAN_CANDIDATE: &str = "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n\nfn main() {\n    println!(\"{}\", add(2, 3));\n}\n";
+
 #[test]
 fn certify_code_issues_a_deterministic_certificate_for_every_verdict() {
     let mut session = McpSession::start();
     session.initialize();
-    // A DISPROVED source still gets its certificate -- the same honest
-    // "here is the conclusive evidence this code is wrong" contract
-    // `nirdosha certify` documents.
-    let source = serde_json::json!({ "source": "fn bad(a: i64) -> i64 {\n    return a - 1\n}\n\nvalidate bad {\n    post: result >= a\n}\n" });
+    // A source with a contract violation still gets its certificate --
+    // the same honest "here is the conclusive evidence this code is
+    // wrong" contract `nirdosha certify` documents natively.
+    let source = serde_json::json!({ "source": V2_CANDIDATE_WITH_CONTRACT_VIOLATION });
     let first = session.call_tool(2, "certify_code", source.clone());
     let second = session.call_tool(3, "certify_code", source);
     let first_structured = &first["result"]["structuredContent"];
     let second_structured = &second["result"]["structuredContent"];
-    assert_eq!(first_structured["certificate_version"], "0", "response: {first}");
-    assert_eq!(first_structured["verdict_summary"]["verdict"], "DISPROVED", "response: {first}");
-    assert_eq!(first_structured["evidence_tier"], "proved", "a conclusive Z3 counterexample is formal evidence: {first}");
+    assert_eq!(first_structured["certificate_version"], "nirdosha.certificate/v2-source-scan", "response: {first}");
+    assert_eq!(first_structured["verdict"], "violations_found", "response: {first}");
+    assert_eq!(first_structured["builds"], true, "the comment is inert to rustc, so this should still build: {first}");
+    assert_eq!(first_structured["evidence_tier"], "source_scan", "no proof pipeline exists for v2 yet: {first}");
     assert!(first_structured["source_hash"].as_str().expect("hash should be a string").starts_with("sha256:"), "response: {first}");
-    assert!(first_structured["grammar_hash"].as_str().expect("hash should be a string").starts_with("sha256:"), "response: {first}");
-    // Deterministic, hash-pinned: byte-for-byte identical for the same
-    // source and compiler version -- the property that makes a
-    // certificate reproducible by any third party.
+    assert!(
+        first_structured["violations"].as_array().expect("violations should be an array").iter().any(|v| v.as_str().unwrap().contains("bogus_field")),
+        "response: {first}"
+    );
+    // Deterministic: byte-for-byte identical for the same source and
+    // compiler version -- the property that makes a certificate
+    // reproducible by any third party.
     assert_eq!(&first_structured, &second_structured, "two calls on the same source must produce identical certificates");
 }
 
@@ -154,14 +168,10 @@ fn every_call_is_logged_in_the_disclosed_ndjson_log() {
     let mut session = McpSession::start();
     session.initialize();
     let log_path = session.log_path();
-    let verify = session.call_tool(
-        2,
-        "verify_code",
-        serde_json::json!({ "source": "fn bad(a: i64) -> i64 {\n    return a - 1\n}\n\nvalidate bad {\n    post: result >= a\n}\n" }),
-    );
-    assert_eq!(verify["result"]["structuredContent"]["verdict"], "DISPROVED", "response: {verify}");
+    let verify = session.call_tool(2, "verify_code", serde_json::json!({ "source": V2_CANDIDATE_WITH_CONTRACT_VIOLATION }));
+    assert_eq!(verify["result"]["structuredContent"]["verdict"], "violations_found", "response: {verify}");
     let grammar = session.call_tool(3, "get_grammar", serde_json::json!({}));
-    assert!(grammar["result"]["structuredContent"]["grammar"].is_string(), "response: {grammar}");
+    assert!(grammar["result"]["structuredContent"]["comment_layer_grammar"].is_string(), "response: {grammar}");
 
     let contents = std::fs::read_to_string(&log_path).expect("the disclosed log file should exist");
     let records: Vec<serde_json::Value> = contents
@@ -177,7 +187,7 @@ fn every_call_is_logged_in_the_disclosed_ndjson_log() {
     assert_eq!(records[1]["tool"], "verify_code");
     assert_eq!(records[1]["call_id"], 1);
     assert_eq!(records[1]["surface"], "mcp-stdio");
-    assert_eq!(records[1]["verdict"], "DISPROVED");
+    assert_eq!(records[1]["verdict"], "violations_found");
     assert!(records[1]["source"]["sha256"].as_str().expect("hash should be a string").starts_with("sha256:"));
     assert!(records[1]["ts"].as_str().expect("ts should be a string").ends_with('Z'));
     assert_eq!(records[2]["tool"], "get_grammar");
@@ -191,22 +201,31 @@ fn every_call_is_logged_in_the_disclosed_ndjson_log() {
 }
 
 #[test]
-fn verify_code_reports_a_disproved_counterexample() {
+fn verify_code_reports_contract_violations() {
     let mut session = McpSession::start();
     session.initialize();
-    let response = session.call_tool(
-        2,
-        "verify_code",
-        serde_json::json!({ "source": "fn bad(a: i64) -> i64 {\n    return a - 1\n}\n\nvalidate bad {\n    post: result >= a\n}\n" }),
-    );
+    let response = session.call_tool(2, "verify_code", serde_json::json!({ "source": V2_CANDIDATE_WITH_CONTRACT_VIOLATION }));
     let structured = &response["result"]["structuredContent"];
-    assert_eq!(structured["verdict"], "DISPROVED", "response: {response}");
-    assert_eq!(structured["contracts"]["failed"], 1, "response: {response}");
-    assert_eq!(structured["source"], "<inline>", "response: {response}");
+    assert_eq!(structured["verdict"], "violations_found", "response: {response}");
+    assert_eq!(structured["builds"], true, "response: {response}");
+    // A malformed contract never becomes a parsed `ContractInfo` -- it's
+    // a finding (`violations`, asserted below), not a counted contract.
+    assert_eq!(structured["contracts_found"], 0, "response: {response}");
     assert_eq!(response["result"]["isError"], false, "response: {response}");
     let text_reparsed: serde_json::Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().expect("text should be a string")).expect("text should be valid JSON");
     assert_eq!(&text_reparsed, structured, "response: {response}");
+}
+
+#[test]
+fn verify_code_reports_a_clean_v2_candidate() {
+    let mut session = McpSession::start();
+    session.initialize();
+    let response = session.call_tool(2, "verify_code", serde_json::json!({ "source": V2_CLEAN_CANDIDATE }));
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["verdict"], "clean", "response: {response}");
+    assert_eq!(structured["builds"], true, "response: {response}");
+    assert_eq!(structured["violations"].as_array().expect("violations should be an array").len(), 0, "response: {response}");
 }
 
 #[test]
@@ -231,9 +250,12 @@ fn get_grammar_returns_the_real_gbnf_file() {
     let mut session = McpSession::start();
     session.initialize();
     let response = session.call_tool(2, "get_grammar", serde_json::json!({}));
-    let grammar = response["result"]["structuredContent"]["grammar"].as_str().expect("grammar should be a string");
-    assert_eq!(response["result"]["structuredContent"]["format"], "gbnf", "response: {response}");
-    assert!(grammar.contains("::="), "response should embed real GBNF, not a placeholder: {response}");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["format"], "v2-comment-layer", "response: {response}");
+    let grammar = structured["comment_layer_grammar"].as_str().expect("comment_layer_grammar should be a string");
+    assert!(grammar.contains("nirdosha:contract"), "response should embed the real comment-kind registry: {response}");
+    assert!(grammar.contains("nirdosha:workflow"), "response should embed the real comment-kind registry: {response}");
+    assert!(structured["role_gating"].as_str().expect("role_gating should be a string").contains("RoleProof"), "response: {response}");
 }
 
 #[test]
@@ -259,74 +281,70 @@ fn get_nirdosha_constructs_reports_every_construct_as_compiling() {
 }
 
 #[test]
-fn get_ui_conventions_covers_naming_annotations_and_screen_grammar() {
+fn get_ui_conventions_covers_the_real_archetype_macros() {
     let mut session = McpSession::start();
     session.initialize();
     let response = session.call_tool(2, "get_ui_conventions", serde_json::json!({}));
     let structured = &response["result"]["structuredContent"];
 
-    let crud = structured["naming_conventions"]["crud_functions"].as_array().expect("crud_functions should be an array");
-    let crud_patterns: Vec<&str> = crud.iter().map(|c| c["pattern"].as_str().unwrap()).collect();
-    assert!(crud_patterns.contains(&"list_<struct_snake_case>"), "response: {response}");
-    assert!(crud_patterns.contains(&"create_<struct_snake_case>"), "response: {response}");
+    let macros = structured["archetype_macros"].as_array().expect("archetype_macros should be an array");
+    let macro_names: Vec<&str> = macros.iter().map(|m| m["macro"].as_str().unwrap()).collect();
+    assert!(macro_names.contains(&"nirdosha_rt::crud_screens!"), "response: {response}");
+    assert!(macro_names.contains(&"nirdosha_rt::dashboard!"), "response: {response}");
+    for m in macros {
+        assert!(m["invocation"].as_str().is_some(), "entry missing invocation: {m}");
+        assert_eq!(m["checked_by"].as_str().unwrap().contains("rustc"), true, "every archetype should be rustc-checked: {m}");
+    }
 
-    let annotations = structured["function_annotations"].as_array().expect("function_annotations should be an array");
-    let annotation_names: Vec<&str> = annotations.iter().map(|a| a["annotation"].as_str().unwrap()).collect();
-    assert!(annotation_names.iter().any(|a| a.contains("requires(public)")), "response: {response}");
-    assert!(annotation_names.iter().any(|a| a.starts_with("nfr(")), "response: {response}");
-
-    assert!(structured["ui_grammar"]["screen"]["grammar"].as_array().expect("screen grammar should be an array").iter().any(|line| {
-        line.as_str().unwrap().contains("screen_decl")
-    }), "response: {response}");
-    assert!(structured["ui_grammar"]["serve"]["grammar"][0].as_str().unwrap().contains("expose"), "response: {response}");
+    assert!(structured["role_gating"].as_str().expect("role_gating should be a string").contains("RoleProof"), "response: {response}");
+    assert!(
+        structured["declarative_comment_layer"].as_str().expect("declarative_comment_layer should be a string").contains("inert"),
+        "response: {response}"
+    );
 }
 
 #[test]
-fn fix_reports_an_auto_patch_without_applying_by_default() {
+fn fix_reports_the_verdict_without_applying_by_default() {
     let mut session = McpSession::start();
     session.initialize();
-    let response =
-        session.call_tool(2, "fix", serde_json::json!({ "source": "fn main() {\n    let amount: i64 = 5\n    print(ammount)\n}\n" }));
+    let response = session.call_tool(2, "fix", serde_json::json!({ "source": V2_CANDIDATE_WITH_CONTRACT_VIOLATION }));
     let structured = &response["result"]["structuredContent"];
-    assert_eq!(structured["before"]["typecheck"]["errors"][0]["fix"]["applicability"], "auto", "response: {response}");
+    assert_eq!(structured["before"]["verdict"], "violations_found", "response: {response}");
     assert_eq!(structured["applied"].as_array().expect("applied should be an array").len(), 0, "response: {response}");
+    assert_eq!(structured["apply_requested"], false, "response: {response}");
     assert!(structured.get("patched_source").is_none(), "response: {response}");
 }
 
 #[test]
-fn fix_with_apply_returns_the_patched_source() {
+fn fix_with_apply_still_applies_nothing_since_no_v2_fixer_exists_yet() {
     let mut session = McpSession::start();
     session.initialize();
-    let response = session.call_tool(
-        2,
-        "fix",
-        serde_json::json!({ "source": "fn main() {\n    let amount: i64 = 5\n    print(ammount)\n}\n", "apply": true }),
-    );
+    let response = session.call_tool(2, "fix", serde_json::json!({ "source": V2_CANDIDATE_WITH_CONTRACT_VIOLATION, "apply": true }));
     let structured = &response["result"]["structuredContent"];
-    assert_eq!(structured["applied"].as_array().expect("applied should be an array").len(), 1, "response: {response}");
-    assert_eq!(structured["patched_source"], "fn main() {\n    let amount: i64 = 5\n    print(amount)\n}\n", "response: {response}");
-    assert_eq!(structured["after"]["typecheck"]["status"], "passed", "response: {response}");
+    assert_eq!(structured["applied"].as_array().expect("applied should be an array").len(), 0, "response: {response}");
+    assert_eq!(structured["apply_requested"], true, "response: {response}");
+    assert!(structured.get("patched_source").is_none(), "response: {response}");
 }
 
 #[test]
-fn describe_summarizes_functions_structs_enums_and_validates() {
+fn describe_summarizes_functions_structs_enums_and_nirdosha_declarations() {
     let mut session = McpSession::start();
     session.initialize();
-    let source = "enum Shape {\n    Circle(f64),\n}\n\nstruct Player {\n    game_state: str,\n}\n\nfn area(s: Shape) -> f64 {\n    return match s {\n        Circle(r) => r * r,\n    }\n}\n\nvalidate area {\n    post: result >= 0.0\n}\n";
+    let source = "enum Shape {\n    Circle(f64),\n}\n\nstruct Player {\n    game_state: String,\n}\n\n/// nirdosha:validate {\"fn\":\"area\",\"post\":[\"result >= 0.0\"]}\nfn area(s: Shape) -> f64 {\n    match s {\n        Shape::Circle(r) => r * r,\n    }\n}\n";
     let response = session.call_tool(2, "describe", serde_json::json!({ "source": source }));
     let structured = &response["result"]["structuredContent"];
-    assert_eq!(structured["functions"][0]["name"], "area", "response: {response}");
-    // `loader::load_program` merges in the prelude's own structs/enums
-    // (Option/Result/HttpResponse/...) ahead of this file's own
-    // declarations, so find by name rather than assume index 0 -- the
-    // prelude's presence is expected, real behavior, not a defect.
+    let functions = structured["functions"].as_array().expect("functions should be an array");
+    assert!(functions.iter().any(|f| f["name"] == "area"), "response: {response}");
     let structs = structured["structs"].as_array().expect("structs should be an array");
     let player = structs.iter().find(|s| s["name"] == "Player").unwrap_or_else(|| panic!("Player struct missing: {response}"));
-    assert_eq!(player["fields"][0]["name"], "game_state", "response: {response}");
+    assert_eq!(player["fields"][0], "game_state", "response: {response}");
     let enums = structured["enums"].as_array().expect("enums should be an array");
     let shape = enums.iter().find(|e| e["name"] == "Shape").unwrap_or_else(|| panic!("Shape enum missing: {response}"));
-    assert_eq!(shape["variants"][0]["name"], "Circle", "response: {response}");
-    assert_eq!(structured["validates"][0]["fn_name"], "area", "response: {response}");
+    assert_eq!(shape["variants"][0], "Circle", "response: {response}");
+    let declarations = structured["nirdosha_declarations"].as_array().expect("nirdosha_declarations should be an array");
+    let validate = declarations.iter().find(|d| d["kind"] == "validate").unwrap_or_else(|| panic!("nirdosha:validate declaration missing: {response}"));
+    assert_eq!(validate["owner"], "area", "response: {response}");
+    assert!(validate["payload"].as_str().unwrap().contains("result >= 0.0"), "response: {response}");
 }
 
 #[test]

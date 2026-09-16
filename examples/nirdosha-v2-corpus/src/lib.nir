@@ -109,11 +109,11 @@ pub fn identity_with_roles(subject: &str, roles: &str) -> VerifiedIdentity {
 /// checked redundancy. The role lives in the proof's *type* (`R`), not
 /// a runtime string — `Some` only if `Auth::prove::<R>()` succeeded.
 /// nirdosha:contract {"effects":["pure"]}
-pub fn mask_unless<R: nirdosha_rt::Role>(proof: Option<&nirdosha_rt::RoleProof<R>>, value: f64) -> f64 {
+pub fn mask_unless<R: nirdosha_rt::Role, T: Default>(proof: Option<&nirdosha_rt::RoleProof<R>>, value: T) -> T {
     if proof.is_some() {
         value
     } else {
-        0.0
+        T::default()
     }
 }
 

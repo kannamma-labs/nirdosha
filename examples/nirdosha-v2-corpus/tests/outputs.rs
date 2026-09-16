@@ -936,3 +936,73 @@ fn compiled_workflow_notifications_post_for_real() {
         handle.join().unwrap();
     }
 }
+
+// --- fintech-canon (migrated from examples/fintech-canon) ---
+
+#[test]
+fn fintech_nonnegative_balance() {
+    expect(&run("v2_fintech_01_nonnegative_balance"), &["700"]);
+}
+
+#[test]
+fn fintech_overdraft_within_limit() {
+    expect(&run("v2_fintech_02_overdraft_within_limit"), &["-200"]);
+}
+
+#[test]
+fn fintech_fee_never_reduces_total() {
+    expect(&run("v2_fintech_03_fee_never_reduces_total"), &["10250"]);
+}
+
+#[test]
+fn fintech_refund_never_exceeds_original() {
+    expect(&run("v2_fintech_04_refund_never_exceeds_original"), &["3000"]);
+}
+
+#[test]
+fn fintech_late_fee_capped() {
+    expect(&run("v2_fintech_05_late_fee_capped"), &["2500"]);
+}
+
+#[test]
+fn fintech_minimum_payment_enforced() {
+    expect(&run("v2_fintech_06_minimum_payment_enforced"), &["1000"]);
+}
+
+#[test]
+fn fintech_discount_bounded_price() {
+    expect(&run("v2_fintech_07_discount_bounded_price"), &["0"]);
+}
+
+#[test]
+fn fintech_transaction_within_daily_limit() {
+    expect(&run("v2_fintech_08_transaction_within_daily_limit"), &["5000"]);
+}
+
+#[test]
+fn fintech_interest_accrual_nonnegative() {
+    expect(&run("v2_fintech_09_interest_accrual_nonnegative"), &["100417"]);
+}
+
+#[test]
+fn fintech_ledger_debit_credit_conserved() {
+    expect(&run("v2_fintech_10_ledger_debit_credit_conserved"), &["7500"]);
+}
+
+#[test]
+fn fintech_withdrawal_within_balance() {
+    expect(&run("v2_fintech_11_withdrawal_within_balance"), &["4000"]);
+}
+
+#[test]
+fn fintech_credit_limit_not_exceeded() {
+    expect(&run("v2_fintech_12_credit_limit_not_exceeded"), &["10000"]);
+}
+
+#[test]
+fn fintech_masked_account_pii() {
+    expect(
+        &run("v2_fintech_13_masked_account_pii"),
+        &["ACC-000123456", "Dana Support"],
+    );
+}

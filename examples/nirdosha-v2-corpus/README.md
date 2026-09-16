@@ -13,7 +13,7 @@ every example's observable behavior under plain cargo; the proprietary
 compiler must reproduce it exactly, then add.
 
 ```
-$ cargo test -p nirdosha-v2-corpus          # 55 golden tests, all green
+$ cargo test -p nirdosha-v2-corpus          # 71 golden tests, all green
 $ cargo run -p nirdosha-v2-corpus --bin v2_enterprise_app
 ```
 
@@ -22,7 +22,7 @@ $ cargo run -p nirdosha-v2-corpus --bin v2_enterprise_app
 | reader | today (pre-migration) | post-migration, same files unmodified |
 |---|---|---|
 | plain `cargo` | builds & runs; comment layer inert; **outputs pinned by tests/outputs.rs** | identical |
-| `cargo nirdosha` | verifies the `nirdosha:contract` claims (live today); 59 files / 68 contracts / 0 violations | all comment kinds cross-referenced + certified |
+| `cargo nirdosha` | verifies the `nirdosha:contract` claims (live today); 75 files / 72 contracts / 0 violations | all comment kinds cross-referenced + certified |
 | proprietary `nirdosha` | — | `emit-ui` renders the screens/dashboards; workflow gains its durable store; transact gains durability enforcement; proofs discharge the `nirdosha:validate` clauses |
 
 ## The translated set (49 files, behavior-verified)
@@ -54,7 +54,7 @@ Batch 2 (43 more files, ~43 more golden tests):
 | real network | `22` tcp client, `23` tcp listener, `24` file io | real `std::net` sockets; fixed ports (9700/9701) |
 | contracts & services | `34` requires public, `37` transact cross-process (real 2-socket txn, `txn-` ids), `47` external service boundary (honest fallthroughs) | |
 | declarative UI | `41` visual (graph/heatmap/timeline), `42` workspace panel, `43` layout, `44` module nav, `45(+helper)` `#[path]` namespacing, `46` schema/role-mapping conventions | new kinds: `visual`, `workspace`, `layout`, `nav`, `schema`, `role_mapping` |
-| masking & nfr | `48` froze, `49` nfr (error_rate_max/throughput_min_per_sec added to the model), `50` field masking (`mask_f64_unless` + `nirdosha:field`) | |
+| masking & nfr | `48` froze, `49` nfr (error_rate_max/throughput_min_per_sec added to the model), `50` field masking (`mask_unless` + `nirdosha:field`) | |
 | compiled serve & workflows | `51` serve (real socket golden test: spawns the bin, GETs `/api/hello`, `/api/echo`, 404), `52` state machine, `53` notifications (real HTTP POSTs w/ `Bearer` keys; fake-Redis driver in the test), `54` escalation | 53/54 pin exact sequences |
 | benchmarks | `bench_matmul`, `bench_det`, `bench_kalman`, `bench_dot`, `bench_fib`, `bench_floatloop` | in the regular suite; all <2.5s debug |
 
@@ -74,6 +74,22 @@ carried by ported files (05/enterprise: db-json-http-mq fixtures;
 are re-specified by the proprietary tier (G3's native adapters already
 verify real JWT signatures and run WAL-backed sagas). Fixture
 archaeology of the deleted interpreter would have bought nothing.
+
+## Beyond the 63: other example directories
+
+The "63" above is `examples/features` + `examples/syntax`. Three more
+directories carry `.nir` showcases outside that set:
+
+| directory | files | status |
+|---|---|---|
+| `examples/fintech-canon` | 13 | **translated** (`src/fintech_canon/`) — 12 mechanical `validate` (Hoare pre/post) templates plus `13_masked_account_pii` (field-level `requires(role)` masking composed with function-level `requires`, same pattern as `50_field_masking_and_check_role.nir`) |
+| `examples/killer_demo` | 7 | not yet translated — race-condition marketing demos (`race_probe*.nir`) |
+| `examples/isolation_demo` | 1 | not yet translated — `race_probe_transact_checked.nir` |
+
+`docs/redteam/2026-09-11-external-submission/adversarial/*.nir` (4
+files) are deliberately excluded from this corpus: they are adversarial
+fixtures designed to probe the interpreter/verifier for bypasses, not
+showcase examples, so "translate to v2" isn't the right frame for them.
 
 ## The comment kinds, and their status
 

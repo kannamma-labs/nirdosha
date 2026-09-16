@@ -33,6 +33,8 @@ pub mod token;
 pub mod typeck;
 pub mod ui_gen;
 pub mod ui_plugin;
+pub mod v2_capabilities;
+pub mod v2_verify;
 pub mod workflow_conformance;
 pub mod workflow_lower;
 

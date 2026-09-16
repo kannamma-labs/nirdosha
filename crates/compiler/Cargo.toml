@@ -19,6 +19,16 @@ serde_json = "1"
 
 [dependencies]
 z3 = "0.20.2"
+# v2 (Rust + `nirdosha:*` comment layer) support for `hi`'s MCP tool
+# surface (`v2_verify.rs`): the same in-process contract scanner
+# `cargo nirdosha verify` runs, reused as a library rather than shelled
+# out to, so `verify_code`/`fix`/`certify_code` can check a v2 source
+# string's declared-vs-actual claims without a subprocess.
+cargo-nirdosha = { path = "../cargo-nirdosha" }
+# `v2_verify.rs`'s `describe_v2_source`: parses a v2 candidate as plain
+# Rust to extract its fn/struct/enum signatures, the same way
+# `cargo-nirdosha` itself parses source for contracts.
+syn = { version = "2", features = ["full"] }
 # The pure isolation-anomaly-detection algorithm (Direct Serialization
 # Graph), shared verbatim with `crates/runtime-kernels`'s own live FFI
 # wiring (`kernel::isolation_check`) -- an ordinary root-workspace

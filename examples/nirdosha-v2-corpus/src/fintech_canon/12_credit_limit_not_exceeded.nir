@@ -1,0 +1,17 @@
+//! v2 of `examples/fintech-canon/12_credit_limit_not_exceeded.nir` —
+//! a charge against a credit line must be rejected (represented here
+//! as clamped to the limit) rather than silently pushing the balance
+//! past the approved credit limit.
+
+/// nirdosha:validate {"fn":"charge_within_credit_limit_cents","pre":["balance_cents >= 0 && charge_cents >= 0 && balance_cents <= credit_limit_cents"],"post":["result <= credit_limit_cents"]}
+fn charge_within_credit_limit_cents(balance_cents: i64, charge_cents: i64, credit_limit_cents: i64) -> i64 {
+    if balance_cents + charge_cents > credit_limit_cents {
+        credit_limit_cents
+    } else {
+        balance_cents + charge_cents
+    }
+}
+
+fn main() {
+    println!("{}", charge_within_credit_limit_cents(9000, 5000, 10000));
+}

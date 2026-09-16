@@ -12,7 +12,7 @@
 //! instead of a single whole-program request.
 
 use std::collections::HashMap;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -863,22 +863,6 @@ fn diagnostic_line_numbers(diagnostic: &str) -> Vec<usize> {
         }
     }
     found
-}
-
-/// `{line}:{col}` out of the parser's own `... at {line}:{col}: ...`
-/// error format, so parse-stage diagnostics can carry the same
-/// structured fields type/ownership-stage errors get from their
-/// `Span`s.
-fn first_span_in(s: &str) -> Option<(usize, usize)> {
-    // `split_once`, not `rsplit_once` -- see `diagnostic_line_numbers`'s
-    // own comment on the same fix: the position sits right after the
-    // FIRST " at ", and a message containing a later " at " (a quoted
-    // path with spaces, prose) must not steal it.
-    let rest = s.split_once(" at ").map(|(_, r)| r)?;
-    let mut it = rest.split(':');
-    let line = it.next()?.trim().parse::<usize>().ok()?;
-    let col = it.next()?.trim().parse::<usize>().ok()?;
-    Some((line, col))
 }
 
 fn machine_error(stage: &str, line: Option<usize>, col: Option<usize>, message: &str) -> String {
@@ -2494,122 +2478,41 @@ pub fn suggest_contract(client: &LlmClient, file_source: &str, fn_name: &str) ->
     Ok(extract_nir_source(&raw))
 }
 
-/// Writes `contents` to a brand-new file at `path`, never an existing
-/// one -- `create_new(true)` sets `O_EXCL`, so if anything is already
-/// there (a real file OR a symlink another local user planted at this
-/// guessable `temp_dir()` path, betting on this call to follow it) the
-/// open fails instead of silently truncating-and-overwriting whatever
-/// that symlink points at. `SCRATCH_COUNTER`'s uniqueness already made
-/// a same-run collision practically impossible; this closes the
-/// different threat model -- a hostile local process racing to plant
-/// something at the path first. On Unix the file is also created
-/// `0600`: the source can encode a project's real business logic, and
-/// `temp_dir()` is normally world-readable/-listable.
-fn write_private_scratch_file(path: &Path, contents: &str) -> std::io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(contents.as_bytes())
-}
-
-/// Verifies a candidate source string actually typechecks, ownership-
-/// checks, *and* builds -- Generate mode's own lock definition
-/// (rfcs/0014: "a CodeUnit locks when its generated `.nir` both exists
-/// and builds successfully") means a typecheck pass alone isn't enough
-/// evidence. Runs against a throwaway, per-call-unique temp file/binary
-/// (`loader::load_program` reads from a path, not a string) that's
-/// removed either way -- this never touches the stable generated-source
-/// path itself; only `generate_program`'s own caller, once this
-/// returns `Ok`, does that.
+/// Verifies a v2 candidate source string actually builds and carries
+/// well-formed `nirdosha:contract` claims -- Generate mode's own lock
+/// definition (rfcs/0014: "a CodeUnit locks when its generated `.nir`
+/// both exists and builds successfully") means a syntax check alone
+/// isn't enough evidence. There is no native typecheck/ownership/SMT/
+/// codegen pipeline to run here (a v2 candidate is plain Rust, not
+/// this crate's own `ast::Program`) -- `v2_verify::verify_v2_source`
+/// is the same two-reader check (`cargo build` + `cargo-nirdosha`)
+/// `mcp_tools::verify_code` runs, reused rather than duplicated so
+/// Generate mode's own acceptance gate and the MCP tool an external
+/// agent calls can never quietly disagree about what "verified" means.
 ///
-/// `SCRATCH_COUNTER`, not PID alone: PID is constant across every
-/// thread in this process, so two *concurrent* calls (two parallel
-/// `#[test]`s, or two real concurrent `hi_server.rs`/window requests --
-/// `hi_window.rs`'s own custom-protocol handler now spawns a thread per
-/// request specifically so slow calls like this one don't block the
-/// window) used to race on the exact same path, each one liable to
-/// overwrite the other's scratch file mid-write. A real, confirmed bug
-/// (not a defensive guess): two `#[test]`s sharing this function
-/// started flaking with exactly this symptom -- a parse error on
-/// content that was neither test's own source -- the moment a third,
-/// unrelated test made their scheduling interleave differently.
+/// Unlike the retired native check, this never calls
+/// `attach_source_lines`: that helper exists to compensate for the
+/// native pipeline's own bare `at {line}:{col}` diagnostics, which
+/// carried no source context on their own. A real `rustc` diagnostic
+/// already quotes the offending line and points a caret at it -- adding
+/// our own copy on top would be redundant, not helpful.
 fn typecheck_and_build_check(source: &str) -> Result<(), String> {
-    static SCRATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let unique = SCRATCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut path = std::env::temp_dir();
-    path.push(format!("nirdosha_hi_generate_check_{}_{unique}.nir", std::process::id()));
-    write_private_scratch_file(&path, source).map_err(|e| format!("writing a scratch file to typecheck: {e}"))?;
-    let mut out_path = std::env::temp_dir();
-    out_path.push(format!("nirdosha_hi_generate_check_{}_{unique}", std::process::id()));
-
-    let result = (|| -> Result<(), String> {
-        let path_str = path.to_str().ok_or_else(|| format!("temp path {} is not valid UTF-8", path.display()))?;
-        let (program, _src): (crate::ast::Program, String) = crate::loader::load_program(path_str).map_err(|e| {
-            // The first-built value was never live -- `first_span_in`
-            // is checked unconditionally right after, and its `Some`
-            // arm always replaced it outright rather than refining it;
-            // building `(None, None)` first only to immediately
-            // overwrite it in the common case (a real parse error
-            // always carries a span) signaled this span extraction
-            // hadn't actually been looked at since it was written.
-            let (line, col) = match first_span_in(&e) {
-                Some((line, col)) => (Some(line), Some(col)),
-                None => (None, None),
-            };
-            // Issue #64: `e`'s own human-readable text is `"lex/parse
-            // error in <scratch-path> at <line>:<col>: <description>"` --
-            // the scratch path is unique per self-repair attempt
-            // (`SCRATCH_COUNTER` above), so passing `&e` straight through
-            // as this machine-readable entry's own `message` field used
-            // to make `hint_cache::normalize_pattern`'s cache key unique
-            // per attempt too, defeating both cache reuse and the "did
-            // this hint actually fix it" check for every lex/parse
-            // diagnostic. `machine_error`'s `message` here is normalized
-            // to the same path-free `"<line>:<col>: <description>"` shape
-            // `typecheck`/`ownership` diagnostics already use below (their
-            // own `d.message` never had a path in it to begin with) --
-            // `e` itself, path included, is unchanged in the human-facing
-            // text `attach_source_lines` builds right after.
-            let normalized_message = e.split_once(" at ").map(|(_, rest)| rest).unwrap_or(&e);
-            let machine = vec![machine_error("parse", line, col, normalized_message)];
-            attach_source_lines(source, &format!("{e}\nmachine-readable errors: [{}]", machine.join(", ")))
-        })?;
-        // Generate mode's own typecheck+ownership check, via the exact
-        // same `crate::mcp_tools::typecheck_and_check_ownership` that
-        // `run_verify_pipeline` (`nirdosha verify`/`nirdosha mcp`'s
-        // `verify_code`) uses -- `require_main: true` since a whole
-        // generated program always has one (this module's own `NIR_
-        // SYSTEM_PROMPT` demands it). Reformats the returned
-        // `VerifyDiagnostic`s into this loop's own long-tuned
-        // self-repair message shape (`self_repair_hint` pattern-matches
-        // on it) rather than a new shape, so the LLM-facing text is
-        // unchanged by this now being shared code.
-        let outcome = crate::mcp_tools::typecheck_and_check_ownership(program, true);
-        if outcome.typecheck.status == crate::mcp_tools::StageStatus::Failed {
-            let machine: Vec<String> =
-                outcome.typecheck.errors.iter().map(|d| machine_error("typecheck", Some(d.line), Some(d.col), &d.message)).collect();
-            let messages: Vec<String> = outcome.typecheck.errors.iter().map(|d| format!("type error: {}", d.message)).collect();
-            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", messages.join("\n"), machine.join(", "))));
+    let verdict = crate::v2_verify::verify_v2_source(source)?;
+    if verdict.passed() {
+        return Ok(());
+    }
+    let mut diagnostic = String::new();
+    if !verdict.builds {
+        diagnostic.push_str(verdict.build_diagnostic.as_deref().unwrap_or("cargo build failed"));
+    }
+    if !verdict.violations.is_empty() {
+        if !diagnostic.is_empty() {
+            diagnostic.push('\n');
         }
-        if outcome.ownership.status == crate::mcp_tools::StageStatus::Failed {
-            let machine: Vec<String> =
-                outcome.ownership.errors.iter().map(|d| machine_error("ownership", Some(d.line), Some(d.col), &d.message)).collect();
-            let messages: Vec<String> = outcome.ownership.errors.iter().map(|d| format!("ownership error: {}", d.message)).collect();
-            return Err(attach_source_lines(source, &format!("{}\nmachine-readable errors: [{}]", messages.join("\n"), machine.join(", "))));
-        }
-        let program = outcome.program.expect("both typecheck and ownership passed, so typecheck_and_check_ownership always returns Some(program)");
-        let smt_report = crate::smt::analyze(&program);
-        crate::codegen::build(&program, &smt_report, &out_path, crate::codegen::OptLevel::O2)
-    })();
-
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(&out_path);
-    result
+        diagnostic.push_str("nirdosha:contract violations:\n");
+        diagnostic.push_str(&verdict.violations.join("\n"));
+    }
+    Err(diagnostic)
 }
 
 #[cfg(test)]
@@ -3049,13 +2952,13 @@ machine-readable errors: [{\"col\":58,\"line\":16,\"message\":\"16:58: expected 
 
     #[test]
     fn typecheck_and_build_check_accepts_valid_source() {
-        typecheck_and_build_check("fn add(a: i64, b: i64) -> i64 { return a + b }\nfn main() { }\n").expect("should build");
+        typecheck_and_build_check("fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() { let _ = add(1, 2); }\n").expect("should build");
     }
 
     #[test]
     fn typecheck_and_build_check_reports_a_real_type_error() {
-        let err = typecheck_and_build_check("fn add(a: i64, b: i64) -> i64 { return \"nope\" }\n").unwrap_err();
-        assert!(err.contains("type error"), "expected a type error, got: {err}");
+        let err = typecheck_and_build_check("fn add(a: i64, b: i64) -> i64 {\n    \"nope\"\n}\n\nfn main() {}\n").unwrap_err();
+        assert!(err.contains("mismatched types"), "expected a real rustc type error, got: {err}");
     }
 
     #[test]
@@ -3156,18 +3059,18 @@ machine-readable errors: [{\"col\":58,\"line\":16,\"message\":\"16:58: expected 
     }
 
     #[test]
-    fn diagnostics_carry_a_machine_readable_block() {
-        // (b) of the 2026-09-11 RCA: the repair conversation should
-        // carry the compiler's own structured error data, not just
-        // prose a model has to re-parse -- plus the offending source
-        // line, since it cannot count to line 154 of its own output.
-        let src = "fn main() {\n    let ok: bool = match json_parse(\"{}\") {\n        Ok(d) => return false,\n    }\n}\n";
-        let err = typecheck_and_build_check(src).expect_err("the match-arm return must fail the check");
-        assert!(err.contains("machine-readable errors: ["), "structured block expected, got:\n{err}");
-        assert!(err.contains("\"stage\":\"parse\""), "parse-stage machine errors expected, got:\n{err}");
-        assert!(err.contains("\"line\":3"), "the structured block must carry the real line number, got:\n{err}");
-        assert!(err.contains("\"col\":18"), "the structured block must carry the real column, got:\n{err}");
-        assert!(err.contains("Ok(d) => return false"), "the offending source line must still be attached, got:\n{err}");
+    fn build_diagnostics_are_real_rustc_output_with_file_and_line_context() {
+        // v2 has no bespoke machine-readable block (docs/
+        // nirdosha-v2-comment-layer.md's whole point is real rustc, not
+        // a custom frontend) -- rustc's own diagnostic already carries
+        // file:line:col and a caret at the offending token, the same
+        // "the model sees WHAT it wrote, not just where" goal the
+        // retired native scheme served, for free.
+        let src = "fn main() {\n    let x: i64 = \"not an i64\";\n    println!(\"{x}\");\n}\n";
+        let err = typecheck_and_build_check(src).expect_err("the string-to-i64 binding must fail the check");
+        assert!(err.contains("mismatched types"), "expected rustc's own diagnostic, got:\n{err}");
+        assert!(err.contains("candidate.nir:2"), "expected a real file:line reference, got:\n{err}");
+        assert!(err.contains("not an i64"), "the offending source text should appear in rustc's own quoted snippet, got:\n{err}");
     }
 
     // =========================================================================

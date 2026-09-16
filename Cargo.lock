@@ -1994,6 +1994,7 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "base64",
+ "cargo-nirdosha",
  "flate2",
  "hmac 0.12.1",
  "native-tls",
@@ -2014,6 +2015,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "signal-hook",
+ "syn 2.0.119",
  "tao",
  "tiny_http",
  "wry",

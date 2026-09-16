@@ -1378,398 +1378,243 @@ pub fn build_certificate(source_bytes: &[u8], pipeline: VerifyVerdict) -> Certif
 /// the grammar it's exported from.
 const NIRDOSHA_GBNF: &str = include_str!("../nirdosha.gbnf");
 
-/// A `.nir` source file that exists only for the duration of one MCP
-/// tool call -- `run_verify_pipeline`/`write_auto_patches`/
-/// `loader::load_program` all take a filesystem path (import
-/// resolution, `write_auto_patches`'s own read-modify-write, and
-/// `db_connect`-relative paths in the source itself all need a real
-/// file on disk), but an MCP tool call only ever carries source text
-/// inline (`tools_list`'s own schemas -- every tool takes `source`,
-/// never `path`, the same choice Kōdo's MCP tools make). Rather than
-/// fork the pipeline into a path-based and a source-based variant,
-/// every MCP handler below materializes `source` to one of these and
-/// reuses the exact same, already-tested pipeline `verify`/`fix` run
-/// against a real file. `Drop` removes it unconditionally, not a
-/// manual `remove_file` at the end of each handler, so a long-running
-/// `nirdosha mcp` process serving many calls never accumulates temp
-/// files -- including on an early `?`-return from a handler.
-pub(crate) struct TempNirFile(std::path::PathBuf);
+/// The v2 declarative layer's real grammar: `docs/
+/// nirdosha-v2-comment-layer.md` §4's spec, plus every comment kind
+/// actually shipped in `examples/nirdosha-v2-corpus` today (not a
+/// forward-looking wishlist -- `nirdosha:validate`/`workflow`/
+/// `screen`/etc. are inert under every checker in this codebase right
+/// now; this teaches the *encoding*, not a claim that they're
+/// cross-referenced). Hand-maintained the same way `get_ui_conventions`
+/// already is (this module's own doc comment on that function explains
+/// why: static content, not `include_str!`, so it needs a matching edit
+/// if the registry moves) -- update this alongside a new comment kind
+/// landing in the corpus.
+const NIRDOSHA_V2_COMMENT_GRAMMAR: &str = r#"Every declarative construct rides one or more `/// nirdosha:<kind> {json}` doc-comment lines directly above the Rust item they describe (a struct, a fn). Consecutive `///` lines are joined before parsing, so a multi-line JSON payload is fine. The payload is always exactly one JSON object; unknown keys are a hard error (deny_unknown_fields), the same rule the shipped `nirdosha:contract` encoding already enforces. A single item may carry more than one kind (e.g. `nirdosha:contract` + `nirdosha:transact` on the same fn).
 
-impl TempNirFile {
-    fn write(source: &str) -> Result<Self, String> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut p = std::env::temp_dir();
-        p.push(format!("nirdosha_mcp_{}_{n}.nir", std::process::id()));
-        std::fs::write(&p, source).map_err(|e| format!("failed to stage source for verification: {e}"))?;
-        Ok(Self(p))
-    }
+Known kinds, and the shape their JSON object takes (every example below is real, taken from a file in examples/nirdosha-v2-corpus/src that plain cargo builds and runs today):
 
-    fn path_str(&self) -> &str {
-        self.0.to_str().expect("temp_dir()-rooted path is always valid UTF-8 on every platform this ships for")
-    }
-}
+- nirdosha:contract {"effects":["pure"|"io"|...], "requires":{"role":"..."}, "nfr":{"latency_ms":N,"concurrency_max":N}, "crud":{...}} -- the shipped form; also expressible as the `#[nirdosha_rt::contract(effects(pure), requires(role = "..."), nfr(latency_ms = 50, concurrency_max = 1000))]` attribute macro, which additionally injects the unforgeable RoleProof parameter (see get_grammar's `role_gating` field). The ONLY kind any checker in this codebase (`cargo-nirdosha`) actually validates today.
 
-impl Drop for TempNirFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+- nirdosha:validate {"fn":"name","pre":["expr", ...],"post":["expr", ...]} -- Hoare pre/post clauses over the decorated fn's own parameter names and `result`. One JSON array entry per clause; every `pre` is a conjunctive hypothesis, every `post` is checked independently.
+
+- nirdosha:workflow {"name":"...", "data":{"struct":"StructName","fields":{...}}, "states":{"StateName":{"transitions":{"EventName":"NextState"}, "terminal":true, "on_entry":"fn_name"}, ...}} -- decorates the state-carrying struct; the state-transition functions themselves (e.g. `start_x`/`advance_x`) are ordinary Rust fns nearby, referenced by name, not enumerated in the JSON.
+
+- nirdosha:screen {"for":"StructName", "title":"...", "fields":{"field_name":{"label":"..."}}} -- decorates the struct a generated UI screen is about. Composes with the plain naming-convention inference (`list_/create_/update_/delete_<struct>` fns) -- this comment is additive, never a replacement for it.
+
+- nirdosha:dashboard {"tiles":[...], "charts":[...]} -- each tile/chart names an existing `stat_*`/`chart_*` fn.
+
+- nirdosha:transact {"verify":"fn_name", "compensate":"fn_name"} (+ optional "retry"/"timeout") -- decorates a fn whose real Rust body performs the saga (calls its own verify/commit/compensate fns visibly); the comment is a claim about what that body does, checked declared-vs-actual, never a replacement for the body.
+
+- nirdosha:serve {"routes":[...]} -- serve-surface metadata for a fn exposing an HTTP route.
+
+- nirdosha:field {"struct":"StructName","field":"field_name","requires":{"role":"..."}} -- field-level masking: the named field must be independently gated in the fn body via a hand-written `Option<&RoleProof<R>>` parameter checked by a `mask_unless`-shaped helper (per-field gating is not a macro feature the way fn-level `requires` is).
+
+- nirdosha:schema / nirdosha:role_mapping -- db-table/column and role-to-table-permission convention declarations (46_db_schema_and_role_mapping_conventions.nir).
+
+- nirdosha:visual / nirdosha:workspace / nirdosha:layout / nirdosha:nav -- additional declarative-UI kinds (graph/heatmap/timeline visuals, workspace panels, page layout, module nav grouping) with the same "one JSON object, deny_unknown_fields" shape as the rest.
+
+- nirdosha:audited -- the one `//`-form (not `///`) kind: doc comments cannot attach to a statement inside a fn body, so an audited block is marked `// nirdosha:audited` immediately above it with an `'audited: <label>` loop/block label, not a doc comment on an item.
+
+The registry is extensible: a signed plugin may declare `nirdosha:plugin:<name>:...` kinds later (not shipped yet)."#;
 
 fn require_str_arg<'a>(arguments: &'a serde_json::Value, name: &str) -> Result<&'a str, String> {
     arguments.get(name).and_then(|v| v.as_str()).ok_or_else(|| format!("Missing required parameter '{name}'"))
 }
 
-/// `verify_code` -- runs `run_verify_pipeline` (the exact pipeline
-/// `nirdosha verify`/`nirdosha fix` both run) against inline source and
-/// returns the identical `VerifyVerdict` JSON shape, `source` replaced
-/// with `"<inline>"` since the real value (a temp path) is an
-/// implementation detail no caller should key off of.
+/// `verify_code` -- v2 (`docs/nirdosha-v2-comment-layer.md`): runs
+/// `v2_verify::verify_v2_source` against inline source (real Rust,
+/// checked by the two readers a v2 file is actually held to: `cargo
+/// build`, then `cargo-nirdosha`'s in-process contract scanner). There
+/// is no Z3/SMT proof pipeline for v2 yet (Phase 4 of the migration
+/// doc is still open), so unlike the retired native `VerifyVerdict`
+/// this never reports a `Proved`/`Disproved` verdict -- `passed` is
+/// exactly "it builds and its `nirdosha:contract` claims are well-
+/// formed," nothing stronger claimed.
 pub fn verify_code(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
     let source = require_str_arg(arguments, "source")?;
-    let temp = TempNirFile::write(source)?;
-    let verdict = run_verify_pipeline(temp.path_str());
-    let mut value = serde_json::to_value(&verdict).expect("VerifyVerdict always serializes");
-    value["source"] = json!("<inline>");
+    let verdict = crate::v2_verify::verify_v2_source(source)?;
+    let mut value = serde_json::to_value(&verdict).expect("V2Verdict always serializes");
+    value["verdict"] = json!(verdict.verdict());
     Ok(value)
 }
 
-/// `get_grammar` -- returns the full LL(1) Nirdosha grammar in GBNF
-/// form (constrained-decoding target for llama.cpp/vLLM-style grammar-
-/// constrained generation). No arguments; the grammar is one fixed
-/// artifact per compiler version, not parameterized per call.
+/// `get_grammar` -- v2 has no GBNF: a v2 `.nir` file is *valid Rust*,
+/// a grammar every model already knows deeply, so there is nothing to
+/// constrain-decode against beyond what any Rust-capable model already
+/// has. What v2 actually adds is the `nirdosha:*` doc-comment
+/// declarative layer (`docs/nirdosha-v2-comment-layer.md` §4) -- the
+/// one part of v2 syntax a model has never seen, and the one this tool
+/// returns.
 pub fn get_grammar(_arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
-    Ok(json!({ "format": "gbnf", "grammar": NIRDOSHA_GBNF }))
+    Ok(json!({
+        "format": "v2-comment-layer",
+        "base_syntax": "A v2 .nir file is valid, ordinary Rust -- compiled unmodified by plain `cargo`, extension intact. Write normal Rust: `fn`/`struct`/`enum`/`match`, `String`/`&str`, `println!`, semicolons, no bare top-level `return` needed on a trailing expression. Every declarative construct native `.nir` used a keyword for (`workflow`, `screen`, `dashboard`, `transact`, `validate`) is NOT special syntax in v2 -- it rides a `/// nirdosha:<kind> {json}` doc comment on the Rust item it describes instead.",
+        "comment_layer_grammar": NIRDOSHA_V2_COMMENT_GRAMMAR,
+        "role_gating": "requires(role: \"...\") becomes #[nirdosha_rt::contract(requires(role = \"...\"))] on the fn, after `nirdosha_rt::roles! { Name = \"...\"; }` declares the role once at the crate root. The macro injects an unforgeable `&nirdosha_rt::RoleProof<Name>` as the function's actual (hidden) leading parameter -- callers obtain one via `nirdosha_rt::Auth::login(subject, &roles).prove::<nirdosha_roles::Name>()` and pass it as the first argument.",
+    }))
 }
 
-/// `fix` -- same pipeline as `verify_code`, plus `write_auto_patches`
-/// (the exact algorithm `nirdosha fix --apply` uses, shared not
-/// duplicated) when `apply: true`. There's no file for the CLI's own
-/// `--apply` to write back to and hand the caller a path for, so this
-/// returns the patched source text directly in `patched_source`
-/// instead -- the MCP-native equivalent of `--apply` actually rewriting
-/// the file on disk.
+/// `fix` -- v2 has no auto-patcher: `write_auto_patches` rewrites
+/// diagnostics against this crate's own native `ast::Program`, which a
+/// v2 candidate (real Rust, `syn`-parsed) never produces. Rather than
+/// fabricate one, `fix` runs the identical `verify_code` check and
+/// always reports `applied: []` -- an honest "here is what's wrong,
+/// nothing was auto-patched" until a real v2 fixer exists. `apply` is
+/// still accepted (and echoed) so an existing caller's request shape
+/// doesn't break; it has no effect yet.
 pub fn fix(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
     let source = require_str_arg(arguments, "source")?;
     let apply = arguments.get("apply").and_then(|v| v.as_bool()).unwrap_or(false);
-    let temp = TempNirFile::write(source)?;
-
-    let before = run_verify_pipeline(temp.path_str());
-    let applied = if apply { write_auto_patches(temp.path_str(), &before)? } else { Vec::new() };
-
-    let mut before_value = serde_json::to_value(&before).expect("VerifyVerdict always serializes");
-    before_value["source"] = json!("<inline>");
-    let mut result = json!({ "before": before_value, "applied": applied });
-
-    if apply {
-        let patched = std::fs::read_to_string(temp.path_str()).map_err(|e| format!("failed to read patched source back: {e}"))?;
-        let after = run_verify_pipeline(temp.path_str());
-        let mut after_value = serde_json::to_value(&after).expect("VerifyVerdict always serializes");
-        after_value["source"] = json!("<inline>");
-        result["after"] = after_value;
-        result["patched_source"] = json!(patched);
-    }
-    Ok(result)
+    let verdict = crate::v2_verify::verify_v2_source(source)?;
+    let mut before = serde_json::to_value(&verdict).expect("V2Verdict always serializes");
+    before["verdict"] = json!(verdict.verdict());
+    Ok(json!({
+        "before": before,
+        "applied": Vec::<String>::new(),
+        "apply_requested": apply,
+        "note": "no v2 auto-fixer exists yet; nothing is applied. Re-read the diagnostics in `before` and edit the source yourself, then call verify_code again.",
+    }))
 }
 
-/// `describe` -- parses (does not require it to typecheck, the same
-/// "AST of a program that doesn't yet typecheck is still legitimate to
-/// inspect" contract `cmd_emit_ast` already documents) inline source
-/// and returns a curated structural summary via `describe_program`.
+/// `describe` -- v2: parses inline source as plain Rust (`syn`, does
+/// not require it to build, the same "still legitimate to inspect"
+/// posture the native `describe` took) and returns a curated
+/// structural summary via `v2_verify::describe_v2_source`: every
+/// fn/struct/enum, plus every `nirdosha:*` doc-comment declaration
+/// found and which item it decorates.
 pub fn describe(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
     let source = require_str_arg(arguments, "source")?;
-    let temp = TempNirFile::write(source)?;
-    let (program, _src) = crate::loader::load_program(temp.path_str())?;
-    Ok(describe_program(&program))
+    crate::v2_verify::describe_v2_source(source)
 }
 
-/// `certify_code` -- the same pipeline `cmd_certify` runs, over inline
-/// source: verify, then wrap in a `Certificate` (`build_certificate`,
-/// shared not duplicated). Issues a certificate for *every* verdict,
-/// `DISPROVED` included -- an honest "this code is proven wrong, here
-/// is the conclusive evidence" is a real, useful attestation, the
-/// same reason `cmd_certify` issues one regardless of verdict. This
-/// is the Certify half of the Constrain -> Verify -> Repair ->
-/// Certify loop, so an agent driving Nirdosha entirely over this tool
-/// surface can produce the auditor-facing artifact, not just verdicts.
+/// `certify_code` -- v2: verifies (`verify_code`'s exact pipeline),
+/// then wraps the result in a minimal, honestly-scoped certificate.
+/// Deliberately **not** the native `Certificate` shape
+/// (`build_certificate`): that struct's `proof_obligations`/
+/// `verdict_summary` encode Z3/SMT-proved facts about a native
+/// `ast::Program`, and no such proof pipeline exists for v2 source
+/// (Phase 4 of `docs/nirdosha-v2-comment-layer.md` is still open) --
+/// claiming that shape for v2 would assert a stronger guarantee than
+/// was actually checked. `evidence_tier` mirrors `cargo-nirdosha`'s own
+/// Stage-1 posture (`nirdosha_contract_core::evidence::Coverage::
+/// source_scan`): "source scanned + built", not "proved".
 ///
-/// Deliberately **unsigned**: `sign_certificate` (Ed25519, `ring`) stays
-/// CLI-only behind `nirdosha certify --sign`, because key custody is a
-/// human decision that must not cross an agent-callable boundary -- an
-/// agent can mint evidence, only a key holder can endorse it. A
-/// verifier consumes the signature via `nirdosha verify-certificate`,
-/// never this tool.
+/// Deliberately **unsigned**, same reasoning as the native tool: key
+/// custody is a human decision that must not cross an agent-callable
+/// boundary.
 pub fn certify_code(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
     let source = require_str_arg(arguments, "source")?;
-    let temp = TempNirFile::write(source)?;
-    let pipeline = run_verify_pipeline(temp.path_str());
-    let certificate = build_certificate(source.as_bytes(), pipeline);
-    Ok(serde_json::to_value(&certificate).expect("Certificate always serializes"))
+    let verdict = crate::v2_verify::verify_v2_source(source)?;
+    Ok(json!({
+        "certificate_version": "nirdosha.certificate/v2-source-scan",
+        "source_hash": sha256_hex(source.as_bytes()),
+        "toolchain_version": env!("CARGO_PKG_VERSION"),
+        "evidence_tier": "source_scan",
+        "verdict": verdict.verdict(),
+        "builds": verdict.builds,
+        "build_diagnostic": verdict.build_diagnostic,
+        "contracts_found": verdict.contracts_found,
+        "violations": verdict.violations,
+    }))
 }
 
-/// `get_nirdosha_constructs` -- the live, compiler-verified inventory
-/// of Nirdosha's major language constructs (`crate::capabilities`):
-/// `fn`, `struct`, `enum`/`match`, `validate` contracts, `workflow`,
-/// `transact` (plain and with `txn_id`), `screen`+`serve`, json display
-/// loops, identity+`acquire`. Each entry's `source` is a real program
-/// just run through the exact pipeline `nirdosha build` runs (lex ->
-/// parse -> typecheck -> ownership -> `smt::analyze` -> `codegen::
-/// build`) against *this* compiler build -- not a hand-typed claim that
-/// can drift stale (see `capabilities.rs`'s own doc comment for why
-/// that drift is a real, previously-observed failure mode). A caller
-/// (an LLM generating Nirdosha source in particular) gets both "is this
-/// construct real right now" and "here is exactly how it's written" in
-/// one call, plus the real compiler diagnostic on `supported: false` --
-/// no separate roundtrip to find out why.
+/// `get_nirdosha_constructs` -- v2 analogue of the native tool: the
+/// live, two-reader-verified inventory of v2's major constructs
+/// (`crate::v2_capabilities`): `fn`, `struct`, `enum`/`match`,
+/// `nirdosha:validate`, `nirdosha:workflow`, `nirdosha:transact`,
+/// `nirdosha:screen`+`serve`, `serde_json`, identity+`RoleProof`. Each
+/// entry's `source` is a real program just run through `cargo build` +
+/// `cargo-nirdosha`'s scanner against *this* build -- not a hand-typed
+/// claim that can drift stale, same discipline the native
+/// `capabilities.rs` documents for why that drift is a real,
+/// previously-observed failure mode.
 pub fn get_nirdosha_constructs(_arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let constructs: Vec<serde_json::Value> = crate::capabilities::run_capability_checks()
+    let constructs: Vec<serde_json::Value> = crate::v2_capabilities::run_v2_capability_checks()
         .into_iter()
         .map(|r| json!({ "name": r.name, "supported": r.passed, "example": r.source, "diagnostic": r.diagnostic }))
         .collect();
     Ok(json!({ "constructs": constructs }))
 }
 
-/// `get_ui_conventions` -- a curated, structured reference (not a live
-/// compiler check, unlike [`get_nirdosha_constructs`]) answering the
-/// three things an LLM generating Nirdosha needs to know to get a UI
-/// out of a program at all: (1) which *function names* `ui_gen.rs`'s
-/// naming-convention inference turns into a screen/dashboard tile, and
-/// what happens (silently) when a name doesn't match; (2) every
-/// annotation a `fn` (or struct field) can carry, what it does, and
-/// whether it's typeck-only or actually compiled/enforced; (3) the
-/// `screen`/`dashboard`/`serve`/`workspace`/`layout` UI DSL's real
-/// grammar, sourced from `docs/GRAMMAR.md`'s own EBNF productions
-/// rather than paraphrased, plus what each key changes in the
-/// generated UI (`docs/LANGUAGE.md` §11/§15/§18's own tables).
-///
-/// Static content, the same posture [`get_grammar`] takes with
-/// `NIRDOSHA_GBNF`: this is a snapshot of `docs/GRAMMAR.md` +
-/// `docs/LANGUAGE.md` + `crates/compiler/src/ui_gen.rs`'s real prefix
-/// strings (`ui_gen.rs:1100-1317`'s `list_`/`get_`/`create_`/
-/// `update_`/`delete_`, `ui_gen.rs:1001`/`:1009`'s `stat_`/`chart_`) at
-/// the time this function was written, not re-derived from the
-/// compiler on every call the way `get_nirdosha_constructs` is -- if
-/// `ui_gen.rs`'s prefixes or `docs/GRAMMAR.md`'s productions move,
-/// this tool needs a matching edit, same maintenance burden
-/// `capabilities.rs`'s own doc comment names for hand-transcribed
-/// prompt content in general.
+/// `get_ui_conventions` -- v2: there is no `ui_gen.rs`-style naming-
+/// convention inference over v2/Rust source anywhere in this codebase
+/// (that machinery only ever walked the native `ast::Program`) -- so
+/// unlike the retired native tool, this isn't teaching an inference
+/// rule, it's pointing at the REAL, working v2 UI mechanism: a family
+/// of declarative `nirdosha_rt::*!` proc-macros (`crates/
+/// nirdosha-macros/src/{crud_screens,dashboard,kanban_board,wizard,
+/// settings_screen,communication_feed,categorical}.rs`, RFC 0009 Track
+/// C) that expand to ordinary, `rustc`-checked Rust -- a typo'd field
+/// or a wrong access level is a real compile error, not a silent
+/// no-screen-generated gap the way a naming-convention miss used to be
+/// in the native tier. Every invocation shape below is quoted verbatim
+/// from that macro's own module doc comment, not paraphrased. The
+/// `nirdosha:screen`/`dashboard`/`workspace`/`layout`/`nav`/`visual`
+/// comment-layer kinds (`get_grammar`'s `comment_layer_grammar`) are a
+/// SEPARATE, currently-inert declarative layer (no checker cross-
+/// references them yet anywhere in this codebase) -- prefer the
+/// macros below for anything that needs to actually render today.
 pub fn get_ui_conventions(_arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(json!({
-        "naming_conventions": {
-            "summary": "nirdosha emit-ui/serve derive a full CRUD+dashboard web UI from nothing but a program's struct declarations plus these function-naming conventions (crates/compiler/src/ui_gen.rs) -- no syntax needed for the common case. screen/dashboard blocks (see ui_grammar below) are an optional additive layer on top of this inference, never a replacement for it.",
-            "struct_name_rule": "<struct_snake_case> is the struct's OWN name, snake_cased, matched exactly -- e.g. `struct CompliancePolicy` needs `list_compliance_policy`/`create_compliance_policy`, not `list_policy`/`create_policy`, even though the latter reads naturally on its own.",
-            "crud_functions": [
-                { "pattern": "list_<struct_snake_case>", "slot": "list", "typical_signature": "fn() -> Result(json, _)", "generates": "the struct's table/list view and its nav entry" },
-                { "pattern": "get_<struct_snake_case>", "slot": "get", "typical_signature": "fn(id: i64) -> Result(json, _)", "generates": "the struct's detail view" },
-                { "pattern": "create_<struct_snake_case>", "slot": "create", "typical_signature": "fn(<Struct>) -> Result(i64, _)", "generates": "the create form/action" },
-                { "pattern": "update_<struct_snake_case>", "slot": "update", "typical_signature": "fn(<Struct>) -> Result(i64, _)", "generates": "the edit form/action" },
-                { "pattern": "delete_<struct_snake_case>", "slot": "delete", "typical_signature": "fn(id: i64) -> Result(i64, _)", "generates": "the delete action" }
-            ],
-            "dashboard_functions": [
-                { "pattern": "stat_<name>", "typical_signature": "fn() -> i64 (or another scalar)", "generates": "a dashboard stat tile" },
-                { "pattern": "chart_<name>", "typical_signature": "fn() -> json", "generates": "a dashboard bar chart (the one built-in chart kind -- see ui_grammar.dashboard)" }
-            ],
-            "serve_route_rules": [
-                "an exposed fn named create_.../update_.../delete_... must carry requires(role: ...) (or explicit requires(public)) or the program fails to typecheck -- mutating routes are deny-by-default",
-                "every exposed fn's requires(...) is checked against the signed-in identity before the call",
-                "a VerifiedIdentity parameter is always filled from the signed-in identity itself, never from the request body -- that's how per-user pages are built"
-            ],
-            "gotchas": [
-                "Getting the name wrong is completely silent: compiles fine, runs fine, the struct just never gets a screen at all -- no error, no warning, nothing points at the missing screen; it's simply absent from the nav. If a struct you expect a screen for doesn't show up, check every one of its CRUD function names against this convention before assuming anything else is wrong.",
-                "A struct with only a create_<struct> function (no list_/get_/update_) has no read action to gate the nav entry on, so its nav item shows UNCONDITIONALLY to every identity, signed in or not -- regardless of create_<struct>'s own requires(...). That inner action still enforces its own gate correctly when actually called; only the nav entry's visibility is unconditional. Give the struct a real list_/get_ under the same role if it should stay hidden until that role can act on it.",
-                "A struct with no matching convention function at all (and no screen block naming it) is treated as a plain data type -- not shown in the nav, no screen generated, no error.",
-                "A PRD/spec that names its operations with a different verb (ingest_transaction, make_alert) is describing the same CRUD action under more natural-sounding prose -- translate it to the convention name (or add a thin wrapper under the convention name that calls the existing one) rather than transcribing the PRD's verb literally."
-            ]
-        },
-        "function_annotations": [
+        "archetype_macros": [
             {
-                "annotation": "requires(public)",
-                "attaches_to": "fn",
-                "syntax": "fn health_check() -> bool requires(public) { ... }",
-                "effect": "Marks a fn intentionally callable with no signed-in identity/token. Does NOT gate the fn -- FnDecl::requires stays None, no acquire needed, exactly as directly callable as a fn with no requires(...) at all. Its only effect is silencing the 'ungated fn' warning nirdosha serve/emit-ui prints for every fn with no requires(...), no requires(public), no VerifiedIdentity parameter, and no db/mq parameter.",
-                "gates_callability": false,
-                "enforcement": "typeck warning only (non-fatal)"
+                "macro": "nirdosha_rt::crud_screens!",
+                "archetype": "List/Detail/Create-Form/Edit-Form/Delete-confirmation over one entity",
+                "invocation": "nirdosha_rt::crud_screens! {\n    mount: mount_product_screens,\n    entity: Product,\n    store: product_store,\n    path: \"/products\",\n    fields: [ name: String, price_cents: i64, cost_cents: i64 ],\n    create: requires role \"admin\",\n    read: public,\n    update: requires role \"admin\",\n    delete: requires role \"admin\",\n}",
+                "requirements": "entity must derive Clone, Default, and serde::Serialize; every field type must implement ParseField (a missing impl is an ordinary rustc trait-bound error).",
+                "checked_by": "rustc (compile-time); a typo'd field name is a real \"no such field\" error"
             },
             {
-                "annotation": "requires(role: \"<name>\")",
-                "attaches_to": "fn or struct field",
-                "syntax": "fn transfer(amount: i64) -> i64 requires(role: \"admin\") { ... }  /  struct Employee { salary: f64 requires(role: \"admin\") }",
-                "effect": "On a fn: gates the fn's VALUE, not just its behavior -- a direct call or taking the fn as a value is a static TypeErrorKind::PrivilegedFnNotAcquired error. The only way to get a callable value is `acquire transfer(proof)`, where proof is a RoleView produced by `check_role(identity, \"admin\")`. On a struct field: masks that field to its type's zero value on every return, unless the returning function itself has a RoleView parameter proving the matching role -- no acquire step, no gate on the function's own callability, just that field silently zeroed for unauthorized viewers.",
-                "gates_callability": "fn form only",
-                "enforcement": "compiled for real (codegen-level indirect calls / emit_field_masking), not just typeck"
+                "macro": "nirdosha_rt::dashboard!",
+                "archetype": "Dashboard -- stat tiles + bar charts",
+                "invocation": "nirdosha_rt::dashboard! {\n    mount: mount_sales_dashboard,\n    path: \"/dashboard\",\n    title: \"Sales Overview\",\n    refresh_seconds: 300,\n    widgets {\n        Metric { label: \"Revenue MTD\", fn: stat_revenue_mtd, target: 1000000, alert_below: true },\n        Chart  { label: \"By Region\", fn: chart_revenue_by_region, mark: bar },\n    }\n}",
+                "requirements": "each widget's fn is called directly in generated code -- a wrong name or signature is an ordinary rustc error, not a runtime surprise.",
+                "checked_by": "rustc (compile-time)"
             },
             {
-                "annotation": "requires(claim: \"<name>\", \"<value>\")",
-                "attaches_to": "fn or struct field",
-                "syntax": "fn read_chart(id: i64) -> str requires(claim: \"department\", \"cardiology\") { ... }",
-                "effect": "Same mechanism as requires(role: ...) in both forms, but proven by a ClaimView from `extract_claim(identity, \"department\")` instead of a RoleView.",
-                "gates_callability": "fn form only",
-                "enforcement": "compiled for real"
+                "macro": "nirdosha_rt::kanban_board!",
+                "archetype": "Board/Canvas -- drag-and-drop, grouped by one categorical field",
+                "invocation": "nirdosha_rt::kanban_board! {\n    mount: mount_status_board,\n    entity: Product,\n    store: product_store,\n    path: \"/board\",\n    access: public,\n    title_field: name,\n    column_field: status,\n    columns: [ \"backlog\", \"in_progress\", \"done\" ],\n    move_path: \"/products/{id}/move/{to}\",\n}",
+                "requirements": "presentational only -- a card move POSTs to move_path, typically a route the app wires by hand to a categorical_actions!-generated fn. The board itself carries no authorization logic; the security boundary is that move endpoint.",
+                "checked_by": "rustc (compile-time) for the board itself; the move endpoint's own #[contract(requires(role=..))] for authorization"
             },
             {
-                "annotation": "nfr(latency_ms: N, error_rate_max: F, throughput_min_per_sec: N, concurrency_max: N)",
-                "attaches_to": "fn",
-                "syntax": "fn checkout(cart_id: i64) -> Result(i64, ErrorCode) nfr(latency_ms: 200, error_rate_max: 0.01, throughput_min_per_sec: 50, concurrency_max: 100) { ... }",
-                "effect": "Up to four independent, all-optional thresholds (at least one required) the APM kernel tracks automatically, zero code at the call site -- every call is codegen-wrapped in nir_nfr_call_begin/nir_nfr_call_end. error_rate_max additionally requires the fn's return type to be Result(_, _). A crossed threshold fires an async, fire-and-forget HTTP POST to NIRDOSHA_OBSERVABILITY_URL if that env var is set (never blocks the caller; unset = no escalation).",
-                "gates_callability": false,
-                "enforcement": "compiled (real per-fn atomics + escalation), disclosed simplifications: running max not a percentile histogram, cumulative not a sliding window"
+                "macro": "nirdosha_rt::wizard!",
+                "archetype": "Workflow/Wizard -- multi-step form, server-side progress",
+                "invocation": "nirdosha_rt::wizard! {\n    mount: mount_onboarding_wizard,\n    entity: Employee,\n    store: employee_store,\n    path: \"/onboarding\",\n    access: public,\n    steps: [\n        { name: \"Basics\", fields: [ name: String, department: String ] },\n        { name: \"Compensation\", fields: [ salary: f64 ] },\n    ],\n}",
+                "requirements": "each step's fields are fixed at compile time (one literal route per step); the final step assembles the full entity and inserts it via the same datasource crud_screens! uses.",
+                "checked_by": "rustc (compile-time)"
             },
             {
-                "annotation": "effect(pure) | effect(rng, io, concurrent, network)",
-                "attaches_to": "fn",
-                "syntax": "fn f(...) -> T effect(io) { ... }",
-                "effect": "Declares an upper bound on the fn's real effect set (a Koka-style set, not a total order; pure denotes the empty set and can't combine with other names). Omitted (the common case): fully inferred, nothing checked. Declared: the real effect set, computed by fixpoint iteration over the call graph, must be a SUBSET of what's declared -- declaring more than the body uses is fine; an undeclared-but-performed effect is TypeErrorKind::EffectNotDeclared.",
-                "gates_callability": false,
-                "enforcement": "typeck-only, no codegen change"
+                "macro": "nirdosha_rt::settings_screen!",
+                "archetype": "Settings/Configuration -- one always-present record, no list, no id, no delete",
+                "invocation": "nirdosha_rt::settings_screen! {\n    mount: mount_app_settings,\n    entity: AppSettings,\n    store: app_settings_store,\n    path: \"/settings\",\n    fields: [ site_name: String, maintenance_mode: bool ],\n    access: requires role \"admin\",\n}",
+                "requirements": "the datasource is a bare `fn() -> &'static Mutex<Entity>` (exactly one row), not the HashMap<i64, Entity> crud_screens!/wizard! use.",
+                "checked_by": "rustc (compile-time)"
             },
             {
-                "annotation": "audited \"<non-empty justification>\" { ... }",
-                "attaches_to": "a block inside a fn body (not the fn signature)",
-                "syntax": "audited \"reviewed: index bound already checked by the caller\" { arr[i] }",
-                "effect": "The one escape hatch that suppresses codegen's Tier-1/2 bounds-check and div-by-zero guards for code inside the block. Requires a non-empty justification string literal.",
-                "gates_callability": false,
-                "enforcement": "compiled (suppresses real guards); interpreter unaffected (there is no interpreter anymore)"
+                "macro": "nirdosha_rt::communication_feed!",
+                "archetype": "Communication -- append-only, newest-first message feed",
+                "invocation": "nirdosha_rt::communication_feed! {\n    mount: mount_team_feed,\n    entity: Message,\n    store: message_store,\n    path: \"/feed\",\n    fields: [ author: String, body: String ],\n    post_access: requires role \"member\",\n    read_access: public,\n    refresh_seconds: 5,\n}",
+                "requirements": "honest client-side polling (a <meta http-equiv=\"refresh\"> tag, dashboard!'s exact mechanism) -- not real server push; the generated routes never pretend otherwise.",
+                "checked_by": "rustc (compile-time)"
+            },
+            {
+                "macro": "nirdosha_rt::categorical_actions!",
+                "archetype": "One role-gated transition function per value of a categorical field",
+                "invocation": "nirdosha_rt::categorical_actions! {\n    entity: Product,\n    store: product_store,\n    field: is_approved: bool,\n    actions {\n        true  => approve_product    requires role \"approver\",\n        false => disapprove_product requires role \"compliance_officer\",\n    }\n}",
+                "requirements": "generates real #[contract(requires(role = ..))]-gated functions (the only thing that decides access) plus a derived, NON-authoritative role_for_<field> projection for audit logs/UI hints -- never itself consulted for authorization. Leaving a field value uncovered is rustc's own E0004 non-exhaustive-patterns error, not a scanner check.",
+                "checked_by": "rustc (compile-time) for both the actions and their exhaustiveness"
             }
         ],
-        "ui_grammar": {
-            "note": "EBNF quoted verbatim from docs/GRAMMAR.md; `screen`/`dashboard`/`landing`/`serve`/`workspace`/`module` are real reserved keywords (dispatched on like struct/enum), while field/action/paginate/tile/chart/visual/panel/role/claim/public/expose/default are CONTEXTUAL keywords -- matched by identifier text only in the one leading slot named, ordinary identifiers everywhere else.",
-            "screen": {
-                "purpose": "An optional, additive cosmetic layer over one struct's naming-convention-inferred screen: a friendlier title, a relabeled/validated field, an extra action button beyond plain create/update/delete. A struct with no screen block gets the default page unchanged.",
-                "grammar": [
-                    "screen_decl    ::= \"screen\" ident \"{\" screen_item* \"}\"",
-                    "screen_item    ::= paginate_block | field_override | action_decl | layout_decl | kv_entry",
-                    "paginate_block ::= \"paginate\" \"{\" kv_entry* \"}\"",
-                    "field_override ::= \"field\" ident \"{\" kv_entry* \"}\"",
-                    "action_decl    ::= \"action\" string \"->\" ident (\"{\" kv_entry* \"}\")?",
-                    "kv_entry       ::= ident \":\" expr"
-                ],
-                "checked": {
-                    "screen <Name>": "must name a real struct",
-                    "field <fname>": "must name a real field of that struct",
-                    "list/create/update/delete, an action's -> target": "must resolve to a real function",
-                    "view/edit": "must be role(...)/claim(...) with string-literal args -- same shape requires(...) itself accepts",
-                    "pattern": "string literal, valid regex; str field only",
-                    "format": "one of a fixed set: email/phone/date/url/uuid; str field only; may not be combined with pattern on the same field",
-                    "min/max": "int/float literal; numeric field only",
-                    "render": "must be \"countdown\" (the only value with meaning so far); integer field only"
-                },
-                "keys_and_effects": {
-                    "title": "overrides the nav label/heading/toast text; defaults to the struct name",
-                    "field <name> { label: \"...\" }": "overrides that field's displayed label everywhere shown; defaults to the raw field name",
-                    "list/create/update/delete": "overrides which function backs that slot; defaults to the <kind>_<snake_case_struct_name> naming convention",
-                    "action \"<label>\" -> <fn> { style, confirm, show_result }": "extra per-row button beyond the inferred CRUD set; calls <fn> with just the row's primary-key-shaped first param; window.confirm(...)-gated when confirm is set",
-                    "show_result: true": "opens <fn>'s own JSON response in a modal on success instead of a plain row-refresh -- <fn> must return Result(json, _)",
-                    "field { view, edit }": "role/claim visibility, enforced both client- and server-side (view-gated fields are redacted to null server-side; edit-gated changes are rejected 403 server-side)",
-                    "field { pattern/format }": "constrains a str field's value on both create_<S> and update_<S>, both as an HTML5 attribute (cosmetic) and as a real server-side check",
-                    "field { min/max }": "same, for a numeric field",
-                    "field { render: \"countdown\" }": "display-only: an integer unix-seconds field renders as a live 'ticking down' chip instead of the raw number, client-side only, no new route or network traffic"
-                }
-            },
-            "layout": {
-                "purpose": "An optional arrangement tree, declared inside a screen block, over that same field/action set -- rows/columns/groups/tabs/dividers instead of one flat implicit top-to-bottom list. At most one per screen.",
-                "grammar": [
-                    "layout_decl ::= \"layout\" \"{\" layout_node* \"}\"",
-                    "layout_node ::= (\"row\" | \"column\" | \"grid\" | \"group\" string?) layout_body",
-                    "              | \"tabs\" \"{\" (\"tab\" string \"{\" layout_node* \"}\")* \"}\"",
-                    "              | \"field\" ident",
-                    "              | \"action\" string",
-                    "              | ident layout_body            // widget leaf, e.g. divider {}",
-                    "layout_body ::= \"{\" kv_entry* layout_node* \"}\""
-                ],
-                "note": "row/column/grid/group/tabs/field/action are contextual keywords, reserved only as a layout_node's own leading identifier; any OTHER identifier is a widget leaf (kind = that identifier's text -- divider/card/timeline are the validated closed list so far)."
-            },
-            "dashboard": {
-                "purpose": "One dashboard section per program, built from stat_/chart_-prefixed functions by naming convention alone, or explicit tile/chart/visual entries.",
-                "grammar": [
-                    "dashboard_decl ::= \"dashboard\" \"{\" dashboard_item* \"}\"",
-                    "dashboard_item ::= (\"tile\" | \"chart\") string \"->\" ident",
-                    "                  | \"visual\" string \"->\" ident (\"{\" kv_entry* \"}\")?"
-                ],
-                "note": "chart is deliberately, permanently one chart kind -- an inline-SVG bar chart, no external charting dependency. `visual` (Track E2) is the escape hatch for graph/heatmap/timeline kinds, not a change to what chart itself does; its target must resolve to a real function, and render is typechecked against a closed vocabulary."
-            },
-            "landing": {
-                "purpose": "Per-role/claim default-screen dispatch after sign-in.",
-                "grammar": [
-                    "landing_decl ::= \"landing\" \"{\" landing_rule* \"}\"",
-                    "landing_rule ::= (\"role\" \"(\" string \")\" | \"claim\" \"(\" string \",\" string \")\" | \"default\") \"->\" ident"
-                ],
-                "note": "target (after ->) must name a real screen's own struct name."
-            },
-            "serve": {
-                "purpose": "The compiled `nirdosha build file.nir --serve` config section: names functions reachable over HTTP beyond the implicit screen/dashboard-bound set.",
-                "grammar": [
-                    "serve_decl ::= \"serve\" \"{\" (\"expose\" ident (\",\" ident)* \",\"?)? \"}\""
-                ],
-                "note": "One serve { ... } block per program. A general per-program serve-config section by design -- expose is its first entry, not its only reason to exist. See serve_route_rules under naming_conventions for the enforcement rules at the route boundary."
-            },
-            "workspace_panel": {
-                "purpose": "A composite, multi-panel screen scoped to one instance of a subject struct -- for real screens that need fields/lists from several structs composed onto one page (e.g. a case's own fields alongside its transactions, alerts, and notes). Additive over screen_decl/dashboard_decl the same way those are additive over pure naming-convention inference.",
-                "grammar": [
-                    "workspace_decl ::= \"workspace\" ident \"{\" workspace_item* \"}\"",
-                    "workspace_item ::= panel_decl | kv_entry",
-                    "panel_decl     ::= \"panel\" string \"{\" panel_item* \"}\"",
-                    "panel_item     ::= action_decl | kv_entry"
-                ],
-                "note": "subject: <Struct> names the struct this workspace is opened per instance of (that struct must have an id: i64 field) -- every panel's source is called with that instance's id. action_decl inside panel_item is screen_item's own production, reused unchanged."
-            }
-        },
+        "role_gating": "Every archetype macro's `access`/`create`/`read`/`update`/`delete`/`post_access`/`read_access` field takes `public` or `requires role \"<name>\"`, expanding to the same #[nirdosha_rt::contract(requires(role = \"...\"))] mechanism get_grammar's `role_gating` field describes -- one unforgeable RoleProof-gated fn per protected action, never a runtime string comparison.",
+        "declarative_comment_layer": "A separate, currently-inert layer: nirdosha:screen/dashboard/workspace/layout/nav/visual doc-comment kinds (see get_grammar's comment_layer_grammar) describe the SAME archetypes in JSON form, but nothing in this codebase cross-references them against real code yet (docs/nirdosha-v2-comment-layer.md's own Phase 2, 'emit-ui reads the comment layer,' is still open). Use them to document intent machine-readably; don't rely on them to make anything render -- use the archetype macros above for that.",
         "sources": [
-            "docs/GRAMMAR.md (screen_decl/layout_decl/dashboard_decl/landing_decl/serve_decl/workspace_decl/panel_decl, fn_decl's effect_annotation/requires_annotation/nfr_annotation, field_mask_requires, audited_stmt)",
-            "docs/LANGUAGE.md §6a/§6e/§6f (annotations), §11/§11c (screen/dashboard), §15 (workspace/panel), §18 (layout)",
-            "agent-skills/nirdosha/paste-anywhere-prompt.md (naming-convention worked examples and gotchas)",
-            "crates/compiler/src/ui_gen.rs (the real list_/get_/create_/update_/delete_/stat_/chart_ prefix strings)"
+            "crates/nirdosha-macros/src/{crud_screens,dashboard,kanban_board,wizard,settings_screen,communication_feed,categorical}.rs (every invocation above is quoted verbatim from that file's own module doc comment)",
+            "rfcs/0009-ui-catalog-extensibility.md (Track C archetypes)",
+            "docs/nirdosha-v2-comment-layer.md §3/§4/§6 (the comment-layer kinds' design, and why they're additive/inert today)"
         ]
     }))
-}
-
-fn describe_program(program: &crate::ast::Program) -> serde_json::Value {
-    let functions: Vec<serde_json::Value> = program
-        .fns
-        .iter()
-        .map(|f| {
-            json!({
-                "name": f.name,
-                "params": f.params.iter().map(|p| json!({ "name": p.name, "type": p.ty })).collect::<Vec<_>>(),
-                "return_type": f.ret,
-                "effects": f.declared_effects,
-                "requires": f.requires,
-                "nfr": f.nfr,
-                "exported": f.exported,
-            })
-        })
-        .collect();
-    let structs: Vec<serde_json::Value> = program
-        .structs
-        .iter()
-        .map(|s| {
-            json!({
-                "name": s.name,
-                "fields": s.fields.iter().map(|f| json!({ "name": f.name, "type": f.ty })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    let enums: Vec<serde_json::Value> = program
-        .enums
-        .iter()
-        .map(|e| {
-            json!({
-                "name": e.name,
-                "variants": e.variants.iter().map(|v| json!({ "name": v.name, "payload": v.payload })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    let validates: Vec<serde_json::Value> = program
-        .validates
-        .iter()
-        .map(|v| {
-            json!({
-                "fn_name": v.fn_name,
-                "entries": v.entries.iter().map(|(key, expr)| json!({ "key": key, "expr": expr })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    json!({ "functions": functions, "structs": structs, "enums": enums, "validates": validates })
 }
 
 /// Wraps one tool handler's structured output in the MCP `tools/call`

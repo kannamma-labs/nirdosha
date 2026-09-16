@@ -244,3 +244,59 @@ path = "src/bench_kalman.nir"
 name = "v2_bench_matmul"
 path = "src/bench_matmul.nir"
 
+# fintech-canon (13 files, migrated from examples/fintech-canon):
+# small, self-contained invariant templates — mechanical `validate`
+# translations (01-12) plus one field-masking/role-gating example (13).
+
+[[bin]]
+name = "v2_fintech_01_nonnegative_balance"
+path = "src/fintech_canon/01_nonnegative_balance_after_debit.nir"
+
+[[bin]]
+name = "v2_fintech_02_overdraft_within_limit"
+path = "src/fintech_canon/02_overdraft_within_limit.nir"
+
+[[bin]]
+name = "v2_fintech_03_fee_never_reduces_total"
+path = "src/fintech_canon/03_fee_never_reduces_total.nir"
+
+[[bin]]
+name = "v2_fintech_04_refund_never_exceeds_original"
+path = "src/fintech_canon/04_refund_never_exceeds_original.nir"
+
+[[bin]]
+name = "v2_fintech_05_late_fee_capped"
+path = "src/fintech_canon/05_late_fee_capped.nir"
+
+[[bin]]
+name = "v2_fintech_06_minimum_payment_enforced"
+path = "src/fintech_canon/06_minimum_payment_enforced.nir"
+
+[[bin]]
+name = "v2_fintech_07_discount_bounded_price"
+path = "src/fintech_canon/07_discount_bounded_price.nir"
+
+[[bin]]
+name = "v2_fintech_08_transaction_within_daily_limit"
+path = "src/fintech_canon/08_transaction_within_daily_limit.nir"
+
+[[bin]]
+name = "v2_fintech_09_interest_accrual_nonnegative"
+path = "src/fintech_canon/09_interest_accrual_nonnegative.nir"
+
+[[bin]]
+name = "v2_fintech_10_ledger_debit_credit_conserved"
+path = "src/fintech_canon/10_ledger_debit_credit_conserved.nir"
+
+[[bin]]
+name = "v2_fintech_11_withdrawal_within_balance"
+path = "src/fintech_canon/11_withdrawal_within_balance.nir"
+
+[[bin]]
+name = "v2_fintech_12_credit_limit_not_exceeded"
+path = "src/fintech_canon/12_credit_limit_not_exceeded.nir"
+
+[[bin]]
+name = "v2_fintech_13_masked_account_pii"
+path = "src/fintech_canon/13_masked_account_pii.nir"
+
