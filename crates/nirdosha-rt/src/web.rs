@@ -68,6 +68,109 @@ impl Request {
     fn path_without_query(&self) -> &str {
         self.path.split('?').next().unwrap_or(&self.path)
     }
+
+    /// The parsed query string (`?a=1&b=2` → `{"a":"1","b":"2"}`).
+    pub fn query(&self) -> HashMap<String, String> {
+        match self.path.split_once('?') {
+            Some((_, q)) => parse_urlencoded(q),
+            None => HashMap::new(),
+        }
+    }
+
+    /// The request body as key→value strings, regardless of whether it
+    /// arrived as `application/json` (an API caller) or
+    /// `application/x-www-form-urlencoded` (an ordinary HTML `<form>`
+    /// POST — this dialect has no client-side JS, so every screen's
+    /// form submits the plain browser default). One body shape, one
+    /// parser either way — screens and the JSON API share the exact
+    /// same create/update functions.
+    pub fn form_or_json(&self) -> HashMap<String, String> {
+        match self.header("content-type") {
+            Some(ct) if ct.starts_with("application/json") => serde_json::from_str::<serde_json::Value>(&self.body)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .map(|obj| obj.into_iter().map(|(k, v)| (k, json_scalar_to_string(&v))).collect())
+                .unwrap_or_default(),
+            _ => parse_urlencoded(&self.body),
+        }
+    }
+}
+
+fn json_scalar_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_urlencoded(s: &str) -> HashMap<String, String> {
+    s.split('&')
+        .filter(|p| !p.is_empty())
+        .filter_map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            Some((url_decode(k), url_decode(v)))
+        })
+        .collect()
+}
+
+/// Percent-decodes into bytes first, then interprets as UTF-8 — naive
+/// char-by-char decoding would corrupt any multi-byte percent-encoded
+/// sequence (e.g. `%C3%A9`).
+fn url_decode(s: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '+' => bytes.push(b' '),
+            '%' => {
+                let hex: String = chars.by_ref().take(2).collect();
+                match u8::from_str_radix(&hex, 16) {
+                    Ok(byte) => bytes.push(byte),
+                    Err(_) => bytes.extend_from_slice(hex.as_bytes()),
+                }
+            }
+            c => {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Escapes `&`, `<`, `>`, `"`, `'` for safe interpolation into HTML —
+/// every screen renderer routes user/entity data through this before
+/// writing it into a page; nothing here ever trusts stored data to be
+/// pre-sanitized.
+pub fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// The one shared page template every server-rendered screen (and
+/// `dashboard!`) wraps its body in — no client-side JS, no build step,
+/// just enough CSS to make tables/forms/widgets legible.
+pub fn page_shell(title: &str, extra_head: &str, body: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title>{extra_head}\
+         <style>\
+         body{{font-family:sans-serif;margin:2rem;color:#222}}\
+         table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:0.5rem;text-align:left}}\
+         th{{background:#f5f5f5}}\
+         .widget{{display:inline-block;vertical-align:top;margin:0 1.5rem 1.5rem 0;padding:1rem;border:1px solid #ccc;border-radius:6px}}\
+         .metric .value{{font-size:2rem;font-weight:bold}}.metric.alert .value{{color:#c0392b}}\
+         .metric .label,.chart .label{{color:#666;font-size:0.9rem}}\
+         .empty{{color:#666;font-style:italic}}\
+         form p{{margin:0.5rem 0}}label{{display:inline-block;width:10rem}}\
+         .danger{{color:#c0392b}}.errors{{color:#c0392b}}\
+         </style></head><body><h1>{}</h1>{body}</body></html>",
+        html_escape(title),
+        html_escape(title),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +178,7 @@ pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
     pub body: String,
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl Response {
@@ -83,6 +187,7 @@ impl Response {
             status,
             content_type: "application/json",
             body: value.to_string(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -91,6 +196,16 @@ impl Response {
             status,
             content_type: "text/plain",
             body: body.into(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    pub fn html(status: u16, body: impl Into<String>) -> Response {
+        Response {
+            status,
+            content_type: "text/html; charset=utf-8",
+            body: body.into(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -99,6 +214,7 @@ impl Response {
             status: 204,
             content_type: "text/plain",
             body: String::new(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -114,14 +230,32 @@ impl Response {
         Response::text(400, msg)
     }
 
+    /// A 302 redirect — used by every screen's POST handler (create,
+    /// update, delete) to send the browser to the resulting page
+    /// instead of rendering a bare API response, since these are
+    /// ordinary `<form>` submissions, not API calls.
+    pub fn redirect(location: impl Into<String>) -> Response {
+        Response {
+            status: 302,
+            content_type: "text/plain",
+            body: String::new(),
+            extra_headers: vec![("Location".to_string(), location.into())],
+        }
+    }
+
     fn write_to(&self, conn: &crate::prelude::Tcp) {
-        conn.send(&format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
             reason_phrase(self.status),
             self.content_type,
             self.body.len(),
-        ));
+        );
+        for (name, value) in &self.extra_headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        conn.send(&head);
         conn.send(&self.body);
     }
 }
@@ -386,7 +520,20 @@ impl Router {
                 Some(req) => self.dispatch(&req),
                 None => Response::bad_request("malformed request"),
             };
-            response.write_to(&conn);
+            // A client that disconnects mid-response (a closed tab, a
+            // cancelled prefetch, an aggressive timeout) must not take
+            // the whole server down with it. `Tcp::send` panics on a
+            // broken pipe — the right behavior for `.nir`'s own
+            // send/recv contract, where a write failure usually means a
+            // real bug — but a long-running HTTP server sees this
+            // condition routinely and must survive it, the same way
+            // `Tcp::recv` already tolerates a closed peer. Isolating
+            // just this connection's write behind `catch_unwind` gets
+            // that survival without changing `Tcp::send`'s panic
+            // contract for every other caller in the dialect.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                response.write_to(&conn);
+            }));
             crate::prelude::stop(conn);
         }
     }
@@ -409,6 +556,52 @@ mod tests {
         assert_eq!(req.path, "/api/products");
         assert_eq!(req.header("authorization"), Some("Bearer tok"));
         assert_eq!(req.body, "{\"name\":\"Widget\"}");
+    }
+
+    #[test]
+    fn query_string_is_parsed() {
+        let req = Request {
+            method: "GET".into(),
+            path: "/api/products?q=widget&page=2".into(),
+            headers: HashMap::new(),
+            body: String::new(),
+        };
+        let q = req.query();
+        assert_eq!(q.get("q"), Some(&"widget".to_string()));
+        assert_eq!(q.get("page"), Some(&"2".to_string()));
+    }
+
+    #[test]
+    fn form_urlencoded_body_is_parsed_with_percent_decoding() {
+        let req = Request {
+            method: "POST".into(),
+            path: "/api/products".into(),
+            headers: HashMap::new(),
+            body: "name=Caf%C3%A9+Table&price_cents=999".into(),
+        };
+        let form = req.form_or_json();
+        assert_eq!(form.get("name"), Some(&"Café Table".to_string()));
+        assert_eq!(form.get("price_cents"), Some(&"999".to_string()));
+    }
+
+    #[test]
+    fn json_body_is_parsed_the_same_way_form_is() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        let req = Request {
+            method: "POST".into(),
+            path: "/api/products".into(),
+            headers,
+            body: r#"{"name":"Widget","price_cents":999}"#.into(),
+        };
+        let form = req.form_or_json();
+        assert_eq!(form.get("name"), Some(&"Widget".to_string()));
+        assert_eq!(form.get("price_cents"), Some(&"999".to_string()));
+    }
+
+    #[test]
+    fn html_escape_neutralizes_markup() {
+        assert_eq!(html_escape("<script>alert('x')</script>"), "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;");
     }
 
     #[test]
@@ -480,6 +673,38 @@ mod tests {
 
         fn segment_strategy() -> impl Strategy<Value = String> {
             "[a-z][a-z0-9_]{1,8}"
+        }
+
+        fn percent_encode(s: &str) -> String {
+            s.bytes()
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+                    _ => format!("%{b:02X}"),
+                })
+                .collect()
+        }
+
+        proptest! {
+            /// Percent-decoding round-trips arbitrary Unicode strings
+            /// through an ordinary percent-encoder — the byte-buffer
+            /// decode (not a naive char-by-char one) has to get
+            /// multi-byte UTF-8 right, not just ASCII.
+            #[test]
+            fn url_decode_round_trips_arbitrary_strings(s in ".*") {
+                let form = format!("k={}", percent_encode(&s));
+                let parsed = parse_urlencoded(&form);
+                prop_assert_eq!(parsed.get("k").map(String::as_str), Some(s.as_str()));
+            }
+
+            /// html_escape's output never contains a raw `<` or `>`,
+            /// for any input — the property that actually makes it
+            /// safe to interpolate into HTML.
+            #[test]
+            fn html_escape_leaves_no_raw_markup_delimiters(s in ".*") {
+                let escaped = html_escape(&s);
+                prop_assert!(!escaped.contains('<'));
+                prop_assert!(!escaped.contains('>'));
+            }
         }
 
         proptest! {

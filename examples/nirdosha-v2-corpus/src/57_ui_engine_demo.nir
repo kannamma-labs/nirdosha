@@ -1,0 +1,134 @@
+//! v2 example: RFC 0009 Track C's UI engine — CRUD screens (List/
+//! Detail/Create-Form/Edit-Form/Delete-confirmation), categorical
+//! actions (`is_approved` → approve/disapprove), and a Dashboard, all
+//! attached to the *same* real datasource (`product_store`). Nothing
+//! here is a separate demo per screen type — one entity, one store,
+//! every screen genuinely reads/writes it.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use nirdosha_v2::{auth_from_identity, oidc_validate_token};
+
+nirdosha_rt::roles! {
+    Admin = "admin";
+    Approver = "approver";
+    ComplianceOfficer = "compliance_officer";
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+struct Product {
+    id: i64,
+    name: String,
+    price_cents: i64,
+    cost_cents: i64,
+    is_approved: bool,
+}
+
+fn product_store() -> &'static Mutex<HashMap<i64, Product>> {
+    static STORE: OnceLock<Mutex<HashMap<i64, Product>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// --- CRUD screens: List, Detail, Create form, Edit form, Delete
+// confirmation — both HTML (for a browser) and JSON (for an API
+// caller), attached to `product_store` directly.
+nirdosha_rt::crud_screens! {
+    mount: mount_product_screens,
+    entity: Product,
+    store: product_store,
+    path: "/products",
+    fields: [ name: String, price_cents: i64, cost_cents: i64 ],
+    create: requires role "admin",
+    read: public,
+    update: requires role "admin",
+    delete: requires role "admin",
+}
+
+// --- categorical action: is_approved -> approve/disapprove, two
+// independently role-gated transitions on the same entity/store.
+nirdosha_rt::categorical_actions! {
+    entity: Product,
+    store: product_store,
+    field: is_approved: bool,
+    actions {
+        true  => approve_product    requires role "approver",
+        false => disapprove_product requires role "compliance_officer",
+    }
+}
+
+// --- dashboard: reads the same store the CRUD screens and categorical
+// actions just wrote to.
+fn stat_total_products() -> i64 {
+    product_store().lock().unwrap().len() as i64
+}
+
+fn stat_approved_products() -> i64 {
+    product_store().lock().unwrap().values().filter(|p| p.is_approved).count() as i64
+}
+
+fn chart_products_by_status() -> String {
+    let store = product_store().lock().unwrap();
+    let approved = store.values().filter(|p| p.is_approved).count();
+    let pending = store.len() - approved;
+    serde_json::json!([
+        {"label": "Approved", "value": approved},
+        {"label": "Pending", "value": pending},
+    ])
+    .to_string()
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_products_dashboard,
+    path: "/dashboard",
+    title: "Product Overview",
+    refresh_seconds: 30,
+    widgets {
+        Metric { label: "Total Products", fn: stat_total_products },
+        Metric { label: "Approved", fn: stat_approved_products },
+        Chart  { label: "By Status", fn: chart_products_by_status, mark: bar },
+    }
+}
+
+// --- auth: the same OIDC-fixture flow the rest of the corpus uses.
+const ISSUER: &str = "https://mock-idp.local";
+const AUDIENCE: &str = "ui-engine-demo";
+const JWKS: &str = r#"{"keys":[{"kid":"key1","kty":"oct","k":"bXktc2VjcmV0LWtleQ"}]}"#;
+
+fn auth_for(req: &nirdosha_rt::Request) -> nirdosha_rt::Auth {
+    match req.header("authorization").and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(token) => match oidc_validate_token(token, ISSUER, AUDIENCE, JWKS) {
+            Ok(identity) => auth_from_identity(&identity),
+            Err(_) => nirdosha_rt::Auth::login("anonymous", &[]),
+        },
+        None => nirdosha_rt::Auth::login("anonymous", &[]),
+    }
+}
+
+fn main() {
+    let router = nirdosha_rt::Router::new(auth_for).with_info("Product UI Engine", "1.0.0");
+    let router = mount_product_screens(router);
+    let router = mount_products_dashboard(router);
+    let router = router
+        .post_gated::<nirdosha_roles::Approver>("/api/products/{id}/approve", "Approve a product", |_req, params, proof| {
+            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => return nirdosha_rt::Response::bad_request("id must be an integer"),
+            };
+            match approve_product(proof, id) {
+                Ok(p) => nirdosha_rt::Response::json(200, &serde_json::to_value(&p).unwrap()),
+                Err(e) => nirdosha_rt::Response::bad_request(e),
+            }
+        })
+        .post_gated::<nirdosha_roles::ComplianceOfficer>("/api/products/{id}/disapprove", "Disapprove a product", |_req, params, proof| {
+            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => return nirdosha_rt::Response::bad_request("id must be an integer"),
+            };
+            match disapprove_product(proof, id) {
+                Ok(p) => nirdosha_rt::Response::json(200, &serde_json::to_value(&p).unwrap()),
+                Err(e) => nirdosha_rt::Response::bad_request(e),
+            }
+        });
+    router.serve(8096);
+}

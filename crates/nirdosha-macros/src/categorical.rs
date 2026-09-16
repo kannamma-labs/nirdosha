@@ -48,16 +48,7 @@ struct CategoricalInput {
     actions: Vec<ActionArm>,
 }
 
-fn expect_keyword(input: ParseStream, expected: &str) -> syn::Result<()> {
-    let ident: Ident = input.parse()?;
-    if ident != expected {
-        return Err(syn::Error::new(
-            ident.span(),
-            format!("expected `{expected}`, found `{ident}`"),
-        ));
-    }
-    Ok(())
-}
+use crate::util::expect_keyword;
 
 impl Parse for CategoricalInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {

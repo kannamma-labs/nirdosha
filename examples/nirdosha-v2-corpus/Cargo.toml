@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 nirdosha-rt = { path = "../../crates/nirdosha-rt" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # The corpus IS the target of the migration — in-dialect from day one.
@@ -214,6 +215,10 @@ path = "src/55_policy_forbidden_operations.nir"
 [[bin]]
 name = "v2_56_product_crud_api"
 path = "src/56_product_crud_api.nir"
+
+[[bin]]
+name = "v2_57_ui_engine_demo"
+path = "src/57_ui_engine_demo.nir"
 
 [[bin]]
 name = "v2_bench_det"

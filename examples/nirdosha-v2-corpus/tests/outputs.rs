@@ -731,6 +731,125 @@ fn product_crud_api_serves_real_requests() {
     assert!(status.contains("404"), "got: {status}");
 }
 
+/// 57 combines every RFC 0009 Track C piece — `crud_screens!`,
+/// `categorical_actions!`, and `dashboard!` — attached to the same
+/// live `product_store`. This test proves they're actually wired
+/// together, not three independent demos: a product created through
+/// the CRUD API is visible in the List/Detail HTML screens, approving
+/// it through the categorical action changes what the Dashboard
+/// reports, and a wrong role on the categorical action is a real 403.
+#[test]
+fn ui_engine_demo_wires_crud_categorical_and_dashboard_to_one_store() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::process::{Child, Stdio};
+    use std::time::Duration;
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let exe = env_bin("v2_57_ui_engine_demo");
+    let _child = ChildGuard(
+        Command::new(&exe)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("ui engine demo bin"),
+    );
+
+    fn request(method: &str, path: &str, bearer: Option<&str>, body: &str) -> (String, String) {
+        let mut last_err = String::new();
+        for _ in 0..100 {
+            match TcpStream::connect("127.0.0.1:8096") {
+                Ok(mut stream) => {
+                    let auth_header = match bearer {
+                        Some(tok) => format!("Authorization: Bearer {tok}\r\n"),
+                        None => String::new(),
+                    };
+                    let req = format!(
+                        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    stream.write_all(req.as_bytes()).unwrap();
+                    let mut out = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => out.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&out).into_owned();
+                    let status_line = text.lines().next().unwrap_or_default().to_string();
+                    let response_body = text.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+                    return (status_line, response_body);
+                }
+                Err(e) => {
+                    last_err = format!("{e}");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        panic!("ui engine demo never came up: {last_err}");
+    }
+
+    const ADMIN: &str = r#"mock.{"sub":"alice","roles":["admin"]}.sig"#;
+    const APPROVER: &str = r#"mock.{"sub":"carol","roles":["approver"]}.sig"#;
+
+    // The literal-suffix route ordering fix: /products/new must not be
+    // swallowed by /products/{id} -- and it's gated the same as create
+    // (admin), so it needs a real admin token, not an anonymous request.
+    let (status, body) = request("GET", "/products/new", Some(ADMIN), "");
+    assert!(status.contains("200"), "got: {status}");
+    assert!(body.contains("<form"), "got: {body}");
+
+    // Dashboard starts at zero -- reading the same store CRUD is about to write to.
+    let (_, body) = request("GET", "/dashboard.json", None, "");
+    let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(doc["widgets"][0]["value"], 0.0);
+
+    // Create through the CRUD API.
+    let (status, body) = request("POST", "/api/products", Some(ADMIN), r#"{"name":"Widget","price_cents":999,"cost_cents":300}"#);
+    assert!(status.contains("201"), "got: {status}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = created["id"].as_i64().unwrap();
+
+    // Visible in the List/Detail HTML screens.
+    let (_, body) = request("GET", "/products", None, "");
+    assert!(body.contains("Widget"), "got: {body}");
+    let (_, body) = request("GET", &format!("/products/{id}"), None, "");
+    assert!(body.contains("Widget"), "got: {body}");
+
+    // Dashboard now reports one product.
+    let (_, body) = request("GET", "/dashboard.json", None, "");
+    let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(doc["widgets"][0]["value"], 1.0);
+    assert_eq!(doc["widgets"][1]["value"], 0.0); // not yet approved
+
+    // The wrong role on the categorical action is a real 403.
+    let (status, _) = request("POST", &format!("/api/products/{id}/approve"), Some(ADMIN), "");
+    assert!(status.contains("403"), "got: {status}");
+
+    // The right role approves it -- and the Dashboard reflects the
+    // same mutation the categorical action just made.
+    let (status, _) = request("POST", &format!("/api/products/{id}/approve"), Some(APPROVER), "");
+    assert!(status.contains("200"), "got: {status}");
+    let (_, body) = request("GET", "/dashboard.json", None, "");
+    let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(doc["widgets"][1]["value"], 1.0);
+
+    // OpenAPI reports every route, including the categorical actions
+    // registered by hand in main() alongside the macro-generated ones.
+    let (_, body) = request("GET", "/openapi.json", None, "");
+    let openapi: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(openapi["paths"]["/api/products/{id}/approve"]["post"]["security"][0]["nirdoshaRole"][0], "approver");
+}
+
 /// 53 needs a reachable Redis, like the original — the golden test
 /// stands one up (a +PONG responder), then the three REAL provider
 /// POSTs flow to the example's own listener. A blocked child is

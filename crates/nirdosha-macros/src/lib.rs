@@ -39,6 +39,9 @@
 //! over-approximate (see `nirdosha-contract-core/src/scan.rs`).
 
 mod categorical;
+mod crud_screens;
+mod dashboard;
+mod util;
 
 use nirdosha_contract_core as cc;
 use proc_macro::TokenStream;
@@ -56,6 +59,19 @@ pub fn contract(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn categorical_actions(input: TokenStream) -> TokenStream {
     categorical::expand(input)
+}
+
+/// See `dashboard::expand`'s module doc — RFC 0009 Track C Phase 0.
+#[proc_macro]
+pub fn dashboard(input: TokenStream) -> TokenStream {
+    dashboard::expand(input)
+}
+
+/// See `crud_screens::expand`'s module doc — RFC 0009 Track C's
+/// CRUD/List/Detail/Form/Delete archetypes, attached to a datasource.
+#[proc_macro]
+pub fn crud_screens(input: TokenStream) -> TokenStream {
+    crud_screens::expand(input)
 }
 
 fn expand(

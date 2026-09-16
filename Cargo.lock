@@ -2157,6 +2157,7 @@ name = "nirdosha-v2-corpus"
 version = "0.1.0"
 dependencies = [
  "nirdosha-rt",
+ "serde",
  "serde_json",
 ]
 
