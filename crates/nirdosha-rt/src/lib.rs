@@ -23,7 +23,9 @@
 //! fn main() {}
 //! ```
 
-pub use nirdosha_macros::{categorical_actions, contract, crud_screens, dashboard, kanban_board, settings_screen, wizard};
+pub use nirdosha_macros::{
+    categorical_actions, communication_feed, contract, crud_screens, dashboard, kanban_board, settings_screen, wizard,
+};
 
 pub mod dashboard;
 pub mod nfr;
@@ -33,6 +35,7 @@ pub mod prelude;
 pub mod native;
 pub mod role;
 pub mod board;
+pub mod feed;
 pub mod screens;
 pub mod web;
 pub mod wizard;

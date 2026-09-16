@@ -39,6 +39,7 @@
 //! over-approximate (see `nirdosha-contract-core/src/scan.rs`).
 
 mod categorical;
+mod communication_feed;
 mod crud_screens;
 mod dashboard;
 mod kanban_board;
@@ -97,6 +98,14 @@ pub fn wizard(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn kanban_board(input: TokenStream) -> TokenStream {
     kanban_board::expand(input)
+}
+
+/// See `communication_feed::expand`'s module doc — RFC 0009 Track C's
+/// Communication archetype: an append-only feed, honestly polling
+/// (`<meta http-equiv="refresh">`), not real server push.
+#[proc_macro]
+pub fn communication_feed(input: TokenStream) -> TokenStream {
+    communication_feed::expand(input)
 }
 
 fn expand(
