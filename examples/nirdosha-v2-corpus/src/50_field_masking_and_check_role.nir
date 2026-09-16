@@ -1,15 +1,22 @@
 //! v2 of `examples/features/50_field_masking_and_check_role.nir` — the
 //! flagship: field-level `requires(role)` masking composed with
-//! function-level `requires` + `acquire`, `effect(pure)`, `nfr(...)`,
-//! and a Z3-proven `validate` — all on one function. Two independent
-//! gates: `get_employee requires(role: "hr_staff")` decides who can
-//! call it at all; the `salary` field's own `requires(role: "admin")`
-//! decides what a successful caller sees back. Under plain cargo the
-//! field gate's executable half is `mask_f64_unless(caller, ...)` —
-//! under the proprietary tier the DECLARED gate (`nirdosha:field`)
-//! masks automatically and the call becomes a checked redundancy.
+//! function-level `requires`, `effect(pure)`, `nfr(...)`, and a
+//! Z3-proven `validate` — all on one function. Two independent gates:
+//! `get_employee requires(role: "hr_staff")` decides who can call it
+//! at all (compiler-injected `RoleProof<HrStaff>` — real, not a string
+//! comparison); the `salary` field's own `requires(role: "admin")`
+//! decides what a successful caller sees back, via a hand-written
+//! `Option<&RoleProof<Admin>>` parameter (per-field gating isn't a
+//! macro feature) checked by `mask_unless`. Under the proprietary tier
+//! the DECLARED gate (`nirdosha:field`) masks automatically and this
+//! call becomes a checked redundancy.
 
-use nirdosha_v2::{acquire, check_role, identity_with_roles, mask_f64_unless, RoleProof, VerifiedIdentity};
+use nirdosha_v2::{auth_from_identity, identity_with_roles, mask_unless, VerifiedIdentity};
+
+nirdosha_rt::roles! {
+    HrStaff = "hr_staff";
+    Admin = "admin";
+}
 
 struct Text {
     value: String,
@@ -37,12 +44,17 @@ fn tenure_bonus_pct(years: i64) -> i64 {
 }
 
 /// nirdosha:field {"struct":"Employee","field":"salary","requires":{"role":"admin"}}
-/// nirdosha:contract {"effects":["pure"],"requires":{"role":"hr_staff"},"nfr":{"latency_ms":50,"concurrency_max":1000}}
-fn get_employee(caller: RoleProof, name: Text, department: Text, salary: f64) -> Employee {
+#[nirdosha_rt::contract(effects(pure), requires(role = "hr_staff"), nfr(latency_ms = 50, concurrency_max = 1000))]
+fn get_employee(
+    admin_proof: Option<&nirdosha_rt::RoleProof<nirdosha_roles::Admin>>,
+    name: Text,
+    department: Text,
+    salary: f64,
+) -> Employee {
     Employee {
         name: name.value,
         department: department.value,
-        salary: mask_f64_unless(&caller, "admin", salary),
+        salary: mask_unless(admin_proof, salary),
     }
 }
 
@@ -50,47 +62,50 @@ fn main() {
     let bonus: i64 = tenure_bonus_pct(7);
     println!("{bonus}"); // 10 — proven in [0, 20] for every possible input
 
-    // Proves both "hr_staff" (to acquire get_employee at all) and
-    // "admin" (to pass as `caller`, so the masked field passes
-    // through untouched) — two separate check_role calls, since a
-    // RoleView only ever proves the one role it was checked against.
+    // Proves both "hr_staff" (to call get_employee at all — the
+    // compiler injects the `RoleProof<HrStaff>` parameter) and "admin"
+    // (so the masked field passes through untouched) — two separate
+    // `Auth::prove` calls, since a proof is only ever good for the one
+    // role type it was minted for.
     let admin_identity: VerifiedIdentity = identity_with_roles("alice", "hr_staff,admin");
-    let admin_view = match check_role(&admin_identity, "hr_staff") {
+    let admin_auth = auth_from_identity(&admin_identity);
+    let admin_view = match admin_auth.prove::<nirdosha_roles::HrStaff>() {
         Err(_e) => Employee { name: String::new(), department: String::new(), salary: -1.0 },
-        Ok(hr_proof) => match acquire(get_employee, hr_proof.clone()) {
-            Ok(f) => match check_role(&admin_identity, "admin") {
-                Err(_e) => f(hr_proof, Text { value: "Ada Lovelace".into() }, Text { value: "Engineering".into() }, 150000.0),
-                Ok(admin_proof) => f(admin_proof, Text { value: "Ada Lovelace".into() }, Text { value: "Engineering".into() }, 150000.0),
-            },
-            Err(_msg) => Employee { name: "denied".into(), department: String::new(), salary: -2.0 },
-        },
+        Ok(hr_proof) => {
+            let admin_proof = admin_auth.prove::<nirdosha_roles::Admin>().ok();
+            get_employee(&hr_proof, admin_proof.as_ref(), Text { value: "Ada Lovelace".into() }, Text { value: "Engineering".into() }, 150000.0)
+        }
     };
     println!("{}", admin_view.salary); // 150000 — caller proved "admin"
 
     // Proves "hr_staff" only — the function-level gate is satisfied,
-    // but the only RoleView available to pass as `caller` proves
-    // "hr_staff", not "admin", so the field gate masks salary.
+    // but there's no "admin" proof to offer, so the field gate masks
+    // salary (`admin_proof` is `None`).
     let hr_identity: VerifiedIdentity = identity_with_roles("carol", "hr_staff");
-    let hr_view = match check_role(&hr_identity, "hr_staff") {
+    let hr_auth = auth_from_identity(&hr_identity);
+    let hr_view = match hr_auth.prove::<nirdosha_roles::HrStaff>() {
         Err(_e) => Employee { name: String::new(), department: String::new(), salary: -1.0 },
-        Ok(hr_proof) => match acquire(get_employee, hr_proof.clone()) {
-            Ok(f) => f(hr_proof, Text { value: "Ada Lovelace".into() }, Text { value: "Engineering".into() }, 150000.0),
-            Err(_msg) => Employee { name: "denied".into(), department: String::new(), salary: -2.0 },
-        },
+        Ok(hr_proof) => {
+            let admin_proof = hr_auth.prove::<nirdosha_roles::Admin>().ok();
+            get_employee(&hr_proof, admin_proof.as_ref(), Text { value: "Ada Lovelace".into() }, Text { value: "Engineering".into() }, 150000.0)
+        }
     };
     println!("{}", hr_view.salary); // 0 — masked
     println!("{}", hr_view.name); // Ada Lovelace — unmasked fields pass through
 
-    // Proves neither role — check_role itself fails, so there's no
-    // RoleView to offer `acquire` in the first place: fail-closed a
-    // full step earlier than the field-masking case.
+    // Proves neither role — `Auth::prove::<HrStaff>()` itself fails,
+    // so `get_employee` is never even called: fail-closed a full step
+    // earlier than the field-masking case, and it's a type-level
+    // impossibility to call it without a proof, not a runtime check
+    // this branch happens to take.
     let outsider_identity: VerifiedIdentity = identity_with_roles("mallory", "guest");
-    let outsider_view = match check_role(&outsider_identity, "hr_staff") {
+    let outsider_auth = auth_from_identity(&outsider_identity);
+    let outsider_view = match outsider_auth.prove::<nirdosha_roles::HrStaff>() {
         Err(_e) => Employee { name: "no_access".into(), department: String::new(), salary: -3.0 },
-        Ok(hr_proof) => match acquire(get_employee, hr_proof.clone()) {
-            Ok(f) => f(hr_proof, Text { value: "Ada Lovelace".into() }, Text { value: "Engineering".into() }, 150000.0),
-            Err(_msg) => Employee { name: "denied".into(), department: String::new(), salary: -3.0 },
-        },
+        Ok(hr_proof) => {
+            let admin_proof = outsider_auth.prove::<nirdosha_roles::Admin>().ok();
+            get_employee(&hr_proof, admin_proof.as_ref(), Text { value: "Ada Lovelace".into() }, Text { value: "Engineering".into() }, 150000.0)
+        }
     };
     println!("{}", outsider_view.salary); // -3 — never even reached the body
     println!("{}", outsider_view.name); // no_access

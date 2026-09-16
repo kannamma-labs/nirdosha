@@ -1,4 +1,8 @@
-use nirdosha_v2::{check_role, mock_issue_token, oidc_validate_token};
+use nirdosha_v2::{auth_from_identity, mock_issue_token, oidc_validate_token};
+
+nirdosha_rt::roles! {
+    Admin = "admin";
+}
 
 #[test]
 fn fixture_identity_flow_debug() {
@@ -9,5 +13,5 @@ fn fixture_identity_flow_debug() {
     let id = oidc_validate_token(&token, "https://mock-idp.local", "features-demo", jwks).unwrap();
     println!("SUBJECT: {:?}", id.subject);
     println!("ROLES: {:?}", id.roles);
-    assert!(check_role(&id, "admin").is_ok());
+    assert!(auth_from_identity(&id).prove::<nirdosha_roles::Admin>().is_ok());
 }

@@ -1,12 +1,14 @@
 //! v2 of `examples/syntax/06_identity_and_declarative_ui.nir` — the
-//! whole moat in one file: `requires`/`acquire`, `transact`, a
+//! whole moat in one file: `requires` (a real compiler-enforced proof),
+//! `transact`, a
 //! `workflow` state machine, `screen`/`dashboard`, and module
 //! namespacing.
 //!
 //! **The encoding, end to end:**
 //! - `use "06_shared_lib.nir"` → a `#[path]` module (extension intact)
-//! - `requires(role:)` → `nirdosha:contract` (verified today) + the
-//!   runtime `oidc → check_role → acquire` flow (`.nir`'s model)
+//! - `requires(role:)` → `#[nirdosha_rt::contract(requires(role = ..))]`,
+//!   a real compiler-enforced proof (`nirdosha_rt::Auth::prove::<R>()`),
+//!   not a hand-written string comparison
 //! - `requires(public)` → the `nirdosha:serve` channel (serve-surface
 //!   metadata, a Phase-0 grammar item)
 //! - `transact { ... }` → visible Rust body + `nirdosha:transact` claim
@@ -28,21 +30,25 @@ mod shared_lib;
 
 use nirdosha_rt::prelude::txn_id;
 use nirdosha_v2::{
-    check_role, acquire, json_parse, mock_issue_token, new_instance_id,
+    auth_from_identity, json_parse, mock_issue_token, new_instance_id,
     oidc_validate_token, VerifiedIdentity, WorkflowActionError,
 };
 use shared_lib::Shared::make_entry;
+
+nirdosha_rt::roles! {
+    Physician = "physician";
+}
 
 struct Text {
     value: String,
 }
 
 // --- 6a. Privileged first-class functions --------------------------
-// The gate: the *value* of `transfer_funds` is unobtainable without a
-// proof — `.nir`'s compiler enforces it; in v2 the contract claim is
-// checked by the Nirdosha compilers and the runtime flow mints proofs
-// only through `check_role`.
-/// nirdosha:contract {"requires":{"role":"physician"}}
+// The gate: `transfer_funds` is uncallable without a
+// `RoleProof<Physician>` — the macro injects the leading proof
+// parameter itself, and its private constructor means only
+// `Auth::prove::<Physician>()` can mint one, under any Rust toolchain.
+#[nirdosha_rt::contract(requires(role = "physician"))]
 fn transfer_funds(amount: i64) -> i64 {
     amount
 }
@@ -238,11 +244,8 @@ fn main() {
     };
 
     let acquired: i64 = match oidc_validate_token(&token, "https://example.com", "my-app", jwks) {
-        Ok(identity) => match check_role(&identity, "physician") {
-            Ok(proof) => match acquire(transfer_funds, proof) {
-                Ok(f) => f(500),
-                Err(_e) => -1,
-            },
+        Ok(identity) => match auth_from_identity(&identity).prove::<nirdosha_roles::Physician>() {
+            Ok(proof) => transfer_funds(&proof, 500),
             Err(_e) => -2,
         },
         Err(_e) => -3,

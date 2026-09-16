@@ -17,8 +17,8 @@
 //! | `db_connect`/`db_execute`/`db_query` | in-memory row store for the corpus SQL shapes | SQLite/rqlite |
 //! | `mq_connect`/`mq_publish` | always `Err` (matches the examples: no Redis running) | Redis pub/sub |
 //! | `http_get`/`http_post` | always `Err` (matches the examples: no listener) | real TcpStream/TLS |
-//! | `mock_issue_token`/`oidc_validate_token` | fixture JWKS round-trip | Row-12 identity kernel |
-//! | `check_role`/`acquire`/`VerifiedIdentity` | runtime role strings, .nir's model | Row-12 unforgeable views |
+//! | `mock_issue_token`/`oidc_validate_token`/`VerifiedIdentity` | fixture JWKS round-trip, roles as strings | Row-12 identity kernel |
+//! | `auth_from_identity` + `nirdosha_rt::Auth`/`RoleProof<R>` | real, compiler-enforced proofs today (not a fixture stand-in) | Row-12 unforgeable views underneath the same interface |
 //! | `json_parse`/`json_get_*` | mini-extractor over the fixture docs | real json |
 //! | `WorkflowActionError` etc. | plain enums | `workflow_lower`'s synthesized shapes |
 //!
@@ -38,13 +38,6 @@ use std::sync::Mutex;
 pub struct VerifiedIdentity {
     pub subject: String,
     pub roles: Vec<String>,
-}
-
-/// Minted *only* by `check_role` when the identity carries the role.
-/// Passing this to `acquire` is how a privileged fn's value is obtained.
-#[derive(Clone)]
-pub struct RoleProof {
-    pub role: String,
 }
 
 /// The deliberate, explicitly-named inverse of `oidc_validate_token`
@@ -83,27 +76,15 @@ pub fn oidc_validate_token(
     Ok(VerifiedIdentity { subject, roles })
 }
 
-/// `check_role(identity, "admin")` — the only minter of `RoleProof`.
+/// Bridge from an OIDC-validated identity to a real, compiler-enforced
+/// session: `nirdosha_rt::Auth::prove::<R>()` is the only way to mint a
+/// `nirdosha_rt::RoleProof<R>` (private constructor), so a fn taking one
+/// as a parameter is uncallable without it — under any Rust toolchain,
+/// no hand-written role comparison involved.
 /// nirdosha:contract {"effects":["pure"]}
-pub fn check_role(identity: &VerifiedIdentity, role: &str) -> Result<RoleProof, String> {
-    if identity.roles.iter().any(|r| r == role) {
-        Ok(RoleProof { role: role.to_string() })
-    } else {
-        Err(format!("identity lacks role `{role}`"))
-    }
-}
-
-/// `acquire f(proof)` — a privileged fn's value, unobtainable without
-/// a proof minted by `check_role`. Fallible, like the original: the
-/// proof must actually satisfy the fn's declared `requires` gate
-/// (enforced cross-referenced by Phase 1; the executable half today
-/// is the proof being minted by `check_role` at all).
-/// nirdosha:contract {"effects":["pure"]}
-pub fn acquire<T>(f: T, proof: RoleProof) -> Result<T, String> {
-    if proof.role.is_empty() {
-        return Err("acquire: no proof".into());
-    }
-    Ok(f)
+pub fn auth_from_identity(identity: &VerifiedIdentity) -> nirdosha_rt::Auth {
+    let roles: Vec<&str> = identity.roles.iter().map(String::as_str).collect();
+    nirdosha_rt::Auth::login(identity.subject.as_str(), &roles)
 }
 
 /// Direct identity construction for the compiled examples that build a
@@ -125,10 +106,11 @@ pub fn identity_with_roles(subject: &str, roles: &str) -> VerifiedIdentity {
 /// Field-level `requires(role)` masking: a field gate's executable half
 /// under plain cargo. Under the proprietary tier the DECLARED gate
 /// (see `nirdosha:field`) masks automatically and this call becomes a
-/// checked redundancy.
+/// checked redundancy. The role lives in the proof's *type* (`R`), not
+/// a runtime string — `Some` only if `Auth::prove::<R>()` succeeded.
 /// nirdosha:contract {"effects":["pure"]}
-pub fn mask_f64_unless(proof: &RoleProof, role: &str, value: f64) -> f64 {
-    if proof.role == role {
+pub fn mask_unless<R: nirdosha_rt::Role>(proof: Option<&nirdosha_rt::RoleProof<R>>, value: f64) -> f64 {
+    if proof.is_some() {
         value
     } else {
         0.0

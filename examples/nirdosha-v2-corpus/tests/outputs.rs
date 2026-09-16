@@ -210,7 +210,7 @@ fn enterprise_app() {
             "199.99",
             "USD()",
             "0.789",
-            "-2", // no cfo role on this token — check_role fails, by design
+            "-2", // no cfo role on this token — Auth::prove fails, by design
             "reversing disbursement for purchase order 1",
             "disbursement 1 false",
             "true",

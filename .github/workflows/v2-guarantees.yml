@@ -14,6 +14,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify source coverage and fail-closed certificate policy
         run: cargo test --locked -p nirdosha-contract-core -p cargo-nirdosha
+      - name: Stage 1 verify the real v2 corpus, not just fixtures
+        run: |
+          cargo build --locked -p cargo-nirdosha
+          cd examples/nirdosha-v2-corpus
+          ../../target/debug/cargo-nirdosha verify
 
   deep-effects:
     runs-on: ubuntu-latest
