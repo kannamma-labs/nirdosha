@@ -38,6 +38,8 @@
 //! interprocedural proof; until then the scan is deliberately
 //! over-approximate (see `nirdosha-contract-core/src/scan.rs`).
 
+mod categorical;
+
 use nirdosha_contract_core as cc;
 use proc_macro::TokenStream;
 use quote::quote;
@@ -46,6 +48,14 @@ use syn::spanned::Spanned;
 #[proc_macro_attribute]
 pub fn contract(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(attr.into(), item).into()
+}
+
+/// See `categorical::expand`'s module doc — one `#[contract(requires(
+/// role = ..))]`-gated function per categorical value, plus a derived,
+/// non-authoritative `role_for_<field>` projection.
+#[proc_macro]
+pub fn categorical_actions(input: TokenStream) -> TokenStream {
+    categorical::expand(input)
 }
 
 fn expand(

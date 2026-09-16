@@ -23,7 +23,7 @@
 //! fn main() {}
 //! ```
 
-pub use nirdosha_macros::contract;
+pub use nirdosha_macros::{categorical_actions, contract};
 
 pub mod nfr;
 pub mod policy;
@@ -31,10 +31,12 @@ pub mod prelude;
 #[cfg(feature = "native")]
 pub mod native;
 pub mod role;
+pub mod web;
 
 pub use nfr::{enter, events, reset_events, Guard, Limits, NfrEvent};
 pub use policy::{crud_forbidden, requires_encryption, Policy};
 pub use role::{Auth, AuthError, Role, RoleProof};
+pub use web::{PathParams, Request, Response, Router};
 
 /// Declare your application's role vocabulary. Invoke exactly once, at
 /// crate root. Each entry declares a marker type plus its wire name;

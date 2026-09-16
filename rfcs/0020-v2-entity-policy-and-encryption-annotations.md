@@ -1,15 +1,15 @@
 # RFC 0020: Compile-time policy compliance and encryption requirements for the v2 Rust dialect
 
-> **Status: `crud`/`policy!` (the forbidden-operation guarantee) is
-> built and proven** — `crates/nirdosha-rt/src/policy.rs`,
-> `crates/nirdosha-contract-core/src/model.rs`'s `Crud`,
-> `crates/nirdosha-macros/src/lib.rs`'s `crud_assertion`, worked example
-> `examples/nirdosha-v2-corpus/src/55_policy_forbidden_operations.nir`.
-> Encryption (at-rest/in-transit) is still just a declared, unenforced
-> field on `Policy` — no crypto or TLS exists in `nirdosha-rt` yet; see
-> Open Questions. An earlier draft of this RFC proposed a
-> doc-comment/JSON scanning mechanism for all of this; that approach
-> was rejected before any of it was built — see Rejected Alternatives.
+> **Status: `crud`/`policy!` (the forbidden-operation guarantee),
+> `categorical_actions!` (per-value role gating), and the
+> `nirdosha_rt::web` HTTP layer (with OpenAPI baked in) are all built
+> and proven** — see "Categorical field actions, the HTTP layer, and
+> OpenAPI" below for the newest piece. Encryption (at-rest/in-transit)
+> is still just a declared, unenforced field on `Policy` — no crypto or
+> TLS exists in `nirdosha-rt` yet; see Open Questions. An earlier draft
+> of this RFC proposed a doc-comment/JSON scanning mechanism for all of
+> this; that approach was rejected before any of it was built — see
+> Rejected Alternatives.
 
 ## Motivation
 
@@ -135,6 +135,128 @@ declare `crud(op = "create"/"update", policy = "financial_us")` (both
 allowed, both compile normally); there is deliberately no
 `delete_product` — the file's own comment shows the exact scratch edit
 that fails to compile if you add one.
+
+## Categorical field actions, the HTTP layer, and OpenAPI
+
+A categorical field (e.g. `is_approved: bool`, or an N-variant `enum`
+status) generalizes the same idea: each value is a distinct
+"transition" that should be independently gated, not one field with
+one generic `update`. Two roads exist for connecting a value to a role,
+and only one of them may ever decide access:
+
+- **Road 1 (authoritative).** The `#[contract(requires(role = ..))]`-
+  gated function generated per value — the exact `RoleProof<R>`
+  mechanism proven unforgeable everywhere else in this dialect. This is
+  the *only* thing that decides access.
+- **Road 2 (derived, non-authoritative).** A `role_for_<field>`
+  projection, useful for audit logs, UI hints, and API documentation —
+  computed from the *same* declaration as Road 1, never an independent
+  input. If the two could ever disagree, Road 1 wins by definition; the
+  actual design goal is that they structurally *cannot* disagree,
+  because there is only one source.
+
+### `nirdosha_rt::categorical_actions!`
+
+`crates/nirdosha-macros/src/categorical.rs`, re-exported from
+`nirdosha_rt`:
+
+```rust
+nirdosha_rt::categorical_actions! {
+    entity: Product,
+    store: product_store,
+    field: is_approved: bool,
+    actions {
+        true  => approve_product    requires role "approver",
+        false => disapprove_product requires role "compliance_officer",
+    }
+}
+```
+
+expands to Road 1 (one independently role-gated function per value,
+looking the entity up in `store()`, setting the field, and returning a
+clone) plus Road 2:
+
+```rust
+fn role_for_is_approved(value: bool) -> &'static str {
+    match value {
+        true => "approver",
+        false => "compliance_officer",
+    }
+}
+```
+
+**The coverage guarantee is `rustc`'s, not a scanner's.** Because
+`role_for_is_approved` is a genuine `match` over the field's real type,
+omitting a value is `error[E0004]: non-exhaustive patterns` — proven by
+temporarily dropping the `false` arm from
+`crates/nirdosha-rt/tests/categorical.rs`'s invocation and rebuilding.
+For an N-variant `enum` field, this scales without change: N arms, N
+gated functions, one exhaustive match.
+
+Scope: the macro only handles values that are simultaneously valid
+match patterns and value expressions with identical tokens (bool
+literals, unit `enum` variants) — deliberately not a general ORM or
+state-machine generator.
+
+### `nirdosha_rt::web` — an HTTP layer with OpenAPI on by default
+
+`crates/nirdosha-rt/src/web.rs`. `Router::dispatch` answers
+`GET /openapi.json` itself, before consulting the route table — every
+Nirdosha web app gets a real OpenAPI 3.0.3 document with no opt-in
+step, generated fresh per request from whatever routes are actually
+registered (so it can't go stale).
+
+Gated registration (`post_gated::<R>`, `get_gated`, `put_gated`,
+`delete_gated`) is where Road 1/Road 2 meet for the HTTP surface: the
+handler receives a real `&RoleProof<R>` (Road 1 — the router calls
+`Auth::prove::<R>()` and returns 403 on `Err` before the handler ever
+runs), and the OpenAPI document's `security` entry for that route is
+`R::NAME` — read from the exact same type parameter, not a separately
+maintained string:
+
+```rust
+Router::new(authenticate)
+    .post_gated::<Admin>("/api/products", "Create a product", |req, _params, proof| {
+        create_product(proof, ..)  // proof is real, minted by Auth::prove::<Admin>()
+    })
+```
+
+### Worked example: `56_product_crud_api.nir`
+
+Combines everything: per-field validators, `cost_cents` masking via
+`Option<&RoleProof<Admin>>`, `is_approved`'s two transitions via
+`categorical_actions!`, and real HTTP via `Router`. Verified two ways:
+
+1. **By hand**, live: `cargo run --bin v2_56_product_crud_api`, then
+   `curl`'d — anonymous list masks `cost_cents` to `0`; anonymous
+   create is `403`; an admin-token create returns `201` with the real
+   cost; an admin (not an approver) trying `/approve` is `403`; the
+   approver succeeds; the compliance officer's `/disapprove` is a
+   *different* role than approve's, on the same field.
+2. **In the golden suite**, `tests/outputs.rs`'s
+   `product_crud_api_serves_real_requests` — real `TcpStream` requests
+   against the actual spawned binary (same convention as
+   `compiled_serve_serves_real_requests`), not a Rust-level function
+   call, so the assertion is "the wire protocol behaves correctly,"
+   not just "the Rust typechecks."
+
+### Property-based tests
+
+`crates/nirdosha-rt/src/web.rs`'s `tests::properties` and
+`crates/nirdosha-rt/tests/categorical.rs`'s `properties` module
+(`proptest`), fuzzed rather than example-based:
+
+- path-template matching round-trips for arbitrary segments and
+  extracts the exact concrete value at a `{param}` position;
+- a mismatched literal segment never matches;
+- an unregistered path is always `404` regardless of method;
+- **the core property this whole RFC exists for**: gated dispatch
+  succeeds if and only if the session's role set actually contains the
+  required role, fuzzed over arbitrary role-set contents — not just the
+  one hand-picked example in each unit test;
+- the categorical macro's two generated functions require *exactly*
+  their own declared role, fuzzed over all four combinations of
+  holding/not-holding each of the two roles.
 
 ## Effect on the permission model
 

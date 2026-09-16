@@ -603,6 +603,134 @@ fn compiled_serve_serves_real_requests() {
     assert!(missing.contains("404 Not Found"), "got: {missing}");
 }
 
+/// 56 runs `nirdosha_rt::web::Router` for real (`main` also loops
+/// forever by design, same convention as 51). Every assertion here
+/// talks actual HTTP over a real socket to the actual running
+/// binary — the point is proving the whole stack (router, per-field
+/// masking, categorical role gating, OpenAPI) behaves correctly over
+/// the wire, not just that the Rust functions typecheck.
+#[test]
+fn product_crud_api_serves_real_requests() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::process::{Child, Stdio};
+    use std::time::Duration;
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let exe = env_bin("v2_56_product_crud_api");
+    let _child = ChildGuard(
+        Command::new(&exe)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("product crud api bin"),
+    );
+
+    // Returns (status_line, json_body) — split on the blank line so JSON
+    // assertions don't have to fish through raw headers.
+    fn request(method: &str, path: &str, bearer: Option<&str>, body: &str) -> (String, String) {
+        let mut last_err = String::new();
+        for _ in 0..100 {
+            match TcpStream::connect("127.0.0.1:8092") {
+                Ok(mut stream) => {
+                    let auth_header = match bearer {
+                        Some(tok) => format!("Authorization: Bearer {tok}\r\n"),
+                        None => String::new(),
+                    };
+                    let request = format!(
+                        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    stream.write_all(request.as_bytes()).unwrap();
+                    let mut out = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => out.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&out).into_owned();
+                    let status_line = text.lines().next().unwrap_or_default().to_string();
+                    let response_body = text.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+                    return (status_line, response_body);
+                }
+                Err(e) => {
+                    last_err = format!("{e}");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        panic!("product crud api never came up: {last_err}");
+    }
+
+    const ADMIN: &str = r#"mock.{"sub":"alice","roles":["admin"]}.sig"#;
+    const APPROVER: &str = r#"mock.{"sub":"carol","roles":["approver"]}.sig"#;
+    const OFFICER: &str = r#"mock.{"sub":"dave","roles":["compliance_officer"]}.sig"#;
+
+    // OpenAPI exists with no opt-in step, and reports the real gate.
+    let (status, body) = request("GET", "/openapi.json", None, "");
+    assert!(status.contains("200"), "got: {status}");
+    let openapi: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(openapi["paths"]["/api/products/{id}/approve"]["post"]["security"][0]["nirdoshaRole"][0], "approver");
+
+    // Anonymous create is refused — the real gate, not documentation.
+    let (status, _) = request("POST", "/api/products", None, r#"{"name":"Widget","price_cents":999,"cost_cents":300}"#);
+    assert!(status.contains("403"), "got: {status}");
+
+    // Admin create succeeds; the creator (an admin) sees the real cost.
+    let (status, body) = request("POST", "/api/products", Some(ADMIN), r#"{"name":"Widget","price_cents":999,"cost_cents":300}"#);
+    assert!(status.contains("201"), "got: {status}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created["cost_cents"], 300);
+    assert_eq!(created["is_approved"], false);
+    let id = created["id"].as_i64().unwrap();
+
+    // A validation failure is a real 400 with the field-level message.
+    let (status, body) = request("POST", "/api/products", Some(ADMIN), r#"{"name":"","price_cents":-1,"cost_cents":300}"#);
+    assert!(status.contains("400"), "got: {status}");
+    assert!(body.contains("price_cents: must be >= 0"), "got: {body}");
+
+    // Anonymous read masks cost_cents to 0; unmasked fields pass through.
+    let (_, body) = request("GET", &format!("/api/products/{id}"), None, "");
+    let anon_view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(anon_view["cost_cents"], 0);
+    assert_eq!(anon_view["name"], "Widget");
+
+    // Admin (not approver) cannot approve — a real, different role.
+    let (status, _) = request("POST", &format!("/api/products/{id}/approve"), Some(ADMIN), "");
+    assert!(status.contains("403"), "got: {status}");
+
+    // The compliance officer cannot approve either (wrong transition's role).
+    let (status, _) = request("POST", &format!("/api/products/{id}/approve"), Some(OFFICER), "");
+    assert!(status.contains("403"), "got: {status}");
+
+    // The approver can.
+    let (status, body) = request("POST", &format!("/api/products/{id}/approve"), Some(APPROVER), "");
+    assert!(status.contains("200"), "got: {status}");
+    let approved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(approved["is_approved"], true);
+
+    // Disapprove is a *different* role than approve, on the same field.
+    let (status, _) = request("POST", &format!("/api/products/{id}/disapprove"), Some(APPROVER), "");
+    assert!(status.contains("403"), "got: {status}");
+    let (status, body) = request("POST", &format!("/api/products/{id}/disapprove"), Some(OFFICER), "");
+    assert!(status.contains("200"), "got: {status}");
+    let disapproved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(disapproved["is_approved"], false);
+
+    // Unknown route is a real 404.
+    let (status, _) = request("GET", "/api/nonexistent", None, "");
+    assert!(status.contains("404"), "got: {status}");
+}
+
 /// 53 needs a reachable Redis, like the original — the golden test
 /// stands one up (a +PONG responder), then the three REAL provider
 /// POSTs flow to the example's own listener. A blocked child is

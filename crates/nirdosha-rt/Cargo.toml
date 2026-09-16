@@ -18,6 +18,7 @@ nirdosha-runtime-kernels = { path = "../runtime-kernels", optional = true }
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 jsonwebtoken = "9"
+proptest = "1"
 # The dialect's own toolchain: explicitly exempt from itself (the
 # verifier does not lint its own implementation — see
 # docs/nirdosha-rt-dialect.md §5).
