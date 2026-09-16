@@ -50,6 +50,8 @@
 // no reason to ever touch directly, matching this module's own "no
 // query interface for `.nir` code" doc comment.
 pub mod kernel;
+pub mod verified_identity;
+pub mod process;
 
 /// Not a real language builtin — no `.nir` program can call this
 /// (`codegen.rs` never emits a `declare`/`call` for it). Proves

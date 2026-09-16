@@ -6,10 +6,18 @@ description = "The Nirdosha runtime: unforgeable role proofs, NFR guards (latenc
 license = "MIT"
 publish = false
 
+[features]
+native = ["dep:nirdosha-runtime-kernels"]
+
 [dependencies]
 nirdosha-macros = { path = "../nirdosha-macros" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+nirdosha-runtime-kernels = { path = "../runtime-kernels", optional = true }
+
+[dev-dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+jsonwebtoken = "9"
 # The dialect's own toolchain: explicitly exempt from itself (the
 # verifier does not lint its own implementation — see
 # docs/nirdosha-rt-dialect.md §5).

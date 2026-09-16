@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# Native runtime adapters depend on this separate build workspace. Explicit
+# exclusion keeps Cargo from auto-enrolling the path dependency as a member.
+exclude = ["crates/runtime-kernels", "crates/compiled-serve"]
 members = [
     "crates/compiler",
     "crates/grammar_check",
