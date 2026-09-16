@@ -447,12 +447,27 @@ the metadata convention this RFC (and `rfcs/0008` Phase 3) define.
 
 ## Track C — the v2 Rust dialect's own UI engine
 
-**Status: design capture, phased, nothing built yet.** Everything
-below targets `nirdosha-rt`/`nirdosha-macros`/`cargo-nirdosha` — the
-Rust dialect whose role/policy/categorical-action/HTTP work is recorded
-in RFC 0020, not `crates/compiler`'s native `.nil` grammar. Read
-alongside RFC 0020, which this track depends on directly (`Router`,
-`RoleProof<R>`/`Auth::prove`, the Road 1/Road 2 framing).
+**Status: Phase 0 (dashboards) and the CRUD/List/Detail/Form/Delete
+archetypes are built and proven** — `nirdosha_rt::dashboard!`,
+`nirdosha_rt::crud_screens!`, `crates/nirdosha-rt/src/{dashboard,
+screens}.rs`, worked example `examples/nirdosha-v2-corpus/src/
+57_ui_engine_demo.nir` (CRUD + categorical actions + dashboard, all
+attached to one real datasource, verified live via curl, a headless-
+browser screenshot pass, and a real-socket golden test). `Router` also
+gained a top nav bar (`with_nav`) and cookie-session login/logout
+(`with_login`) — the Auth-screens row below is now partial, not
+unstarted. Two real bugs were found live and fixed with regression
+tests: `Router::serve` panicking the whole process on a client that
+disconnected mid-response, and a literal-suffix route (`/products/new`)
+being silently swallowed by the `/products/{id}` wildcard because of
+registration order. Phases 2–5 (query-param filtering, per-widget
+visibility, real-time push, client-side interactivity) remain as
+originally designed below, not yet built. Everything here targets
+`nirdosha-rt`/`nirdosha-macros`/`cargo-nirdosha` — the Rust dialect
+whose role/policy/categorical-action/HTTP work is recorded in RFC 0020,
+not `crates/compiler`'s native `.nil` grammar. Read alongside RFC 0020,
+which this track depends on directly (`Router`, `RoleProof<R>`/
+`Auth::prove`, the Road 1/Road 2 framing).
 
 ### Why a separate track, not a shared catalog
 
@@ -485,18 +500,18 @@ dashboard-shaped hole:
 
 | Archetype | Primary verb | Interaction density | v2 dialect status |
 |---|---|---|---|
-| CRUD: List/Index | scan & select | high (filter, sort, search, paginate, batch actions) | backend exists (`Router`, `56_product_crud_api.nir`'s `list_products`); no List HTML renderer |
-| CRUD: Detail/Show | read & tweak | medium (tabs, history, related records) | backend exists (`get_product`); no Detail HTML renderer |
-| CRUD: Create/Edit Form | input & validate | medium-high (inline errors, autosave, steppers) | backend exists (validators, `create_product`/`update_product`); no Form HTML renderer |
-| CRUD: Delete/destructive | confirm & undo | low, high-stakes | `categorical_actions!` already covers "a destructive transition needs its own role," not the confirm-UI/undo-toast pattern |
-| Dashboard/Overview | monitor & drill | medium (date range, drill-down, cross-filter) | **this track — Phase 0 below** |
+| CRUD: List/Index | scan & select | high (filter, sort, search, paginate, batch actions) | **built** — `crud_screens!`'s `list_html`; no filter/sort/paginate yet (Phase 2) |
+| CRUD: Detail/Show | read & tweak | medium (tabs, history, related records) | **built** — `crud_screens!`'s `detail_html`; no tabs/history |
+| CRUD: Create/Edit Form | input & validate | medium-high (inline errors, autosave, steppers) | **built** — `crud_screens!`'s `form_html`, inline field-scoped errors on a failed submit; no autosave/steppers |
+| CRUD: Delete/destructive | confirm & undo | low, high-stakes | **built** — `crud_screens!`'s typed "type DELETE to confirm" page; no undo-toast |
+| Dashboard/Overview | monitor & drill | medium (date range, drill-down, cross-filter) | **built (Phase 0)** — `dashboard!`, `Metric`/`Chart` widgets; no drill-down yet (Phase 2) |
+| Auth screens | credential & verify | low-medium, security-sensitive | **partial** — `Router::with_login` (cookie session, login form, logout) + `with_nav`'s Login/Logout button; no MFA/SSO/password-strength/CAPTCHA |
 | Workflow/Wizard | progress linearly | low per step, gated | not started; `nirdosha:workflow` doc comments exist in the corpus (inert) but Track C would need its own, non-GBNF mechanism |
-| Auth screens | credential & verify | low-medium, security-sensitive | `Auth`/`RoleProof<R>` cover the *server* half; no login-page renderer |
 | Search & Discovery | find & narrow | high (autocomplete, facets) | not started |
 | Board/Canvas | manipulate spatially | very high (drag, zoom, connect) | not started, likely out of scope for a "no JS pipeline" dialect (see Open Questions) |
-| Settings/Configuration | configure safely | low-medium (danger zones, guards) | not started |
+| Settings/Configuration | configure safely | low-medium (danger zones, guards) | not started — a natural next slice: `crud_screens!` against a singleton datasource |
 | Communication | react & respond | high, often real-time | not started; depends on the same real-time gap Phase 4 below names |
-| System state (404/empty/loading) | recover | low | not started |
+| System state (404/empty/loading) | recover | low | **partial** — real 404 (`Response::not_found`), 403, and empty-list states exist; no styled error pages or loading skeletons |
 | Report/Export | select & schedule | medium (format, columns, preview) | not started |
 
 Read-heavy archetypes (List, Dashboard, Search) optimize for scanning
