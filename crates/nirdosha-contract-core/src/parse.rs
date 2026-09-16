@@ -120,6 +120,8 @@ fn parse_requires(group: &proc_macro2::Group) -> syn::Result<Requires> {
 fn parse_nfr(group: &proc_macro2::Group) -> syn::Result<Nfr> {
     let mut nfr = Nfr {
         latency_ms: None,
+        error_rate_max: None,
+        throughput_min_per_sec: None,
         concurrency_max: None,
     };
     let trees: Vec<TokenTree> = group.stream().into_iter().collect();
@@ -130,7 +132,7 @@ fn parse_nfr(group: &proc_macro2::Group) -> syn::Result<Nfr> {
             other => {
                 return Err(syn::Error::new(
                     other.span(),
-                    "nfr keys: latency_ms, concurrency_max",
+                    "nfr keys: latency_ms, error_rate_max, throughput_min_per_sec, concurrency_max",
                 ))
             }
         };
@@ -150,6 +152,18 @@ fn parse_nfr(group: &proc_macro2::Group) -> syn::Result<Nfr> {
                 }
                 nfr.latency_ms = Some(parse_number(&value, span)?);
             }
+            "error_rate_max" => {
+                if nfr.error_rate_max.is_some() {
+                    return Err(syn::Error::new(span, "error_rate_max declared twice"));
+                }
+                nfr.error_rate_max = Some(parse_number(&value, span)?);
+            }
+            "throughput_min_per_sec" => {
+                if nfr.throughput_min_per_sec.is_some() {
+                    return Err(syn::Error::new(span, "throughput_min_per_sec declared twice"));
+                }
+                nfr.throughput_min_per_sec = Some(parse_number(&value, span)?);
+            }
             "concurrency_max" => {
                 if nfr.concurrency_max.is_some() {
                     return Err(syn::Error::new(span, "concurrency_max declared twice"));
@@ -159,7 +173,7 @@ fn parse_nfr(group: &proc_macro2::Group) -> syn::Result<Nfr> {
             other => {
                 return Err(syn::Error::new(
                     span,
-                    format!("unknown nfr key `{other}` — valid keys: latency_ms, concurrency_max"),
+                    format!("unknown nfr key `{other}` — valid keys: latency_ms, error_rate_max, throughput_min_per_sec, concurrency_max"),
                 ))
             }
         }

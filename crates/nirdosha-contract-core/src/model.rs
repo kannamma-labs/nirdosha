@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Claiming an unknown effect is a build error under `cargo nirdosha`
 /// (and a `compile_error!` under the attribute macro).
 pub const KNOWN_EFFECTS: &[&str] = &[
-    "pure", "io", "net", "db", "alloc", "clock", "random", "inference",
+    "pure", "io", "net", "db", "alloc", "clock", "random", "concurrent", "inference",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -43,6 +43,10 @@ pub struct Requires {
 pub struct Nfr {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_rate_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_min_per_sec: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_max: Option<u64>,
 }
@@ -107,6 +111,8 @@ mod tests {
             }),
             nfr: Some(Nfr {
                 latency_ms: Some(50.0),
+                error_rate_max: None,
+                throughput_min_per_sec: None,
                 concurrency_max: Some(1000),
             }),
         };
