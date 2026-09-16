@@ -1065,11 +1065,17 @@ impl Tcp {
     }
 
     /// `recv(conn)` — one read syscall's worth of currently-available
-    /// bytes, exactly `.nir`'s semantics (not a drain loop).
+    /// bytes, exactly `.nir`'s semantics (not a drain loop). A closed
+    /// or reset peer yields "" (no bytes available) rather than a
+    /// panic — a server must survive a connection that is opened and
+    /// dropped without speaking (a port-scan, a health poll).
     pub fn recv(&self) -> String {
         use std::io::Read;
         let mut buf = [0u8; 65536];
-        let n = (&self.stream).read(&mut buf).expect("tcp recv");
+        let n = match (&self.stream).read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return String::new(),
+        };
         String::from_utf8_lossy(&buf[..n]).into_owned()
     }
 }

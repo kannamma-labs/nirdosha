@@ -20,6 +20,7 @@ struct Invoice {
 
 /// nirdosha:nav {"module":"Billing"}
 /// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the declaration layer
 fn list_invoice() -> Result<Json, InvoiceError> {
     match json_parse("[]") {
         Ok(doc) => Ok(doc),
@@ -34,6 +35,7 @@ fn create_invoice(inv: Invoice) -> Result<i64, InvoiceError> {
 }
 
 /// nirdosha:nav {"module":"Shipping"}
+#[allow(dead_code)] // declared-complete for the declaration layer
 struct Shipment {
     #[allow(dead_code)]
     id: i64,

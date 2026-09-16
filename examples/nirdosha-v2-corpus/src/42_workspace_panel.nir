@@ -12,6 +12,7 @@ enum ErrorCode {
     MalformedListing,
 }
 
+#[allow(dead_code)] // declared-complete for the declaration layer
 struct Case {
     id: i64,
     #[allow(dead_code)] // declared-complete for the screen layer
@@ -21,6 +22,7 @@ struct Case {
 }
 
 /// nirdosha:contract {"effects":["pure"]}
+#[allow(unused_variables)] // list fns are panel sources; the case_id param is part of the .nir shape
 fn list_transaction_for_case(case_id: i64) -> Result<Json, ErrorCode> {
     match json_parse("[]") {
         Ok(doc) => Ok(doc),
@@ -29,6 +31,8 @@ fn list_transaction_for_case(case_id: i64) -> Result<Json, ErrorCode> {
 }
 
 /// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the declaration layer
+#[allow(unused_variables)] // list fns are panel sources; the case_id param is part of the .nir shape
 fn list_case_note(case_id: i64) -> Result<Json, ErrorCode> {
     match json_parse("[]") {
         Ok(doc) => Ok(doc),
@@ -42,6 +46,7 @@ fn add_case_note(case_id: i64) -> Result<i64, ErrorCode> {
 }
 
 /// nirdosha:workspace {"name":"CaseInvestigation","title":"Investigation Workspace","subject":"Case","panels":[{"label":"Transactions","source":"list_transaction_for_case"},{"label":"Notes","source":"list_case_note","actions":[{"label":"Add Note","fn":"add_case_note","style":"filled"}]}]}
+#[allow(dead_code)] // declared-complete for the declaration layer
 struct CaseInvestigationMarker;
 
 fn main() {

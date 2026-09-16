@@ -12,6 +12,7 @@ use nirdosha_v2::{
 };
 
 #[derive(Clone)]
+#[allow(dead_code)] // declared-complete for the workflow layer
 enum IncidentEvent {
     Resolve,
 }
@@ -19,6 +20,7 @@ enum IncidentEvent {
 #[derive(Clone, PartialEq)]
 enum IncidentState {
     Open,
+    #[allow(dead_code)] // declared-complete for the workflow layer
     Resolved,
 }
 
@@ -40,6 +42,7 @@ fn start_incident(_identity: Option<VerifiedIdentity>, _data: IncidentData) -> R
     Ok(id)
 }
 
+#[allow(dead_code)] // declared-complete for the workflow layer
 fn advance_incident(
     _identity: VerifiedIdentity,
     instance_id: i64,

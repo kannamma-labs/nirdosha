@@ -24,6 +24,7 @@ fn graph_of_relationships() -> Result<Json, ErrorCode> {
 
 /// nirdosha:visual {"label":"Shipment Density","render":"heatmap"}
 /// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the visual layer
 fn heatmap_of_shipments() -> Result<Json, ErrorCode> {
     let text = r#"[{"lat": 37.77, "lng": -122.41, "weight": 5}]"#;
     match json_parse(text) {
@@ -34,6 +35,7 @@ fn heatmap_of_shipments() -> Result<Json, ErrorCode> {
 
 /// nirdosha:visual {"label":"Case History","render":"timeline"}
 /// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the visual layer
 fn timeline_of_events() -> Result<Json, ErrorCode> {
     let text = r#"[{"ts": 1700000000, "label": "submitted"}, {"ts": 1700003600, "label": "approved"}]"#;
     match json_parse(text) {

@@ -9,6 +9,7 @@ use nirdosha_v2::{json_parse, Json};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ErrorCode {
+    #[allow(dead_code)] // declared-complete for the declaration layer
     MalformedListing,
 }
 
@@ -22,6 +23,7 @@ struct Case {
 }
 
 /// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the declaration layer
 fn list_case() -> Result<Json, ErrorCode> {
     match json_parse("[]") {
         Ok(doc) => Ok(doc),
@@ -35,6 +37,8 @@ fn escalate_case(id: i64) -> Result<i64, ErrorCode> {
 }
 
 /// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the declaration layer
+#[allow(unused_variables)] // the case_id param is part of the .nir shape
 fn list_case_history(case_id: i64) -> Result<Json, ErrorCode> {
     match json_parse("[]") {
         Ok(doc) => Ok(doc),
@@ -44,6 +48,7 @@ fn list_case_history(case_id: i64) -> Result<Json, ErrorCode> {
 
 /// nirdosha:screen {"struct":"Case","actions":[{"label":"Escalate","fn":"escalate_case"}]}
 /// nirdosha:layout {"tree":{"row":[{"column":[{"group":"Details","fields":["case_number","status","priority"]},{"divider":true},{"group":"Assignment","fields":["assigned_to"]}]},{"column":[{"tabs":[{"tab":"History","timeline":{"source":"list_case_history"}},{"tab":"Actions","action":"Escalate"}]}]}]}}
+#[allow(dead_code)] // declared-complete for the declaration layer
 struct CaseScreenMarker;
 
 fn main() {

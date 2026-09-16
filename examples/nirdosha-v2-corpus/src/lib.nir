@@ -359,7 +359,15 @@ pub fn db_execute(conn: &DbConn, sql: &str, params: &[String]) -> Result<i64, St
 }
 
 fn value_json(v: &str) -> String {
-    if v.parse::<i64>().is_ok() {
+    // A raw is numeric only when it *looks like* a SQL/JSON number literal:
+    // first char must be a digit or '-'. Rust's i64 parse also accepts a
+    // leading '+', but "+15550100" is a phone-number *string* — quoting it
+    // keeps json_get_str faithful to the original's typed params.
+    let numeric_shape = v
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '-');
+    if numeric_shape && v.parse::<i64>().is_ok() {
         v.to_string()
     } else {
         format!("\"{v}\"")

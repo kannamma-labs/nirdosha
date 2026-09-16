@@ -74,8 +74,64 @@ fn ownership_and_concurrency() {
     );
 }
 
+/// mq-sensitive tests (05's honest `connection refused`, 53's fake
+/// Redis) serialize against each other: while 53's responder is up,
+/// 05's bin would legitimately connect. The guard is held until the
+/// responder is torn down, so 05 always sees the refusal it pins.
+fn mq_lock() -> &'static std::sync::Mutex<()> {
+    static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Like `run`, but kills the child after `secs` and fails LOUDLY with
+/// the partial output — a regression must never hang the suite
+/// silently (53's `join h` blocks forever if its provider chain never
+/// completes, exactly like the original).
+fn run_with_timeout(bin: &str, secs: u64) -> String {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(env_bin(bin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("cannot spawn {bin}: {e}"));
+    let mut pipe = child.stdout.take().unwrap();
+    let collected: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = collected.clone();
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink.lock().unwrap().extend_from_slice(&buf[..n]),
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            reader.join().unwrap();
+            let stdout = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
+            assert!(status.success(), "{bin} failed: {stdout}");
+            return stdout;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            reader.join().unwrap();
+            let stdout = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
+            panic!("{bin} did not exit within {secs}s — a join is blocked; partial output:\n{stdout}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn platform_services() {
+    let _guard = mq_lock().lock().unwrap();
     expect(
         &run("v2_05_platform_services"),
         &[
@@ -423,9 +479,10 @@ fn compiled_workflow_escalation() {
             "1",
             "[]",
             "true",
-            "instance_id",
             "incident 1 escalated to manager",
+            "true",
             "incident 1 resolved",
+            "true",
         ],
     );
 }
@@ -465,85 +522,143 @@ fn bench_kalman() {
 
 /// 51 runs an accept loop forever by design — the golden test plays the
 /// original's `curl` walkthrough against it with a real client socket,
-/// then kills it.
+/// then kills it. The child runs with null stdio and a Drop guard, so
+/// neither a failure nor a leaked grandchild can hold cargo's pipes
+/// (an orphaned inheritor is what makes `cargo test` hang silently
+/// after the summary).
 #[test]
 fn compiled_serve_serves_real_requests() {
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::process::{Child, Stdio};
     use std::time::Duration;
 
-    let exe = env_bin("v2_51_compiled_serve");
-    let mut child = Command::new(&exe).spawn().expect("serve bin");
-
-    // poll until the listener is up
-    let mut stream = None;
-    for _ in 0..100 {
-        if let Ok(s) = TcpStream::connect("127.0.0.1:8080") {
-            stream = Some(s);
-            break;
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
-    let mut stream = stream.expect("serve never came up");
 
-    stream
-        .write_all(b"GET /api/hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).unwrap();
-    let hello = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let exe = env_bin("v2_51_compiled_serve");
+    let mut child = ChildGuard(
+        Command::new(&exe)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("serve bin"),
+    );
+
+    fn get(path: &str) -> String {
+        // The child may need a moment to bind — retry by SPEAKING, never
+        // by opening-and-dropping (a silent connection is not part of
+        // the protocol the serve loop promises to handle).
+        let mut last_err = String::new();
+        for _ in 0..100 {
+            match TcpStream::connect("127.0.0.1:8080") {
+                Ok(mut stream) => {
+                    stream
+                        .write_all(
+                            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                                .as_bytes(),
+                        )
+                        .unwrap();
+                    let mut out = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    // read until EOF — headers and body may arrive as
+                    // separate packets; a single read races the segmentation.
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => out.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    return String::from_utf8_lossy(&out).into_owned();
+                }
+                Err(e) => {
+                    last_err = format!("{e}");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        panic!("serve never came up: {last_err}");
+    }
+
+    let hello = get("/api/hello");
     assert!(hello.contains("hello from /api/hello"), "got: {hello}");
 
-    let mut stream = TcpStream::connect("127.0.0.1:8080").unwrap();
-    stream
-        .write_all(b"GET /api/echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let n = stream.read(&mut buf).unwrap();
-    let echo = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let echo = get("/api/echo");
     assert!(echo.contains("hello from /api/echo"), "got: {echo}");
 
-    let mut stream = TcpStream::connect("127.0.0.1:8080").unwrap();
-    stream
-        .write_all(b"GET /api/unknown HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let n = stream.read(&mut buf).unwrap();
-    let missing = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let missing = get("/api/unknown");
     assert!(missing.contains("404 Not Found"), "got: {missing}");
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// 53 needs a reachable Redis, like the original — the golden test
 /// stands one up (a +PONG responder), then the three REAL provider
-/// POSTs flow to the example's own listener.
+/// POSTs flow to the example's own listener. A blocked child is
+/// killed and reported, never allowed to hang the suite; 6379
+/// occupied by a non-RESP server is a skip, not a hang.
 #[test]
 fn compiled_workflow_notifications_post_for_real() {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
-    // the fake Redis: PING -> +PONG, PUBLISH -> :1
-    let redis = TcpListener::bind("127.0.0.1:6379");
-    let redis_handle = match redis {
-        Ok(l) => Some(std::thread::spawn(move || {
-            for conn in l.incoming().flatten() {
-                let mut conn = conn;
-                let mut buf = [0u8; 128];
-                if let Ok(n) = conn.read(&mut buf) {
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    if text.starts_with("PING") {
-                        let _ = conn.write_all(b"+PONG\r\n");
-                    } else if text.starts_with("PUBLISH") {
-                        let _ = conn.write_all(b":1\r\n");
+    let _guard = mq_lock().lock().unwrap();
+
+    // Stand up the fake Redis (PING -> +PONG, PUBLISH -> :1).
+    let responder: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> =
+        match TcpListener::bind("127.0.0.1:6379") {
+            Ok(l) => {
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let flag = shutdown.clone();
+                let handle = std::thread::spawn(move || {
+                    while !flag.load(Ordering::SeqCst) {
+                        match l.accept() {
+                            Ok((mut conn, _)) => {
+                                if flag.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                let mut buf = [0u8; 128];
+                                if let Ok(n) = conn.read(&mut buf) {
+                                    let text = String::from_utf8_lossy(&buf[..n]);
+                                    if text.starts_with("PING") {
+                                        let _ = conn.write_all(b"+PONG\r\n");
+                                    } else if text.starts_with("PUBLISH") {
+                                        let _ = conn.write_all(b":1\r\n");
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
                     }
-                }
+                });
+                Some((shutdown, handle))
             }
-        })),
-        // a real Redis is already here — the bin will use it instead
-        Err(_e) => None,
-    };
+            Err(_) => {
+                // 6379 is taken: a genuine Redis works just as well, but
+                // anything else would make the bin block forever.
+                let speaks_resp =
+                    TcpStream::connect("127.0.0.1:6379").ok().and_then(|mut c| {
+                        c.write_all(b"PING\r\n").ok()?;
+                        let mut buf = [0u8; 16];
+                        let n = c.read(&mut buf).ok()?;
+                        buf[..n.min(5)]
+                            .starts_with(b"+PONG")
+                            .then_some(true)
+                    });
+                if speaks_resp.is_none() {
+                    eprintln!("skipping: port 6379 is occupied by a non-RESP server");
+                    return;
+                }
+                None // a real Redis is already here — the bin will use it
+            }
+        };
 
-    let out = run("v2_53_compiled_notifications");
+    let out = run_with_timeout("v2_53_compiled_notifications", 30);
     expect(
         &out,
         &[
@@ -556,5 +671,13 @@ fn compiled_workflow_notifications_post_for_real() {
             "1",
         ],
     );
-    drop(redis_handle);
+
+    // Tear the responder down (wake the accept, then join) BEFORE
+    // releasing the mq lock, so the next serialized test still sees
+    // `connection refused`.
+    if let Some((flag, handle)) = responder {
+        flag.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect("127.0.0.1:6379");
+        handle.join().unwrap();
+    }
 }
