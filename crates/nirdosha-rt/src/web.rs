@@ -14,10 +14,13 @@
 //! cannot drift from what is actually enforced, because there is only
 //! one source (`R`), not two.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::role::{Auth, Role, RoleProof};
+
+const SESSION_COOKIE: &str = "nirdosha_session";
 
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -67,6 +70,15 @@ impl Request {
 
     fn path_without_query(&self) -> &str {
         self.path.split('?').next().unwrap_or(&self.path)
+    }
+
+    /// One cookie's value from the `Cookie` header (`a=1; b=2`).
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        let raw = self.header("cookie")?;
+        raw.split(';').find_map(|part| {
+            let (k, v) = part.trim().split_once('=')?;
+            (k == name).then(|| v.to_string())
+        })
     }
 
     /// The parsed query string (`?a=1&b=2` → `{"a":"1","b":"2"}`).
@@ -260,12 +272,32 @@ impl Response {
     }
 }
 
+fn login_page_html(action: &str, error: Option<&str>) -> String {
+    let error_html = match error {
+        Some(msg) => format!("<p class=\"errors\">{}</p>", html_escape(msg)),
+        None => String::new(),
+    };
+    page_shell(
+        "Log in",
+        "",
+        &format!(
+            "{error_html}<form method=\"post\" action=\"{action}\">\
+             <p><label>Username</label><input type=\"text\" name=\"username\"></p>\
+             <p><label>Password</label><input type=\"password\" name=\"password\"></p>\
+             <p><button type=\"submit\">Log in</button></p>\
+             </form>"
+        ),
+    )
+}
+
 fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        302 => "Found",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -358,6 +390,23 @@ struct Route {
     handler: Handler,
 }
 
+/// One top-bar/side-nav link — a plain label + href, rendered on every
+/// HTML screen once `Router::with_nav` is set.
+#[derive(Clone)]
+pub struct NavLink {
+    pub label: &'static str,
+    pub href: &'static str,
+}
+
+/// `verify(username, password)` returning the session's roles on
+/// success — the one thing an app supplies; everything else (the
+/// login form, the session cookie, the logout route, the nav bar's
+/// Login/Logout button) is handled by the router itself.
+struct LoginConfig {
+    path: String,
+    verify: Rc<dyn Fn(&str, &str) -> Option<Vec<String>>>,
+}
+
 /// A request → `Response` router with OpenAPI baked into `dispatch`
 /// itself. `authenticate` turns a request into a session (e.g. reading
 /// an `Authorization` header via the app's own identity fixture) —
@@ -368,6 +417,38 @@ pub struct Router {
     version: &'static str,
     routes: Vec<Route>,
     authenticate: Rc<dyn Fn(&Request) -> Auth>,
+    nav: Vec<NavLink>,
+    login: Option<LoginConfig>,
+    /// session id → (username, roles). In-memory, process-global, lost
+    /// on restart — matches this dialect's other fixture-grade stores
+    /// (`product_store`-style `Mutex<HashMap<..>>`s), not a claim of
+    /// production session durability.
+    sessions: Rc<RefCell<HashMap<String, (String, Vec<String>)>>>,
+}
+
+/// Resolves a session cookie to an `Auth`, if the cookie names a
+/// session this router actually minted. Shared by every gated route's
+/// closure and by the nav bar's Login/Logout rendering, so both agree
+/// on what "logged in" means.
+fn session_auth(sessions: &Rc<RefCell<HashMap<String, (String, Vec<String>)>>>, req: &Request) -> Option<Auth> {
+    let sid = req.cookie(SESSION_COOKIE)?;
+    let sessions = sessions.borrow();
+    let (user, roles) = sessions.get(&sid)?;
+    let role_refs: Vec<&str> = roles.iter().map(String::as_str).collect();
+    Some(Auth::login(user.clone(), &role_refs))
+}
+
+/// A demo-grade session id: unique and unguessable-by-accident, but
+/// **not** cryptographically secure — no CSPRNG is used. Fine for this
+/// dialect's fixture-grade session store; a real deployment needs a
+/// real secure-random source here, the same honesty this crate applies
+/// to `mock_issue_token`-style fixtures elsewhere.
+fn generate_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{nanos:x}-{count:x}-{:p}", &count)
 }
 
 macro_rules! ungated_method {
@@ -399,8 +480,10 @@ macro_rules! gated_method {
             handler: impl Fn(&Request, &PathParams, &RoleProof<R>) -> Response + 'static,
         ) -> Self {
             let authenticate = self.authenticate.clone();
+            let sessions = self.sessions.clone();
             let wrapped = move |req: &Request, params: &PathParams| -> Response {
-                match authenticate(req).prove::<R>() {
+                let auth = session_auth(&sessions, req).unwrap_or_else(|| authenticate(req));
+                match auth.prove::<R>() {
                     Ok(proof) => handler(req, params, &proof),
                     Err(_) => Response::forbidden(),
                 }
@@ -424,12 +507,37 @@ impl Router {
             version: "0.1.0",
             routes: Vec::new(),
             authenticate: Rc::new(authenticate),
+            nav: Vec::new(),
+            login: None,
+            sessions: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
     pub fn with_info(mut self, title: &'static str, version: &'static str) -> Self {
         self.title = title;
         self.version = version;
+        self
+    }
+
+    /// A top-bar shown on every HTML screen, with a Login/Logout button
+    /// on the right when `with_login` is also set.
+    pub fn with_nav(mut self, links: Vec<NavLink>) -> Self {
+        self.nav = links;
+        self
+    }
+
+    /// Real, cookie-based session login — the only way this dialect's
+    /// server-rendered screens (no client-side JS) can carry an
+    /// identity across requests without an `Authorization` header on
+    /// every request. Registers `GET`/`POST {path}` (the login form and
+    /// its submission) and `POST {path}/logout`. `verify` checks a
+    /// submitted username/password and returns the session's roles on
+    /// success — this crate has no opinion on where credentials live.
+    pub fn with_login(mut self, path: &'static str, verify: impl Fn(&str, &str) -> Option<Vec<String>> + 'static) -> Self {
+        self.login = Some(LoginConfig {
+            path: path.to_string(),
+            verify: Rc::new(verify),
+        });
         self
     }
 
@@ -446,9 +554,48 @@ impl Router {
     /// Route one already-parsed request. `GET /openapi.json` is
     /// answered here directly, before the route table — it always
     /// exists, computed fresh from the final route list, and cannot be
-    /// shadowed by an app forgetting to register it.
+    /// shadowed by an app forgetting to register it. Login/logout (if
+    /// configured) are handled the same way, then every HTML response
+    /// gets the nav bar spliced in.
     pub fn dispatch(&self, req: &Request) -> Response {
-        let path = req.path_without_query();
+        let path = req.path_without_query().to_string();
+
+        if let Some(login) = &self.login {
+            if path == login.path && req.method == "GET" {
+                return self.with_nav_bar(req, Response::html(200, login_page_html(&login.path, None)));
+            }
+            if path == login.path && req.method == "POST" {
+                let form = req.form_or_json();
+                let username = form.get("username").cloned().unwrap_or_default();
+                let password = form.get("password").cloned().unwrap_or_default();
+                let resp = match (login.verify)(&username, &password) {
+                    Some(roles) => {
+                        let session_id = generate_session_id();
+                        self.sessions.borrow_mut().insert(session_id.clone(), (username, roles));
+                        let mut resp = Response::redirect("/");
+                        resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}={session_id}; HttpOnly; Path=/")));
+                        resp
+                    }
+                    None => Response::html(401, login_page_html(&login.path, Some("invalid username or password"))),
+                };
+                return self.with_nav_bar(req, resp);
+            }
+            let logout_path = format!("{}/logout", login.path.trim_end_matches('/'));
+            if path == logout_path && req.method == "POST" {
+                if let Some(sid) = req.cookie(SESSION_COOKIE) {
+                    self.sessions.borrow_mut().remove(&sid);
+                }
+                let mut resp = Response::redirect("/");
+                resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}=; Path=/; Max-Age=0")));
+                return resp;
+            }
+        }
+
+        let response = self.dispatch_routes(&path, req);
+        self.with_nav_bar(req, response)
+    }
+
+    fn dispatch_routes(&self, path: &str, req: &Request) -> Response {
         if req.method == "GET" && path == "/openapi.json" {
             return Response::json(200, &self.openapi_document());
         }
@@ -466,6 +613,47 @@ impl Router {
         } else {
             Response::not_found()
         }
+    }
+
+    /// Splices the nav bar (if configured) into an HTML response, right
+    /// after `<body>` — `page_shell` always emits exactly one literal
+    /// `<body>` tag, so a single first-occurrence replace is exact, not
+    /// a heuristic.
+    fn with_nav_bar(&self, req: &Request, mut response: Response) -> Response {
+        if self.nav.is_empty() && self.login.is_none() {
+            return response;
+        }
+        if !response.content_type.starts_with("text/html") {
+            return response;
+        }
+        let nav_html = self.render_nav(req);
+        response.body = response.body.replacen("<body>", &format!("<body>{nav_html}"), 1);
+        response
+    }
+
+    fn render_nav(&self, req: &Request) -> String {
+        let mut html = String::from(
+            "<nav style=\"margin:-2rem -2rem 2rem -2rem;padding:0.75rem 2rem;background:#f5f5f5;border-bottom:1px solid #ddd\">",
+        );
+        for link in &self.nav {
+            html.push_str(&format!("<a href=\"{}\" style=\"margin-right:1.5rem\">{}</a>", link.href, html_escape(link.label)));
+        }
+        if let Some(login) = &self.login {
+            match session_auth(&self.sessions, req) {
+                Some(auth) => {
+                    html.push_str(&format!(
+                        "<span style=\"float:right\">{} — <form method=\"post\" action=\"{}/logout\" style=\"display:inline;margin:0\"><button type=\"submit\">Logout</button></form></span>",
+                        html_escape(auth.user()),
+                        login.path.trim_end_matches('/'),
+                    ));
+                }
+                None => {
+                    html.push_str(&format!("<a href=\"{}\" style=\"float:right\">Login</a>", login.path));
+                }
+            }
+        }
+        html.push_str("</nav>");
+        html
     }
 
     /// A minimal OpenAPI 3.0.3 document: paths, methods, summaries, and
@@ -661,6 +849,93 @@ mod tests {
         let doc = router.openapi_document();
         let role = &doc["paths"]["/api/products"]["post"]["security"][0]["nirdoshaRole"][0];
         assert_eq!(role, "admin");
+    }
+
+    fn cookie_req(method: &str, path: &str, cookie: Option<&str>) -> Request {
+        let mut headers = HashMap::new();
+        if let Some(c) = cookie {
+            headers.insert("cookie".to_string(), c.to_string());
+        }
+        Request { method: method.into(), path: path.into(), headers, body: String::new() }
+    }
+
+    fn cookie_from_set_cookie(resp: &Response) -> String {
+        let raw = resp
+            .extra_headers
+            .iter()
+            .find(|(k, _)| k == "Set-Cookie")
+            .map(|(_, v)| v.clone())
+            .expect("no Set-Cookie header");
+        raw.split(';').next().unwrap().to_string()
+    }
+
+    fn form(pairs: &[(&str, &str)]) -> Request {
+        let body = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+        Request { method: "POST".into(), path: "/login".into(), headers: HashMap::new(), body }
+    }
+
+    #[test]
+    fn login_mints_a_session_cookie_that_a_gated_route_then_accepts() {
+        let router = Router::new(|_| Auth::login("anon", &[]))
+            .with_login("/login", |u, p| if u == "alice" && p == "secret" { Some(vec!["admin".to_string()]) } else { None })
+            .get_gated::<Admin>("/secret", "secret", |_, _, _proof| Response::text(200, "ok"));
+
+        // Wrong password: no session minted.
+        let bad = router.dispatch(&form(&[("username", "alice"), ("password", "wrong")]));
+        assert_eq!(bad.status, 401);
+        assert!(bad.extra_headers.iter().all(|(k, _)| k != "Set-Cookie"));
+
+        // Right password: a session cookie is minted...
+        let ok = router.dispatch(&form(&[("username", "alice"), ("password", "secret")]));
+        assert_eq!(ok.status, 302);
+        let cookie = cookie_from_set_cookie(&ok);
+
+        // ...and it alone (no Authorization header) satisfies the admin gate.
+        let secret = router.dispatch(&cookie_req("GET", "/secret", Some(&cookie)));
+        assert_eq!(secret.status, 200);
+
+        // A request with no cookie at all is still refused.
+        let denied = router.dispatch(&cookie_req("GET", "/secret", None));
+        assert_eq!(denied.status, 403);
+    }
+
+    #[test]
+    fn logout_clears_the_session() {
+        let router = Router::new(|_| Auth::login("anon", &[]))
+            .with_login("/login", |_, _| Some(vec!["admin".to_string()]))
+            .get_gated::<Admin>("/secret", "secret", |_, _, _proof| Response::text(200, "ok"));
+
+        let ok = router.dispatch(&form(&[("username", "x"), ("password", "y")]));
+        let cookie = cookie_from_set_cookie(&ok);
+        assert_eq!(router.dispatch(&cookie_req("GET", "/secret", Some(&cookie))).status, 200);
+
+        let logout_req = Request { method: "POST".into(), path: "/login/logout".into(), headers: {
+            let mut h = HashMap::new();
+            h.insert("cookie".to_string(), cookie.clone());
+            h
+        }, body: String::new() };
+        let logout_resp = router.dispatch(&logout_req);
+        assert_eq!(logout_resp.status, 302);
+
+        // The same (now-invalidated) cookie no longer satisfies the gate.
+        assert_eq!(router.dispatch(&cookie_req("GET", "/secret", Some(&cookie))).status, 403);
+    }
+
+    #[test]
+    fn nav_bar_shows_login_when_anonymous_and_logout_when_authenticated() {
+        let router = Router::new(|_| Auth::login("anon", &[]))
+            .with_nav(vec![NavLink { label: "Home", href: "/" }])
+            .with_login("/login", |_, _| Some(vec!["admin".to_string()]))
+            .get("/", "home", |_, _| Response::html(200, "<html><body>hi</body></html>"));
+
+        let anon = router.dispatch(&cookie_req("GET", "/", None));
+        assert!(anon.body.contains("Login"), "got: {}", anon.body);
+        assert!(!anon.body.contains("Logout"));
+
+        let login_resp = router.dispatch(&form(&[("username", "x"), ("password", "y")]));
+        let cookie = cookie_from_set_cookie(&login_resp);
+        let authed = router.dispatch(&cookie_req("GET", "/", Some(&cookie)));
+        assert!(authed.body.contains("Logout"), "got: {}", authed.body);
     }
 
     // -------------------------------------------------------------------

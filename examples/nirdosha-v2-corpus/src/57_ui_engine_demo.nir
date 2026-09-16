@@ -105,8 +105,28 @@ fn auth_for(req: &nirdosha_rt::Request) -> nirdosha_rt::Auth {
     }
 }
 
+// --- login: a fixed demo credential table (fixture-grade, same
+// posture as the corpus's own mock_issue_token) -- Router::with_login
+// handles the session cookie, the form, and logout entirely; this file
+// only supplies "is this username/password real, and what roles does
+// it hold."
+fn verify_login(username: &str, password: &str) -> Option<Vec<String>> {
+    match (username, password) {
+        ("alice", "admin123") => Some(vec!["admin".to_string()]),
+        ("carol", "approve123") => Some(vec!["approver".to_string()]),
+        ("dave", "comply123") => Some(vec!["compliance_officer".to_string()]),
+        _ => None,
+    }
+}
+
 fn main() {
-    let router = nirdosha_rt::Router::new(auth_for).with_info("Product UI Engine", "1.0.0");
+    let router = nirdosha_rt::Router::new(auth_for)
+        .with_info("Product UI Engine", "1.0.0")
+        .with_nav(vec![
+            nirdosha_rt::NavLink { label: "Products", href: "/products" },
+            nirdosha_rt::NavLink { label: "Dashboard", href: "/dashboard" },
+        ])
+        .with_login("/login", verify_login);
     let router = mount_product_screens(router);
     let router = mount_products_dashboard(router);
     let router = router

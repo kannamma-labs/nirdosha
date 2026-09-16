@@ -38,7 +38,7 @@ pub mod web;
 pub use nfr::{enter, events, reset_events, Guard, Limits, NfrEvent};
 pub use policy::{crud_forbidden, requires_encryption, Policy};
 pub use role::{Auth, AuthError, Role, RoleProof};
-pub use web::{html_escape, page_shell, PathParams, Request, Response, Router};
+pub use web::{html_escape, page_shell, NavLink, PathParams, Request, Response, Router};
 
 /// Declare your application's role vocabulary. Invoke exactly once, at
 /// crate root. Each entry declares a marker type plus its wire name;
