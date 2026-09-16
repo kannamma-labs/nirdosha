@@ -72,3 +72,43 @@ fn openapi_lists_both_routes() {
     assert!(doc["paths"]["/dashboard"]["get"].is_object());
     assert!(doc["paths"]["/dashboard.json"]["get"].is_object());
 }
+
+fn stat_exact_cost() -> i64 {
+    42
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_internal_dashboard,
+    path: "/internal",
+    title: "Internal",
+    widgets {
+        Metric { label: "Revenue", fn: stat_revenue_mtd },
+        Metric { label: "Exact Cost", fn: stat_exact_cost, requires_role: "admin" },
+    }
+}
+
+fn dispatch_as(path: &str, roles: &[&str]) -> Response {
+    let router = mount_internal_dashboard(Router::new(|req: &nirdosha_rt::Request| {
+        let roles: Vec<&str> = req.header("x-roles").map(|s| s.split(',').filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+        Auth::login("test", &roles)
+    }));
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("x-roles".to_string(), roles.join(","));
+    let req = nirdosha_rt::Request { method: "GET".into(), path: path.into(), headers, body: String::new() };
+    router.dispatch(&req)
+}
+
+#[test]
+fn a_widget_with_requires_role_is_hidden_from_a_viewer_without_it() {
+    let anon = dispatch_as("/internal.json", &[]);
+    let doc: serde_json::Value = serde_json::from_str(&anon.body).unwrap();
+    let widgets = doc["widgets"].as_array().unwrap();
+    assert_eq!(widgets.len(), 1, "got: {widgets:?}");
+    assert_eq!(widgets[0]["label"], "Revenue");
+
+    let admin = dispatch_as("/internal.json", &["admin"]);
+    let doc: serde_json::Value = serde_json::from_str(&admin.body).unwrap();
+    let widgets = doc["widgets"].as_array().unwrap();
+    assert_eq!(widgets.len(), 2, "got: {widgets:?}");
+    assert!(widgets.iter().any(|w| w["label"] == "Exact Cost"));
+}

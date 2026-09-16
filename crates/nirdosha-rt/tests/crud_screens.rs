@@ -125,6 +125,31 @@ fn crud_screens_full_session() {
     let ok = dispatch("POST", &format!("/widgets/{id}/delete"), Some("admin"), "confirm=DELETE");
     assert_eq!(ok.status, 302);
     assert_eq!(dispatch("GET", &format!("/api/widgets/{id}"), None, "").status, 404);
+
+    // 8. Search filters generically across every field (not just
+    // strings), and CSV export respects the same filter. The store is
+    // empty again after step 7's delete, so these two are the only rows.
+    dispatch("POST", "/api/widgets", Some("admin"), r#"{"name":"Red Gadget","price_cents":100}"#);
+    dispatch("POST", "/api/widgets", Some("admin"), r#"{"name":"Blue Gizmo","price_cents":200}"#);
+
+    let (_, body) = dispatch_query("GET", "/api/widgets", "q=gadget");
+    let items: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<&str> = items.as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap()).collect();
+    assert!(names.iter().any(|n| n.contains("Gadget")));
+    assert!(!names.iter().any(|n| n.contains("Gizmo")));
+
+    // A numeric field is searchable too -- the point of formatting
+    // every field generically rather than special-casing strings.
+    let (_, body) = dispatch_query("GET", "/api/widgets", "q=200");
+    let items: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(items.as_array().unwrap().iter().any(|v| v["name"] == "Blue Gizmo"));
+
+    // CSV export respects the same filter and includes a header row.
+    let (status, csv) = dispatch_query("GET", "/widgets/export.csv", "q=gadget");
+    assert!(status.contains("200"), "got: {status}");
+    assert!(csv.starts_with("name,price_cents\n"), "got: {csv}");
+    assert!(csv.contains("Gadget"));
+    assert!(!csv.contains("Gizmo"));
 }
 
 #[test]
@@ -136,6 +161,12 @@ fn literal_suffix_routes_are_not_swallowed_by_the_id_wildcard() {
     let resp = dispatch("GET", "/widgets/new", Some("admin"), "");
     assert_eq!(resp.status, 200);
     assert!(resp.body.contains("<form"), "got: {}", resp.body);
+}
+
+fn dispatch_query(method: &str, path: &str, query: &str) -> (String, String) {
+    let full_path = format!("{path}?{query}");
+    let resp = dispatch(method, &full_path, None, "");
+    (format!("{}", resp.status), resp.body)
 }
 
 #[test]

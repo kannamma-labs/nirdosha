@@ -222,6 +222,8 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     let edit_path = quote! { #edit_path_str };
     let delete_path_str = format!("{path_str}/{{id}}/delete");
     let delete_path = quote! { #delete_path_str };
+    let export_path_str = format!("{path_str}/export.csv");
+    let export_path = quote! { #export_path_str };
 
     let title = path_str.trim_start_matches('/').to_string();
 
@@ -296,6 +298,31 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         fn __delete(id: i64) -> bool {
             #store().lock().unwrap().remove(&id).is_some()
         }
+
+        /// `?q=` filters rows generically across every declared field,
+        /// regardless of type — each field's `Display` output is
+        /// substring-matched case-insensitively. Shared by the List
+        /// screen, its JSON form, and the CSV export, so all three
+        /// agree on what a search actually returns.
+        fn __matching_rows(req: &::nirdosha_rt::Request) -> Vec<#entity> {
+            let q = req.query().get("q").map(|s| s.to_lowercase());
+            let mut rows: Vec<#entity> = #store()
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|e| match &q {
+                    None => true,
+                    Some(needle) if needle.is_empty() => true,
+                    Some(needle) => {
+                        let searchable: Vec<String> = vec![ #( e.#field_idents.to_string() ),* ];
+                        searchable.iter().any(|v| v.to_lowercase().contains(needle))
+                    }
+                })
+                .cloned()
+                .collect();
+            rows.sort_by_key(|e| e.id);
+            rows
+        }
     };
 
     let new_title = format!("New {title}");
@@ -304,15 +331,30 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     // ---- read: list + detail, HTML + JSON ----
     let list_html_route = route("get", &input.read, &path, "List", |_| {
         quote! {
-            let mut rows: Vec<::serde_json::Value> = #store().lock().unwrap().values().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-            rows.sort_by_key(|r| r["id"].as_i64().unwrap_or(0));
-            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create))
+            let matched = __matching_rows(req);
+            let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+            let q = req.query().get("q").cloned();
+            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref()))
+        }
+    });
+    let export_route = route("get", &input.read, &export_path, "Export CSV", |_| {
+        quote! {
+            let matched = __matching_rows(req);
+            let mut csv = String::new();
+            csv.push_str(&[ #(#field_names),* ].join(","));
+            csv.push('\n');
+            for e in &matched {
+                let cells: Vec<String> = vec![ #( ::nirdosha_rt::screens::csv_escape(&e.#field_idents.to_string()) ),* ];
+                csv.push_str(&cells.join(","));
+                csv.push('\n');
+            }
+            ::nirdosha_rt::Response::csv(200, csv)
         }
     });
     let list_api_route = route("get", &input.read, &api_path, "List (JSON)", |_| {
         quote! {
-            let mut rows: Vec<::serde_json::Value> = #store().lock().unwrap().values().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-            rows.sort_by_key(|r| r["id"].as_i64().unwrap_or(0));
+            let matched = __matching_rows(req);
+            let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
             ::nirdosha_rt::Response::json(200, &::serde_json::json!(rows))
         }
     });
@@ -445,6 +487,7 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
             router
                 #list_html_route
                 #list_api_route
+                #export_route
                 #new_form_route
                 #edit_form_route
                 #delete_confirm_route

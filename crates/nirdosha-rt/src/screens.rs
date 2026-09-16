@@ -78,14 +78,38 @@ pub fn row_to_form_values(fields: &[FieldSpec], row: &serde_json::Value) -> Hash
 /// `GET <path>` — a table of every row, or an empty-state message with
 /// a "Create one" link if the datasource has nothing yet (System
 /// State screens, RFC 0009 Track C's archetype 9).
-pub fn list_html(title: &str, base_path: &str, fields: &[FieldSpec], rows: &[serde_json::Value], can_create: bool) -> String {
+pub fn list_html(
+    title: &str,
+    base_path: &str,
+    fields: &[FieldSpec],
+    rows: &[serde_json::Value],
+    can_create: bool,
+    search: Option<&str>,
+) -> String {
+    let search_box = format!(
+        "<form method=\"get\" action=\"{base_path}\" style=\"margin-bottom:1rem\">\
+         <input type=\"text\" name=\"q\" value=\"{}\" placeholder=\"Search {}...\">\
+         <button type=\"submit\">Search</button>{}</form>",
+        html_escape(search.unwrap_or_default()),
+        html_escape(title),
+        if search.is_some_and(|s| !s.is_empty()) {
+            format!(" <a href=\"{base_path}\">clear</a>")
+        } else {
+            String::new()
+        },
+    );
     if rows.is_empty() {
         let cta = if can_create {
             format!(" <a href=\"{base_path}/new\">Create one</a>.")
         } else {
             String::new()
         };
-        return page_shell(title, "", &format!("<p class=\"empty\">No {} yet.{cta}</p>", html_escape(title)));
+        let empty_msg = if search.is_some_and(|s| !s.is_empty()) {
+            "No matching results.".to_string()
+        } else {
+            format!("No {} yet.{cta}", html_escape(title))
+        };
+        return page_shell(title, "", &format!("{search_box}<p class=\"empty\">{empty_msg}</p>"));
     }
     let mut table = String::from("<table><thead><tr>");
     for f in fields {
@@ -103,7 +127,20 @@ pub fn list_html(title: &str, base_path: &str, fields: &[FieldSpec], rows: &[ser
     }
     table.push_str("</tbody></table>");
     let new_link = if can_create { format!("<p><a href=\"{base_path}/new\">+ New</a></p>") } else { String::new() };
-    page_shell(title, "", &format!("{new_link}{table}"))
+    let export_link = format!("<p><a href=\"{base_path}/export.csv\">Export CSV</a></p>");
+    page_shell(title, "", &format!("{search_box}{new_link}{table}{export_link}"))
+}
+
+/// Escapes one CSV field per RFC 4180: wrap in quotes (doubling any
+/// embedded quote) whenever the value contains a comma, quote, or
+/// newline — left bare otherwise, matching how every spreadsheet
+/// import expects an unambiguous field to look.
+pub fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 /// `GET <path>/{id}` — every field as a read row, plus Edit/Delete
@@ -207,7 +244,7 @@ mod tests {
 
     #[test]
     fn list_html_shows_empty_state_with_create_link() {
-        let html = list_html("Products", "/products", &[], &[], true);
+        let html = list_html("Products", "/products", &[], &[], true, None);
         assert!(html.contains("No Products yet"));
         assert!(html.contains("/products/new"));
     }
@@ -216,10 +253,24 @@ mod tests {
     fn list_html_renders_rows_and_view_links() {
         let fields = [FieldSpec { name: "name", input_type: "text" }];
         let rows = vec![serde_json::json!({"id": 1, "name": "Widget"})];
-        let html = list_html("Products", "/products", &fields, &rows, false);
+        let html = list_html("Products", "/products", &fields, &rows, false, None);
         assert!(html.contains("Widget"));
         assert!(html.contains("/products/1"));
         assert!(!html.contains("/products/new"));
+    }
+
+    #[test]
+    fn list_html_shows_no_matching_results_for_an_empty_search() {
+        let html = list_html("Products", "/products", &[], &[], true, Some("xyz"));
+        assert!(html.contains("No matching results"));
+        assert!(html.contains("value=\"xyz\""));
+    }
+
+    #[test]
+    fn csv_escape_quotes_only_when_needed() {
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("has,comma"), "\"has,comma\"");
+        assert_eq!(csv_escape("has\"quote"), "\"has\"\"quote\"");
     }
 
     #[test]

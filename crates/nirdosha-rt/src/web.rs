@@ -221,6 +221,15 @@ impl Response {
         }
     }
 
+    pub fn csv(status: u16, body: impl Into<String>) -> Response {
+        Response {
+            status,
+            content_type: "text/csv; charset=utf-8",
+            body: body.into(),
+            extra_headers: Vec::new(),
+        }
+    }
+
     pub fn no_content() -> Response {
         Response {
             status: 204,
@@ -550,6 +559,35 @@ impl Router {
     gated_method!(post_gated, "POST");
     gated_method!(put_gated, "PUT");
     gated_method!(delete_gated, "DELETE");
+
+    /// An ungated route (no `RoleProof<R>` required to view it at all)
+    /// whose handler still gets the resolved `Auth` — for content that
+    /// is *visible* to everyone but *varies* per viewer (e.g.
+    /// `dashboard!`'s per-widget `requires_role`, which hides a widget
+    /// from a viewer lacking the role rather than gating the whole
+    /// page). Resolves the same way a gated route does: session cookie
+    /// first, then the app's own `authenticate`.
+    pub fn get_with_auth(
+        mut self,
+        path: &'static str,
+        summary: &'static str,
+        handler: impl Fn(&Request, &PathParams, &Auth) -> Response + 'static,
+    ) -> Self {
+        let authenticate = self.authenticate.clone();
+        let sessions = self.sessions.clone();
+        let wrapped = move |req: &Request, params: &PathParams| -> Response {
+            let auth = session_auth(&sessions, req).unwrap_or_else(|| authenticate(req));
+            handler(req, params, &auth)
+        };
+        self.routes.push(Route {
+            method: "GET",
+            template: PathTemplate::parse(path),
+            summary,
+            required_role: None,
+            handler: Box::new(wrapped),
+        });
+        self
+    }
 
     /// Route one already-parsed request. `GET /openapi.json` is
     /// answered here directly, before the route table — it always

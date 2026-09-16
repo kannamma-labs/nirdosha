@@ -33,12 +33,22 @@ enum Widget {
         stat_fn: Ident,
         target: Option<Lit>,
         alert_below: bool,
+        requires_role: Option<LitStr>,
     },
     Chart {
         label: LitStr,
         chart_fn: Ident,
         mark: Ident,
+        requires_role: Option<LitStr>,
     },
+}
+
+impl Widget {
+    fn requires_role(&self) -> &Option<LitStr> {
+        match self {
+            Widget::Metric { requires_role, .. } | Widget::Chart { requires_role, .. } => requires_role,
+        }
+    }
 }
 
 impl Parse for Widget {
@@ -48,7 +58,7 @@ impl Parse for Widget {
         braced!(content in input);
         match kind.to_string().as_str() {
             "Metric" => {
-                let (mut label, mut stat_fn, mut target, mut alert_below) = (None, None, None, false);
+                let (mut label, mut stat_fn, mut target, mut alert_below, mut requires_role) = (None, None, None, false, None);
                 while !content.is_empty() {
                     let key = Ident::parse_any(&content)?;
                     content.parse::<Token![:]>()?;
@@ -57,10 +67,11 @@ impl Parse for Widget {
                         "fn" => stat_fn = Some(content.parse::<Ident>()?),
                         "target" => target = Some(content.parse::<Lit>()?),
                         "alert_below" => alert_below = content.parse::<LitBool>()?.value,
+                        "requires_role" => requires_role = Some(content.parse::<LitStr>()?),
                         other => {
                             return Err(syn::Error::new(
                                 key.span(),
-                                format!("unknown Metric key `{other}` — valid keys: label, fn, target, alert_below"),
+                                format!("unknown Metric key `{other}` — valid keys: label, fn, target, alert_below, requires_role"),
                             ))
                         }
                     }
@@ -73,10 +84,11 @@ impl Parse for Widget {
                     stat_fn: stat_fn.ok_or_else(|| syn::Error::new(kind.span(), "Metric needs `fn`"))?,
                     target,
                     alert_below,
+                    requires_role,
                 })
             }
             "Chart" => {
-                let (mut label, mut chart_fn, mut mark) = (None, None, None);
+                let (mut label, mut chart_fn, mut mark, mut requires_role) = (None, None, None, None);
                 while !content.is_empty() {
                     let key = Ident::parse_any(&content)?;
                     content.parse::<Token![:]>()?;
@@ -84,10 +96,11 @@ impl Parse for Widget {
                         "label" => label = Some(content.parse::<LitStr>()?),
                         "fn" => chart_fn = Some(content.parse::<Ident>()?),
                         "mark" => mark = Some(content.parse::<Ident>()?),
+                        "requires_role" => requires_role = Some(content.parse::<LitStr>()?),
                         other => {
                             return Err(syn::Error::new(
                                 key.span(),
-                                format!("unknown Chart key `{other}` — valid keys: label, fn, mark"),
+                                format!("unknown Chart key `{other}` — valid keys: label, fn, mark, requires_role"),
                             ))
                         }
                     }
@@ -106,6 +119,7 @@ impl Parse for Widget {
                     label: label.ok_or_else(|| syn::Error::new(kind.span(), "Chart needs `label`"))?,
                     chart_fn: chart_fn.ok_or_else(|| syn::Error::new(kind.span(), "Chart needs `fn`"))?,
                     mark,
+                    requires_role,
                 })
             }
             other => Err(syn::Error::new(
@@ -195,47 +209,57 @@ fn expand_parsed(input: DashboardInput) -> TokenStream2 {
     };
     let json_path = format!("{}.json", input.path.value().trim_end_matches('/'));
 
-    let widget_pushes = input.widgets.iter().map(|w| match w {
-        Widget::Metric { label, stat_fn, target, alert_below } => {
-            let target_tok = match target {
-                Some(lit) => quote! { Some(#lit as f64) },
-                None => quote! { None },
-            };
-            quote! {
-                widgets.push(::nirdosha_rt::dashboard::metric_widget(
-                    #label,
-                    ::nirdosha_rt::dashboard::IntoMetricValue::into_metric_value(#stat_fn()),
-                    #target_tok,
-                    #alert_below,
-                ));
+    let widget_pushes = input.widgets.iter().map(|w| {
+        let push = match w {
+            Widget::Metric { label, stat_fn, target, alert_below, .. } => {
+                let target_tok = match target {
+                    Some(lit) => quote! { Some(#lit as f64) },
+                    None => quote! { None },
+                };
+                quote! {
+                    widgets.push(::nirdosha_rt::dashboard::metric_widget(
+                        #label,
+                        ::nirdosha_rt::dashboard::IntoMetricValue::into_metric_value(#stat_fn()),
+                        #target_tok,
+                        #alert_below,
+                    ));
+                }
             }
-        }
-        Widget::Chart { label, chart_fn, mark } => {
-            let mark_str = mark.to_string();
-            quote! {
-                widgets.push(::nirdosha_rt::dashboard::chart_widget(
-                    #label,
-                    #mark_str,
-                    ::nirdosha_rt::dashboard::IntoChartData::into_chart_data(#chart_fn()),
-                ));
+            Widget::Chart { label, chart_fn, mark, .. } => {
+                let mark_str = mark.to_string();
+                quote! {
+                    widgets.push(::nirdosha_rt::dashboard::chart_widget(
+                        #label,
+                        #mark_str,
+                        ::nirdosha_rt::dashboard::IntoChartData::into_chart_data(#chart_fn()),
+                    ));
+                }
             }
+        };
+        // Per-widget visibility: a widget with `requires_role` is
+        // simply omitted from the assembled list for a viewer lacking
+        // that role -- the same `Option<&RoleProof<R>>`-masking spirit
+        // as RFC 0020's per-field masking, applied per-widget instead.
+        match w.requires_role() {
+            Some(role) => quote! { if auth.has_role(#role) { #push } },
+            None => push,
         }
     });
 
     quote! {
         fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
-            fn __nirdosha_dashboard_widgets() -> Vec<::serde_json::Value> {
+            fn __nirdosha_dashboard_widgets(auth: &::nirdosha_rt::Auth) -> Vec<::serde_json::Value> {
                 let mut widgets: Vec<::serde_json::Value> = Vec::new();
                 #(#widget_pushes)*
                 widgets
             }
             router
-                .get(#json_path, concat!(#title, " (JSON)"), |_req, _params| {
-                    let widgets = __nirdosha_dashboard_widgets();
+                .get_with_auth(#json_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
+                    let widgets = __nirdosha_dashboard_widgets(auth);
                     ::nirdosha_rt::Response::json(200, &::serde_json::json!({ "title": #title, "widgets": widgets }))
                 })
-                .get(#path, #title, |_req, _params| {
-                    let widgets = __nirdosha_dashboard_widgets();
+                .get_with_auth(#path, #title, |_req, _params, auth| {
+                    let widgets = __nirdosha_dashboard_widgets(auth);
                     ::nirdosha_rt::Response::html(200, ::nirdosha_rt::dashboard::render_dashboard_html(#title, #refresh, &widgets))
                 })
         }
