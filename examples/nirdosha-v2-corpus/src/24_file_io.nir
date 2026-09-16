@@ -1,0 +1,30 @@
+//! v2 of `examples/features/24_file_io.nir` — `file`/`open`: one new
+//! type-former, `send`/`recv`/`stop` reused from the channel surface
+//! (`NirFile` in the prelude). Mode is "r", "w", or "a".
+
+use nirdosha_rt::prelude::*;
+
+fn main() {
+    let path = "/tmp/nirdosha_features_file_io.txt";
+
+    let mut out = open(path, "w");
+    out.send("first line\n");
+    stop(out);
+
+    // "a" (append) — opens the same path without truncating it
+    let mut appended = open(path, "a");
+    appended.send("second line\n");
+    stop(appended);
+
+    let inp = open(path, "r");
+    let content = inp.recv(); // reads all currently-available bytes
+    stop(inp);
+    println!("{content}");
+
+    // reading past EOF is `""`, not an error
+    let inp2 = open(path, "r");
+    let _all = inp2.recv();
+    let eof = inp2.recv();
+    stop(inp2);
+    println!("{}", eof == ""); // true
+}

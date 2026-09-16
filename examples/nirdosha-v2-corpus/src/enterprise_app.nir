@@ -529,10 +529,10 @@ fn main() {
     // callable value; this token lacks the role — check_role fails.
     let overridden = match oidc_validate_token(&ops_token, issuer, audience, jwks) {
         Ok(identity) => match check_role(&identity, "cfo") {
-            Ok(proof) => {
-                let f = acquire(override_spending_limit, proof);
-                f(500000)
-            }
+            Ok(proof) => match acquire(override_spending_limit, proof) {
+                Ok(f) => f(500000),
+                Err(_e) => -1,
+            },
             Err(_e) => -2,
         },
         Err(_e) => -3,
@@ -543,12 +543,12 @@ fn main() {
     // durable disbursement.
     let vendor_id = match oidc_validate_token(&ops_token, issuer, audience, jwks) {
         Ok(identity) => match check_role(&identity, "procurement_manager") {
-            Ok(proof) => {
-                let f = acquire(create_vendor, proof);
-                match f(Vendor { id: 0, name: "Acme Components".into(), rating: 4 }) {
+            Ok(proof) => match acquire(create_vendor, proof) {
+                Ok(f) => match f(Vendor { id: 0, name: "Acme Components".into(), rating: 4 }) {
                     Ok(id) => id,
                     Err(_e) => -1,
-                }
+                },
+                Err(_e) => -1,
             }
             Err(_e) => -1,
         },

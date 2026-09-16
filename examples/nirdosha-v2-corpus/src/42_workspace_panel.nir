@@ -1,0 +1,59 @@
+//! v2 of `examples/features/42_workspace_panel.nir` — `workspace`:
+//! composite, multi-panel screens scoped to one subject instance. The
+//! declaration is one `nirdosha:workspace` claim on the subject
+//! struct; the panels' sources/actions are ordinary typechecked fns
+//! the claim references by name — `workspace` composes calls that
+//! already exist, it adds no new trust boundary.
+
+use nirdosha_v2::{json_parse, Json};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    MalformedListing,
+}
+
+struct Case {
+    id: i64,
+    #[allow(dead_code)] // declared-complete for the screen layer
+    title: String,
+    #[allow(dead_code)]
+    status: String,
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn list_transaction_for_case(case_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("[]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn list_case_note(case_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("[]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn add_case_note(case_id: i64) -> Result<i64, ErrorCode> {
+    Ok(case_id)
+}
+
+/// nirdosha:workspace {"name":"CaseInvestigation","title":"Investigation Workspace","subject":"Case","panels":[{"label":"Transactions","source":"list_transaction_for_case"},{"label":"Notes","source":"list_case_note","actions":[{"label":"Add Note","fn":"add_case_note","style":"filled"}]}]}
+struct CaseInvestigationMarker;
+
+fn main() {
+    let txns: bool = match list_transaction_for_case(1) {
+        Ok(_doc) => true,
+        Err(_e) => false,
+    };
+    println!("{txns}"); // true
+
+    let added: i64 = match add_case_note(1) {
+        Ok(id) => id,
+        Err(_e) => -1,
+    };
+    println!("{added}"); // 1
+}

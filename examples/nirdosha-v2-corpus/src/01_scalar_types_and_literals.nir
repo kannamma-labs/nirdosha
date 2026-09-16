@@ -1,0 +1,34 @@
+//! v2 of `examples/features/01_scalar_types_and_literals.nir` — every
+//! scalar type and literal form, ported 1:1. Plain cargo runs this
+//! today; post-migration the same unmodified file runs under the
+//! proprietary compiler.
+
+fn returns_unit() {
+    // no `return` needed — falling off the end of a `unit`-returning fn
+    // is fine; `unit` itself has no literal syntax at all.
+}
+
+fn main() {
+    let a: i8 = 100;
+    let b: i16 = 30000;
+    let c: i32 = 2000000000;
+    let d: i64 = 9000000000000000000;
+    let e: u8 = 200;
+    let f: u32 = 4000000000;
+    let g: usize = 42;
+    println!("{a} {b} {c} {d} {e} {f} {g}");
+
+    let pi: f64 = 3.14159;
+    println!("{pi}");
+
+    let ok: bool = true;
+    println!("{ok}");
+
+    // `str`: literal + escapes only — no concatenation, slicing, or
+    // indexing (the boundary convention 08 demonstrates).
+    let s: &str = "line one\nline two\ttabbed\\backslash\"quoted\"";
+    println!("{s}");
+
+    returns_unit();
+    println!("{:?}", returns_unit()); // unit prints as "()" (Debug — Rust has no Display for unit)
+}

@@ -1,0 +1,26 @@
+//! v2 of `examples/features/45_module_namespacing_helper.nir` — the
+//! library half of real namespacing: a `#[path]`-included module file
+//! (the v2 form of `.nir`'s `use "path"`). `Shared` is a real
+//! namespace; `RetentionPolicy` is private — unreachable from
+//! outside `Shared`, even qualified.
+
+#[allow(non_snake_case)]
+pub mod Shared {
+    pub struct AuditEntry {
+        pub id: i64,
+        pub note: String,
+    }
+
+    // private — unreachable from outside `Shared`, even qualified
+    #[allow(dead_code)] // declared-complete: the policy ships with the module
+    struct RetentionPolicy {
+        days: i64,
+    }
+
+    // even inside its own module, a namespaced declaration is reachable
+    // only by its qualified form.
+    /// nirdosha:contract {"effects":["pure"]}
+    pub fn make_entry(id: i64) -> AuditEntry {
+        AuditEntry { id, note: "created".into() }
+    }
+}

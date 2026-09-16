@@ -239,10 +239,10 @@ fn main() {
 
     let acquired: i64 = match oidc_validate_token(&token, "https://example.com", "my-app", jwks) {
         Ok(identity) => match check_role(&identity, "physician") {
-            Ok(proof) => {
-                let f = acquire(transfer_funds, proof);
-                f(500)
-            }
+            Ok(proof) => match acquire(transfer_funds, proof) {
+                Ok(f) => f(500),
+                Err(_e) => -1,
+            },
             Err(_e) => -2,
         },
         Err(_e) => -3,

@@ -1,0 +1,46 @@
+//! v2 of `examples/features/08_str_boundary_convention.nir` — the
+//! "enum favoring" rule: `str` never rides a fn's parameter or return
+//! type. Two escape hatches: the `Text` carrier struct for genuine free
+//! text, a real `enum` for closed string sets. (The RULE itself is a
+//! `.nir`-grammar guarantee — under plain cargo this file merely
+//! demonstrates the convention every other example follows.)
+
+struct Text {
+    value: String,
+}
+
+fn greet(name: &Text) -> Text {
+    Text { value: name.value.clone() }
+}
+
+// Escape hatch 2: a closed set of string values belongs in a real
+// `enum`, so it gets exhaustive `match`, `==`/`!=`, and a searchable
+// `emit-ui` dropdown for free.
+// The full set is declared on purpose — every variant exists for the
+// `emit-ui` dropdown even where this demo only constructs `Approved`.
+#[allow(dead_code)]
+enum Status {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+fn describe(s: &Status) -> Text {
+    match s {
+        Status::Pending => Text { value: "pending".into() },
+        Status::Approved => Text { value: "approved".into() },
+        Status::Rejected => Text { value: "rejected".into() },
+    }
+}
+
+fn main() {
+    // `str` is fine as a local variable and as a struct field.
+    let s: &str = "hello, nirdosha";
+    println!("{s}");
+
+    let g = greet(&Text { value: "world".into() });
+    println!("{}", g.value);
+
+    let d = describe(&Status::Approved);
+    println!("{}", d.value);
+}

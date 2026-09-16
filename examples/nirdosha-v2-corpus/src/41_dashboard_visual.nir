@@ -1,0 +1,51 @@
+//! v2 of `examples/features/41_dashboard_visual.nir` — the second
+//! dashboard item kind: `visual "<label>" -> <fn> { render: ... }` for
+//! graph/heatmap/timeline. No naming-convention equivalent exists
+//! (a render kind can't be inferred from a fn name), so in v2 each
+//! visual is an explicit `nirdosha:visual` claim on its backing fn —
+//! inert under plain cargo, rendered by `emit-ui` post-migration.
+
+use nirdosha_v2::{json_parse, Json};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    MalformedVisual,
+}
+
+/// nirdosha:visual {"label":"Vendor Network","render":"graph"}
+/// nirdosha:contract {"effects":["pure"]}
+fn graph_of_relationships() -> Result<Json, ErrorCode> {
+    let text = r#"{"nodes": [{"id": "a", "label": "Vendor A"}, {"id": "b", "label": "Vendor B"}], "edges": [{"source": "a", "target": "b", "weight": 3}]}"#;
+    match json_parse(text) {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedVisual),
+    }
+}
+
+/// nirdosha:visual {"label":"Shipment Density","render":"heatmap"}
+/// nirdosha:contract {"effects":["pure"]}
+fn heatmap_of_shipments() -> Result<Json, ErrorCode> {
+    let text = r#"[{"lat": 37.77, "lng": -122.41, "weight": 5}]"#;
+    match json_parse(text) {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedVisual),
+    }
+}
+
+/// nirdosha:visual {"label":"Case History","render":"timeline"}
+/// nirdosha:contract {"effects":["pure"]}
+fn timeline_of_events() -> Result<Json, ErrorCode> {
+    let text = r#"[{"ts": 1700000000, "label": "submitted"}, {"ts": 1700003600, "label": "approved"}]"#;
+    match json_parse(text) {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedVisual),
+    }
+}
+
+fn main() {
+    let graph_ok: bool = match graph_of_relationships() {
+        Ok(_doc) => true,
+        Err(_e) => false,
+    };
+    println!("{graph_ok}"); // true
+}

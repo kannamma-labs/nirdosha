@@ -79,13 +79,13 @@ fn main() {
     };
     let restocked = match oidc_validate_token(&token, "https://mock-idp.local", "features-demo", jwks) {
         Ok(identity) => match check_role(&identity, "admin") {
-            Ok(proof) => {
-                let f = acquire(restock_product, proof);
-                match f(1) {
+            Ok(proof) => match acquire(restock_product, proof) {
+                Ok(f) => match f(1) {
                     Ok(id) => id,
                     Err(_e) => -1,
-                }
-            }
+                },
+                Err(_e) => -1,
+            },
             Err(_e) => -1,
         },
         Err(_e) => -1,
