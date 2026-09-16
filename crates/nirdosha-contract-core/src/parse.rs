@@ -13,7 +13,7 @@
 //! Unknown clauses are hard errors — in the dialect, a contract is a
 //! checked declaration, so a typo can never degrade into a comment.
 
-use crate::model::{Contract, Nfr, Requires};
+use crate::model::{Contract, Crud, Nfr, Requires};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
 pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
@@ -51,13 +51,15 @@ pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
             "effects" => contract.effects = Some(parse_effects(&group)?),
             "requires" => contract.requires = Some(parse_requires(&group)?),
             "nfr" => contract.nfr = Some(parse_nfr(&group)?),
+            "crud" => contract.crud = Some(parse_crud(&group)?),
             other => {
                 return Err(syn::Error::new(
                     span,
                     format!(
                         "unknown contract clause `{other}` — valid clauses: \
                          effects(pure, io, net, ...), requires(role = \"name\"), \
-                         nfr(latency_ms = N, concurrency_max = N)"
+                         nfr(latency_ms = N, concurrency_max = N), \
+                         crud(op = \"delete\", policy = \"name\")"
                     ),
                 ))
             }
@@ -193,6 +195,68 @@ fn parse_nfr(group: &proc_macro2::Group) -> syn::Result<Nfr> {
     Ok(nfr)
 }
 
+/// `crud(op = "delete", policy = "financial_us")` — order-flexible,
+/// both keys required, same shape as `nfr(..)`'s key=value list.
+fn parse_crud(group: &proc_macro2::Group) -> syn::Result<Crud> {
+    let mut op: Option<String> = None;
+    let mut policy: Option<String> = None;
+    let trees: Vec<TokenTree> = group.stream().into_iter().collect();
+    let mut i = 0;
+    while i < trees.len() {
+        let key = match &trees[i] {
+            TokenTree::Ident(id) => id.to_string(),
+            other => return Err(syn::Error::new(other.span(), "crud keys: op, policy")),
+        };
+        match trees.get(i + 1) {
+            Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+            _ => return Err(syn::Error::new(trees[i].span(), "expected `=`")),
+        }
+        let span = trees[i].span();
+        let value = match trees.get(i + 2) {
+            Some(TokenTree::Literal(lit)) => match syn::Lit::new(lit.clone()) {
+                syn::Lit::Str(s) => s.value(),
+                _ => return Err(syn::Error::new(lit.span(), "crud values are string literals")),
+            },
+            _ => return Err(syn::Error::new(span, "crud values are string literals")),
+        };
+        match key.as_str() {
+            "op" => {
+                if op.is_some() {
+                    return Err(syn::Error::new(span, "op declared twice"));
+                }
+                op = Some(value);
+            }
+            "policy" => {
+                if policy.is_some() {
+                    return Err(syn::Error::new(span, "policy declared twice"));
+                }
+                policy = Some(value);
+            }
+            other => {
+                return Err(syn::Error::new(
+                    span,
+                    format!("unknown crud key `{other}` — valid keys: op, policy"),
+                ))
+            }
+        }
+        i += 3;
+        if i < trees.len() {
+            match &trees[i] {
+                TokenTree::Punct(p) if p.as_char() == ',' => i += 1,
+                other => {
+                    return Err(syn::Error::new(
+                        other.span(),
+                        "crud items are comma-separated: crud(op = \"delete\", policy = \"financial_us\")",
+                    ))
+                }
+            }
+        }
+    }
+    let op = op.ok_or_else(|| syn::Error::new(group.span(), "crud(..) requires `op`"))?;
+    let policy = policy.ok_or_else(|| syn::Error::new(group.span(), "crud(..) requires `policy`"))?;
+    Ok(Crud { op, policy })
+}
+
 fn parse_number(lit: &proc_macro2::Literal, span: proc_macro2::Span) -> syn::Result<f64> {
     match syn::Lit::new(lit.clone()) {
         syn::Lit::Int(i) => i.base10_parse::<f64>().map_err(|_| err(span)),
@@ -233,5 +297,24 @@ mod tests {
     fn unknown_nfr_key_is_an_error() {
         let e = parse_contract(quote! { nfr(latency = 50) }).unwrap_err();
         assert!(e.to_string().contains("unknown nfr key"));
+    }
+
+    #[test]
+    fn parses_crud_clause_either_key_order() {
+        let c = parse_contract(quote! { crud(op = "delete", policy = "financial_us") }).unwrap();
+        let crud = c.crud.unwrap();
+        assert_eq!(crud.op, "delete");
+        assert_eq!(crud.policy, "financial_us");
+
+        let c = parse_contract(quote! { crud(policy = "financial_us", op = "delete") }).unwrap();
+        let crud = c.crud.unwrap();
+        assert_eq!(crud.op, "delete");
+        assert_eq!(crud.policy, "financial_us");
+    }
+
+    #[test]
+    fn crud_missing_a_key_is_an_error() {
+        let e = parse_contract(quote! { crud(op = "delete") }).unwrap_err();
+        assert!(e.to_string().contains("requires `policy`"));
     }
 }

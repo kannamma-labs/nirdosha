@@ -26,7 +26,13 @@
 //! - for `nfr(..)`, a Drop-based guard wrapping the body that records
 //!   latency against the declared limit and gates concurrency;
 //! - for `effects(pure)`, a local scan of the body for known-impure
-//!   operations. A lie is a `compile_error!` — under plain cargo too.
+//!   operations. A lie is a `compile_error!` — under plain cargo too;
+//! - for `crud(op = "..", policy = "..")`, a sibling `const _: () =
+//!   assert!(..)` item cross-checking the named
+//!   [`nirdosha_rt::policy!`]-declared policy's forbidden-operations
+//!   list. `rustc`'s own const-evaluator refuses the build if the
+//!   policy forbids the named operation — see RFC 0020 and
+//!   `docs/nirdosha-rt-dialect.md`'s "no bespoke parser, ever" rule.
 //!
 //! Stage 2 (the rustc driver) upgrades the local scan to full
 //! interprocedural proof; until then the scan is deliberately
@@ -146,9 +152,35 @@ fn expand(
         .expect("nfr guard wrapper always parses");
     }
 
+    // --- policy cross-check: crud(op, policy) becomes a real const assertion,
+    // not a doc-comment scanner. rustc's own const-evaluator refuses the
+    // build if the named policy forbids the named operation — see
+    // docs/nirdosha-rt-dialect.md's "no bespoke parser, ever" rule.
+    let crud_assertion = match &contract.crud {
+        Some(crud) => {
+            let policy_ident = match cc::role::role_ident(&crud.policy, fn_item.sig.ident.span()) {
+                Ok(i) => i,
+                Err(e) => return e.to_compile_error(),
+            };
+            let op_str = &crud.op;
+            let message = format!(
+                "policy `{}` forbids the `{op_str}` operation, but `{fn_name}` declares crud(op = \"{op_str}\", policy = \"{}\")",
+                crud.policy, crud.policy
+            );
+            quote! {
+                const _: () = assert!(
+                    !::nirdosha_rt::crud_forbidden::<crate::nirdosha_policies::#policy_ident>(#op_str),
+                    #message
+                );
+            }
+        }
+        None => quote!(),
+    };
+
     // --- portable encoding: the contract rides into rustdoc as a doc attribute ---
     let doc = contract.doc_string();
     quote! {
+        #crud_assertion
         #[doc = #doc]
         #fn_item
     }

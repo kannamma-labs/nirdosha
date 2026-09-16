@@ -194,6 +194,7 @@ fn bench_gates_hold_and_breach() {
                 latency_ms: Some(10.0),
                 concurrency_max: Some(4),
             }),
+            crud: None,
         },
     };
 

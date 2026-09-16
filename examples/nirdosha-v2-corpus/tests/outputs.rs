@@ -488,6 +488,14 @@ fn compiled_workflow_escalation() {
 }
 
 #[test]
+fn policy_forbidden_operations() {
+    expect(
+        &run("v2_55_policy_forbidden_ops"),
+        &["1", "Widget", "999", "1"],
+    );
+}
+
+#[test]
 fn bench_dot() {
     expect(&run("v2_bench_dot"), &["352531173.3352983"]);
 }

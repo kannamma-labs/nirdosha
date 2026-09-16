@@ -30,12 +30,30 @@ pub struct Contract {
     pub requires: Option<Requires>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nfr: Option<Nfr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crud: Option<Crud>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requires {
     pub role: String,
+}
+
+/// Every CRUD operation name a `Crud` gate may name, and a `policy!`'s
+/// `forbids` list may forbid.
+pub const KNOWN_CRUD_OPS: &[&str] = &["create", "read", "update", "delete"];
+
+/// `crud(op = "delete", policy = "financial_us")` — cross-checks this
+/// function against a named [`crate::role::Role`]-style policy type at
+/// build time (`crates/nirdosha-rt/src/policy.rs`'s `crud_forbidden`).
+/// Real `rustc` const-evaluation, not a doc-comment scanner: see
+/// `docs/nirdosha-rt-dialect.md`'s "no bespoke parser, ever" rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Crud {
+    pub op: String,
+    pub policy: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -94,6 +112,17 @@ impl Contract {
                 issues.push("nfr: concurrency_max must be >= 1".into());
             }
         }
+        if let Some(crud) = &self.crud {
+            if !KNOWN_CRUD_OPS.contains(&crud.op.as_str()) {
+                issues.push(format!(
+                    "crud(op = ...) — unknown op `{}`, known ops: {KNOWN_CRUD_OPS:?}",
+                    crud.op
+                ));
+            }
+            if let Err(msg) = crate::role::validate_role_name(&crud.policy) {
+                issues.push(format!("crud(policy = ...) — {msg}"));
+            }
+        }
         issues
     }
 }
@@ -115,6 +144,10 @@ mod tests {
                 throughput_min_per_sec: None,
                 concurrency_max: Some(1000),
             }),
+            crud: Some(Crud {
+                op: "delete".into(),
+                policy: "financial_us".into(),
+            }),
         };
         let doc = c.doc_string();
         assert!(doc.starts_with("nirdosha:contract {"));
@@ -122,6 +155,18 @@ mod tests {
             Ok(Some(back)) => assert_eq!(back, c),
             _ => panic!("doc contract did not roundtrip: {doc}"),
         }
+    }
+
+    #[test]
+    fn crud_rejects_unknown_op() {
+        let c = Contract {
+            crud: Some(Crud {
+                op: "wipe".into(),
+                policy: "financial_us".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!c.validate().is_empty());
     }
 
     #[test]

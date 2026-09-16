@@ -1,0 +1,64 @@
+//! v2 example: `nirdosha_rt::policy!` + `crud(op, policy)` — "this
+//! domain forbids delete" as a real `rustc` guarantee, not a
+//! doc-comment a scanner might or might not have been run against.
+//!
+//! `financial_us` forbids `delete`. `create_product`/`update_product`
+//! below declare `crud(op = "create"/"update", policy = "financial_us")`
+//! — neither is forbidden, so both compile normally. There is
+//! deliberately no `delete_product`: adding one with
+//! `crud(op = "delete", policy = "financial_us")` is a real compile
+//! error, not a lint — `rustc`'s own const-evaluator refuses it via the
+//! `const _: () = assert!(..)` the macro emits, cross-checking
+//! `financial_us`'s `FORBIDDEN_OPS` list. See RFC 0020 and
+//! `docs/nirdosha-rt-dialect.md`'s "no bespoke parser, ever" rule.
+
+nirdosha_rt::roles! {
+    Admin = "admin";
+}
+
+nirdosha_rt::policy! {
+    FinancialUs = "financial_us" {
+        forbids: [delete],
+        encryption: [at_rest, in_transit],
+    }
+}
+
+struct Product {
+    id: i64,
+    name: String,
+    price_cents: i64,
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"), crud(op = "create", policy = "financial_us"))]
+fn create_product(name: String, price_cents: i64) -> Product {
+    Product {
+        id: 1,
+        name,
+        price_cents,
+    }
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"), crud(op = "update", policy = "financial_us"))]
+fn update_product(id: i64, price_cents: i64) -> Result<i64, &'static str> {
+    if price_cents < 0 {
+        return Err("price_cents: must be >= 0");
+    }
+    Ok(id)
+}
+
+fn main() {
+    let auth = nirdosha_rt::Auth::login("alice", &["admin"]);
+    let proof = auth
+        .prove::<nirdosha_roles::Admin>()
+        .expect("alice holds the admin role");
+
+    let p = create_product(&proof, "Widget".into(), 999);
+    println!("{}", p.id);
+    println!("{}", p.name);
+    println!("{}", p.price_cents);
+
+    match update_product(&proof, p.id, 1099) {
+        Ok(id) => println!("{id}"),
+        Err(e) => println!("{e}"),
+    }
+}

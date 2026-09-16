@@ -12,6 +12,19 @@ the verification layer now runs on the language AI agents already
 emit natively. The `.nir` language stays the reference implementation of
 the spec; this dialect is the adoption wedge.
 
+**Standing design rule: no bespoke parser, ever.** Every guarantee this
+dialect makes — `requires(role)`, `nfr(..)`, and any future clause
+(e.g. policy/`crud_op` gating) — must be real, stock `rustc` doing the
+work: the type system (an unforgeable proof type), ordinary proc-macro
+expansion (`syn`/`quote`, checked by `rustc` for every build, not an
+opt-in tool), or `const`-evaluation (a `const _: () = assert!(..)` that
+`rustc` itself refuses to compile past). It must **never** be a
+hand-rolled scanner reading JSON out of a doc comment and checked only
+by a separate, optional tool someone has to remember to run — that
+demotes a compiler guarantee back to a lint one person forgot to invoke.
+If a new mechanism can't be expressed as one of the three real
+`rustc`-checked forms above, it isn't ready to ship as a guarantee yet.
+
 ---
 
 ## 1. The promise, precisely

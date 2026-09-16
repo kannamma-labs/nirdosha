@@ -207,6 +207,10 @@ name = "v2_54_compiled_escalation"
 path = "src/54_compiled_workflow_escalation.nir"
 
 [[bin]]
+name = "v2_55_policy_forbidden_ops"
+path = "src/55_policy_forbidden_operations.nir"
+
+[[bin]]
 name = "v2_bench_det"
 path = "src/bench_det.nir"
 
