@@ -2063,6 +2063,13 @@ name = "nirdosha-ui-plugin-example-sparkline"
 version = "0.1.0"
 
 [[package]]
+name = "nirdosha-v2-corpus"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-rt",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,43 @@
+//! v2 of `examples/features/40_dashboard.nir` — the declarative
+//! dashboard layer.
+//!
+//! **The encoding:** `.nir`'s `dashboard { tile "..." -> stat_x, chart
+//! "..." -> chart_x }` block becomes a `nirdosha:dashboard` comment.
+//! Anchor convention: the comment decorates the dashboard's first
+//! tile fn — the proprietary scanner collects them file-wide either
+//! way; the names inside are what `emit-ui` reads.
+//!
+//! Pre-migration: the stat/chart fns run as ordinary Rust; the
+//! comment is inert. Post-migration: `emit-ui` renders the tile and
+//! the inline-SVG bar chart from this exact declaration.
+
+use nirdosha_v2::{json_parse, Json};
+
+#[allow(dead_code)]
+enum ErrorCode {
+    MalformedChart(String),
+}
+
+/// nirdosha:dashboard {"tiles":[{"label":"Open Orders","stat":"stat_open_orders"}],"charts":[{"label":"By Status","chart":"chart_orders_by_status"}]}
+fn stat_open_orders() -> i64 {
+    12
+}
+
+fn chart_orders_by_status() -> Result<Json, ErrorCode> {
+    match json_parse(
+        r#"[{"label": "pending", "value": 3}, {"label": "paid", "value": 9}]"#,
+    ) {
+        Ok(doc) => Ok(doc),
+        Err(e) => Err(ErrorCode::MalformedChart(e)),
+    }
+}
+
+fn main() {
+    println!("{}", stat_open_orders()); // 12 — called directly, same as ever
+
+    let chart_ok = match chart_orders_by_status() {
+        Ok(_doc) => true,
+        Err(_e) => false,
+    };
+    println!("{chart_ok}"); // true
+}

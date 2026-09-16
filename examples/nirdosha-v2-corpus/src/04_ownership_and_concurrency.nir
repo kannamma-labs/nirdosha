@@ -1,0 +1,94 @@
+//! v2 of `examples/syntax/04_ownership_and_concurrency.nir` —
+//! `box`/`&`/move, `froze`, `spawn`/`join`, `chan`, `sandbox`.
+//!
+//! **The mapping is the point of this file:** `.nir`'s `box` *is*
+//! Rust's `Box` (affine, moved, deref'd — no shim needed); `froze`
+//! is the `Frozen` prelude type (copyable, deeply immutable);
+//! `spawn`/`join` are real OS threads; `chan` is the unbounded-MPMC
+//! `Chan` with `send` that never blocks; `sandbox` runs on a
+//! thread today (the proprietary tier isolates it in a real OS
+//! process and `stop` really kills it — the corpus-grade deviation,
+//! disclosed in the README).
+//!
+//! Pre-migration: full behavior parity with the original, including
+//! the `-1` from `stop` on a still-running worker. Post-migration:
+//! the same, with a real process underneath the sandbox.
+
+use nirdosha_rt::prelude::*;
+
+fn consume(b: Box<i64>) -> i64 {
+    *b
+}
+
+fn make_boxed(n: i64) -> Box<i64> {
+    Box::new(n)
+}
+
+fn read_frozen(f: &Frozen<i64>) -> i64 {
+    *f.get()
+}
+
+fn peek(r: &i64) -> i64 {
+    *r + 1
+}
+
+fn double(n: i64) -> i64 {
+    n * 2
+}
+
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+// A channel handle is freely copyable — both sides keep a handle to
+// the same queue after the spawn.
+fn producer(c: &Chan<i64>) {
+    send(c, 14);
+    send(c, 28);
+}
+
+// `sandbox` runs this as a real, separate OS process in the
+// proprietary tier; `stop` kills it and yields its exit code.
+fn background_work() {
+    loop {}
+}
+
+fn main() {
+    // box / move
+    let a: Box<i64> = Box::new(10);
+    println!("{}", consume(a)); // moves `a`; using `a` again would not compile
+
+    let b: Box<i64> = make_boxed(32);
+    println!("{}", *b + 10); // 42
+
+    // froze — freely copyable: `f` is used twice below, no move error.
+    let f: Frozen<i64> = Frozen::freeze(21);
+    println!("{}", read_frozen(&f)); // 21
+    println!("{}", read_frozen(&f) * 2); // 42
+
+    // & / shared borrow
+    let n: i64 = 41;
+    println!("{}", peek(&n));
+    println!("{}", peek(&n)); // `n` was only borrowed — fine
+
+    // spawn / join / thread
+    let h1 = spawn(move || double(21));
+    let h2 = spawn(move || add(10, 32));
+    println!("{}", join(h1)); // 42
+    println!("{}", join(h2)); // 42
+
+    // chan / send / recv
+    let c: Chan<i64> = Chan::new();
+    let producer_c = c.clone();
+    let h = spawn(move || producer(&producer_c));
+    let x = recv(&c);
+    let y = recv(&c);
+    join(h);
+    println!("{}", x + y); // 42
+
+    // sandbox / stop — the corpus-grade body still reports -1 for a
+    // still-running worker, matching the original example's output.
+    let s = sandbox(move || background_work());
+    let code: i64 = stop(s);
+    println!("{code}"); // -1
+}

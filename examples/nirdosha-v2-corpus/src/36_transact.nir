@@ -1,0 +1,82 @@
+//! v2 of `examples/features/36_transact.nir` — the durable-effect
+//! saga: `precheck`?, `network`, `verify`, `commit`, `compensate`?,
+//! `log`?, with the implicit always-unique `txn_id`.
+//!
+//! **The encoding — the split v2 always makes:** the *claim* (which
+//! steps form the saga, in order, and what runs on failure) is a
+//! `nirdosha:transact` comment; the *execution* is visible Rust. A
+//! Nirdosha compiler checks the body against the claim — the
+//! declared-vs-actual move, exactly like `effects(pure)` refusing a
+//! lying body. Plain rustc just runs the body.
+//!
+//! Pre-migration: the saga runs as ordinary Rust (the prints show
+//! commit/compensate/log paths). Post-migration: the proprietary
+//! compiler additionally *enforces durability* behind the same shape
+//! — `txn_id` is generated before `network`, `commit` retries with
+//! backoff, a crash replays the exact `txn_id`.
+
+use nirdosha_rt::prelude::txn_id;
+
+fn db_reachable() -> bool {
+    true
+}
+
+fn call_api(txn_id: &str, amount: i64) -> i64 {
+    // a correctly-built downstream dedupes on `txn_id` — what makes it
+    // safe for crash replay to resend this exact call after a restart.
+    let _ = txn_id;
+    amount
+}
+
+fn check(resp: i64) -> bool {
+    resp > 0
+}
+
+fn update_db(amount: i64) -> i64 {
+    println!("committing {amount}");
+    amount
+}
+
+fn refund(amount: i64) -> i64 {
+    println!("compensating {amount}");
+    amount
+}
+
+fn write_log(amount: i64, ok: bool) {
+    println!("logged {amount} {ok}");
+}
+
+/// nirdosha:transact {"precheck":"db_reachable","network":"call_api","verify":"check","commit":"update_db","compensate":"refund","log":"write_log"}
+fn checkout(amount: i64) -> bool {
+    let id = txn_id();
+    if !db_reachable() {
+        return false; // aborted before anything durable was written
+    }
+    let network = call_api(&id, amount);
+    let verified = check(network);
+    if verified {
+        update_db(amount);
+    } else {
+        refund(amount);
+    }
+    write_log(amount, verified);
+    verified
+}
+
+// all three of `precheck`/`compensate`/`log` are optional
+/// nirdosha:transact {"network":"call_api","verify":"check","commit":"update_db"}
+fn minimal(amount: i64) -> bool {
+    let id = txn_id();
+    let network = call_api(&id, amount);
+    let verified = check(network);
+    if verified {
+        update_db(amount);
+    }
+    verified
+}
+
+fn main() {
+    println!("{}", checkout(10)); // true — committing 10
+    println!("{}", checkout(-5)); // false — compensating -5
+    println!("{}", minimal(1)); // true — committing 1, no compensate/log slot to run
+}

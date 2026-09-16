@@ -26,6 +26,7 @@
 pub use nirdosha_macros::contract;
 
 pub mod nfr;
+pub mod prelude;
 pub mod role;
 
 pub use nfr::{enter, events, reset_events, Guard, Limits, NfrEvent};

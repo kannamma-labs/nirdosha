@@ -155,7 +155,7 @@ pub fn verify_package(manifest_dir: &Path, strict: bool) -> Result<ScanSummary, 
         ));
     }
     let mut files = Vec::new();
-    collect_rs_files(&src, &mut files);
+    collect_dialect_files(&src, &mut files);
     files.sort();
     Ok(verify_sources(&package, manifest_dir, &files, strict))
 }
@@ -180,13 +180,16 @@ pub fn verify_sources(
     summary
 }
 
-fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Collect the dialect's source files: `.rs` and `.nir` alike — a v2
+/// `.nir` file is valid Rust that plain cargo already builds (the v2
+/// corpus proved it), so it carries contracts the same way.
+fn collect_dialect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_rs_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
+            collect_dialect_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs" || e == "nir") {
             out.push(path);
         }
     }

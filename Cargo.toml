@@ -68,6 +68,7 @@ members = [
     "examples/rt-payroll",
     "examples/rt-payroll-lying",
     "examples/rt-payroll-pure-chain",
+    "examples/nirdosha-v2-corpus",
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

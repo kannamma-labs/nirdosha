@@ -1,0 +1,416 @@
+//! # `nirdosha_v2` — the fixture surface of the v2 corpus
+//!
+//! This is a `.nir` **v2 file**: valid Rust, compiled by plain `cargo`,
+//! extension intact. It is the *fixture-grade* half of the `.nir`
+//! platform vocabulary — the services whose real implementations live
+//! in the proprietary tier (`db` over SQLite, `mq` over Redis, `http`
+//! over TcpStream, `oidc` over the Row-12 identity kernel). Post
+//! migration, the same examples run **unmodified** under the
+//! proprietary compiler, which supplies the real bodies behind these
+//! same names; under plain cargo these fixtures keep them compiling
+//! and running with documented, corpus-grade behavior.
+//!
+//! What is deliberately here vs deliberately elsewhere:
+//!
+//! | surface | here (fixture) | proprietary tier (real) |
+//! |---|---|---|
+//! | `db_connect`/`db_execute`/`db_query` | in-memory row store for the corpus SQL shapes | SQLite/rqlite |
+//! | `mq_connect`/`mq_publish` | always `Err` (matches the examples: no Redis running) | Redis pub/sub |
+//! | `http_get`/`http_post` | always `Err` (matches the examples: no listener) | real TcpStream/TLS |
+//! | `mock_issue_token`/`oidc_validate_token` | fixture JWKS round-trip | Row-12 identity kernel |
+//! | `check_role`/`acquire`/`VerifiedIdentity` | runtime role strings, .nir's model | Row-12 unforgeable views |
+//! | `json_parse`/`json_get_*` | mini-extractor over the fixture docs | real json |
+//! | `WorkflowActionError` etc. | plain enums | `workflow_lower`'s synthesized shapes |
+//!
+//! The concurrency/decimal/linalg surfaces (`Chan`, `Frozen`, `spawn`,
+//! `sandbox`, `Dec128`, `Money`, `Vector`, …) are NOT fixtures — they
+//! live in the real `nirdosha-rt` prelude.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+// ---------------------------------------------------------------------------
+// Verified identity — .nir's runtime-role model (fixture JWKS flow).
+// ---------------------------------------------------------------------------
+
+/// The validated identity: subject + roles extracted from the claims.
+#[derive(Clone)]
+pub struct VerifiedIdentity {
+    pub subject: String,
+    pub roles: Vec<String>,
+}
+
+/// Minted *only* by `check_role` when the identity carries the role.
+/// Passing this to `acquire` is how a privileged fn's value is obtained.
+pub struct RoleProof {
+    pub role: String,
+}
+
+/// The deliberate, explicitly-named inverse of `oidc_validate_token`
+/// (the mock IdP from `examples/identity_mock.nir`): mints a signed
+/// token against the fixed local JWKS the examples carry.
+/// nirdosha:contract {"effects":["pure"]}
+pub fn mock_issue_token(
+    _subject: &str,
+    _issuer: &str,
+    _audience: &str,
+    _iat: i64,
+    _exp: i64,
+    claims: &str,
+    _jwks: &str,
+) -> Result<String, String> {
+    // Fixture encoding: the claims ride the token verbatim (a real
+    // tier signs them; the fixture validates structurally).
+    Ok(format!("mock.{}.sig", claims))
+}
+
+/// Validate a token against issuer/audience/JWKS (fixture body:
+/// structural check + claims extraction; real body: Row 12).
+/// nirdosha:contract {"effects":["pure"]}
+pub fn oidc_validate_token(
+    token: &str,
+    _issuer: &str,
+    _audience: &str,
+    _jwks: &str,
+) -> Result<VerifiedIdentity, String> {
+    let claims = token
+        .strip_prefix("mock.")
+        .and_then(|rest| rest.strip_suffix(".sig"))
+        .ok_or("malformed token")?;
+    let subject = extract_str(claims, "sub").unwrap_or_default();
+    let roles = extract_roles(claims);
+    Ok(VerifiedIdentity { subject, roles })
+}
+
+/// `check_role(identity, "admin")` — the only minter of `RoleProof`.
+/// nirdosha:contract {"effects":["pure"]}
+pub fn check_role(identity: &VerifiedIdentity, role: &str) -> Result<RoleProof, String> {
+    if identity.roles.iter().any(|r| r == role) {
+        Ok(RoleProof { role: role.to_string() })
+    } else {
+        Err(format!("identity lacks role `{role}`"))
+    }
+}
+
+/// `acquire f(proof)` — a privileged fn's value, unobtainable without
+/// a proof minted by `check_role`.
+/// nirdosha:contract {"effects":["pure"]}
+pub fn acquire<T>(f: T, _proof: RoleProof) -> T {
+    f
+}
+
+fn extract_str(json: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\":");
+    let rest = json.split(&pat).nth(1)?.trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn extract_roles(json: &str) -> Vec<String> {
+    let Some(rest) = json.split("\"roles\"").nth(1) else {
+        return Vec::new();
+    };
+    let Some(array) = rest.split('[').nth(1) else {
+        return Vec::new();
+    };
+    array
+        .split(']')
+        .next()
+        .unwrap_or("")
+        .split(',')
+        .map(|item| item.trim().trim_matches('"').to_string())
+        .filter(|role| !role.is_empty())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// json — mini-extractor over the fixture documents.
+// ---------------------------------------------------------------------------
+
+/// `.nir`'s `json` type: an already-parsed document. Fixture body: the
+/// serialized text.
+pub type Json = String;
+
+/// `json_parse(text)` — fixture body: well-formedness is checked
+/// structurally only.
+/// nirdosha:contract {"effects":["pure"]}
+pub fn json_parse(text: &str) -> Result<Json, String> {
+    let t = text.trim();
+    if t.starts_with('{') && t.ends_with('}') || t.starts_with('[') && t.ends_with(']') {
+        Ok(t.to_string())
+    } else {
+        Err(format!("not json: {t:?}"))
+    }
+}
+
+/// `json_get_str(doc, "name")`
+/// nirdosha:contract {"effects":["pure"]}
+pub fn json_get_str(doc: &str, key: &str) -> Result<String, String> {
+    extract_str(doc, key).ok_or(format!("no field `{key}`"))
+}
+
+/// `json_get_i64(doc, "oid")`
+/// nirdosha:contract {"effects":["pure"]}
+pub fn json_get_i64(doc: &str, key: &str) -> Result<i64, String> {
+    let pat = format!("\"{key}\": ");
+    let rest = doc.split(&pat).nth(1).ok_or(format!("no field `{key}`"))?;
+    let num: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    num.parse::<i64>().map_err(|e| e.to_string())
+}
+
+/// `json_array_get(rows, 0)` — fixture body: the whole document is the
+/// row store, so index 0 yields the first object it contains.
+/// nirdosha:contract {"effects":["pure"]}
+pub fn json_array_get(rows: &str, _index: usize) -> Result<Json, String> {
+    let trimmed = rows.trim();
+    if trimmed.starts_with('[') {
+        Ok(trimmed
+            .trim_start_matches('[')
+            .split_once('{')
+            .map(|(_, rest)| format!("{{{rest}"))
+            .unwrap_or_else(|| "{}".to_string()))
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// db — in-memory row store for the corpus SQL shapes.
+// ---------------------------------------------------------------------------
+
+/// `.nir`'s `db` handle: affine, connected, used, `stop`ped in one fn.
+/// Fixture body: every connection shares one global in-memory store
+/// (the corpus's examples reconnect to the same file repeatedly).
+pub struct DbConn;
+
+struct DbStore {
+    /// rows per table, each row a JSON object string
+    tables: HashMap<String, Vec<String>>,
+    /// per-table rowid counter (like SQLite's AUTOINCREMENT)
+    rowids: HashMap<String, i64>,
+    /// the table the most recent INSERT touched
+    last_insert_table: Option<String>,
+}
+
+fn global_store() -> &'static Mutex<DbStore> {
+    static STORE: std::sync::OnceLock<Mutex<DbStore>> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| {
+        Mutex::new(DbStore {
+            tables: HashMap::new(),
+            rowids: HashMap::new(),
+            last_insert_table: None,
+        })
+    })
+}
+
+/// `db_connect(path)` — fixture body: the global in-memory store.
+/// nirdosha:contract {"effects":["db"]}
+pub fn db_connect(_path: &str) -> Result<DbConn, String> {
+    Ok(DbConn)
+}
+
+fn with_store<T>(f: impl FnOnce(&mut DbStore) -> T) -> T {
+    f(&mut global_store().lock().unwrap())
+}
+
+/// `db_execute(conn, sql, params)` — fixture body understands the
+/// corpus's `CREATE TABLE`, `INSERT INTO t (cols) VALUES (?,?,...)`
+/// and `UPDATE t SET status = ?` shapes; everything else succeeds
+/// with 0 rows affected.
+/// nirdosha:contract {"effects":["db"]}
+pub fn db_execute(conn: &DbConn, sql: &str, params: &[String]) -> Result<i64, String> {
+    let _ = conn;
+    with_store(|store| {
+        if sql.starts_with("CREATE TABLE") {
+            // handles both `CREATE TABLE t (...)` and
+            // `CREATE TABLE IF NOT EXISTS t (...)` (the corpus's shapes)
+            let rest = sql.strip_prefix("CREATE TABLE").unwrap_or(sql);
+            let rest = rest.strip_prefix(" IF NOT EXISTS").unwrap_or(rest);
+            let table = rest
+                .split_whitespace()
+                .next()
+                .ok_or("no table in CREATE TABLE")?
+                .to_string();
+            store.tables.entry(table).or_default();
+            Ok(0)
+        } else if let Some(rest) = sql.strip_prefix("INSERT INTO ") {
+            let table = rest.split_whitespace().next().unwrap_or_default().to_string();
+            let rowid = store.rowids.entry(table.clone()).or_insert(0);
+            *rowid += 1;
+            store.last_insert_table = Some(table.clone());
+            let cols = rest
+                .split('(')
+                .nth(1)
+                .unwrap_or("")
+                .split(')')
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .collect::<Vec<_>>();
+            let mut row = String::from("{");
+            for (i, col) in cols.iter().enumerate() {
+                let value = params.get(i).cloned().unwrap_or_default();
+                let value = value.trim_matches('"');
+                if i > 0 {
+                    row.push_str(", ");
+                }
+                let rendered = value_json(value);
+                    row.push_str(&format!("\"{col}\": {rendered}"));
+            }
+            row.push('}');
+            let _rowid = store.rowids.get(&table).copied().unwrap_or(1);
+            store.tables.entry(table).or_default().push(row);
+            Ok(_rowid)
+        } else if sql.starts_with("UPDATE") {
+            // `UPDATE t SET status = ? WHERE id = ?` — mark every row
+            // of the named table with the status (the corpus's usage).
+            let table = sql.split_whitespace().nth(1).unwrap_or_default().to_string();
+            let status = params.first().cloned().unwrap_or_default();
+            let status = status.trim_matches('"');
+            if let Some(rows) = store.tables.get_mut(&table) {
+                for row in rows.iter_mut() {
+                    if row.contains("\"status\"") {
+                        // rewrite the status field fixture-style
+                        let rest = row.split("\"status\": ").nth(1).unwrap_or("\"\"");
+                        let tail = rest.split(',').next().unwrap_or("\"\"");
+                        *row = row.replace(
+                            &format!("\"status\": {tail}"),
+                            &format!("\"status\": {status}"),
+                        );
+                    } else {
+                        row.push_str(&format!(", \"status\": {status}"));
+                    }
+                }
+            }
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    })
+}
+
+fn value_json(v: &str) -> String {
+    if v.parse::<i64>().is_ok() {
+        v.to_string()
+    } else {
+        format!("\"{v}\"")
+    }
+}
+
+/// `db_query(conn, sql)` — fixture body answers the corpus's SELECT
+/// shapes: full-table reads serialize the rows as a JSON array;
+/// `SELECT last_insert_rowid` yields the counter.
+/// nirdosha:contract {"effects":["db"]}
+pub fn db_query(conn: &DbConn, sql: &str) -> Result<Json, String> {
+    let _ = conn;
+    with_store(|store| {
+        if sql.contains("last_insert_rowid") {
+            let table = store.last_insert_table.clone().unwrap_or_default();
+            let oid = store.rowids.get(&table).copied().unwrap_or(1);
+            return Ok(format!("{{\"oid\": {oid}}}"));
+        }
+        let table = sql
+            .split("FROM")
+            .nth(1)
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(';')
+            .to_string();
+        match store.tables.get(&table) {
+            Some(rows) => Ok(format!("[{}]", rows.join(", "))),
+            None => Ok("[]".to_string()),
+        }
+    })
+}
+
+impl nirdosha_rt::prelude::Stoppable for DbConn {
+    fn stop(self) -> i64 {
+        drop(self);
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// http / mq — fixture bodies match the examples' documented "no server
+// running" behavior: always `Err`.
+// ---------------------------------------------------------------------------
+
+/// `http_get(host, port, path)` — fixture: connection refused, exactly
+/// the outcome `05_platform_services` documents for its no-listener
+/// round trip.
+/// nirdosha:contract {"effects":["net"]}
+pub fn http_get(_host: &str, _port: u16, _path: &str) -> Result<HttpResponse, String> {
+    Err("connection refused (fixture: no listener)".into())
+}
+
+/// `http_post(host, port, path, body)`
+/// nirdosha:contract {"effects":["net"]}
+pub fn http_post(
+    _host: &str,
+    _port: u16,
+    _path: &str,
+    _body: &str,
+) -> Result<HttpResponse, String> {
+    Err("connection refused (fixture: no listener)".into())
+}
+
+pub struct HttpResponse {
+    pub status: i64,
+    pub body: String,
+}
+
+/// `mq_connect(host, port)` — fixture: no Redis, always `Err`.
+/// nirdosha:contract {"effects":["net"]}
+pub fn mq_connect(_host: &str, _port: u16) -> Result<MqConn, String> {
+    Err("connection refused (fixture: no Redis)".into())
+}
+
+pub struct MqConn;
+
+impl nirdosha_rt::prelude::Stoppable for MqConn {
+    fn stop(self) -> i64 {
+        drop(self);
+        0
+    }
+}
+
+/// `mq_publish(conn, topic, message)`
+/// nirdosha:contract {"effects":["net"]}
+pub fn mq_publish(_conn: &MqConn, _topic: &str, _message: &str) -> Result<i64, String> {
+    Err("connection refused (fixture: no Redis)".into())
+}
+
+// ---------------------------------------------------------------------------
+// workflow — the desugared shapes `workflow_lower` synthesizes.
+// ---------------------------------------------------------------------------
+
+/// The synthesized `<W>ActionError`.
+#[derive(Clone)]
+pub enum WorkflowActionError {
+    NoSuchTransition,
+    NotStateOwner,
+}
+
+impl std::fmt::Display for WorkflowActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkflowActionError::NoSuchTransition => write!(f, "NoSuchTransition"),
+            WorkflowActionError::NotStateOwner => write!(f, "NotStateOwner"),
+        }
+    }
+}
+
+/// `start_<w>(None(), <W>Data(..))` — fixture body: a process-global
+/// instance counter (the real tier's durable store keeps state).
+/// nirdosha:contract {"effects":["alloc"]}
+pub fn new_instance_id() -> i64 {
+    static COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    1 + COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}

@@ -1,0 +1,94 @@
+//! v2 of `examples/features/39_screen_ui.nir` — the declarative UI
+//! layer (`screen`) over a CRUD convention.
+//!
+//! **The encoding:** `.nir`'s `screen Product { title, field, action }`
+//! becomes a `nirdosha:screen` comment on the struct; the CRUD fns
+//! (`list_/create_/restock_product`) need **zero** encoding — emit-ui
+//! infers CRUD from names, and names survive the translation as-is.
+//! `requires(role: "admin")` rides the existing `nirdosha:contract`
+//! channel (verified under `cargo nirdosha` today); the runtime
+//! gating is the `oidc → check_role → acquire` flow, .nir's model.
+//!
+//! Pre-migration: the fns run; acquire works through the fixture
+//! identity (restocked: 1). Post-migration: `emit-ui` renders the
+//! Catalog screen from this exact declaration — relabeled Product
+//! Name field, the `^[A-Za-z0-9 ]+$` pattern, the styled "Restock +10"
+//! action with its confirm text — and `serve` exposes the endpoints.
+
+use nirdosha_v2::{
+    check_role, acquire, json_parse, mock_issue_token, oidc_validate_token, Json,
+};
+
+#[allow(dead_code)]
+enum ErrorCode {
+    MalformedListing(String),
+}
+
+/// nirdosha:screen {"for":"Product","title":"Catalog","fields":{"name":{"label":"Product Name","pattern":"^[A-Za-z0-9 ]+$"},"stock":{"min":0}},"actions":[{"label":"Restock +10","fn":"restock_product","style":"outlined","confirm":"Restock this product by 10 units?"}}
+#[allow(dead_code)]
+struct Product {
+    id: i64,
+    name: String,
+    price_cents: i64,
+    stock: i64,
+}
+
+fn list_product() -> Result<Json, ErrorCode> {
+    match json_parse("[]") {
+        Ok(doc) => Ok(doc),
+        Err(e) => Err(ErrorCode::MalformedListing(e)),
+    }
+}
+
+/// nirdosha:contract {"requires":{"role":"admin"}}
+#[allow(dead_code)]
+fn create_product(p: Product) -> Result<i64, ErrorCode> {
+    Ok(p.id)
+}
+
+/// nirdosha:contract {"requires":{"role":"admin"}}
+fn restock_product(id: i64) -> Result<i64, ErrorCode> {
+    Ok(id)
+}
+
+fn main() {
+    // the `screen` declaration changes nothing about how these fns
+    // behave when called directly — it only changes what `emit-ui`/`serve`
+    // render for `Product`.
+    let listed_ok = match list_product() {
+        Ok(_doc) => true,
+        Err(_e) => false,
+    };
+    println!("{listed_ok}"); // true
+
+    // `restock_product` is role-gated — calling it still needs a real,
+    // acquired proof, regardless of the screen's "Restock +10" action.
+    let jwks = r#"{"keys":[{"kid":"key1","kty":"oct","k":"bXktc2VjcmV0LWtleQ"}]}"#;
+    let claims = r#"{"roles":["admin"]}"#;
+    let token = match mock_issue_token(
+        "admin-user",
+        "https://mock-idp.local",
+        "features-demo",
+        1700000000,
+        999999999,
+        claims,
+        jwks,
+    ) {
+        Ok(t) => t,
+        Err(_e) => String::new(),
+    };
+    let restocked = match oidc_validate_token(&token, "https://mock-idp.local", "features-demo", jwks) {
+        Ok(identity) => match check_role(&identity, "admin") {
+            Ok(proof) => {
+                let f = acquire(restock_product, proof);
+                match f(1) {
+                    Ok(id) => id,
+                    Err(_e) => -1,
+                }
+            }
+            Err(_e) => -1,
+        },
+        Err(_e) => -1,
+    };
+    println!("{restocked}"); // 1
+}

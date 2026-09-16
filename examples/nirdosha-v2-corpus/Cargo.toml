@@ -1,0 +1,65 @@
+[package]
+name = "nirdosha-v2-corpus"
+version = "0.1.0"
+edition = "2024"
+description = "The v2 golden corpus: every showcase .nir example translated to valid Rust + the nirdosha:* comment layer. Plain cargo compiles and runs them today (extension intact); post migration, the proprietary compiler consumes the same unmodified files and adds the Nirdosha-specific layer (emit-ui, workflow runtime, proofs)."
+publish = false
+
+[dependencies]
+nirdosha-rt = { path = "../../crates/nirdosha-rt" }
+
+# The corpus IS the target of the migration — in-dialect from day one.
+[package.metadata.nirdosha-rt]
+dialect = true
+
+[lib]
+name = "nirdosha_v2"
+path = "src/lib.nir"
+
+[[bin]]
+name = "v2_hello_nir"
+path = "src/hello_nir.nir"
+
+[[bin]]
+name = "v2_02_types_and_control_flow"
+path = "src/02_types_and_control_flow.nir"
+
+[[bin]]
+name = "v2_03_data_modeling"
+path = "src/03_data_modeling.nir"
+
+[[bin]]
+name = "v2_04_ownership_and_concurrency"
+path = "src/04_ownership_and_concurrency.nir"
+
+[[bin]]
+name = "v2_05_platform_services"
+path = "src/05_platform_services.nir"
+
+[[bin]]
+name = "v2_06_identity_and_declarative_ui"
+path = "src/06_identity_and_declarative_ui.nir"
+
+[[bin]]
+name = "v2_35_validate_contracts"
+path = "src/35_validate_contracts.nir"
+
+[[bin]]
+name = "v2_36_transact"
+path = "src/36_transact.nir"
+
+[[bin]]
+name = "v2_38_workflow"
+path = "src/38_workflow.nir"
+
+[[bin]]
+name = "v2_39_screen_ui"
+path = "src/39_screen_ui.nir"
+
+[[bin]]
+name = "v2_40_dashboard"
+path = "src/40_dashboard.nir"
+
+[[bin]]
+name = "v2_enterprise_app"
+path = "src/enterprise_app.nir"
