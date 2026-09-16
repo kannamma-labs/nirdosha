@@ -47,7 +47,7 @@ the verifier/certificate layer without replacing those edits.
 | G3: shared authorization + durable transaction | Real authority boundary, role denial without side effects, restart/retry consistency | Adapter implemented; native acceptance tests pass; application migration pending |
 | G4: shared isolation/cancellation | Process lifecycle and cleanup tests; no thread fixture accepted as isolation | Unix process runtime implemented and tested; application migration pending |
 | G5: cross-reader equivalence | One enterprise flow under each implemented reader with matching state/audit/recovery outcomes | Pending |
-| G6: build provenance | Artifact/configuration/dependency binding and authenticated issuer policy | Pending |
+| G6: build provenance | Artifact/configuration/dependency binding and authenticated issuer policy | In progress: dependency-closure + toolchain binding implemented; artifact/cfg binding and authenticated issuer policy pending |
 
 ## Work log
 
@@ -171,3 +171,44 @@ Crash correctness is defined by permitted recovered business states and
 idempotency of effects, not by matching console output. Cross-reader tests
 must fail or mark a reader unavailable when v2 consumption is unimplemented;
 they must never substitute the same Cargo invocation and call it equivalence.
+
+### 2026-09-16 — G6 dependency-closure + toolchain binding (in progress)
+
+Implemented the mechanical half of build provenance: a new
+`nirdosha-contract-core::provenance` module hashes the nearest `Cargo.lock`
+(walking upward from the package/workspace directory, the same resolution
+Cargo itself uses) and records the `rustc --version` string. This is
+explicitly NOT issuer authentication — anyone can recompute the same
+binding from the same lockfile and toolchain; it proves reproducibility,
+not who produced it. Authenticated issuer identity is entry #13's
+signed-plugin trust chain and remains pending, same as artifact-bytes and
+cfg/feature binding.
+
+`cargo nirdosha verify --provenance` (and `verify --workspace --provenance`)
+opts a certificate into this: `tool.toolchain` is set to the captured
+rustc version, `verification.provenance` carries the bound lockfile hash,
+and `verification.coverage` is built via the new
+`Coverage::source_scan_with_provenance`, marking `build_provenance` passed
+with method `dependency_closure_and_toolchain_binding`. Without the flag,
+certificates are byte-identical to before — `build_provenance` still
+reports `unsupported`.
+
+`check_policy` now recognizes both coverage shapes (plain source-scan and
+source-scan-with-provenance) rather than a single fixed equality target.
+`check-certificate --require build_provenance` independently re-derives
+the dependency-closure hash at the caller's `--root` and compares it to
+what the certificate bound — it never trusts a certificate-supplied path,
+the same discipline `check_sources` already uses for source files. A
+changed `Cargo.lock` after minting is refused with an explicit message.
+
+Evidence: 5 new tests (3 in `provenance`, 2 in `coverage_policy.rs`,
+including a real changed-lockfile refusal), all passing alongside the
+existing 31. Verified against a real package (not just the test fixture):
+`cargo nirdosha verify --provenance` on `nirdosha-contract-core` itself
+produced a certificate with a real Cargo.lock SHA-256 and real nightly
+toolchain string, and `check-certificate --require build_provenance`
+against it passed.
+
+Remaining for G6: binding the built executable's bytes and resolved
+cfg/feature/target configuration (not just the lockfile), and the
+authenticated issuer half (signing — entry #13).

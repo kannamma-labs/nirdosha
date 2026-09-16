@@ -80,11 +80,28 @@ impl ScanSummary {
     /// hash-bound envelope — every verified file's SHA-256, the tool
     /// identity, and a binding over the whole content. Deterministic by
     /// construction (no timestamps), so re-verification is a byte-diff.
-    pub fn write_report(&self, target_dir: &Path) -> std::io::Result<PathBuf> {
+    ///
+    /// `bind_provenance`: additionally binds the resolved dependency
+    /// closure (`Cargo.lock`) and toolchain (G6) — mechanical binding
+    /// only, not issuer authentication. See `nirdosha_contract_core::provenance`.
+    pub fn write_report(&self, target_dir: &Path, bind_provenance: bool) -> std::io::Result<PathBuf> {
         let dir = target_dir.join("nirdosha");
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("contract-report-{}.json", self.package));
-        let payload = serde_json::json!({
+        let provenance = if bind_provenance {
+            Some(cc::provenance::Provenance {
+                cargo_lock_sha256: cc::provenance::hash_cargo_lock(&self.package_dir)
+                    .map_err(std::io::Error::other)?,
+                toolchain: rustc_version()?,
+            })
+        } else {
+            None
+        };
+        let coverage = match &provenance {
+            Some(_) => cc::evidence::Coverage::source_scan_with_provenance(self.violations().is_empty(), true),
+            None => cc::evidence::Coverage::source_scan(self.violations().is_empty()),
+        };
+        let mut payload = serde_json::json!({
             "tool": "cargo-nirdosha",
             "dialect": "nirdosha-rt",
             "stage": 1,
@@ -93,8 +110,11 @@ impl ScanSummary {
             "contracts": self.contracts,
             "findings": self.findings,
             "violations": self.violations().len(),
-            "coverage": cc::evidence::Coverage::source_scan(self.violations().is_empty()),
+            "coverage": coverage,
         });
+        if let Some(p) = &provenance {
+            payload["provenance"] = serde_json::to_value(p)?;
+        }
         let certificate = cc::certificate::Certificate::new(
             cc::certificate::Subject {
                 package: self.package.clone(),
@@ -104,8 +124,9 @@ impl ScanSummary {
                 name: "cargo-nirdosha".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 mode: cc::certificate::Mode::SourceScan,
-                // None is honest: the source scan never invokes rustc.
-                toolchain: None,
+                // None is honest when unbound: the source scan itself
+                // never invokes rustc. Set when provenance is bound.
+                toolchain: provenance.as_ref().map(|p| p.toolchain.clone()),
             },
             cc::certificate::scan_sources(&self.package_dir, &self.files)?,
             payload,
@@ -113,6 +134,13 @@ impl ScanSummary {
         fs::write(&path, serde_json::to_vec_pretty(&certificate)?)?;
         Ok(path)
     }
+}
+
+/// `rustc --version`, trimmed. The toolchain a provenance-bound
+/// certificate records — recorded, not re-verified at consuming time.
+fn rustc_version() -> std::io::Result<String> {
+    let out = std::process::Command::new("rustc").arg("--version").output()?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The package's declared version, for the certificate subject.
@@ -497,9 +525,13 @@ impl WorkspaceSummary {
     }
 
     /// Write each package's report plus the aggregate workspace certificate.
-    pub fn write_reports(&self, target_dir: &Path) -> std::io::Result<PathBuf> {
+    /// `bind_provenance` — see `ScanSummary::write_report`. Not consumable
+    /// via `check-certificate` today (workspace certificates are refused
+    /// there; evaluate the individual package certificates), but bound
+    /// here anyway for consistency and future workspace-level policy.
+    pub fn write_reports(&self, target_dir: &Path, bind_provenance: bool) -> std::io::Result<PathBuf> {
         for summary in &self.packages {
-            summary.write_report(target_dir)?;
+            summary.write_report(target_dir, bind_provenance)?;
         }
         let dir = target_dir.join("nirdosha");
         fs::create_dir_all(&dir)?;
@@ -519,7 +551,20 @@ impl WorkspaceSummary {
             }
             findings.extend(summary.findings.iter().cloned());
         }
-        let payload = serde_json::json!({
+        let provenance = if bind_provenance {
+            Some(cc::provenance::Provenance {
+                cargo_lock_sha256: cc::provenance::hash_cargo_lock(target_dir)
+                    .map_err(std::io::Error::other)?,
+                toolchain: rustc_version()?,
+            })
+        } else {
+            None
+        };
+        let coverage = match &provenance {
+            Some(_) => cc::evidence::Coverage::source_scan_with_provenance(self.violations() == 0, true),
+            None => cc::evidence::Coverage::source_scan(self.violations() == 0),
+        };
+        let mut payload = serde_json::json!({
             "tool": "cargo-nirdosha",
             "dialect": "nirdosha-rt",
             "stage": 1.5,
@@ -528,8 +573,11 @@ impl WorkspaceSummary {
             "contracts": contracts,
             "findings": findings,
             "violations": self.violations(),
-            "coverage": cc::evidence::Coverage::source_scan(self.violations() == 0),
+            "coverage": coverage,
         });
+        if let Some(p) = &provenance {
+            payload["provenance"] = serde_json::to_value(p)?;
+        }
         // Aggregate certificate: every in-dialect package's sources,
         // prefixed `<package>/<path>` so paths stay unambiguous.
         let mut sources = Vec::new();
@@ -547,7 +595,7 @@ impl WorkspaceSummary {
                 name: "cargo-nirdosha".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 mode: cc::certificate::Mode::SourceScan,
-                toolchain: None,
+                toolchain: provenance.as_ref().map(|p| p.toolchain.clone()),
             },
             sources,
             payload,

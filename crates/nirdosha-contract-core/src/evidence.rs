@@ -2,6 +2,7 @@
 //!
 //! Integrity is not authentication. Callers must trust the producer separately.
 use crate::certificate::{Certificate, Mode};
+use crate::provenance::{self, Provenance};
 use serde::{Deserialize, Serialize};
 
 pub const PROFILE: &str = "nirdosha.source-scan/v1";
@@ -80,7 +81,28 @@ impl Coverage {
             .collect(),
         }
     }
+
+    /// Extends a source-scan coverage claim set with a bound dependency
+    /// closure (`Cargo.lock`) and toolchain. Still not issuer
+    /// authentication — see `provenance` module docs.
+    pub fn source_scan_with_provenance(source_scan_passed: bool, provenance_passed: bool) -> Self {
+        let mut cov = Self::source_scan(source_scan_passed);
+        cov.scope = "listed source files, plus dependency-closure (Cargo.lock) and toolchain binding; not a resolved Cargo build".into();
+        for claim in &mut cov.claims {
+            if claim.guarantee == "build_provenance" {
+                claim.outcome = if provenance_passed { Outcome::Passed } else { Outcome::Failed };
+                claim.method = BUILD_PROVENANCE_METHOD.into();
+            }
+        }
+        cov.limitations.retain(|l| l != "no executable, toolchain/configuration or dependency closure binding");
+        cov.limitations.push(
+            "dependency closure = Cargo.lock bytes only; does not bind the built executable, cfg flags/features, or authenticate the issuer".into(),
+        );
+        cov
+    }
 }
+
+pub const BUILD_PROVENANCE_METHOD: &str = "dependency_closure_and_toolchain_binding";
 
 /// Evaluate required guarantees. Source freshness is checked separately by
 /// the CLI using the caller-provided package root. Older reports fail closed.
@@ -120,7 +142,13 @@ pub fn check_policy(cert: &Certificate, required: &[String]) -> Result<(), Strin
     .map_err(|e| format!("invalid coverage evidence: {e}"))?;
     // A source scanner cannot promote its result into stronger evidence.
     // A new producer/profile needs a deliberate policy implementation.
-    if coverage != Coverage::source_scan(true) {
+    let has_provenance = cert.verification.get("provenance").is_some();
+    let expected = if has_provenance {
+        Coverage::source_scan_with_provenance(true, true)
+    } else {
+        Coverage::source_scan(true)
+    };
+    if coverage != expected {
         return Err("unsupported or inconsistent source-scan coverage".into());
     }
     for requirement in required {
@@ -134,6 +162,29 @@ pub fn check_policy(cert: &Certificate, required: &[String]) -> Result<(), Strin
                 "required guarantee `{requirement}` is unsupported by source_scan"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Re-derives the dependency-closure hash at `root` independently (never
+/// trusting a certificate-supplied path — the same discipline
+/// `Certificate::check_sources` uses) and compares it to what the
+/// certificate bound. Toolchain is recorded on the certificate but not
+/// re-verified here: the checking machine may run a different rustc than
+/// the one that produced the certificate.
+pub fn check_provenance(cert: &Certificate, root: &std::path::Path) -> Result<(), String> {
+    let bound: Provenance = serde_json::from_value(
+        cert.verification
+            .get("provenance")
+            .cloned()
+            .ok_or("certificate has no provenance evidence")?,
+    )
+    .map_err(|e| format!("invalid provenance evidence: {e}"))?;
+    let current = provenance::hash_cargo_lock(root)?;
+    if current != bound.cargo_lock_sha256 {
+        return Err(
+            "dependency closure (Cargo.lock) has changed since this certificate was minted".into(),
+        );
     }
     Ok(())
 }

@@ -23,7 +23,17 @@ impl Fixture {
     }
     fn mint(&self) -> (PathBuf, Certificate) {
         let summary = verify_sources("coverage", &self.0, &[self.0.join("src/main.rs")], false);
-        let path = summary.write_report(&self.0.join("target")).unwrap();
+        let path = summary.write_report(&self.0.join("target"), false).unwrap();
+        let cert = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        (path, cert)
+    }
+
+    /// Same as `mint`, plus a real `Cargo.lock` at the fixture root so
+    /// G6's provenance binding has something to hash.
+    fn mint_with_provenance(&self) -> (PathBuf, Certificate) {
+        fs::write(self.0.join("Cargo.lock"), "# fixture lockfile\n").unwrap();
+        let summary = verify_sources("coverage", &self.0, &[self.0.join("src/main.rs")], false);
+        let path = summary.write_report(&self.0.join("target"), true).unwrap();
         let cert = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         (path, cert)
     }
@@ -127,6 +137,42 @@ fn stale_failed_legacy_and_promoted_reports_fail_closed() {
 }
 
 #[test]
+fn provenance_binding_passes_then_fails_on_a_changed_lockfile() {
+    let fixture = Fixture::new(CLEAN);
+    let (path, cert) = fixture.mint_with_provenance();
+    assert!(cert.binding_valid());
+    assert!(cert.verification.get("provenance").is_some());
+    assert!(cert.tool.toolchain.is_some(), "provenance binds a real toolchain string");
+
+    // build_provenance passes alongside source_scan.
+    assert!(fixture.cli(&path, &["source_scan", "build_provenance"]).status.success());
+
+    // Change the dependency closure: the same certificate must now refuse.
+    fs::write(fixture.0.join("Cargo.lock"), "# a different lockfile\n").unwrap();
+    let result = fixture.cli(&path, &["build_provenance"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("dependency closure"));
+
+    // source_scan alone is unaffected by the lockfile changing.
+    assert!(fixture.cli(&path, &["source_scan"]).status.success());
+}
+
+#[test]
+fn provenance_is_not_required_and_not_claimed_without_the_flag() {
+    let fixture = Fixture::new(CLEAN);
+    let (_, cert) = fixture.mint();
+    assert!(cert.verification.get("provenance").is_none());
+    assert!(cert.tool.toolchain.is_none());
+    let coverage = &cert.verification["coverage"];
+    let claims = coverage["claims"].as_array().unwrap();
+    let build_provenance = claims
+        .iter()
+        .find(|c| c["guarantee"] == "build_provenance")
+        .unwrap();
+    assert_eq!(build_provenance["outcome"], "unsupported");
+}
+
+#[test]
 fn workspace_hash_failure_is_not_silently_omitted() {
     let fixture = Fixture::new(CLEAN);
     let summary = verify_sources(
@@ -140,7 +186,7 @@ fn workspace_hash_failure_is_not_silently_omitted() {
         packages: vec![summary],
         all_packages: vec!["coverage".into()],
     };
-    assert!(workspace.write_reports(&fixture.0.join("target")).is_err());
+    assert!(workspace.write_reports(&fixture.0.join("target"), false).is_err());
 }
 
 #[test]

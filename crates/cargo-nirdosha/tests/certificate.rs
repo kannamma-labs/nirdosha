@@ -30,7 +30,7 @@ fn main() { println!("{}", total(&[1, 2])); }
 fn mint(dir: &Path, files: &[PathBuf], target: &Path) -> ScanSummary {
     let summary = verify_sources("cert-fixture", dir, files, false);
     assert!(summary.violations().is_empty(), "fixture must verify clean");
-    let path = summary.write_report(target).unwrap();
+    let path = summary.write_report(target, false).unwrap();
     // The report IS a v1 certificate.
     let cert: Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -54,7 +54,7 @@ fn certificate_mints_binds_and_detects_tampering() {
     let (summary, _) = (verify_sources("cert-fixture", &dir, &files, false), ());
     let path = target.join("nirdosha/contract-report-cert-fixture.json");
     let first = fs::read_to_string(&path).unwrap();
-    summary.write_report(&target).unwrap();
+    summary.write_report(&target, false).unwrap();
     let second = fs::read_to_string(&path).unwrap();
     assert_eq!(first, second, "same sources + tool must give identical bytes");
 

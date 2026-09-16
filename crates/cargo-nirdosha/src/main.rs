@@ -45,13 +45,18 @@ fn main() -> ExitCode {
         "check-certificate" => check_certificate_cli(rest),
         "verify" => {
             let workspace = rest.iter().any(|a| a == "--workspace" || a == "--all");
+            // `--provenance` (G6): additionally binds the resolved
+            // dependency closure (Cargo.lock) and toolchain into the
+            // certificate. Mechanical binding only, not issuer
+            // authentication.
+            let bind_provenance = rest.iter().any(|a| a == "--provenance");
             if workspace {
-                return verify_ws_cli();
+                return verify_ws_cli(bind_provenance);
             }
             if rest.iter().any(|a| a == "--audit") {
                 return audit_cli(rest.iter().find(|a| !a.starts_with("--")).cloned());
             }
-            let summary = match verify_cwd() {
+            let summary = match verify_cwd(bind_provenance) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("nirdosha: {e}");
@@ -76,7 +81,7 @@ fn main() -> ExitCode {
             // `cargo nirdosha check --workspace` gates every in-dialect
             // crate (strict) before delegating the workspace-wide cargo.
             if cargo_args.iter().any(|a| a == "--workspace" || a == "--all") {
-                let exit = verify_ws_cli();
+                let exit = verify_ws_cli(false);
                 if exit != ExitCode::SUCCESS {
                     eprintln!(
                         "nirdosha: refusing to {s} the workspace — in-dialect crates have violations"
@@ -85,7 +90,7 @@ fn main() -> ExitCode {
                 }
                 return delegate_with(s, &cargo_args, deep);
             }
-            let summary = match verify_cwd() {
+            let summary = match verify_cwd(false) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("nirdosha: {e}");
@@ -109,7 +114,7 @@ fn main() -> ExitCode {
 
 /// Explicit consumer gate, deliberately independent of Cargo metadata.
 fn check_certificate_cli(args: &[String]) -> ExitCode {
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<bool, String> {
         let mut path = None;
         let mut root = None;
         let mut required = Vec::new();
@@ -139,11 +144,23 @@ fn check_certificate_cli(args: &[String]) -> ExitCode {
             if !resolved.starts_with(&root) { return Err("source escapes package root".into()); }
         }
         if !cert.check_sources(&root).ok() { return Err("listed source files changed or disappeared".into()); }
-        Ok(())
+        // G6: if build_provenance was required, independently re-derive
+        // the dependency-closure hash at root and compare — never trust
+        // the certificate's own claim without re-checking against the
+        // filesystem, same discipline as the source re-hash above.
+        let provenance_checked = required.iter().any(|r| r == "build_provenance");
+        if provenance_checked {
+            nirdosha_contract_core::evidence::check_provenance(&cert, &root)?;
+        }
+        Ok(provenance_checked)
     })();
     match result {
-        Ok(()) => {
-            eprintln!("nirdosha: certificate policy passed; listed sources match. Issuer authentication and build provenance are not established.");
+        Ok(provenance_checked) => {
+            if provenance_checked {
+                eprintln!("nirdosha: certificate policy passed; listed sources and dependency closure match. Issuer authentication is not established.");
+            } else {
+                eprintln!("nirdosha: certificate policy passed; listed sources match. Issuer authentication and build provenance are not established.");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -163,6 +180,7 @@ fn usage() {
          - plain `cargo build`            compiles and runs Nirdosha code like any Rust program\n\
          - `cargo nirdosha build`         verifies contract claims first; a lie refuses the build\n\
          - `cargo nirdosha verify --workspace`  strict gate over every in-dialect crate + certificate\n\
+         - `cargo nirdosha verify --provenance`  also binds Cargo.lock + toolchain into the certificate\n\
          - `cargo nirdosha bench`          nfr(latency_ms) CI gate: your test suite is the workload\n\
          - `cargo nirdosha check-certificate <path> --root <package> --require <guarantee>`"
     );
@@ -211,12 +229,12 @@ fn locate() -> Result<Location, String> {
     ))
 }
 
-fn verify_cwd() -> Result<ScanSummary, String> {
+fn verify_cwd(bind_provenance: bool) -> Result<ScanSummary, String> {
     let loc = locate()?;
     let strict = std::env::var_os("NIRDOSHA_STRICT").is_some_and(|v| !v.is_empty());
     let summary = verify_package(&loc.manifest_dir, strict)?;
     let report_path = summary
-        .write_report(&loc.target_dir)
+        .write_report(&loc.target_dir, bind_provenance)
         .map_err(|e| format!("cannot write certificate: {e}"))?;
     eprintln!(
         "nirdosha: certificate → {}",
@@ -360,7 +378,7 @@ fn workspace_target_dir() -> Result<PathBuf, String> {
 
 /// `cargo nirdosha verify --workspace`: verify every in-dialect crate,
 /// strict by default, plus the aggregate certificate.
-fn verify_ws_cli() -> ExitCode {
+fn verify_ws_cli(bind_provenance: bool) -> ExitCode {
     match cargo_nirdosha::verify_workspace(true) {
         Ok(ws) => {
             let target_dir = match workspace_target_dir() {
@@ -370,7 +388,7 @@ fn verify_ws_cli() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match ws.write_reports(&target_dir) {
+            match ws.write_reports(&target_dir, bind_provenance) {
                 Ok(path) => eprintln!("nirdosha: workspace certificate → {}", path.display()),
                 Err(e) => {
                     eprintln!("nirdosha: cannot write certificate: {e}");
@@ -421,7 +439,7 @@ fn verify_ws_cli() -> ExitCode {
 /// the declared limit. Exit nonzero on any breach — or on any verify
 /// failure, so a lying program never gets a bench verdict.
 fn bench_cli(rest: &[String]) -> ExitCode {
-    let summary = match verify_cwd() {
+    let summary = match verify_cwd(false) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("nirdosha: {e}");
