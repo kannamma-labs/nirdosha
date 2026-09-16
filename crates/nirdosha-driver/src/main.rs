@@ -12,14 +12,12 @@
 //!   not because its text looks like a path. Stage 1's over-approximate
 //!   string matching is retired for crates compiled through this
 //!   driver.
-//! - **Totality at the MIR level.** `unwrap`/`expect`/bounds checks/
-//!   division-by-zero compile to `assert` terminators — flagged exactly,
-//!   with zero false positives from same-named user methods. Arithmetic
-//!   overflow checks are allowed: checked arithmetic is the dialect's
-//!   documented runtime guard.
-//! - **Default-deny third party.** A call into a crate that is neither
-//!   `core`/`std`/`alloc`/`nirdosha_rt` nor contract-carrying makes the
-//!   caller impure — an unverified dependency cannot launder effects.
+//! - **Conservative local subset.** Expanded HIR and pre-optimization MIR
+//!   reject unsafe/static boundaries, reference writes, destructors and
+//!   unresolved calls. External calls require summaries; no crate is trusted
+//!   wholesale. Scalar arithmetic and local recursion remain supported.
+//! - **No totality claim.** Arithmetic overflow guards and recursion are
+//!   permitted; termination and panic freedom are not established here.
 //!
 //! Runs two ways:
 //!
@@ -37,20 +35,22 @@
 
 extern crate rustc_ast;
 extern crate rustc_driver;
+extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_span;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::process::ExitCode;
 
 use nirdosha_contract_core as cc;
 
 use rustc_driver::{Callbacks, Compilation};
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface::Compiler;
-use rustc_middle::mir::{Operand, TerminatorKind};
+use rustc_middle::mir::{Operand, ProjectionElem, StatementKind, TerminatorKind};
 use rustc_middle::ty::{TyCtxt, TyKind};
-use rustc_span::def_id::{DefId, LocalDefId, LOCAL_CRATE};
+use rustc_span::def_id::{DefId, LOCAL_CRATE, LocalDefId};
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().collect();
@@ -122,7 +122,6 @@ fn analyze(tcx: TyCtxt<'_>) -> Compilation {
         errors = true;
     }
 
-    let mut engine = Effects::new(tcx);
     for (did, contract) in &claims {
         for issue in contract.validate() {
             tcx.dcx()
@@ -134,6 +133,10 @@ fn analyze(tcx: TyCtxt<'_>) -> Compilation {
             errors = true;
         }
         if contract.claims_pure() {
+            // Each root gets its own traversal. Caching an incomplete result
+            // while walking a recursive component can hide effects from a
+            // later root in the same component.
+            let mut engine = Effects::new(tcx);
             let impurities = engine.effects_of(*did);
             if !impurities.is_empty() {
                 let span = tcx.def_span(did.to_def_id());
@@ -168,11 +171,8 @@ fn analyze(tcx: TyCtxt<'_>) -> Compilation {
 }
 
 // ---------------------------------------------------------------------------
-// The effect lattice engine: least-effect computation over the local
-// call graph, memoized, cycle-safe (a back-edge contributes nothing —
-// any impure call site is found from the body that contains it, so
-// recursion like factorial stays pure and laundering through cycles is
-// impossible).
+// Each pure root traverses its own reachable local call graph. No partial
+// recursive result is cached across roots; every reachable body is inspected.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -200,31 +200,16 @@ const FOREIGN_NEEDLES: &[(&str, &str)] = &[
     ("rand::", "OS randomness"),
 ];
 
-/// Crates whose non-needle functions are considered pure by default.
-/// Everything else is default-deny: an unverified third-party crate
-/// cannot launder effects into a pure fn.
-///
-/// `nirdosha_rt` is in here on purpose: the `#[contract]` macro injects
-/// `nirdosha_rt::nfr::enter` into any fn with an `nfr(..)` clause —
-/// including pure-claiming ones. `effects(pure)` describes the *user's*
-/// body; the injected guard's clock/semaphore is the dialect's own
-/// infrastructure, declared honestly by the separate `nfr(..)` clause.
-/// The needle table above still pins `nirdosha_rt`'s impure spots if
-/// anything changes.
-const KNOWN_PURE_CRATES: &[&str] = &["core", "std", "alloc", "nirdosha_rt"];
-
 struct Effects<'tcx> {
     tcx: TyCtxt<'tcx>,
-    memo: HashMap<LocalDefId, Vec<Impurity>>,
-    visiting: HashSet<LocalDefId>,
+    visited: HashSet<LocalDefId>,
 }
 
 impl<'tcx> Effects<'tcx> {
     fn new(tcx: TyCtxt<'tcx>) -> Self {
         Self {
             tcx,
-            memo: HashMap::new(),
-            visiting: HashSet::new(),
+            visited: HashSet::new(),
         }
     }
 
@@ -245,21 +230,82 @@ impl<'tcx> Effects<'tcx> {
     }
 
     fn effects_of(&mut self, did: LocalDefId) -> Vec<Impurity> {
-        if let Some(memo) = self.memo.get(&did) {
-            return memo.clone();
-        }
-        if !self.visiting.insert(did) {
-            // Back-edge in recursion: contributes nothing (see the
-            // cycle-safety note above).
+        if !self.visited.insert(did) {
+            // Every reachable body is inspected once per claiming root.
             return Vec::new();
         }
 
         let mut impurities = Vec::new();
         let my_name = self.name(did.to_def_id());
-        let body = self.tcx.optimized_mir(did.to_def_id());
+        if self.tcx.trait_of_assoc(did.to_def_id()).is_some() {
+            return vec![Impurity {
+                reason: "unresolved trait dispatch has no complete target set".into(),
+                chain: vec![my_name],
+            }];
+        }
+        if !self.tcx.is_mir_available(did.to_def_id()) {
+            return vec![Impurity {
+                reason: "unresolved local call target has no inspectable MIR".into(),
+                chain: vec![my_name],
+            }];
+        }
+        if self.tcx.is_coroutine(did.to_def_id()) {
+            return vec![Impurity {
+                reason: "coroutine effects are unsupported".into(),
+                chain: vec![my_name],
+            }];
+        }
+        // Inspect runtime MIR before inlining and dead-code optimization.
+        // Otherwise an optimization can erase a forbidden boundary, or turn
+        // a callback into apparently harmless arithmetic before we inspect it.
+        let body = self
+            .tcx
+            .mir_drops_elaborated_and_const_checked(did)
+            .borrow();
+        let hir_id = self.tcx.local_def_id_to_hir_id(did);
+        if let Some(sig) = self.tcx.hir_fn_sig_by_hir_id(hir_id) {
+            if sig.header.is_unsafe() || sig.header.is_async() {
+                impurities.push(Impurity {
+                    reason: "unsafe or async function is outside the pure subset".into(),
+                    chain: vec![my_name.clone()],
+                });
+            }
+        }
+        if let Some(hir_body) = self.tcx.hir_maybe_body_owned_by(did) {
+            let mut restrictions = BodyRestrictions {
+                tcx: self.tcx,
+                reasons: Vec::new(),
+            };
+            restrictions.visit_body(hir_body);
+            for reason in restrictions.reasons {
+                impurities.push(Impurity {
+                    reason: reason.into(),
+                    chain: vec![my_name.clone()],
+                });
+            }
+        }
 
         for block in body.basic_blocks.iter() {
-            let Some(terminator) = &block.terminator else { continue };
+            for statement in &block.statements {
+                if let StatementKind::Assign(assignment) = &statement.kind {
+                    if assignment
+                        .0
+                        .projection
+                        .iter()
+                        .any(|p| matches!(p, ProjectionElem::Deref))
+                    {
+                        impurities.push(Impurity {
+                            reason:
+                                "write through a reference or pointer is outside the pure subset"
+                                    .into(),
+                            chain: vec![my_name.clone()],
+                        });
+                    }
+                }
+            }
+            let Some(terminator) = &block.terminator else {
+                continue;
+            };
             match &terminator.kind {
                 TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. } => {
                     self.visit_callee(func, &my_name, &mut impurities);
@@ -278,16 +324,19 @@ impl<'tcx> Effects<'tcx> {
                         chain: vec![my_name.clone()],
                     });
                 }
+                TerminatorKind::Drop { .. } => {
+                    impurities.push(Impurity {
+                        reason: "destructor effects lack a verified summary".into(),
+                        chain: vec![my_name.clone()],
+                    });
+                }
                 _ => {}
             }
         }
 
-        self.visiting.remove(&did);
-
         // Dedup: a callee reached by two paths is one fact.
         let mut seen = HashSet::new();
         impurities.retain(|imp| seen.insert((imp.reason.clone(), imp.chain.clone())));
-        self.memo.insert(did, impurities.clone());
         impurities
     }
 
@@ -303,6 +352,10 @@ impl<'tcx> Effects<'tcx> {
         };
         let ty = const_operand.const_.ty();
         let TyKind::FnDef(did, _) = ty.kind() else {
+            out.push(Impurity {
+                reason: "unresolved call target is outside the pure subset".into(),
+                chain: vec![my_name.to_string(), "<unresolved call>".into()],
+            });
             return;
         };
         let did = *did;
@@ -330,11 +383,41 @@ impl<'tcx> Effects<'tcx> {
                 return Some(why);
             }
         }
-        let crate_name = self.tcx.crate_name(did.krate);
-        if KNOWN_PURE_CRATES.contains(&crate_name.as_str()) {
-            return None;
+        Some(
+            "external call lacks a verified effect summary (including std, core, alloc and nirdosha_rt)",
+        )
+    }
+}
+
+/// Expanded HIR closes unsafe/static boundaries before MIR optimization.
+/// Nested bodies are checked if reachable through the MIR call graph.
+struct BodyRestrictions<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    reasons: Vec<&'static str>,
+}
+
+impl<'tcx> Visitor<'tcx> for BodyRestrictions<'tcx> {
+    fn visit_block(&mut self, block: &'tcx rustc_hir::Block<'tcx>) {
+        if matches!(block.rules, rustc_hir::BlockCheckMode::UnsafeBlock(_)) {
+            self.reasons.push("unsafe block is outside the pure subset");
         }
-        Some("call into unverified third-party crate — publish contracts for it or keep it out of pure fns")
+        intravisit::walk_block(self, block);
+    }
+
+    fn visit_expr(&mut self, expr: &'tcx rustc_hir::Expr<'tcx>) {
+        if let rustc_hir::ExprKind::Path(ref path) = expr.kind {
+            let res = self
+                .tcx
+                .typeck(expr.hir_id.owner.def_id)
+                .qpath_res(path, expr.hir_id);
+            if matches!(
+                res,
+                rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Static { .. }, _)
+            ) {
+                self.reasons.push("static state is outside the pure subset");
+            }
+        }
+        intravisit::walk_expr(self, expr);
     }
 }
 
