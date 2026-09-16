@@ -36,6 +36,53 @@ The core split, and the whole design in two lines:
 > **Declarations are data — data rides comments.**
 > **Execution is code — code stays Rust, with its claims in comments.**
 
+### Why `cargo nirdosha` exists at all (asked once, answered here forever)
+
+Short answer: **it is the free tier.** Without it there are two readers
+— plain cargo and the paid compiler — which is proprietary-only, the
+exact model the decision record rejects. Each reader earns its place
+by answering a different question:
+
+| Reader | Answers | Tier |
+|---|---|---|
+| plain `cargo` | "will it build & run?" | floor — everyone, no vendor |
+| `cargo nirdosha` | "are its claims **true**?" | free hook — verification, certificates, gates |
+| proprietary `nirdosha` | "will it **generate & prove**?" | paid moat — UI/CRUD/workflow codegen, Z3, signed plugins |
+
+Five reasons the middle reader must exist as its own tool, recorded so
+the question never re-opens unfounded:
+
+1. **The funnel needs something free to land on.** A `.rs` file with
+   inert comments is just Rust — it hooks nobody. "Same source, two
+   compilers, lying is a build error, here's the certificate" hooks
+   everyone — and it only works if verification installs without the
+   paid compiler. No free verification → no funnel → proprietary-only.
+2. **We commoditize our own complement before someone else does**
+   (falsifier #3 on the register). If `cargo nirdosha` doesn't become
+   the free verification standard over Rust, Vera or rustc-native
+   effects will. Owning the free layer is what lets the paid layer
+   sit *above* a standard we control.
+3. **Certificates need a free minter to become an ecosystem
+   artifact.** Third parties — a downstream crate consumer, an agent,
+   an auditor — must verify contract claims with no vendor
+   relationship, or `nirdosha.certificate/v1` stays a vendor feature
+   instead of becoming a standard.
+4. **A whole class of customer never buys — and spreads the standard
+   anyway.** A Rust shop that wants `effects(pure)` checking, role
+   typestate, and SLA bench gates in CI gets permanent free value;
+   some fraction converts, all of them spread the certificate format.
+   And the free tier is deliberately *light* — scanner + delegator +
+   optional nightly driver — vs the heavy proprietary toolchain, so
+   the free experience is a 30-second install with zero new
+   toolchain.
+5. **The free mechanics are cargo-native.** Refuse-or-delegate in
+   front of cargo, `verify --workspace`/`bench` as free CI gates, the
+   Stage-2 MIR driver on `RUSTC_WORKSPACE_WRAPPER` — none of it fits
+   a standalone proprietary compiler naturally.
+
+One-liner for the whole architecture: **cargo runs it, `cargo nirdosha`
+believes it, `nirdosha` builds the rest of the product around it.**
+
 ---
 
 ## 1. The problem (why A and B both miss)
