@@ -160,6 +160,18 @@ pub fn detail_html(title: &str, base_path: &str, id: i64, fields: &[FieldSpec], 
     page_shell(title, "", &format!("{rows}<p>{actions}</p><p><a href=\"{base_path}\">back to list</a></p>"))
 }
 
+/// `GET <path>` for a `settings_screen!` — like `detail_html` but for a
+/// singleton record with no `id`, so the edit link is `edit_path`
+/// verbatim rather than `{base_path}/{id}/edit`.
+pub fn settings_view_html(title: &str, edit_path: &str, fields: &[FieldSpec], row: &serde_json::Value, can_edit: bool) -> String {
+    let mut rows = String::new();
+    for f in fields {
+        rows.push_str(&format!("<p><label>{}</label> {}</p>", html_escape(f.name), html_escape(&value_display(&row[f.name]))));
+    }
+    let actions = if can_edit { format!("<a href=\"{edit_path}\">edit</a>") } else { String::new() };
+    page_shell(title, "", &format!("{rows}<p>{actions}</p>"))
+}
+
 /// `GET <path>/new` or `GET <path>/{id}/edit` — a plain `<form>`
 /// (browser-default, `application/x-www-form-urlencoded`), pre-filled
 /// with `existing` values on edit, with any `errors` from a failed

@@ -41,6 +41,7 @@
 mod categorical;
 mod crud_screens;
 mod dashboard;
+mod settings_screen;
 mod util;
 
 use nirdosha_contract_core as cc;
@@ -72,6 +73,14 @@ pub fn dashboard(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn crud_screens(input: TokenStream) -> TokenStream {
     crud_screens::expand(input)
+}
+
+/// See `settings_screen::expand`'s module doc — RFC 0009 Track C's
+/// Settings archetype: a single always-present record, no list/create/
+/// delete, attached to a singleton datasource.
+#[proc_macro]
+pub fn settings_screen(input: TokenStream) -> TokenStream {
+    settings_screen::expand(input)
 }
 
 fn expand(

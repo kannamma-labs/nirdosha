@@ -23,7 +23,7 @@
 //! fn main() {}
 //! ```
 
-pub use nirdosha_macros::{categorical_actions, contract, crud_screens, dashboard};
+pub use nirdosha_macros::{categorical_actions, contract, crud_screens, dashboard, settings_screen};
 
 pub mod dashboard;
 pub mod nfr;
