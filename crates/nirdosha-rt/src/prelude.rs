@@ -1058,6 +1058,10 @@ pub fn connect(host: &str, port: i64) -> Tcp {
 }
 
 impl Tcp {
+    pub(crate) fn from_stream(stream: std::net::TcpStream) -> Self {
+        Self { stream }
+    }
+
     /// `send(conn, s)` — one write.
     pub fn send(&self, s: &str) {
         use std::io::Write;

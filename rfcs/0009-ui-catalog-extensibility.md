@@ -510,7 +510,7 @@ dashboard-shaped hole:
 | Search & Discovery | find & narrow | high (autocomplete, facets) | not started |
 | Board/Canvas | manipulate spatially | very high (drag, zoom, connect) | not started, likely out of scope for a "no JS pipeline" dialect (see Open Questions) |
 | Settings/Configuration | configure safely | low-medium (danger zones, guards) | not started — a natural next slice: `crud_screens!` against a singleton datasource |
-| Communication | react & respond | high, often real-time | not started; depends on the same real-time gap Phase 4 below names |
+| Communication | react & respond | high, often real-time | **built** - `communication_feed!` with timer refresh or opt-in bounded long polling; concurrent Router workers (#66); SSE/WebSocket still pending |
 | System state (404/empty/loading) | recover | low | **partial** — real 404 (`Response::not_found`), 403, and empty-list states exist; no styled error pages or loading skeletons |
 | Report/Export | select & schedule | medium (format, columns, preview) | not started |
 

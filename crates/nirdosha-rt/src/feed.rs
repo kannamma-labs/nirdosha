@@ -1,20 +1,66 @@
 //! Runtime support for `nirdosha_rt::communication_feed!` (RFC 0009
 //! Track C's Communication archetype).
 //!
-//! **This is honest client-side polling, not real server push.** True
-//! push needs `Router` to hold connections open (`Arc<Mutex<..>>` +
-//! thread-per-connection via `nirdosha_rt::prelude::spawn`/`join`,
-//! replacing the current `Rc<RefCell<..>>`, one-connection-at-a-time
-//! model) — a genuine concurrency-model change to already-shipped code,
-//! not a new feature layered on top. Until that's decided and done,
-//! `communication_feed!` reuses `dashboard!`'s own `<meta
-//! http-equiv="refresh">` mechanism: the browser reloads the whole page
-//! on a timer, same as any dashboard. It *feels* live at human
-//! timescales; it is not a persistent connection, and this module's
-//! name says "feed," not "socket" or "push," on purpose.
+//! `refresh_seconds` retains timer-based page refresh. Opt-in
+//! `long_poll_seconds` holds a JSON request until a generated POST publishes
+//! a change or the bounded wait expires. Router workers keep other requests
+//! moving. Notifications are process-local and cover generated POSTs only;
+//! direct writes to the backing store must arrange their own notifications.
 
 use crate::screens::{value_display, FieldSpec};
 use crate::web::{html_escape, page_shell};
+
+/// A process-local change counter. Wait releases the mutex, and checking the
+/// counter under that same mutex prevents a publish-before-wait lost wakeup.
+pub struct FeedUpdates {
+    revision: std::sync::Mutex<u64>,
+    changed: std::sync::Condvar,
+}
+
+impl Default for FeedUpdates {
+    fn default() -> Self { Self::new() }
+}
+
+impl FeedUpdates {
+    pub const fn new() -> Self {
+        Self { revision: std::sync::Mutex::new(0), changed: std::sync::Condvar::new() }
+    }
+
+    pub fn revision(&self) -> u64 { *self.revision.lock().unwrap() }
+
+    pub fn publish(&self) {
+        let mut revision = self.revision.lock().unwrap();
+        *revision = revision.wrapping_add(1);
+        self.changed.notify_all();
+    }
+
+    /// Returns immediately for a stale cursor; otherwise waits at most timeout.
+    pub fn wait(&self, since: u64, timeout: std::time::Duration) -> u64 {
+        let (revision, _) = self.changed.wait_timeout_while(
+            self.revision.lock().unwrap(), timeout, |revision| *revision == since,
+        ).unwrap();
+        *revision
+    }
+}
+
+/// Adds a long-poll client. Only a changed revision reloads the page; errors
+/// back off, and loss of read authorization stops further requests.
+pub fn with_long_poll(html: String, api_path: &str, revision: u64) -> String {
+    let path = serde_json::to_string(api_path).unwrap().replace('<', "\\u003c");
+    let script = format!(r#"<script>(async()=>{{
+const path={path}, revision="{revision}";
+for(;;){{try{{
+const r=await fetch(path+"?since="+revision,{{cache:"no-store"}});
+if(r.status===401||r.status===403)return;
+if(!r.ok)throw new Error("feed");
+const next=r.headers.get("X-Nirdosha-Revision");
+await r.text();
+if(next!==null&&next!==revision){{location.reload();return;}}
+}}catch(_){{await new Promise(resolve=>setTimeout(resolve,1000));}}
+}}
+}})();</script>"#);
+    html.replacen("</body>", &format!("{script}</body>"), 1)
+}
 
 /// `GET <path>` — the most recent messages, newest first, plus a plain
 /// `<form>` to post a new one (shown regardless of whether the viewer

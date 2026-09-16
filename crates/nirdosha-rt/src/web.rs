@@ -14,9 +14,8 @@
 //! cannot drift from what is actually enforced, because there is only
 //! one source (`R`), not two.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::role::{Auth, Role, RoleProof};
 
@@ -400,8 +399,9 @@ impl PathTemplate {
     }
 }
 
-type Handler = Box<dyn Fn(&Request, &PathParams) -> Response>;
+type Handler = Arc<dyn Fn(&Request, &PathParams) -> Response + Send + Sync>;
 
+#[derive(Clone)]
 struct Route {
     method: &'static str,
     template: PathTemplate,
@@ -426,9 +426,10 @@ pub struct NavLink {
 /// success — the one thing an app supplies; everything else (the
 /// login form, the session cookie, the logout route, the nav bar's
 /// Login/Logout button) is handled by the router itself.
+#[derive(Clone)]
 struct LoginConfig {
     path: String,
-    verify: Rc<dyn Fn(&str, &str) -> Option<Vec<String>>>,
+    verify: Arc<dyn Fn(&str, &str) -> Option<Vec<String>> + Send + Sync>,
 }
 
 /// A request → `Response` router with OpenAPI baked into `dispatch`
@@ -436,28 +437,45 @@ struct LoginConfig {
 /// an `Authorization` header via the app's own identity fixture) —
 /// this crate has no opinion on token formats, only on what happens
 /// once you have an `Auth`.
+#[derive(Clone)]
 pub struct Router {
     title: &'static str,
     version: &'static str,
     routes: Vec<Route>,
-    authenticate: Rc<dyn Fn(&Request) -> Auth>,
+    authenticate: Arc<dyn Fn(&Request) -> Auth + Send + Sync>,
     nav: Vec<NavLink>,
     login: Option<LoginConfig>,
-    /// session id → (username, roles). In-memory, process-global, lost
+    /// session id → (username, roles). In-memory, shared by clones, lost
     /// on restart — matches this dialect's other fixture-grade stores
     /// (`product_store`-style `Mutex<HashMap<..>>`s), not a claim of
     /// production session durability.
-    sessions: Rc<RefCell<HashMap<String, (String, Vec<String>)>>>,
+    sessions: Arc<Mutex<HashMap<String, (String, Vec<String>)>>>,
+}
+
+/// Bounds socket workers and socket I/O waits. Handler execution must itself
+/// be bounded; shutdown drains in-flight handlers rather than interrupting them.
+#[derive(Clone, Copy, Debug)]
+pub struct ServeConfig {
+    pub max_connections: std::num::NonZeroUsize,
+    pub io_timeout: std::time::Duration,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: std::num::NonZeroUsize::new(64).unwrap(),
+            io_timeout: std::time::Duration::from_secs(5),
+        }
+    }
 }
 
 /// Resolves a session cookie to an `Auth`, if the cookie names a
 /// session this router actually minted. Shared by every gated route's
 /// closure and by the nav bar's Login/Logout rendering, so both agree
 /// on what "logged in" means.
-fn session_auth(sessions: &Rc<RefCell<HashMap<String, (String, Vec<String>)>>>, req: &Request) -> Option<Auth> {
+fn session_auth(sessions: &Arc<Mutex<HashMap<String, (String, Vec<String>)>>>, req: &Request) -> Option<Auth> {
     let sid = req.cookie(SESSION_COOKIE)?;
-    let sessions = sessions.borrow();
-    let (user, roles) = sessions.get(&sid)?;
+    let (user, roles) = sessions.lock().unwrap().get(&sid)?.clone();
     let role_refs: Vec<&str> = roles.iter().map(String::as_str).collect();
     Some(Auth::login(user.clone(), &role_refs))
 }
@@ -481,14 +499,14 @@ macro_rules! ungated_method {
             mut self,
             path: &'static str,
             summary: &'static str,
-            handler: impl Fn(&Request, &PathParams) -> Response + 'static,
+            handler: impl Fn(&Request, &PathParams) -> Response + Send + Sync + 'static,
         ) -> Self {
             self.routes.push(Route {
                 method: $method,
                 template: PathTemplate::parse(path),
                 summary,
                 required_role: None,
-                handler: Box::new(handler),
+                handler: Arc::new(handler),
             });
             self
         }
@@ -501,7 +519,7 @@ macro_rules! gated_method {
             mut self,
             path: &'static str,
             summary: &'static str,
-            handler: impl Fn(&Request, &PathParams, &RoleProof<R>) -> Response + 'static,
+            handler: impl Fn(&Request, &PathParams, &RoleProof<R>) -> Response + Send + Sync + 'static,
         ) -> Self {
             let authenticate = self.authenticate.clone();
             let sessions = self.sessions.clone();
@@ -517,7 +535,7 @@ macro_rules! gated_method {
                 template: PathTemplate::parse(path),
                 summary,
                 required_role: Some(R::NAME),
-                handler: Box::new(wrapped),
+                handler: Arc::new(wrapped),
             });
             self
         }
@@ -525,15 +543,15 @@ macro_rules! gated_method {
 }
 
 impl Router {
-    pub fn new(authenticate: impl Fn(&Request) -> Auth + 'static) -> Router {
+    pub fn new(authenticate: impl Fn(&Request) -> Auth + Send + Sync + 'static) -> Router {
         Router {
             title: "Nirdosha service",
             version: "0.1.0",
             routes: Vec::new(),
-            authenticate: Rc::new(authenticate),
+            authenticate: Arc::new(authenticate),
             nav: Vec::new(),
             login: None,
-            sessions: Rc::new(RefCell::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -557,10 +575,10 @@ impl Router {
     /// its submission) and `POST {path}/logout`. `verify` checks a
     /// submitted username/password and returns the session's roles on
     /// success — this crate has no opinion on where credentials live.
-    pub fn with_login(mut self, path: &'static str, verify: impl Fn(&str, &str) -> Option<Vec<String>> + 'static) -> Self {
+    pub fn with_login(mut self, path: &'static str, verify: impl Fn(&str, &str) -> Option<Vec<String>> + Send + Sync + 'static) -> Self {
         self.login = Some(LoginConfig {
             path: path.to_string(),
-            verify: Rc::new(verify),
+            verify: Arc::new(verify),
         });
         self
     }
@@ -586,7 +604,7 @@ impl Router {
         mut self,
         path: &'static str,
         summary: &'static str,
-        handler: impl Fn(&Request, &PathParams, &Auth) -> Response + 'static,
+        handler: impl Fn(&Request, &PathParams, &Auth) -> Response + Send + Sync + 'static,
     ) -> Self {
         let authenticate = self.authenticate.clone();
         let sessions = self.sessions.clone();
@@ -599,7 +617,7 @@ impl Router {
             template: PathTemplate::parse(path),
             summary,
             required_role: None,
-            handler: Box::new(wrapped),
+            handler: Arc::new(wrapped),
         });
         self
     }
@@ -624,7 +642,7 @@ impl Router {
                 let resp = match (login.verify)(&username, &password) {
                     Some(roles) => {
                         let session_id = generate_session_id();
-                        self.sessions.borrow_mut().insert(session_id.clone(), (username, roles));
+                        self.sessions.lock().unwrap().insert(session_id.clone(), (username, roles));
                         let mut resp = Response::redirect("/");
                         resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}={session_id}; HttpOnly; Path=/")));
                         resp
@@ -636,7 +654,7 @@ impl Router {
             let logout_path = format!("{}/logout", login.path.trim_end_matches('/'));
             if path == logout_path && req.method == "POST" {
                 if let Some(sid) = req.cookie(SESSION_COOKIE) {
-                    self.sessions.borrow_mut().remove(&sid);
+                    self.sessions.lock().unwrap().remove(&sid);
                 }
                 let mut resp = Response::redirect("/");
                 resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}=; Path=/; Max-Age=0")));
@@ -749,34 +767,81 @@ impl Router {
         })
     }
 
-    /// Serve forever on `127.0.0.1:port` — one connection at a time,
-    /// same simplification `51_compiled_serve.nir` already makes (a
-    /// single `recv()` read per request; no keep-alive).
+    /// Serve on localhost with bounded concurrent connection workers.
+    /// Retains the minimal HTTP transport: one recv per request, no keep-alive.
     pub fn serve(&self, port: u16) -> ! {
-        let listener = crate::prelude::listen(port as i64);
-        loop {
-            let conn = crate::prelude::accept(&listener);
-            let raw = conn.recv();
-            let response = match Request::parse(&raw) {
-                Some(req) => self.dispatch(&req),
-                None => Response::bad_request("malformed request"),
-            };
-            // A client that disconnects mid-response (a closed tab, a
-            // cancelled prefetch, an aggressive timeout) must not take
-            // the whole server down with it. `Tcp::send` panics on a
-            // broken pipe — the right behavior for `.nir`'s own
-            // send/recv contract, where a write failure usually means a
-            // real bug — but a long-running HTTP server sees this
-            // condition routinely and must survive it, the same way
-            // `Tcp::recv` already tolerates a closed peer. Isolating
-            // just this connection's write behind `catch_unwind` gets
-            // that survival without changing `Tcp::send`'s panic
-            // contract for every other caller in the dialect.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                response.write_to(&conn);
-            }));
-            crate::prelude::stop(conn);
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("listen");
+        self.serve_until(listener, &std::sync::atomic::AtomicBool::new(false), ServeConfig::default())
+            .expect("HTTP server failed");
+        unreachable!("the permanent server has no shutdown signal")
+    }
+
+    /// Serve an already-bound listener until shutdown is requested. Excess
+    /// connections are closed without spawning a worker. Stop accepting first,
+    /// then join every worker; user handlers must eventually return.
+    pub fn serve_until(
+        &self,
+        listener: std::net::TcpListener,
+        shutdown: &std::sync::atomic::AtomicBool,
+        config: ServeConfig,
+    ) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering;
+        if config.io_timeout.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "io_timeout must be positive"));
         }
+        listener.set_nonblocking(true)?;
+        let shared_router = Arc::new(self.clone());
+        let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        let result = loop {
+            let mut index = 0;
+            while index < workers.len() {
+                if workers[index].is_finished() {
+                    crate::prelude::join(workers.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            if shutdown.load(Ordering::Acquire) {
+                break Ok(());
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if workers.len() >= config.max_connections.get() {
+                        drop(stream);
+                        continue;
+                    }
+                    let setup = stream.set_nonblocking(false)
+                        .and_then(|_| stream.set_read_timeout(Some(config.io_timeout)))
+                        .and_then(|_| stream.set_write_timeout(Some(config.io_timeout)));
+                    if let Err(error) = setup {
+                        break Err(error);
+                    }
+                    let router = shared_router.clone();
+                    workers.push(crate::prelude::spawn(move || {
+                        let conn = crate::prelude::Tcp::from_stream(stream);
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let raw = conn.recv();
+                            let response = match Request::parse(&raw) {
+                                Some(req) => router.dispatch(&req),
+                                None => Response::bad_request("malformed request"),
+                            };
+                            response.write_to(&conn);
+                        }));
+                        crate::prelude::stop(conn);
+                    }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => break Err(error),
+            }
+        };
+        drop(listener);
+        for worker in workers {
+            crate::prelude::join(worker);
+        }
+        result
     }
 }
 

@@ -101,8 +101,8 @@ pub fn kanban_board(input: TokenStream) -> TokenStream {
 }
 
 /// See `communication_feed::expand`'s module doc — RFC 0009 Track C's
-/// Communication archetype: an append-only feed, honestly polling
-/// (`<meta http-equiv="refresh">`), not real server push.
+/// Communication archetype: an append-only feed with timer refresh or
+/// opt-in bounded long polling (`long_poll_seconds: 1..=30`).
 #[proc_macro]
 pub fn communication_feed(input: TokenStream) -> TokenStream {
     communication_feed::expand(input)

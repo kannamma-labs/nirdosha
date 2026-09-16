@@ -23,6 +23,14 @@ tracks **status and sequencing** across all of them in one place, plus
 the work items that don't have a home in any existing doc yet (Track
 A, Track B, Track C below) — but the specs themselves stay put.
 
+## V2 issue fixes
+
+- `[DONE]` **2026-09-16, GitHub #66: concurrent v2 HTTP and live feeds.**
+  Bounded connection workers, shared sessions, orderly shutdown, and opt-in
+  feed long polling implemented. Runtime/macro suite passes (70 tests);
+  all v2 corpus binaries pass `cargo check`. Details:
+  `docs/V2_IMPLEMENTATION_BOOK.md`, issue #66 entry.
+
 ## Status tags
 
 Same discipline `examples/trade-finance/todo.md` already uses:

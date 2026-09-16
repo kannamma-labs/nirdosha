@@ -1,11 +1,10 @@
 //! `communication_feed! { .. }` — RFC 0009 Track C's Communication
 //! archetype: an append-only, newest-first feed of posted messages.
 //!
-//! **Honest client-side polling, not real server push** — see the
-//! module doc on `nirdosha_rt::feed`. `refresh_seconds` reuses
-//! `dashboard!`'s exact `<meta http-equiv="refresh">` mechanism; there
-//! is no persistent connection, and this macro's generated routes
-//! don't pretend otherwise.
+//! `refresh_seconds` refreshes on a timer. Alternatively,
+//! `long_poll_seconds: 1..=30` waits for a generated POST before refreshing;
+//! the JSON endpoint accepts a `since` revision and returns its current
+//! revision in `X-Nirdosha-Revision`. Both modes preserve read-role gates.
 //!
 //! ```ignore
 //! nirdosha_rt::communication_feed! {
@@ -69,6 +68,7 @@ struct FeedInput {
     post_access: Access,
     read_access: Access,
     refresh_seconds: Option<LitInt>,
+    long_poll_seconds: Option<LitInt>,
 }
 
 impl Parse for FeedInput {
@@ -123,18 +123,25 @@ impl Parse for FeedInput {
         input.parse::<Token![,]>()?;
 
         let mut refresh_seconds = None;
-        if input.peek(Ident) {
-            let fork = input.fork();
-            let maybe: Ident = fork.parse()?;
-            if maybe == "refresh_seconds" {
-                input.parse::<Ident>()?;
-                input.parse::<Token![:]>()?;
-                refresh_seconds = Some(input.parse::<LitInt>()?);
-                let _ = input.parse::<Token![,]>();
+        let mut long_poll_seconds = None;
+        if !input.is_empty() {
+            let mode: Ident = input.parse()?;
+            input.parse::<Token![:]>()?;
+            let seconds: LitInt = input.parse()?;
+            if mode == "refresh_seconds" {
+                refresh_seconds = Some(seconds);
+            } else if mode == "long_poll_seconds" {
+                if !(1..=30).contains(&seconds.base10_parse::<u64>()?) {
+                    return Err(syn::Error::new(seconds.span(), "long_poll_seconds must be between 1 and 30"));
+                }
+                long_poll_seconds = Some(seconds);
+            } else {
+                return Err(syn::Error::new(mode.span(), "expected refresh_seconds or long_poll_seconds"));
             }
+            if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
         }
 
-        Ok(FeedInput { mount, entity, store, path, fields, post_access, read_access, refresh_seconds })
+        Ok(FeedInput { mount, entity, store, path, fields, post_access, read_access, refresh_seconds, long_poll_seconds })
     }
 }
 
@@ -167,6 +174,25 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
         Some(n) => quote! { Some(#n) },
         None => quote! { None },
     };
+    let publish = input.long_poll_seconds.as_ref().map(|_| quote! { __UPDATES.publish(); });
+    let view_revision = input.long_poll_seconds.as_ref().map(|_| quote! { let revision = __UPDATES.revision(); });
+    let view_live = input.long_poll_seconds.as_ref().map(|_| quote! {
+        let html = ::nirdosha_rt::feed::with_long_poll(html, #api_path, revision);
+    });
+    let wait = input.long_poll_seconds.as_ref().map(|seconds| quote! {
+        let query = _req.query();
+        let revision = match query.get("since") {
+            Some(since) => match since.parse::<u64>() {
+                Ok(since) => __UPDATES.wait(since, ::std::time::Duration::from_secs(#seconds)),
+                Err(_) => return ::nirdosha_rt::Response::bad_request("invalid feed revision"),
+            },
+            None => __UPDATES.revision(),
+        };
+    });
+    let revision_header = input.long_poll_seconds.as_ref().map(|_| quote! {
+        response.extra_headers.push(("X-Nirdosha-Revision".into(), revision.to_string()));
+        response.extra_headers.push(("Cache-Control".into(), "no-store".into()));
+    });
 
     let field_idents: Vec<&Ident> = input.fields.iter().map(|f| &f.name).collect();
     let field_names: Vec<String> = input.fields.iter().map(|f| f.name.to_string()).collect();
@@ -200,13 +226,18 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
             let mut store = #store().lock().unwrap();
             store.push(entity.clone());
             store.sort_by_key(|e: &#entity| ::std::cmp::Reverse(e.id));
+            drop(store);
+            #publish
             Ok(entity)
         }
     };
 
     let view_body = quote! {
+        #view_revision
         let messages: Vec<::serde_json::Value> = #store().lock().unwrap().iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::feed::feed_html(#title, #refresh, #path, &__fields(), &messages))
+        let html = ::nirdosha_rt::feed::feed_html(#title, #refresh, #path, &__fields(), &messages);
+        #view_live
+        ::nirdosha_rt::Response::html(200, html)
     };
     let view_route = match &input.read_access {
         Access::Public => quote! { .get(#path, #title, |_req, _params| { #view_body }) },
@@ -217,8 +248,12 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
     };
 
     let api_body = quote! {
+        #wait
         let messages: Vec<::serde_json::Value> = #store().lock().unwrap().iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-        ::nirdosha_rt::Response::json(200, &::serde_json::Value::Array(messages))
+        #[allow(unused_mut)]
+        let mut response = ::nirdosha_rt::Response::json(200, &::serde_json::Value::Array(messages));
+        #revision_header
+        response
     };
     let api_route = match &input.read_access {
         Access::Public => quote! { .get(#api_path, concat!(#title, " (JSON)"), |_req, _params| { #api_body }) },
@@ -254,12 +289,40 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
 
     quote! {
         fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+            static __UPDATES: ::nirdosha_rt::feed::FeedUpdates = ::nirdosha_rt::feed::FeedUpdates::new();
             #fields_fn
             #post_fn
             router
                 #view_route
                 #api_route
                 #post_route
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FeedInput;
+
+    fn parse(mode: &str) -> syn::Result<FeedInput> {
+        syn::parse_str(&format!(
+            "mount: mount_feed, entity: Message, store: messages, path: \"/feed\", \
+             fields: [body: String], post_access: public, read_access: public, {mode}"
+        ))
+    }
+
+    #[test]
+    fn long_poll_wait_is_bounded_and_modes_are_exclusive() {
+        assert!(parse("long_poll_seconds: 1,").is_ok());
+        assert!(parse("long_poll_seconds: 30,").is_ok());
+        for mode in [
+            "long_poll_seconds: 0,",
+            "long_poll_seconds: 31,",
+            "long_poll_seconds: 1, refresh_seconds: 5,",
+            "refresh_seconds: 5, long_poll_seconds: 1,",
+            "unknown_mode: 1,",
+        ] {
+            assert!(parse(mode).is_err(), "accepted {mode}");
         }
     }
 }

@@ -51,6 +51,45 @@ the verifier/certificate layer without replacing those edits.
 
 ## Work log
 
+### 2026-09-16 - Issue #66: concurrent Router and long-poll feeds
+
+Implemented and verified. GitHub #65 remains the umbrella register; #66 is
+the first standalone defect in the reviewed #65-#75 sequence.
+
+- Router handlers/authentication callbacks now require `Send + Sync`.
+  Router clones share callbacks and the mutex-protected session store;
+  locks are released before invoking application handlers.
+- `serve` uses up to 64 simultaneous OS-thread workers with five-second
+  socket I/O timeouts. `web::ServeConfig` customizes those bounds.
+  `Router::serve_until` accepts an already-bound listener and atomic stop
+  flag: stop accepting, then drain and join workers. Saturated connections
+  are closed. Application handlers must finish cooperatively; arbitrary
+  blocking handler code cannot be forcibly cancelled. The existing minimal
+  one-read HTTP parser/no-keep-alive transport is unchanged.
+- `communication_feed!` accepts `long_poll_seconds: 1..=30` instead of
+  `refresh_seconds`. `GET /api/<feed>?since=<revision>` waits for a successful
+  generated POST or timeout, returning the existing JSON array plus
+  `X-Nirdosha-Revision` and `Cache-Control: no-store`. Missing cursors return
+  immediately; malformed cursors return 400. Existing read/post role gates
+  still apply. Authorization is checked at request entry.
+- The opt-in browser client reloads on a changed revision, stops on 401/403,
+  and backs off after transport failures. Timer-based feeds remain unchanged.
+  Notifications cover generated POSTs within one process, not direct store
+  mutations or other replicas. No SSE/WebSocket or durable event log claim.
+- Regression coverage: real held-open connections alongside ordinary HTTP,
+  admission limits, idle peers, handler panics/disconnects, worker drainage,
+  concurrent login/logout and role isolation, gated live delivery, stale
+  cursors and timeout behavior.
+
+Evidence: `cargo test --locked --offline --target-dir
+/tmp/nirdosha-issue-66-target -p nirdosha-rt -p nirdosha-macros` passes
+70 tests, including 3 runnable doctests (10 existing doctests ignored).
+Socket tests ran outside the restricted sandbox, which prohibits localhost
+binding. `cargo check --locked --offline --target-dir
+/tmp/nirdosha-issue-66-target -p nirdosha-v2-corpus --bins` passes for all
+corpus binaries. No native-runtime changes; optional native-feature tests
+were not rerun. Commit reference is recorded on GitHub issue #66.
+
 ### 2026-09-16 — initial audit and G1
 
 Implemented:
