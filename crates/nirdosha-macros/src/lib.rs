@@ -43,6 +43,7 @@ mod crud_screens;
 mod dashboard;
 mod settings_screen;
 mod util;
+mod wizard;
 
 use nirdosha_contract_core as cc;
 use proc_macro::TokenStream;
@@ -81,6 +82,13 @@ pub fn crud_screens(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn settings_screen(input: TokenStream) -> TokenStream {
     settings_screen::expand(input)
+}
+
+/// See `wizard::expand`'s module doc — RFC 0009 Track C's Workflow/
+/// Wizard archetype: a multi-step form with server-side, per-run state.
+#[proc_macro]
+pub fn wizard(input: TokenStream) -> TokenStream {
+    wizard::expand(input)
 }
 
 fn expand(

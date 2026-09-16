@@ -23,7 +23,7 @@
 //! fn main() {}
 //! ```
 
-pub use nirdosha_macros::{categorical_actions, contract, crud_screens, dashboard, settings_screen};
+pub use nirdosha_macros::{categorical_actions, contract, crud_screens, dashboard, settings_screen, wizard};
 
 pub mod dashboard;
 pub mod nfr;
@@ -34,6 +34,7 @@ pub mod native;
 pub mod role;
 pub mod screens;
 pub mod web;
+pub mod wizard;
 
 pub use nfr::{enter, events, reset_events, Guard, Limits, NfrEvent};
 pub use policy::{crud_forbidden, requires_encryption, Policy};
