@@ -46,7 +46,7 @@ the verifier/certificate layer without replacing those edits.
 | G2: accepted Rust subset | Expanded macros, resolved calls, dependency summaries, unknown dispatch rejection; adversarial fixtures | In progress: conservative local checker implemented |
 | G3: shared authorization + durable transaction | Real authority boundary, role denial without side effects, restart/retry consistency | Adapter implemented; native acceptance tests pass; application migration pending |
 | G4: shared isolation/cancellation | Process lifecycle and cleanup tests; no thread fixture accepted as isolation | Unix process runtime implemented and tested; application migration pending |
-| G5: cross-reader equivalence | One enterprise flow under each implemented reader with matching state/audit/recovery outcomes | Pending |
+| G5: cross-reader equivalence | One enterprise flow under each implemented reader with matching state/audit/recovery outcomes | In progress: ordered golden trail + reader-aware harness implemented; only one reader (plain cargo) exists today, so equivalence itself is not yet achievable |
 | G6: build provenance | Artifact/configuration/dependency binding and authenticated issuer policy | In progress: dependency-closure + toolchain binding implemented; artifact/cfg binding and authenticated issuer policy pending |
 
 ## Work log
@@ -212,3 +212,35 @@ against it passed.
 Remaining for G6: binding the built executable's bytes and resolved
 cfg/feature/target configuration (not just the lockfile), and the
 authenticated issuer half (signing — entry #13).
+
+### 2026-09-16 — G5 cross-reader equivalence scaffolding (in progress)
+
+Added `examples/nirdosha-v2-corpus/tests/cross_reader.rs`: a `Reader`
+abstraction (`Cargo`, `Proprietary`) plus `available_readers()`, run
+against the enterprise flow (`enterprise_app.nir`). The proprietary
+reader is opt-in via `NIRDOSHA_PROPRIETARY_BIN` — building
+`crates/compiler` (GTK/WebKit/z3) costs minutes, and this suite must
+not silently eat that cost every run just to prove a reader is
+missing.
+
+Captured the enterprise flow's real, ordered stdout as
+`ENTERPRISE_FLOW_GOLDEN` — 13 lines, order-sensitive (an audit trail's
+commit/compensate/reversal sequence is a different, wrong behavior if
+reordered), stricter than `tests/outputs.rs`'s existing unordered
+substring pins. This is the reference Phase 2-4's proprietary reader
+must reproduce exactly to claim G5.
+
+Implements the book's own constraint from the prior entry directly in
+code, not just prose: `enterprise_flow_cross_reader_equivalence`
+counts how many readers actually ran (not how many exist), and with
+fewer than two successes it reports exactly which readers were
+unavailable and why, then returns — it never asserts success because
+only plain cargo happened to run. Confirmed by inspection with
+`--nocapture`: today's run prints "G5 not yet achievable: only 1
+reader(s) ran... (plain cargo)" and still exits green, which is the
+honest outcome, not equivalence.
+
+Remaining for G5: everything downstream of a real second reader
+existing — state and recovery-outcome comparison (not just stdout),
+and the proprietary reader itself consuming v2 files at all (Phase 2-4,
+unstarted, tracked in the other repo).
