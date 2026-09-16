@@ -93,6 +93,7 @@ impl ScanSummary {
             "contracts": self.contracts,
             "findings": self.findings,
             "violations": self.violations().len(),
+            "coverage": cc::evidence::Coverage::source_scan(self.violations().is_empty()),
         });
         let certificate = cc::certificate::Certificate::new(
             cc::certificate::Subject {
@@ -527,22 +528,19 @@ impl WorkspaceSummary {
             "contracts": contracts,
             "findings": findings,
             "violations": self.violations(),
+            "coverage": cc::evidence::Coverage::source_scan(self.violations() == 0),
         });
         // Aggregate certificate: every in-dialect package's sources,
         // prefixed `<package>/<path>` so paths stay unambiguous.
-        let sources = self
-            .packages
-            .iter()
-            .flat_map(|summary| {
-                cc::certificate::scan_sources(&summary.package_dir, &summary.files)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|source| cc::certificate::SourceFile {
-                        path: format!("{}/{}", summary.package, source.path),
-                        sha256: source.sha256,
-                    })
-            })
-            .collect();
+        let mut sources = Vec::new();
+        for summary in &self.packages {
+            for source in cc::certificate::scan_sources(&summary.package_dir, &summary.files)? {
+                sources.push(cc::certificate::SourceFile {
+                    path: format!("{}/{}", summary.package, source.path),
+                    sha256: source.sha256,
+                });
+            }
+        }
         let certificate = cc::certificate::Certificate::new(
             cc::certificate::Subject { package: "workspace".into(), version: None },
             cc::certificate::Tool {

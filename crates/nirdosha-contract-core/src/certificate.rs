@@ -23,8 +23,8 @@
 //!    function of source + flags" — extends to its attestations).
 //!    Re-verify and diff; zero diff means zero drift.
 //! 2. **Two reserved fields, one future each.** `proofs` carries
-//!    Stage 2.5's Z3 discharge objects (empty in v1 — enforced claims
-//!    only). `signature` is entry #13's signed-plugin envelope (always
+//!    Stage 2.5's Z3 discharge objects (empty establishes no proof;
+//!    see verification.coverage). `signature` is entry #13's envelope (always
 //!    `null` in v1; a signature covers the `binding`, never lives
 //!    inside what it signs).
 //! 3. **One schema across tiers.** The free dialect and the
@@ -104,7 +104,7 @@ pub struct Certificate {
     pub tool: Tool,
     pub sources: Vec<SourceFile>,
     /// Stage 2.5 Z3 discharge objects. Empty in v1: claims here are
-    /// *enforced*, not proven.
+    /// described by verification.coverage, not inferred to be proven.
     #[serde(default)]
     pub proofs: Vec<Value>,
     /// The tier-specific report (contracts, findings, violations),
@@ -163,8 +163,9 @@ impl Certificate {
         hex(&Sha256::digest(&bytes))
     }
 
-    /// Does the stored binding match the certificate's content? A
-    /// forged or edited certificate fails here.
+    /// Does the stored binding match the certificate's content? An edit
+    /// without recomputing the hash fails. This is not authentication:
+    /// anyone can recompute an unsigned certificate's binding.
     pub fn binding_valid(&self) -> bool {
         self.schema == SCHEMA && self.binding == self.compute_binding()
     }

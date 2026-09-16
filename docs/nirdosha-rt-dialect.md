@@ -74,26 +74,21 @@ cargo nirdosha build                   # (in that package) REFUSED: 3 violations
      because it resolves to that `DefId`, not because its text looks
      like a path. Stage 1's over-approximate string matching is
      retired for anything compiled through the driver.
-   - **Totality at MIR level** — `unwrap`/`expect`/bounds checks/
-     division-by-zero compile to `assert` terminators, flagged with
-     zero false positives; arithmetic-overflow checks are allowed
-     (checked arithmetic is the dialect's documented runtime guard);
-     recursion is sound (back-edges contribute nothing to the effect
-     lattice).
-   - **Default-deny third party** — a call into a crate outside
-     `core`/`std`/`alloc`/`nirdosha_rt` makes the caller impure unless
-     that crate is contract-carrying/verified: an unverified dependency
-     cannot launder effects.
-   - **Pass-through for non-dialect crates** — the driver no-ops when a
-     crate has no Nirdosha contracts anywhere, so dependencies and the
-     `.nir` toolchain build byte-identical under the wrapper.
+   - **Conservative local subset** — expanded HIR and pre-optimization MIR
+     reject unsafe/static boundaries, reference writes, destructors and
+     unresolved function/trait calls. Scalar arithmetic and local recursion
+     are supported; this does not prove termination or panic freedom.
+   - **No crate-wide trust** — external calls, including std/core/alloc and
+     nirdosha_rt, require explicit effect summaries. Those summaries are not
+     implemented yet, so iterator-heavy code and injected NFR guards are
+     currently unsupported by deep checking. Plain Cargo remains usable.
+   - **Pass-through for non-contract crates** — the driver adds no effect
+     restrictions to crates without contracts.
 
-   The injected NFR guard is *trusted infrastructure*: `nirdosha_rt`
-   sits in the pure-by-default set because the `#[contract]` macro
-   injects `nirdosha_rt::nfr::enter` into any fn with an `nfr(..)`
-   clause — `effects(pure)` describes the user's body, and the guard's
-   clock/semaphore behavior is declared honestly by the separate
-   `nfr(..)` clause.
+   The prior runtime-wide NFR exemption was removed: it also admitted
+   arbitrary runtime effects and callbacks. See [V2 guarantees](V2_GUARANTEES.md)
+   for the supported subset and the [running book](V2_IMPLEMENTATION_BOOK.md)
+   for migration evidence.
 
    Stage 2 is nightly + `rustc-dev` only (it links `rustc_private`);
    Stage 1 verification is stable and works everywhere. `cargo
@@ -190,8 +185,8 @@ writes `contract-report-workspace.json`). The envelope is shared by
 design with the proprietary tier: `subject` (package), `tool` (which
 surface verified — `source_scan` never invokes rustc and says so),
 `sources` (every verified file, package-relative, SHA-256), `proofs`
-(reserved for Stage 2.5's Z3 discharge objects — empty means
-*enforced*, not *proven*), `signature` (reserved for the signed-plugin
+(reserved for Stage 2.5's Z3 discharge objects — empty establishes no
+formal proof), `signature` (reserved for the signed-plugin
 trust chain), and `binding` — SHA-256 over all bound content.
 
 Two deliberate properties: **determinism** (no timestamps, no ambient
@@ -201,21 +196,25 @@ re-verification is a diff, and zero diff means zero drift), and
 
 ```
 $ cargo nirdosha verify --audit
-nirdosha: audit binding OK — claims are as minted (5a6067…)
+nirdosha: audit binding OK — content matches its stored hash (5a6067…)
 nirdosha: audit sources OK — 1 file(s) match their verified hashes
-nirdosha: certificate holds — the verified code is exactly what was attested
+nirdosha: listed source hashes and certificate binding match; this does not authenticate the issuer or establish build provenance
 ```
 
-Edit the source after verification, or edit the certificate's claims
-themselves — both are refused with a nonzero exit. That is the trust
-half of the register's entry #13 before any signing arrives.
+Changing a listed source or editing claims without recomputing the binding
+fails the integrity audit. An attacker can recompute an unsigned binding;
+this is not issuer authentication. New source reports include bound
+`verification.coverage` and a consuming policy command that refuses stronger
+guarantees unsupported by the source scanner. See
+[V2 guarantees](V2_GUARANTEES.md) for commands and limitations, and the
+[running implementation book](V2_IMPLEMENTATION_BOOK.md) for migration gates.
 
 Usage:
 
 ```
 cargo build && cargo install --path crates/cargo-nirdosha   # or PATH=target/debug
 cargo nirdosha build | check | run | test | verify          # per-package verification
-cargo nirdosha verify --audit                               # re-check a certificate (tamper-proofing)
+cargo nirdosha verify --audit                               # listed-source and binding integrity only
 NIRDOSHA_STRICT=1 cargo nirdosha build                       # strict: every pub fn carries a contract
 cargo nirdosha verify --workspace                           # strict gate over all in-dialect crates
 cargo nirdosha bench                                        # nfr(latency_ms) CI gate, real workload

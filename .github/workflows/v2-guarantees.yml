@@ -1,0 +1,35 @@
+name: v2-guarantees
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  certificate-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify source coverage and fail-closed certificate policy
+        run: cargo test --locked -p nirdosha-contract-core -p cargo-nirdosha
+
+  deep-effects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-18
+          components: rustc-dev, llvm-tools-preview
+      - name: Reject effect escapes through real rustc at O0 and O3
+        run: cargo test --locked -p nirdosha-driver --test effects
+
+  native-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Authorization, crash recovery and process lifecycle
+        run: cargo test --locked -p nirdosha-rt --features native --test native_guarantees

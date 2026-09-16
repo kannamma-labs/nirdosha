@@ -98,9 +98,8 @@ struct ImpureScanner {
 }
 
 impl<'ast> Visit<'ast> for ImpureScanner {
-    fn visit_expr_macro(&mut self, mac: &'ast syn::ExprMacro) {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         let name = mac
-            .mac
             .path
             .segments
             .last()
@@ -109,7 +108,7 @@ impl<'ast> Visit<'ast> for ImpureScanner {
         if let Some((_, why)) = MACRO_DENIES.iter().find(|(m, _)| *m == name) {
             self.hits.push(hit(format!("{name}!(..)"), why, mac.span()));
         }
-        syn::visit::visit_expr_macro(self, mac);
+        syn::visit::visit_macro(self, mac);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {

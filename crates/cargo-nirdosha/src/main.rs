@@ -42,6 +42,7 @@ fn main() -> ExitCode {
     let rest = if args.len() > 1 { &args[1..] } else { &[][..] };
 
     match sub.as_str() {
+        "check-certificate" => check_certificate_cli(rest),
         "verify" => {
             let workspace = rest.iter().any(|a| a == "--workspace" || a == "--all");
             if workspace {
@@ -106,6 +107,52 @@ fn main() -> ExitCode {
     }
 }
 
+/// Explicit consumer gate, deliberately independent of Cargo metadata.
+fn check_certificate_cli(args: &[String]) -> ExitCode {
+    let result = (|| -> Result<(), String> {
+        let mut path = None;
+        let mut root = None;
+        let mut required = Vec::new();
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--root" if root.is_none() => root = Some(PathBuf::from(args.next().ok_or("--root needs a directory")?)),
+                "--require" => required.push(args.next().ok_or("--require needs a guarantee")?.clone()),
+                value if !value.starts_with('-') && path.is_none() => path = Some(PathBuf::from(value)),
+                _ => return Err(format!("unexpected argument `{arg}`")),
+            }
+        }
+        let path = path.ok_or("check-certificate needs a certificate path")?;
+        let root = root.ok_or("check-certificate needs --root <package directory>")?;
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let cert: nirdosha_contract_core::certificate::Certificate =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        nirdosha_contract_core::evidence::check_policy(&cert, &required)?;
+        // Refuse paths that could read outside the caller's intended root.
+        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        for source in &cert.sources {
+            let relative = Path::new(&source.path);
+            if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+                return Err(format!("invalid source path `{}`", source.path));
+            }
+            let resolved = root.join(relative).canonicalize().map_err(|e| e.to_string())?;
+            if !resolved.starts_with(&root) { return Err("source escapes package root".into()); }
+        }
+        if !cert.check_sources(&root).ok() { return Err("listed source files changed or disappeared".into()); }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            eprintln!("nirdosha: certificate policy passed; listed sources match. Issuer authentication and build provenance are not established.");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("nirdosha: certificate policy refused: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn usage() {
     eprintln!(
         "cargo-nirdosha — the Nirdosha compiler (Stage 1.5)\n\
@@ -116,7 +163,8 @@ fn usage() {
          - plain `cargo build`            compiles and runs Nirdosha code like any Rust program\n\
          - `cargo nirdosha build`         verifies contract claims first; a lie refuses the build\n\
          - `cargo nirdosha verify --workspace`  strict gate over every in-dialect crate + certificate\n\
-         - `cargo nirdosha bench`          nfr(latency_ms) CI gate: your test suite is the workload"
+         - `cargo nirdosha bench`          nfr(latency_ms) CI gate: your test suite is the workload\n\
+         - `cargo nirdosha check-certificate <path> --root <package> --require <guarantee>`"
     );
 }
 
@@ -227,7 +275,7 @@ fn audit_cli(path: Option<String>) -> ExitCode {
         };
     let mut ok = true;
     if cert.binding_valid() {
-        eprintln!("nirdosha: audit binding OK — claims are as minted ({})", cert.binding);
+        eprintln!("nirdosha: audit binding OK — content matches its stored hash ({})", cert.binding);
     } else {
         eprintln!("nirdosha: audit FAILED — binding mismatch; this certificate was edited");
         ok = false;
@@ -248,7 +296,7 @@ fn audit_cli(path: Option<String>) -> ExitCode {
         ok = false;
     }
     if ok {
-        eprintln!("nirdosha: certificate holds — the verified code is exactly what was attested");
+        eprintln!("nirdosha: listed source hashes and certificate binding match; this does not authenticate the issuer or establish build provenance");
         ExitCode::SUCCESS
     } else {
         eprintln!(
@@ -277,7 +325,7 @@ fn report(summary: &ScanSummary, refused_for: &[&str]) {
         );
     }
     eprintln!(
-        "nirdosha: {} — {} files, {} contracts verified, {} violations",
+        "nirdosha: {} — source_scan: {} files, {} contracts inspected, {} violations",
         summary.package,
         summary.files.len(),
         summary.contracts.len(),
@@ -345,7 +393,7 @@ fn verify_ws_cli() -> ExitCode {
                 }
             }
             eprintln!(
-                "nirdosha: workspace — {} in-dialect package(s) verified, {} contracts, {} violations",
+                "nirdosha: workspace source_scan — {} in-dialect package(s) scanned, {} contracts, {} violations",
                 ws.packages.len(),
                 ws.contracts(),
                 ws.violations()

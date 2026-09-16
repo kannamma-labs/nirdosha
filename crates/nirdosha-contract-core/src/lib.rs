@@ -21,6 +21,8 @@
 
 pub mod certificate;
 pub mod docparse;
+pub mod declarations;
+pub mod evidence;
 pub mod model;
 pub mod parse;
 pub mod role;
