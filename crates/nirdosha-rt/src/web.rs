@@ -230,6 +230,21 @@ impl Response {
         }
     }
 
+    /// Serves the dialect's client-side-interactivity foundation: one
+    /// small, hand-written, reviewable vanilla-JS asset (no bundler, no
+    /// framework) — currently just `kanban_board!`'s drag-and-drop,
+    /// calling back into the app's own already-gated JSON routes via
+    /// `fetch()`. There is no client-side JS anywhere else in the
+    /// dialect's generated output.
+    pub fn javascript(status: u16, body: impl Into<String>) -> Response {
+        Response {
+            status,
+            content_type: "text/javascript; charset=utf-8",
+            body: body.into(),
+            extra_headers: Vec::new(),
+        }
+    }
+
     pub fn no_content() -> Response {
         Response {
             status: 204,

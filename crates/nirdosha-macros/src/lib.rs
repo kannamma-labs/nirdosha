@@ -41,6 +41,7 @@
 mod categorical;
 mod crud_screens;
 mod dashboard;
+mod kanban_board;
 mod settings_screen;
 mod util;
 mod wizard;
@@ -89,6 +90,13 @@ pub fn settings_screen(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn wizard(input: TokenStream) -> TokenStream {
     wizard::expand(input)
+}
+
+/// See `kanban_board::expand`'s module doc — RFC 0009 Track C's
+/// Board/Canvas archetype: a presentational drag-and-drop board.
+#[proc_macro]
+pub fn kanban_board(input: TokenStream) -> TokenStream {
+    kanban_board::expand(input)
 }
 
 fn expand(
