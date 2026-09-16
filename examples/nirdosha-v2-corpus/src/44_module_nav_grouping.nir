@@ -1,0 +1,70 @@
+//! v2 of `examples/features/44_module_nav_grouping.nir` — nav
+//! grouping, NOT scoping: `module "Display Name" { ... }` is pure
+//! sugar; everything inside still registers flat. In v2 each item
+//! carries a `nirdosha:nav` claim with its display group — emit-ui's
+//! nav folds screens by it; the fns stay directly callable.
+
+use nirdosha_v2::{json_parse, Json};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InvoiceError {
+    MalformedListing,
+}
+
+/// nirdosha:nav {"module":"Billing"}
+struct Invoice {
+    id: i64,
+    #[allow(dead_code)] // declared-complete for the CRUD layer
+    amount_cents: i64,
+}
+
+/// nirdosha:nav {"module":"Billing"}
+/// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the declaration layer
+fn list_invoice() -> Result<Json, InvoiceError> {
+    match json_parse("[]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(InvoiceError::MalformedListing),
+    }
+}
+
+/// nirdosha:nav {"module":"Billing"}
+/// nirdosha:contract {"effects":["pure"]}
+fn create_invoice(inv: Invoice) -> Result<i64, InvoiceError> {
+    Ok(inv.id)
+}
+
+/// nirdosha:nav {"module":"Shipping"}
+#[allow(dead_code)] // declared-complete for the declaration layer
+struct Shipment {
+    #[allow(dead_code)]
+    id: i64,
+    #[allow(dead_code)]
+    invoice_id: i64,
+}
+
+/// nirdosha:nav {"module":"Shipping"}
+/// nirdosha:contract {"effects":["pure"]}
+fn list_shipment() -> Result<Json, InvoiceError> {
+    match json_parse("[]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(InvoiceError::MalformedListing),
+    }
+}
+
+fn main() {
+    // `Invoice`/`Shipment` and their fns are ordinary, flat, top-level
+    // declarations — calling one from outside its own nav group needs
+    // no qualification at all, unlike 45's real namespaces.
+    let created: i64 = match create_invoice(Invoice { id: 1, amount_cents: 5000 }) {
+        Ok(id) => id,
+        Err(_e) => -1,
+    };
+    println!("{created}"); // 1
+
+    let listed_ok: bool = match list_shipment() {
+        Ok(_doc) => true,
+        Err(_e) => false,
+    };
+    println!("{listed_ok}"); // true
+}

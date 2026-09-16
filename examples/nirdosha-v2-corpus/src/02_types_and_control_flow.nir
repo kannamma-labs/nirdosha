@@ -1,0 +1,106 @@
+//! v2 of `examples/syntax/02_types_and_control_flow.nir` — scalar types,
+//! operators, and control flow. This is the "pure Rust already" class of
+//! the corpus: the translation is mechanical (semicolons, enum paths,
+//! `println!`), with zero Nirdosha-specific comments needed.
+//!
+//! Pre-migration (plain cargo): identical behavior to the original.
+//! Post-migration: the same, plus a certificate.
+
+/// `.nir`'s closed `Classification` set — printed with its original
+/// `Negative()` spelling for output parity.
+enum Classification {
+    Negative,
+    Even,
+    Odd,
+}
+
+impl std::fmt::Display for Classification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Classification::Negative => "Negative()",
+            Classification::Even => "Even()",
+            Classification::Odd => "Odd()",
+        };
+        write!(f, "{name}")
+    }
+}
+
+fn is_even(n: i64) -> bool {
+    n - (n / 2) * 2 == 0
+}
+
+// `if`/`else` as an *expression*: both branches produce a value.
+fn classify(n: i64) -> Classification {
+    if n < 0 {
+        Classification::Negative
+    } else if is_even(n) {
+        Classification::Even
+    } else {
+        Classification::Odd
+    }
+}
+
+fn factorial(n: i64) -> i64 {
+    if n <= 1 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+
+fn average(a: f64, b: f64) -> f64 {
+    (a + b) / 2.0
+}
+
+fn main() {
+    // i64: arithmetic + comparison
+    let x: i64 = 7;
+    let y: i64 = 3;
+    println!("{}", x + y); // 10
+    println!("{}", x - y); // 4
+    println!("{}", x * y); // 21
+    println!("{}", x / y); // 2 (integer division)
+    println!("{}", x > y && y > 0); // true
+
+    // f64: arithmetic, comparison, negation
+    let f: f64 = 3.5;
+    let g: f64 = 1.5;
+    println!("{}", f + g); // 5
+    println!("{}", -f); // -3.5
+    println!("{}", f == 3.5); // true
+    println!("{}", average(2.0, 4.0)); // 3
+
+    // bool + short-circuit logical operators
+    let a: bool = true;
+    let b: bool = false;
+    println!("{}", a && b); // false
+    println!("{}", a || b); // true
+    println!("{}", !a); // false
+
+    // String: literal, escapes, equality (free text at a fn boundary
+    // needs a carrier struct — level 3's rule, unchanged in v2)
+    let s = "line one\nline two\ttabbed";
+    println!("{s}");
+    println!("{}", "same" == "same"); // true
+
+    // control flow: `if` as a statement, `while`, mutation, recursion
+    if is_even(x) {
+        println!("x is even");
+    } else {
+        println!("x is odd");
+    }
+
+    let n: i64 = 5;
+    let mut i: i64 = 0;
+    let mut sum: i64 = 0;
+    while i < n {
+        sum = sum + i;
+        i = i + 1;
+    }
+    println!("{sum}"); // 0+1+2+3+4 = 10
+
+    println!("{}", classify(-3)); // Negative()
+    println!("{}", classify(4)); // Even()
+    println!("{}", classify(7)); // Odd()
+    println!("{}", factorial(10)); // 3628800
+}

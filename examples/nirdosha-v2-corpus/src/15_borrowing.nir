@@ -1,0 +1,28 @@
+//! v2 of `examples/features/15_borrowing.nir` — shared borrows `&T`.
+//! No `&mut` exists in `.nir`; Rust's `&` is the same read-only view
+//! (the file uses no interior mutability, so the shape matches).
+
+use nirdosha_rt::prelude::*;
+
+fn peek(r: &i64) -> i64 {
+    *r + 1
+}
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+fn distance_from_origin(p: &Point) -> f64 {
+    norm(&Vector([p.x, p.y]))
+}
+
+fn main() {
+    let n: i64 = 41;
+    println!("{}", peek(&n));
+    println!("{}", peek(&n)); // `n` was only borrowed, not moved
+
+    let origin_point = Point { x: 3.0, y: 4.0 };
+    println!("{}", distance_from_origin(&origin_point)); // 5
+    println!("{}", origin_point.x); // still usable — only borrowed above
+}

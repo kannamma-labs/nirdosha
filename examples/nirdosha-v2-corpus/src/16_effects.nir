@@ -1,0 +1,43 @@
+//! v2 of `examples/features/16_effects.nir` — a Koka-style effect SET
+//! (declared must be a superset of performed). In v2 the declaration
+//! rides `nirdosha:contract`; `.nir`'s four tags map onto the dialect:
+//! `rng` -> `random`, `io` -> `io`, `concurrent` -> `concurrent`,
+//! `network` -> `net`. `pure` is the empty set and can't combine.
+
+use nirdosha_rt::prelude::*;
+
+/// nirdosha:contract {"effects":["pure"]}
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+/// nirdosha:contract {"effects":["io"]}
+fn log_result(n: i64) {
+    println!("{n}");
+}
+
+/// nirdosha:contract {"effects":["random"]}
+fn roll_dice() -> f64 {
+    rand_f64()
+}
+
+/// nirdosha:contract {"effects":["concurrent"]}
+fn broadcast(n: i64) -> i64 {
+    let h = spawn(move || add(n, 0));
+    join(h)
+}
+
+// Declaring MORE than the body performs is fine — only an
+// undeclared-but-performed effect is a build error.
+/// nirdosha:contract {"effects":["io","random","concurrent","net"]}
+fn generous(n: i64) -> i64 {
+    add(n, 1) // actually pure, a subset of what's declared
+}
+
+fn main() {
+    log_result(add(2, 3)); // pure feeding io
+    rand_seed(1);
+    println!("{}", roll_dice());
+    println!("{}", broadcast(20));
+    println!("{}", generous(41));
+}

@@ -130,6 +130,7 @@ base64 = "0.22"
 # pins `sha2 = "0.10"` for its own certificate-hashing use, now needed
 # here too, no new provenance story.
 sha2 = "0.10"
+libc = "0.2"
 # `nir_db_connect`/`nir_db_query`/`nir_db_execute`'s real SQLite backend
 # (Row: `db`). Same crate + feature the root workspace's own
 # `crates/compiler/Cargo.toml` already pins (`rusqlite = { version =

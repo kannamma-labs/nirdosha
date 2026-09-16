@@ -1,0 +1,41 @@
+//! v2 of `examples/features/14_ownership_box.nir` — `box`/`*`/move
+//! semantics. `.nir`'s `box T` IS Rust's `Box<T>`; the affine story
+//! (use-after-move is a static error) is checked by the same
+//! borrow-checker either way.
+
+struct Payload {
+    id: i64,
+    #[allow(dead_code)] // declared-complete: the payload carries weight for the real archive
+    weight: f64,
+}
+
+fn consume(b: Box<i64>) -> i64 {
+    *b
+}
+
+fn make_boxed(n: i64) -> Box<i64> {
+    Box::new(n)
+}
+
+fn archive(p: Box<Payload>) -> i64 {
+    (*p).id
+}
+
+fn main() {
+    let a: Box<i64> = Box::new(10);
+    println!("{}", consume(a)); // moves `a` — reusing it would not typecheck
+
+    let b: Box<i64> = make_boxed(32);
+    println!("{}", *b + 10); // 42
+
+    // box works over any type, not just scalars
+    let payload = Box::new(Payload { id: 7, weight: 12.5 });
+    println!("{}", archive(payload)); // 7 — `payload` is moved away here
+
+    // ownership across branches: both arms move `c` exactly once, so
+    // single ownership holds either way.
+    let c: Box<i64> = Box::new(99);
+    let flag: bool = true;
+    let result: i64 = if flag { consume(c) } else { unreachable!() };
+    println!("{result}"); // 99
+}

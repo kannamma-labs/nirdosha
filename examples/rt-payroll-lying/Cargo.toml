@@ -1,0 +1,14 @@
+[package]
+name = "rt-payroll-lying"
+version = "0.1.0"
+edition = "2024"
+description = "Nirdosha dialect demo: a lying program. Zero Nirdosha dependencies — plain cargo builds and runs it; cargo nirdosha refuses it. That difference is the product."
+publish = false
+
+# No dependencies. This is deliberate: this file is *just another Rust
+# program* to the external world.
+# The zero-dependency opt-in: this crate stays plain Rust to the
+# external world (see src/main.rs), but is gated by `cargo nirdosha`
+# like any in-dialect crate — no runtime dependency required.
+[package.metadata.nirdosha-rt]
+dialect = true

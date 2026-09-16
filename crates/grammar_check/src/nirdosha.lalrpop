@@ -262,6 +262,7 @@ Stmt: () = {
 
 LetStmt: () = { "let" IDENT ":" Type "=" Expr => () };
 WhileStmt: () = { "while" Expr Block => () };
+#[inline]
 ExprStmt: () = { Expr };
 
 // expr ::= if_expr | assignment
@@ -293,33 +294,51 @@ Assignment: () = {
 };
 
 LogicOr: () = {
+    #[precedence(level="0")]
     LogicAnd,
+    #[precedence(level="1")] #[assoc(side="left")]
     LogicOr "||" LogicAnd => (),
 };
 LogicAnd: () = {
+    #[precedence(level="0")]
     Equality,
+    #[precedence(level="1")] #[assoc(side="left")]
     LogicAnd "&&" Equality => (),
 };
 Equality: () = {
+    #[precedence(level="0")]
     Comparison,
+    #[precedence(level="1")] #[assoc(side="left")]
     Equality "==" Comparison => (),
+    #[precedence(level="1")] #[assoc(side="left")]
     Equality "!=" Comparison => (),
 };
 Comparison: () = {
+    #[precedence(level="0")]
     Additive,
+    #[precedence(level="1")] #[assoc(side="left")]
     Comparison "<" Additive => (),
+    #[precedence(level="1")] #[assoc(side="left")]
     Comparison ">" Additive => (),
+    #[precedence(level="1")] #[assoc(side="left")]
     Comparison "<=" Additive => (),
+    #[precedence(level="1")] #[assoc(side="left")]
     Comparison ">=" Additive => (),
 };
 Additive: () = {
+    #[precedence(level="0")]
     Multiplicative,
+    #[precedence(level="1")] #[assoc(side="left")]
     Additive "+" Multiplicative => (),
+    #[precedence(level="1")] #[assoc(side="left")]
     Additive "-" Multiplicative => (),
 };
 Multiplicative: () = {
+    #[precedence(level="0")]
     Unary,
+    #[precedence(level="1")] #[assoc(side="left")]
     Multiplicative "*" Unary => (),
+    #[precedence(level="1")] #[assoc(side="left")]
     Multiplicative "/" Unary => (),
 };
 Unary: () = {
@@ -340,6 +359,7 @@ Call: () = {
     Primary,
     Primary "(" Args ")" => (),
 };
+#[inline]
 Args: () = {
     => (),
     ArgList,

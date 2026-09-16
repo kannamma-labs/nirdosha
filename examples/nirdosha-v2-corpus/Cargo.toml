@@ -1,0 +1,232 @@
+[package]
+name = "nirdosha-v2-corpus"
+version = "0.1.0"
+edition = "2024"
+description = "The v2 golden corpus: every showcase .nir example translated to valid Rust + the nirdosha:* comment layer. Plain cargo compiles and runs them today (extension intact); post migration, the proprietary compiler consumes the same unmodified files and adds the Nirdosha-specific layer (emit-ui, workflow runtime, proofs)."
+publish = false
+
+[dependencies]
+nirdosha-rt = { path = "../../crates/nirdosha-rt" }
+
+# The corpus IS the target of the migration — in-dialect from day one.
+[package.metadata.nirdosha-rt]
+dialect = true
+
+[lib]
+name = "nirdosha_v2"
+path = "src/lib.nir"
+
+[[bin]]
+name = "v2_hello_nir"
+path = "src/hello_nir.nir"
+
+[[bin]]
+name = "v2_02_types_and_control_flow"
+path = "src/02_types_and_control_flow.nir"
+
+[[bin]]
+name = "v2_03_data_modeling"
+path = "src/03_data_modeling.nir"
+
+[[bin]]
+name = "v2_04_ownership_and_concurrency"
+path = "src/04_ownership_and_concurrency.nir"
+
+[[bin]]
+name = "v2_05_platform_services"
+path = "src/05_platform_services.nir"
+
+[[bin]]
+name = "v2_06_identity_and_declarative_ui"
+path = "src/06_identity_and_declarative_ui.nir"
+
+[[bin]]
+name = "v2_35_validate_contracts"
+path = "src/35_validate_contracts.nir"
+
+[[bin]]
+name = "v2_36_transact"
+path = "src/36_transact.nir"
+
+[[bin]]
+name = "v2_38_workflow"
+path = "src/38_workflow.nir"
+
+[[bin]]
+name = "v2_39_screen_ui"
+path = "src/39_screen_ui.nir"
+
+[[bin]]
+name = "v2_40_dashboard"
+path = "src/40_dashboard.nir"
+
+[[bin]]
+name = "v2_enterprise_app"
+path = "src/enterprise_app.nir"
+[[bin]]
+name = "v2_01_scalar_types"
+path = "src/01_scalar_types_and_literals.nir"
+
+[[bin]]
+name = "v2_02_operators"
+path = "src/02_operators.nir"
+
+[[bin]]
+name = "v2_03_control_flow"
+path = "src/03_control_flow_and_functions.nir"
+
+[[bin]]
+name = "v2_04_first_class_functions"
+path = "src/04_first_class_functions.nir"
+
+[[bin]]
+name = "v2_05_structs_enums_match"
+path = "src/05_structs_enums_match.nir"
+
+[[bin]]
+name = "v2_06_generics"
+path = "src/06_generics.nir"
+
+[[bin]]
+name = "v2_07_option_result"
+path = "src/07_option_result_prelude.nir"
+
+[[bin]]
+name = "v2_08_str_boundary"
+path = "src/08_str_boundary_convention.nir"
+
+[[bin]]
+name = "v2_09_money_currency"
+path = "src/09_money_and_currency.nir"
+
+[[bin]]
+name = "v2_10_measure_unit"
+path = "src/10_measure_and_unit.nir"
+[[bin]]
+name = "v2_12_linalg"
+path = "src/12_vector_matrix_linalg.nir"
+
+[[bin]]
+name = "v2_13_simulation"
+path = "src/13_deterministic_simulation.nir"
+
+[[bin]]
+name = "v2_14_box"
+path = "src/14_ownership_box.nir"
+
+[[bin]]
+name = "v2_15_borrowing"
+path = "src/15_borrowing.nir"
+
+[[bin]]
+name = "v2_16_effects"
+path = "src/16_effects.nir"
+
+[[bin]]
+name = "v2_17_audited"
+path = "src/17_audited_block.nir"
+
+[[bin]]
+name = "v2_18_threads"
+path = "src/18_threads.nir"
+
+[[bin]]
+name = "v2_19_channels"
+path = "src/19_channels.nir"
+[[bin]]
+name = "v2_22_tcp_client"
+path = "src/22_tcp_client.nir"
+
+[[bin]]
+name = "v2_23_tcp_listener"
+path = "src/23_tcp_listener.nir"
+
+[[bin]]
+name = "v2_24_file_io"
+path = "src/24_file_io.nir"
+
+[[bin]]
+name = "v2_34_requires_public"
+path = "src/34_requires_public.nir"
+
+[[bin]]
+name = "v2_37_transact_cross"
+path = "src/37_transact_cross_process.nir"
+[[bin]]
+name = "v2_41_dashboard_visual"
+path = "src/41_dashboard_visual.nir"
+
+[[bin]]
+name = "v2_42_workspace_panel"
+path = "src/42_workspace_panel.nir"
+
+[[bin]]
+name = "v2_43_layout"
+path = "src/43_layout.nir"
+
+[[bin]]
+name = "v2_44_module_nav"
+path = "src/44_module_nav_grouping.nir"
+
+[[bin]]
+name = "v2_45_module_namespacing"
+path = "src/45_module_namespacing.nir"
+
+[[bin]]
+name = "v2_46_schema_conventions"
+path = "src/46_db_schema_and_role_mapping_conventions.nir"
+
+[[bin]]
+name = "v2_47_external_boundary"
+path = "src/47_external_service_boundary.nir"
+[[bin]]
+name = "v2_48_froze"
+path = "src/48_froze.nir"
+
+[[bin]]
+name = "v2_49_nfr"
+path = "src/49_nfr.nir"
+
+[[bin]]
+name = "v2_50_field_masking"
+path = "src/50_field_masking_and_check_role.nir"
+[[bin]]
+name = "v2_51_compiled_serve"
+path = "src/51_compiled_serve.nir"
+
+[[bin]]
+name = "v2_52_compiled_workflow"
+path = "src/52_compiled_workflow_state_machine.nir"
+
+[[bin]]
+name = "v2_53_compiled_notifications"
+path = "src/53_compiled_workflow_notifications.nir"
+
+[[bin]]
+name = "v2_54_compiled_escalation"
+path = "src/54_compiled_workflow_escalation.nir"
+
+[[bin]]
+name = "v2_bench_det"
+path = "src/bench_det.nir"
+
+[[bin]]
+name = "v2_bench_dot"
+path = "src/bench_dot.nir"
+
+[[bin]]
+name = "v2_bench_fib"
+path = "src/bench_fib.nir"
+
+[[bin]]
+name = "v2_bench_floatloop"
+path = "src/bench_floatloop.nir"
+
+[[bin]]
+name = "v2_bench_kalman"
+path = "src/bench_kalman.nir"
+
+[[bin]]
+name = "v2_bench_matmul"
+path = "src/bench_matmul.nir"
+

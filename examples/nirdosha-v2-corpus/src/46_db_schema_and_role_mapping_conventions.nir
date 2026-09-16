@@ -1,0 +1,42 @@
+//! v2 of `examples/features/46_db_schema_and_role_mapping_conventions.nir`
+//! — two `serve --db`-gated behaviors with no new syntax: an ordinary
+//! `struct` gets special treatment only when the flag is passed. In
+//! v2 the conventions ride `nirdosha:schema` claims (inert today;
+//! `serve` consumes them post-migration); the structs stay completely
+//! ordinary.
+
+/// nirdosha:schema {"auto_migrate":true}
+struct Vendor {
+    #[allow(dead_code)] // the convention: id: i64 -> INTEGER PRIMARY KEY AUTOINCREMENT
+    id: i64, // the convention: id: i64 -> INTEGER PRIMARY KEY AUTOINCREMENT
+    name: String,
+    #[allow(dead_code)] // declared-complete for the CRUD layer
+    rating: i64,
+    #[allow(dead_code)]
+    active: bool,
+}
+
+/// nirdosha:role_mapping
+/// An ordinary admin-editable struct with exactly these three fields:
+/// `serve --db` loads every (app_role, idp_role) row so
+/// `requires(role)` matches either the literal or any mapped idp_role.
+struct RoleMapping {
+    #[allow(dead_code)]
+    id: i64,
+    app_role: String,
+    idp_role: String,
+}
+
+fn main() {
+    let v = Vendor { id: 1, name: "Acme".into(), rating: 4, active: true };
+    println!("{}", v.name); // Acme
+    println!("{}", v.active); // true
+
+    let mapping = RoleMapping {
+        id: 1,
+        app_role: "compliance_officer".into(),
+        idp_role: "legal-and-compliance".into(),
+    };
+    println!("{}", mapping.app_role); // compliance_officer
+    println!("{}", mapping.idp_role); // legal-and-compliance
+}

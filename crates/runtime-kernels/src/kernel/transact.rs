@@ -27,6 +27,31 @@ use std::sync::{Mutex, OnceLock};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+pub mod durable;
+
+/// Shared connection setup for native ABI and safe Rust saga adapters.
+/// Caller owns the instance lock for the lifetime of the connection.
+fn open_log(path: &std::path::Path) -> Result<Connection, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if !mode.eq_ignore_ascii_case("wal") { return Err(format!("WAL unavailable: {mode}")); }
+    conn.execute_batch(
+        "PRAGMA synchronous=FULL;
+         CREATE TABLE IF NOT EXISTS nirdosha_transact_log (
+             txn_id TEXT PRIMARY KEY,
+             site_id INTEGER NOT NULL,
+             state TEXT NOT NULL,
+             network_result_json TEXT,
+             commit_args_json TEXT,
+             compensate_args_json TEXT,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL
+         );"
+    ).map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
 /// One `commit`/`compensate` argument, durably serializable — unlike
 /// `crate::NirBindValue` (a raw `{tag, i, f, ptr, len}` ABI struct
 /// carrying a live pointer, meaningless after a restart), this owns its
@@ -121,57 +146,13 @@ pub unsafe extern "C" fn nir_transact_log_init() -> i32 {
         // `instance_lock::acquire` already printed the real reason.
         return 0;
     }
-    let conn = match Connection::open(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("nirdosha: failed to open transact log at {path}: {e}");
+    let conn = match open_log(std::path::Path::new(&path)) {
+        Ok(conn) => conn,
+        Err(error) => {
+            eprintln!("nirdosha: failed to initialize durable transact log at {path}: {error}");
             return 0;
         }
     };
-    // Red-team report A19 (`scratch/red-team-report-main-d7fae42.md`):
-    // `PRAGMA journal_mode=WAL` is itself a query (it returns one row
-    // naming the mode that's actually now active), not a plain
-    // statement -- run through `execute_batch` (which discards row
-    // results, meant for a sequence of statements) below, its outcome
-    // was never actually checked. If the underlying filesystem doesn't
-    // support WAL's shared-memory mapping requirement (some NAS/network
-    // mounts), SQLite silently keeps the *previous* journal mode instead
-    // of erroring, and this durability log's entire reason for
-    // existing -- "a crash can't silently lose a pending transact" --
-    // quietly stops being true. Queried explicitly here, checked, and
-    // treated as a real init failure if it didn't actually take.
-    let actual_mode: Result<String, _> = conn.query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0));
-    match actual_mode {
-        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
-        Ok(mode) => {
-            eprintln!(
-                "nirdosha: transact log at {path} could not enable WAL journal mode (still {mode:?} after requesting it) -- \
-                 durability on crash is not guaranteed on this filesystem; refusing to start rather than silently degrading"
-            );
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("nirdosha: failed to query journal_mode while initializing transact log at {path}: {e}");
-            return 0;
-        }
-    }
-    let setup = conn.execute_batch(
-        "PRAGMA synchronous=FULL;
-         CREATE TABLE IF NOT EXISTS nirdosha_transact_log (
-             txn_id TEXT PRIMARY KEY,
-             site_id INTEGER NOT NULL,
-             state TEXT NOT NULL,
-             network_result_json TEXT,
-             commit_args_json TEXT,
-             compensate_args_json TEXT,
-             created_at INTEGER NOT NULL,
-             updated_at INTEGER NOT NULL
-         );",
-    );
-    if let Err(e) = setup {
-        eprintln!("nirdosha: failed to initialize transact log schema: {e}");
-        return 0;
-    }
     LOG.set(Mutex::new(conn)).ok();
     1
 }
@@ -327,7 +308,7 @@ fn scan_pending_rows() -> Vec<PendingRow> {
         let mut stmt = match conn.prepare(
             "SELECT txn_id, site_id, state, \
              CASE state WHEN 'commit_pending' THEN commit_args_json ELSE compensate_args_json END \
-             FROM nirdosha_transact_log WHERE state IN ('commit_pending', 'compensate_pending')",
+             FROM nirdosha_transact_log WHERE site_id >= 0 AND state IN ('commit_pending', 'compensate_pending')",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),

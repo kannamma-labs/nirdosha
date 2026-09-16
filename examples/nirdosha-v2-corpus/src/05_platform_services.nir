@@ -1,0 +1,164 @@
+//! v2 of `examples/syntax/05_platform_services.nir` — file I/O, `db`,
+//! `json`, `http`, `mq`, declared effects, and `validate` contracts.
+//!
+//! **The encoding:** `effect(pure)` / `effect(io)` ride the existing
+//! `nirdosha:contract` channel (these verify under `cargo nirdosha`
+//! **today**); `validate`'s clauses ride the `nirdosha:validate`
+//! channel (proved when Z3 discharge lands). The platform services
+//! (`db`/`mq`/`http`) resolve to the fixture bodies under plain cargo
+//! and to the real kernels post-migration — same names, same shapes.
+//!
+//! Pre-migration: runs with behavior parity for the services that are
+//! live in the fixture (file round-trip writes and reads back; db
+//! round-trips through the in-memory store; json extracts fields);
+//! `http`/`mq` land in `Err` — exactly what the original documents for
+//! its no-listener demos. Post-migration: real SQLite/Redis/TcpStream
+//! behind the same calls.
+
+#![allow(dead_code)] // declaration-complete: the UI/CRUD layer exists for emit-ui/serve, not for main
+
+use nirdosha_rt::prelude::*;
+use nirdosha_v2::{
+    db_connect, db_execute, db_query, http_get, json_array_get, json_get_str, json_parse,
+    mq_connect, mq_publish, DbConn,
+};
+
+struct Text {
+    value: String,
+}
+
+// --- effect(...) — a declared annotation, checked against what the
+// body actually does under `cargo nirdosha`.
+/// nirdosha:contract {"effects":["pure"]}
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+/// nirdosha:contract {"effects":["io"]}
+fn log_result(n: i64) {
+    println!("{n}");
+}
+
+// --- validate — a Hoare contract, orthogonal to `requires`:
+// gates *who* may call a function; `validate` states a fact the
+// function itself must honor.
+/// nirdosha:validate {"fn":"max_of","post":["result >= a","result >= b"]}
+fn max_of(a: i64, b: i64) -> i64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// --- file / open — `send`/`recv`/`stop` reused verbatim from `chan`.
+fn file_roundtrip() -> Text {
+    let mut out = open("/tmp/nirdosha_syntax_level5.txt", "w");
+    out.send("hello from level 5");
+    stop(out);
+
+    let inp = open("/tmp/nirdosha_syntax_level5.txt", "r");
+    let content = inp.recv();
+    stop(inp);
+    Text { value: content }
+}
+
+// --- db_connect/db_query/db_execute — SQLite-backed in the
+// proprietary tier; results always read back as json. The handle is
+// affine: connected, used, and `stop`ped inside one function.
+fn run_all(conn: DbConn) -> Text {
+    let _created = match db_execute(
+        &conn,
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+        &[],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    let _inserted = match db_execute(
+        &conn,
+        "INSERT INTO users (name) VALUES (?)",
+        &["ada".to_string()],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    let name = match db_query(&conn, "SELECT name FROM users ORDER BY id") {
+        Ok(rows) => match json_array_get(&rows, 0) {
+            Ok(row) => match json_get_str(&row, "name") {
+                Ok(n) => Text { value: n },
+                Err(e) => Text { value: e },
+            },
+            Err(e) => Text { value: e },
+        },
+        Err(e) => Text { value: e },
+    };
+    stop(conn);
+    name
+}
+
+fn db_roundtrip() -> Text {
+    match db_connect(":memory:") {
+        Ok(conn) => run_all(conn),
+        Err(e) => Text { value: e },
+    }
+}
+
+// --- json_parse/json_get_* — per-target-type accessors.
+fn json_roundtrip() -> Text {
+    let text = r#"{"name": "nirdosha", "version": 1, "stable": false}"#;
+    match json_parse(text) {
+        Ok(doc) => match json_get_str(&doc, "name") {
+            Ok(name) => Text { value: name },
+            Err(msg) => Text { value: msg },
+        },
+        Err(msg) => Text { value: msg },
+    }
+}
+
+// --- http_get — plain HTTP over a real TcpStream in the proprietary
+// tier; no listener is running for this example, so it lands in `Err`
+// under both compilers — the point is the `Result` shape.
+fn http_roundtrip() -> Text {
+    match http_get("127.0.0.1", 8977, "/ping") {
+        Ok(_resp) => Text { value: "unexpected listener".into() },
+        Err(e) => Text { value: e },
+    }
+}
+
+// --- mq_connect/mq_publish — Redis-backed pub/sub, affine like `db`;
+// no Redis running here either.
+fn publish_demo(conn: nirdosha_v2::MqConn) -> i64 {
+    let published = match mq_publish(&conn, "level5.demo", "hello") {
+        Ok(_u) => 0,
+        Err(_e) => -1,
+    };
+    stop(conn);
+    published
+}
+
+fn mq_roundtrip() -> i64 {
+    match mq_connect("127.0.0.1", 6379) {
+        Ok(conn) => publish_demo(conn),
+        Err(_e) => -1,
+    }
+}
+
+fn main() {
+    log_result(add(2, 3)); // effect(pure) feeding effect(io) — prints 5
+    println!("{}", max_of(3, 9)); // 9 — validate's posts hold
+
+    let file_result = file_roundtrip();
+    println!("{}", file_result.value); // hello from level 5
+
+    let db_result = db_roundtrip();
+    println!("{}", db_result.value); // ada
+
+    let json_result = json_roundtrip();
+    println!("{}", json_result.value); // nirdosha
+
+    let http_result = http_roundtrip();
+    println!("{}", http_result.value); // a real connection-refused message
+
+    println!("{}", mq_roundtrip()); // -1: no Redis running for this example
+}

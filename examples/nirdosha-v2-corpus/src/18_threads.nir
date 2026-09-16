@@ -1,0 +1,35 @@
+//! v2 of `examples/features/18_threads.nir` — `thread T`, `spawn`,
+//! `join`: real OS threads. `.nir`'s `spawn f(args)` becomes
+//! `spawn(move || f(args))` (closure form — the documented delta);
+//! race-freedom comes from move semantics either way.
+
+use nirdosha_rt::prelude::*;
+
+fn double(n: i64) -> i64 {
+    n * 2
+}
+
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+fn double_boxed(b: Box<i64>) -> i64 {
+    *b * 2
+}
+
+fn main() {
+    let h1 = spawn(move || double(21));
+    let h2 = spawn(move || add(10, 32));
+
+    let r1: i64 = join(h1);
+    let r2: i64 = join(h2);
+
+    println!("{r1}"); // 42
+    println!("{r2}"); // 42
+
+    // an affine value moved into `spawn` — `boxed` is unusable again
+    // in `main` after this line.
+    let boxed: Box<i64> = Box::new(100);
+    let h3 = spawn(move || double_boxed(boxed));
+    println!("{}", join(h3)); // 200
+}

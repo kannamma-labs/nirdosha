@@ -1,0 +1,576 @@
+//! v2 of `examples/syntax/enterprise_app.nir` — "Nirdosha Procurement
+//! & Payments": the whole showcase in one program. Vendor CRUD, a
+//! purchase-order approval workflow, a durable payment disbursement,
+//! role-gated privileged actions, the declarative screen/dashboard
+//! layer, async finance notification, an audit trail, and an event
+//! bus.
+//!
+//! Every v2 channel appears here: `nirdosha:contract` (effects +
+//! requires), `nirdosha:validate` (risk_score's post), `nirdosha:serve`
+//! (health_check's requires_public), `nirdosha:transact` (disburse),
+//! `nirdosha:workflow` (PoApproval with an owner-gated state),
+//! `nirdosha:screen` + `nirdosha:dashboard` (Vendor, PurchaseOrder).
+//!
+//! Pre-migration (plain cargo): the entire flow runs — vendor onboards
+//! (id 1), the PO inserts, the finance-director identity satisfies the
+//! workflow's owner gate, disbursement's `verify` fails (no payment
+//! gateway) so `compensate` runs, the audit log file is written, and
+//! finance is notified over a real channel. Post-migration: the same
+//! file, unmodified, additionally renders both screens and the
+//! dashboard, gains the durable workflow store and saga runtime, and
+//! gets the certificate.
+
+#![allow(dead_code)] // declaration-complete: the UI/CRUD layer exists for emit-ui/serve, not for main
+
+#[path = "ledger.nir"]
+mod ledger;
+
+use ledger::Ledger::{record_entry, AuditEntry};
+use nirdosha_rt::prelude::*;
+use nirdosha_v2::{
+    auth_from_identity, db_connect, db_execute, db_query, http_post, json_array_get,
+    json_get_i64, json_parse, mock_issue_token, mq_connect, mq_publish, new_instance_id,
+    oidc_validate_token, VerifiedIdentity, WorkflowActionError,
+};
+
+nirdosha_rt::roles! {
+    Cfo = "cfo";
+    ProcurementManager = "procurement_manager";
+}
+
+struct Text {
+    value: String,
+}
+
+#[allow(dead_code)]
+enum ErrorCode {
+    DbError(String),
+    PaymentDeclined,
+    InvalidRequest,
+}
+
+/// nirdosha:screen {"for":"Vendor","title":"Vendors","fields":{"name":{"label":"Vendor Name"},"rating":{"min":0,"max":5}}}
+struct Vendor {
+    id: i64,
+    name: String,
+    rating: i64,
+}
+
+/// nirdosha:screen {"for":"PurchaseOrder","title":"Purchase Orders","fields":{"amount_cents":{"label":"Amount (cents)","min":0}}}
+struct PurchaseOrder {
+    id: i64,
+    vendor_id: i64,
+    amount_cents: i64,
+}
+
+// A generic wrapper struct — one reusable shape for "a value plus which
+// vendor it came from."
+struct Tagged<T> {
+    vendor_id: i64,
+    payload: T,
+}
+
+fn describe_tagged_amount(t: Tagged<i64>) -> i64 {
+    t.payload
+}
+
+struct Shipment {
+    po_id: i64,
+    weight: Measure,
+}
+
+enum ShipmentError {
+    UnitMismatch,
+}
+
+impl std::fmt::Display for ShipmentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UnitMismatch()")
+    }
+}
+
+// Refuses a mismatched-unit combination, the same discipline
+// `add_money`/`add_measure` apply.
+fn combine_shipment_weight(a: Measure, b: Measure) -> Result<Measure, ShipmentError> {
+    if a.unit_code != b.unit_code {
+        return Err(ShipmentError::UnitMismatch);
+    }
+    Ok(Measure {
+        value: Dec128 {
+            mantissa: a.value.mantissa + b.value.mantissa,
+            scale: a.value.scale,
+        },
+        unit_code: a.unit_code,
+    })
+}
+
+// A price quote in real Money.
+fn quote_in_usd(unscaled_cents: i64) -> Money {
+    Money { amount: dec_from_i64(unscaled_cents, 2), currency: Currency::USD }
+}
+
+// ---- risk scoring: effect(pure), Vector/dot, and a validate post,
+// all on the same function.
+/// nirdosha:contract {"effects":["pure"]}
+/// nirdosha:validate {"fn":"risk_score","post":["result >= 0.0"]}
+fn risk_score(delivery: f64, quality: f64, price: f64) -> f64 {
+    let weights = Vector([0.5, 0.3, 0.2]);
+    let factors = Vector([delivery, quality, price]);
+    dot(&weights, &factors)
+}
+
+// ---- ownership: box/move, and &/shared borrow.
+struct AuditPayload {
+    po_id: i64,
+    note: String,
+}
+
+fn archive_audit(p: Box<AuditPayload>) -> i64 {
+    p.po_id
+}
+
+fn peek_rating(r: &i64) -> i64 {
+    *r + 1
+}
+
+// ---- concurrency: spawn/join, chan/send/recv — a best-effort,
+// fire-and-forget "notify finance" side channel.
+fn notify_finance_team(c: &Chan<i64>, po_id: i64) {
+    send(c, po_id);
+}
+
+fn notify_finance_async(po_id: i64) -> i64 {
+    let c: Chan<i64> = Chan::new();
+    let producer_c = c.clone();
+    let h = spawn(move || notify_finance_team(&producer_c, po_id));
+    let acked = recv(&c);
+    join(h);
+    acked
+}
+
+// ---- privileged first-class functions.
+#[nirdosha_rt::contract(requires(role = "cfo"))]
+fn override_spending_limit(amount_cents: i64) -> i64 {
+    amount_cents
+}
+
+/// nirdosha:serve {"requires_public":true}
+fn health_check() -> bool {
+    true
+}
+
+// ---- vendor management: CRUD over the db, admin-gated writes.
+/// nirdosha:contract {"effects":["io"]}
+fn list_vendor_inner(conn: &nirdosha_v2::DbConn) -> Result<String, ErrorCode> {
+    let _created = match db_execute(
+        conn,
+        "CREATE TABLE IF NOT EXISTS vendors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, rating INTEGER)",
+        &[],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    let rows = match db_query(conn, "SELECT id, name, rating FROM vendors ORDER BY id") {
+        Ok(r) => Ok(r),
+        Err(e) => Err(ErrorCode::DbError(e)),
+    };
+    rows
+}
+
+fn list_vendor() -> Result<String, ErrorCode> {
+    match db_connect("enterprise_app.db") {
+        Ok(conn) => {
+            let rows = list_vendor_inner(&conn);
+            stop(conn);
+            rows
+        }
+        Err(e) => Err(ErrorCode::DbError(e)),
+    }
+}
+
+fn create_vendor_inner(conn: &nirdosha_v2::DbConn, v: &Vendor) -> Result<i64, ErrorCode> {
+    let _created = match db_execute(
+        conn,
+        "CREATE TABLE IF NOT EXISTS vendors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, rating INTEGER)",
+        &[],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    let result = match db_execute(
+        conn,
+        "INSERT INTO vendors (name, rating) VALUES (?, ?)",
+        &[v.name.clone(), v.rating.to_string()],
+    ) {
+        Ok(n) => Ok(n),
+        Err(e) => Err(ErrorCode::DbError(e)),
+    };
+    result
+}
+
+#[nirdosha_rt::contract(requires(role = "procurement_manager"))]
+fn create_vendor(v: Vendor) -> Result<i64, ErrorCode> {
+    match db_connect("enterprise_app.db") {
+        Ok(conn) => {
+            let result = create_vendor_inner(&conn, &v);
+            stop(conn);
+            result
+        }
+        Err(e) => Err(ErrorCode::DbError(e)),
+    }
+}
+
+
+// ---- purchase orders: CRUD plus the workflow that moves one along.
+/// nirdosha:contract {"effects":["io"]}
+fn list_purchase_order_inner(conn: &nirdosha_v2::DbConn) -> Result<String, ErrorCode> {
+    let _created = match db_execute(
+        conn,
+        "CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, vendor_id INTEGER, amount_cents INTEGER, status TEXT)",
+        &[],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    let rows = match db_query(conn, "SELECT id, vendor_id, amount_cents, status FROM purchase_orders ORDER BY id DESC") {
+        Ok(r) => Ok(r),
+        Err(e) => Err(ErrorCode::DbError(e)),
+    };
+    rows
+}
+
+fn insert_purchase_order_inner(conn: &nirdosha_v2::DbConn, vendor_id: i64, amount_cents: i64) -> i64 {
+    let _created = match db_execute(
+        conn,
+        "CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, vendor_id INTEGER, amount_cents INTEGER, status TEXT)",
+        &[],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    let _inserted = match db_execute(
+        conn,
+        "INSERT INTO purchase_orders (vendor_id, amount_cents, status) VALUES (?, ?, ?)",
+        &[vendor_id.to_string(), amount_cents.to_string(), "pending_approval".into()],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    let new_id = match db_query(conn, "SELECT last_insert_rowid() as oid") {
+        Ok(rows) => match json_array_get(&rows, 0) {
+            Ok(row) => match json_get_i64(&row, "oid") {
+                Ok(i) => i,
+                Err(_e) => -1,
+            },
+            Err(_e) => -1,
+        },
+        Err(_e) => -1,
+    };
+    new_id
+}
+
+fn mark_purchase_order_paid_inner(conn: &nirdosha_v2::DbConn, po_id: i64) -> i64 {
+    let _updated = match db_execute(
+        conn,
+        "UPDATE purchase_orders SET status = ? WHERE id = ?",
+        &["paid".to_string(), po_id.to_string()],
+    ) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    0
+}
+
+fn mark_purchase_order_paid(po_id: i64) -> i64 {
+    match db_connect("enterprise_app.db") {
+        Ok(conn) => {
+            let updated = mark_purchase_order_paid_inner(&conn, po_id);
+            stop(conn);
+            updated
+        }
+        Err(_e) => -1,
+    }
+}
+
+/// nirdosha:contract {"effects":["io"]}
+fn stat_purchase_order_count() -> i64 {
+    0
+}
+
+fn chart_purchase_orders_by_vendor() -> Result<String, ErrorCode> {
+    match db_connect("enterprise_app.db") {
+        Ok(conn) => {
+            let rows = list_purchase_order_inner(&conn);
+            stop(conn);
+            rows
+        }
+        Err(e) => Err(ErrorCode::DbError(e)),
+    }
+}
+
+
+/// nirdosha:dashboard {"tiles":[{"label":"Open Purchase Orders","stat":"stat_purchase_order_count"}],"charts":[{"label":"By Vendor","chart":"chart_purchase_orders_by_vendor"}]}
+#[allow(dead_code)]
+struct DashboardAnchor {}
+
+// ---- payment disbursement: the transact saga.
+fn erp_reachable() -> bool {
+    true
+}
+
+fn call_payment_gateway(txn_id: &str, amount_cents: i64) -> i64 {
+    let _ = (txn_id, amount_cents);
+    match http_post("127.0.0.1", 9091, "/api/charge", "{}") {
+        Ok(resp) => resp.status,
+        Err(_e) => -1,
+    }
+}
+
+fn payment_confirmed(status: i64) -> bool {
+    status == 200
+}
+
+fn commit_disbursement(po_id: i64) -> i64 {
+    mark_purchase_order_paid(po_id)
+}
+
+fn compensate_disbursement(po_id: i64) -> i64 {
+    println!("reversing disbursement for purchase order {po_id}");
+    po_id
+}
+
+fn write_disbursement_log(po_id: i64, ok: bool) {
+    let mut out = open("enterprise_app_audit.log", "a");
+    out.send("disbursement attempted");
+    stop(out);
+    let note = Text { value: "disbursement".into() };
+    let entry: AuditEntry = record_entry(po_id, note.value);
+    println!("{} {} {}", entry.action, entry.id, ok);
+}
+
+/// nirdosha:transact {"precheck":"erp_reachable","network":"call_payment_gateway","verify":"payment_confirmed","commit":"commit_disbursement","compensate":"compensate_disbursement","log":"write_disbursement_log"}
+fn disburse(po_id: i64) -> bool {
+    let id = txn_id();
+    if !erp_reachable() {
+        return false;
+    }
+    let network = call_payment_gateway(&id, po_id);
+    let verified = payment_confirmed(network);
+    if verified {
+        commit_disbursement(po_id);
+    } else {
+        compensate_disbursement(po_id);
+    }
+    write_disbursement_log(po_id, verified);
+    verified
+}
+
+// ---- event bus: mq, best-effort.
+fn publish_po_paid(mqconn: nirdosha_v2::MqConn, po_id: i64) -> i64 {
+    let _published = match mq_publish(&mqconn, "po.paid", "po.paid") {
+        Ok(_u) => 0,
+        Err(_e) => -1,
+    };
+    stop(mqconn);
+    let _ = po_id;
+    0
+}
+
+fn announce_po_paid(po_id: i64) -> i64 {
+    match mq_connect("127.0.0.1", 6379) {
+        Ok(mqconn) => publish_po_paid(mqconn, po_id),
+        Err(_e) => -1,
+    }
+}
+
+// ---- the approval workflow: an owner-gated state machine.
+fn finalize_purchase_order(instance_id: i64, po_id: i64) -> bool {
+    let paid = disburse(po_id);
+    let _announced = announce_po_paid(po_id);
+    let _acked = notify_finance_async(po_id);
+    let _ = instance_id;
+    paid
+}
+
+/// nirdosha:workflow {"name":"PoApproval","data":{"struct":"PoApprovalData","fields":{"po_id":"i64"}},"states":{"PendingApproval":{"owner":"finance_director","transitions":{"Approve":"Approved","Reject":"Rejected"}},"Approved":{"terminal":true,"on_entry":"finalize_purchase_order"},"Rejected":{"terminal":true}}}
+struct PoApprovalData {
+    po_id: i64,
+}
+
+enum PoApprovalEvent {
+    Approve,
+    Reject,
+}
+
+#[derive(Clone, PartialEq)]
+enum PoApprovalState {
+    PendingApproval,
+    Approved,
+    Rejected,
+}
+
+fn po_instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, (PoApprovalData, PoApprovalState)>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<i64, (PoApprovalData, PoApprovalState)>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn start_po_approval(
+    _identity: Option<VerifiedIdentity>,
+    data: PoApprovalData,
+) -> Result<i64, WorkflowActionError> {
+    let id = new_instance_id();
+    po_instances().lock().unwrap().insert(id, (data, PoApprovalState::PendingApproval));
+    Ok(id)
+}
+
+fn advance_po_approval(
+    identity: &VerifiedIdentity,
+    instance_id: i64,
+    decision: PoApprovalEvent,
+    _payload: String,
+) -> Result<bool, WorkflowActionError> {
+    if !identity.roles.iter().any(|r| r == "finance_director") {
+        return Err(WorkflowActionError::NotStateOwner);
+    }
+    let mut store = po_instances().lock().unwrap();
+    let Some((data, state)) = store.get_mut(&instance_id) else {
+        return Err(WorkflowActionError::NoSuchTransition);
+    };
+    if *state != PoApprovalState::PendingApproval {
+        return Err(WorkflowActionError::NoSuchTransition);
+    }
+    let approved = match decision {
+        PoApprovalEvent::Approve => true,
+        PoApprovalEvent::Reject => false,
+    };
+    let po_id = data.po_id;
+    *state = if approved {
+        PoApprovalState::Approved
+    } else {
+        PoApprovalState::Rejected
+    };
+    drop(store);
+    if approved {
+        finalize_purchase_order(instance_id, po_id); // Approved's on_entry
+    }
+    Ok(true)
+}
+
+fn submit_purchase_order(vendor_id: i64, amount_cents: i64) -> Result<i64, WorkflowActionError> {
+    let po_id = insert_purchase_order_inner_wrapper(vendor_id, amount_cents);
+    start_po_approval(None, PoApprovalData { po_id })
+}
+
+fn insert_purchase_order_inner_wrapper(vendor_id: i64, amount_cents: i64) -> i64 {
+    match db_connect("enterprise_app.db") {
+        Ok(conn) => {
+            let id = insert_purchase_order_inner(&conn, vendor_id, amount_cents);
+            stop(conn);
+            id
+        }
+        Err(_e) => -1,
+    }
+}
+
+fn decide_purchase_order(
+    identity: &VerifiedIdentity,
+    instance_id: i64,
+    decision: PoApprovalEvent,
+) -> Result<bool, WorkflowActionError> {
+    match json_parse("{}") {
+        Ok(payload) => advance_po_approval(identity, instance_id, decision, payload),
+        Err(_e) => Err(WorkflowActionError::NoSuchTransition),
+    }
+}
+
+fn main() {
+    // -- identity: mock_issue_token mints a real token against the
+    // fixed local JWKS; deliberately missing "cfo" — an ops user.
+    let jwks = r#"{"keys":[{"kid":"key1","kty":"oct","k":"bXktc2VjcmV0LWtleQ"}]}"#;
+    let issuer = "https://mock-idp.local";
+    let audience = "enterprise-app";
+    let claims = r#"{"roles":["procurement_manager","finance_director"]}"#;
+    let ops_token = match mock_issue_token("ops-user", issuer, audience, 1700000000, 999999999, claims, jwks) {
+        Ok(t) => t,
+        Err(_e) => String::new(),
+    };
+
+    println!("{}", health_check()); // true — requires(public)
+
+    // -- ownership: box a payload, move it into archive_audit.
+    let payload = Box::new(AuditPayload { po_id: 1, note: "onboarded".into() });
+    println!("{}", archive_audit(payload)); // 1
+
+    // -- borrow: &-shared, reusable afterward.
+    let rating: i64 = 4;
+    println!("{}", peek_rating(&rating));
+    println!("{}", peek_rating(&rating)); // 42, 42
+
+    // -- generics: a Tagged(i64) value.
+    let tagged = Tagged { vendor_id: 7, payload: 25000 };
+    println!("{}", describe_tagged_amount(tagged)); // 25000
+
+    // -- Money / Measure prelude types.
+    let quote = quote_in_usd(19999);
+    println!("{}", quote.amount); // 199.99
+    println!("{}", quote.currency); // USD()
+    let w1 = Measure { value: dec_from_i64(2, 0), unit_code: UnitCode::Kilogram };
+    let w2 = Measure { value: dec_from_i64(3, 0), unit_code: UnitCode::Kilogram };
+    let total_weight = match combine_shipment_weight(w1, w2) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = e;
+            Measure { value: dec_from_i64(0, 0), unit_code: UnitCode::Kilogram }
+        }
+    };
+    println!("{}", total_weight.value); // 5
+
+    // -- effect(pure) + validate.
+    println!("{}", risk_score(0.9, 0.8, 0.5)); // 0.79
+
+    // -- privileged fn: uncallable without a real "cfo" `RoleProof` —
+    // this token lacks the role, so `Auth::prove` fails.
+    let overridden = match oidc_validate_token(&ops_token, issuer, audience, jwks) {
+        Ok(identity) => match auth_from_identity(&identity).prove::<nirdosha_roles::Cfo>() {
+            Ok(proof) => override_spending_limit(&proof, 500000),
+            Err(_e) => -2,
+        },
+        Err(_e) => -3,
+    };
+    println!("{overridden}"); // -2: no "cfo" role, Auth::prove fails
+
+    // -- the procurement flow: vendor → PO → owner-gated approval →
+    // durable disbursement.
+    let vendor_id = match oidc_validate_token(&ops_token, issuer, audience, jwks) {
+        Ok(identity) => match auth_from_identity(&identity).prove::<nirdosha_roles::ProcurementManager>() {
+            Ok(proof) => match create_vendor(&proof, Vendor { id: 0, name: "Acme Components".into(), rating: 4 }) {
+                Ok(id) => id,
+                Err(_e) => -1,
+            },
+            Err(_e) => -1,
+        },
+        Err(_e) => -1,
+    };
+
+    let instance_id = match submit_purchase_order(vendor_id, 250000) {
+        Ok(id) => id,
+        Err(_e) => -1,
+    };
+
+    // decide as finance_director — the workflow's own owner gate
+    // accepts this identity; on_entry runs the disbursement (whose
+    // verify slot fails with no gateway, so compensate runs — see the
+    // "reversing disbursement" line), publishes over mq, notifies
+    // finance over a chan; an on_entry outcome never blocks the
+    // transition itself.
+    let approved = match oidc_validate_token(&ops_token, issuer, audience, jwks) {
+        Ok(identity) => match decide_purchase_order(&identity, instance_id, PoApprovalEvent::Approve) {
+            Ok(ok) => ok,
+            Err(_e) => false,
+        },
+        Err(_e) => false,
+    };
+    println!("{approved}"); // true
+}

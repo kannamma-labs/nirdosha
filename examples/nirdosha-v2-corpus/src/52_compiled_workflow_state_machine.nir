@@ -1,0 +1,138 @@
+//! v2 of `examples/features/52_compiled_workflow_state_machine.nir` —
+//! the compiled Layer-1 state-machine core. The `workflow` block is a
+//! `nirdosha:workflow` claim; the executable half is the desugared
+//! `start_ticket`/`advance_ticket`/`TicketEvent`/`TicketData` the
+//! proprietary compiler will generate, hand-written here.
+
+use nirdosha_v2::{identity_with_roles, json_parse, new_instance_id, VerifiedIdentity, WorkflowActionError};
+
+#[derive(Clone)]
+enum TicketEvent {
+    Start,
+    Close,
+}
+
+#[derive(Clone, PartialEq)]
+enum TicketState {
+    Open,
+    InProgress,
+    Closed,
+}
+
+/// nirdosha:workflow {"name":"Ticket","states":{"Open":{"on_entry":"log_opened","on_exit":"log_left_open","transitions":{"Start":"InProgress","Close":"Closed"}},"InProgress":{"on_entry":"log_in_progress","transitions":{"Close":"Closed"}},"Closed":{"terminal":true,"on_entry":"log_closed"}}}
+#[derive(Clone)]
+struct TicketData {}
+
+fn instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, TicketState>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<i64, TicketState>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn log_opened(instance_id: i64) {
+    println!("ticket {instance_id} opened");
+}
+
+fn log_left_open(instance_id: i64) {
+    println!("ticket {instance_id} leaving Open");
+}
+
+fn log_in_progress(instance_id: i64) {
+    println!("ticket {instance_id} now InProgress");
+}
+
+fn log_closed(instance_id: i64) {
+    println!("ticket {instance_id} closed");
+}
+
+// `workflow_lower`'s synthesized `start_<w>` — Open's on_entry runs
+// before this returns, for real.
+fn start_ticket(_identity: Option<VerifiedIdentity>, _data: TicketData) -> Result<i64, WorkflowActionError> {
+    let id = new_instance_id();
+    instances().lock().unwrap().insert(id, TicketState::Open);
+    log_opened(id);
+    Ok(id)
+}
+
+// `workflow_lower`'s synthesized `advance_<w>`.
+fn advance_ticket(
+    _identity: VerifiedIdentity,
+    instance_id: i64,
+    event: TicketEvent,
+    _payload: String,
+) -> Result<bool, WorkflowActionError> {
+    let mut store = instances().lock().unwrap();
+    let state = store
+        .get_mut(&instance_id)
+        .ok_or(WorkflowActionError::InstanceNotFound)?;
+    match (&state, &event) {
+        (TicketState::Open, TicketEvent::Start) => {
+            log_left_open(instance_id);
+            *state = TicketState::InProgress;
+            log_in_progress(instance_id);
+            Ok(true)
+        }
+        (TicketState::Open, TicketEvent::Close) | (TicketState::InProgress, TicketEvent::Close) => {
+            *state = TicketState::Closed;
+            log_closed(instance_id);
+            Ok(true)
+        }
+        // `Closed` is terminal — any event is a real Err, never a trap.
+        _ => Err(WorkflowActionError::NoSuchTransition),
+    }
+}
+
+fn advance_now(
+    identity: &VerifiedIdentity,
+    instance_id: i64,
+    event: TicketEvent,
+) -> Result<bool, WorkflowActionError> {
+    match json_parse("{}") {
+        Ok(payload) => advance_ticket(identity.clone(), instance_id, event, payload),
+        Err(_e) => Err(WorkflowActionError::NoSuchTransition),
+    }
+}
+
+fn main() {
+    // `advance_ticket` requires a real identity — built directly here,
+    // the same shortcut the original takes when the point is the
+    // workflow, not the JWT.
+    let identity = identity_with_roles("agent-7", "");
+
+    // Open's on_entry already ran before this returns — "ticket 1
+    // opened" prints BEFORE this `println!` does.
+    let instance_id: i64 = match start_ticket(None, TicketData {}) {
+        Ok(id) => id,
+        Err(_e) => -1,
+    };
+    println!("{instance_id}"); // 1
+
+    // Open -> InProgress: Open's on_exit, then InProgress's on_entry.
+    let moved: bool = match advance_now(&identity, instance_id, TicketEvent::Start) {
+        Err(_e) => false,
+        Ok(v) => v,
+    };
+    println!("{moved}"); // true
+
+    // InProgress -> Closed (terminal).
+    let closed: bool = match advance_now(&identity, instance_id, TicketEvent::Close) {
+        Err(_e) => false,
+        Ok(v) => v,
+    };
+    println!("{closed}"); // true
+
+    // `Closed` is terminal — any event is a real Err(NoSuchTransition).
+    let stuck: bool = match advance_now(&identity, instance_id, TicketEvent::Close) {
+        Ok(_v) => false,
+        Err(_e) => true,
+    };
+    println!("{stuck}"); // true
+
+    // A nonexistent instance id is a real Err(InstanceNotFound).
+    let missing: bool = match advance_now(&identity, 999999, TicketEvent::Close) {
+        Ok(_v) => false,
+        Err(_e) => true,
+    };
+    println!("{missing}"); // true
+}

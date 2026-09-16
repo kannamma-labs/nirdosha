@@ -1,0 +1,36 @@
+//! v2 of `examples/features/47_external_service_boundary.nir` — the
+//! plugin-backed `db`/`mq` scheme dispatch, demonstrated by its
+//! absence: an unregistered `mysql://` db path falls through to the
+//! built-in SQLite file open and fails honestly; `mq_connect_via`
+//! names the exact missing provider builtin. Real `Err`s, never traps.
+
+use nirdosha_v2::{db_connect, mq_connect_via};
+
+struct Text {
+    value: String,
+}
+
+fn try_scheme_dispatched_db() -> Text {
+    match db_connect("mysql://user:pass@localhost/orders") {
+        Ok(_conn) => Text { value: "unexpectedly connected".into() },
+        Err(e) => Text { value: e },
+    }
+}
+
+fn try_scheme_dispatched_mq() -> Text {
+    match mq_connect_via("kafka://localhost:9092") {
+        Ok(_conn) => Text { value: "unexpectedly connected".into() },
+        Err(e) => Text { value: e },
+    }
+}
+
+fn main() {
+    let db_result = try_scheme_dispatched_db();
+    // the honest SQLite-fallthrough failure — no `db_provider_mysql_*`
+    // plugin is registered
+    println!("{}", db_result.value);
+
+    let mq_result = try_scheme_dispatched_mq();
+    // names the missing `mq_provider_kafka_connect`
+    println!("{}", mq_result.value);
+}

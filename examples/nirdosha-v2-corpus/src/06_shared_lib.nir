@@ -1,0 +1,33 @@
+//! v2 of `examples/syntax/06_shared_lib.nir` — a tiny library file,
+//! imported by `06_identity_and_declarative_ui.nir` via a `#[path]`
+//! module (the v2 form of `.nir`'s `use "file.nir"` — verified working
+//! with the extension intact).
+//!
+//! `module Shared { ... }` is a real Rust module; `pub` is `pub`; the
+//! private `InternalOnly` stays private. Namespaced declarations stay
+//! qualified: `Shared::AuditEntry`, never bare.
+
+#![allow(dead_code)] // declaration-complete: the UI/CRUD layer exists for emit-ui/serve, not for main
+
+#[allow(non_snake_case)]
+pub mod Shared {
+    pub struct AuditEntry {
+        pub id: i64,
+        pub note: String,
+    }
+
+    struct InternalOnly {
+        secret: i64,
+    }
+
+    // Reachable only by its qualified form, exactly as in `.nir`.
+    /// nirdosha:contract {"effects":["pure"]}
+pub fn make_entry(id: i64) -> AuditEntry {
+        AuditEntry { id, note: "created".into() }
+    }
+
+    #[allow(dead_code)]
+    fn unused_private_shape() -> InternalOnly {
+        InternalOnly { secret: 1 }
+    }
+}

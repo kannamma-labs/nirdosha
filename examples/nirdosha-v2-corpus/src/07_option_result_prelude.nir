@@ -1,0 +1,49 @@
+//! v2 of `examples/features/07_option_result_prelude.nir` — the
+//! `Option`/`Result` prelude, built in, composing through the same
+//! generic machinery 06's own `Duo`/`Either` use.
+
+fn unwrap_option(o: Option<i64>, default: i64) -> i64 {
+    match o {
+        Some(n) => n,
+        None => default,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    NotFound,
+}
+
+fn safe_div(a: i64, b: i64) -> Result<i64, ErrorCode> {
+    if b == 0 {
+        return Err(ErrorCode::NotFound);
+    }
+    Ok(a / b)
+}
+
+fn main() {
+    let some = Some(41);
+    let none: Option<i64> = None;
+    println!("{}", unwrap_option(some, 0)); // 41
+    println!("{}", unwrap_option(none, 0)); // 0
+
+    let ok: i64 = match safe_div(10, 2) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    println!("{ok}"); // 5
+
+    let failed: i64 = match safe_div(10, 0) {
+        Ok(n) => n,
+        Err(_e) => -1,
+    };
+    println!("{failed}"); // -1
+
+    // Nested: Result(Option(i64), ErrorCode) composes the same way.
+    let nested: Result<Option<i64>, ErrorCode> = Ok(Some(7));
+    let value: i64 = match nested {
+        Ok(inner) => unwrap_option(inner, -1),
+        Err(_e) => -2,
+    };
+    println!("{value}"); // 7
+}

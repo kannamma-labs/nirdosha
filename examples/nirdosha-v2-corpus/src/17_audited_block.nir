@@ -1,0 +1,34 @@
+//! v2 of `examples/features/17_audited_block.nir` — the one escape
+//! hatch from automatic Tier-1/2 bounds. In v2 the justification rides
+//! a `// nirdosha:audited` claim above a labeled block (doc comments
+//! can't attach to statements, so this is the one `//`-form kind — the
+//! proprietary compiler reads source, so it still sees it), and the
+//! compiler only enforces that the justification is non-empty.
+
+use nirdosha_rt::prelude::*;
+
+/// nirdosha:contract {"effects":["pure"]}
+fn safe_index(v: &Vector<3>, i: i64) -> f64 {
+    // nirdosha:audited {"justification":"i is checked against len(v) on the line right above"}
+    #[allow(unused_labels)]
+    'audited: {
+        if i >= 0 && i < len(v) {
+            return v.0[i as usize];
+        }
+    }
+    0.0
+}
+
+fn main() {
+    let v = Vector([10.0, 20.0, 30.0]);
+    println!("{}", safe_index(&v, 1)); // 20
+    println!("{}", safe_index(&v, 9)); // 0 — out of range, falls through
+
+    let n: i64 = 100;
+    let d: i64 = 5;
+    // nirdosha:audited {"justification":"d is a literal 5, never zero, in this exact call site"}
+    #[allow(unused_labels)]
+    'audited: {
+        println!("{}", n / d); // 20
+    }
+}
