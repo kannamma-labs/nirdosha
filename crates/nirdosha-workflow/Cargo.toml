@@ -1,0 +1,15 @@
+[package]
+name = "nirdosha-workflow"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Durable reference approval runtime for Nirdosha v2 applications"
+[dependencies]
+nirdosha-graph = { path = "../nirdosha-graph" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+[dev-dependencies]
+tempfile = "3"
+[package.metadata.nirdosha-rt]
+toolchain = true
