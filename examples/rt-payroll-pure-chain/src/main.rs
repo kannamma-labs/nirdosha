@@ -6,13 +6,17 @@
 //!
 //! ```bash
 //! cargo build                          # plain cargo: builds and runs fine
-//! cargo nirdosha build                 # Stage 1: body-local scan — PASSES (the lie is out of sight)
-//! cargo nirdosha build --deep          # Stage 2: MIR call graph — REFUSED, chains named
+//! cargo nirdosha build                 # Stage 2 (default): MIR call graph — REFUSED, chains named
+//! cargo nirdosha build --fast          # Stage 1 only: body-local scan — PASSES (the lie is out of sight)
 //! ```
 //!
-//! The gap between those last two lines is exactly what Stage 2 exists
-//! for: `effects(pure)` verified against the *transitive closure* of
-//! what a function calls, with real name resolution.
+//! Issue #74 flipped which of those is the certifying default: Stage 1's
+//! body-local scan cannot see a pure claim that reaches an impure call
+//! through the call graph, so it no longer gets to be the default gate.
+//! `--fast`/`--shallow` keeps it available for sub-second IDE-time
+//! feedback. The gap between the two lines above is exactly what Stage 2
+//! exists for: `effects(pure)` verified against the *transitive closure*
+//! of what a function calls, with real name resolution.
 //!
 //! `risk_weight` stays in the file on purpose: recursion plus checked
 //! arithmetic must survive the effect lattice (back-edges contribute

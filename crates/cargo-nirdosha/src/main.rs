@@ -1,12 +1,13 @@
-//! `cargo nirdosha` — the Nirdosha compiler CLI, Stage 1.
+//! `cargo nirdosha` — the Nirdosha compiler CLI.
 //!
 //! Usage (as a cargo subcommand):
 //!
 //! ```text
-//! cargo nirdosha build      # verify contracts, then delegate to `cargo build`
+//! cargo nirdosha build      # Stage 1 scan + Stage 2 (MIR effect lattice), then `cargo build`
 //! cargo nirdosha check
 //! cargo nirdosha run
 //! cargo nirdosha test
+//! cargo nirdosha build --fast   # Stage 1 only: sub-second, no nightly/rustc-dev needed
 //! cargo nirdosha verify     # verify + emit certificate, no cargo delegation
 //! cargo nirdosha fmt        # pass-through: no contract semantics involved
 //! ```
@@ -18,7 +19,14 @@
 //!    restrictions.
 //! 3. Any violation → the build is REFUSED (plain `cargo build` would
 //!    have accepted the same code; that difference is the product).
-//! 4. Otherwise delegate to the real cargo with the remaining args, and
+//! 4. Unless `--fast`/`--shallow` was given, the Stage-2 rustc driver
+//!    (MIR-level interprocedural effects) rides along as
+//!    `RUSTC_WORKSPACE_WRAPPER` — a pure claim that is only locally
+//!    clean but reaches an impure call through the call graph is
+//!    caught here, not just body-local lies (issue #74: this is the
+//!    certifying default now; Stage 1 alone is an opt-in, IDE-speed
+//!    hint).
+//! 5. Otherwise delegate to the real cargo with the remaining args, and
 //!    emit the certificate next to the artifacts:
 //!    `<target>/nirdosha/contract-report-<package>.json`.
 
@@ -72,12 +80,23 @@ fn main() -> ExitCode {
         }
         "bench" => bench_cli(rest),
         s if matches!(s, "build" | "check" | "run" | "test" | "bench" | "doc") => {
-            // `--deep` opts this build into Stage 2: the rustc driver
-            // (MIR-level interprocedural effects) rides along as
-            // RUSTC_WORKSPACE_WRAPPER. Strip it — cargo doesn't know it.
-            let deep = rest.iter().any(|a| a == "--deep");
-            let cargo_args: Vec<String> =
-                rest.iter().filter(|a| *a != "--deep").cloned().collect();
+            // Stage 2 (the rustc driver, MIR-level interprocedural
+            // effects) is the certifying default — see issue #74: a
+            // body-local source scan cannot see a pure claim that
+            // reaches an impure call three hops down the call graph,
+            // and the certificate's headline claim should not be
+            // weaker than what the driver can already prove.
+            // `--fast`/`--shallow` opts back into Stage-1-only, for
+            // sub-second IDE-time feedback with no nightly/rustc-dev
+            // requirement. `--deep` is still accepted (and now a
+            // no-op) so existing invocations keep working.
+            let shallow = rest.iter().any(|a| a == "--fast" || a == "--shallow");
+            let deep = !shallow;
+            let cargo_args: Vec<String> = rest
+                .iter()
+                .filter(|a| !matches!(a.as_str(), "--deep" | "--fast" | "--shallow"))
+                .cloned()
+                .collect();
             // `cargo nirdosha check --workspace` gates every in-dialect
             // crate (strict) before delegating the workspace-wide cargo.
             if cargo_args.iter().any(|a| a == "--workspace" || a == "--all") {
@@ -172,13 +191,14 @@ fn check_certificate_cli(args: &[String]) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "cargo-nirdosha — the Nirdosha compiler (Stage 1.5)\n\
+        "cargo-nirdosha — the Nirdosha compiler\n\
          \n\
-         usage: cargo nirdosha <build|check|run|test|doc|verify|bench> [cargo args] [--workspace]\n\
+         usage: cargo nirdosha <build|check|run|test|doc|verify|bench> [cargo args] [--workspace] [--fast]\n\
          \n\
          Same source, two compilers:\n\
          - plain `cargo build`            compiles and runs Nirdosha code like any Rust program\n\
-         - `cargo nirdosha build`         verifies contract claims first; a lie refuses the build\n\
+         - `cargo nirdosha build`         Stage 1 scan + Stage 2 MIR effect lattice; a lie refuses the build\n\
+         - `cargo nirdosha build --fast`  Stage 1 only (source scan): sub-second, no nightly/rustc-dev needed\n\
          - `cargo nirdosha verify --workspace`  strict gate over every in-dialect crate + certificate\n\
          - `cargo nirdosha verify --provenance`  also binds Cargo.lock + toolchain into the certificate\n\
          - `cargo nirdosha bench`          nfr(latency_ms) CI gate: your test suite is the workload\n\
@@ -555,15 +575,17 @@ fn driver_path() -> Option<PathBuf> {
 }
 
 /// Delegate to cargo, optionally with the Stage-2 rustc driver attached
-/// as RUSTC_WORKSPACE_WRAPPER (`--deep`).
+/// as RUSTC_WORKSPACE_WRAPPER. `deep` is true unless `--fast`/`--shallow`
+/// was given (issue #74: Stage 2 is the certifying default).
 fn delegate_with(sub: &str, rest: &[String], deep: bool) -> ExitCode {
     let mut command = Command::new("cargo");
     command.arg(sub).args(rest);
     if deep {
         let Some(driver) = driver_path() else {
             eprintln!(
-                "nirdosha: --deep needs the Stage-2 driver next to cargo-nirdosha \
-                 — run `cargo build -p nirdosha-driver` first (nightly + rustc-dev)"
+                "nirdosha: the Stage-2 driver is not built next to cargo-nirdosha \
+                 — run `cargo build -p nirdosha-driver` first (nightly + rustc-dev), \
+                 or pass `--fast`/`--shallow` for the weaker, Stage-1-only source scan"
             );
             return ExitCode::FAILURE;
         };

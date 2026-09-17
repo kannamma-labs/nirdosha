@@ -232,8 +232,51 @@ const PURE: &[&str] = &[
     // the wrapped body's own result -- a sanctioned, first-class
     // contract clause, not smuggled impurity. Without this, no fn
     // could ever claim `effects(pure)` and `nfr(..)` together.
+    //
+    // `def_path_str` resolves a foreign call to the *shortest visible*
+    // path, not necessarily the item's defining module: `nirdosha-rt`
+    // re-exports `nfr::enter` at its crate root (`pub use nfr::enter`,
+    // `nirdosha-rt/src/lib.rs`), and a call site through that root path
+    // resolves the same `DefId` to `nirdosha_rt::enter`, not `nirdosha_rt
+    // ::nfr::enter` — confirmed empirically compiling `rt-payroll`
+    // through this driver. Both spellings are listed, same dual-path
+    // reasoning `core::slice`/`std::slice` above already uses for a
+    // path that prints differently depending on context.
     "nirdosha_rt::nfr::enter",
+    "nirdosha_rt::enter",
 ];
+
+/// Foreign types (issue #78) whose *own* explicit `impl Drop` is vetted
+/// safe to admit under a pure claim — keyed by the ADT's own path
+/// (`AdtDef::destructor(tcx)`'s returned `DefId` belongs to the impl
+/// method, e.g. `<std::vec::Vec<T, A> as std::ops::Drop>::drop`, which
+/// isn't a stable thing to string-match; the type's own path is what a
+/// maintainer actually recognizes and vouches for). A local type's
+/// explicit `Drop::drop` gets real recursive analysis instead
+/// (`Effects::effects_of` on its `DefId`, the same treatment a direct
+/// call already gets) — this table is only consulted for *foreign*
+/// destructors.
+///
+/// Confirmed empirically the same way `PURE`/`HIGHER_ORDER_PURE` were:
+/// std's owned containers (`Vec`, `String`, `HashMap`, `BTreeMap`) all
+/// carry an *explicit* `impl Drop` (buffer deallocation) — "no custom
+/// `Drop` impl" is not actually why they were rejected; an unconditional
+/// "any `Drop` terminator is an impurity" check was.
+const PURE_DESTRUCTOR_TYPES: &[&str] = &[
+    "std::vec::Vec",
+    "std::string::String",
+    "std::collections::HashMap",
+    "std::collections::BTreeMap",
+    // `nirdosha_rt::nfr::Guard`'s `Drop` records timing (mutex + clock
+    // read) -- real effects, but a sanctioned, first-class part of the
+    // dialect's own `nfr(..)` instrumentation (see the `nirdosha_rt::
+    // enter` `PURE` entry above), not a smuggled impurity.
+    "nirdosha_rt::Guard",
+];
+
+pub fn classify_destructor(type_path: &str) -> bool {
+    PURE_DESTRUCTOR_TYPES.contains(&normalize(type_path).as_str())
+}
 
 const HIGHER_ORDER_PURE: &[&str] = &[
     "std::iter::Iterator::map",
@@ -298,5 +341,16 @@ mod tests {
     #[test]
     fn classifies_nirdosha_rts_own_injected_nfr_guard() {
         assert_eq!(classify("nirdosha_rt::nfr::enter"), Some(Effect::Pure));
+        // The crate-root re-export path `def_path_str` actually resolves
+        // to at a real call site (issue #74's rt-payroll regression).
+        assert_eq!(classify("nirdosha_rt::enter"), Some(Effect::Pure));
+    }
+
+    #[test]
+    fn classifies_trusted_foreign_destructors() {
+        assert!(classify_destructor("std::vec::Vec"));
+        assert!(classify_destructor("std::string::String"));
+        assert!(classify_destructor("nirdosha_rt::Guard"));
+        assert!(!classify_destructor("std::sync::MutexGuard"));
     }
 }

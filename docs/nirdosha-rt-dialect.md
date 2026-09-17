@@ -75,8 +75,10 @@ cargo nirdosha build                   # (in that package) REFUSED: 3 violations
    aggregate certificate
    `target/nirdosha/contract-report-workspace.json`.
 
-4. **The rustc driver** — Stage 2 (`crates/nirdosha-driver`, invoked by
-   `--deep`): the Clippy architecture. The full rustc pipeline runs, and
+4. **The rustc driver** — Stage 2 (`crates/nirdosha-driver`), the
+   certifying default since issue #74 (`--fast`/`--shallow` opts back
+   into Stage-1-only): the Clippy architecture. The full rustc pipeline
+   runs, and
    afterwards contract claims are verified over **MIR**:
 
    - **Interprocedural purity** — `effects(pure)` is checked against
@@ -104,9 +106,10 @@ cargo nirdosha build                   # (in that package) REFUSED: 3 violations
    for migration evidence.
 
    Stage 2 is nightly + `rustc-dev` only (it links `rustc_private`);
-   Stage 1 verification is stable and works everywhere. `cargo
-   nirdosha build --deep` wires the driver in as
-   `RUSTC_WORKSPACE_WRAPPER`. Stage 2.5 now discharges numeric MIR
+   Stage 1 verification is stable and works everywhere, which is why it
+   stays available as `cargo nirdosha build --fast`/`--shallow` for
+   IDE-time feedback. `cargo nirdosha build` (no flag) wires the driver
+   in as `RUSTC_WORKSPACE_WRAPPER` by default. Stage 2.5 now discharges numeric MIR
    assertions with shared Z3 integer semantics (or an explicit interval
    fallback) and emits bound proof records. Guarded division/indexing can
    pass purity checking. Actual MIR proof-elision remains follow-on work.
@@ -142,10 +145,11 @@ injected proof parameter does not resolve.
 - **Stage 1's `effects(pure)` checking is over-approximate and
   body-local.** It is path-based (`std::fs`, `Instant`, `.spawn()`,
   `unwrap`…) without full name resolution, and it cannot see through
-  calls — `rt-payroll-pure-chain` passes Stage 1 and is refused by
-  Stage 2, on purpose, in the repo. False positives are possible in
-  Stage 1 and preferable to false negatives; `--deep` replaces the
-  guessing with real resolution.
+  calls — `rt-payroll-pure-chain` passes Stage 1 (`--fast`/`--shallow`)
+  and is refused by Stage 2, on purpose, in the repo. False positives
+  are possible in Stage 1 and preferable to false negatives; Stage 2,
+  the certifying default since issue #74, replaces the guessing with
+  real resolution.
 - **NFRs are enforced, not proven.** `latency_ms` is measured per call
   (flight recorder, `NIRDOSHA_NFR_LOG=1` for JSON lines on stderr,
   `NIRDOSHA_NFR_LOG_FILE=…` as the harness sink); `concurrency_max`
@@ -182,7 +186,7 @@ injected proof parameter does not resolve.
 
 ## 5. What each surface catches (the honest matrix)
 
-| Lie | plain cargo | `cargo nirdosha build` (Stage 1) | `--deep` (Stage 2) |
+| Lie | plain cargo | `cargo nirdosha build --fast` (Stage 1) | `cargo nirdosha build` (Stage 2, default) |
 |---|---|---|---|
 | pure claim, direct `std::fs` call | runs | **compile_error** (macro scan) + verify refusal | **rustc error** |
 | pure claim, file I/O 3 calls away | runs | passes (out of sight) | **rustc error, chain named** |
@@ -201,11 +205,11 @@ injected proof parameter does not resolve.
 | `crates/nirdosha-contract-core` | contract model + JSON encoding, attribute parser, impure/dialect scanners (shared by macro, compiler, driver) |
 | `crates/nirdosha-macros` | `#[contract]`: parse, honesty-check locally, inject proof param + NFR guard, emit doc encoding |
 | `crates/nirdosha-rt` | runtime: `roles!`, `RoleProof`, `Auth`, NFR guard + flight recorder; re-exports `contract` |
-| `crates/cargo-nirdosha` | the Nirdosha compiler CLI: verify → refuse-or-delegate → certificates; `--workspace` strict gate; `bench` SLA gate; `--deep` wires in the driver |
+| `crates/cargo-nirdosha` | the Nirdosha compiler CLI: verify → refuse-or-delegate → certificates; `--workspace` strict gate; `bench` SLA gate; wires in the driver by default, `--fast`/`--shallow` opts out |
 | `crates/nirdosha-driver` | Stage 2 rustc driver: MIR interprocedural effects, real name resolution, totality checks, default-deny third party |
-| `examples/rt-payroll` | compliant program; all contract forms on display; passes `--deep` |
+| `examples/rt-payroll` | compliant program; all contract forms on display; passes the default (Stage 2) gate |
 | `examples/rt-payroll-lying` | zero-dependency lying program; plain cargo runs it, nirdosha refuses it |
-| `examples/rt-payroll-pure-chain` | the *indirect* lie: Stage 1 passes it, Stage 2 refuses with the chain |
+| `examples/rt-payroll-pure-chain` | the *indirect* lie: Stage 1 (`--fast`) passes it, the Stage 2 default refuses with the chain |
 
 ### Certificates: `nirdosha.certificate/v1`
 
@@ -249,7 +253,8 @@ cargo nirdosha verify --audit                               # listed-source and 
 NIRDOSHA_STRICT=1 cargo nirdosha build                       # strict: every pub fn carries a contract
 cargo nirdosha verify --workspace                           # strict gate over all in-dialect crates
 cargo nirdosha bench                                        # nfr(latency_ms) CI gate, real workload
-cargo build -p nirdosha-driver && cargo nirdosha build --deep   # Stage 2 (nightly + rustc-dev)
+cargo build -p nirdosha-driver && cargo nirdosha build          # Stage 2 (nightly + rustc-dev), default since #74
+cargo nirdosha build --fast                                     # Stage 1 only, opt out of the driver
 ```
 
 ## 7. What this borrows from the `.nir` compiler (and what replaces it)

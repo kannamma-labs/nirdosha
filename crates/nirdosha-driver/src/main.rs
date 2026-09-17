@@ -479,11 +479,40 @@ impl<'a, 'tcx> Effects<'a, 'tcx> {
                         chain: vec![my_name.clone()],
                     });
                 }
-                TerminatorKind::Drop { .. } => {
-                    impurities.push(Impurity {
-                        reason: "destructor effects lack a verified summary".into(),
-                        chain: vec![my_name.clone()],
-                    });
+                TerminatorKind::Drop { place, .. } => {
+                    // Issue #78: MIR inserts a `Drop` terminator for any
+                    // type needing drop glue, custom `impl Drop` or not
+                    // (a `Vec`'s buffer, a plain struct's fields, ...).
+                    // Only an *explicit* `impl Drop` can hide a real
+                    // effect — `AdtDef::destructor` returns `None` for
+                    // ordinary derived/recursive field drops, which are
+                    // pure by construction (nothing a summary needs to
+                    // vouch for).
+                    let ty = place.ty(&body.local_decls, self.tcx).ty;
+                    if let Some(adt) = ty.ty_adt_def() {
+                        if let Some(destructor) = adt.destructor(self.tcx) {
+                            if destructor.did.is_local() {
+                                // A local type's `Drop::drop` gets the
+                                // same real analysis a local function
+                                // call already gets.
+                                let callee = destructor.did.expect_local();
+                                let mut sub = self.effects_of(callee);
+                                for imp in &mut sub {
+                                    imp.chain.insert(0, my_name.clone());
+                                }
+                                impurities.extend(sub);
+                            } else {
+                                let type_path = self.tcx.def_path_str(adt.did());
+                                if !std_effects::classify_destructor(&type_path) {
+                                    impurities.push(Impurity {
+                                        reason: "destructor effects lack a verified summary"
+                                            .into(),
+                                        chain: vec![my_name.clone(), type_path],
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }

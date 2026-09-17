@@ -123,12 +123,58 @@ fn std_callback_is_not_trusted_by_crate_name() {
 
 #[test]
 fn drop_is_an_effect_boundary() {
+    // Issue #78: a local type's explicit `Drop::drop` gets the same real
+    // recursive analysis a direct call does, so the actual effect (I/O,
+    // here) is named in the chain rather than a generic "destructor
+    // effects lack a verified summary" catch-all.
     reject(
         r#"
         pub struct Noisy;
         impl Drop for Noisy { fn drop(&mut self) { println!("effect"); } }
         /// nirdosha:contract {"effects":["pure"]}
         pub fn root(value: Noisy) { }
+    "#,
+        "I/O",
+    );
+}
+
+#[test]
+fn owning_a_vec_with_no_custom_drop_is_pure() {
+    // Issue #78's own headline example: MIR inserts a `Drop` terminator
+    // for `v` (`Vec`'s own explicit `impl Drop` deallocates the buffer),
+    // but that destructor is curated-trusted (`std_effects::
+    // PURE_DESTRUCTOR_TYPES`) — owning a `Vec` locally must not block a
+    // pure claim just because it needs drop glue.
+    let fixture = Fixture::new();
+    let source = r#"
+        /// nirdosha:contract {"effects":["pure"]}
+        pub fn build(mut v: Vec<i64>, x: i64) -> Vec<i64> {
+            v.push(x);
+            v
+        }
+    "#;
+    for optimization in ["0", "3"] {
+        let output = fixture.compile(source, true, optimization);
+        assert!(
+            output.status.success(),
+            "O{optimization}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn foreign_destructor_without_a_verified_summary_is_rejected() {
+    // The other side of issue #78: a foreign type's explicit `Drop` that
+    // is NOT in the curated table must still fail closed, exactly like
+    // an uncovered foreign call does.
+    reject(
+        r#"
+        /// nirdosha:contract {"effects":["pure"]}
+        pub fn root() {
+            let m = std::sync::Mutex::new(0);
+            let _g = m.lock().unwrap();
+        }
     "#,
         "destructor effects",
     );
