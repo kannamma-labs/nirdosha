@@ -10,12 +10,17 @@
 > authorization (update)" below — dialect-wide claims-based
 > authorization (`nirdosha-rt::role::{Claim, ClaimProof}`,
 > `nirdosha_rt::claims!`, `requires(claim = "..", "..")` macro injection,
-> and `web::Router::{get,post,put,delete}_gated_claim`). All of it is
-> real, tested end-to-end (sockets for the router-level items;
-> `crates/nirdosha-rt/tests/claims.rs` for the contract-macro path), not
-> just unit-tested in isolation. A real DPoP/RFC 9449 port onto this
-> router is still explicitly **not** part of this RFC — see "Follow-up
-> work" below.
+> and `web::Router::{get,post,put,delete}_gated_claim`) — and, added the
+> same day again, see "DPoP, TLS, fleet-wide rate limiting, and security
+> headers (update)" below: a real DPoP/RFC 9449 port
+> (`with_sender_constrained_tokens`), real TLS termination (`with_tls`,
+> both transports), a Redis-backed fleet-wide rate limiter
+> (`with_fleet_rate_limit`), and real security headers (CSP,
+> `X-Frame-Options`, HSTS when TLS is active, etc.) on every response.
+> All of it is real, tested end-to-end over real sockets (and, for the
+> fleet-wide limiter, a real Redis), not just unit-tested in isolation —
+> see each update section for the specific test files. Nothing from this
+> RFC's original "Follow-up work" list remains open.
 >
 > Cross-references:
 > - `docs/ROADMAP.md`'s 2026-09-17 deprecation note — `crates/compiler`
@@ -277,26 +282,103 @@ already carries claims (an app's own `authenticate` closure building
 production-identity path), not via the built-in username/password
 login form.
 
-## Follow-up work (real gaps, disclosed, not started)
+## DPoP, TLS, fleet-wide rate limiting, and security headers (update, 2026-09-17)
 
-- **DPoP / RFC 9449 on this router.** The FAPI 2.0 sender-constrained-
-  token work from earlier in this session's history was built and
-  proven against `compiled-serve` (real end-to-end tests: DPoP-bound
-  demo login, replay rejection, wrong-key rejection), then reverted
-  when `crates/compiler`'s deprecation surfaced — none of that logic
-  has been ported to `web.rs` yet. A real port needs `nir_dpop_verify`/
-  `nir_oidc_validate_token` (`runtime-kernels`, not deprecated) wired
-  into `web.rs`'s own `Auth`/session model, which has a materially
-  different shape (cookie-based sessions plus an app-supplied
-  `authenticate` closure) than `compiled-serve`'s bearer-token-only
-  model — not a drop-in port.
-- **TLS termination.** Unchanged, disclosed limit: `web.rs` speaks
-  plain HTTP only; a deployer's reverse proxy is assumed for TLS, the
-  same posture `compiled-serve` always had.
-- **Fleet-wide rate limiting.** The shipped limiter is per-process, by
-  design, same as `compiled-serve`'s own. A shared-store (e.g. Redis)
-  version for multi-instance deployments is real, separate work.
-- **Security headers** (`Content-Security-Policy`, `X-Frame-Options`,
-  `Strict-Transport-Security`, etc.) on `web.rs`'s HTML responses were
-  out of this RFC's scope entirely — not evaluated, not disclosed as
-  "considered and deferred," genuinely not looked at yet.
+All four items this RFC's own "Follow-up work" section originally
+listed as real, disclosed, not-yet-started gaps shipped the same day,
+each a plain-Rust addition to `web.rs`'s own module tree
+(`web/dpop.rs`, `web/dpop_replay.rs`, `web/tls.rs`,
+`web/fleet_ratelimit.rs`), each proven end-to-end over real sockets
+(and, for the fleet-wide limiter, a real disposable Redis container),
+not just unit-tested in isolation.
+
+- **DPoP / RFC 9449** (`Router::with_sender_constrained_tokens`).
+  `web/dpop.rs` is a plain-Rust port of `runtime-kernels`'s own
+  `dpop_verify_inner`/`dpop_jwk_thumbprint` — not an FFI call into that
+  crate, since `nirdosha-rt` is plain Rust with no compiled-artifact ABI
+  boundary to cross. `Auth` gained `with_cnf_jkt`/`cnf_jkt` (additive,
+  `Auth::login`'s signature unchanged) so an app's own `authenticate`
+  closure — real production identity verification, which this crate
+  still has no opinion on the format of — can bind a session to a
+  verified token's `cnf.jkt` claim; `Router::check_dpop` then enforces
+  proof-of-possession (`htm`/`htu`/`iat` freshness, `ath`, `cnf.jkt`
+  match, replay via `dpop_replay::DpopReplayCache`) on every bearer-token
+  request once opted in. Fails closed at every step: no `DPoP` header,
+  an unbound token, an invalid proof, or a replayed `jti` are all a real
+  `401`. Proven: `crates/nirdosha-rt/tests/dpop.rs` (full round trip,
+  replay rejection, wrong-key rejection, unbound-token rejection, and
+  confirmation that an anonymous request is untouched by the check
+  entirely) plus `web/dpop.rs`'s own unit tests (ground-truthed against
+  the same fixed P-256 test key and independently-computed JKT
+  `runtime-kernels`'s original tests use).
+- **TLS termination** (`Router::with_tls`). `web/tls.rs`'s `TlsConfig`
+  wraps a real `rustls::ServerConfig` built from PEM cert/key bytes;
+  `Runtime::Sync` terminates it via `rustls::Stream` directly,
+  `Runtime::Async` via `tokio_rustls::TlsAcceptor` — both transports
+  share one `serve_one_async`/`handle_sync_connection`-shaped read-
+  dispatch-write cycle, so the logic isn't duplicated per transport. A
+  deployer's reverse proxy remains fully supported (`with_tls` never
+  called, unchanged default — this crate still has no opinion on which
+  a given deployment should use). `security_headers` now emits
+  `Strict-Transport-Security` exactly when `Router::tls` is actually set
+  — sending that header over a connection this process doesn't itself
+  terminate TLS on would be simply false. Proven over real sockets, both
+  transports, with a real client that validates the server's actual
+  certificate (no disabled verification standing in for "TLS happened"):
+  `crates/nirdosha-rt/tests/tls.rs`, plus a negative test that a
+  plaintext client talking directly to a TLS-terminated server never
+  gets a parsed HTTP response.
+- **Fleet-wide rate limiting** (`Router::with_fleet_rate_limit`).
+  `web/fleet_ratelimit.rs`'s `FleetRateLimiter` is a Redis-backed
+  sibling to `ratelimit.rs`'s own per-process limiter — same fixed-
+  window-per-peer-IP shape, but `INCR`+conditional-`EXPIRE` runs as one
+  atomic Lua script (`redis::Script`) so a crash between the two can
+  never leave a key with no TTL, permanently locking an IP out. A Redis
+  outage fails *open* (logged loudly), a deliberate choice: a rate
+  limiter that can also take the whole fleet down on its own dependency
+  hiccup would trade a real availability outage for a soft abuse bound
+  `with_rate_limit`'s own per-process backstop still partially covers.
+  Proven against a real, disposable `redis:alpine` container during
+  development — `web/fleet_ratelimit.rs`'s own unit tests (window
+  behavior, per-IP independence, and, the one this module exists for,
+  two independent `FleetRateLimiter` handles sharing one count) and
+  `crates/nirdosha-rt/tests/fleet_rate_limit.rs` (the same, over two
+  real HTTP servers). All `#[ignore]`d so the normal suite stays green
+  without a Redis available — run explicitly with one.
+- **Security headers.** Every response now carries
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: strict-origin-when-cross-origin`, and a real
+  `Content-Security-Policy` (`default-src 'self'`, `object-src 'none'`,
+  `frame-ancestors 'none'`, `base-uri 'self'` — genuinely restrictive;
+  `script-src`/`style-src` allow `'unsafe-inline'` deliberately, not by
+  oversight, since this dialect's own generated pages
+  (`feed.rs`'s long-poll script, every `style="..."` attribute the
+  screen archetypes emit) rely on inline `<script>`/`style=` today and
+  a stricter policy would break real, first-party output, not just
+  close a hole).
+
+Every one of these four is behind its own Cargo feature
+(`dpop`/`tls`/`async-runtime` default-on, `fleet-rate-limit` default-off
+given the Redis dependency's weight — see each feature's own `Cargo.toml`
+comment), mirroring the precedent `nirdosha-hi`'s `native-window`
+feature already established: real, usually-wanted capabilities, never
+mandatory for a build with no use for them.
+
+**Real gap found and fixed along the way**: `Runtime::default()` always
+returned `Async` regardless of whether `async-runtime` was actually
+compiled in, so a `--no-default-features` build's own `Router::new()`
+carried a landmine — any `serve_until` call would fail at runtime unless
+`with_runtime(Sync)` was called explicitly every time. `Runtime::default()`
+is now feature-aware (`Async` when compiled in, `Sync` otherwise),
+caught by actually running the full `--no-default-features` test suite
+end to end rather than only the one test written to exercise that
+build's own error path.
+
+**Still open**: none of the four gaps this RFC originally disclosed
+here remain. The next real, disclosed gap is claims-based authorization
+being unreachable through the built-in cookie/session login (see the
+"Claims-based authorization" section's own "disclosed scope note"
+above) and a full FAPI 2.0 profile beyond DPoP (PAR, mandatory PKCE,
+client authentication, OIDF certification) — see the earlier
+conversation's own honest-claim answer on what this codebase can and
+can't say about FAPI compliance; nothing here changes that answer.

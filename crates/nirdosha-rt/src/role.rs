@@ -113,6 +113,16 @@ pub struct Auth {
     /// roles)` call site (this crate's own tests included) keeps
     /// compiling unchanged.
     claims: Vec<(String, String)>,
+    /// RFC 9449 §4.1's `cnf.jkt` confirmation claim — `None` for an
+    /// ordinary bearer token. Set via `with_cnf_jkt`, by whatever real
+    /// `authenticate` closure the app supplies after it verifies a real
+    /// access token's own claims (this crate has no opinion on token
+    /// formats — see `Router`'s own doc comment — so it never reads
+    /// this itself; `web::Router::with_sender_constrained_tokens`'s DPoP
+    /// check is the one reader). Same additive-builder shape as
+    /// `claims`, for the identical reason: `Auth::login`'s signature
+    /// never changes.
+    cnf_jkt: Option<String>,
 }
 
 impl Auth {
@@ -122,6 +132,7 @@ impl Auth {
             user: user.into(),
             roles: roles.iter().map(|r| r.to_string()).collect(),
             claims: Vec::new(),
+            cnf_jkt: None,
         }
     }
 
@@ -139,6 +150,19 @@ impl Auth {
     pub fn with_claims(mut self, claims: &[(&str, &str)]) -> Auth {
         self.claims.extend(claims.iter().map(|(n, v)| (n.to_string(), v.to_string())));
         self
+    }
+
+    /// Binds this session's access token to `jkt` (RFC 7638, an EC/P-256
+    /// JWK thumbprint) — chainable, e.g. an `authenticate` closure
+    /// verifying a real sender-constrained token calls
+    /// `Auth::login(sub, roles).with_cnf_jkt(claims["cnf"]["jkt"])`.
+    pub fn with_cnf_jkt(mut self, jkt: impl Into<String>) -> Auth {
+        self.cnf_jkt = Some(jkt.into());
+        self
+    }
+
+    pub fn cnf_jkt(&self) -> Option<&str> {
+        self.cnf_jkt.as_deref()
     }
 
     pub fn user(&self) -> &str {

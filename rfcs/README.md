@@ -36,7 +36,7 @@ this list.
 | [0021.a](./0021.a-workflow-authoring-graph.md) | Non-executable workflow/state/transition and approval-policy authoring schemas — proposed, not implemented |
 | [0021.b](./0021.b-approval-runtime.md) | Multi-person approval runtime, person-equivalence trust contract, durable ledger and outbox — proposed, not implemented |
 | [0021.c](./0021.c-graph-analysis.md) | Analysis findings, checker integration, coverage and evidence freshness — proposed, not implemented |
-| [0022](./0022-web-layer-hardening-and-switchable-transport.md) | Web-layer hardening for `nirdosha-rt`'s live `Router` — `Secure`/`SameSite` cookies, real non-wildcard CORS, per-IP rate limiting, a switchable async/sync `serve_until` transport (async default), and dialect-wide claims-based authorization (`Claim`/`ClaimProof`, `requires(claim = ..)`) — shipped |
+| [0022](./0022-web-layer-hardening-and-switchable-transport.md) | Web-layer hardening for `nirdosha-rt`'s live `Router` — `Secure`/`SameSite` cookies, real non-wildcard CORS, per-IP and Redis-backed fleet-wide rate limiting, a switchable async/sync `serve_until` transport (async default), dialect-wide claims-based authorization (`Claim`/`ClaimProof`, `requires(claim = ..)`), RFC 9449 DPoP (`with_sender_constrained_tokens`), real TLS termination (`with_tls`), and security headers on every response — shipped |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a

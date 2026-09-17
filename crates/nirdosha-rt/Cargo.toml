@@ -7,7 +7,7 @@ license = "MIT"
 publish = false
 
 [features]
-default = ["async-runtime"]
+default = ["async-runtime", "dpop", "tls"]
 native = ["dep:nirdosha-runtime-kernels"]
 # `web::Router`'s async transport (`Runtime::Async`, the default
 # `Router::new` picks -- most apps are I/O-bound, not CPU-bound, so a
@@ -25,6 +25,29 @@ native = ["dep:nirdosha-runtime-kernels"]
 # `nirdosha-hi`'s own `native-window` feature already established for
 # an optional-but-usually-wanted heavy dependency.
 async-runtime = ["dep:tokio"]
+# `web::Router::with_sender_constrained_tokens` -- RFC 9449 DPoP proof
+# verification (`web/dpop.rs`, a plain-Rust port of `runtime-kernels`'
+# own `dpop_verify_inner`/`dpop_jwk_thumbprint`, not an FFI call into
+# that crate -- `nirdosha-rt` is plain Rust with no compiled-artifact
+# ABI boundary to cross, so there's nothing the FFI wrapping would buy
+# here). Default-on, same reasoning as `async-runtime`: a real,
+# usually-wanted capability for anything exposing sender-constrained
+# tokens, not a mandatory one for a build with no use for it.
+dpop = ["dep:jsonwebtoken", "dep:sha2", "dep:base64"]
+# `ServeConfig`'s optional TLS termination (`web/tls.rs`) -- `rustls`
+# for the sync transport, plus `tokio-rustls` when `async-runtime` is
+# also enabled. Default-on: a real deployment almost always wants this
+# available, even if a given one still terminates TLS at a reverse
+# proxy instead (`ServeConfig::tls: None`, unchanged default behavior).
+tls = ["dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls"]
+# `Router::with_fleet_rate_limit` -- a Redis-backed sibling to
+# `with_rate_limit`'s own per-process limiter, for a multi-instance
+# deployment where per-process state isn't enough (`ratelimit.rs`'s own
+# doc comment already discloses this as real, separate follow-up work).
+# Default-**off**: most apps run one instance, or accept per-process
+# limiting even with several, and a Redis dependency is real weight to
+# carry for a capability most builds won't use.
+fleet-rate-limit = ["dep:redis"]
 
 [dependencies]
 nirdosha-macros = { path = "../nirdosha-macros" }
@@ -32,6 +55,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nirdosha-runtime-kernels = { path = "../runtime-kernels", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"], optional = true }
+jsonwebtoken = { version = "9", optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+redis = { version = "0.27", default-features = false, features = ["script"], optional = true }
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }

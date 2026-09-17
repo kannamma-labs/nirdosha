@@ -21,6 +21,14 @@ use std::sync::{Arc, Mutex};
 use crate::role::{Auth, Claim, ClaimProof, Role, RoleProof};
 
 mod ratelimit;
+#[cfg(feature = "dpop")]
+mod dpop;
+#[cfg(feature = "dpop")]
+mod dpop_replay;
+#[cfg(feature = "fleet-rate-limit")]
+mod fleet_ratelimit;
+#[cfg(feature = "tls")]
+mod tls;
 
 const SESSION_COOKIE: &str = "nirdosha_session";
 
@@ -39,6 +47,15 @@ const SESSION_COOKIE: &str = "nirdosha_session";
 /// see this cookie sent back at all -- a real, disclosed limit of a
 /// from-scratch HTTP/1.1 listener with no TLS of its own, not a bug.
 const SESSION_COOKIE_ATTRS: &str = "HttpOnly; Secure; SameSite=Strict; Path=/";
+
+/// A DPoP proof's own `iat` freshness window, and the matching window
+/// `dpop_replay`'s cache remembers a `jti` for — one constant, so the
+/// two stay in lockstep. RFC 9449 sets no mandated value; 300s is
+/// generous enough for real network latency and clock drift while
+/// still bounding how long a captured-off-the-wire proof stays
+/// replayable at all.
+#[cfg(feature = "dpop")]
+const DPOP_PROOF_FRESHNESS_WINDOW_SECS: i64 = 300;
 
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -517,10 +534,26 @@ pub struct Router {
     /// limit; this is that same limit's *dispatch-path* counterpart,
     /// not silently assumed away either.
     rate_limit: Option<RateLimitRule>,
+    /// A Redis-backed sibling to `rate_limit`, for a multi-instance
+    /// deployment — see `Router::with_fleet_rate_limit`'s own doc
+    /// comment. `None` (the default) means no path is fleet-rate-limited.
+    #[cfg(feature = "fleet-rate-limit")]
+    fleet_rate_limit: Option<FleetRateLimitRule>,
     /// Which `serve_until` accept-loop implementation this router runs
     /// under — see [`Runtime`]'s own doc comment. `Runtime::default()`
     /// (`Async`) unless overridden by `with_runtime`.
     runtime: Runtime,
+    /// `true` once `with_sender_constrained_tokens` is called — see
+    /// [`check_dpop`](Router::check_dpop)'s own doc comment for the
+    /// full enforcement this turns on.
+    #[cfg(feature = "dpop")]
+    require_dpop: bool,
+    #[cfg(feature = "dpop")]
+    dpop_replay: Arc<dpop_replay::DpopReplayCache>,
+    /// `Some` once `ServeConfig`-level TLS is configured via
+    /// `Router::with_tls` — see `tls.rs`'s own doc comment.
+    #[cfg(feature = "tls")]
+    tls: Option<Arc<tls::TlsConfig>>,
 }
 
 /// `serve_until`'s transport strategy — never changes what a route
@@ -552,9 +585,25 @@ pub enum Runtime {
     Sync,
 }
 
+/// Feature-aware: `Async` when `async-runtime` was actually compiled
+/// in (the default, real feature set), `Sync` otherwise. `Router::new`
+/// picking a default that then panics at `serve_until` time on a
+/// `--no-default-features` build would defeat the entire point of that
+/// build option -- skipping tokio for a build with no use for it should
+/// mean "this router just uses the always-available transport
+/// instead," not "this router silently carries a landmine until
+/// someone calls `serve_until`."
+#[cfg(feature = "async-runtime")]
 impl Default for Runtime {
     fn default() -> Self {
         Runtime::Async
+    }
+}
+
+#[cfg(not(feature = "async-runtime"))]
+impl Default for Runtime {
+    fn default() -> Self {
+        Runtime::Sync
     }
 }
 
@@ -564,6 +613,15 @@ struct RateLimitRule {
     max_per_window: u32,
     window: std::time::Duration,
     limiter: Arc<ratelimit::RateLimiter>,
+}
+
+#[cfg(feature = "fleet-rate-limit")]
+#[derive(Clone)]
+struct FleetRateLimitRule {
+    paths: Vec<String>,
+    max_per_window: u32,
+    window: std::time::Duration,
+    limiter: Arc<fleet_ratelimit::FleetRateLimiter>,
 }
 
 /// Bounds socket workers and socket I/O waits. Handler execution must itself
@@ -688,6 +746,43 @@ macro_rules! gated_claim_method {
     };
 }
 
+/// One TLS-or-plain async request/response cycle -- the async
+/// transport's own version of `tls::handle_sync_connection`'s sync
+/// one, generic over the actual stream type (`tokio::net::TcpStream`
+/// directly, or `tokio_rustls::server::TlsStream<TcpStream>` once a
+/// handshake has already completed) so `serve_until_async`'s accept
+/// loop needs this logic written exactly once regardless of which one
+/// a given connection turns out to be. Single-read semantics, matching
+/// `serve_until_sync`'s own (and `crate::prelude::Tcp::recv`'s own doc
+/// comment on why).
+#[cfg(feature = "async-runtime")]
+async fn serve_one_async<S>(mut stream: S, io_timeout: std::time::Duration, peer_ip: IpAddr, router: Arc<Router>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = [0u8; 65536];
+    let n = match tokio::time::timeout(io_timeout, stream.read(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => n,
+        _ => return,
+    };
+    let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let response = match Request::parse(&raw) {
+        Some(req) => {
+            let router = Arc::clone(&router);
+            // The one handler call, off the reactor's own worker
+            // threads -- see `serve_until_async`'s own doc comment for
+            // why.
+            match tokio::task::spawn_blocking(move || router.dispatch_from_peer(&req, Some(peer_ip))).await {
+                Ok(response) => response,
+                Err(_) => return, // the handler panicked -- close with no response, matching `serve_until_sync`'s own `catch_unwind`
+            }
+        }
+        None => Response::bad_request("malformed request"),
+    };
+    let _ = tokio::time::timeout(io_timeout, stream.write_all(response.wire_string().as_bytes())).await;
+}
+
 impl Router {
     pub fn new(authenticate: impl Fn(&Request) -> Auth + Send + Sync + 'static) -> Router {
         Router {
@@ -700,7 +795,15 @@ impl Router {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             allowed_origins: Vec::new(),
             rate_limit: None,
+            #[cfg(feature = "fleet-rate-limit")]
+            fleet_rate_limit: None,
             runtime: Runtime::default(),
+            #[cfg(feature = "dpop")]
+            require_dpop: false,
+            #[cfg(feature = "dpop")]
+            dpop_replay: Arc::new(dpop_replay::DpopReplayCache::new()),
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 
@@ -762,12 +865,64 @@ impl Router {
         self
     }
 
+    /// The fleet-wide (Redis-backed) sibling to `with_rate_limit` —
+    /// same fixed-window-per-peer-IP shape, but the count is shared
+    /// across every process pointed at `redis_url` instead of held
+    /// per-process. Fails to construct (`Result`, not a panic) only if
+    /// `redis_url` itself is malformed; an *unreachable* Redis at
+    /// request time is `check_fleet_rate_limit`'s own concern (it fails
+    /// open, disclosed there). `paths` may overlap with `with_rate_limit`'s
+    /// own — both would apply if configured, a per-process backstop on
+    /// top of the fleet-wide one, not mutually exclusive.
+    #[cfg(feature = "fleet-rate-limit")]
+    pub fn with_fleet_rate_limit(mut self, paths: Vec<&'static str>, max_per_window: u32, window: std::time::Duration, redis_url: &str) -> Result<Self, redis::RedisError> {
+        self.fleet_rate_limit = Some(FleetRateLimitRule {
+            paths: paths.into_iter().map(String::from).collect(),
+            max_per_window,
+            window,
+            limiter: Arc::new(fleet_ratelimit::FleetRateLimiter::new(redis_url)?),
+        });
+        Ok(self)
+    }
+
     /// Picks `serve_until`'s transport strategy — see [`Runtime`]'s own
     /// doc comment. Only ever matters via `serve_until`/`serve`;
     /// `dispatch` called directly is identical either way.
     pub fn with_runtime(mut self, runtime: Runtime) -> Self {
         self.runtime = runtime;
         self
+    }
+
+    /// RFC 9449 (DPoP): `false` (default, unchanged behavior) means an
+    /// ordinary bearer token is enough, same as every router before
+    /// this existed. `true` additionally requires a valid `DPoP` header
+    /// on every request that also carries an `Authorization: Bearer`
+    /// header — proof-of-possession over the token, checked in
+    /// `check_dpop`. Never inferred, never on by default: an app opts
+    /// in only once it actually issues sender-constrained tokens (its
+    /// own `authenticate` closure calling `Auth::with_cnf_jkt` after
+    /// verifying a real token's `cnf.jkt` claim).
+    #[cfg(feature = "dpop")]
+    pub fn with_sender_constrained_tokens(mut self) -> Self {
+        self.require_dpop = true;
+        self
+    }
+
+    /// Terminates TLS directly in this process (`serve_until`'s own
+    /// transport, both `Sync`/`Async`) instead of speaking plain HTTP
+    /// only and assuming a deployer's reverse proxy handles it — the
+    /// prior, and still available (`with_tls` never called), default.
+    /// `cert_pem`/`key_pem` are the real PEM bytes a deployment's own
+    /// certificate/key files already contain (ACME, a mounted secret,
+    /// a local file — this crate has no opinion on where they come
+    /// from). Also turns on `Strict-Transport-Security` on every
+    /// response (`security_headers`'s own doc comment) — sending that
+    /// header is only ever honest once this process is actually the
+    /// one terminating TLS.
+    #[cfg(feature = "tls")]
+    pub fn with_tls(mut self, cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, String> {
+        self.tls = Some(Arc::new(tls::TlsConfig::from_pem(cert_pem, key_pem)?));
+        Ok(self)
     }
 
     ungated_method!(get, "GET");
@@ -846,8 +1001,94 @@ impl Router {
                 }
             }
         }
+        if let Some(resp) = self.check_fleet_rate_limit(req, peer) {
+            return self.apply_cors(req, resp);
+        }
+        if let Some(resp) = self.check_dpop(req) {
+            return self.apply_cors(req, resp);
+        }
         let response = self.dispatch_authenticated(req);
         self.apply_cors(req, response)
+    }
+
+    /// `Some(429)` if a `with_fleet_rate_limit`-configured path's shared
+    /// count is already past its limit; `None` otherwise, including
+    /// when no fleet limit is configured, this request's path isn't one
+    /// of the configured ones, there's no real peer IP (`dispatch`
+    /// called directly), or Redis itself is unreachable. That last case
+    /// is a deliberate fail-*open* choice — a rate limiter that also
+    /// takes the whole fleet down when its own Redis has a bad moment
+    /// would trade a real availability outage for a soft abuse-bound
+    /// that `with_rate_limit`'s own per-process backstop still partially
+    /// covers -- logged loudly (`eprintln!`), never silently.
+    #[cfg(feature = "fleet-rate-limit")]
+    fn check_fleet_rate_limit(&self, req: &Request, peer: Option<IpAddr>) -> Option<Response> {
+        let rule = self.fleet_rate_limit.as_ref()?;
+        let path = req.path_without_query();
+        if !rule.paths.iter().any(|p| p == path) {
+            return None;
+        }
+        let ip = peer?;
+        match rule.limiter.check(ip, rule.max_per_window, rule.window) {
+            Ok(true) => None,
+            Ok(false) => Some(Response::text(429, "rate limited")),
+            Err(e) => {
+                eprintln!("nirdosha-rt: fleet rate limiter's Redis is unreachable, failing open for this request: {e}");
+                None
+            }
+        }
+    }
+
+    #[cfg(not(feature = "fleet-rate-limit"))]
+    fn check_fleet_rate_limit(&self, _req: &Request, _peer: Option<IpAddr>) -> Option<Response> {
+        None
+    }
+
+    /// RFC 9449 (DPoP) enforcement — only ever does anything once
+    /// `with_sender_constrained_tokens` was called. `Some(response)`
+    /// means reject with that response (always a `401`); `None` means
+    /// either this check doesn't apply (no `Authorization: Bearer`
+    /// header at all — an anonymous or non-bearer request is a
+    /// different gate's problem) or it passed. Fails closed at every
+    /// step: a bearer token whose `Auth` carries no `cnf.jkt` at all
+    /// (this deployment requires sender-constrained tokens but the
+    /// token itself wasn't issued as one), no `DPoP` header, a proof
+    /// that doesn't verify, or a replayed `jti` are all a real `401`,
+    /// never silently accepted.
+    #[cfg(feature = "dpop")]
+    fn check_dpop(&self, req: &Request) -> Option<Response> {
+        if !self.require_dpop {
+            return None;
+        }
+        let auth_header = req.header("authorization")?;
+        let token = auth_header.strip_prefix("Bearer ").or_else(|| auth_header.strip_prefix("bearer "))?;
+        let auth = (self.authenticate)(req);
+        let Some(expected_jkt) = auth.cnf_jkt() else {
+            return Some(Response::text(401, "this access token has no `cnf.jkt` binding -- it was not issued as a sender-constrained token, and this server requires one"));
+        };
+        let Some(proof) = req.header("dpop") else {
+            return Some(Response::text(401, "this server requires a `DPoP` header (sender-constrained tokens only, RFC 9449)"));
+        };
+        let host = req.header("host").unwrap_or("");
+        let scheme = if self.tls_active() { "https" } else { "http" };
+        let url = format!("{scheme}://{host}{}", req.path_without_query());
+        let expected_ath = dpop::access_token_hash(token);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        match dpop::verify_proof(proof, &req.method, &url, &expected_ath, expected_jkt, DPOP_PROOF_FRESHNESS_WINDOW_SECS, now) {
+            Ok(verified) => {
+                if !self.dpop_replay.check_and_record(&verified.jti, std::time::Duration::from_secs(DPOP_PROOF_FRESHNESS_WINDOW_SECS as u64)) {
+                    Some(Response::text(401, "this DPoP proof has already been used (replay)"))
+                } else {
+                    None
+                }
+            }
+            Err(e) => Some(Response::text(401, &format!("invalid DPoP proof: {e}"))),
+        }
+    }
+
+    #[cfg(not(feature = "dpop"))]
+    fn check_dpop(&self, _req: &Request) -> Option<Response> {
+        None
     }
 
     /// The old body of `dispatch`, unchanged — login/logout, then the
@@ -973,8 +1214,56 @@ impl Router {
         ]
     }
 
+    /// Every response gets these, unconditionally — `X-Content-Type-
+    /// Options`/`X-Frame-Options`/`Referrer-Policy` cost nothing and
+    /// have no legitimate use case they'd break. `Content-Security-
+    /// Policy` allows `'unsafe-inline'` for both `script-src` and
+    /// `style-src` deliberately, not by oversight: this dialect's own
+    /// generated pages (`feed.rs`'s long-poll script,
+    /// `showcase_screens.rs`, every `style="..."` attribute
+    /// `render_nav`/the screen archetypes emit) rely on inline
+    /// `<script>`/`style=` today, and a strict CSP with neither would
+    /// break real, first-party output, not just close a hole. What it
+    /// still does for real: no external origin can be loaded at all
+    /// (`default-src 'self'`), no plugin content (`object-src 'none'`),
+    /// and no framing (`frame-ancestors 'none'`, redundant with but
+    /// stronger than `X-Frame-Options` for browsers that honor both).
+    /// `Strict-Transport-Security` is added only when this connection
+    /// is actually TLS-terminated by this process itself (`self.tls`) —
+    /// sending it over a plain-HTTP-only deployment would tell a
+    /// browser to *only* ever use HTTPS for this host, which is simply
+    /// false for a deployment that never configured TLS at all.
+    fn security_headers(&self) -> Vec<(String, String)> {
+        let mut headers = vec![
+            ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
+            ("X-Frame-Options".to_string(), "DENY".to_string()),
+            ("Referrer-Policy".to_string(), "strict-origin-when-cross-origin".to_string()),
+            (
+                "Content-Security-Policy".to_string(),
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
+                 img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+                    .to_string(),
+            ),
+        ];
+        if self.tls_active() {
+            headers.push(("Strict-Transport-Security".to_string(), "max-age=31536000; includeSubDomains".to_string()));
+        }
+        headers
+    }
+
+    #[cfg(feature = "tls")]
+    fn tls_active(&self) -> bool {
+        self.tls.is_some()
+    }
+
+    #[cfg(not(feature = "tls"))]
+    fn tls_active(&self) -> bool {
+        false
+    }
+
     fn apply_cors(&self, req: &Request, mut resp: Response) -> Response {
         resp.extra_headers.extend(self.cors_headers_for(req));
+        resp.extra_headers.extend(self.security_headers());
         resp
     }
 
@@ -988,6 +1277,7 @@ impl Router {
             headers.push(("Access-Control-Allow-Methods".to_string(), "GET, POST, PUT, DELETE, OPTIONS".to_string()));
             headers.push(("Access-Control-Allow-Headers".to_string(), "Content-Type, Authorization, X-Requested-With".to_string()));
         }
+        headers.extend(self.security_headers());
         Response { status: 204, content_type: "text/plain", body: String::new(), extra_headers: headers }
     }
 
@@ -1102,6 +1392,13 @@ impl Router {
                     }
                     let router = shared_router.clone();
                     workers.push(crate::prelude::spawn(move || {
+                        #[cfg(feature = "tls")]
+                        if let Some(tls) = router.tls.clone() {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                tls::handle_sync_connection(&tls, stream, |req| router.dispatch_from_peer(req, Some(peer_addr.ip())));
+                            }));
+                            return;
+                        }
                         let conn = crate::prelude::Tcp::from_stream(stream);
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let raw = conn.recv();
@@ -1150,7 +1447,6 @@ impl Router {
     #[cfg(feature = "async-runtime")]
     fn serve_until_async(&self, listener: std::net::TcpListener, shutdown: &std::sync::atomic::AtomicBool, config: ServeConfig) -> std::io::Result<()> {
         use std::sync::atomic::Ordering;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         listener.set_nonblocking(true)?;
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -1194,30 +1490,20 @@ impl Router {
                 };
                 let router = Arc::clone(&shared_router);
                 let io_timeout = config.io_timeout;
+                let peer_ip = peer_addr.ip();
+                #[cfg(feature = "tls")]
+                let tls_acceptor = self.tls.as_ref().map(|tls| tls::acceptor(tls));
                 tasks.push(tokio::spawn(async move {
                     let _permit = permit;
-                    let mut stream = stream;
-                    let mut buf = [0u8; 65536];
-                    let n = match tokio::time::timeout(io_timeout, stream.read(&mut buf)).await {
-                        Ok(Ok(n)) if n > 0 => n,
-                        _ => return,
-                    };
-                    let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    let response = match Request::parse(&raw) {
-                        Some(req) => {
-                            let router = Arc::clone(&router);
-                            let peer_ip = peer_addr.ip();
-                            // The one handler call, off the reactor's
-                            // own worker threads -- see this fn's own
-                            // doc comment for why.
-                            match tokio::task::spawn_blocking(move || router.dispatch_from_peer(&req, Some(peer_ip))).await {
-                                Ok(response) => response,
-                                Err(_) => return, // the handler panicked -- close with no response, matching `serve_until_sync`'s own `catch_unwind`
-                            }
+                    #[cfg(feature = "tls")]
+                    if let Some(acceptor) = tls_acceptor {
+                        match acceptor.accept(stream).await {
+                            Ok(tls_stream) => serve_one_async(tls_stream, io_timeout, peer_ip, router).await,
+                            Err(_) => {} // handshake failed -- close with no response, same posture as any other malformed/incomplete request
                         }
-                        None => Response::bad_request("malformed request"),
-                    };
-                    let _ = tokio::time::timeout(io_timeout, stream.write_all(response.wire_string().as_bytes())).await;
+                        return;
+                    }
+                    serve_one_async(stream, io_timeout, peer_ip, router).await;
                 }));
             };
             drop(listener);
@@ -1337,15 +1623,22 @@ mod tests {
     }
 
     /// Most apps this dialect targets are I/O-bound, not CPU-bound --
-    /// `Router::new` must default to `Runtime::Async` without anyone
-    /// having to call `with_runtime` at all, and `with_runtime` must
-    /// actually change it (this crate's own tests, and any app that
-    /// wants the opt-out, both depend on the builder really taking
-    /// effect, not just type-checking).
+    /// `Router::new` must default to `Runtime::Async` whenever that
+    /// transport is actually compiled in, without anyone having to call
+    /// `with_runtime` at all, and `with_runtime` must actually change it
+    /// (this crate's own tests, and any app that wants the opt-out,
+    /// both depend on the builder really taking effect, not just
+    /// type-checking). Under `--no-default-features` (no
+    /// `async-runtime`, so no working `Async` transport at all) the
+    /// default is `Sync` instead -- `Runtime::default()`'s own doc
+    /// comment has the "why."
     #[test]
     fn router_defaults_to_the_async_runtime_and_with_runtime_overrides_it() {
         let router = Router::new(|_| Auth::login("anon", &[]));
+        #[cfg(feature = "async-runtime")]
         assert_eq!(router.runtime, Runtime::Async);
+        #[cfg(not(feature = "async-runtime"))]
+        assert_eq!(router.runtime, Runtime::Sync);
         let router = router.with_runtime(Runtime::Sync);
         assert_eq!(router.runtime, Runtime::Sync);
     }
@@ -1358,7 +1651,11 @@ mod tests {
     #[cfg(not(feature = "async-runtime"))]
     #[test]
     fn async_runtime_without_the_feature_is_a_clear_error_not_a_panic() {
-        let router = Router::new(|_| Auth::login("anon", &[])).get("/", "root", |_, _| Response::text(200, "ok"));
+        // `Router::new`'s own default is feature-aware (`Sync` here,
+        // since this test only compiles without `async-runtime`) -- so
+        // this has to *explicitly* request `Async` to reach the error
+        // path this test is actually about.
+        let router = Router::new(|_| Auth::login("anon", &[])).with_runtime(Runtime::Async).get("/", "root", |_, _| Response::text(200, "ok"));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let shutdown = std::sync::atomic::AtomicBool::new(false);
         let err = router.serve_until(listener, &shutdown, ServeConfig::default()).unwrap_err();
