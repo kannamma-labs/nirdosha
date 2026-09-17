@@ -13,7 +13,7 @@
 //! mechanics 5b actually needs now exist below (`sign_pack`/
 //! `verify_and_install_signed_pack`/`TrustAnchor`, Sigstore-*pattern*:
 //! Ed25519 signatures, an operator-configured trust-anchor list, a
-//! local append-only signing log mirroring Rekor's role). **What
+//! real hash-chained signing log mirroring Rekor's role). **What
 //! remains genuinely blocked, unchanged**: live Fulcio/OIDC short-lived
 //! certificate issuance and a public, cross-organization Rekor
 //! transparency log -- both need a registry operator this project
@@ -21,10 +21,96 @@
 //! `install_pack_from_bytes` below is still the default path and still
 //! works exactly as it always has; signing is additive and opt-in, on
 //! both the author and operator sides.
+//!
+//! **Issue #76 follow-up, closing more of the "pack ID is the law" and
+//! "domain_class" gaps 5a/5b left open:**
+//! - The pinned/signed identity (`pack_content_id`, both the tamper
+//!   pin above and what `sign_pack` actually signs) is now RFC 0016's
+//!   own `pack_id = "sha256:" + SHA-256(domsep || JCS-canonical-bytes)`
+//!   -- not a plain `SHA-256` over whatever raw bytes were on disk. Two
+//!   byte-different encodings of the same logical manifest now share
+//!   one identity, and the digest itself is domain-separated so a
+//!   pack signature can never be replayed as a signature over
+//!   something else.
+//! - `PackManifest` now carries `domain_class`/`jurisdictions`
+//!   (`DomainClass`'s own doc comment); `verify_and_install_signed_pack`
+//!   refuses TOFU outright for `domain_class: regulated` -- this
+//!   toolchain's stand-in for "a self-signed cert on a `regulated`
+//!   manifest fails verification," since a real registry-issued
+//!   certificate chain is still the blocked, registry-dependent piece.
+//! - The pack-signing log now rides on `nirdosha_audit::audit_chain`'s
+//!   real hash chain (`verify_pack_signing_log`), not a plain
+//!   unstructured JSON-Lines append -- tampering with or deleting a
+//!   past entry is now detectable, though it remains a *local* log
+//!   (RFC 0016's own 5a/5b split: no public inclusion proof without a
+//!   registry).
+//! - Still genuinely unimplemented, disclosed rather than assumed
+//!   solved: `PACK.cert`/registry-issued certificates, live transparency-
+//!   log inclusion proofs, break-glass, the deployment-side
+//!   `jurisdictions` check, and MIR-level (Stage 2) enforcement of
+//!   `mandatory_fns`/`protected_structs` for the Rust v2 dialect
+//!   (`cargo-nirdosha`'s own enforcement, wired separately, is
+//!   syntactic/Stage 1 today).
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+/// RFC 0016 "Content addressing — the pack ID is the law": a
+/// domain-separation prefix hashed before the canonical payload, so a
+/// signature minted over this digest can never be replayed as a
+/// signature over some other domain-separated digest that happens to
+/// share the same raw bytes. `"nir-plugin/v1\0"`, exactly as specified.
+const PACK_ID_DOMAIN_SEPARATOR: &[u8] = b"nir-plugin/v1\0";
+
+/// RFC 0016's `pack_id = "sha256:" + SHA-256(domsep || canonical_bytes)`
+/// — the plugin's content-addressed identity. `manifest_bytes` is
+/// canonicalized via JCS (RFC 8785, `serde_jcs`) before hashing, so two
+/// byte-different encodings of the same logical manifest (different
+/// whitespace, different key order) share one identity — unlike a
+/// plain `SHA-256` over whatever raw bytes happen to be on disk, which
+/// is what this module hashed before this function existed. This is
+/// both the value install-time tamper detection pins and the exact
+/// bytes `sign_pack`/`verify_and_install_signed_pack` sign — "one
+/// hash, one signed message," the RFC's own words for why a second,
+/// differently-computed hash for signing would reopen the domain-
+/// separation hole this scheme exists to close.
+///
+/// **Scope, disclosed**: the RFC's second canonicalized member,
+/// `pack.invariants.nir`, is not folded into this digest — no
+/// installed pack ships `primitives_nir` today (`validate_primitives_
+/// nir`'s own doc comment: this toolchain refuses any pack that sets
+/// it, since the native `.nir` compiler that would parse/typecheck/
+/// prove it no longer lives in this crate), so there is currently
+/// nothing else to canonicalize.
+pub fn pack_content_id(manifest_bytes: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(manifest_bytes).map_err(|e| format!("pack manifest is not valid JSON: {e}"))?;
+    let canonical = serde_jcs::to_vec(&value).map_err(|e| format!("canonicalizing pack manifest: {e}"))?;
+    let mut payload = Vec::with_capacity(PACK_ID_DOMAIN_SEPARATOR.len() + canonical.len());
+    payload.extend_from_slice(PACK_ID_DOMAIN_SEPARATOR);
+    payload.extend_from_slice(&canonical);
+    Ok(format!("sha256:{}", crate::hi_graph::sha256_hex(&payload)))
+}
+
+/// RFC 0016 "Manifest fields": which trust tier a pack's law is held
+/// to. `Regulated` packs cannot install via trust-on-first-use — see
+/// `verify_and_install_signed_pack`'s own enforcement — mirroring the
+/// RFC's "a self-signed cert on a manifest declaring `domain_class:
+/// regulated` fails ... verification" rule, adapted to this toolchain's
+/// real trust primitive (a configured `TrustAnchor`) rather than the
+/// registry-issued certificate chain the full RFC specifies (still
+/// blocked on a registry operator this project doesn't have).
+/// `#[serde(default)]`'d to `LongTail` on the manifest field below —
+/// an unspecified pack gets the *weaker* tier, never silently upgraded
+/// to a trust level its author didn't ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainClass {
+    #[default]
+    LongTail,
+    Regulated,
+}
 
 /// A loaded pack manifest.
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +118,20 @@ use serde::Deserialize;
 pub struct PackManifest {
     pub id: String,
     pub name: String,
+    /// RFC 0016 "Manifest fields" — see [`DomainClass`].
+    #[serde(default)]
+    pub domain_class: DomainClass,
+    /// RFC 0016 "Manifest fields": which jurisdictions this pack's law
+    /// covers ("a cross-border system legitimately runs under EU + US
+    /// + UK law simultaneously"). Real data, carried and round-tripped
+    /// — **the deployment-side check is not wired**: the RFC's loader
+    /// rule ("a deployment that declares jurisdiction J must have a
+    /// plugin covering J present") needs a place for a *deployment* to
+    /// declare which jurisdiction it requires, and no such concept
+    /// exists anywhere in this toolchain yet. Disclosed gap, not
+    /// silently assumed solved.
+    #[serde(default)]
+    pub jurisdictions: Vec<String>,
     #[serde(default)]
     pub invariants: Vec<PackInvariant>,
     #[serde(default)]
@@ -288,7 +388,7 @@ pub fn install_pack_from_bytes(
     bytes: &[u8],
     source_desc: &str,
 ) -> Result<String, String> {
-    let sha256 = crate::hi_graph::sha256_hex(bytes);
+    let sha256 = pack_content_id(bytes)?;
     let manifest: PackManifest =
         serde_json::from_slice(bytes).map_err(|e| format!("parsing pack manifest from {source_desc}: {e}"))?;
     validate_compliance_profiles(&manifest)?;
@@ -369,7 +469,7 @@ pub fn reload_installed_packs(conn: &rusqlite::Connection, root: &Path) -> Resul
         let path = pack_manifest_path(root, &id);
         let bytes = std::fs::read(&path)
             .map_err(|e| format!("reading pack {} at {}: {e}", id, path.display()))?;
-        let actual_sha256 = crate::hi_graph::sha256_hex(&bytes);
+        let actual_sha256 = pack_content_id(&bytes)?;
         if actual_sha256 != recorded_sha256 {
             return Err(format!(
                 "pack {id} has been modified since install (expected sha256 {recorded_sha256}, got {actual_sha256}) -- revoke and reinstall if the change is intentional",
@@ -720,8 +820,9 @@ pub struct SignedPackEnvelope {
     pub signer_identity: String,
 }
 
-/// Author-side: signs `manifest_bytes` (a pack's raw JSON, exactly as
-/// `install_pack_from_bytes` accepts it) with the Ed25519 private key
+/// Author-side: signs the pack's content-addressed identity
+/// (`pack_content_id`, RFC 0016's `pack_id` — not the raw manifest
+/// bytes; "one hash, one signed message") with the Ed25519 private key
 /// at `key_path`, reusing `nirdosha_audit::signing::sign_bytes` -- the same primitive
 /// `nirdosha certify --sign` uses, one Ed25519 implementation in this
 /// crate for both certificates and packs.
@@ -732,7 +833,8 @@ pub fn sign_pack(manifest_bytes: &[u8], key_path: &str, signer_identity: String)
     // silently produce a validly-signed envelope around garbage that
     // only fails later, at someone else's install time.
     let _: PackManifest = serde_json::from_str(&manifest_json).map_err(|e| format!("not a valid pack manifest: {e}"))?;
-    let (public_key, signature) = nirdosha_audit::signing::sign_bytes(manifest_bytes, key_path)?;
+    let pack_id = pack_content_id(manifest_bytes)?;
+    let (public_key, signature) = nirdosha_audit::signing::sign_bytes(pack_id.as_bytes(), key_path)?;
     Ok(SignedPackEnvelope { manifest_json, signature_algorithm: "ed25519".to_string(), public_key, signature, signer_identity })
 }
 
@@ -783,27 +885,35 @@ fn pack_signing_log_path() -> std::path::PathBuf {
     trust_anchors_path().with_file_name("pack_signing_log.jsonl")
 }
 
-/// Appends one accepted-signature record -- best-effort, exactly like
-/// `hint_cache::HintCache::record_success`'s own audit log: a signing
-/// decision that couldn't be durably logged must never be the reason a
-/// legitimate pack install fails, but the log itself is real (append-
-/// only, human-readable JSON Lines) whenever the write succeeds. This
-/// is the local, single-organization analogue of Rekor -- see this
-/// module's own top doc comment on exactly what that does and doesn't
-/// claim.
+/// Appends one accepted-signature record to a real hash chain
+/// (`nirdosha_audit::audit_chain` -- the same primitive
+/// `hint_cache.rs`'s self-repair log uses, and the one that module's
+/// own doc comment names this call site as the intended second
+/// consumer of). Best-effort, exactly like `hint_cache::HintCache::
+/// record_success`'s own audit log: a signing decision that couldn't
+/// be durably logged must never be the reason a legitimate pack
+/// install fails. Unlike a plain JSON-Lines append, tampering with or
+/// deleting a past entry is now detectable (`verify_pack_signing_log`)
+/// -- this is the local, single-organization analogue of Rekor; see
+/// this module's own top doc comment on exactly what that does and
+/// doesn't claim (no public, cross-organization inclusion proof).
 fn append_pack_signing_log(pack_id: &str, sha256: &str, signer_identity: &str, trust_basis: &str) {
-    use std::io::Write;
-    let path = pack_signing_log_path();
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let line = serde_json::json!({ "installed_at": now, "pack_id": pack_id, "sha256": sha256, "signer_identity": signer_identity, "trust_basis": trust_basis }).to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{line}");
-    }
+    let content = serde_json::json!({ "pack_id": pack_id, "sha256": sha256, "signer_identity": signer_identity, "trust_basis": trust_basis });
+    nirdosha_audit::audit_chain::append_entry(&pack_signing_log_path(), content, now);
+}
+
+/// Verifies the local pack-signing log's hash chain is intact end to
+/// end -- an entry silently edited or deleted after the fact is
+/// detectable, per `nirdosha_audit::audit_chain::verify_chain`.
+/// Returns the number of verified entries. This remains a *local* log
+/// (RFC 0016's own 5a/5b split): it proves nobody tampered with this
+/// machine's record after the fact, not that the record is complete or
+/// that a public, cross-organization observer agrees with it -- that
+/// half needs the registry infrastructure RFC 0016 itself says this
+/// project doesn't have.
+pub fn verify_pack_signing_log() -> Result<usize, String> {
+    nirdosha_audit::audit_chain::verify_chain(&pack_signing_log_path()).map_err(|e| e.to_string())
 }
 
 /// Install-side: verifies `envelope`'s signature, then delegates to the
@@ -832,12 +942,26 @@ fn append_pack_signing_log(pack_id: &str, sha256: &str, signer_identity: &str, t
 /// not by refusing the install. A key present in the trust-anchor list
 /// under multiple identities, or removed/rotated mid-flight, is an
 /// operator-side list-hygiene question this module doesn't referee.
+///
+/// **RFC 0016 `domain_class` gating**: a fourth outcome, checked after
+/// signature verification succeeds -- a pack that declares
+/// `domain_class: regulated` and would otherwise install via TOFU is
+/// refused outright. "Self-signed is not enough for regulated domains"
+/// (the RFC's own words); the real mechanism here is "a configured
+/// `TrustAnchor` is not enough for TOFU," this toolchain's closest
+/// available stand-in for the registry-issued certificate the full RFC
+/// specifies (still blocked on a registry operator this project
+/// doesn't have).
 pub fn verify_and_install_signed_pack(conn: &rusqlite::Connection, root: &Path, envelope: &SignedPackEnvelope, source_desc: &str) -> Result<String, String> {
     let manifest_bytes = envelope.manifest_json.as_bytes();
-    let valid = nirdosha_audit::signing::verify_bytes(manifest_bytes, &envelope.public_key, &envelope.signature)?;
+    let pack_id = pack_content_id(manifest_bytes)?;
+    let valid = nirdosha_audit::signing::verify_bytes(pack_id.as_bytes(), &envelope.public_key, &envelope.signature)?;
     if !valid {
         return Err(format!("{source_desc}: signature does not verify against the embedded public key -- refusing to install"));
     }
+
+    let manifest: PackManifest =
+        serde_json::from_slice(manifest_bytes).map_err(|e| format!("parsing pack manifest from {source_desc}: {e}"))?;
 
     let anchors = load_trust_anchors()?;
     let (identity, trust_basis) = match anchors.iter().find(|a| a.public_key == envelope.public_key) {
@@ -845,11 +969,17 @@ pub fn verify_and_install_signed_pack(conn: &rusqlite::Connection, root: &Path, 
         None => (envelope.signer_identity.clone(), "tofu"),
     };
 
-    let sha256 = crate::hi_graph::sha256_hex(manifest_bytes);
-    let pack_id = install_pack_from_bytes(conn, root, manifest_bytes, source_desc)?;
-    conn.execute("UPDATE plugins SET signer_identity = ?1 WHERE id = ?2", rusqlite::params![identity, pack_id]).map_err(|e| format!("recording signer_identity for {pack_id}: {e}"))?;
-    append_pack_signing_log(&pack_id, &sha256, &identity, trust_basis);
-    Ok(pack_id)
+    if manifest.domain_class == DomainClass::Regulated && trust_basis == "tofu" {
+        return Err(format!(
+            "{source_desc}: pack `{}` declares domain_class \"regulated\" -- trust-on-first-use is not sufficient for a regulated domain (RFC 0016); configure a trust anchor for public key {} (see NIRDOSHA_PACK_TRUST_ANCHORS) before installing",
+            manifest.id, envelope.public_key
+        ));
+    }
+
+    let installed_id = install_pack_from_bytes(conn, root, manifest_bytes, source_desc)?;
+    conn.execute("UPDATE plugins SET signer_identity = ?1 WHERE id = ?2", rusqlite::params![identity, installed_id]).map_err(|e| format!("recording signer_identity for {installed_id}: {e}"))?;
+    append_pack_signing_log(&installed_id, &pack_id, &identity, trust_basis);
+    Ok(installed_id)
 }
 
 /// The signer identity recorded for an installed pack, if it was
@@ -1097,12 +1227,55 @@ mod tests {
         let dir = scratch_dir("sign_tofu");
         point_trust_anchors_at(&dir); // points at a path that doesn't exist -- no anchors configured
         let key = generate_test_key(&dir);
-        let envelope = sign_pack(BANKING_V0_JSON.as_bytes(), key.to_str().unwrap(), "banking-domain-experts@kannamma-labs".to_string()).expect("signing must succeed");
+        // A long-tail pack (the default `domain_class` when unset) --
+        // TOFU is only refused for `domain_class: regulated`, see
+        // `regulated_pack_refuses_tofu_install_without_a_configured_
+        // trust_anchor` below for that case, now that `banking-v0`
+        // itself declares `regulated`.
+        let bytes = pack_with_mandatory_fns("ledger-v0-tofu", &["transfer"]);
+        let envelope = sign_pack(bytes.as_bytes(), key.to_str().unwrap(), "some-domain-experts@example.org".to_string()).expect("signing must succeed");
 
         let conn = crate::hi_graph::open(&dir).expect("open");
         let id = verify_and_install_signed_pack(&conn, &dir, &envelope, "test").expect("TOFU install must succeed");
+        assert_eq!(id, "ledger-v0-tofu");
+        assert_eq!(pack_signer_identity(&conn, &id).unwrap(), Some("some-domain-experts@example.org".to_string()));
+
+        unsafe { std::env::remove_var("NIRDOSHA_PACK_TRUST_ANCHORS") };
+    }
+
+    /// RFC 0016: "a self-signed cert on a manifest declaring
+    /// `domain_class: regulated` fails ... verification." This
+    /// toolchain's stand-in for that registry-issued-certificate
+    /// requirement: a regulated pack cannot install via TOFU, full
+    /// stop, no matter how valid its signature is -- it needs an
+    /// operator-configured `TrustAnchor` for the signing key. Real
+    /// `banking-v0` (now `domain_class: "regulated"`), not a synthetic
+    /// fixture, so this pins the toolchain's actual shipped demo pack
+    /// against the rule it's the RFC's own motivating example for.
+    #[test]
+    fn regulated_pack_refuses_tofu_install_without_a_configured_trust_anchor() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch_dir("sign_regulated_tofu_refused");
+        let anchors_path = point_trust_anchors_at(&dir); // no anchors configured yet
+        let key = generate_test_key(&dir);
+        let envelope = sign_pack(BANKING_V0_JSON.as_bytes(), key.to_str().unwrap(), "banking-domain-experts@kannamma-labs".to_string()).expect("signing must succeed");
+
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let err = verify_and_install_signed_pack(&conn, &dir, &envelope, "test").expect_err("a regulated pack must never install via TOFU");
+        assert!(err.contains("regulated"), "got: {err}");
+        assert!(err.contains("trust-on-first-use"), "got: {err}");
+        assert!(installed_pack_ids(&conn).expect("list").is_empty(), "a refused install must not partially persist");
+
+        // The same envelope installs cleanly once the signer's key is a
+        // configured trust anchor -- regulated packs are not
+        // uninstallable, they just can't rest on TOFU.
+        std::fs::write(
+            &anchors_path,
+            serde_json::to_string(&[TrustAnchor { public_key: envelope.public_key.clone(), identity: "Banking Domain Experts (configured)".to_string() }]).unwrap(),
+        )
+        .unwrap();
+        let id = verify_and_install_signed_pack(&conn, &dir, &envelope, "test").expect("install must succeed once the key is a configured trust anchor");
         assert_eq!(id, "banking-v0");
-        assert_eq!(pack_signer_identity(&conn, &id).unwrap(), Some("banking-domain-experts@kannamma-labs".to_string()));
 
         unsafe { std::env::remove_var("NIRDOSHA_PACK_TRUST_ANCHORS") };
     }
@@ -1159,6 +1332,72 @@ mod tests {
         let key = generate_test_key(&dir);
         let err = sign_pack(b"{\"not\": \"a real pack manifest\"}", key.to_str().unwrap(), "someone".to_string()).expect_err("a non-PackManifest JSON blob must be refused");
         assert!(err.contains("not a valid pack manifest"), "got: {err}");
+    }
+
+    /// RFC 0016 "the pack ID is the law": before JCS canonicalization,
+    /// this module hashed whatever raw bytes were on disk, so two
+    /// byte-different encodings of the identical logical manifest
+    /// (here: compact vs. pretty-printed JSON, and a different key
+    /// order) minted two different identities/signatures for "the same"
+    /// pack. `pack_content_id` must treat them as one.
+    #[test]
+    fn pack_content_id_is_stable_across_equivalent_json_encodings() {
+        let compact = r#"{"id":"ledger-v0","name":"n","mandatory_fns":["transfer"]}"#;
+        let pretty = "{\n  \"name\": \"n\",\n  \"id\": \"ledger-v0\",\n  \"mandatory_fns\": [\"transfer\"]\n}\n";
+        let id_compact = pack_content_id(compact.as_bytes()).expect("canonicalizes");
+        let id_pretty = pack_content_id(pretty.as_bytes()).expect("canonicalizes");
+        assert_eq!(id_compact, id_pretty, "reformatting/reordering keys must not change the pack's identity");
+        assert!(id_compact.starts_with("sha256:"), "got: {id_compact}");
+
+        // A real content change (even just whitespace-insignificant vs.
+        // an actual different value) must still change the ID.
+        let different = r#"{"id":"ledger-v0","name":"n","mandatory_fns":["transfer","refund"]}"#;
+        assert_ne!(id_compact, pack_content_id(different.as_bytes()).unwrap());
+    }
+
+    /// `sign_pack`/`verify_and_install_signed_pack` sign and verify the
+    /// content-addressed `pack_id`, not the raw manifest bytes -- so
+    /// re-serializing the same manifest (the shape `manifest_json`
+    /// travels as, e.g. pretty vs. compact) must not invalidate an
+    /// already-issued signature.
+    #[test]
+    fn a_signature_survives_re_serialization_of_an_equivalent_manifest() {
+        let dir = scratch_dir("sign_reserialize");
+        let key = generate_test_key(&dir);
+        let compact = pack_with_mandatory_fns("ledger-v0-reserialize", &["transfer"]);
+        let mut envelope = sign_pack(compact.as_bytes(), key.to_str().unwrap(), "someone".to_string()).expect("signing must succeed");
+        let value: serde_json::Value = serde_json::from_str(&envelope.manifest_json).unwrap();
+        envelope.manifest_json = serde_json::to_string_pretty(&value).unwrap();
+        assert!(
+            nirdosha_audit::signing::verify_bytes(pack_content_id(envelope.manifest_json.as_bytes()).unwrap().as_bytes(), &envelope.public_key, &envelope.signature).unwrap(),
+            "a pretty-printed re-serialization of the identical manifest must still verify"
+        );
+    }
+
+    /// `verify_pack_signing_log`'s own real hash-chain tamper detection
+    /// -- an install decision that's been silently rewritten in the
+    /// local log file after the fact must be detectable, not just
+    /// "append-only by convention."
+    #[test]
+    fn pack_signing_log_detects_tampering() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch_dir("signing_log_tamper");
+        point_trust_anchors_at(&dir);
+        let key = generate_test_key(&dir);
+        let bytes = pack_with_mandatory_fns("ledger-v0-log", &["transfer"]);
+        let envelope = sign_pack(bytes.as_bytes(), key.to_str().unwrap(), "someone".to_string()).expect("signing must succeed");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        verify_and_install_signed_pack(&conn, &dir, &envelope, "test").expect("install");
+        assert_eq!(verify_pack_signing_log().expect("a fresh log verifies"), 1);
+
+        let log_path = pack_signing_log_path();
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        let tampered = text.replace("\"tofu\"", "\"trust_anchor\"");
+        assert_ne!(text, tampered, "the log must actually contain the trust_basis this test tampers with");
+        std::fs::write(&log_path, tampered).unwrap();
+        assert!(verify_pack_signing_log().is_err(), "editing a past entry must be detected");
+
+        unsafe { std::env::remove_var("NIRDOSHA_PACK_TRUST_ANCHORS") };
     }
 }
 

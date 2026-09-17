@@ -1,6 +1,8 @@
 {
   "id": "banking-v0",
   "name": "Banking domain law v0",
+  "domain_class": "regulated",
+  "jurisdictions": ["US", "EU"],
   "invariants": [
     {
       "kind": "fn",

@@ -33,6 +33,11 @@ quote = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+# `hi_plugin::pack_content_id` (RFC 0016 "the pack ID is the law"):
+# JCS (RFC 8785) canonicalization so two byte-different encodings of
+# the same logical manifest share one content-addressed identity,
+# instead of hashing whatever raw bytes happened to be on disk.
+serde_jcs = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 base64 = "0.22"
 # `hi_window.rs`'s native build-mode window; `hi_api.rs`'s custom-

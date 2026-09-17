@@ -2967,6 +2967,21 @@ fn main() {}
         assert_eq!(last, 0);
     }
 
+    /// A `CandidateUnit` carrying one `validate contract <demand>`
+    /// attribute -- `demanded_contract`'s own recognized shape -- so a
+    /// test can construct "a pack-demanded proof obligation on fn
+    /// `name`" without hand-writing the attribute string's exact
+    /// prefix at every call site.
+    fn demand_unit(name: &str, demand: &str) -> crate::hi_graph::CandidateUnit {
+        crate::hi_graph::CandidateUnit {
+            id: format!("code:fn:{name}"),
+            kind: "fn".to_string(),
+            name: name.to_string(),
+            driving_text: format!("{name}, demanded by an installed domain pack"),
+            attributes: vec![format!("validate contract {demand}")],
+        }
+    }
+
     #[test]
     fn units_prompt_renders_proof_demands_as_mandatory() {
         let units = vec![
