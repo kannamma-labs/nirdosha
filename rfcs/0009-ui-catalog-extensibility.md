@@ -513,6 +513,13 @@ dashboard-shaped hole:
 | Communication | react & respond | high, often real-time | **built** - `communication_feed!` with timer refresh or opt-in bounded long polling; concurrent Router workers (#66); SSE/WebSocket still pending |
 | System state (404/empty/loading) | recover | low | **partial** — real 404 (`Response::not_found`), 403, and empty-list states exist; no styled error pages or loading skeletons |
 | Report/Export | select & schedule | medium (format, columns, preview) | not started |
+| Audit trail | review & attest | medium (who, when, before/after) | not started — natural generalization of `workflow_history` |
+| Approval chain | decide & escalate | high (quorum, delegation, SLA) | not started — extends `workflow!` with quorum + delegation |
+| Notification inbox | read & dismiss | medium (categories, read/unread) | not started — `on_entry` can already insert rows; no bell-icon convention |
+| RBAC admin | assign & review | low-medium (roles, claims, mappings) | not started — needs claim primitive first |
+| Scheduled job / scheduler | schedule & monitor | medium (cron, retries, log) | not started — no cron primitive; external scheduler contract |
+| Search & faceted discovery | find & narrow | high (autocomplete, saved queries) | not started |
+| Import / export job | upload & validate / select & download | medium-high | not started — blocked on file/blob type |
 
 Read-heavy archetypes (List, Dashboard, Search) optimize for scanning
 and filtering; write-heavy ones (Form, Wizard) optimize for validation
@@ -664,6 +671,11 @@ other mechanism in this dialect, all of which hold under plain
 - Whether `Table`'s column convention (explicit `columns:` list,
   recommended above) should also support a typed row struct instead of
   raw `Json`, once a real use case asks for it.
+- Which of the new archetypes (audit trail, approval chain,
+  notification inbox, RBAC admin, scheduler, search, import/export)
+  belong as standalone macros versus extensions of `crud_screens!`/
+  `dashboard!` — most are macro-only once the underlying table/view
+  convention is decided.
 - Same "who reviews this" question Phase B's own Open Questions raises
   for `render_js`, deferred to Phase 5: once any client-side JS exists
   in this dialect, what review convention keeps "add a UI script" a
