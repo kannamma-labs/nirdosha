@@ -20,10 +20,12 @@
 //! checks.
 
 pub mod certificate;
+pub mod claim;
 pub mod docparse;
 pub mod declarations;
 pub mod evidence;
 pub mod model;
+pub mod naming;
 pub mod pack;
 pub mod pack_check;
 pub mod parse;

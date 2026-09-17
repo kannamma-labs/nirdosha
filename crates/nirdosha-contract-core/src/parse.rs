@@ -6,6 +6,7 @@
 //! contract   := clause*
 //! clause     := effects "(" ident ("," ident)* ")"
 //!             | requires "(" "role" "=" string ")"
+//!             | requires "(" "claim" "=" string "," string ")"
 //!             | requires "(" predicate ")"
 //!             | ensures "(" predicate ")"
 //!             | nfr "(" nfr_item ("," nfr_item)* ")"
@@ -67,6 +68,7 @@ pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
                     format!(
                         "unknown contract clause `{other}` — valid clauses: \
                          effects(pure, io, net, ...), requires(role = \"name\") or \
+                         requires(claim = \"name\", \"value\") or \
                          requires(<bool expr>), ensures(<bool expr>), \
                          nfr(latency_ms = N, concurrency_max = N), \
                          crud(op = \"delete\", policy = \"name\"), \
@@ -98,12 +100,15 @@ fn parse_effects(group: &proc_macro2::Group) -> syn::Result<Vec<String>> {
     Ok(effects)
 }
 
-/// `requires(role = "role_name")` (unforgeable-proof injection) or
-/// `requires(<bool expr>)` (a numeric precondition, discharged at Stage 2
-/// against the same Z3 VC IR item 1 built — issue #68). The two forms
-/// are distinguished the only way that doesn't need a keyword: the
-/// three-token `role = "..."` shape is tried first, and anything else in
-/// the group is parsed whole as a Rust expression.
+/// `requires(role = "role_name")` (unforgeable-proof injection),
+/// `requires(claim = "claim_name", "claim_value")` (the same, for a
+/// claim key/value pair — `ClaimProof`, `role.rs`'s own sibling
+/// mechanism in `nirdosha-rt`), or `requires(<bool expr>)` (a numeric
+/// precondition, discharged at Stage 2 against the same Z3 VC IR item 1
+/// built — issue #68). The three forms are distinguished the only way
+/// that doesn't need a keyword: the three-token `role = "..."` shape is
+/// tried first, then the five-token `claim = "...", "..."` shape, and
+/// anything else in the group is parsed whole as a Rust expression.
 fn parse_requires(group: &proc_macro2::Group) -> syn::Result<Requires> {
     let trees: Vec<TokenTree> = group.stream().into_iter().collect();
     if let [TokenTree::Ident(id), TokenTree::Punct(eq), TokenTree::Literal(lit)] = trees.as_slice()
@@ -114,6 +119,7 @@ fn parse_requires(group: &proc_macro2::Group) -> syn::Result<Requires> {
             syn::Lit::Str(s) => Ok(Requires {
                 role: Some(s.value()),
                 expr: None,
+                claim: None,
             }),
             _ => Err(syn::Error::new(
                 lit.span(),
@@ -121,10 +127,28 @@ fn parse_requires(group: &proc_macro2::Group) -> syn::Result<Requires> {
             )),
         };
     }
+    if let [TokenTree::Ident(id), TokenTree::Punct(eq), TokenTree::Literal(name_lit), TokenTree::Punct(comma), TokenTree::Literal(value_lit)] = trees.as_slice()
+        && id == "claim"
+        && eq.as_char() == '='
+        && comma.as_char() == ','
+    {
+        return match (syn::Lit::new(name_lit.clone()), syn::Lit::new(value_lit.clone())) {
+            (syn::Lit::Str(name), syn::Lit::Str(value)) => Ok(Requires {
+                role: None,
+                expr: None,
+                claim: Some((name.value(), value.value())),
+            }),
+            _ => Err(syn::Error::new(
+                value_lit.span(),
+                "claim names/values are string literals: requires(claim = \"department\", \"cardiology\")",
+            )),
+        };
+    }
     let expr = parse_predicate_group(group, "requires")?;
     Ok(Requires {
         role: None,
         expr: Some(expr),
+        claim: None,
     })
 }
 
@@ -427,6 +451,22 @@ mod tests {
         .unwrap();
         assert_eq!(c.requires.as_ref().unwrap().expr.as_deref(), Some("idx < len"));
         assert_eq!(c.ensures.as_ref().unwrap().expr, "result >= 0");
+    }
+
+    #[test]
+    fn parses_requires_claim_clause() {
+        let c = parse_contract(quote! {
+            requires(claim = "department", "cardiology")
+        })
+        .unwrap();
+        assert_eq!(c.requires.as_ref().unwrap().claim, Some(("department".to_string(), "cardiology".to_string())));
+        assert_eq!(c.requires.as_ref().unwrap().role, None);
+        assert_eq!(c.requires.as_ref().unwrap().expr, None);
+    }
+
+    #[test]
+    fn requires_claim_needs_two_string_literals() {
+        assert!(parse_contract(quote! { requires(claim = "department", cardiology) }).is_err());
     }
 
     // issue #69: `resource(kind = "..")` — no such clause exists yet, so

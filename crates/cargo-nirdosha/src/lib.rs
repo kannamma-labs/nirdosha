@@ -198,10 +198,11 @@ impl ScanSummary {
                 inferred_effects.insert(c.function.clone(), serde_json::json!(effects));
             }
             if let Some(requires) = &c.contract.requires {
-                let describe = match (&requires.role, &requires.expr) {
-                    (Some(role), _) => format!("role:{role}"),
-                    (None, Some(expr)) => format!("expr:{expr}"),
-                    (None, None) => "unknown".to_string(),
+                let describe = match (&requires.role, &requires.expr, &requires.claim) {
+                    (Some(role), _, _) => format!("role:{role}"),
+                    (None, Some(expr), _) => format!("expr:{expr}"),
+                    (None, None, Some((name, value))) => format!("claim:{name}={value}"),
+                    (None, None, None) => "unknown".to_string(),
                 };
                 gated_exports.insert(c.function.clone(), serde_json::json!(describe));
             } else if c.is_pub {

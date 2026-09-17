@@ -4,14 +4,18 @@
 > live `Router`, not `crates/compiler`'s deprecated `nirdosha build
 > --serve` / `crates/compiled-serve`) now has: `Secure`/`SameSite=Strict`
 > session cookies, real non-wildcard CORS (`with_cors`), fixed-window
-> per-peer-IP rate limiting (`with_rate_limit`), and a switchable
+> per-peer-IP rate limiting (`with_rate_limit`), a switchable
 > `serve_until` transport (`Runtime::Async` default, `Runtime::Sync`
-> opt-out via `with_runtime`). All four are real, tested end-to-end over
-> real sockets (`crates/nirdosha-rt/tests/router_concurrency.rs`), not
-> just unit-tested in isolation. Claims-based authorization (a
-> `ClaimProof` sibling to `role.rs`'s `RoleProof<R>`) and a real DPoP/
-> RFC 9449 port onto this router are explicitly **not** part of this
-> RFC — see "Follow-up work" below.
+> opt-out via `with_runtime`), and — added the same day, see "Claims-based
+> authorization (update)" below — dialect-wide claims-based
+> authorization (`nirdosha-rt::role::{Claim, ClaimProof}`,
+> `nirdosha_rt::claims!`, `requires(claim = "..", "..")` macro injection,
+> and `web::Router::{get,post,put,delete}_gated_claim`). All of it is
+> real, tested end-to-end (sockets for the router-level items;
+> `crates/nirdosha-rt/tests/claims.rs` for the contract-macro path), not
+> just unit-tested in isolation. A real DPoP/RFC 9449 port onto this
+> router is still explicitly **not** part of this RFC — see "Follow-up
+> work" below.
 >
 > Cross-references:
 > - `docs/ROADMAP.md`'s 2026-09-17 deprecation note — `crates/compiler`
@@ -207,11 +211,74 @@ caller's perspective, not just independently plausible. Plus:
 `async_runtime_without_the_feature_is_a_clear_error_not_a_panic` (only
 compiled under `--no-default-features`).
 
+## Claims-based authorization (update, 2026-09-17)
+
+`gaps.md`'s two claims-based-identity rows — `role.rs`'s `RoleProof<R>`
+had no claims-based sibling at all, so a gated route (or a
+`#[contract(...)]`-annotated function) could require a role but never
+an arbitrary claim — are now closed, the same day this RFC's other
+work shipped. Dialect-wide, not just at the router:
+
+- **`nirdosha-contract-core`**: `naming.rs` (extracted, shared
+  snake_case validation + PascalCase conversion — `role.rs` now
+  delegates to it too, unchanged behavior) and `claim.rs`
+  (`validate_claim_name`/`validate_claim_value`/`claim_ident`, the
+  `requires(claim = "..", "..")` sibling to `role.rs`'s own
+  `requires(role = "..")` mapping: `PascalCase(name) ++
+  PascalCase(value)`, mechanical and total the same way). `Requires`
+  gained a `claim: Option<(String, String)>` field; `Contract::validate`
+  now requires exactly one of `role`/`expr`/`claim`, never more than one
+  or none.
+- **`nirdosha-contract-core::parse`**: `requires(claim = "department",
+  "cardiology")` — the five-token form, tried after the three-token
+  `role = "..."` form and before falling back to parsing the group as a
+  boolean expression.
+- **`nirdosha-rt::role`**: `Claim` (a `NAME`/`VALUE` trait, unlike
+  `Role`'s presence-only `NAME`), `ClaimProof<C>` (same private-
+  constructor design as `RoleProof<R>`), `Auth::with_claim`/
+  `with_claims` (additive builder methods — `Auth::login`'s existing
+  2-arg signature is unchanged, so every pre-existing call site across
+  the dialect still compiles), `Auth::has_claim`/`prove_claim::<C>()`,
+  and a new `AuthError::MissingClaim` variant.
+- **`nirdosha_rt::claims!`**: the `roles!` sibling macro — declares
+  marker types mapping a chosen ident to a `(name, value)` pair.
+- **`nirdosha-macros`**: `requires(claim = ..)` now injects
+  `&ClaimProof<crate::nirdosha_claims::#ident>` as the gated function's
+  first parameter, mirroring the existing role-proof injection exactly
+  (same insertion point, same "uncallable without a minted proof"
+  guarantee).
+- **`web::Router`**: `get_gated_claim`/`post_gated_claim`/
+  `put_gated_claim`/`delete_gated_claim` (mirroring `*_gated`'s own
+  macro-generated shape), `Route.required_claim` for accurate
+  `openapi_document` reporting (a `nirdoshaClaim` security scheme,
+  sibling to the existing `nirdoshaRole` one).
+- **`cargo-nirdosha`**: `guarantee_bundle`'s `gated_exports` reporting
+  fixed to describe a claim-gated function as `"claim:name=value"`
+  rather than silently falling through to `"unknown"` — a real,
+  if minor, correctness gap this change would otherwise have
+  introduced into an existing tool.
+
+Tested end-to-end, not just unit-tested: `crates/nirdosha-rt/tests/
+claims.rs` (a real `#[contract(effects(pure), requires(claim = ..))]`-
+gated function — a session holding the exact claim can call it, a
+session with the same claim *name* but a different *value* cannot, a
+session with no claims at all cannot) and `web.rs`'s own
+`claim_gated_route_enforces_the_real_claim_proof`/
+`openapi_reports_the_same_claim_the_gate_checked`. All pre-existing
+`nirdosha-contract-core`/`nirdosha-macros`/`nirdosha-rt` tests still
+pass unmodified.
+
+**Disclosed scope note**: the built-in cookie/session login
+(`Router::with_login`) stays role-only — its `verify` closure returns
+`Vec<String>` roles, no claims, matching the fixture-grade demo-login
+shape it always had. `get_gated_claim` is reachable via a session that
+already carries claims (an app's own `authenticate` closure building
+`Auth` with `.with_claims(..)` from a real token's claim set, the
+production-identity path), not via the built-in username/password
+login form.
+
 ## Follow-up work (real gaps, disclosed, not started)
 
-- **Claims-based authorization.** `gaps.md` §3.1: `role.rs`'s
-  `RoleProof<R>` has no claims-based sibling (`ClaimProof`) at all — a
-  gated route can require a role, never an arbitrary claim. Next work.
 - **DPoP / RFC 9449 on this router.** The FAPI 2.0 sender-constrained-
   token work from earlier in this session's history was built and
   proven against `compiled-serve` (real end-to-end tests: DPoP-bound

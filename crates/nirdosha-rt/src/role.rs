@@ -17,6 +17,16 @@ pub trait Role {
     const NAME: &'static str;
 }
 
+/// A claim key/value pair in the application's vocabulary. Declared via
+/// [`crate::claims!`] — the `requires(claim = "..", "..")` sibling to
+/// [`Role`]/[`crate::roles!`]. Unlike a role (presence alone), holding
+/// this claim means the session's own claim set has `NAME` mapped to
+/// exactly `VALUE` — `Auth::prove_claim::<C>()` checks both.
+pub trait Claim {
+    const NAME: &'static str;
+    const VALUE: &'static str;
+}
+
 /// An unforgeable proof that the authenticated session holds role `R`.
 ///
 /// Cannot be constructed outside this module. The `#[contract]` macro
@@ -40,16 +50,46 @@ impl<R: Role> fmt::Debug for RoleProof<R> {
     }
 }
 
+/// An unforgeable proof that the authenticated session holds claim `C`
+/// (i.e. its claim set maps `C::NAME` to exactly `C::VALUE`). The
+/// `requires(claim = "..", "..")` sibling to [`RoleProof`] — same
+/// private-constructor design, same reasoning: see this module's own
+/// top doc comment.
+pub struct ClaimProof<C: Claim> {
+    _priv: (),
+    _marker: PhantomData<C>,
+}
+
+impl<C: Claim> ClaimProof<C> {
+    pub fn name(&self) -> &'static str {
+        C::NAME
+    }
+
+    pub fn value(&self) -> &'static str {
+        C::VALUE
+    }
+}
+
+impl<C: Claim> fmt::Debug for ClaimProof<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ClaimProof<{}={}>", C::NAME, C::VALUE)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
     /// The session does not hold the required role.
     MissingRole(&'static str),
+    /// The session's claim set has no `NAME` entry, or `NAME` is
+    /// present but mapped to a different value than the one required.
+    MissingClaim(&'static str, &'static str),
 }
 
 impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthError::MissingRole(role) => write!(f, "session does not hold role `{role}`"),
+            AuthError::MissingClaim(name, value) => write!(f, "session does not hold claim `{name}` = `{value}`"),
         }
     }
 }
@@ -67,6 +107,12 @@ impl std::error::Error for AuthError {}
 pub struct Auth {
     user: String,
     roles: Vec<String>,
+    /// `(name, value)` pairs — empty unless `with_claim`/`with_claims`
+    /// was used. Kept as a separate, additive builder rather than a
+    /// third `login` parameter so every existing `Auth::login(user,
+    /// roles)` call site (this crate's own tests included) keeps
+    /// compiling unchanged.
+    claims: Vec<(String, String)>,
 }
 
 impl Auth {
@@ -75,7 +121,24 @@ impl Auth {
         Auth {
             user: user.into(),
             roles: roles.iter().map(|r| r.to_string()).collect(),
+            claims: Vec::new(),
         }
+    }
+
+    /// Adds one claim `name = value` to this session — chainable, e.g.
+    /// `Auth::login("sita", &["hr_staff"]).with_claim("department",
+    /// "cardiology")`.
+    pub fn with_claim(mut self, name: impl Into<String>, value: impl Into<String>) -> Auth {
+        self.claims.push((name.into(), value.into()));
+        self
+    }
+
+    /// Same as repeated `with_claim`, from a slice — the shape an
+    /// `authenticate` closure reading claims off a real token's own
+    /// claim set will usually already have.
+    pub fn with_claims(mut self, claims: &[(&str, &str)]) -> Auth {
+        self.claims.extend(claims.iter().map(|(n, v)| (n.to_string(), v.to_string())));
+        self
     }
 
     pub fn user(&self) -> &str {
@@ -84,6 +147,13 @@ impl Auth {
 
     pub fn has_role(&self, role: &str) -> bool {
         self.roles.iter().any(|r| r == role)
+    }
+
+    /// `true` iff the session's claim set maps `name` to exactly
+    /// `value` — an absent `name`, or `name` present with a different
+    /// value, are both `false`. Never a substring/prefix match.
+    pub fn has_claim(&self, name: &str, value: &str) -> bool {
+        self.claims.iter().any(|(n, v)| n == name && v == value)
     }
 
     /// Mint a proof for role `R` — the sole constructor of
@@ -96,6 +166,20 @@ impl Auth {
             })
         } else {
             Err(AuthError::MissingRole(R::NAME))
+        }
+    }
+
+    /// Mint a proof for claim `C` — the sole constructor of
+    /// `ClaimProof<C>`. Fails when the session's claim set doesn't map
+    /// `C::NAME` to exactly `C::VALUE`.
+    pub fn prove_claim<C: Claim>(&self) -> Result<ClaimProof<C>, AuthError> {
+        if self.has_claim(C::NAME, C::VALUE) {
+            Ok(ClaimProof {
+                _priv: (),
+                _marker: PhantomData,
+            })
+        } else {
+            Err(AuthError::MissingClaim(C::NAME, C::VALUE))
         }
     }
 }
@@ -132,5 +216,46 @@ mod tests {
     fn unheld_role_is_uncallable() {
         let outsider = Auth::login("ravana", &["janitor"]);
         assert!(outsider.prove::<HrStaff>().is_err());
+    }
+
+    struct Cardiology;
+    impl Claim for Cardiology {
+        const NAME: &'static str = "department";
+        const VALUE: &'static str = "cardiology";
+    }
+    struct Oncology;
+    impl Claim for Oncology {
+        const NAME: &'static str = "department";
+        const VALUE: &'static str = "oncology";
+    }
+
+    fn guarded_by_claim(_proof: &ClaimProof<Cardiology>) -> &'static str {
+        "allowed"
+    }
+
+    #[test]
+    fn claim_proof_mints_only_when_the_session_holds_the_exact_name_and_value() {
+        let session = Auth::login("sita", &[]).with_claim("department", "cardiology");
+        let proof = session.prove_claim::<Cardiology>().expect("claim held");
+        assert_eq!(guarded_by_claim(&proof), "allowed");
+        // Same claim *name*, different required *value* -- not a match.
+        assert!(matches!(
+            session.prove_claim::<Oncology>(),
+            Err(AuthError::MissingClaim("department", "oncology"))
+        ));
+    }
+
+    #[test]
+    fn a_session_with_no_claims_at_all_cannot_prove_one() {
+        let session = Auth::login("ravana", &["janitor"]);
+        assert!(session.prove_claim::<Cardiology>().is_err());
+    }
+
+    #[test]
+    fn with_claims_from_a_slice_matches_repeated_with_claim() {
+        let a = Auth::login("x", &[]).with_claim("department", "cardiology").with_claim("tier", "gold");
+        let b = Auth::login("x", &[]).with_claims(&[("department", "cardiology"), ("tier", "gold")]);
+        assert!(a.has_claim("department", "cardiology") && b.has_claim("department", "cardiology"));
+        assert!(a.has_claim("tier", "gold") && b.has_claim("tier", "gold"));
     }
 }

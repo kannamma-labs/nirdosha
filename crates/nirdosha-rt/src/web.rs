@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
-use crate::role::{Auth, Role, RoleProof};
+use crate::role::{Auth, Claim, ClaimProof, Role, RoleProof};
 
 mod ratelimit;
 
@@ -452,6 +452,10 @@ struct Route {
     /// way around — nothing here can cause a route to be gated; it only
     /// documents a gate that already exists.
     required_role: Option<&'static str>,
+    /// Same idea as `required_role`, for a claim-gated route
+    /// (`get_gated_claim`/etc.) — `(C::NAME, C::VALUE)`, a read of the
+    /// *actual* gate, never the other way around.
+    required_claim: Option<(&'static str, &'static str)>,
     handler: Handler,
 }
 
@@ -616,6 +620,7 @@ macro_rules! ungated_method {
                 template: PathTemplate::parse(path),
                 summary,
                 required_role: None,
+                required_claim: None,
                 handler: Arc::new(handler),
             });
             self
@@ -645,6 +650,37 @@ macro_rules! gated_method {
                 template: PathTemplate::parse(path),
                 summary,
                 required_role: Some(R::NAME),
+                required_claim: None,
+                handler: Arc::new(wrapped),
+            });
+            self
+        }
+    };
+}
+
+macro_rules! gated_claim_method {
+    ($name:ident, $method:literal) => {
+        pub fn $name<C: Claim + 'static>(
+            mut self,
+            path: &'static str,
+            summary: &'static str,
+            handler: impl Fn(&Request, &PathParams, &ClaimProof<C>) -> Response + Send + Sync + 'static,
+        ) -> Self {
+            let authenticate = self.authenticate.clone();
+            let sessions = self.sessions.clone();
+            let wrapped = move |req: &Request, params: &PathParams| -> Response {
+                let auth = session_auth(&sessions, req).unwrap_or_else(|| authenticate(req));
+                match auth.prove_claim::<C>() {
+                    Ok(proof) => handler(req, params, &proof),
+                    Err(_) => Response::forbidden(),
+                }
+            };
+            self.routes.push(Route {
+                method: $method,
+                template: PathTemplate::parse(path),
+                summary,
+                required_role: None,
+                required_claim: Some((C::NAME, C::VALUE)),
                 handler: Arc::new(wrapped),
             });
             self
@@ -744,6 +780,11 @@ impl Router {
     gated_method!(put_gated, "PUT");
     gated_method!(delete_gated, "DELETE");
 
+    gated_claim_method!(get_gated_claim, "GET");
+    gated_claim_method!(post_gated_claim, "POST");
+    gated_claim_method!(put_gated_claim, "PUT");
+    gated_claim_method!(delete_gated_claim, "DELETE");
+
     /// An ungated route (no `RoleProof<R>` required to view it at all)
     /// whose handler still gets the resolved `Auth` — for content that
     /// is *visible* to everyone but *varies* per viewer (e.g.
@@ -768,6 +809,7 @@ impl Router {
             template: PathTemplate::parse(path),
             summary,
             required_role: None,
+            required_claim: None,
             handler: Arc::new(wrapped),
         });
         self
@@ -951,9 +993,9 @@ impl Router {
 
     /// A minimal OpenAPI 3.0.3 document: paths, methods, summaries, and
     /// — for a gated route — a `security` entry naming the role
-    /// `R::NAME` that route's handler actually checked at registration
-    /// time. Not a schema generator: request/response bodies are not
-    /// typed here.
+    /// `R::NAME` or the claim `(C::NAME, C::VALUE)` that route's
+    /// handler actually checked at registration time. Not a schema
+    /// generator: request/response bodies are not typed here.
     pub fn openapi_document(&self) -> serde_json::Value {
         let mut paths = serde_json::Map::new();
         for route in &self.routes {
@@ -970,6 +1012,9 @@ impl Router {
             if let Some(role) = route.required_role {
                 op["security"] = serde_json::json!([{ "nirdoshaRole": [role] }]);
             }
+            if let Some((name, value)) = route.required_claim {
+                op["security"] = serde_json::json!([{ "nirdoshaClaim": [format!("{name}={value}")] }]);
+            }
             entry.insert(route.method.to_ascii_lowercase(), op);
         }
         serde_json::json!({
@@ -983,6 +1028,12 @@ impl Router {
                         "in": "header",
                         "name": "X-Nirdosha-Role-Doc",
                         "description": "Documentation only, mirroring the RoleProof<R> type actually enforced server-side (RFC 0020 Road 1/Road 2). Never authoritative on its own."
+                    },
+                    "nirdoshaClaim": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "X-Nirdosha-Claim-Doc",
+                        "description": "Documentation only, mirroring the ClaimProof<C> type actually enforced server-side. Never authoritative on its own."
                     }
                 }
             }
@@ -1346,6 +1397,41 @@ mod tests {
         let doc = router.openapi_document();
         let role = &doc["paths"]["/api/products"]["post"]["security"][0]["nirdoshaRole"][0];
         assert_eq!(role, "admin");
+    }
+
+    struct CardiologyDept;
+    impl Claim for CardiologyDept {
+        const NAME: &'static str = "department";
+        const VALUE: &'static str = "cardiology";
+    }
+
+    /// `get_gated_claim`'s real enforcement (`Auth::prove_claim::<C>()`
+    /// via the router) -- the same shape
+    /// `gated_route_enforces_the_real_role_proof` already proves for
+    /// roles, ported to claims: absent claim -> 403, wrong value for
+    /// the right claim name -> still 403, exact name+value -> 200.
+    #[test]
+    fn claim_gated_route_enforces_the_real_claim_proof() {
+        let router = Router::new(|r| Auth::login("user", &[]).with_claims(&r.header("x-department").map(|d| vec![("department", d)]).unwrap_or_default()))
+            .get_gated_claim::<CardiologyDept>("/api/cardiology-report", "report", |_, _, _proof| Response::text(200, "ok"));
+
+        let mut denied = req("GET", "/api/cardiology-report");
+        assert_eq!(router.dispatch(&denied).status, 403);
+
+        denied.headers.insert("x-department".into(), "oncology".into());
+        assert_eq!(router.dispatch(&denied).status, 403, "the right claim name with the wrong value must still be denied");
+
+        denied.headers.insert("x-department".into(), "cardiology".into());
+        assert_eq!(router.dispatch(&denied).status, 200);
+    }
+
+    #[test]
+    fn openapi_reports_the_same_claim_the_gate_checked() {
+        let router = Router::new(|_| Auth::login("anon", &[]))
+            .get_gated_claim::<CardiologyDept>("/api/cardiology-report", "report", |_, _, _proof| Response::text(200, "ok"));
+        let doc = router.openapi_document();
+        let claim = &doc["paths"]["/api/cardiology-report"]["get"]["security"][0]["nirdoshaClaim"][0];
+        assert_eq!(claim, "department=cardiology");
     }
 
     fn cookie_req(method: &str, path: &str, cookie: Option<&str>) -> Request {

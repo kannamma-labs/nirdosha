@@ -40,12 +40,15 @@ pub struct Contract {
     pub sequence: Option<Sequence>,
 }
 
-/// Either a role gate (`requires(role = "hr_staff")`, unforgeable-proof
-/// injection, checked by the type system) or a numeric precondition
-/// (`requires(idx < len)`, assumed before the body's own MIR proof
-/// obligations and discharged by the same Z3 VC IR item 1 built —
-/// issue #68). Exactly one of the two, never both or neither: a single
-/// `requires(..)` clause is one claim, not a bundle.
+/// A role gate (`requires(role = "hr_staff")`), a claim gate
+/// (`requires(claim = "department", "cardiology")` — a claim *name*
+/// plus the exact *value* the session must hold under it, both
+/// unforgeable-proof injection checked by the type system), or a
+/// numeric precondition (`requires(idx < len)`, assumed before the
+/// body's own MIR proof obligations and discharged by the same Z3 VC IR
+/// item 1 built — issue #68). Exactly one of the three, never more than
+/// one or none: a single `requires(..)` clause is one claim, not a
+/// bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requires {
@@ -53,6 +56,10 @@ pub struct Requires {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expr: Option<String>,
+    /// `(name, value)` — `requires(claim = "department", "cardiology")`
+    /// encodes as `Some(("department".into(), "cardiology".into()))`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<(String, String)>,
 }
 
 /// `ensures(result >= 0)` — a postcondition over the function's own
@@ -169,23 +176,29 @@ impl Contract {
             }
         }
         if let Some(req) = &self.requires {
-            match (&req.role, &req.expr) {
-                (Some(role), None) => {
+            match (&req.role, &req.expr, &req.claim) {
+                (Some(role), None, None) => {
                     if let Err(msg) = crate::role::validate_role_name(role) {
                         issues.push(format!("requires(role = ...) — {msg}"));
                     }
                 }
-                (None, Some(expr)) => {
+                (None, Some(expr), None) => {
                     if let Err(msg) = crate::predicate::parse_predicate(expr) {
                         issues.push(format!("requires({expr}) — {msg}"));
                     }
                 }
-                (Some(_), Some(_)) => {
-                    issues.push("requires(..) takes a role or an expression, not both".into())
+                (None, None, Some((name, value))) => {
+                    if let Err(msg) = crate::claim::validate_claim_name(name) {
+                        issues.push(format!("requires(claim = ...) — {msg}"));
+                    }
+                    if let Err(msg) = crate::claim::validate_claim_value(value) {
+                        issues.push(format!("requires(claim = ...) — {msg}"));
+                    }
                 }
-                (None, None) => {
-                    issues.push("requires(..) needs a role or a boolean expression".into())
+                (None, None, None) => {
+                    issues.push("requires(..) needs a role, a claim, or a boolean expression".into())
                 }
+                _ => issues.push("requires(..) takes exactly one of a role, a claim, or an expression".into()),
             }
         }
         if let Some(ens) = &self.ensures
@@ -239,6 +252,7 @@ mod tests {
             requires: Some(Requires {
                 role: Some("hr_staff".into()),
                 expr: None,
+                claim: None,
             }),
             ensures: Some(Ensures {
                 expr: "result >= 0".into(),
@@ -306,6 +320,36 @@ mod tests {
     fn validate_catches_unknown_effect() {
         let c = Contract {
             effects: Some(vec!["purr".into()]),
+            ..Default::default()
+        };
+        assert!(!c.validate().is_empty());
+    }
+
+    #[test]
+    fn validate_accepts_a_well_formed_claim_and_rejects_a_malformed_one() {
+        let ok = Contract {
+            requires: Some(Requires { role: None, expr: None, claim: Some(("department".into(), "cardiology".into())) }),
+            ..Default::default()
+        };
+        assert!(ok.validate().is_empty(), "issues: {:?}", ok.validate());
+
+        let bad_name = Contract {
+            requires: Some(Requires { role: None, expr: None, claim: Some(("Department".into(), "cardiology".into())) }),
+            ..Default::default()
+        };
+        assert!(!bad_name.validate().is_empty());
+
+        let bad_value = Contract {
+            requires: Some(Requires { role: None, expr: None, claim: Some(("department".into(), "Cardiology".into())) }),
+            ..Default::default()
+        };
+        assert!(!bad_value.validate().is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_more_than_one_of_role_expr_claim() {
+        let c = Contract {
+            requires: Some(Requires { role: Some("hr_staff".into()), expr: None, claim: Some(("department".into(), "cardiology".into())) }),
             ..Default::default()
         };
         assert!(!c.validate().is_empty());

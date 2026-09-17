@@ -207,6 +207,20 @@ fn expand(
         fn_item.sig.inputs.insert(0, param);
     }
 
+    // --- capability injection: requires(claim) becomes an unforgeable proof parameter ---
+    // Same mechanism as `requires(role)` above, mirrored exactly — the
+    // one difference is the type ident is mechanically derived from
+    // *two* strings (`cc::claim::claim_ident`), not one.
+    if let Some((name, value)) = contract.requires.as_ref().and_then(|r| r.claim.as_ref()) {
+        let ident = match cc::claim::claim_ident(name, value, fn_item.sig.ident.span()) {
+            Ok(i) => i,
+            Err(e) => return e.to_compile_error(),
+        };
+        let param: syn::FnArg =
+            syn::parse_quote!(__nirdosha_claim_proof: &::nirdosha_rt::ClaimProof<crate::nirdosha_claims::#ident>);
+        fn_item.sig.inputs.insert(0, param);
+    }
+
     // --- requires(expr)/ensures(expr) (issue #68): a dead sibling fn with
     // this fn's own original parameter list (and, for ensures, a `result:
     // <ReturnType>` parameter) whose body is just the predicate. It is

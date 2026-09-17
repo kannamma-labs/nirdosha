@@ -47,7 +47,7 @@ pub mod wizard;
 pub use nfr::{enter, events, reset_events, Guard, Limits, NfrEvent};
 pub use policy::{crud_forbidden, requires_encryption, Policy};
 pub use resource::{acquire, release, Resource};
-pub use role::{Auth, AuthError, Role, RoleProof};
+pub use role::{Auth, AuthError, Claim, ClaimProof, Role, RoleProof};
 pub use web::{html_escape, page_shell, NavLink, PathParams, Request, Response, Router};
 pub use theme::{load as load_theme, themed_page_shell, themed_page_shell_ex, Theme};
 
@@ -85,6 +85,49 @@ macro_rules! roles {
                 pub struct $Name;
                 impl ::nirdosha_rt::Role for $Name {
                     const NAME: &'static str = $name;
+                }
+            )+
+        }
+    };
+}
+
+/// Declare your application's claim vocabulary — the `requires(claim =
+/// "..", "..")` sibling to [`roles!`]. Invoke exactly once, at crate
+/// root. Each entry declares a marker type plus its wire `(name,
+/// value)`; `requires(claim = "name", "value")` in a contract resolves
+/// to the type whose own `(name, value)` matches exactly — mechanically
+/// (`PascalCase(name) ++ PascalCase(value)`, `nirdosha-contract-core::
+/// claim::claim_ident`'s own doc comment has the full mapping), never
+/// by lookup. A claim with no matching declared type is a compile
+/// error when the proof parameter is injected, the same guarantee
+/// [`roles!`] already gives a role with no declared type.
+///
+/// ```
+/// nirdosha_rt::claims! {
+///     DepartmentCardiology = "department" -> "cardiology";
+/// }
+/// ```
+///
+/// expands to
+///
+/// ```ignore
+/// pub mod nirdosha_claims {
+///     pub struct DepartmentCardiology;
+///     impl nirdosha_rt::Claim for DepartmentCardiology {
+///         const NAME: &'static str = "department";
+///         const VALUE: &'static str = "cardiology";
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! claims {
+    ( $( $Name:ident = $name:literal -> $value:literal ; )+ ) => {
+        pub mod nirdosha_claims {
+            $(
+                pub struct $Name;
+                impl ::nirdosha_rt::Claim for $Name {
+                    const NAME: &'static str = $name;
+                    const VALUE: &'static str = $value;
                 }
             )+
         }
