@@ -166,22 +166,7 @@ pub fn html_escape(s: &str) -> String {
 /// `dashboard!`) wraps its body in — no client-side JS, no build step,
 /// just enough CSS to make tables/forms/widgets legible.
 pub fn page_shell(title: &str, extra_head: &str, body: &str) -> String {
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title>{extra_head}\
-         <style>\
-         body{{font-family:sans-serif;margin:2rem;color:#222}}\
-         table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding:0.5rem;text-align:left}}\
-         th{{background:#f5f5f5}}\
-         .widget{{display:inline-block;vertical-align:top;margin:0 1.5rem 1.5rem 0;padding:1rem;border:1px solid #ccc;border-radius:6px}}\
-         .metric .value{{font-size:2rem;font-weight:bold}}.metric.alert .value{{color:#c0392b}}\
-         .metric .label,.chart .label{{color:#666;font-size:0.9rem}}\
-         .empty{{color:#666;font-style:italic}}\
-         form p{{margin:0.5rem 0}}label{{display:inline-block;width:10rem}}\
-         .danger{{color:#c0392b}}.errors{{color:#c0392b}}\
-         </style></head><body><h1>{}</h1>{body}</body></html>",
-        html_escape(title),
-        html_escape(title),
-    )
+    crate::theme::themed_page_shell_ex(title, "", extra_head, body)
 }
 
 #[derive(Debug, Clone)]

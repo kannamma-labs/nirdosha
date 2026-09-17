@@ -3,7 +3,8 @@
 //! rendering, attached to whatever datasource the macro is given. No
 //! client-side JS — every form is a plain browser `<form>` POST.
 
-use crate::web::{html_escape, page_shell};
+use crate::theme::themed_page_shell;
+use crate::web::html_escape;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -88,8 +89,8 @@ pub fn list_html(
 ) -> String {
     let search_box = format!(
         "<form method=\"get\" action=\"{base_path}\" style=\"margin-bottom:1rem\">\
-         <input type=\"text\" name=\"q\" value=\"{}\" placeholder=\"Search {}...\">\
-         <button type=\"submit\">Search</button>{}</form>",
+         <input type=\"text\" class=\"nir-input\" name=\"q\" value=\"{}\" placeholder=\"Search {}...\">\
+         <button type=\"submit\" class=\"nir-btn\">Search</button>{}</form>",
         html_escape(search.unwrap_or_default()),
         html_escape(title),
         if search.is_some_and(|s| !s.is_empty()) {
@@ -109,7 +110,7 @@ pub fn list_html(
         } else {
             format!("No {} yet.{cta}", html_escape(title))
         };
-        return page_shell(title, "", &format!("{search_box}<p class=\"empty\">{empty_msg}</p>"));
+        return themed_page_shell(title, "", &format!("{search_box}<p class=\"empty\">{empty_msg}</p>"));
     }
     let mut table = String::from("<table><thead><tr>");
     for f in fields {
@@ -126,9 +127,9 @@ pub fn list_html(
         table.push_str("</tr>");
     }
     table.push_str("</tbody></table>");
-    let new_link = if can_create { format!("<p><a href=\"{base_path}/new\">+ New</a></p>") } else { String::new() };
-    let export_link = format!("<p><a href=\"{base_path}/export.csv\">Export CSV</a></p>");
-    page_shell(title, "", &format!("{search_box}{new_link}{table}{export_link}"))
+    let new_link = if can_create { format!("<p><a href=\"{base_path}/new\" class=\"nir-btn\">+ New</a></p>") } else { String::new() };
+    let export_link = format!("<p><a href=\"{base_path}/export.csv\" class=\"nir-btn nir-btn-secondary\">Export CSV</a></p>");
+    themed_page_shell(title, "", &format!("{search_box}{new_link}{table}{export_link}"))
 }
 
 /// Escapes one CSV field per RFC 4180: wrap in quotes (doubling any
@@ -152,12 +153,12 @@ pub fn detail_html(title: &str, base_path: &str, id: i64, fields: &[FieldSpec], 
     }
     let mut actions = String::new();
     if can_edit {
-        actions.push_str(&format!("<a href=\"{base_path}/{id}/edit\">edit</a> "));
+        actions.push_str(&format!("<a href=\"{base_path}/{id}/edit\" class=\"nir-btn nir-btn-secondary\">edit</a> "));
     }
     if can_delete {
-        actions.push_str(&format!("<a href=\"{base_path}/{id}/delete\" class=\"danger\">delete</a>"));
+        actions.push_str(&format!("<a href=\"{base_path}/{id}/delete\" class=\"nir-btn nir-btn-danger\">delete</a>"));
     }
-    page_shell(title, "", &format!("{rows}<p>{actions}</p><p><a href=\"{base_path}\">back to list</a></p>"))
+    themed_page_shell(title, "", &format!("{rows}<p>{actions}</p><p><a href=\"{base_path}\">back to list</a></p>"))
 }
 
 /// `GET <path>` for a `settings_screen!` — like `detail_html` but for a
@@ -168,8 +169,8 @@ pub fn settings_view_html(title: &str, edit_path: &str, fields: &[FieldSpec], ro
     for f in fields {
         rows.push_str(&format!("<p><label>{}</label> {}</p>", html_escape(f.name), html_escape(&value_display(&row[f.name]))));
     }
-    let actions = if can_edit { format!("<a href=\"{edit_path}\">edit</a>") } else { String::new() };
-    page_shell(title, "", &format!("{rows}<p>{actions}</p>"))
+    let actions = if can_edit { format!("<a href=\"{edit_path}\" class=\"nir-btn nir-btn-secondary\">edit</a>") } else { String::new() };
+    themed_page_shell(title, "", &format!("{rows}<p>{actions}</p>"))
 }
 
 /// `GET <path>/new` or `GET <path>/{id}/edit` — a plain `<form>`
@@ -192,20 +193,20 @@ pub fn form_html(title: &str, action: &str, fields: &[FieldSpec], values: &HashM
         if f.input_type == "checkbox" {
             let checked = if value == "true" || value == "on" { " checked" } else { "" };
             inputs.push_str(&format!(
-                "<p><label>{}</label><input type=\"checkbox\" name=\"{}\"{checked}></p>",
+                "<p><label>{}</label><input type=\"checkbox\" class=\"nir-input\" name=\"{}\"{checked}></p>",
                 html_escape(f.name), f.name,
             ));
         } else {
             inputs.push_str(&format!(
-                "<p><label>{}</label><input type=\"{}\" name=\"{}\" value=\"{}\"></p>",
+                "<p><label>{}</label><input type=\"{}\" class=\"nir-input\" name=\"{}\" value=\"{}\"></p>",
                 html_escape(f.name), f.input_type, f.name, html_escape(&value),
             ));
         }
     }
-    page_shell(
+    themed_page_shell(
         title,
         "",
-        &format!("{error_block}<form method=\"post\" action=\"{action}\">{inputs}<p><button type=\"submit\">Save</button></p></form>"),
+        &format!("{error_block}<div class=\"nir-card\"><form method=\"post\" action=\"{action}\">{inputs}<p><button type=\"submit\" class=\"nir-btn\">Save</button></p></form></div>"),
     )
 }
 
@@ -214,15 +215,15 @@ pub fn form_html(title: &str, action: &str, fields: &[FieldSpec], values: &HashM
 /// not a bare button), since a plain HTML form has no other way to
 /// guard a destructive POST.
 pub fn delete_confirm_html(title: &str, action: &str, confirm_word: &str, label: &str) -> String {
-    page_shell(
+    themed_page_shell(
         title,
         "",
         &format!(
-            "<p>Delete <strong>{}</strong>? This cannot be undone.</p>\
+            "<div class=\"nir-card\"><p>Delete <strong>{}</strong>? This cannot be undone.</p>\
              <form method=\"post\" action=\"{action}\">\
-             <p><label>Type {confirm_word} to confirm</label><input type=\"text\" name=\"confirm\"></p>\
-             <p><button type=\"submit\" class=\"danger\">Delete</button> <a href=\"{action}\">cancel</a></p>\
-             </form>",
+             <p><label>Type {confirm_word} to confirm</label><input type=\"text\" class=\"nir-input\" name=\"confirm\"></p>\
+             <p><button type=\"submit\" class=\"nir-btn nir-btn-danger\">Delete</button> <a href=\"{action}\">cancel</a></p>\
+             </form></div>",
             html_escape(label),
         ),
     )

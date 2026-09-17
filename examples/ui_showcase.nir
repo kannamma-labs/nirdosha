@@ -1,0 +1,406 @@
+// ui_showcase.nir -- one program that exercises every declarative UI
+// screen type the current Nirdosha compiler can generate, so that
+// `nirdosha emit-ui examples/ui_showcase.nir -o ui_showcase.html`
+// produces a single static page containing:
+//
+//   * a `module`-grouped primary nav,
+//   * a full CRUD screen (list / create / edit / delete),
+//   * a screen with custom actions, field-level RBAC, validation,
+//     badges, countdowns, searchable selects, and a `layout { ... }`
+//     arrangement (row/column/group/tabs/timeline),
+//   * a composite `workspace` with table/graph/timeline panels,
+//   * a `dashboard` with tiles, a bar chart, and graph/heatmap/timeline
+//     visuals,
+//   * a generated `workflow` queue with state stepper,
+//   * per-role `landing` pages.
+//
+// It also compiles and runs as a native binary (`nirdosha build`),
+// exercising the compiled workflow layer-1 subset and a small identity
+// flow without any external database or HTTP dependency.
+
+enum ErrorCode {
+    Malformed(str),
+}
+
+struct Text {
+    value: str,
+}
+
+// ---- zero-payload status enum, used with field { render: "badge" } -----
+enum Status {
+    Draft,
+    Pending,
+    Approved,
+    Rejected,
+}
+// ---- Master Data -------------------------------------------------------
+module "Master Data" {
+    struct Vendor {
+        id: i64,
+        name: str,
+        email: str,
+        risk_score: i64,
+    }
+}
+
+fn list_vendor() -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("[{\"id\":1,\"name\":\"Acme Inc\",\"email\":\"acme@example.com\",\"risk_score\":2},{\"id\":2,\"name\":\"Globex\",\"email\":\"globex@example.com\",\"risk_score\":4}]") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn get_vendor(id: i64) -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("{\"id\":1,\"name\":\"Acme Inc\",\"email\":\"acme@example.com\",\"risk_score\":2}") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn create_vendor(v: Vendor) -> Result(i64, ErrorCode) requires(role: "admin") {
+    return Ok(1)
+}
+
+fn update_vendor(v: Vendor) -> Result(i64, ErrorCode) requires(role: "admin") {
+    return Ok(v.id)
+}
+
+fn delete_vendor(id: i64) -> Result(bool, ErrorCode) requires(role: "admin") {
+    return Ok(true)
+}
+
+fn audit_vendor(id: i64) -> Result(i64, ErrorCode) requires(role: "auditor") {
+    return Ok(id)
+}
+
+screen Vendor {
+    title: "Supplier Directory"
+    field name {
+        label: "Supplier Name"
+        pattern: "^[A-Za-z0-9 ]+$"
+    }
+    field email {
+        label: "Contact Email"
+        format: "email"
+    }
+    field risk_score {
+        label: "Risk Score"
+        min: 0
+        max: 10
+        view: role("admin", "risk_manager")
+        edit: role("admin")
+    }
+    action "Audit" -> audit_vendor {
+        style: "outlined"
+        confirm: "Run a compliance audit for this supplier?"
+    }
+}
+
+// ---- Operations --------------------------------------------------------
+module "Operations" {
+    struct PurchaseOrder {
+        id: i64,
+        vendor_id: i64,
+        amount_cents: i64,
+        status: Status,
+        deadline: i64,
+        internal_note: str,
+    }
+
+    struct Shipment {
+        id: i64,
+        purchase_order_id: i64,
+        carrier: str,
+        tracking: str,
+    }
+}
+
+fn list_purchase_order() -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("[{\"id\":1,\"vendor_id\":1,\"amount_cents\":250000,\"status\":\"Pending\",\"deadline\":1800000000,\"internal_note\":\"urgent\"},{\"id\":2,\"vendor_id\":2,\"amount_cents\":125000,\"status\":\"Approved\",\"deadline\":1700000000,\"internal_note\":\"\"}]") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn get_purchase_order(id: i64) -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("{\"id\":1,\"vendor_id\":1,\"amount_cents\":250000,\"status\":\"Pending\",\"deadline\":1800000000,\"internal_note\":\"urgent\"}") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn create_purchase_order(p: PurchaseOrder) -> Result(i64, ErrorCode) requires(role: "admin") {
+    return Ok(3)
+}
+
+fn update_purchase_order(p: PurchaseOrder) -> Result(i64, ErrorCode) requires(role: "admin") {
+    return Ok(p.id)
+}
+
+fn delete_purchase_order(id: i64) -> Result(bool, ErrorCode) requires(role: "admin") {
+    return Ok(true)
+}
+
+fn simulate_purchase_order(id: i64) -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("{\"would_affect\":1,\"projected_spend_cents\":250000}") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn list_shipment_for_po(purchase_order_id: i64) -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("[{\"id\":1,\"purchase_order_id\":1,\"carrier\":\"FastFreight\",\"tracking\":\"FF-12345\"}]") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn list_po_timeline(purchase_order_id: i64) -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("[{\"ts\":1700000000,\"label\":\"Created\",\"detail\":\"PO raised by alice\"},{\"ts\":1700003600,\"label\":\"Approved\",\"detail\":\"Approved by manager-1\"}]") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn graph_relationships_for_po(purchase_order_id: i64) -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("{\"nodes\":[{\"id\":\"v1\",\"label\":\"Acme Inc\",\"risk\":2},{\"id\":\"po1\",\"label\":\"PO 1\",\"risk\":1}],\"edges\":[{\"source\":\"v1\",\"target\":\"po1\",\"weight\":3}]}") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn add_shipment_for_po(purchase_order_id: i64, carrier: Text) -> Result(i64, ErrorCode) requires(role: "logistics") {
+    return Ok(1)
+}
+
+screen PurchaseOrder {
+    title: "Purchase Orders"
+    field vendor_id {
+        label: "Supplier"
+        render: "searchable_select"
+        source: Vendor
+    }
+    field amount_cents {
+        label: "Amount (cents)"
+        min: 0
+    }
+    field status {
+        render: "badge"
+    }
+    field deadline {
+        label: "SLA Deadline"
+        render: "countdown"
+    }
+    field internal_note {
+        view: role("admin")
+        edit: role("admin")
+    }
+    action "Simulate Impact" -> simulate_purchase_order {
+        style: "outlined"
+        show_result: true
+    }
+
+    layout {
+        row {
+            column {
+                group "Header" {
+                    field vendor_id
+                    field amount_cents
+                    field status
+                    field deadline
+                }
+                divider {}
+                group "Internal" {
+                    field internal_note
+                }
+            }
+            column {
+                tabs {
+                    tab "Actions" {
+                        action "Simulate Impact"
+                    }
+                    tab "History" {
+                        timeline { source: list_po_timeline }
+                    }
+                }
+            }
+        }
+    }
+}
+
+workspace PurchaseOrderWorkspace {
+    title: "PO Investigation"
+    subject: PurchaseOrder
+
+    panel "Shipments" {
+        source: list_shipment_for_po
+        action "Add Shipment" -> add_shipment_for_po {
+            style: "filled"
+        }
+    }
+
+    panel "Network" {
+        source: graph_relationships_for_po
+        render: "graph"
+    }
+
+    panel "History" {
+        source: list_po_timeline
+        render: "timeline"
+    }
+}
+
+// ---- Dashboard ---------------------------------------------------------
+fn stat_total_purchase_order() -> i64 requires(public) {
+    return 12
+}
+
+fn stat_total_spend() -> i64 requires(public) {
+    return 2450000
+}
+
+fn chart_purchase_orders_by_status() -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("[{\"label\":\"Pending\",\"value\":3},{\"label\":\"Approved\",\"value\":7},{\"label\":\"Rejected\",\"value\":2}]") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn graph_vendor_network() -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("{\"nodes\":[{\"id\":\"acme\",\"label\":\"Acme Inc\",\"risk\":2},{\"id\":\"globex\",\"label\":\"Globex\",\"risk\":4},{\"id\":\"us\",\"label\":\"Our Org\",\"risk\":0}],\"edges\":[{\"source\":\"us\",\"target\":\"acme\",\"weight\":5},{\"source\":\"us\",\"target\":\"globex\",\"weight\":2}]}") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn heatmap_shipment_density() -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("[{\"lat\":37.77,\"lng\":-122.41,\"weight\":5,\"label\":\"SF\"},{\"lat\":40.71,\"lng\":-74.01,\"weight\":3,\"label\":\"NYC\"}]") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+fn timeline_company_events() -> Result(json, ErrorCode) requires(public) {
+    return match json_parse("[{\"ts\":1700000000,\"label\":\"Q1 close\",\"detail\":\"Books closed\"},{\"ts\":1700003600,\"label\":\"Audit start\",\"detail\":\"External audit kicked off\"}]") {
+        Ok(j) => Ok(j),
+        Err(e) => Err(Malformed(e)),
+    }
+}
+
+dashboard {
+    tile "Open POs" -> stat_total_purchase_order
+    tile "Total Spend" -> stat_total_spend
+    chart "By Status" -> chart_purchase_orders_by_status
+    visual "Vendor Network" -> graph_vendor_network {
+        render: "graph"
+    }
+    visual "Shipment Heatmap" -> heatmap_shipment_density {
+        render: "heatmap"
+    }
+    visual "Company Timeline" -> timeline_company_events {
+        render: "timeline"
+    }
+}
+
+// ---- Workflow queue ----------------------------------------------------
+fn log_submitted(instance_id: i64) -> unit {
+    print("approval", instance_id, "submitted")
+}
+
+fn log_approved(instance_id: i64) -> unit {
+    print("approval", instance_id, "approved")
+}
+
+fn log_rejected(instance_id: i64) -> unit {
+    print("approval", instance_id, "rejected")
+}
+
+workflow Approval {
+    data {}
+
+    state Draft {
+        on_entry {
+            log_submitted(instance_id)
+        }
+        on Submit -> Pending
+    }
+
+    state Pending {
+        owner: role("manager")
+        on Approve -> Approved
+        on Reject -> Rejected
+    }
+
+    state Approved terminal {
+        on_entry {
+            log_approved(instance_id)
+        }
+    }
+
+    state Rejected terminal {
+        on_entry {
+            log_rejected(instance_id)
+        }
+    }
+}
+
+fn advance_approval_now(identity: VerifiedIdentity, instance_id: i64, event: ApprovalEvent) -> Result(bool, WorkflowActionError) {
+    return match json_parse("{}") {
+        Ok(payload) => advance_approval(identity, instance_id, event, payload),
+        Err(e) => Err(NoSuchTransition()),
+    }
+}
+
+// ---- Landing pages ------------------------------------------------------
+struct AdminHome {
+    id: i64,
+}
+
+struct ManagerHome {
+    id: i64,
+}
+
+struct UserHome {
+    id: i64,
+}
+
+screen AdminHome {
+    title: "Admin Home"
+}
+
+screen ManagerHome {
+    title: "Manager Home"
+}
+
+screen UserHome {
+    title: "Home"
+}
+
+landing {
+    role("admin") -> AdminHome
+    role("manager") -> ManagerHome
+    default -> UserHome
+}
+
+// ---- main: a tiny compiled scenario proving the workflow runs ----------
+fn main() {
+    let identity: VerifiedIdentity = VerifiedIdentity("manager-1", "https://mock-idp.local", "ui-showcase", 9999999999, 0, "{\"roles\":[\"manager\"]}")
+
+    let instance_id: i64 = match start_approval(None(), ApprovalData()) {
+        Ok(id) => id,
+        Err(e) => -1,
+    }
+    print(instance_id) // 1
+
+    let submitted: bool = match advance_approval_now(identity, instance_id, Submit()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    print(submitted) // true
+
+    let approved: bool = match advance_approval_now(identity, instance_id, Approve()) {
+        Err(e) => false,
+        Ok(v) => v,
+    }
+    print(approved) // true
+}

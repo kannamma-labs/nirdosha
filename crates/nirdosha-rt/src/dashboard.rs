@@ -4,7 +4,8 @@
 //! is a plain server-rendered page, refreshed via `<meta
 //! http-equiv="refresh">` when `refresh_seconds` is set.
 
-use crate::web::{html_escape, page_shell};
+use crate::theme::themed_page_shell;
+use crate::web::html_escape;
 use serde_json::Value;
 
 /// A `Metric`/stat function may return `i64` or `f64` — this trait
@@ -67,7 +68,7 @@ pub fn render_dashboard_html(title: &str, refresh_seconds: Option<u64>, widgets:
     for widget in widgets {
         body.push_str(&render_widget_html(widget));
     }
-    page_shell(title, &refresh_meta, &body)
+    themed_page_shell(title, &refresh_meta, &body)
 }
 
 fn render_widget_html(widget: &Value) -> String {
@@ -81,8 +82,8 @@ fn render_widget_html(widget: &Value) -> String {
                 None => String::new(),
             };
             format!(
-                "<div class=\"widget metric{}\"><div class=\"label\">{}</div><div class=\"value\">{value}</div>{target_line}</div>",
-                if alert { " alert" } else { "" },
+                "<div class=\"nir-metric{}\"><div class=\"label\">{}</div><div class=\"value\">{value}</div>{target_line}</div>",
+                if alert { " important" } else { "" },
                 html_escape(label),
             )
         }
@@ -94,7 +95,7 @@ fn render_widget_html(widget: &Value) -> String {
                 "line" => render_line_chart(&data),
                 _ => render_bar_chart(&data),
             };
-            format!("<div class=\"widget chart\"><div class=\"label\">{}</div>{svg}</div>", html_escape(label))
+            format!("<div class=\"nir-chart\"><div class=\"label\">{}</div>{svg}</div>", html_escape(label))
         }
         _ => String::new(),
     }
@@ -130,7 +131,7 @@ pub fn render_bar_chart(data: &[Value]) -> String {
         let x = GAP + i as f64 * (BAR_WIDTH + GAP);
         let y = CHART_HEIGHT - bar_height;
         svg.push_str(&format!(
-            "<rect x=\"{x}\" y=\"{y}\" width=\"{BAR_WIDTH}\" height=\"{bar_height}\" fill=\"#4a90d9\"/>\
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{BAR_WIDTH}\" height=\"{bar_height}\" fill=\"var(--nir-primary)\"/>\
              <text x=\"{}\" y=\"{}\" font-size=\"10\" text-anchor=\"middle\">{}</text>",
             x + BAR_WIDTH / 2.0,
             CHART_HEIGHT + 14.0,
@@ -167,7 +168,7 @@ pub fn render_line_chart(data: &[Value]) -> String {
         .collect();
     format!(
         "<svg width=\"320\" height=\"{}\" xmlns=\"http://www.w3.org/2000/svg\">\
-         <polyline points=\"{}\" fill=\"none\" stroke=\"#4a90d9\" stroke-width=\"2\"/>{labels}</svg>",
+         <polyline points=\"{}\" fill=\"none\" stroke=\"var(--nir-primary)\" stroke-width=\"2\"/>{labels}</svg>",
         CHART_HEIGHT + 20.0,
         coords.join(" "),
     )

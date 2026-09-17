@@ -39,6 +39,8 @@ pub mod role;
 pub mod board;
 pub mod feed;
 pub mod screens;
+pub mod showcase_screens;
+pub mod theme;
 pub mod web;
 pub mod wizard;
 
@@ -47,6 +49,7 @@ pub use policy::{crud_forbidden, requires_encryption, Policy};
 pub use resource::{acquire, release, Resource};
 pub use role::{Auth, AuthError, Role, RoleProof};
 pub use web::{html_escape, page_shell, NavLink, PathParams, Request, Response, Router};
+pub use theme::{load as load_theme, themed_page_shell, themed_page_shell_ex, Theme};
 
 /// Declare your application's role vocabulary. Invoke exactly once, at
 /// crate root. Each entry declares a marker type plus its wire name;

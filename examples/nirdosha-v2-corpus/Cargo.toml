@@ -300,3 +300,7 @@ path = "src/fintech_canon/12_credit_limit_not_exceeded.nir"
 name = "v2_fintech_13_masked_account_pii"
 path = "src/fintech_canon/13_masked_account_pii.nir"
 
+[[bin]]
+name = "v2_58_ui_showcase"
+path = "src/58_ui_showcase.nir"
+

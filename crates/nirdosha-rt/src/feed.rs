@@ -83,18 +83,18 @@ pub fn feed_html(title: &str, refresh_seconds: Option<u64>, action: &str, post_f
             for f in post_fields {
                 fields.push_str(&format!("<span>{}</span> ", html_escape(&value_display(&m[f.name]))));
             }
-            items.push_str(&format!("<p class=\"feed-item\">{fields}</p>"));
+            items.push_str(&format!("<div class=\"nir-card\" style=\"margin:0.5rem 0\"><p class=\"feed-item\">{fields}</p></div>"));
         }
     }
     let mut inputs = String::new();
     for f in post_fields {
         inputs.push_str(&format!(
-            "<input type=\"{}\" name=\"{}\" placeholder=\"{}\">",
+            "<input type=\"{}\" class=\"nir-input\" name=\"{}\" placeholder=\"{}\">",
             f.input_type, f.name, html_escape(f.name),
         ));
     }
     let body = format!(
-        "<form method=\"post\" action=\"{action}\">{inputs}<button type=\"submit\">Post</button></form><div class=\"feed\">{items}</div>",
+        "<form method=\"post\" action=\"{action}\">{inputs}<button type=\"submit\" class=\"nir-btn\">Post</button></form><div class=\"feed\">{items}</div>",
     );
     page_shell(title, &refresh_meta, &body)
 }

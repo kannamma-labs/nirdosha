@@ -1,0 +1,827 @@
+//! v2 UI showcase -- one program that exercises every declarative
+//! screen type the Nirdosha runtime can generate today, encoded as
+//! the v2 Rust dialect with `nirdosha:*` comment claims.
+//!
+//! Screens demonstrated:
+//!   * `crud_screens!` -- List / Detail / Create-Form / Edit-Form / Delete
+//!   * `categorical_actions!` -- role-gated state transitions on one field
+//!   * `dashboard!` -- metric tiles and an inline-SVG bar chart
+//!   * `nirdosha:screen` + `nirdosha:layout` -- custom field labels,
+//!     validation, badges, countdowns, searchable selects, row/column/
+//!     group/tabs/timeline arrangement
+//!   * `nirdosha:workspace` -- composite multi-panel screen (table,
+//!     graph, timeline)
+//!   * `nirdosha:visual` -- dashboard graph/heatmap/timeline visuals
+//!   * `nirdosha:nav` -- primary-nav grouping into modules
+//!   * `nirdosha:workflow` -- generated workflow queue with state stepper
+//!   * `nirdosha:field` -- field-level masking
+//!   * `nirdosha:validate` + `nirdosha:contract` -- Hoare contracts,
+//!     role gating, NFRs, and effect claims.
+//!
+//! Theme tokens live in `src/token.js`; override with
+//! NIRDOSHA_THEME=/path/to/token.js.
+
+#![allow(dead_code)]
+
+use nirdosha_rt::prelude::SharedTable;
+use nirdosha_rt::showcase_screens::{
+    LandingRule, LayoutAction, LayoutField, LayoutNode, TimelineEvent, WorkspacePanel,
+    WorkflowInstance, render_custom_screen, render_landing, render_visual_page,
+    render_workflow_queue, render_workspace,
+};
+use nirdosha_rt::{Request, Response, RoleProof, Router};
+use nirdosha_v2::{
+    auth_from_identity, identity_with_roles, json_parse, mask_unless, new_instance_id,
+    oidc_validate_token, VerifiedIdentity, WorkflowActionError, Json,
+};
+use serde_json::Value as JsonValue;
+
+nirdosha_rt::roles! {
+    Admin = "admin";
+    Approver = "approver";
+    ComplianceOfficer = "compliance_officer";
+    Manager = "manager";
+    Logistics = "logistics";
+    Auditor = "auditor";
+    RiskManager = "risk_manager";
+    HrStaff = "hr_staff";
+}
+
+const ISSUER: &str = "https://mock-idp.local";
+const AUDIENCE: &str = "ui-showcase";
+const JWKS: &str = r#"{"keys":[{"kid":"key1","kty":"oct","k":"bXktc2VjcmV0LWtleQ"}]}"#;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    MalformedListing,
+    MalformedVisual,
+}
+
+// ---------------------------------------------------------------------------
+// 1. Product: macro-generated CRUD screen + categorical actions + dashboard
+// ---------------------------------------------------------------------------
+
+/// nirdosha:nav {"module":"Catalog"}
+/// nirdosha:field {"struct":"Product","field":"cost_cents","requires":{"role":"admin"}}
+#[derive(Clone, Default, serde::Serialize)]
+struct Product {
+    id: i64,
+    name: String,
+    price_cents: i64,
+    cost_cents: i64,
+    is_approved: bool,
+}
+
+fn product_store() -> &'static SharedTable<i64, Product> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, Product>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_product_screens,
+    entity: Product,
+    store: product_store,
+    path: "/products",
+    fields: [ name: String, price_cents: i64, cost_cents: i64 ],
+    create: requires role "admin",
+    read: public,
+    update: requires role "admin",
+    delete: requires role "admin",
+}
+
+nirdosha_rt::categorical_actions! {
+    entity: Product,
+    store: product_store,
+    field: is_approved: bool,
+    actions {
+        true  => approve_product    requires role "approver",
+        false => disapprove_product requires role "compliance_officer",
+    }
+}
+
+fn stat_total_products() -> i64 {
+    product_store().len() as i64
+}
+
+fn stat_approved_products() -> i64 {
+    product_store()
+        .snapshot()
+        .iter()
+        .filter(|(_, p)| p.is_approved)
+        .count() as i64
+}
+
+fn chart_products_by_status() -> String {
+    let approved = product_store()
+        .snapshot()
+        .iter()
+        .filter(|(_, p)| p.is_approved)
+        .count();
+    let pending = product_store().len() - approved;
+    serde_json::json!([
+        {"label": "Approved", "value": approved},
+        {"label": "Pending", "value": pending},
+    ])
+    .to_string()
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_products_dashboard,
+    path: "/dashboard",
+    title: "Product Overview",
+    refresh_seconds: 30,
+    widgets {
+        Metric { label: "Total Products", fn: stat_total_products },
+        Metric { label: "Approved Products", fn: stat_approved_products },
+        Chart  { label: "By Status", fn: chart_products_by_status, mark: bar },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Vendor: claim-based screen with validation, custom action, nav grouping
+// ---------------------------------------------------------------------------
+
+/// nirdosha:nav {"module":"Master Data"}
+/// nirdosha:screen {"for":"Vendor","title":"Supplier Directory","fields":{"name":{"label":"Supplier Name","pattern":"^[A-Za-z0-9 ]+$"},"email":{"label":"Contact Email","format":"email"},"risk_score":{"label":"Risk Score","min":0,"max":10}},"actions":[{"label":"Audit","fn":"audit_vendor","style":"outlined","confirm":"Run a compliance audit for this supplier?"}]}
+/// nirdosha:field {"struct":"Vendor","field":"risk_score","requires":{"role":"admin"}}
+#[derive(Clone, Default, serde::Serialize)]
+struct Vendor {
+    id: i64,
+    name: String,
+    email: String,
+    risk_score: i64,
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn list_vendor() -> Result<Json, ErrorCode> {
+    match json_parse("[{\"id\":1,\"name\":\"Acme Inc\",\"email\":\"acme@example.com\",\"risk_score\":2}]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn get_vendor(_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("{\"id\":1,\"name\":\"Acme Inc\",\"email\":\"acme@example.com\",\"risk_score\":2}") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"))]
+fn create_vendor(_v: Vendor) -> Result<i64, ErrorCode> {
+    Ok(1)
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"))]
+fn update_vendor(v: Vendor) -> Result<i64, ErrorCode> {
+    Ok(v.id)
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"))]
+fn delete_vendor(_id: i64) -> Result<bool, ErrorCode> {
+    Ok(true)
+}
+
+#[nirdosha_rt::contract(requires(role = "auditor"))]
+fn audit_vendor(id: i64) -> Result<i64, ErrorCode> {
+    Ok(id)
+}
+
+// ---------------------------------------------------------------------------
+// 3. PurchaseOrder: screen + layout + workspace + visuals
+// ---------------------------------------------------------------------------
+
+/// nirdosha:nav {"module":"Operations"}
+#[derive(Clone, Default, serde::Serialize)]
+struct PurchaseOrder {
+    id: i64,
+    vendor_id: i64,
+    amount_cents: i64,
+    status: String,
+    deadline: i64,
+    internal_note: String,
+}
+
+/// nirdosha:screen {"for":"PurchaseOrder","title":"Purchase Orders","fields":{"vendor_id":{"label":"Supplier","render":"searchable_select","source":"Vendor"},"amount_cents":{"label":"Amount (cents)","min":0},"status":{"render":"badge"},"deadline":{"label":"SLA Deadline","render":"countdown"}},"actions":[{"label":"Simulate Impact","fn":"simulate_purchase_order","style":"outlined","show_result":true}]}
+/// nirdosha:field {"struct":"PurchaseOrder","field":"internal_note","requires":{"role":"admin"}}
+/// nirdosha:layout {"tree":{"row":[{"column":[{"group":"Header","fields":["vendor_id","amount_cents","status","deadline"]},{"divider":true},{"group":"Internal","fields":["internal_note"]}]},{"column":[{"tabs":[{"tab":"Actions","action":"Simulate Impact"},{"tab":"History","timeline":{"source":"list_po_timeline"}}]}]}]}}
+#[allow(dead_code)]
+struct PurchaseOrderScreenMarker;
+
+/// nirdosha:workspace {"name":"PurchaseOrderWorkspace","title":"PO Investigation","subject":"PurchaseOrder","panels":[{"label":"Shipments","source":"list_shipment_for_po","actions":[{"label":"Add Shipment","fn":"add_shipment_for_po","style":"filled"}]},{"label":"Network","source":"graph_relationships_for_po","render":"graph"},{"label":"History","source":"list_po_timeline","render":"timeline"}]}
+#[allow(dead_code)]
+struct PurchaseOrderWorkspaceMarker;
+
+/// nirdosha:contract {"effects":["pure"]}
+fn list_purchase_order() -> Result<Json, ErrorCode> {
+    match json_parse("[{\"id\":1,\"vendor_id\":1,\"amount_cents\":250000,\"status\":\"Pending\",\"deadline\":1800000000,\"internal_note\":\"urgent\"}]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn get_purchase_order(_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("{\"id\":1,\"vendor_id\":1,\"amount_cents\":250000,\"status\":\"Pending\",\"deadline\":1800000000,\"internal_note\":\"urgent\"}") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"))]
+fn create_purchase_order(_p: PurchaseOrder) -> Result<i64, ErrorCode> {
+    Ok(3)
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"))]
+fn update_purchase_order(p: PurchaseOrder) -> Result<i64, ErrorCode> {
+    Ok(p.id)
+}
+
+#[nirdosha_rt::contract(requires(role = "admin"))]
+fn delete_purchase_order(_id: i64) -> Result<bool, ErrorCode> {
+    Ok(true)
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn simulate_purchase_order(_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("{\"would_affect\":1,\"projected_spend_cents\":250000}") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+#[allow(unused_variables)]
+fn list_shipment_for_po(_purchase_order_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("[{\"id\":1,\"purchase_order_id\":1,\"carrier\":\"FastFreight\",\"tracking\":\"FF-12345\"}]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+#[allow(unused_variables)]
+fn list_po_timeline(_purchase_order_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("[{\"ts\":1700000000,\"label\":\"Created\",\"detail\":\"PO raised by alice\"},{\"ts\":1700003600,\"label\":\"Approved\",\"detail\":\"Approved by manager-1\"}]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+#[allow(unused_variables)]
+fn graph_relationships_for_po(_purchase_order_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("{\"nodes\":[{\"id\":\"v1\",\"label\":\"Acme Inc\",\"risk\":2},{\"id\":\"po1\",\"label\":\"PO 1\",\"risk\":1}],\"edges\":[{\"source\":\"v1\",\"target\":\"po1\",\"weight\":3}]}") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedVisual),
+    }
+}
+
+#[nirdosha_rt::contract(requires(role = "logistics"))]
+#[allow(unused_variables)]
+fn add_shipment_for_po(_purchase_order_id: i64, _carrier: String) -> Result<i64, ErrorCode> {
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// 4. Dashboard visuals (graph / heatmap / timeline)
+// ---------------------------------------------------------------------------
+
+/// nirdosha:visual {"label":"Vendor Network","render":"graph"}
+/// nirdosha:contract {"effects":["pure"]}
+fn graph_vendor_network() -> Result<Json, ErrorCode> {
+    let text = r#"{"nodes": [{"id": "acme", "label": "Acme Inc", "risk": 2}, {"id": "globex", "label": "Globex", "risk": 4}, {"id": "us", "label": "Our Org", "risk": 0}], "edges": [{"source": "us", "target": "acme", "weight": 5}, {"source": "us", "target": "globex", "weight": 2}]}"#;
+    match json_parse(text) {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedVisual),
+    }
+}
+
+/// nirdosha:visual {"label":"Shipment Heatmap","render":"heatmap"}
+/// nirdosha:contract {"effects":["pure"]}
+fn heatmap_shipment_density() -> Result<Json, ErrorCode> {
+    let text = r#"[{"lat": 37.77, "lng": -122.41, "weight": 5, "label": "SF"}, {"lat": 40.71, "lng": -74.01, "weight": 3, "label": "NYC"}]"#;
+    match json_parse(text) {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedVisual),
+    }
+}
+
+/// nirdosha:visual {"label":"Company Timeline","render":"timeline"}
+/// nirdosha:contract {"effects":["pure"]}
+fn timeline_company_events() -> Result<Json, ErrorCode> {
+    let text = r#"[{"ts": 1700000000, "label": "Q1 close", "detail": "Books closed"}, {"ts": 1700003600, "label": "Audit start", "detail": "External audit kicked off"}]"#;
+    match json_parse(text) {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedVisual),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Workflow: generated queue with state stepper
+// ---------------------------------------------------------------------------
+
+/// nirdosha:workflow {"name":"Approval","data":{"struct":"ApprovalData","fields":{"amount":"i64"}},"states":{"Draft":{"transitions":{"Submit":"Pending"}},"Pending":{"owner":{"role":"manager"},"transitions":{"Approve":"Approved","Reject":"Rejected"}},"Approved":{"terminal":true,"on_entry":"log_approved"},"Rejected":{"terminal":true,"on_entry":"log_rejected"}}}
+#[derive(Clone)]
+struct ApprovalData {
+    amount: i64,
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalEvent {
+    Submit,
+    Approve,
+    Reject,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApprovalState {
+    Draft,
+    Pending,
+    Approved,
+    Rejected,
+}
+
+fn approval_instances() -> &'static SharedTable<i64, (ApprovalData, ApprovalState)> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, (ApprovalData, ApprovalState)>> =
+        std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+fn start_approval(_identity: Option<VerifiedIdentity>, data: ApprovalData) -> Result<i64, WorkflowActionError> {
+    let id = new_instance_id();
+    approval_instances().insert(id, (data, ApprovalState::Draft));
+    Ok(id)
+}
+
+fn advance_approval(
+    _identity: &VerifiedIdentity,
+    instance_id: i64,
+    event: ApprovalEvent,
+    _payload: Json,
+) -> Result<bool, WorkflowActionError> {
+    approval_instances().update(&instance_id, |entry| {
+        let Some((_data, state)) = entry else {
+            return Err(WorkflowActionError::NoSuchTransition);
+        };
+        let (new_state, approved) = match (*state, event) {
+            (ApprovalState::Draft, ApprovalEvent::Submit) => (ApprovalState::Pending, None),
+            (ApprovalState::Pending, ApprovalEvent::Approve) => (ApprovalState::Approved, Some(true)),
+            (ApprovalState::Pending, ApprovalEvent::Reject) => (ApprovalState::Rejected, Some(false)),
+            _ => return Err(WorkflowActionError::NoSuchTransition),
+        };
+        *state = new_state;
+        Ok(approved.unwrap_or(true))
+    })
+}
+
+fn log_approved(instance_id: i64) {
+    println!("approval {instance_id} approved");
+}
+
+fn log_rejected(instance_id: i64) {
+    println!("approval {instance_id} rejected");
+}
+
+fn submit_approval(amount: i64) -> Result<i64, WorkflowActionError> {
+    start_approval(None, ApprovalData { amount })
+}
+
+fn decide_approval(
+    identity: &VerifiedIdentity,
+    instance_id: i64,
+    event: ApprovalEvent,
+) -> Result<bool, WorkflowActionError> {
+    match json_parse("{}") {
+        Ok(payload) => advance_approval(identity, instance_id, event, payload),
+        Err(_e) => Err(WorkflowActionError::NoSuchTransition),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Field-level masking + validate contract
+// ---------------------------------------------------------------------------
+
+/// nirdosha:field {"struct":"Employee","field":"salary","requires":{"role":"admin"}}
+struct Employee {
+    name: String,
+    department: String,
+    salary: f64,
+}
+
+/// nirdosha:validate {"pre":["years >= 0"],"post":["result >= 0","result <= 20"]}
+/// nirdosha:contract {"effects":["pure"]}
+fn tenure_bonus_pct(years: i64) -> i64 {
+    if years >= 10 {
+        return 20;
+    }
+    if years >= 5 {
+        return 10;
+    }
+    0
+}
+
+#[nirdosha_rt::contract(
+    effects(pure),
+    requires(role = "hr_staff"),
+    nfr(latency_ms = 50, concurrency_max = 1000)
+)]
+fn get_employee(
+    admin_proof: Option<&RoleProof<nirdosha_roles::Admin>>,
+    name: String,
+    department: String,
+    salary: f64,
+) -> Employee {
+    Employee {
+        name,
+        department,
+        salary: mask_unless(admin_proof, salary),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Router wiring (screens exist; no need to serve in this demo)
+// ---------------------------------------------------------------------------
+
+fn auth_for(req: &Request) -> nirdosha_rt::Auth {
+    match req.header("authorization").and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(token) => match oidc_validate_token(token, ISSUER, AUDIENCE, JWKS) {
+            Ok(identity) => auth_from_identity(&identity),
+            Err(_) => nirdosha_rt::Auth::login("anonymous", &[]),
+        },
+        None => nirdosha_rt::Auth::login("anonymous", &[]),
+    }
+}
+
+fn verify_login(username: &str, password: &str) -> Option<Vec<String>> {
+    match (username, password) {
+        ("alice", "admin123") => Some(vec!["admin".to_string(), "approver".to_string(), "manager".to_string()]),
+        ("carol", "approve123") => Some(vec!["approver".to_string()]),
+        ("dave", "comply123") => Some(vec!["compliance_officer".to_string()]),
+        ("mallory", "guest123") => Some(vec![]),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Route helpers for every non-CRUD/non-dashboard screen archetype.
+// These are the runtime side of the `nirdosha:screen`/`layout`/`workspace`/
+// `workflow`/`visual`/`landing` comment claims in this file.
+// ---------------------------------------------------------------------------
+
+fn parse_json(j: &Json) -> Result<JsonValue, String> {
+    serde_json::from_str(j).map_err(|e| e.to_string())
+}
+
+fn verified_identity_from_auth(auth: &nirdosha_rt::Auth) -> VerifiedIdentity {
+    let mut roles = Vec::new();
+    for r in ["admin", "manager", "approver", "compliance_officer", "auditor", "logistics", "risk_manager", "hr_staff"] {
+        if auth.has_role(r) {
+            roles.push(r.to_string());
+        }
+    }
+    VerifiedIdentity { subject: auth.user().to_string(), roles }
+}
+
+fn landing_handler(req: &Request, _params: &nirdosha_rt::PathParams) -> Response {
+    let auth = auth_for(req);
+    let roles: Vec<String> = ["admin", "manager", "approver", "compliance_officer", "auditor", "logistics", "risk_manager", "hr_staff"]
+        .iter()
+        .filter(|r| auth.has_role(r))
+        .map(|r| r.to_string())
+        .collect();
+    let rules = vec![
+        LandingRule { label: "Admin Home".into(), href: "/admin_home".into(), required_role: Some("admin".into()) },
+        LandingRule { label: "Manager Home".into(), href: "/manager_home".into(), required_role: Some("manager".into()) },
+        LandingRule { label: "Products".into(), href: "/products".into(), required_role: None },
+        LandingRule { label: "Dashboard".into(), href: "/dashboard".into(), required_role: None },
+        LandingRule { label: "Purchase Orders".into(), href: "/purchase_orders".into(), required_role: None },
+        LandingRule { label: "PO Workspace".into(), href: "/po_workspace/1".into(), required_role: None },
+        LandingRule { label: "Workflows".into(), href: "/workflows".into(), required_role: Some("manager".into()) },
+        LandingRule { label: "Visuals".into(), href: "/visuals/network".into(), required_role: None },
+    ];
+    Response::html(200, render_landing("UI Showcase", &rules, auth.user(), &roles))
+}
+
+fn vendor_screen_handler(_req: &Request, _params: &nirdosha_rt::PathParams) -> Response {
+    let j = match list_vendor() {
+        Ok(j) => j,
+        Err(_) => return Response::bad_request("vendor data unavailable"),
+    };
+    let rows = match parse_json(&j).and_then(|v| v.as_array().cloned().ok_or("not array".into())) {
+        Ok(r) => r,
+        Err(_) => return Response::bad_request("bad vendor json"),
+    };
+    let row = rows.first().cloned().unwrap_or(serde_json::json!({"id":0,"name":"","email":"","risk_score":0}));
+    let fields = vec![
+        LayoutField { name: "name".into(), label: "Supplier Name".into(), value: row["name"].as_str().unwrap_or("").into() },
+        LayoutField { name: "email".into(), label: "Contact Email".into(), value: row["email"].as_str().unwrap_or("").into() },
+        LayoutField { name: "risk_score".into(), label: "Risk Score".into(), value: row["risk_score"].as_i64().unwrap_or(0).to_string() },
+    ];
+    let actions = vec![
+        LayoutAction { label: "Audit".into(), href: "#".into(), style: "outlined".into() },
+    ];
+    let layout = LayoutNode::Column(vec![
+        LayoutNode::Group { title: "Supplier Details".into(), fields: vec!["name".into(), "email".into(), "risk_score".into()] },
+    ]);
+    Response::html(200, render_custom_screen("Supplier Directory", &fields, &actions, &layout, &row))
+}
+
+fn purchase_order_screen_handler(_req: &Request, _params: &nirdosha_rt::PathParams) -> Response {
+    let j = match get_purchase_order(1) {
+        Ok(j) => j,
+        Err(_) => return Response::bad_request("po data unavailable"),
+    };
+    let row = match parse_json(&j) {
+        Ok(v) => v,
+        Err(_) => return Response::bad_request("bad po json"),
+    };
+    let status_text = row["status"].as_str().unwrap_or("").to_string();
+    let deadline = row["deadline"].as_i64().unwrap_or(0);
+    let fields = vec![
+        LayoutField { name: "vendor_id".into(), label: "Supplier".into(), value: row["vendor_id"].as_i64().unwrap_or(0).to_string() },
+        LayoutField { name: "amount_cents".into(), label: "Amount (cents)".into(), value: row["amount_cents"].as_i64().unwrap_or(0).to_string() },
+        LayoutField { name: "status".into(), label: "Status".into(), value: status_text.clone() },
+        LayoutField { name: "deadline".into(), label: "SLA Deadline".into(), value: deadline.to_string() },
+        LayoutField { name: "internal_note".into(), label: "Internal Note".into(), value: row["internal_note"].as_str().unwrap_or("").into() },
+    ];
+    let actions = vec![
+        LayoutAction { label: "Simulate Impact".into(), href: "#".into(), style: "outlined".into() },
+    ];
+    let timeline = match list_po_timeline(1) {
+        Ok(j) => parse_json(&j).unwrap_or(serde_json::json!([])),
+        Err(_) => serde_json::json!([]),
+    };
+    let events: Vec<TimelineEvent> = timeline.as_array().cloned().unwrap_or_default().iter().map(|e| TimelineEvent {
+        ts: e["ts"].as_i64().unwrap_or(0),
+        label: e["label"].as_str().unwrap_or("").into(),
+        detail: e["detail"].as_str().unwrap_or("").into(),
+    }).collect();
+    let layout = LayoutNode::Row(vec![
+        LayoutNode::Column(vec![
+            LayoutNode::Group { title: "Header".into(), fields: vec!["vendor_id".into(), "amount_cents".into(), "status".into(), "deadline".into()] },
+            LayoutNode::Divider,
+            LayoutNode::Group { title: "Internal".into(), fields: vec!["internal_note".into()] },
+        ]),
+        LayoutNode::Column(vec![
+            LayoutNode::Tabs(vec![
+                ("Actions".into(), LayoutNode::Column(vec![])),
+                ("History".into(), LayoutNode::Timeline { source_label: "PO History".into(), events }),
+            ]),
+        ]),
+    ]);
+    Response::html(200, render_custom_screen("Purchase Orders", &fields, &actions, &layout, &row))
+}
+
+fn workspace_handler(_req: &Request, params: &nirdosha_rt::PathParams) -> Response {
+    let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) {
+        Some(id) => id,
+        None => return Response::bad_request("id must be an integer"),
+    };
+    let po = match get_purchase_order(id).and_then(|j| parse_json(&j).map_err(|_| ErrorCode::MalformedListing)) {
+        Ok(v) => v,
+        Err(_) => return Response::bad_request("po not found"),
+    };
+    let subject = vec![
+        LayoutField { name: "id".into(), label: "ID".into(), value: po["id"].as_i64().unwrap_or(0).to_string() },
+        LayoutField { name: "vendor_id".into(), label: "Supplier".into(), value: po["vendor_id"].as_i64().unwrap_or(0).to_string() },
+        LayoutField { name: "amount_cents".into(), label: "Amount".into(), value: po["amount_cents"].as_i64().unwrap_or(0).to_string() },
+        LayoutField { name: "status".into(), label: "Status".into(), value: po["status"].as_str().unwrap_or("").into() },
+    ];
+    let shipments = match list_shipment_for_po(id) {
+        Ok(j) => parse_json(&j).unwrap_or(serde_json::json!([])),
+        Err(_) => serde_json::json!([]),
+    };
+    let network = match graph_relationships_for_po(id) {
+        Ok(j) => parse_json(&j).unwrap_or(serde_json::json!({"nodes":[],"edges":[]})),
+        Err(_) => serde_json::json!({"nodes":[],"edges":[]}),
+    };
+    let history = match list_po_timeline(id) {
+        Ok(j) => parse_json(&j).unwrap_or(serde_json::json!([])),
+        Err(_) => serde_json::json!([]),
+    };
+    let panels = vec![
+        WorkspacePanel { title: "Shipments".into(), render: "table".into(), data: shipments },
+        WorkspacePanel { title: "Network".into(), render: "graph".into(), data: network },
+        WorkspacePanel { title: "History".into(), render: "timeline".into(), data: history },
+    ];
+    Response::html(200, render_workspace("PO Investigation", &subject, &panels))
+}
+
+fn workflow_queue_handler(req: &Request, _params: &nirdosha_rt::PathParams) -> Response {
+    let auth = auth_for(req);
+    if !auth.has_role("manager") {
+        return Response::forbidden();
+    }
+    let states = vec!["Draft".into(), "Pending".into(), "Approved".into(), "Rejected".into()];
+    let mut instances = Vec::new();
+    approval_instances().snapshot().into_iter().for_each(|(id, (data, state))| {
+        let state_name = match state {
+            ApprovalState::Draft => "Draft",
+            ApprovalState::Pending => "Pending",
+            ApprovalState::Approved => "Approved",
+            ApprovalState::Rejected => "Rejected",
+        };
+        instances.push(WorkflowInstance {
+            id,
+            state: state_name.into(),
+            data_label: format!("amount: {}", data.amount),
+        });
+    });
+    // Sort so stable ordering in screenshots
+    instances.sort_by(|a, b| a.id.cmp(&b.id));
+    let actions = vec![("Submit".into(), "Submit".into()), ("Approve".into(), "Approve".into()), ("Reject".into(), "Reject".into())];
+    Response::html(200, render_workflow_queue("Workflows", &states, &instances, &actions))
+}
+
+fn workflow_advance_handler(req: &Request, params: &nirdosha_rt::PathParams) -> Response {
+    let auth = auth_for(req);
+    if !auth.has_role("manager") {
+        return Response::forbidden();
+    }
+    let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) {
+        Some(id) => id,
+        None => return Response::bad_request("id must be an integer"),
+    };
+    let form = req.form_or_json();
+    let event = match form.get("event").map(String::as_str) {
+        Some("Submit") => ApprovalEvent::Submit,
+        Some("Approve") => ApprovalEvent::Approve,
+        Some("Reject") => ApprovalEvent::Reject,
+        _ => return Response::bad_request("event required"),
+    };
+    let identity = verified_identity_from_auth(&auth);
+    match decide_approval(&identity, id, event) {
+        Ok(_) => Response::redirect("/workflows"),
+        Err(_) => Response::bad_request("advance failed"),
+    }
+}
+
+fn visual_handler(kind: &str, title: &str, data_fn: fn() -> Result<Json, ErrorCode>) -> Response {
+    let j = match data_fn() {
+        Ok(j) => j,
+        Err(_) => return Response::bad_request("visual data unavailable"),
+    };
+    let data = match parse_json(&j) {
+        Ok(v) => v,
+        Err(_) => return Response::bad_request("bad visual json"),
+    };
+    Response::html(200, render_visual_page(title, kind, &data))
+}
+
+fn main() {
+    // 1. validate contract
+    println!("{}", tenure_bonus_pct(7)); // 10
+
+    // 2. workflow: drive one instance to Approved to exercise state machine
+    let manager_identity = identity_with_roles("manager-1", "manager");
+    let instance_id = match submit_approval(250000) {
+        Ok(id) => id,
+        Err(_e) => -1,
+    };
+    println!("{instance_id}"); // 1
+
+    let _ = decide_approval(&manager_identity, instance_id, ApprovalEvent::Submit);
+    let _ = decide_approval(&manager_identity, instance_id, ApprovalEvent::Approve);
+
+    // Seed additional workflow instances so the queue has rows in varied states.
+    if let Ok(id2) = submit_approval(100000) {
+        let _ = decide_approval(&manager_identity, id2, ApprovalEvent::Submit);
+    }
+    if let Ok(id3) = submit_approval(50000) {
+        let _ = decide_approval(&manager_identity, id3, ApprovalEvent::Submit);
+        let _ = decide_approval(&manager_identity, id3, ApprovalEvent::Reject);
+    }
+
+    // 3. field masking
+    let admin_identity = identity_with_roles("alice", "hr_staff,admin");
+    let admin_auth = auth_from_identity(&admin_identity);
+    let admin_view = match admin_auth.prove::<nirdosha_roles::HrStaff>() {
+        Err(_e) => Employee {
+            name: String::new(),
+            department: String::new(),
+            salary: -1.0,
+        },
+        Ok(hr_proof) => {
+            let admin_proof = admin_auth.prove::<nirdosha_roles::Admin>().ok();
+            get_employee(
+                &hr_proof,
+                admin_proof.as_ref(),
+                "Ada Lovelace".into(),
+                "Engineering".into(),
+                150000.0,
+            )
+        }
+    };
+    println!("{}", admin_view.salary); // 150000
+
+    let hr_identity = identity_with_roles("carol", "hr_staff");
+    let hr_auth = auth_from_identity(&hr_identity);
+    let hr_view = match hr_auth.prove::<nirdosha_roles::HrStaff>() {
+        Err(_e) => Employee {
+            name: String::new(),
+            department: String::new(),
+            salary: -2.0,
+        },
+        Ok(hr_proof) => {
+            let admin_proof = hr_auth.prove::<nirdosha_roles::Admin>().ok();
+            get_employee(
+                &hr_proof,
+                admin_proof.as_ref(),
+                "Ada Lovelace".into(),
+                "Engineering".into(),
+                150000.0,
+            )
+        }
+    };
+    println!("{}", hr_view.salary); // 0
+
+    // 4. categorical action on a seeded product
+    product_store().insert(
+        1,
+        Product {
+            id: 1,
+            name: "Widget".into(),
+            price_cents: 999,
+            cost_cents: 300,
+            is_approved: false,
+        },
+    );
+
+    let approver_identity = identity_with_roles("carol", "approver");
+    let approver_auth = auth_from_identity(&approver_identity);
+    let product = match approver_auth.prove::<nirdosha_roles::Approver>() {
+        Err(_e) => None,
+        Ok(proof) => match approve_product(&proof, 1) {
+            Ok(p) => Some(p),
+            Err(_e) => None,
+        },
+    };
+    match product {
+        Some(p) => println!("{} {}", p.name, p.is_approved), // Widget true
+        None => println!("approve failed"),
+    }
+
+    // 5. Build the router with every screen archetype wired to real routes.
+    // Load the theme token file (embedded default if missing or unreadable).
+    nirdosha_rt::theme::load(None);
+
+    // Load theme token file (defaults to embedded modern theme if env var absent).
+    nirdosha_rt::load_theme(std::env::var("NIRDOSHA_THEME").ok().as_deref().map(std::path::Path::new));
+
+    let router = Router::new(auth_for)
+        .with_info("UI Showcase", "1.0.0")
+        .with_nav(vec![
+            nirdosha_rt::NavLink { label: "Home", href: "/" },
+            nirdosha_rt::NavLink { label: "Products", href: "/products" },
+            nirdosha_rt::NavLink { label: "Dashboard", href: "/dashboard" },
+            nirdosha_rt::NavLink { label: "Supplier", href: "/vendor" },
+            nirdosha_rt::NavLink { label: "Purchase Orders", href: "/purchase_orders" },
+            nirdosha_rt::NavLink { label: "Workspace", href: "/po_workspace/1" },
+            nirdosha_rt::NavLink { label: "Workflows", href: "/workflows" },
+            nirdosha_rt::NavLink { label: "Network", href: "/visuals/network" },
+            nirdosha_rt::NavLink { label: "Heatmap", href: "/visuals/heatmap" },
+            nirdosha_rt::NavLink { label: "Timeline", href: "/visuals/timeline" },
+        ])
+        .with_login("/login", verify_login)
+        .get("/", "Landing", landing_handler)
+        .get("/vendor", "Supplier Directory", vendor_screen_handler)
+        .get("/purchase_orders", "Purchase Orders", purchase_order_screen_handler)
+        .get("/po_workspace/{id}", "PO Investigation", workspace_handler)
+        .get("/workflows", "Workflows", workflow_queue_handler)
+        .post("/workflows/{id}/advance", "Advance workflow", workflow_advance_handler)
+        .get("/visuals/network", "Vendor Network", |_req, _params| visual_handler("graph", "Vendor Network", graph_vendor_network))
+        .get("/visuals/heatmap", "Shipment Heatmap", |_req, _params| visual_handler("heatmap", "Shipment Heatmap", heatmap_shipment_density))
+        .get("/visuals/timeline", "Company Timeline", |_req, _params| visual_handler("timeline", "Company Timeline", timeline_company_events));
+    let router = mount_product_screens(router);
+    let router = mount_products_dashboard(router);
+    let router = router
+        .post_gated::<nirdosha_roles::Approver>("/api/products/{id}/approve", "Approve a product", |_req, params, proof| {
+            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => return Response::bad_request("id must be an integer"),
+            };
+            match approve_product(proof, id) {
+                Ok(p) => Response::json(200, &serde_json::to_value(&p).unwrap()),
+                Err(e) => Response::bad_request(e),
+            }
+        })
+        .post_gated::<nirdosha_roles::ComplianceOfficer>("/api/products/{id}/disapprove", "Disapprove a product", |_req, params, proof| {
+            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => return Response::bad_request("id must be an integer"),
+            };
+            match disapprove_product(proof, id) {
+                Ok(p) => Response::json(200, &serde_json::to_value(&p).unwrap()),
+                Err(e) => Response::bad_request(e),
+            }
+        });
+
+    if std::env::var("NIRDOSHA_UI_SHOWCASE_SERVE").is_ok() {
+        router.serve(8097);
+    } else {
+        println!("screens wired (set NIRDOSHA_UI_SHOWCASE_SERVE=1 to start HTTP server)");
+    }
+}

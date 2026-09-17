@@ -1006,3 +1006,11 @@ fn fintech_masked_account_pii() {
         &["ACC-000123456", "Dana Support"],
     );
 }
+
+#[test]
+fn ui_showcase_runs_smoke_and_serves_screens() {
+    expect(
+        &run("v2_58_ui_showcase"),
+        &["10", "1", "150000", "0", "Widget true"],
+    );
+}
