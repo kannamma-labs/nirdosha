@@ -2,7 +2,7 @@
 name = "nirdosha"
 version = "0.1.0"
 edition = "2024"
-description = "A systems language designed for LLMs to write: an LL(1) grammar constrained-decodable to GBNF, no GC/data races/deadlocks/overflow, OS-process sandboxing as a language primitive."
+description = "DEPRECATED: the native `.nir` compiler. Superseded by the v2 Rust dialect (crates/cargo-nirdosha, crates/nirdosha-rt, crates/nirdosha-driver). No longer built or published by any release/Docker workflow (both retired); kept in the workspace as source (its own crate, own toolchain, no dependency relationship with v2) for reference and its still-real Z3/contract-check machinery, not as an actively shipped product."
 license = "Apache-2.0"
 repository = "https://github.com/kannamma-labs/nirdosha"
 homepage = "https://github.com/kannamma-labs/nirdosha"

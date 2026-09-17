@@ -23,6 +23,28 @@ tracks **status and sequencing** across all of them in one place, plus
 the work items that don't have a home in any existing doc yet (Track
 A, Track B, Track C below) — but the specs themselves stay put.
 
+## Hi graph authoring proposal
+
+- `[PROPOSED — NOT IMPLEMENTED]` **2026-09-17, RFC 0021: typed graph,
+  project MCP, and incremental authoring.**
+  [Design and phased acceptance criteria](../rfcs/0021-typed-hi-graph-mcp-and-incremental-authoring.md)
+  cover explicit fields/signatures/contracts/bindings, stable scoped
+  identities, revisioned node/edge/whole-graph retrieval, atomic agent
+  patches, resumable streams and a durable change feed. The emission
+  proposal uses accepted typed snapshots and custom body slots to
+  produce v2 `.nir` deterministically; no other `.nir` dialect is supported.
+  The reviewed core defines exact acceptance dependency pins, gap
+  lifecycle, per-spec schema versions, canonical hashes, replay/error
+  contracts and revocation checks. Extensions have separate scopes and
+  acceptance criteria: [0021.a](../rfcs/0021.a-workflow-authoring-graph.md)
+  for non-executable workflow authoring,
+  [0021.b](../rfcs/0021.b-approval-runtime.md) for distinct-person
+  approval/runtime/outbox enforcement, and
+  [0021.c](../rfcs/0021.c-graph-analysis.md) for checker integration.
+  These are design documents only;
+  existing graph storage, MCP tools and whole-program LLM generation
+  are unchanged. Core phases A–E and all extension stages are pending.
+
 ## V2 issue fixes
 
 - `[DONE]` **2026-09-17, GitHub #73: macro-time workflow/state-machine
@@ -875,6 +897,19 @@ source of "tools," unrelated to Track C's LLM-client work.
 soon — independent of Track B, since the interpreter path
 (`nirdosha serve`) is what will run those apps regardless of how much
 of Track B has landed.*
+
+> **Deprecation note (2026-09-17).** `crates/compiler` (the native
+> `.nir` compiler this entire track hardens for production) is now
+> deprecated in favor of the v2 Rust dialect
+> (`docs/nirdosha-rt-dialect.md`). The release/Docker infrastructure
+> this track's A2 items describe as `[DONE]`
+> (`.github/workflows/release.yml`, the `runtime` image job in
+> `.github/workflows/docker.yml`, the repo-root `Dockerfile`,
+> `ghcr.io/protobox/nirdosha-runtime`) has been retired — those files
+> no longer exist or no longer build this image. Every `[DONE]`/
+> `[PARTIAL]` entry below remains an accurate historical record of what
+> was built and verified at the time; it does not describe a currently
+> live, published artifact.
 
 - `[DONE]` **A1. `transact` durability under real failure conditions** —
   actually kill the process mid-transaction under load and confirm

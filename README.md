@@ -196,6 +196,20 @@ Full comparison in the [wiki](https://github.com/kannamma-labs/nirdosha/wiki/Nir
 <details>
 <summary><b>📦 Install (binaries, from source, or Codespaces)</b></summary>
 
+**Prebuilt binaries are no longer published.** `crates/compiler` (the
+native `.nir` compiler) is deprecated —
+`.github/workflows/release.yml` and the old installer scripts no
+longer resolve to a real release. Build from source instead, which
+needs `clang` and `z3` (`apt install clang libz3-dev` / `brew install
+llvm z3` / `pacman -S clang z3`):
+
+```sh
+cd crates/compiler
+cargo build --release
+../../target/release/nirdosha build ../../examples/syntax/hello_nir.nir -o hello && ./hello
+../../target/release/nirdosha emit-ui ../../examples/features/39_screen_ui.nir -o ui.html   # static UI derived from a struct/screen block
+```
+
 **No local toolchain at all?** Click
 [**Open in GitHub Codespaces**](https://codespaces.new/kannamma-labs/nirdosha?quickstart=1)
 — it builds the compiler for you (system Z3, ~1 min) and drops you into a
@@ -218,37 +232,7 @@ lines, each by an LLM with no prior Nirdosha exposure. See
 [LLM Integration](https://github.com/kannamma-labs/nirdosha/wiki/LLM-Integration)
 for the full mechanism and evidence.
 
-**Install and run it yourself — no compiler needed, prebuilt binaries are
-published on every [release](https://github.com/kannamma-labs/nirdosha/releases):**
-
-```sh
-# macOS / Linux — installer script, auto-detects your platform
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/kannamma-labs/nirdosha/main/scripts/install.sh | sh
-
-nirdosha build examples/syntax/hello_nir.nir -o hello && ./hello
-nirdosha emit-ui examples/features/39_screen_ui.nir -o ui.html   # static UI derived from a struct/screen block
-```
-
-```powershell
-# Windows — PowerShell
-irm https://raw.githubusercontent.com/kannamma-labs/nirdosha/main/scripts/install.ps1 | iex
-```
-
-Prefer not to pipe a script? `.../releases/latest/download/<asset>` always resolves to the newest release:
-
-```sh
-# Linux x86_64
-curl -fsSL https://github.com/kannamma-labs/nirdosha/releases/latest/download/nirdosha-x86_64-unknown-linux-gnu.tar.gz | tar xz
-
-# macOS, Apple Silicon
-curl -fsSL https://github.com/kannamma-labs/nirdosha/releases/latest/download/nirdosha-aarch64-apple-darwin.tar.gz | tar xz
-
-./nirdosha build examples/syntax/hello_nir.nir -o hello && ./hello
-```
-
-(Intel Mac: build from source for now — see below.)
-
-Building from source needs `clang` and `z3` (`apt install clang libz3-dev` / `brew install llvm z3` / `pacman -S clang z3`). Full matrix, scaffolding, and UI generation: [Getting Started](https://github.com/kannamma-labs/nirdosha/wiki/Getting-Started).
+Full matrix, scaffolding, and UI generation: [Getting Started](https://github.com/kannamma-labs/nirdosha/wiki/Getting-Started) (note: that wiki page may still describe the retired prebuilt-binary install path — building from source, above, is the current supported route).
 
 **Four things that will trip up your *first original line*** — parse/type errors, not style nits:
 

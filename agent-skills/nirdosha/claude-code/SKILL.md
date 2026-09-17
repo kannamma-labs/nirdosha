@@ -656,9 +656,10 @@ first line, which can look confusingly unrelated to "I forgot to
 delete two lines." Save only what's between the fences as the `.nir`
 file's actual content.
 
-If you have shell access to a machine with `nirdosha` installed
-(`curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/kannamma-labs/nirdosha/main/scripts/install.sh | sh`),
-verify before presenting code as final:
+If you have shell access to a machine with `nirdosha` built from source
+(no prebuilt binary is published any more — `crates/compiler` is
+deprecated, see its own crate doc comment; `cd crates/compiler && cargo
+build --release`), verify before presenting code as final:
 
 ```sh
 nirdosha emit-ui file.nir -o /tmp/out.html   # full typecheck + ownership check, no side effects (doesn't run main())
@@ -706,8 +707,10 @@ Always run the verification loop above (`nirdosha emit-ui`, then
 interpreter and no `--format=json` flag anymore, see above) before
 telling the user the code is done — don't just claim it typechecks, and
 don't rely on `emit-ast` for that (see above — it doesn't typecheck).
-If `nirdosha` isn't installed yet, install it first:
+If `nirdosha` isn't built yet, build it first (no prebuilt binary is
+published any more — `crates/compiler` is deprecated, see its own
+crate doc comment):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/kannamma-labs/nirdosha/main/scripts/install.sh | sh
+cd crates/compiler && cargo build --release
 ```

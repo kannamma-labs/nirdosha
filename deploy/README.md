@@ -37,14 +37,13 @@ for the case for nirdosha over a classic two-tier stack on k8s):
    a per-project derived image (`FROM` the base runtime image below,
    `COPY`s in just that project's `.nir` source) before applying.
 
-All three need the base runtime image published first — see the repo
-root `Dockerfile` and `docs/KUBERNETES.md`'s P0 remediation item
-("Publish `ghcr.io/protobox/nirdosha-runtime`"). Build it locally for
-testing with:
-
-```sh
-docker build -t ghcr.io/protobox/nirdosha-runtime:latest .
-```
+All three need the base runtime image published first — and that image
+is now permanently retired, not just unpublished: `crates/compiler`
+(the native `.nir` compiler it packaged) is deprecated, the repo-root
+`Dockerfile` it built from is deleted, and `.github/workflows/
+docker.yml`'s `runtime` image job no longer exists. There is nothing
+left to `docker build` here — see `docs/KUBERNETES.md`'s own
+deprecation note (2026-09-17) for the full picture.
 
 ## Choosing single-replica vs. multi-replica
 

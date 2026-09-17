@@ -6,12 +6,17 @@ triage, or design feedback — helps.
 
 ## Quick ways to help
 
-- **Try it and report what breaks.** Build from source (below) or grab
-  a [prebuilt binary](https://github.com/kannamma-labs/nirdosha/releases/latest),
-  try a few `examples/features/*.nir`/`examples/syntax/*.nir` files
-  through `nirdosha emit-ui`/`build` (there is no interpreter anymore —
-  see `examples/features/README.md`'s 2026-09 note on what still
-  actually runs), open an issue for anything confusing or wrong.
+- **Try it and report what breaks.** `crates/compiler` (the native
+  `.nir` compiler this section used to point a prebuilt binary release
+  at) is deprecated — no prebuilt binaries are published any more; the
+  project's active surface is the v2 Rust dialect
+  (`docs/nirdosha-rt-dialect.md`: `cargo build && cargo install --path
+  crates/cargo-nirdosha`). Build from source (below) to try the native
+  compiler anyway; try a few `examples/features/*.nir`/
+  `examples/syntax/*.nir` files through `nirdosha emit-ui`/`build`
+  (there is no interpreter anymore — see `examples/features/
+  README.md`'s 2026-09 note on what still actually runs), open an
+  issue for anything confusing or wrong.
 - **Improve docs.** Typos, unclear explanations, and missing examples
   are all welcome fixes.
 - **Add `.nir` examples**, especially ones exercising a feature that

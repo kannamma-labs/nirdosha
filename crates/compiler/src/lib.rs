@@ -1,3 +1,16 @@
+//! # Deprecated
+//!
+//! This is the native `.nir` compiler. It is **deprecated** in favor
+//! of the v2 Rust dialect — `crates/cargo-nirdosha` (the verifier),
+//! `crates/nirdosha-rt` (the runtime), and `crates/nirdosha-driver`
+//! (the Stage-2 MIR checker). Neither `.github/workflows/release.yml`
+//! nor the `ghcr.io/protobox/nirdosha-runtime` Docker image exist any
+//! more — this crate is no longer built or published as a product.
+//! It remains in the workspace as source, still tested by CI, for
+//! reference and its own still-real Z3/contract-check machinery; it
+//! has no dependency relationship with the v2 dialect in either
+//! direction, and none is planned.
+
 pub mod ast;
 pub mod capabilities;
 pub mod codegen;

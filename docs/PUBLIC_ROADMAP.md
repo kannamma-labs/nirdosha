@@ -41,6 +41,16 @@ any form today; added 2026-09, see the callout just below).
 > and `docs/PHASE0.md`'s "Twentieth" through "Twenty-sixth" updates for
 > the full detail this list doesn't yet reflect below.
 
+> **Deprecation note (2026-09-17).** `crates/compiler`, the native
+> `.nir` compiler this entire roadmap tracks, is now deprecated in
+> favor of the v2 Rust dialect (`docs/nirdosha-rt-dialect.md`:
+> `crates/cargo-nirdosha`/`crates/nirdosha-rt`/`crates/nirdosha-driver`).
+> Prebuilt binaries, the `.github/workflows/release.yml` pipeline, and
+> the `ghcr.io/protobox/nirdosha-runtime` Docker image are all retired
+> — install by building from source (see `README.md`). Every `[DONE]`
+> item below about release/Docker infrastructure remains an accurate
+> historical record, not a description of a currently live pipeline.
+
 ---
 
 ## Shipped

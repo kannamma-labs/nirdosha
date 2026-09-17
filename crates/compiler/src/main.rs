@@ -13,6 +13,15 @@ use nirdosha::verify_pipeline::{
 };
 
 fn main() -> ExitCode {
+    // Deprecation notice (see this crate's own lib.rs doc comment):
+    // printed on every invocation, to stderr so it never pollutes a
+    // subcommand's stdout (some subcommands' stdout is machine-parsed
+    // JSON). `NIRDOSHA_SUPPRESS_DEPRECATION_WARNING` exists for CI/test
+    // harnesses that assert on stderr content and don't want this line
+    // in the way; it changes nothing about what actually runs.
+    if std::env::var_os("NIRDOSHA_SUPPRESS_DEPRECATION_WARNING").is_none() {
+        eprintln!("nirdosha: this native `.nir` compiler is deprecated in favor of the v2 Rust dialect (cargo-nirdosha/nirdosha-rt/nirdosha-driver) — see crates/compiler/src/lib.rs");
+    }
     // No interpreter, no `run`/`serve`/`--sandbox-worker` — every
     // remaining subcommand is compiled-path or frontend-only, so no
     // up-front flag scanning is needed before dispatch.
