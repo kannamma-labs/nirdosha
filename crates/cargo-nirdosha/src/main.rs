@@ -113,8 +113,22 @@ fn main() -> ExitCode {
                     );
                     return exit;
                 }
-                return delegate_with(s, &cargo_args, deep);
+                let root = match workspace_root() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("nirdosha: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                return delegate_with(s, &cargo_args, deep, &root);
             }
+            let loc = match locate() {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("nirdosha: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let summary = match verify_cwd(false, None) {
                 Ok(s) => s,
                 Err(e) => {
@@ -124,7 +138,7 @@ fn main() -> ExitCode {
             };
             if summary.violations().is_empty() {
                 report(&summary, &[]);
-                delegate_with(s, &cargo_args, deep)
+                delegate_with(s, &cargo_args, deep, &loc.manifest_dir)
             } else {
                 report(&summary, &[s]);
                 ExitCode::FAILURE
@@ -533,6 +547,26 @@ fn workspace_target_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "cargo metadata has no target_directory".to_string())
 }
 
+/// The workspace root — where `nirdosha-driver`'s own pack-check
+/// (issue #76) looks for `.nir/hi.db`/`.nir/plugins` when gating a
+/// `--workspace` build, the same convention `nirdosha-hi` uses for a
+/// single-project root.
+fn workspace_root() -> Result<PathBuf, String> {
+    let out = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .map_err(|e| format!("cannot run cargo metadata: {e}"))?;
+    if !out.status.success() {
+        return Err("cargo metadata failed — is this a cargo workspace?".into());
+    }
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    meta.get("workspace_root")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .ok_or_else(|| "cargo metadata has no workspace_root".to_string())
+}
+
 /// `cargo nirdosha verify --workspace`: verify every in-dialect crate,
 /// strict by default, plus the aggregate certificate.
 fn verify_ws_cli(bind_provenance: bool) -> ExitCode {
@@ -713,8 +747,11 @@ fn driver_path() -> Option<PathBuf> {
 
 /// Delegate to cargo, optionally with the Stage-2 rustc driver attached
 /// as RUSTC_WORKSPACE_WRAPPER. `deep` is true unless `--fast`/`--shallow`
-/// was given (issue #74: Stage 2 is the certifying default).
-fn delegate_with(sub: &str, rest: &[String], deep: bool) -> ExitCode {
+/// was given (issue #74: Stage 2 is the certifying default). `package_root`
+/// is where the driver's own pack-check (issue #76) looks for
+/// `.nir/hi.db`/`.nir/plugins` — the same root `cargo-nirdosha`'s own
+/// Stage 1 pack wiring (`check_pack_invariants`) already uses.
+fn delegate_with(sub: &str, rest: &[String], deep: bool, package_root: &Path) -> ExitCode {
     let mut command = Command::new("cargo");
     command.arg(sub).args(rest);
     if deep {
@@ -732,6 +769,7 @@ fn delegate_with(sub: &str, rest: &[String], deep: bool) -> ExitCode {
         );
         command.env("NIRDOSHA_DRIVER", "1");
         command.env("RUSTC_WORKSPACE_WRAPPER", &driver);
+        command.env("NIRDOSHA_PACKAGE_ROOT", package_root);
     }
     match command.status() {
         Ok(status) => status

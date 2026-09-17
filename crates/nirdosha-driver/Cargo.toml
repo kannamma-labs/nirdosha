@@ -21,6 +21,11 @@ serde_json = "1"
 # identifiers against real MIR locals -- issue #68.
 syn = { version = "2", features = ["full"] }
 
+[dev-dependencies]
+# Only for tests/pack_check.rs, to write a fixture `.nir/hi.db` in the
+# exact shape `nirdosha-contract-core::pack` reads.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [features]
 default = ["smt"]
 smt = ["nirdosha-smt-core/smt"]

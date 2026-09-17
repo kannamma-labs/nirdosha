@@ -50,6 +50,7 @@ use std::collections::{HashMap, HashSet};
 
 mod dataflow;
 mod numeric;
+mod pack_check;
 mod proof_certificate;
 mod sequence_dataflow;
 mod std_effects;
@@ -162,9 +163,24 @@ fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>
         }
     }
 
-    // A crate with no Nirdosha contracts is a verbatim pass-through:
-    // the driver changes nothing about how dependencies build.
-    if claims.is_empty() && malformed.is_empty() {
+    // Issue #76: a signed, active domain pack's `mandatory_fns`/
+    // `protected_structs` invariants govern this crate independent of
+    // whether any function here carries its own `nirdosha:contract` —
+    // a pack is a project-wide rule, not a per-function opt-in, so it
+    // must not be skipped by the pass-through check just below.
+    let packs = match pack_check::load_active_packs() {
+        Ok(p) => p,
+        Err(e) => {
+            tcx.dcx().err(format!("cannot read active domain packs: {e}"));
+            tcx.dcx().abort_if_errors();
+            return Compilation::Continue;
+        }
+    };
+
+    // A crate with no Nirdosha contracts and no active pack invariants
+    // is a verbatim pass-through: the driver changes nothing about how
+    // dependencies build.
+    if claims.is_empty() && malformed.is_empty() && packs.is_empty() {
         return Compilation::Continue;
     }
 
@@ -331,6 +347,25 @@ fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>
                 errors = true;
             }
         }
+    }
+
+    for violation in pack_check::check_protected_struct_exclusivity(tcx, &packs) {
+        tcx.dcx()
+            .struct_span_err(
+                violation.span,
+                format!(
+                    "fn `{}` constructs `{}` directly — an active domain pack marks `{}` a protected type; only a mandatory certified primitive may construct it",
+                    violation.fn_name, violation.struct_name, violation.struct_name
+                ),
+            )
+            .emit();
+        errors = true;
+    }
+    for name in pack_check::check_mandatory_call_sites(tcx, &packs) {
+        tcx.dcx().err(format!(
+            "an active domain pack marks `{name}` a mandatory certified primitive, but no fn in this crate calls it anywhere — the pack's rule must be wired, not merely installed"
+        ));
+        errors = true;
     }
 
     if errors {
