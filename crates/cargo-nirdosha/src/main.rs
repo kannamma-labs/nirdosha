@@ -51,6 +51,8 @@ fn main() -> ExitCode {
 
     match sub.as_str() {
         "check-certificate" => check_certificate_cli(rest),
+        "keygen" => keygen_cli(rest),
+        "verify-certificate" => verify_certificate_cli(rest),
         "verify" => {
             let workspace = rest.iter().any(|a| a == "--workspace" || a == "--all");
             // `--provenance` (G6): additionally binds the resolved
@@ -58,13 +60,17 @@ fn main() -> ExitCode {
             // certificate. Mechanical binding only, not issuer
             // authentication.
             let bind_provenance = rest.iter().any(|a| a == "--provenance");
+            // `--sign <key.pk8>` (issue #75 item 2): Ed25519-signs the
+            // certificate's binding with `nirdosha keygen`'s private
+            // key.
+            let sign_key = flag_value(rest, "--sign");
             if workspace {
                 return verify_ws_cli(bind_provenance);
             }
             if rest.iter().any(|a| a == "--audit") {
                 return audit_cli(rest.iter().find(|a| !a.starts_with("--")).cloned());
             }
-            let summary = match verify_cwd(bind_provenance) {
+            let summary = match verify_cwd(bind_provenance, sign_key.as_deref()) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("nirdosha: {e}");
@@ -109,7 +115,7 @@ fn main() -> ExitCode {
                 }
                 return delegate_with(s, &cargo_args, deep);
             }
-            let summary = match verify_cwd(false) {
+            let summary = match verify_cwd(false, None) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("nirdosha: {e}");
@@ -189,6 +195,113 @@ fn check_certificate_cli(args: &[String]) -> ExitCode {
     }
 }
 
+/// `cargo nirdosha keygen [-o <path>]` — issue #75 item 2: generates a
+/// real Ed25519 keypair (`nirdosha-audit`'s CSPRNG, not a fixed/test
+/// seed — `ring`'s or, under `--features fips`, `aws-lc-rs`'s) for
+/// `cargo nirdosha verify --sign`. Writes the private key as raw
+/// PKCS#8 DER to `<path>` (default `nirdosha_signing_key.pk8`) —
+/// **keep this file secret** — and the base64 public key to
+/// `<path>.pub`, the thing you actually distribute/pin. Mirrors the
+/// native `.nir` compiler's `nirdosha keygen` (`crates/compiler/src/
+/// main.rs::cmd_keygen`) exactly; same backend, same file shapes.
+fn keygen_cli(args: &[String]) -> ExitCode {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use nirdosha_audit::crypto_backend::signature::KeyPair;
+
+    let out_path = flag_value(args, "-o").unwrap_or_else(|| "nirdosha_signing_key.pk8".to_string());
+
+    let rng = nirdosha_audit::crypto_backend::rand::SystemRandom::new();
+    let pkcs8 = match nirdosha_audit::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("nirdosha: key generation failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(&out_path, pkcs8.as_ref()) {
+        eprintln!("nirdosha: error writing {out_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    let keypair = nirdosha_audit::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .expect("a key this function just generated always parses");
+    let public_key_b64 = BASE64_STANDARD.encode(keypair.public_key().as_ref());
+    let pub_path = format!("{out_path}.pub");
+    if let Err(e) = std::fs::write(&pub_path, format!("{public_key_b64}\n")) {
+        eprintln!("nirdosha: error writing {pub_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "private_key_path": out_path,
+            "public_key_path": pub_path,
+            "public_key": public_key_b64,
+            "algorithm": "ed25519",
+        }))
+        .expect("this JSON value always serializes")
+    );
+    ExitCode::SUCCESS
+}
+
+/// `cargo nirdosha verify-certificate <certificate.json> --public-key
+/// <base64>` — issue #75 item 2's verify-side mirror of `verify
+/// --sign`: checks the certificate's Ed25519 signature against its own
+/// `binding` under the given public key. Says nothing about whether
+/// that key is one the caller *should* trust — pinning acceptable keys
+/// is the caller's own operational policy, same as the native
+/// compiler's `SignedCertificate`.
+fn verify_certificate_cli(args: &[String]) -> ExitCode {
+    let Some(path) = args.iter().find(|a| !a.starts_with('-')) else {
+        eprintln!("nirdosha: usage: cargo nirdosha verify-certificate <certificate.json> --public-key <base64>");
+        return ExitCode::FAILURE;
+    };
+    let Some(public_key) = flag_value(args, "--public-key") else {
+        eprintln!("nirdosha: verify-certificate needs --public-key <base64> (see `nirdosha keygen`'s .pub file)");
+        return ExitCode::FAILURE;
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("nirdosha: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cert: nirdosha_contract_core::certificate::Certificate = match serde_json::from_slice(&bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("nirdosha: {path} is not a valid certificate: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !cert.binding_valid() {
+        eprintln!("nirdosha: certificate binding is invalid — this certificate was edited");
+        return ExitCode::FAILURE;
+    }
+    let Some(signature) = &cert.signature else {
+        eprintln!("nirdosha: {path} is not signed — missing `signature` (did you mean to run `verify --sign`?)");
+        return ExitCode::FAILURE;
+    };
+    if signature.algorithm != "ed25519" {
+        eprintln!("nirdosha: unsupported signature algorithm `{}`", signature.algorithm);
+        return ExitCode::FAILURE;
+    }
+    match nirdosha_audit::signing::verify_bytes(cert.binding.as_bytes(), &public_key, &signature.value) {
+        Ok(true) => {
+            eprintln!("nirdosha: signature valid — this certificate's binding was signed by the holder of the given public key");
+            ExitCode::SUCCESS
+        }
+        Ok(false) => {
+            eprintln!("nirdosha: signature verification FAILED — either a different key signed this certificate, or it was tampered with");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("nirdosha: cannot verify signature: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn usage() {
     eprintln!(
         "cargo-nirdosha — the Nirdosha compiler\n\
@@ -202,7 +315,10 @@ fn usage() {
          - `cargo nirdosha verify --workspace`  strict gate over every in-dialect crate + certificate\n\
          - `cargo nirdosha verify --provenance`  also binds Cargo.lock + toolchain into the certificate\n\
          - `cargo nirdosha bench`          nfr(latency_ms) CI gate: your test suite is the workload\n\
-         - `cargo nirdosha check-certificate <path> --root <package> --require <guarantee>`"
+         - `cargo nirdosha check-certificate <path> --root <package> --require <guarantee>`\n\
+         - `cargo nirdosha keygen [-o key.pk8]`   generate an Ed25519 keypair for `verify --sign`\n\
+         - `cargo nirdosha verify --sign key.pk8`  sign the certificate (add `--features fips` to build for a CMVP-validatable backend)\n\
+         - `cargo nirdosha verify-certificate <path> --public-key <base64>`  check a signed certificate's signature"
     );
 }
 
@@ -249,17 +365,38 @@ fn locate() -> Result<Location, String> {
     ))
 }
 
-fn verify_cwd(bind_provenance: bool) -> Result<ScanSummary, String> {
+/// Finds `--flag <value>` in `args` and returns `value`, if present.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+fn verify_cwd(bind_provenance: bool, sign_key: Option<&str>) -> Result<ScanSummary, String> {
     let loc = locate()?;
     let strict = std::env::var_os("NIRDOSHA_STRICT").is_some_and(|v| !v.is_empty());
     let summary = verify_package(&loc.manifest_dir, strict)?;
-    let report_path = summary
-        .write_report(&loc.target_dir, bind_provenance)
-        .map_err(|e| format!("cannot write certificate: {e}"))?;
+    let report_path = match sign_key {
+        Some(key) => summary.write_report_signed(&loc.target_dir, bind_provenance, key),
+        None => summary.write_report(&loc.target_dir, bind_provenance),
+    }
+    .map_err(|e| format!("cannot write certificate: {e}"))?;
     eprintln!(
         "nirdosha: certificate → {}",
         report_path.display()
     );
+    // Issue #75 item 1: the guarantee bundle travels with every build,
+    // not just an explicit `verify` invocation — every path here
+    // (`build`/`check`/`run`/`test`/`doc`/`bench`/`verify`) funnels
+    // through this function.
+    let cert_bytes = std::fs::read(&report_path).map_err(|e| format!("cannot read certificate: {e}"))?;
+    let cert: nirdosha_contract_core::certificate::Certificate =
+        serde_json::from_slice(&cert_bytes).map_err(|e| format!("cannot parse certificate: {e}"))?;
+    let bundle_path = summary
+        .write_guarantee_bundle(&loc.target_dir, &report_path, &cert.binding)
+        .map_err(|e| format!("cannot write guarantee bundle: {e}"))?;
+    eprintln!("nirdosha: guarantee bundle → {}", bundle_path.display());
     Ok(summary)
 }
 
@@ -459,7 +596,7 @@ fn verify_ws_cli(bind_provenance: bool) -> ExitCode {
 /// the declared limit. Exit nonzero on any breach — or on any verify
 /// failure, so a lying program never gets a bench verdict.
 fn bench_cli(rest: &[String]) -> ExitCode {
-    let summary = match verify_cwd(false) {
+    let summary = match verify_cwd(false, None) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("nirdosha: {e}");

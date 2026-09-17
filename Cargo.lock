@@ -311,6 +311,8 @@ dependencies = [
 name = "cargo-nirdosha"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "nirdosha-audit",
  "nirdosha-contract-core",
  "serde",
  "serde_json",

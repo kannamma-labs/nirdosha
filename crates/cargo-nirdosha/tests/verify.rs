@@ -198,6 +198,7 @@ fn bench_gates_hold_and_breach() {
             }),
             crud: None,
         },
+        is_pub: true,
     };
 
     // Fast calls: p95 under the limit — PASS

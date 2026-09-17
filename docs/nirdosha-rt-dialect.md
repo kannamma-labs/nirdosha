@@ -220,8 +220,22 @@ design with the proprietary tier: `subject` (package), `tool` (which
 surface verified — `source_scan` never invokes rustc and says so),
 `sources` (every verified file, package-relative, SHA-256), `proofs`
 (per-assertion MIR discharge records with an explicit backend; source scans
-leave this empty), `signature` (reserved for the signed-plugin
-trust chain), and `binding` — SHA-256 over all bound content.
+leave this empty), `signature` (Ed25519, via `cargo nirdosha verify --sign
+<key.pk8>` — issue #75 item 2; `None` unless signed), and `binding` —
+SHA-256 over all bound content.
+
+Every verification also emits a **guarantee bundle** —
+`target/nirdosha/guarantees-<package>.json` (issue #75 item 1) — the
+artifact that travels *with* the build, not just a certificate sitting
+next to it: `inferred_effects`/`gated_exports`/`public_exports`/
+`nfr_tracked` per function, plus `source_hash` (the certificate's own
+`binding`) and `certificate` (its path), so an auditor handed only the
+build output can still trace back to the source-side attestation.
+Same shape as the native `.nir` compiler's RFC 0017 bundle
+(`crates/compiler/src/guarantee_manifest.rs`) where the data maps
+directly — a real, disclosed subset (no `resource_budgets`/
+`network_policy` yet; those need call-graph/codegen-level visibility
+this scanner doesn't have), not a redesign.
 
 Two deliberate properties: **determinism** (no timestamps, no ambient
 state — same sources + tool give byte-identical certificates, so
@@ -255,6 +269,10 @@ cargo nirdosha verify --workspace                           # strict gate over a
 cargo nirdosha bench                                        # nfr(latency_ms) CI gate, real workload
 cargo build -p nirdosha-driver && cargo nirdosha build          # Stage 2 (nightly + rustc-dev), default since #74
 cargo nirdosha build --fast                                     # Stage 1 only, opt out of the driver
+cargo nirdosha keygen -o key.pk8                                # Ed25519 keypair for signing (#75 item 2)
+cargo nirdosha verify --sign key.pk8                            # sign the certificate's binding
+cargo nirdosha verify-certificate <path> --public-key <base64>  # check a signed certificate's signature
+cargo build --features fips -p cargo-nirdosha                   # CMVP-validatable signing backend (aws-lc-rs)
 ```
 
 ## 7. What this borrows from the `.nir` compiler (and what replaces it)

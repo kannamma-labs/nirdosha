@@ -28,7 +28,15 @@ impl Theme {
     }
 
     pub fn default_modern() -> Self {
-        let text = include_str!("../../../examples/nirdosha-v2-corpus/src/token.js");
+        // Embedded from this crate's own source tree (issue #75 item
+        // 3: a self-contained binary's default assets must not
+        // `include_str!` reach outside its own crate directory into a
+        // sibling example — that breaks the moment this crate is used,
+        // vendored, or published independently of the workspace's
+        // examples/ tree). `examples/nirdosha-v2-corpus/src/token.js`
+        // is a worked *override* example, loaded at runtime via
+        // `NIRDOSHA_THEME`, not the compile-time default.
+        let text = include_str!("default_theme.json");
         Self::from_json(text)
     }
 

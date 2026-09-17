@@ -53,6 +53,11 @@ pub struct ContractInfo {
     pub function: String,
     pub form: ContractForm,
     pub contract: cc::model::Contract,
+    /// Whether the fn is `pub` — the guarantee bundle's `gated_exports`/
+    /// `public_exports` (issue #75 item 1) only describe the exposed
+    /// surface, not every internal helper that happens to carry a
+    /// contract.
+    pub is_pub: bool,
 }
 
 pub struct ScanSummary {
@@ -85,9 +90,39 @@ impl ScanSummary {
     /// closure (`Cargo.lock`) and toolchain (G6) — mechanical binding
     /// only, not issuer authentication. See `nirdosha_contract_core::provenance`.
     pub fn write_report(&self, target_dir: &Path, bind_provenance: bool) -> std::io::Result<PathBuf> {
-        let dir = target_dir.join("nirdosha");
-        fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("contract-report-{}.json", self.package));
+        let certificate = self.build_certificate(bind_provenance)?;
+        self.write_certificate(target_dir, &certificate)
+    }
+
+    /// Same as [`Self::write_report`], additionally Ed25519-signing the
+    /// certificate's `binding` with the PKCS#8 private key at
+    /// `key_path` (issue #75 item 2 — `signature` was "reserved for
+    /// the signed-plugin trust chain" and unimplemented; this wires it
+    /// up via `nirdosha-audit`, the same Ed25519/SHA-256 backend the
+    /// native `.nir` compiler's certificate/pack signing already uses,
+    /// FIPS-swappable via the `fips` feature). Signing the binding
+    /// rather than the raw certificate bytes means the signature
+    /// travels correctly even across re-serializations: the binding is
+    /// already a canonical, deterministic digest of every bound field.
+    pub fn write_report_signed(
+        &self,
+        target_dir: &Path,
+        bind_provenance: bool,
+        key_path: &str,
+    ) -> std::io::Result<PathBuf> {
+        let mut certificate = self.build_certificate(bind_provenance)?;
+        let (public_key, signature) =
+            nirdosha_audit::signing::sign_bytes(certificate.binding.as_bytes(), key_path)
+                .map_err(std::io::Error::other)?;
+        certificate.signature = Some(cc::certificate::Signature {
+            algorithm: "ed25519".into(),
+            key_id: public_key,
+            value: signature,
+        });
+        self.write_certificate(target_dir, &certificate)
+    }
+
+    fn build_certificate(&self, bind_provenance: bool) -> std::io::Result<cc::certificate::Certificate> {
         let provenance = if bind_provenance {
             Some(cc::provenance::Provenance {
                 cargo_lock_sha256: cc::provenance::hash_cargo_lock(&self.package_dir)
@@ -115,7 +150,7 @@ impl ScanSummary {
         if let Some(p) = &provenance {
             payload["provenance"] = serde_json::to_value(p)?;
         }
-        let certificate = cc::certificate::Certificate::new(
+        Ok(cc::certificate::Certificate::new(
             cc::certificate::Subject {
                 package: self.package.clone(),
                 version: package_version(&self.package_dir),
@@ -130,8 +165,82 @@ impl ScanSummary {
             },
             cc::certificate::scan_sources(&self.package_dir, &self.files)?,
             payload,
-        );
-        fs::write(&path, serde_json::to_vec_pretty(&certificate)?)?;
+        ))
+    }
+
+    fn write_certificate(&self, target_dir: &Path, certificate: &cc::certificate::Certificate) -> std::io::Result<PathBuf> {
+        let dir = target_dir.join("nirdosha");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("contract-report-{}.json", self.package));
+        fs::write(&path, serde_json::to_vec_pretty(certificate)?)?;
+        Ok(path)
+    }
+
+    /// The emitted guarantee bundle (issue #75 item 1 — the dialect's
+    /// counterpart to the native `.nir` compiler's RFC 0017 bundle,
+    /// `crates/compiler/src/guarantee_manifest.rs::build_bundle`, same
+    /// field names/shape where the data maps directly). Real minimal
+    /// version: built entirely from what `ScanSummary` already
+    /// computes, no new analysis — `inferred_effects` per function,
+    /// `gated_exports`/`public_exports` for the exposed surface,
+    /// `nfr_tracked` for declared NFRs, and a provenance link back to
+    /// the source certificate via `source_hash` (the certificate's own
+    /// `binding` — a package has many source files, so there is no
+    /// single-file hash the way a `.nir` module has one; the binding is
+    /// the honest multi-file analog: it changes if any bound fact does).
+    pub fn guarantee_bundle(&self, certificate_path: &Path, certificate_binding: &str) -> serde_json::Value {
+        let mut inferred_effects = serde_json::Map::new();
+        let mut gated_exports = serde_json::Map::new();
+        let mut public_exports: Vec<&str> = Vec::new();
+        let mut nfr_tracked = serde_json::Map::new();
+        for c in &self.contracts {
+            if let Some(effects) = &c.contract.effects {
+                inferred_effects.insert(c.function.clone(), serde_json::json!(effects));
+            }
+            if let Some(requires) = &c.contract.requires {
+                let describe = match (&requires.role, &requires.expr) {
+                    (Some(role), _) => format!("role:{role}"),
+                    (None, Some(expr)) => format!("expr:{expr}"),
+                    (None, None) => "unknown".to_string(),
+                };
+                gated_exports.insert(c.function.clone(), serde_json::json!(describe));
+            } else if c.is_pub {
+                public_exports.push(&c.function);
+            }
+            if let Some(nfr) = &c.contract.nfr {
+                nfr_tracked.insert(
+                    c.function.clone(),
+                    serde_json::to_value(nfr).expect("Nfr always serializes"),
+                );
+            }
+        }
+        serde_json::json!({
+            "bundle_version": "1",
+            "package": self.package,
+            "certificate": certificate_path,
+            "source_hash": certificate_binding,
+            "inferred_effects": inferred_effects,
+            "gated_exports": gated_exports,
+            "public_exports": public_exports,
+            "nfr_tracked": nfr_tracked,
+        })
+    }
+
+    /// Writes the guarantee bundle next to the certificate:
+    /// `<target>/nirdosha/guarantees-<package>.json` — the artifact
+    /// that travels with the build, per issue #75 item 1's "nothing
+    /// travels with the artifact" gap.
+    pub fn write_guarantee_bundle(
+        &self,
+        target_dir: &Path,
+        certificate_path: &Path,
+        certificate_binding: &str,
+    ) -> std::io::Result<PathBuf> {
+        let dir = target_dir.join("nirdosha");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("guarantees-{}.json", self.package));
+        let bundle = self.guarantee_bundle(certificate_path, certificate_binding);
+        fs::write(&path, serde_json::to_vec_pretty(&bundle)?)?;
         Ok(path)
     }
 }
@@ -453,6 +562,7 @@ fn check_fn(f: &FnInfo, path: &Path, strict: bool, out: &mut ScanSummary) {
         function: f.ident.clone(),
         form,
         contract,
+        is_pub: f.is_pub,
     });
 }
 
@@ -531,7 +641,13 @@ impl WorkspaceSummary {
     /// here anyway for consistency and future workspace-level policy.
     pub fn write_reports(&self, target_dir: &Path, bind_provenance: bool) -> std::io::Result<PathBuf> {
         for summary in &self.packages {
-            summary.write_report(target_dir, bind_provenance)?;
+            let report_path = summary.write_report(target_dir, bind_provenance)?;
+            // Issue #75 item 1: every in-dialect workspace member gets
+            // its own guarantee bundle too, not just the standalone
+            // per-package `verify` path.
+            let cert_bytes = fs::read(&report_path)?;
+            let cert: cc::certificate::Certificate = serde_json::from_slice(&cert_bytes)?;
+            summary.write_guarantee_bundle(target_dir, &report_path, &cert.binding)?;
         }
         let dir = target_dir.join("nirdosha");
         fs::create_dir_all(&dir)?;

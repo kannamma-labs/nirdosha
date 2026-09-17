@@ -16,9 +16,26 @@ path = "src/main.rs"
 
 [dependencies]
 nirdosha-contract-core = { path = "../nirdosha-contract-core" }
+# Ed25519 signing/verification (issue #75 item 2 — certificate
+# signing) via the same backend `crates/compiler` (certificate/pack
+# signing) and `crates/nirdosha-hi` (domain-pack signing) already
+# share, so this doesn't grow a second implementation. See that
+# crate's own Cargo.toml for the `fips` feature this pulls its own
+# copy of below.
+nirdosha-audit = { path = "../nirdosha-audit" }
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 syn = { version = "2", features = ["full"] }
+
+[features]
+# `nirdosha-audit`'s own `fips` feature (Ed25519/SHA-256 via
+# `aws-lc-rs` instead of `ring`) — forwarded here exactly as
+# `crates/compiler/Cargo.toml` forwards its own copy, so `cargo build
+# --features fips` swaps the certificate-signing backend to
+# `aws-lc-rs`'s CMVP-validatable module.
+fips = ["nirdosha-audit/fips"]
+
 # The dialect's own toolchain: explicitly exempt from itself (the
 # verifier does not lint its own implementation — see
 # docs/nirdosha-rt-dialect.md §5).
