@@ -51,6 +51,7 @@ use std::collections::{HashMap, HashSet};
 mod dataflow;
 mod numeric;
 mod proof_certificate;
+mod sequence_dataflow;
 mod std_effects;
 use std::process::ExitCode;
 
@@ -263,6 +264,37 @@ fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>
                             other => other,
                         };
                         diag.note(format!("{reason} — {}", v.location));
+                    }
+                    diag.emit();
+                    errors = true;
+                }
+            }
+        }
+        if contract.sequence.is_some() {
+            match sequence_dataflow::analyze(tcx, *did, Some(contract)) {
+                sequence_dataflow::Report::NotClaimed | sequence_dataflow::Report::Clean => {}
+                sequence_dataflow::Report::Unsupported(reason) => {
+                    tcx.dcx()
+                        .struct_span_err(
+                            tcx.def_span(did.to_def_id()),
+                            format!(
+                                "fn `{}` claims sequence(..) but its call ordering cannot be checked: {reason}",
+                                tcx.def_path_str(did.to_def_id())
+                            ),
+                        )
+                        .emit();
+                    errors = true;
+                }
+                sequence_dataflow::Report::Violations(violations) => {
+                    let mut diag = tcx.dcx().struct_span_err(
+                        tcx.def_span(did.to_def_id()),
+                        format!(
+                            "fn `{}` claims sequence(..) but calls `after` without `before` guaranteed first",
+                            tcx.def_path_str(did.to_def_id())
+                        ),
+                    );
+                    for v in &violations {
+                        diag.note(format!("call reachable without the required predecessor — {}", v.location));
                     }
                     diag.emit();
                     errors = true;

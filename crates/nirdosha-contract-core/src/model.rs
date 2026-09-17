@@ -36,6 +36,8 @@ pub struct Contract {
     pub crud: Option<Crud>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<Resource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<Sequence>,
 }
 
 /// Either a role gate (`requires(role = "hr_staff")`, unforgeable-proof
@@ -92,6 +94,35 @@ pub struct Crud {
 #[serde(deny_unknown_fields)]
 pub struct Resource {
     pub kind: String,
+}
+
+/// `sequence(before = "debit", after = "credit")` (issue #76) — this
+/// fn's own body must never reach a call to `after` on any MIR path
+/// where a call to `before` is not *guaranteed* to have already run.
+/// Checked by a `rustc_mir_dataflow` "must" analysis over
+/// pre-optimization MIR, the same framework and "every path" semantics
+/// `resource(kind = ...)` (issue #69) already uses.
+///
+/// Names are matched by resolved callee (a `DefId`'s own last path
+/// segment, not source text), the same real-name-resolution principle
+/// `effects(pure)`'s driver checker uses — but, disclosed rather than
+/// hidden: this is a **direct-call-only, subject-blind** check. It
+/// does not follow into a local wrapper fn that itself calls `before`/
+/// `after` transitively (matching `resource(..)`'s own precedent —
+/// neither clause stitches interprocedural call graphs), and it does
+/// not distinguish *which* value/account a call operates on: calling
+/// `before`/`after` on two different subjects (`debit(&a); credit(&b)`)
+/// is indistinguishable from calling them on the same one. Both are
+/// real, bounded scope decisions, not partial bugs — full subject
+/// tracking is a harder, disclosed follow-on (see the issue's own text:
+/// "a debit-then-credit rule is an ordering constraint between two
+/// named operations on a shared subject ... a different, harder
+/// problem" than a single-value resource lifecycle).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sequence {
+    pub before: String,
+    pub after: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -186,6 +217,13 @@ impl Contract {
         {
             issues.push("resource(kind = ...) — kind must not be empty".into());
         }
+        if let Some(sequence) = &self.sequence {
+            if sequence.before.is_empty() || sequence.after.is_empty() {
+                issues.push("sequence(before = ..., after = ...) — neither name may be empty".into());
+            } else if sequence.before == sequence.after {
+                issues.push("sequence(before = ..., after = ...) — before and after must name different fns".into());
+            }
+        }
         issues
     }
 }
@@ -218,6 +256,10 @@ mod tests {
             resource: Some(Resource {
                 kind: "lock".into(),
             }),
+            sequence: Some(Sequence {
+                before: "debit".into(),
+                after: "credit".into(),
+            }),
         };
         let doc = c.doc_string();
         assert!(doc.starts_with("nirdosha:contract {"));
@@ -233,6 +275,18 @@ mod tests {
             crud: Some(Crud {
                 op: "wipe".into(),
                 policy: "financial_us".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!c.validate().is_empty());
+    }
+
+    #[test]
+    fn sequence_rejects_identical_before_and_after() {
+        let c = Contract {
+            sequence: Some(Sequence {
+                before: "debit".into(),
+                after: "debit".into(),
             }),
             ..Default::default()
         };

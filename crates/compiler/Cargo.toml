@@ -38,6 +38,12 @@ nirdosha-isolation-core = { path = "../isolation-core" }
 # this crate (see that crate's own Cargo.toml for the `fips` feature
 # this pulled its own copy of).
 nirdosha-audit = { path = "../nirdosha-audit" }
+# `pack::load_active_packs`/`active_mandatory_fns`/
+# `active_protected_structs` (issue #76): reads the same `.nir/hi.db`
+# `plugins` table `nirdosha-hi::hi_plugin` already writes, without
+# depending on the rest of that crate (its GUI/LLM-console
+# dependencies) -- see that module's own doc comment.
+nirdosha-contract-core = { path = "../nirdosha-contract-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 native-tls = "0.2"

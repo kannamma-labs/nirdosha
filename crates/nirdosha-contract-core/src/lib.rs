@@ -24,6 +24,8 @@ pub mod docparse;
 pub mod declarations;
 pub mod evidence;
 pub mod model;
+pub mod pack;
+pub mod pack_check;
 pub mod parse;
 pub mod predicate;
 pub mod provenance;

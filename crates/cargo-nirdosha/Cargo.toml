@@ -28,6 +28,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 syn = { version = "2", features = ["full"] }
 
+[dev-dependencies]
+# Only for tests/pack_invariants.rs, to write a fixture `.nir/hi.db`
+# in the exact shape `nirdosha-contract-core::pack` reads — the crate
+# itself never opens SQLite directly, `nirdosha-contract-core::pack`
+# does that.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [features]
 # `nirdosha-audit`'s own `fips` feature (Ed25519/SHA-256 via
 # `aws-lc-rs` instead of `ring`) — forwarded here exactly as

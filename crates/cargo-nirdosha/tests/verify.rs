@@ -197,6 +197,7 @@ fn bench_gates_hold_and_breach() {
                 concurrency_max: Some(4),
             }),
             crud: None,
+            sequence: None,
         },
         is_pub: true,
     };

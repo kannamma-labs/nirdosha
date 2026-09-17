@@ -511,6 +511,55 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // Issue #76: a signed, installed domain pack's `mandatory_fns`/
+    // `protected_structs` invariants, enforced for real -- until now,
+    // `check_mandatory_primitive_call_sites`/`check_primitive_
+    // exclusivity` (both real, already tested) had zero callers
+    // anywhere in this binary; only `nirdosha-hi`'s own LLM-generation
+    // guidance loop ever consulted a pack's rules. `root` is the
+    // project directory `.nir/hi.db`/`.nir/plugins` live under -- the
+    // same convention `nirdosha-hi` itself uses, and ordinarily the
+    // directory this build is invoked from.
+    let pack_root = std::path::Path::new(&path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+    let mandatory_fns = match nirdosha_contract_core::pack::active_mandatory_fns(pack_root) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("cannot read active domain packs: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let protected_structs = match nirdosha_contract_core::pack::active_protected_structs(pack_root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cannot read active domain packs: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !mandatory_fns.is_empty() {
+        let mut violated = false;
+        for outcome in nirdosha::contract_check::check_mandatory_primitive_call_sites(&program, &mandatory_fns) {
+            if !matches!(outcome.result, nirdosha::contract_check::ContractCheckResult::Proved) {
+                eprintln!(
+                    "build failed: fn `{}` calls a pack-mandatory certified primitive without satisfying its own precondition: {:?}",
+                    outcome.fn_name, outcome.result
+                );
+                violated = true;
+            }
+        }
+        if violated {
+            return ExitCode::FAILURE;
+        }
+    }
+    if !protected_structs.is_empty() {
+        let violations = nirdosha::contract_check::check_primitive_exclusivity(&program, &protected_structs, &mandatory_fns);
+        if !violations.is_empty() {
+            eprintln!("build failed: {} pack-invariant violation(s):", violations.len());
+            for v in &violations {
+                eprintln!("  - {v}");
+            }
+            return ExitCode::FAILURE;
+        }
+    }
     let smt_report = nirdosha::smt::analyze(&program);
     let result = match serve {
         Some(port) => {

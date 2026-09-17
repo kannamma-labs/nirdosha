@@ -314,6 +314,7 @@ dependencies = [
  "base64",
  "nirdosha-audit",
  "nirdosha-contract-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "syn 2.0.119",
@@ -1988,6 +1989,7 @@ dependencies = [
  "flate2",
  "native-tls",
  "nirdosha-audit",
+ "nirdosha-contract-core",
  "nirdosha-isolation-core",
  "nirdosha-smt-core",
  "nirdosha-ui-plugin-example-sparkline",
@@ -2034,6 +2036,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",

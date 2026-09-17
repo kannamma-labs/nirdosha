@@ -315,7 +315,69 @@ pub fn verify_sources(
     for file in files {
         verify_file(file, strict, &mut summary);
     }
+    check_pack_invariants(package_dir, files, &mut summary);
     summary
+}
+
+/// Issue #76: enforce a signed, active domain pack's `mandatory_fns`/
+/// `protected_structs` invariants for real — until this, that same
+/// on-disk, install-time-signature-verified state
+/// (`nirdosha-contract-core::pack`) only ever fed `nirdosha-hi`'s
+/// LLM-generation guidance loop, never a build that actually refuses
+/// on violation. A no-op — no re-parsing, no findings — when no active
+/// pack declares either (the overwhelmingly common case: no pack
+/// installed at all).
+fn check_pack_invariants(package_dir: &Path, files: &[PathBuf], out: &mut ScanSummary) {
+    let cargo_toml = package_dir.join("Cargo.toml");
+    let mandatory_fns = match cc::pack::active_mandatory_fns(package_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            out.findings.push(error(&cargo_toml, 0, None, format!("cannot read active domain packs: {e}")));
+            return;
+        }
+    };
+    let protected_structs = match cc::pack::active_protected_structs(package_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            out.findings.push(error(&cargo_toml, 0, None, format!("cannot read active domain packs: {e}")));
+            return;
+        }
+    };
+    if mandatory_fns.is_empty() && protected_structs.is_empty() {
+        return;
+    }
+    let mut parsed: Vec<(&PathBuf, syn::File)> = Vec::new();
+    for file in files {
+        // A file that doesn't read/parse was already reported by
+        // `verify_file` above; skip it here rather than double-report.
+        let Ok(text) = fs::read_to_string(file) else { continue };
+        let Ok(ast) = syn::parse_file(&text) else { continue };
+        parsed.push((file, ast));
+    }
+    let all_files: Vec<syn::File> = parsed.iter().map(|(_, f)| f.clone()).collect();
+    for name in cc::pack_check::missing_mandatory_call_sites(&all_files, &mandatory_fns) {
+        out.findings.push(error(
+            &cargo_toml,
+            0,
+            None,
+            format!(
+                "an active domain pack marks `{name}` a mandatory certified primitive, but no fn in this package calls it anywhere — the pack's rule must be wired, not merely installed"
+            ),
+        ));
+    }
+    for (path, file) in &parsed {
+        for violation in cc::pack_check::check_primitive_exclusivity(file, &protected_structs, &mandatory_fns) {
+            out.findings.push(error(
+                path,
+                violation.line,
+                Some(&violation.fn_name),
+                format!(
+                    "constructs `{}` directly — an active domain pack marks `{}` a protected type; only a mandatory certified primitive may construct it",
+                    violation.struct_name, violation.struct_name
+                ),
+            ));
+        }
+    }
 }
 
 /// Collect the dialect's source files: `.rs` and `.nir` alike — a v2
