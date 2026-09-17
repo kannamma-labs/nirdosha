@@ -21,6 +21,22 @@ use crate::role::{Auth, Role, RoleProof};
 
 const SESSION_COOKIE: &str = "nirdosha_session";
 
+/// Every session cookie this router mints carries all three — matching
+/// `compiled-serve`'s own attribute set (the only prior art in this
+/// codebase for a real session cookie): `HttpOnly` (unreachable from
+/// page JS, irrelevant for the no-client-JS dialect but cheap and
+/// correct anyway), `Secure` (never sent over a plain-HTTP connection),
+/// and `SameSite=Strict` (never sent on a cross-site navigation or
+/// request at all — this dialect's screens are same-origin `<form>`
+/// posts, so `Strict` costs nothing real). `Secure` here assumes the
+/// same disclosed deployment model `compiled-serve`'s own `ServeConfig`
+/// doc comment states: this listener speaks plain HTTP itself; TLS, if
+/// any, terminates at a deployer's own reverse proxy in front of it. A
+/// browser talking to this process directly over plain HTTP would never
+/// see this cookie sent back at all -- a real, disclosed limit of a
+/// from-scratch HTTP/1.1 listener with no TLS of its own, not a bug.
+const SESSION_COOKIE_ATTRS: &str = "HttpOnly; Secure; SameSite=Strict; Path=/";
+
 #[derive(Debug, Clone)]
 pub struct Request {
     pub method: String,
@@ -148,6 +164,34 @@ fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// An `Origin` header's own `(scheme, host, port)`, with the scheme's
+/// real default port filled in when the origin carries none — so
+/// `https://example.com` and `https://example.com:443` compare equal,
+/// the same normalization `compiled-serve`'s own `parse_origin` already
+/// does. `None` only when there's no `scheme://` separator at all.
+fn parse_origin(origin: &str) -> Option<(&str, &str, u16)> {
+    let (scheme, rest) = origin.split_once("://")?;
+    let default_port = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => 0,
+    };
+    match rest.rsplit_once(':') {
+        Some((host, port_str)) => match port_str.parse::<u16>() {
+            Ok(port) => Some((scheme, host, port)),
+            Err(_) => Some((scheme, rest, default_port)),
+        },
+        None => Some((scheme, rest, default_port)),
+    }
+}
+
+fn origins_match(a: &str, b: &str) -> bool {
+    match (parse_origin(a), parse_origin(b)) {
+        (Some(pa), Some(pb)) => pa == pb,
+        _ => a == b,
+    }
 }
 
 /// Escapes `&`, `<`, `>`, `"`, `'` for safe interpolation into HTML —
@@ -435,6 +479,17 @@ pub struct Router {
     /// (`product_store`-style `Mutex<HashMap<..>>`s), not a claim of
     /// production session durability.
     sessions: Arc<Mutex<HashMap<String, (String, Vec<String>)>>>,
+    /// CORS: the exact origin(s) this router reflects back on a
+    /// credentialed response. Empty (the default) means no CORS headers
+    /// are ever emitted at all — same posture as `compiled-serve`'s own
+    /// `ServeConfig::allowed_origins`, ported here since this router had
+    /// no CORS handling whatsoever before this. Never a wildcard: a
+    /// credentialed response (this router always sends one, since every
+    /// gated route relies on the session cookie) reflecting `*` would
+    /// let *any* origin ride an authenticated user's session — the
+    /// wildcard is what the custom-header/explicit-origin split in the
+    /// CORS spec exists to prevent.
+    allowed_origins: Vec<String>,
 }
 
 /// Bounds socket workers and socket I/O waits. Handler execution must itself
@@ -537,6 +592,7 @@ impl Router {
             nav: Vec::new(),
             login: None,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            allowed_origins: Vec::new(),
         }
     }
 
@@ -565,6 +621,20 @@ impl Router {
             path: path.to_string(),
             verify: Arc::new(verify),
         });
+        self
+    }
+
+    /// Real, non-wildcard CORS: a cross-origin browser caller from one
+    /// of `origins` gets its own origin reflected back (never `*`, see
+    /// this struct's own `allowed_origins` doc comment) plus
+    /// `Access-Control-Allow-Credentials: true` so its cookie-carrying
+    /// `fetch()` calls actually work; any other origin gets no CORS
+    /// headers at all, which every browser treats as a hard deny. Empty
+    /// (never calling this) keeps today's behavior: no CORS headers,
+    /// ever — an app with no cross-origin caller needs to opt into
+    /// nothing.
+    pub fn with_cors(mut self, origins: Vec<&'static str>) -> Self {
+        self.allowed_origins = origins.into_iter().map(String::from).collect();
         self
     }
 
@@ -614,6 +684,20 @@ impl Router {
     /// configured) are handled the same way, then every HTML response
     /// gets the nav bar spliced in.
     pub fn dispatch(&self, req: &Request) -> Response {
+        if req.method == "OPTIONS" {
+            return self.cors_preflight_response(req);
+        }
+        let response = self.dispatch_authenticated(req);
+        self.apply_cors(req, response)
+    }
+
+    /// The old body of `dispatch`, unchanged — login/logout, then the
+    /// route table, then the nav bar splice. Split out so `dispatch`
+    /// itself can apply CORS headers to *every* response this produces,
+    /// including its several early returns, from one single place
+    /// rather than repeating the same header injection at each return
+    /// site.
+    fn dispatch_authenticated(&self, req: &Request) -> Response {
         let path = req.path_without_query().to_string();
 
         if let Some(login) = &self.login {
@@ -629,7 +713,7 @@ impl Router {
                         let session_id = generate_session_id();
                         self.sessions.lock().unwrap().insert(session_id.clone(), (username, roles));
                         let mut resp = Response::redirect("/");
-                        resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}={session_id}; HttpOnly; Path=/")));
+                        resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}={session_id}; {SESSION_COOKIE_ATTRS}")));
                         resp
                     }
                     None => Response::html(401, login_page_html(&login.path, Some("invalid username or password"))),
@@ -642,7 +726,7 @@ impl Router {
                     self.sessions.lock().unwrap().remove(&sid);
                 }
                 let mut resp = Response::redirect("/");
-                resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}=; Path=/; Max-Age=0")));
+                resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}=; {SESSION_COOKIE_ATTRS}; Max-Age=0")));
                 return resp;
             }
         }
@@ -710,6 +794,42 @@ impl Router {
         }
         html.push_str("</nav>");
         html
+    }
+
+    /// This request's `Origin` header, matched against `allowed_origins`
+    /// -- `None` (no headers at all) when there's no `Origin` header, or
+    /// it doesn't match any configured entry. Ported verbatim from
+    /// `compiled-serve`'s own `cors_headers_for`/`parse_origin`/
+    /// `origins_match` (that crate's own comments explain the scheme/
+    /// default-port normalization; unchanged here).
+    fn cors_headers_for(&self, req: &Request) -> Vec<(String, String)> {
+        let Some(origin) = req.header("origin") else { return Vec::new() };
+        if !self.allowed_origins.iter().any(|o| origins_match(o, origin)) {
+            return Vec::new();
+        }
+        vec![
+            ("Access-Control-Allow-Origin".to_string(), origin.to_string()),
+            ("Access-Control-Allow-Credentials".to_string(), "true".to_string()),
+            ("Vary".to_string(), "Origin".to_string()),
+        ]
+    }
+
+    fn apply_cors(&self, req: &Request, mut resp: Response) -> Response {
+        resp.extra_headers.extend(self.cors_headers_for(req));
+        resp
+    }
+
+    /// A CORS preflight (`OPTIONS`) response — `204` either way; the
+    /// actual allow/deny decision is entirely in whether `cors_headers_for`
+    /// found a match, since an empty header set is what tells the
+    /// browser to block the real request that would have followed.
+    fn cors_preflight_response(&self, req: &Request) -> Response {
+        let mut headers = self.cors_headers_for(req);
+        if !headers.is_empty() {
+            headers.push(("Access-Control-Allow-Methods".to_string(), "GET, POST, PUT, DELETE, OPTIONS".to_string()));
+            headers.push(("Access-Control-Allow-Headers".to_string(), "Content-Type, Authorization, X-Requested-With".to_string()));
+        }
+        Response { status: 204, content_type: "text/plain", body: String::new(), extra_headers: headers }
     }
 
     /// A minimal OpenAPI 3.0.3 document: paths, methods, summaries, and
@@ -1039,6 +1159,73 @@ mod tests {
         let cookie = cookie_from_set_cookie(&login_resp);
         let authed = router.dispatch(&cookie_req("GET", "/", Some(&cookie)));
         assert!(authed.body.contains("Logout"), "got: {}", authed.body);
+    }
+
+    /// The minted session cookie carries `Secure`/`SameSite=Strict` on
+    /// top of the pre-existing `HttpOnly` -- a VAPT-obvious finding
+    /// (session cookie missing `Secure`/`SameSite`) that used to be real
+    /// against this router and now isn't.
+    #[test]
+    fn session_cookie_carries_secure_and_samesite_attributes() {
+        let router = Router::new(|_| Auth::login("anon", &[])).with_login("/login", |_, _| Some(vec!["admin".to_string()]));
+        let login_resp = router.dispatch(&form(&[("username", "x"), ("password", "y")]));
+        let set_cookie = login_resp.extra_headers.iter().find(|(k, _)| k == "Set-Cookie").map(|(_, v)| v.clone()).expect("no Set-Cookie header");
+        assert!(set_cookie.contains("Secure"), "got: {set_cookie}");
+        assert!(set_cookie.contains("SameSite=Strict"), "got: {set_cookie}");
+        assert!(set_cookie.contains("HttpOnly"), "got: {set_cookie}");
+
+        let logout_req = Request {
+            method: "POST".into(),
+            path: "/login/logout".into(),
+            headers: HashMap::new(),
+            body: String::new(),
+        };
+        let logout_resp = router.dispatch(&logout_req);
+        let cleared = logout_resp.extra_headers.iter().find(|(k, _)| k == "Set-Cookie").map(|(_, v)| v.clone()).expect("no Set-Cookie header");
+        assert!(cleared.contains("Secure"), "got: {cleared}");
+        assert!(cleared.contains("SameSite=Strict"), "got: {cleared}");
+    }
+
+    fn req_with_origin(method: &str, path: &str, origin: &str) -> Request {
+        let mut headers = HashMap::new();
+        headers.insert("origin".to_string(), origin.to_string());
+        Request { method: method.into(), path: path.into(), headers, body: String::new() }
+    }
+
+    /// A configured origin gets its own value reflected back plus
+    /// `Access-Control-Allow-Credentials: true`, on both a real response
+    /// and an `OPTIONS` preflight -- and never a wildcard, which a
+    /// credentialed router (every gated route relies on the session
+    /// cookie) can never safely send.
+    #[test]
+    fn cors_reflects_only_a_configured_origin_never_a_wildcard() {
+        let router = Router::new(|_| Auth::login("anon", &[]))
+            .with_cors(vec!["https://app.example.com"])
+            .get("/api/products", "list", |_, _| Response::text(200, "ok"));
+
+        let allowed = router.dispatch(&req_with_origin("GET", "/api/products", "https://app.example.com"));
+        let acao = allowed.extra_headers.iter().find(|(k, _)| k == "Access-Control-Allow-Origin").map(|(_, v)| v.clone());
+        assert_eq!(acao, Some("https://app.example.com".to_string()));
+        assert!(allowed.extra_headers.iter().any(|(k, v)| k == "Access-Control-Allow-Credentials" && v == "true"));
+        assert!(!allowed.extra_headers.iter().any(|(_, v)| v == "*"), "must never reflect a wildcard");
+
+        let denied = router.dispatch(&req_with_origin("GET", "/api/products", "https://evil.example.com"));
+        assert!(!denied.extra_headers.iter().any(|(k, _)| k == "Access-Control-Allow-Origin"), "an unconfigured origin must get no CORS headers at all");
+
+        let preflight = router.dispatch(&req_with_origin("OPTIONS", "/api/products", "https://app.example.com"));
+        assert_eq!(preflight.status, 204);
+        assert!(preflight.extra_headers.iter().any(|(k, _)| k == "Access-Control-Allow-Origin"));
+        assert!(preflight.extra_headers.iter().any(|(k, _)| k == "Access-Control-Allow-Methods"));
+    }
+
+    /// The default (`with_cors` never called) emits no CORS headers at
+    /// all, even for an `Origin` header a caller sends anyway -- an app
+    /// with no cross-origin caller opts into nothing by default.
+    #[test]
+    fn no_cors_configured_means_no_cors_headers_at_all() {
+        let router = Router::new(|_| Auth::login("anon", &[])).get("/api/products", "list", |_, _| Response::text(200, "ok"));
+        let resp = router.dispatch(&req_with_origin("GET", "/api/products", "https://app.example.com"));
+        assert!(resp.extra_headers.iter().all(|(k, _)| k != "Access-Control-Allow-Origin"));
     }
 
     // -------------------------------------------------------------------
