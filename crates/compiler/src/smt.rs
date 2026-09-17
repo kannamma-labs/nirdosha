@@ -205,20 +205,7 @@ fn prove_nonzero(solver: &Solver, term: &Int) -> bool {
 /// `pub(crate)` — `contract_check.rs`'s Hoare-predicate walker
 /// (`int_expr`'s `BinOp::Div`/`BinOp::Rem` arms) uses this exact same
 /// relation rather than a second, possibly-drifting copy of it.
-pub(crate) fn div_rem(solver: &Solver, a: &Int, b: &Int) -> (Int, Int) {
-    let q = Int::fresh_const("div_q");
-    let rem = Int::fresh_const("div_r");
-    solver.assert(a.eq(b * &q + &rem));
-
-    let zero = Int::from_i64(0);
-    let abs_b = b.lt(&zero).ite(&(-b), b);
-    solver.assert(rem.lt(&abs_b));
-    solver.assert(rem.gt(&(-abs_b)));
-    // `rem == 0`, or `rem`'s sign matches `a`'s -- truncation toward
-    // zero, not floor.
-    solver.assert(rem.eq(&zero) | a.lt(&zero).eq(&rem.lt(&zero)));
-    (q, rem)
-}
+pub(crate) use nirdosha_smt_core::div_rem;
 
 /// Same technique as `prove_in_range`, against a literal `[0, dim)`
 /// instead of a `Ty`'s bounds — `Expr::Index`'s proof obligation for one

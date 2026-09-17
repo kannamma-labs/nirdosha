@@ -15,5 +15,18 @@ fn main() {
         .trim()
         .to_string();
     println!("cargo:rustc-link-search=native={sysroot}/lib");
+    // Cargo test supplies a loader search path, but direct invocation and
+    // RUSTC_WORKSPACE_WRAPPER must also find this exact nightly's driver.
+    if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{sysroot}/lib");
+    }
+    let version = std::process::Command::new(&rustc)
+        .arg("--version")
+        .output()
+        .expect("rustc version");
+    println!(
+        "cargo:rustc-env=NIRDOSHA_RUSTC_VERSION={}",
+        String::from_utf8(version.stdout).unwrap().trim()
+    );
     println!("cargo:rerun-if-changed=build.rs");
 }

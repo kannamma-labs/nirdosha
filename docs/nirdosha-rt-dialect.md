@@ -106,8 +106,11 @@ cargo nirdosha build                   # (in that package) REFUSED: 3 violations
    Stage 2 is nightly + `rustc-dev` only (it links `rustc_private`);
    Stage 1 verification is stable and works everywhere. `cargo
    nirdosha build --deep` wires the driver in as
-   `RUSTC_WORKSPACE_WRAPPER`. Z3 discharge of numeric bounds and
-   proof-elision ("verified code runs faster") remain Stage 2.5.
+   `RUSTC_WORKSPACE_WRAPPER`. Stage 2.5 now discharges numeric MIR
+   assertions with shared Z3 integer semantics (or an explicit interval
+   fallback) and emits bound proof records. Guarded division/indexing can
+   pass purity checking. Actual MIR proof-elision remains follow-on work.
+   See [MIR numeric proofs](MIR_NUMERIC_PROOFS.md) for scope and examples.
 
 ## 3. Two authoring forms, one encoding
 
@@ -198,13 +201,14 @@ writes `contract-report-workspace.json`). The envelope is shared by
 design with the proprietary tier: `subject` (package), `tool` (which
 surface verified — `source_scan` never invokes rustc and says so),
 `sources` (every verified file, package-relative, SHA-256), `proofs`
-(reserved for Stage 2.5's Z3 discharge objects — empty establishes no
-formal proof), `signature` (reserved for the signed-plugin
+(per-assertion MIR discharge records with an explicit backend; source scans
+leave this empty), `signature` (reserved for the signed-plugin
 trust chain), and `binding` — SHA-256 over all bound content.
 
 Two deliberate properties: **determinism** (no timestamps, no ambient
 state — same sources + tool give byte-identical certificates, so
-re-verification is a diff, and zero diff means zero drift), and
+re-verification is a diff, and zero diff means zero drift; bounded MIR
+solver outcomes can still vary with resource availability), and
 **auditable claims**:
 
 ```
@@ -237,9 +241,11 @@ cargo build -p nirdosha-driver && cargo nirdosha build --deep   # Stage 2 (night
 ## 7. What this borrows from the `.nir` compiler (and what replaces it)
 
 `effects.rs` semantics (the effect vocabulary, declared-vs-actual
-checking) now live over Rust syntax as the MIR effect lattice;
-`smt.rs`/Z3 discharge of numeric bounds, contract checking on impl
-blocks, and Row-12 identity remain Stage 2.5 on the driver's MIR pass.
+checking) now live over Rust syntax as the MIR effect lattice.
+The shared `nirdosha-smt-core` encoder now supplies numeric MIR assertion
+proofs; [MIR numeric proofs](MIR_NUMERIC_PROOFS.md) describes the supported
+subset. Contract checking on impl blocks and Row-12 identity remain future
+work on the driver's MIR pass.
 The `.nir` frontend (token/parser/ast) is *replaced by rustc itself* —
 that is the point: we stop maintaining a grammar and start inheriting
 the entire Rust ecosystem, LLM training priors included.

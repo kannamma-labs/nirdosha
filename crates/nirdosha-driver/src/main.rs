@@ -16,6 +16,10 @@
 //!   reject unsafe/static boundaries, reference writes, destructors and
 //!   unresolved calls. External calls require summaries; no crate is trusted
 //!   wholesale. Scalar arithmetic and local recursion remain supported.
+//! - **Numeric assertions.** Shared Z3 integer semantics prove overflow,
+//!   nonzero divisors and array bounds over normal MIR paths. An explicit
+//!   interval backend is available without Z3. Bound certificates record
+//!   per-assertion evidence; proven guards are not removed from MIR yet.
 //! - **No totality claim.** Arithmetic overflow guards and recursion are
 //!   permitted; termination and panic freedom are not established here.
 //!
@@ -40,7 +44,10 @@ extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_span;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+mod numeric;
+mod proof_certificate;
 use std::process::ExitCode;
 
 use nirdosha_contract_core as cc;
@@ -63,16 +70,28 @@ fn main() -> ExitCode {
     {
         args.remove(1);
     }
-    rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(&args, &mut NirdoshaCallbacks);
-    })
+    let mut callbacks = NirdoshaCallbacks { certificate: None };
+    let status = rustc_driver::catch_with_exit_code(|| {
+        rustc_driver::run_compiler(&args, &mut callbacks);
+    });
+    if status == ExitCode::SUCCESS {
+        if let Some(pending) = callbacks.certificate {
+            if let Err(error) = pending.write() {
+                eprintln!("nirdosha: cannot write MIR certificate: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    status
 }
 
-struct NirdoshaCallbacks;
+struct NirdoshaCallbacks {
+    certificate: Option<proof_certificate::Pending>,
+}
 
 impl Callbacks for NirdoshaCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
-        analyze(tcx)
+        analyze(tcx, &mut self.certificate)
     }
 }
 
@@ -82,7 +101,7 @@ impl Callbacks for NirdoshaCallbacks {
 // exactly this doc form — so both authoring surfaces converge here.
 // ---------------------------------------------------------------------------
 
-fn analyze(tcx: TyCtxt<'_>) -> Compilation {
+fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>) -> Compilation {
     let mut claims: Vec<(LocalDefId, cc::model::Contract)> = Vec::new();
     let mut malformed: Vec<(LocalDefId, String)> = Vec::new();
 
@@ -110,6 +129,19 @@ fn analyze(tcx: TyCtxt<'_>) -> Compilation {
         return Compilation::Continue;
     }
 
+    let numeric: HashMap<_, _> = tcx
+        .mir_keys(())
+        .iter()
+        .filter(|did| {
+            matches!(
+                tcx.def_kind(**did),
+                rustc_hir::def::DefKind::Fn
+                    | rustc_hir::def::DefKind::AssocFn
+                    | rustc_hir::def::DefKind::Closure
+            )
+        })
+        .map(|did| (*did, numeric::analyze(tcx, *did)))
+        .collect();
     let mut errors = false;
 
     for (did, msg) in malformed {
@@ -136,7 +168,7 @@ fn analyze(tcx: TyCtxt<'_>) -> Compilation {
             // Each root gets its own traversal. Caching an incomplete result
             // while walking a recursive component can hide effects from a
             // later root in the same component.
-            let mut engine = Effects::new(tcx);
+            let mut engine = Effects::new(tcx, &numeric);
             let impurities = engine.effects_of(*did);
             if !impurities.is_empty() {
                 let span = tcx.def_span(did.to_def_id());
@@ -166,6 +198,14 @@ fn analyze(tcx: TyCtxt<'_>) -> Compilation {
 
     if errors {
         tcx.dcx().abort_if_errors();
+    }
+    match proof_certificate::prepare(tcx, &numeric) {
+        Ok(pending) => *certificate = Some(pending),
+        Err(error) => {
+            tcx.dcx()
+                .err(format!("cannot prepare MIR certificate: {error}"));
+            tcx.dcx().abort_if_errors();
+        }
     }
     Compilation::Continue
 }
@@ -200,15 +240,17 @@ const FOREIGN_NEEDLES: &[(&str, &str)] = &[
     ("rand::", "OS randomness"),
 ];
 
-struct Effects<'tcx> {
+struct Effects<'a, 'tcx> {
+    numeric: &'a HashMap<LocalDefId, numeric::Report>,
     tcx: TyCtxt<'tcx>,
     visited: HashSet<LocalDefId>,
 }
 
-impl<'tcx> Effects<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>) -> Self {
+impl<'a, 'tcx> Effects<'a, 'tcx> {
+    fn new(tcx: TyCtxt<'tcx>, numeric: &'a HashMap<LocalDefId, numeric::Report>) -> Self {
         Self {
             tcx,
+            numeric,
             visited: HashSet::new(),
         }
     }
@@ -285,7 +327,7 @@ impl<'tcx> Effects<'tcx> {
             }
         }
 
-        for block in body.basic_blocks.iter() {
+        for (bb, block) in body.basic_blocks.iter_enumerated() {
             for statement in &block.statements {
                 if let StatementKind::Assign(assignment) = &statement.kind {
                     if assignment
@@ -311,6 +353,13 @@ impl<'tcx> Effects<'tcx> {
                     self.visit_callee(func, &my_name, &mut impurities);
                 }
                 TerminatorKind::Assert { msg, .. } => {
+                    if self
+                        .numeric
+                        .get(&did)
+                        .is_some_and(|report| report.proven(bb))
+                    {
+                        continue;
+                    }
                     if let Some(reason) = assert_reason(msg) {
                         impurities.push(Impurity {
                             reason,

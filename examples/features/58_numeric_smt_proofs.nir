@@ -1,0 +1,25 @@
+// GitHub #67: native counterpart of the MIR driver's relational proof.
+// The native frontend and MIR frontend share Rust-correct div/rem encoding.
+// Z3 combines branch constraints with gap = x - y to prove gap != 0.
+// Independent intervals cannot establish this relationship.
+fn divide_by_gap(x: i64, y: i64) -> i64 {
+    if x >= 0 && x <= 100 && y >= 0 && y < x {
+        let gap: i64 = x - y
+        let quotient: i64 = 100 / gap
+        return quotient
+    }
+    return 0
+}
+
+// Truncation toward zero is intentional: -7 / 2 is -3, not -4.
+fn negative_quotient() -> i64 {
+    let numerator: i64 = -7
+    return numerator / 2
+}
+
+fn main() -> i64 {
+    print(divide_by_gap(9, 5))
+    print(divide_by_gap(5, 9))
+    print(negative_quotient())
+    return 0
+}

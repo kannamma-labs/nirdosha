@@ -624,7 +624,6 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
- "subtle",
 ]
 
 [[package]]
@@ -1335,15 +1334,6 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest 0.10.7",
-]
-
-[[package]]
-name = "hmac"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
@@ -1992,13 +1982,12 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 name = "nirdosha"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "base64",
- "cargo-nirdosha",
  "flate2",
- "hmac 0.12.1",
  "native-tls",
+ "nirdosha-audit",
  "nirdosha-isolation-core",
+ "nirdosha-smt-core",
  "nirdosha-ui-plugin-example-sparkline",
  "postgres",
  "postgres-native-tls",
@@ -2007,26 +1996,32 @@ dependencies = [
  "r2d2_sqlite",
  "redis 0.27.6",
  "regex",
- "reqwest",
- "ring",
  "rusqlite",
  "rust_decimal",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "signal-hook",
- "syn 2.0.119",
- "tao",
  "tiny_http",
- "wry",
  "z3",
+]
+
+[[package]]
+name = "nirdosha-audit"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
 name = "nirdosha-bench"
 version = "0.1.0"
 dependencies = [
- "nirdosha",
+ "nirdosha-hi",
  "serde",
  "serde_json",
 ]
@@ -2048,6 +2043,8 @@ name = "nirdosha-driver"
 version = "0.1.0"
 dependencies = [
  "nirdosha-contract-core",
+ "nirdosha-smt-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -2064,6 +2061,25 @@ version = "0.1.0"
 dependencies = [
  "llama-cpp-gbnf",
  "nirdosha",
+]
+
+[[package]]
+name = "nirdosha-hi"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "cargo-nirdosha",
+ "nirdosha-audit",
+ "nirdosha-rt",
+ "quote",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "tao",
+ "tiny_http",
+ "wry",
 ]
 
 [[package]]
@@ -2148,6 +2164,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "nirdosha-smt-core"
+version = "0.1.0"
+dependencies = [
+ "z3",
 ]
 
 [[package]]
@@ -2673,7 +2696,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "fallible-iterator 0.2.0",
- "hmac 0.13.0",
+ "hmac",
  "md-5",
  "memchr",
  "rand 0.10.2",

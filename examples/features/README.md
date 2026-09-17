@@ -72,6 +72,7 @@ completion by itself.
 | 52 | `52_compiled_workflow_state_machine.nir` | compiled `workflow` Layer 1 (2026-09) — `start_*`/`advance_*`, `on_entry`/`on_exit`, ordinary transitions, `terminal` states, `Err(NoSuchTransition)`/`Err(InstanceNotFound)` as real, non-trapping errors |
 | 53 | `53_compiled_workflow_notifications.nir` | compiled `send_email`/`send_sms`/`send_push`/`notify` fired from a workflow's `on_entry` — real authenticated HTTPS POSTs against a real, admin-editable provider row in a real SQLite table, and the real not-configured (`send_push`, no provider row) path |
 | 54 | `54_compiled_workflow_escalation.nir` | compiled `state { sla_seconds: N }` + `list_<workflow>_overdue()` (`docs/ROADMAP.md` A15) — real SLA/escalation *detection*, driving a real "external scheduler polls, then calls `advance_<workflow>`" escalation round trip; per-state, not workflow-wide (a state with no `sla_seconds` is never reported overdue) |
+| 58 | `58_numeric_smt_proofs.nir` | Z3 proves a correlated divisor nonzero; signed division truncates toward zero. Native counterpart of `../rt-numeric-proofs.rs`; see [MIR numeric proofs](../../docs/MIR_NUMERIC_PROOFS.md). |
 
 ## Deliberately not given their own file
 
@@ -82,7 +83,7 @@ Properties of the toolchain/compiler rather than `.nir` syntax you write:
   there is no interpreter, no bare `nirdosha <file>`, and no `serve`/
   `--format=json` anymore).
 - **Static guarantees** (type checking, ownership/move-checking,
-  interval analysis, Z3 bounds proving) — properties every file above
+  interval analysis) — properties every file above
   is already subject to, not a separate construct to demonstrate.
   `17_audited_block.nir` is the one place these become visibly
   controllable.

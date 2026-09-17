@@ -19,6 +19,7 @@ serde_json = "1"
 
 [dependencies]
 z3 = "0.20.2"
+nirdosha-smt-core = { path = "../nirdosha-smt-core" }
 # The pure isolation-anomaly-detection algorithm (Direct Serialization
 # Graph), shared verbatim with `crates/runtime-kernels`'s own live FFI
 # wiring (`kernel::isolation_check`) -- an ordinary root-workspace

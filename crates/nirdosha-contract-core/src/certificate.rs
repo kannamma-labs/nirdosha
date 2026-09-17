@@ -22,8 +22,8 @@
 //!    reproducible-build requirement — "the compiler is a deterministic
 //!    function of source + flags" — extends to its attestations).
 //!    Re-verify and diff; zero diff means zero drift.
-//! 2. **Two reserved fields, one future each.** `proofs` carries
-//!    Stage 2.5's Z3 discharge objects (empty establishes no proof;
+//! 2. **Explicit numeric evidence.** `proofs` carries MIR numeric
+//!    discharge records (empty establishes no proof;
 //!    see verification.coverage). `signature` is entry #13's envelope (always
 //!    `null` in v1; a signature covers the `binding`, never lives
 //!    inside what it signs).
@@ -57,6 +57,13 @@ pub struct SourceFile {
     pub path: String,
     /// Hex SHA-256 of the file's bytes at verification time.
     pub sha256: String,
+}
+
+impl SourceFile {
+    /// Hash an already-read source snapshot, avoiding a second file read.
+    pub fn from_bytes(path: String, bytes: &[u8]) -> Self {
+        Self { path, sha256: hex(&Sha256::digest(bytes)) }
+    }
 }
 
 /// What was verified.
@@ -103,8 +110,8 @@ pub struct Certificate {
     pub subject: Subject,
     pub tool: Tool,
     pub sources: Vec<SourceFile>,
-    /// Stage 2.5 Z3 discharge objects. Empty in v1: claims here are
-    /// described by verification.coverage, not inferred to be proven.
+    /// Numeric discharge records, with explicit backend and assertion scope.
+    /// Source-scan certificates leave this empty.
     #[serde(default)]
     pub proofs: Vec<Value>,
     /// The tier-specific report (contracts, findings, violations),
@@ -119,6 +126,13 @@ pub struct Certificate {
 }
 
 impl Certificate {
+    /// Attach numeric evidence and bind it together with the report.
+    pub fn with_proofs(mut self, proofs: Vec<Value>) -> Self {
+        self.proofs = proofs;
+        self.binding = self.compute_binding();
+        self
+    }
+
     /// Build a certificate, computing its binding. `sources` must use
     /// package-root-relative paths — see [`scan_sources`].
     pub fn new(

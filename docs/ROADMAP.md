@@ -25,6 +25,13 @@ A, Track B, Track C below) — but the specs themselves stay put.
 
 ## V2 issue fixes
 
+- `[DONE]` **2026-09-17, GitHub #67: MIR numeric proof discharge.**
+  Shared Rust integer encoder, path-sensitive MIR assertions, explicit
+  interval fallback, and bound per-assertion certificates verified. Z3,
+  fallback, native SMT/contract suites and both examples pass. Actual MIR
+  check removal and precondition syntax remain follow-ons. Details and
+  research: `docs/MIR_NUMERIC_PROOFS.md`.
+
 - `[DONE]` **2026-09-16, GitHub #66: concurrent v2 HTTP and live feeds.**
   Bounded connection workers, shared sessions, orderly shutdown, and opt-in
   feed long polling implemented. Runtime/macro suite passes (70 tests);

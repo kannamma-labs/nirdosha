@@ -40,7 +40,9 @@ reject stronger guarantees rather than infer them from scanner success.
 The driver traverses local calls separately for every pure-claiming root,
 using expanded HIR and runtime MIR before optimization. It accepts scalar
 arithmetic, branches, local helpers and recursion. This checks effects; it
-does not prove termination or prevent arithmetic-overflow panics.
+does not prove termination or prevent arithmetic-overflow panics. Numeric assertion proofs now let guarded division
+and indexing pass: see [MIR numeric proofs](MIR_NUMERIC_PROOFS.md). These
+per-check records do not upgrade this to a whole-program guarantee.
 
 It rejects external calls without effect summaries, including **all** calls
 into std/core/alloc/nirdosha_rt; crate names no longer grant trust. This

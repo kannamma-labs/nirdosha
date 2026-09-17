@@ -84,6 +84,7 @@ members = [
     # lying becomes a build error. See docs/nirdosha-rt-dialect.md for
     # the design and the two demo crates below for the story.
     "crates/nirdosha-contract-core",
+    "crates/nirdosha-smt-core",
     "crates/nirdosha-macros",
     "crates/nirdosha-rt",
     "crates/cargo-nirdosha",

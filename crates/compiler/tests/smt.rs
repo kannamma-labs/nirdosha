@@ -403,3 +403,17 @@ fn a_condition_narrowed_index_is_proven_by_smt_specifically() {
     };
     assert!(report.proven_index_bounds.contains(span));
 }
+
+#[test]
+fn issue_67_example_needs_z3_for_the_correlated_divisor() {
+    let program = parse(include_str!("../../../examples/features/58_numeric_smt_proofs.nir"));
+    let smt = analyze(&program);
+    let interval = nirdosha::refine::analyze(&program);
+    // Locate the actual variable-denominator division, not a convenient
+    // constant division elsewhere in the example.
+    let function = program.fns.iter().find(|f| f.name == "divide_by_gap").unwrap();
+    let Stmt::Expr(nirdosha::ast::Expr::If { then_block, .. }) = &function.body.stmts[0] else { panic!("expected branch") };
+    let Stmt::Let { value: nirdosha::ast::Expr::Binary(_, _, _, span), .. } = &then_block.stmts[1] else { panic!("expected quotient") };
+    assert!(smt.proven_nonzero_divisor.contains(span));
+    assert!(!interval.proven_nonzero_divisor.contains(span));
+}

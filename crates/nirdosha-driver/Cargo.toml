@@ -2,7 +2,7 @@
 name = "nirdosha-driver"
 version = "0.1.0"
 edition = "2024"
-description = "Stage 2: the Nirdosha rustc driver — MIR-level interprocedural effects verification with real name resolution. A pure claim must survive the whole call graph, not just one body. Requires nightly + the rustc-dev component."
+description = "The Nirdosha rustc driver: MIR interprocedural effects and numeric proof discharge. Requires nightly + rustc-dev."
 license = "MIT"
 publish = false
 
@@ -12,6 +12,13 @@ path = "src/main.rs"
 
 [dependencies]
 nirdosha-contract-core = { path = "../nirdosha-contract-core" }
+nirdosha-smt-core = { path = "../nirdosha-smt-core", default-features = false }
+serde_json = "1"
+
+[features]
+default = ["smt"]
+smt = ["nirdosha-smt-core/smt"]
+dist = ["smt", "nirdosha-smt-core/dist"]
 
 # The dialect's own toolchain: explicitly exempt from itself (the
 # verifier does not lint its own implementation — see

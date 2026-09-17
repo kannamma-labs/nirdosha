@@ -51,6 +51,40 @@ the verifier/certificate layer without replacing those edits.
 
 ## Work log
 
+### 2026-09-17 - Issue #67: MIR numeric proof discharge
+
+Implemented shared `nirdosha-smt-core` integer semantics, a path-sensitive
+pre-optimization MIR assertion pass, and separate `mir_driver` certificates
+with bound per-assertion proof records. Proven division and array bounds
+checks now satisfy the numeric part of purity checking. See
+[MIR numeric proofs](MIR_NUMERIC_PROOFS.md) for primary-source research,
+algorithm, commands, and limitations.
+
+- Z3 tests verify the actual `Solver::check` counter and relational proofs
+  at O0/O3. The same relational fixture is rejected by the interval-only
+  build. No-default-features dependency inspection confirms no Z3 linkage.
+- Both effect regression suites pass, including unsafe/static/callback
+  rejection. Static initializers are excluded from numeric traversal;
+  already-consumed MIR yields an explicit unsupported result.
+- Adversarial tests cover joins, loops, indirect mutation, truncating casts,
+  signed MIN/-1 division and remainder, negation, shifts, disabled overflow
+  checks, and full-width integer bounds. Certificate edits invalidate the
+  binding, and source snapshots are checked against rustc's loaded hashes.
+- Validation: 43 default-backend/core/effects/certificate tests, 18
+  interval-backend tests, and 25 native SMT/contract tests pass. A real
+  `cargo-nirdosha check --deep` invocation produces two Z3 proof records;
+  the standalone Rust example produces three (overflow, divisor, bounds).
+- Added `examples/rt-numeric-proofs.rs` and
+  `examples/features/58_numeric_smt_proofs.nir`, including a native test
+  showing that the correlated divisor requires Z3 rather than intervals.
+  The `.nir` example compiles to a native binary and prints `25`, `0`, `-3`.
+
+Scope remains per-assertion partial correctness on normal acyclic paths.
+Loop invariants, numeric call summaries, `requires(expr)` syntax, actual
+MIR guard removal, and numeric consuming-policy support are follow-on work;
+no whole-program totality, authenticated proof object, or executable binding
+is claimed. The source scanner's evidence policy is unchanged.
+
 ### 2026-09-16 - Issue #66: concurrent Router and long-poll feeds
 
 Implemented and verified. GitHub #65 remains the umbrella register; #66 is

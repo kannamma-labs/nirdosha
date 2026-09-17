@@ -369,6 +369,8 @@ threshold or simply weren't covered before.
 
 ## smt.rs (708 lines, as of 2026-09-07)
 
+- `div_rem` now re-exports `nirdosha_smt_core::div_rem` (2026-09-17, #67), shared with the MIR driver; the native frontend and proof report are unchanged.
+
 - `1` — module doc: SMT-backed refinement checking (`docs/goal.md` §3/§6 Phase 2's real Tier-1 pass), a real Z3 solver (`z3` crate) proving (1) an arithmetic expression's value fits its declared target type, (2) a division's divisor is never zero; supersedes `refine.rs`'s interval analysis as the primary Tier-1 checker, though `refine.rs` stays in the tree undeleted
 - `48` — **now accurate as of this pass** (previously claimed "not wired to elide anything, no backend exists yet" — corrected 2026-09-07): `codegen.rs` takes `&SmtReport` directly and skips a `guard_in_range`/`guard_index_in_bounds` trap wherever `SmtReport::proven_in_range`/`proven_index_bounds` already proved it. `refine.rs`'s `RefineReport` has no equivalent consumer.
 - `70` `pub struct SmtReport` — the whole program's Z3-discharged proof result set, consumed directly by `codegen.rs`
