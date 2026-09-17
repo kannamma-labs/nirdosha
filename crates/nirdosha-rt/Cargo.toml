@@ -7,13 +7,31 @@ license = "MIT"
 publish = false
 
 [features]
+default = ["async-runtime"]
 native = ["dep:nirdosha-runtime-kernels"]
+# `web::Router`'s async transport (`Runtime::Async`, the default
+# `Router::new` picks -- most apps are I/O-bound, not CPU-bound, so a
+# tokio-based accept loop that never dedicates one OS thread per
+# connection is the better default; `Runtime::Sync` stays available via
+# `Router::with_runtime` for whoever wants today's thread-per-connection
+# model instead). Handler closures themselves are unchanged, ordinary
+# sync `Fn(&Request, &PathParams) -> Response` either way -- only the
+# accept-loop/IO strategy underneath them differs; this deliberately
+# never touches the dialect's own driver, which still rejects `async
+# fn` outright (`nirdosha-driver`'s pure-subset check) and isn't part
+# of this feature's scope. Default-on, but still a real feature (not a
+# plain dependency) so a build with no use for `web::Router` at all can
+# `--no-default-features` and skip tokio entirely -- the same reasoning
+# `nirdosha-hi`'s own `native-window` feature already established for
+# an optional-but-usually-wanted heavy dependency.
+async-runtime = ["dep:tokio"]
 
 [dependencies]
 nirdosha-macros = { path = "../nirdosha-macros" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nirdosha-runtime-kernels = { path = "../runtime-kernels", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"], optional = true }
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }

@@ -142,6 +142,54 @@ fn slow_handler_does_not_block_other_routes_and_capacity_is_bounded() {
     }
 }
 
+/// Real sockets, a real `serve_until` accept loop, real repeated
+/// connections from the same peer (`127.0.0.1`, this test process
+/// itself) -- proving `with_rate_limit` actually throttles through the
+/// live server, not just at the `ratelimit::RateLimiter` unit level.
+/// `router.dispatch(&req)` (no real socket, no peer) never rate-limits
+/// at all -- disclosed, not a gap -- so this has to go through a real
+/// `Server`, the same reason every other test in this file does.
+#[test]
+fn rate_limit_denies_past_the_configured_max_from_the_same_peer_and_leaves_other_paths_untouched() {
+    let server = Server::start(
+        Router::new(|_| Auth::login("anon", &[]))
+            .get("/limited", "limited", |_, _| Response::text(200, "ok"))
+            .get("/unlimited", "unlimited", |_, _| Response::text(200, "ok"))
+            .with_rate_limit(vec!["/limited"], 3, Duration::from_secs(60)),
+        64,
+    );
+    for _ in 0..3 {
+        assert!(server.request("/limited").starts_with("HTTP/1.1 200"));
+    }
+    assert!(server.request("/limited").starts_with("HTTP/1.1 429"));
+    // A path never named in `with_rate_limit` is never throttled, no
+    // matter how many times the same peer hits it.
+    for _ in 0..5 {
+        assert!(server.request("/unlimited").starts_with("HTTP/1.1 200"));
+    }
+}
+
+/// `Router::new` defaults to `Runtime::Async` (unit-tested in
+/// `web.rs` itself); this proves the `Runtime::Sync` opt-out is a real,
+/// working transport over real sockets too, not just a type that
+/// exists -- the same rate-limit scenario the async-default test above
+/// already covers, run again with the sync accept loop explicitly
+/// selected.
+#[test]
+fn with_runtime_sync_opt_out_still_serves_real_requests_over_real_sockets() {
+    use nirdosha_rt::web::Runtime;
+    let server = Server::start(
+        Router::new(|_| Auth::login("anon", &[]))
+            .get("/limited", "limited", |_, _| Response::text(200, "ok"))
+            .with_rate_limit(vec!["/limited"], 2, Duration::from_secs(60))
+            .with_runtime(Runtime::Sync),
+        64,
+    );
+    assert!(server.request("/limited").starts_with("HTTP/1.1 200"));
+    assert!(server.request("/limited").starts_with("HTTP/1.1 200"));
+    assert!(server.request("/limited").starts_with("HTTP/1.1 429"));
+}
+
 #[test]
 fn concurrent_sessions_keep_roles_and_logout_separate() {
     use nirdosha_rt::{NavLink, Request, Role};

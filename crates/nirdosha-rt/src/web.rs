@@ -15,9 +15,12 @@
 //! one source (`R`), not two.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use crate::role::{Auth, Role, RoleProof};
+
+mod ratelimit;
 
 const SESSION_COOKIE: &str = "nirdosha_session";
 
@@ -307,7 +310,12 @@ impl Response {
         }
     }
 
-    fn write_to(&self, conn: &crate::prelude::Tcp) {
+    /// The complete HTTP/1.1 response, head and body together, as one
+    /// string — shared by both `serve_until`'s sync path (`write_to`,
+    /// below) and its async path (`serve_until_async`'s own socket
+    /// write), so the wire format has exactly one definition regardless
+    /// of which transport a given `Router` runs under.
+    fn wire_string(&self) -> String {
         let mut head = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
@@ -319,8 +327,12 @@ impl Response {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
         head.push_str("\r\n");
-        conn.send(&head);
-        conn.send(&self.body);
+        head.push_str(&self.body);
+        head
+    }
+
+    fn write_to(&self, conn: &crate::prelude::Tcp) {
+        conn.send(&self.wire_string());
     }
 }
 
@@ -490,6 +502,64 @@ pub struct Router {
     /// wildcard is what the custom-header/explicit-origin split in the
     /// CORS spec exists to prevent.
     allowed_origins: Vec<String>,
+    /// Fixed-window, per-peer-IP rate limiting for `paths` — `None`
+    /// (the default) means no path is rate-limited at all. Only takes
+    /// effect through `serve_until`'s real TCP accept loop, the one
+    /// source of a real peer IP; `dispatch` called directly (this
+    /// crate's own tests, or an app embedding `Router` in its own
+    /// server loop) never rate-limits — the same disclosed,
+    /// per-process-only scope `ratelimit::RateLimiter` (ported from
+    /// `compiled-serve`'s own) already states for its *fleet-wide*
+    /// limit; this is that same limit's *dispatch-path* counterpart,
+    /// not silently assumed away either.
+    rate_limit: Option<RateLimitRule>,
+    /// Which `serve_until` accept-loop implementation this router runs
+    /// under — see [`Runtime`]'s own doc comment. `Runtime::default()`
+    /// (`Async`) unless overridden by `with_runtime`.
+    runtime: Runtime,
+}
+
+/// `serve_until`'s transport strategy — never changes what a route
+/// handler looks like (still an ordinary sync `Fn(&Request,
+/// &PathParams) -> Response`, on both variants) or what the dialect's
+/// own driver accepts (`async fn` stays rejected there regardless of
+/// this setting) — only how the accept loop underneath handlers is
+/// implemented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runtime {
+    /// A tokio-based accept loop (`serve_until_async`): bounded worker
+    /// *tasks*, not one OS thread per connection, with each handler
+    /// invocation run via `tokio::task::spawn_blocking` (handlers can
+    /// legitimately block — `communication_feed!`'s long-poll wait is
+    /// exactly that shape — so this still never stalls the async
+    /// reactor's own worker threads). The default: most apps this
+    /// dialect targets are I/O-bound (waiting on a database, an
+    /// upstream HTTP call, a long-poll), which is exactly where an
+    /// async accept loop's lower per-connection overhead pays for
+    /// itself; a CPU-bound app gets no benefit from this over `Sync`
+    /// either way; requires this crate's `async-runtime` feature
+    /// (on by default — see that feature's own `Cargo.toml` comment).
+    Async,
+    /// Today's original accept loop (`serve_until_sync`): one OS thread
+    /// per accepted connection, bounded by `ServeConfig::max_connections`.
+    /// Simple, no tokio dependency needed at all, and perfectly
+    /// adequate for a low-concurrency app or one that's CPU-bound
+    /// rather than I/O-bound (async buys nothing there).
+    Sync,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Runtime::Async
+    }
+}
+
+#[derive(Clone)]
+struct RateLimitRule {
+    paths: Vec<String>,
+    max_per_window: u32,
+    window: std::time::Duration,
+    limiter: Arc<ratelimit::RateLimiter>,
 }
 
 /// Bounds socket workers and socket I/O waits. Handler execution must itself
@@ -593,6 +663,8 @@ impl Router {
             login: None,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             allowed_origins: Vec::new(),
+            rate_limit: None,
+            runtime: Runtime::default(),
         }
     }
 
@@ -635,6 +707,30 @@ impl Router {
     /// nothing.
     pub fn with_cors(mut self, origins: Vec<&'static str>) -> Self {
         self.allowed_origins = origins.into_iter().map(String::from).collect();
+        self
+    }
+
+    /// Fixed-window, per-peer-IP rate limiting on `paths` (most
+    /// relevant to `with_login`'s own login path, to bound brute-force
+    /// throughput -- but takes an arbitrary path list since any handler
+    /// might want the same protection). See `Router::rate_limit`'s own
+    /// doc comment for the one real scope limit: this only ever
+    /// triggers through `serve_until`'s real accept loop.
+    pub fn with_rate_limit(mut self, paths: Vec<&'static str>, max_per_window: u32, window: std::time::Duration) -> Self {
+        self.rate_limit = Some(RateLimitRule {
+            paths: paths.into_iter().map(String::from).collect(),
+            max_per_window,
+            window,
+            limiter: Arc::new(ratelimit::RateLimiter::new()),
+        });
+        self
+    }
+
+    /// Picks `serve_until`'s transport strategy — see [`Runtime`]'s own
+    /// doc comment. Only ever matters via `serve_until`/`serve`;
+    /// `dispatch` called directly is identical either way.
+    pub fn with_runtime(mut self, runtime: Runtime) -> Self {
+        self.runtime = runtime;
         self
     }
 
@@ -684,8 +780,29 @@ impl Router {
     /// configured) are handled the same way, then every HTML response
     /// gets the nav bar spliced in.
     pub fn dispatch(&self, req: &Request) -> Response {
+        self.dispatch_from_peer(req, None)
+    }
+
+    /// `serve_until`'s own entry point -- identical to `dispatch` except
+    /// it also has a real peer IP to rate-limit against. `peer: None`
+    /// (what `dispatch` itself passes) always skips the rate-limit
+    /// check entirely, never fails open on a *configured* limit in a
+    /// way that would be a false negative under real traffic -- see
+    /// `Router::rate_limit`'s own doc comment for why that's the
+    /// correct, disclosed scope rather than a gap.
+    fn dispatch_from_peer(&self, req: &Request, peer: Option<IpAddr>) -> Response {
         if req.method == "OPTIONS" {
             return self.cors_preflight_response(req);
+        }
+        if let Some(rule) = &self.rate_limit {
+            let path = req.path_without_query();
+            if rule.paths.iter().any(|p| p == path) {
+                if let Some(ip) = peer {
+                    if !rule.limiter.check(ip, rule.max_per_window, rule.window) {
+                        return self.apply_cors(req, Response::text(429, "rate limited"));
+                    }
+                }
+            }
         }
         let response = self.dispatch_authenticated(req);
         self.apply_cors(req, response)
@@ -881,19 +998,30 @@ impl Router {
         unreachable!("the permanent server has no shutdown signal")
     }
 
-    /// Serve an already-bound listener until shutdown is requested. Excess
-    /// connections are closed without spawning a worker. Stop accepting first,
-    /// then join every worker; user handlers must eventually return.
-    pub fn serve_until(
-        &self,
-        listener: std::net::TcpListener,
-        shutdown: &std::sync::atomic::AtomicBool,
-        config: ServeConfig,
-    ) -> std::io::Result<()> {
-        use std::sync::atomic::Ordering;
+    /// Serve an already-bound listener until shutdown is requested,
+    /// under whichever [`Runtime`] this router was built with
+    /// (`with_runtime`, default `Async`). Both implementations honor
+    /// the identical contract: excess connections (past
+    /// `ServeConfig::max_connections`) are accepted then closed without
+    /// being handled; accepting stops first, then every in-flight
+    /// handler is drained before this returns; user handlers must
+    /// eventually return (or, on the async side, eventually stop
+    /// blocking the `spawn_blocking` thread they're running on).
+    pub fn serve_until(&self, listener: std::net::TcpListener, shutdown: &std::sync::atomic::AtomicBool, config: ServeConfig) -> std::io::Result<()> {
         if config.io_timeout.is_zero() {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "io_timeout must be positive"));
         }
+        match self.runtime {
+            Runtime::Sync => self.serve_until_sync(listener, shutdown, config),
+            Runtime::Async => self.serve_until_async(listener, shutdown, config),
+        }
+    }
+
+    /// Today's original accept loop: one OS thread per accepted
+    /// connection, bounded by `config.max_connections`. See
+    /// `Runtime::Sync`'s own doc comment.
+    fn serve_until_sync(&self, listener: std::net::TcpListener, shutdown: &std::sync::atomic::AtomicBool, config: ServeConfig) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering;
         listener.set_nonblocking(true)?;
         let shared_router = Arc::new(self.clone());
         let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -910,7 +1038,7 @@ impl Router {
                 break Ok(());
             }
             match listener.accept() {
-                Ok((stream, _)) => {
+                Ok((stream, peer_addr)) => {
                     if workers.len() >= config.max_connections.get() {
                         drop(stream);
                         continue;
@@ -927,7 +1055,7 @@ impl Router {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let raw = conn.recv();
                             let response = match Request::parse(&raw) {
-                                Some(req) => router.dispatch(&req),
+                                Some(req) => router.dispatch_from_peer(&req, Some(peer_addr.ip())),
                                 None => Response::bad_request("malformed request"),
                             };
                             response.write_to(&conn);
@@ -947,6 +1075,122 @@ impl Router {
             crate::prelude::join(worker);
         }
         result
+    }
+
+    /// A tokio-based accept loop: bounded async *tasks* (a
+    /// `tokio::sync::Semaphore` sized to `config.max_connections`, not
+    /// one OS thread per connection) with each handler invocation run
+    /// via `tokio::task::spawn_blocking` -- handlers stay the exact
+    /// same sync `Fn(&Request, &PathParams) -> Response` closures
+    /// `dispatch_authenticated` already calls on the sync path; this
+    /// never awaits a handler inline, so a handler that legitimately
+    /// blocks (`communication_feed!`'s long-poll wait) never stalls the
+    /// reactor's own worker threads, matching `serve_until_sync`'s own
+    /// "a slow handler doesn't block other routes" guarantee via a
+    /// different mechanism (a dedicated blocking-task thread pool
+    /// instead of a dedicated OS thread per connection). Same contract
+    /// as the sync path otherwise: an over-capacity connection is
+    /// accepted then dropped without being handled (never left
+    /// unaccepted in the kernel backlog, which is what a caller
+    /// expecting a prompt, explicit connection close -- not an
+    /// eventual timeout -- actually depends on); shutdown stops
+    /// accepting first, then every spawned task is awaited before this
+    /// returns.
+    #[cfg(feature = "async-runtime")]
+    fn serve_until_async(&self, listener: std::net::TcpListener, shutdown: &std::sync::atomic::AtomicBool, config: ServeConfig) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        listener.set_nonblocking(true)?;
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        let shared_router = Arc::new(self.clone());
+
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_connections.get()));
+            let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+            let result: std::io::Result<()> = loop {
+                let mut index = 0;
+                while index < tasks.len() {
+                    if tasks[index].is_finished() {
+                        tasks.swap_remove(index);
+                    } else {
+                        index += 1;
+                    }
+                }
+                if shutdown.load(Ordering::Acquire) {
+                    break Ok(());
+                }
+                // A short poll tick, the same 5ms cadence
+                // `serve_until_sync`'s own `WouldBlock` sleep uses --
+                // gives the shutdown flag a bounded, real chance to be
+                // rechecked instead of blocking on `accept()` forever.
+                let accepted = tokio::time::timeout(std::time::Duration::from_millis(5), listener.accept()).await;
+                let (stream, peer_addr) = match accepted {
+                    Ok(Ok(pair)) => pair,
+                    Ok(Err(error)) => break Err(error),
+                    Err(_) => continue,
+                };
+                let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
+                    // Over capacity: accepted, then dropped without
+                    // being handled -- the peer sees an immediate,
+                    // explicit close (FIN/RST), never an unaccepted
+                    // connection sitting in the kernel backlog until it
+                    // times out on its own.
+                    drop(stream);
+                    continue;
+                };
+                let router = Arc::clone(&shared_router);
+                let io_timeout = config.io_timeout;
+                tasks.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    let mut stream = stream;
+                    let mut buf = [0u8; 65536];
+                    let n = match tokio::time::timeout(io_timeout, stream.read(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => return,
+                    };
+                    let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let response = match Request::parse(&raw) {
+                        Some(req) => {
+                            let router = Arc::clone(&router);
+                            let peer_ip = peer_addr.ip();
+                            // The one handler call, off the reactor's
+                            // own worker threads -- see this fn's own
+                            // doc comment for why.
+                            match tokio::task::spawn_blocking(move || router.dispatch_from_peer(&req, Some(peer_ip))).await {
+                                Ok(response) => response,
+                                Err(_) => return, // the handler panicked -- close with no response, matching `serve_until_sync`'s own `catch_unwind`
+                            }
+                        }
+                        None => Response::bad_request("malformed request"),
+                    };
+                    let _ = tokio::time::timeout(io_timeout, stream.write_all(response.wire_string().as_bytes())).await;
+                }));
+            };
+            drop(listener);
+            for task in tasks {
+                let _ = task.await;
+            }
+            result
+        })
+    }
+
+    /// This crate was built with `--no-default-features` (no
+    /// `async-runtime`, so no `tokio`) and something still requested
+    /// `Runtime::Async` -- either explicitly via `with_runtime`, or by
+    /// leaving `Router::new`'s own `Runtime::default()` in place. A
+    /// real, honest `Err` (this crate's own posture everywhere else:
+    /// never a silent downgrade to a different runtime than the one
+    /// asked for), not a compile error at the call site and not a
+    /// panic here.
+    #[cfg(not(feature = "async-runtime"))]
+    fn serve_until_async(&self, _listener: std::net::TcpListener, _shutdown: &std::sync::atomic::AtomicBool, _config: ServeConfig) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Runtime::Async requires nirdosha-rt's `async-runtime` feature (on by default) -- either enable it, or call .with_runtime(Runtime::Sync)",
+        ))
     }
 }
 
@@ -1039,6 +1283,36 @@ mod tests {
         assert_eq!(router.dispatch(&req("GET", "/nope")).status, 404);
         assert_eq!(router.dispatch(&req("POST", "/api/products")).status, 405);
         assert_eq!(router.dispatch(&req("GET", "/api/products")).status, 200);
+    }
+
+    /// Most apps this dialect targets are I/O-bound, not CPU-bound --
+    /// `Router::new` must default to `Runtime::Async` without anyone
+    /// having to call `with_runtime` at all, and `with_runtime` must
+    /// actually change it (this crate's own tests, and any app that
+    /// wants the opt-out, both depend on the builder really taking
+    /// effect, not just type-checking).
+    #[test]
+    fn router_defaults_to_the_async_runtime_and_with_runtime_overrides_it() {
+        let router = Router::new(|_| Auth::login("anon", &[]));
+        assert_eq!(router.runtime, Runtime::Async);
+        let router = router.with_runtime(Runtime::Sync);
+        assert_eq!(router.runtime, Runtime::Sync);
+    }
+
+    /// Only meaningful (and only compiled) in a `--no-default-features`
+    /// build, where `Runtime::Async` -- still `Router::new`'s own
+    /// default even here -- has no real implementation behind it.
+    /// Requesting it must be a real, honest `Err` naming the missing
+    /// feature, never a panic or a silent fallback to `Sync`.
+    #[cfg(not(feature = "async-runtime"))]
+    #[test]
+    fn async_runtime_without_the_feature_is_a_clear_error_not_a_panic() {
+        let router = Router::new(|_| Auth::login("anon", &[])).get("/", "root", |_, _| Response::text(200, "ok"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let shutdown = std::sync::atomic::AtomicBool::new(false);
+        let err = router.serve_until(listener, &shutdown, ServeConfig::default()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("async-runtime"), "got: {err}");
     }
 
     #[test]
