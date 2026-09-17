@@ -51,6 +51,7 @@ use std::collections::{HashMap, HashSet};
 mod dataflow;
 mod numeric;
 mod proof_certificate;
+mod std_effects;
 use std::process::ExitCode;
 
 use nirdosha_contract_core as cc;
@@ -58,7 +59,7 @@ use nirdosha_contract_core as cc;
 use rustc_driver::{Callbacks, Compilation};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_interface::interface::Compiler;
-use rustc_middle::mir::{Operand, ProjectionElem, StatementKind, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, ProjectionElem, StatementKind, TerminatorKind};
 use rustc_middle::ty::{TyCtxt, TyKind};
 use rustc_span::def_id::{DefId, LOCAL_CRATE, LocalDefId};
 
@@ -419,8 +420,9 @@ impl<'a, 'tcx> Effects<'a, 'tcx> {
                 continue;
             };
             match &terminator.kind {
-                TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. } => {
-                    self.visit_callee(func, &my_name, &mut impurities);
+                TerminatorKind::Call { func, args, .. }
+                | TerminatorKind::TailCall { func, args, .. } => {
+                    self.visit_callee(func, args, &body, &my_name, &mut impurities);
                 }
                 TerminatorKind::Assert { msg, .. } => {
                     if self
@@ -459,7 +461,14 @@ impl<'a, 'tcx> Effects<'a, 'tcx> {
         impurities
     }
 
-    fn visit_callee(&mut self, func: &Operand<'tcx>, my_name: &str, out: &mut Vec<Impurity>) {
+    fn visit_callee(
+        &mut self,
+        func: &Operand<'tcx>,
+        args: &[rustc_span::Spanned<Operand<'tcx>>],
+        body: &Body<'tcx>,
+        my_name: &str,
+        out: &mut Vec<Impurity>,
+    ) {
         let Operand::Constant(const_operand) = func else {
             out.push(Impurity {
                 reason: "dynamically dispatched call — purity is provable only for \
@@ -487,7 +496,61 @@ impl<'a, 'tcx> Effects<'a, 'tcx> {
             out.extend(sub);
             return;
         }
+        // The curated std/core/alloc/nirdosha_rt effect-summary table
+        // (issue #71) — consulted before the deny-list/blanket
+        // rejection below, the same "resolved DefId, not string-matched
+        // source" principle `foreign_reason` already uses, applied to a
+        // table that grants trust instead of denying it.
+        match std_effects::classify(&self.tcx.def_path_str(did)) {
+            Some(std_effects::Effect::Pure) => return,
+            Some(std_effects::Effect::HigherOrderPure) => {
+                // Trusted for the call itself, but a closure/fn-item
+                // argument's own body can still hide an effect (e.g. a
+                // `println!` inside `.map(|x| { .. })`) — check every
+                // argument that resolves to one, the same recursive
+                // local-effects machinery a direct call already gets.
+                for arg in args {
+                    self.visit_callable_argument(&arg.node, body, my_name, out);
+                }
+                return;
+            }
+            None => {}
+        }
         if let Some(reason) = self.foreign_reason(did) {
+            out.push(Impurity {
+                reason: reason.to_string(),
+                chain: vec![my_name.to_string(), self.name(did)],
+            });
+        }
+    }
+
+    /// A closure literal or fn-item value passed as an argument to a
+    /// trusted higher-order std call (`Iterator::map`, `Option::
+    /// and_then`, ...) — resolve its own `DefId` from its MIR type and
+    /// check its body exactly as if it had been called directly.
+    fn visit_callable_argument(
+        &mut self,
+        operand: &Operand<'tcx>,
+        body: &Body<'tcx>,
+        my_name: &str,
+        out: &mut Vec<Impurity>,
+    ) {
+        let Some(place) = operand.place() else {
+            return;
+        };
+        let ty = place.ty(&body.local_decls, self.tcx).ty;
+        let (TyKind::Closure(did, _) | TyKind::FnDef(did, _)) = ty.kind() else {
+            return;
+        };
+        let did = *did;
+        if did.is_local() {
+            let callee = did.expect_local();
+            let mut sub = self.effects_of(callee);
+            for imp in &mut sub {
+                imp.chain.insert(0, my_name.to_string());
+            }
+            out.extend(sub);
+        } else if let Some(reason) = self.foreign_reason(did) {
             out.push(Impurity {
                 reason: reason.to_string(),
                 chain: vec![my_name.to_string(), self.name(did)],

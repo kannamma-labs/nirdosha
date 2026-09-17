@@ -44,12 +44,37 @@ does not prove termination or prevent arithmetic-overflow panics. Numeric assert
 and indexing pass: see [MIR numeric proofs](MIR_NUMERIC_PROOFS.md). These
 per-check records do not upgrade this to a whole-program guarantee.
 
-It rejects external calls without effect summaries, including **all** calls
-into std/core/alloc/nirdosha_rt; crate names no longer grant trust. This
-currently rejects pure iterator-based code and injected NFR guards as well
-as impure callbacks. Do not restore crate-wide exemptions to make a demo
-pass. Version-bound summaries and explicit instrumentation boundaries are
-the route to broader acceptance.
+It rejects external calls without effect summaries; crate names alone never
+grant trust. A curated, `DefId`-resolved effect table
+(`nirdosha-driver/src/std_effects.rs`, issue #71) now covers a real but
+bounded std/core/alloc surface — `Vec`/`Option`/`Result`/`String`/`HashMap`
+inherent methods, `Iterator` adaptors (`map`/`filter`/`fold`/...), and the
+dialect's own injected `nfr(..)` guard — so ordinary iterator-based code and
+NFR-instrumented pure fns are no longer blocked outright. A higher-order
+call (`.map(closure)`) is trusted for the call itself but still requires the
+closure/fn-item argument's own body to check out, so a real effect hidden
+inside a callback passed to a trusted adaptor is still rejected. Grown
+incrementally, one table entry plus a test per addition; anything not in the
+table still falls back to blanket rejection. Deliberately **not** trusted by
+path name, even though real code hits them constantly: `Clone::clone`,
+`Deref`/`DerefMut`, `Mul`/`Add`/comparison operators, and other traits a
+downstream type routinely reimplements — `def_path_str` resolves a trait
+method call to the trait's own declared path regardless of which type
+implements it (confirmed empirically: a hand-written `impl Mul<i64> for
+Loud` with a real side effect resolves to the exact same
+`std::ops::Mul::mul` string a primitive multiply would), so trusting these
+by name would silently accept a lying `effects(pure)` claim. A sound fix
+needs the call's resolved `Self` type checked against Rust's orphan-rule
+guarantee first — real, and worth doing, but its own follow-on. Do not
+restore crate-wide exemptions to make a demo pass; version-bound summaries
+and explicit instrumentation boundaries are the route to broader
+acceptance.
+
+Separately: any value needing drop glue — even a plain `Vec`/`String` with
+no custom `Drop` impl, just ordinary deallocation — is *also* rejected
+outright (`"destructor effects lack a verified summary"`,
+`TerminatorKind::Drop` in `main.rs`), independent of this table. That gap is
+tracked separately; this fix does not touch it.
 
 Unresolved function pointers and trait dispatch (including default trait
 bodies), destructors, static state, writes through references/pointers,

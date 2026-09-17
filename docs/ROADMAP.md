@@ -25,6 +25,29 @@ A, Track B, Track C below) — but the specs themselves stay put.
 
 ## V2 issue fixes
 
+- `[DONE]` **2026-09-17, GitHub #71: curated std/core/alloc effect
+  summary table.** Stage 2 rejected *every* external call by name,
+  including `Vec::push`, `.iter().map(..)`, and the dialect's own
+  injected `nfr(..)` guard — nothing outside the local crate was
+  trusted at all. `nirdosha-driver/src/std_effects.rs`: a curated,
+  `DefId`-resolved table covering a real but bounded std/core/alloc
+  surface, consulted before `foreign_reason`'s blanket rejection. A
+  higher-order call (`Iterator::map`, `Option::and_then`, ...) is
+  trusted for the call itself but the effects walker still recurses
+  into any closure/fn-item argument's own body, so a real effect
+  hidden inside a callback stays rejected — verified via the existing
+  `std_callback_is_not_trusted_by_crate_name` regression test, still
+  green. Deliberately excludes trait methods a downstream type
+  routinely reimplements (`Clone`, `Deref`, arithmetic/comparison
+  operators): confirmed empirically that `def_path_str` resolves a
+  trait method call to the trait's own declared path regardless of
+  which type implements it, so trusting `std::ops::Mul::mul` by name
+  would also silently trust a user type's own, possibly side-effecting
+  `Mul` impl. Also surfaced a separate, pre-existing gap this fix does
+  **not** touch: any value needing drop glue (even a plain `Vec` with
+  no custom `Drop`) is unconditionally rejected too — filed as GitHub
+  #78.
+
 - `[DONE]` **2026-09-17, GitHub #69: domain-specific affine/resource
   checking via `rustc_mir_dataflow`.** A new `resource(kind = "..")`
   contract clause: a real `rustc_mir_dataflow` forward "may still hold
