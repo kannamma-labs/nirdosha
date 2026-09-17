@@ -1,13 +1,15 @@
 use std::process::ExitCode;
 
-// The relocated MCP tool layer + the verify/fix/certify pipelines it
-// wraps -- previously defined in this file, now living in the library
-// (`nirdosha::mcp_tools`) so `nirdosha hi`'s embedded calls and this
-// binary's CLI subcommands and stdio server all share one
-// implementation, one wire shape, and one call log.
-use nirdosha::mcp_tools::{
-    build_certificate, isolation_violations_from_anomalies, nfr_commitments_from_program, nfr_drift, run_verify_pipeline, sha256_hex, sign_certificate, tools_call, tools_list, write_auto_patches,
-    Certificate, FixReport, McpCallLog, NfrEscalation, ProofVerdict,
+// The native verify/fix/certify pipeline -- previously defined in this
+// file, now living in the library (`nirdosha::verify_pipeline`) so this
+// binary's CLI subcommands stay thin wrappers over one implementation.
+// The v2 MCP tool surface this file used to also share
+// (`tools_call`/`tools_list`/`McpCallLog`, `nirdosha mcp`) moved to the
+// standalone `nirdosha-hi` crate (`nirdosha-hi mcp`) 2026-09-16 -- this
+// crate has no dependency on it at all anymore.
+use nirdosha::verify_pipeline::{
+    build_certificate, isolation_violations_from_anomalies, nfr_commitments_from_program, nfr_drift, run_verify_pipeline, sha256_hex, sign_certificate, write_auto_patches, Certificate, FixReport,
+    NfrEscalation, ProofVerdict,
 };
 
 fn main() -> ExitCode {
@@ -41,15 +43,17 @@ fn main() -> ExitCode {
         "attest" => cmd_attest(args),
         "audit" => cmd_audit(args),
         "suggest-contracts" => cmd_suggest_contracts(args),
-        "mcp" => cmd_mcp(args),
-        "plugin" => cmd_plugin(args),
         "emit-llvm" => cmd_emit_llvm(args),
         "emit-ast" => cmd_emit_ast(args),
         "emit-ui" => cmd_emit_ui(args),
         "emit-catalog" => cmd_emit_catalog(args),
         "grammar-export" => cmd_grammar_export(args),
         "roles" => cmd_roles(args),
-        "hi" => cmd_hi(args),
+        "hi" | "mcp" | "plugin" => {
+            let suffix = if first == "hi" { String::new() } else { format!(" {first}") };
+            eprintln!("`nirdosha {first}` moved to the standalone `nirdosha-hi` binary 2026-09-16 (`nirdosha-hi{suffix}`) -- this compiler binary no longer depends on it.");
+            ExitCode::FAILURE
+        }
         other => {
             eprintln!("unknown subcommand `{other}` -- nirdosha has no interpreter/`run`/`serve` mode anymore; use `build` or `emit-llvm`.");
             print_usage();
@@ -527,48 +531,20 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             let effects = nirdosha::effects::infer_effects(&program, &registry);
             let ui_html = nirdosha::ui_gen::generate(&program, &effects, None, false, true, false, None).into_bytes();
 
-            // RFC 0016's FAPI wiring, activated through the graph/pack
-            // system (not a CLI flag): if this project's `.nir/hi.db`
-            // already exists and an active pack's compliance profile
-            // declares `sender_constrained_tokens`, this build turns on
-            // `compiled_serve`'s real DPoP enforcement. A project with
-            // no graph at all (the common case for a plain `nirdosha
-            // build --serve`) is completely unaffected -- `hi_graph::open`
-            // is never called unless `.nir/hi.db` already exists, so a
-            // plain build never gets the side effect of creating one.
-            let mut require_sender_constrained_tokens = false;
-            if let Ok(cwd) = std::env::current_dir() {
-                let hi_db = nirdosha::hi_graph::hi_dir(&cwd).join("hi.db");
-                if hi_db.is_file() {
-                    match nirdosha::hi_graph::open(&cwd) {
-                        Ok(conn) => match nirdosha::hi_plugin::wiring_requires_sender_constrained_tokens(&conn, &cwd) {
-                            Ok(required) => {
-                                require_sender_constrained_tokens = required;
-                                match nirdosha::hi_plugin::render_wiring_config(&conn, &cwd) {
-                                    Ok(Some(config)) => {
-                                        let sidecar_path = format!("{out}.fapi-config.json");
-                                        match serde_json::to_string_pretty(&config) {
-                                            Ok(text) => {
-                                                if let Err(e) = std::fs::write(&sidecar_path, text) {
-                                                    eprintln!("warning: failed to write {sidecar_path}: {e}");
-                                                } else {
-                                                    println!("wrote {sidecar_path} (compliance wiring your real authorization server/gateway must enforce -- nirdosha does not run one)");
-                                                }
-                                            }
-                                            Err(e) => eprintln!("warning: failed to render compliance wiring config: {e}"),
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => eprintln!("warning: failed to read compliance wiring config from installed packs: {e}"),
-                                }
-                            }
-                            Err(e) => eprintln!("warning: failed to check installed packs' wiring requirements: {e}"),
-                        },
-                        Err(e) => eprintln!("warning: failed to open {}: {e}", hi_db.display()),
-                    }
-                }
-            }
-
+            // RFC 0016's FAPI wiring used to auto-detect through
+            // `.nir/hi.db` (if a project had one, and an active pack's
+            // compliance profile declared `sender_constrained_tokens`,
+            // this build turned on `compiled_serve`'s real DPoP
+            // enforcement with no CLI flag needed). `.nir/hi.db`'s
+            // reader/writer (`hi_graph`/`hi_plugin`) moved to the
+            // standalone `nirdosha-hi` crate 2026-09-16 -- this compiler
+            // binary no longer depends on it, so that auto-detection no
+            // longer happens here. A real, disclosed feature reduction,
+            // not silently dropped: DPoP enforcement itself
+            // (`compiled_serve`) is unaffected, and `nirdosha-hi`'s own
+            // `:publish` is the supported path for a project that wants
+            // its installed packs' wiring requirements to shape a build.
+            let require_sender_constrained_tokens = false;
             let opts = nirdosha::codegen::ServeCodegenOptions { port, ui_html, require_sender_constrained_tokens };
             nirdosha::codegen::build_serve(&program, &smt_report, std::path::Path::new(&out), opt, &opts)
         }
@@ -608,192 +584,6 @@ fn cmd_build(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// `nirdosha hi` -- one command, one app (rfcs/0013-nirdosha-realm.md,
-/// rfcs/0014-generative-build-console.md). Bare `hi`, no subcommand,
-/// opens the native build-mode window directly: a live 3D graph over
-/// `.nir/hi.db`, with its own bottom-of-window `:ask`/`:impact` console
-/// baked into the page itself (`hi_graph.html`) -- there is no separate
-/// terminal front end to launch first and hand off from. The named
-/// subcommands below are `.nir/hi.db`'s standalone CLI surface, for
-/// CI/scripting use that never needs a window at all: `ingest`/`link`
-/// aren't things the window's own startup runs on its own, and
-/// `sync`/`impact` are exactly what bare `hi` already does/shows, just
-/// callable without opening anything.
-fn cmd_hi(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error resolving the current directory: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let Some(sub) = args.next() else {
-        return cmd_hi_window(&cwd);
-    };
-    let conn = match nirdosha::hi_graph::open(&cwd) {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("{msg}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if let Err(e) = nirdosha::hi_plugin::ensure_default_packs(&conn, &cwd) {
-        eprintln!("hi: default domain packs failed to install, continuing: {e}");
-    }
-    if let Err(e) = nirdosha::hi_plugin::reload_installed_packs(&conn, &cwd) {
-        eprintln!("hi: installed domain packs failed to reload, continuing: {e}");
-    }
-    match sub.as_str() {
-        "ingest" => {
-            let Some(doc) = args.next() else {
-                eprintln!("usage: nirdosha hi ingest <doc.md>");
-                return ExitCode::FAILURE;
-            };
-            match nirdosha::hi_graph::ingest_document(&conn, std::path::Path::new(&doc)) {
-                Ok(n) => {
-                    println!("ingested {n} new chunk(s) from {doc}");
-                    ExitCode::SUCCESS
-                }
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        "sync" => {
-            let files: Vec<String> = args.collect();
-            match nirdosha::hi_graph::sync(&conn, &cwd, &files) {
-                Ok(r) => {
-                    println!(
-                        "synced {} file(s): {} unit(s) seen, {} added, {} changed, {} edge(s) flagged possibly_stale",
-                        r.files_scanned, r.units_seen, r.units_added, r.units_changed, r.edges_flagged
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        "link" => {
-            let (Some(req_id), Some(target)) = (args.next(), args.next()) else {
-                eprintln!("usage: nirdosha hi link <requirement-id> <fn|struct|enum|screen:name>");
-                return ExitCode::FAILURE;
-            };
-            match nirdosha::hi_graph::link(&conn, &req_id, &target) {
-                Ok(()) => {
-                    println!("linked {req_id} <-> {target}");
-                    ExitCode::SUCCESS
-                }
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        "impact" => {
-            let Some(target) = args.next() else {
-                eprintln!("usage: nirdosha hi impact <target>");
-                return ExitCode::FAILURE;
-            };
-            match nirdosha::hi_graph::impact(&conn, &target) {
-                Ok(report) => {
-                    print!("{}", format_impact_report(&target, &report));
-                    ExitCode::SUCCESS
-                }
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        "serve" => {
-            // The headless/network-reachable fallback rfcs/0014's own
-            // "no network port at all" section documents -- not the
-            // default build-mode transport (that's the wry custom-
-            // protocol handler bare `hi` opens), but a real surface for
-            // scripting/CI/remote-dev-box use. Drop this validating
-            // connection before handing the directory to the server,
-            // which opens its own per-request connections (see
-            // hi_server.rs's own doc comment on why:
-            // rusqlite::Connection isn't Sync).
-            drop(conn);
-            match nirdosha::hi_server::serve(&cwd) {
-                Ok(handle) => {
-                    println!("hi API listening on http://127.0.0.1:{} (Ctrl+C to stop)", handle.port);
-                    loop {
-                        std::thread::park();
-                    }
-                }
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        other => {
-            eprintln!("unknown `hi` subcommand `{other}` -- usage: nirdosha hi [ingest|sync|link|impact|serve] ...");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// Bare `nirdosha hi`: auto-scaffolds/syncs `.nir/hi.db` (best-effort --
-/// a sync problem degrades to a logged warning, never blocks the window
-/// from opening, same "must never be the thing that crashes" posture
-/// `hi_graph.rs`'s own doc comment describes), then opens the native
-/// build-mode window and blocks until it's closed. `NIRDOSHA_HI_DISABLE=1`
-/// skips the scaffold/sync step entirely (the window still opens, just
-/// against whatever `.nir/hi.db` already has, or none at all).
-fn cmd_hi_window(cwd: &std::path::Path) -> ExitCode {
-    if !nirdosha::hi_graph::is_disabled(&|k| std::env::var(k).ok()) {
-        match nirdosha::hi_graph::open(cwd) {
-            Ok(conn) => {
-                if let Err(e) = nirdosha::hi_plugin::ensure_default_packs(&conn, cwd) {
-                    eprintln!("hi: default domain packs failed to install, continuing: {e}");
-                }
-                if let Err(e) = nirdosha::hi_plugin::reload_installed_packs(&conn, cwd) {
-                    eprintln!("hi: installed domain packs failed to reload, continuing: {e}");
-                }
-                if let Err(e) = nirdosha::hi_graph::sync(&conn, cwd, &[]) {
-                    eprintln!("hi: sync failed, continuing with a possibly-stale graph: {e}");
-                }
-            }
-            Err(e) => eprintln!("hi: couldn't open .nir/hi.db, continuing without it ({}=1 to silence this): {e}", nirdosha::hi_graph::HI_DISABLE_VAR),
-        }
-    }
-    match nirdosha::hi_window::open(cwd) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(msg) => {
-            eprintln!("{msg}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// One rendering of a bounded impact walk (rfcs/0013), flagged nodes
-/// listed first (`hi_graph::impact` already sorts them that way).
-fn format_impact_report(target: &str, report: &nirdosha::hi_graph::ImpactReport) -> String {
-    if report.hits.is_empty() {
-        return format!("no reachable nodes from `{target}` -- try `nirdosha hi link` or `nirdosha hi sync` first.\n");
-    }
-    let mut out = format!("impact of `{target}` ({} node(s){}):\n", report.hits.len(), if report.partial { ", partial -- bound reached" } else { "" });
-    for h in &report.hits {
-        let flag = h.flag.as_deref().map(|f| format!("  [{f}]")).unwrap_or_default();
-        // `source_ref`/`line`/`col` are only ever set on a `CodeUnit`
-        // node (`Requirement`/`Document`/`Chunk` have nothing to point
-        // at) -- printed only when present, same "NULL means nothing to
-        // show" convention the rest of this report already follows.
-        let location = match (&h.source_ref, h.line, h.col) {
-            (Some(path), Some(line), Some(col)) => format!("  ({path}:{line}:{col})"),
-            _ => String::new(),
-        };
-        out.push_str(&format!("  depth {} {} {} `{}`{location}{flag}\n", h.depth, h.kind, h.edge_kind, h.title.as_deref().unwrap_or(&h.node_id)));
-    }
-    out
 }
 
 fn cmd_emit_llvm(mut args: impl Iterator<Item = String>) -> ExitCode {
@@ -1219,17 +1009,23 @@ fn cmd_check_isolation(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
     };
     let clean = anomalies.is_empty();
+    // `--teach`'s runtime-lessons hint cache (`hint_cache.rs`) moved to
+    // `crates/nirdosha-hi` 2026-09-16 along with the rest of `hi` -- a
+    // native incident can no longer directly seed `hi`'s corrective-
+    // hint cache in-process (they're separate binaries now). The flag
+    // still parses (so an existing script's invocation doesn't break),
+    // it just can't record anywhere anymore.
     if !clean {
-        if let Some(hint) = &teach {
-            nirdosha::hint_cache::shared_runtime_lessons().lock().unwrap_or_else(|e| e.into_inner()).record("transact_isolation_anomaly", hint);
+        if teach.is_some() {
+            eprintln!("--teach: the runtime-lessons hint cache now lives in the standalone nirdosha-hi crate -- nothing recorded here");
         }
     }
     let verdict = if clean { "clean" } else { "anomaly_found" };
     let predicate = serde_json::json!({
         "verdict": verdict,
-        "evidence_tier": nirdosha::mcp_tools::IsolationViolation::EVIDENCE_TIER,
+        "evidence_tier": nirdosha::verify_pipeline::IsolationViolation::EVIDENCE_TIER,
         "anomalies": isolation_violations_from_anomalies(&anomalies),
-        "taught": teach.is_some() && !clean,
+        "taught": false,
     });
     let output = if in_toto {
         let source_hash = match std::fs::read(&path) {
@@ -1324,10 +1120,10 @@ fn cmd_check_drift(mut args: impl Iterator<Item = String>) -> ExitCode {
     let findings = nfr_drift(&commitments, &escalations);
     let drifted = !findings.is_empty();
 
-    if drifted {
-        if let Some(hint) = &teach {
-            nirdosha::hint_cache::shared_runtime_lessons().lock().unwrap_or_else(|e| e.into_inner()).record("nfr_drift", hint);
-        }
+    // See `cmd_check_isolation`'s own `--teach` comment: the hint cache
+    // this used to record into moved to `crates/nirdosha-hi`.
+    if drifted && teach.is_some() {
+        eprintln!("--teach: the runtime-lessons hint cache now lives in the standalone nirdosha-hi crate -- nothing recorded here");
     }
 
     // The actual "trigger re-verification" half -- only run when there
@@ -1513,7 +1309,7 @@ fn cmd_verify_binary(mut args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 /// `nirdosha keygen [-o <path>]` -- generates a real Ed25519 keypair
-/// (`nirdosha::crypto_backend::rand::SystemRandom`, the OS CSPRNG, not a fixed/test seed)
+/// (`nirdosha_audit::crypto_backend::rand::SystemRandom`, the OS CSPRNG, not a fixed/test seed)
 /// for `nirdosha certify --sign`. Writes the private key as raw
 /// PKCS#8 DER to `<path>` (default `nirdosha_signing_key.pk8`) --
 /// **keep this file secret**, anyone holding it can sign certificates
@@ -1522,7 +1318,7 @@ fn cmd_verify_binary(mut args: impl Iterator<Item = String>) -> ExitCode {
 fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
-    use nirdosha::crypto_backend::signature::KeyPair;
+    use nirdosha_audit::crypto_backend::signature::KeyPair;
 
     let mut out: Option<String> = None;
     while let Some(a) = args.next() {
@@ -1542,8 +1338,8 @@ fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
     }
     let out_path = out.unwrap_or_else(|| "nirdosha_signing_key.pk8".to_string());
 
-    let rng = nirdosha::crypto_backend::rand::SystemRandom::new();
-    let pkcs8 = match nirdosha::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+    let rng = nirdosha_audit::crypto_backend::rand::SystemRandom::new();
+    let pkcs8 = match nirdosha_audit::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("key generation failed: {e}");
@@ -1554,7 +1350,7 @@ fn cmd_keygen(mut args: impl Iterator<Item = String>) -> ExitCode {
         eprintln!("error writing {out_path}: {e}");
         return ExitCode::FAILURE;
     }
-    let keypair = nirdosha::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("a key this function just generated always parses");
+    let keypair = nirdosha_audit::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("a key this function just generated always parses");
     let public_key_b64 = BASE64_STANDARD.encode(keypair.public_key().as_ref());
     let pub_path = format!("{out_path}.pub");
     if let Err(e) = std::fs::write(&pub_path, format!("{public_key_b64}\n")) {
@@ -1619,7 +1415,7 @@ fn cmd_verify_certificate(mut args: impl Iterator<Item = String>) -> ExitCode {
     };
     let canonical = serde_json::to_vec(&certificate).expect("Certificate always serializes");
 
-    let valid = match nirdosha::mcp_tools::verify_bytes(&canonical, public_key_b64, signature_b64) {
+    let valid = match nirdosha_audit::signing::verify_bytes(&canonical, public_key_b64, signature_b64) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{path}'s signature/public_key: {e}");
@@ -1839,7 +1635,7 @@ fn cmd_attest(mut args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let keypair = match nirdosha::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(&pkcs8) {
+    let keypair = match nirdosha_audit::crypto_backend::signature::Ed25519KeyPair::from_pkcs8(&pkcs8) {
         Ok(k) => k,
         Err(e) => {
             eprintln!("{key_path} is not a valid Ed25519 PKCS#8 private key: {e}");
@@ -1895,7 +1691,7 @@ fn audit_one_attestation(attestation: &Attestation, trust_config: &TrustConfig, 
     let valid = (|| -> Option<bool> {
         let public_key_bytes = BASE64_STANDARD.decode(&identity.public_key).ok()?;
         let signature_bytes = BASE64_STANDARD.decode(&attestation.signature).ok()?;
-        let public_key = nirdosha::crypto_backend::signature::UnparsedPublicKey::new(&nirdosha::crypto_backend::signature::ED25519, &public_key_bytes);
+        let public_key = nirdosha_audit::crypto_backend::signature::UnparsedPublicKey::new(&nirdosha_audit::crypto_backend::signature::ED25519, &public_key_bytes);
         Some(public_key.verify(&canonical, &signature_bytes).is_ok())
     })()
     .unwrap_or(false);
@@ -2039,13 +1835,6 @@ fn cmd_suggest_contracts(mut args: impl Iterator<Item = String>) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error reading {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
     let (program, _src) = match nirdosha::loader::load_program(&path) {
         Ok(p) => p,
         Err(msg) => {
@@ -2062,334 +1851,21 @@ fn cmd_suggest_contracts(mut args: impl Iterator<Item = String>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let activation = match nirdosha::hi_llm::resolve_activation(&|k| std::env::var(k).ok()) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("nirdosha suggest-contracts: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let client = match nirdosha::hi_llm::LlmClient::new(activation) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("nirdosha suggest-contracts: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let suggestion = match nirdosha::hi_llm::suggest_contract(&client, &source, &fn_name) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let mut scratch_path = std::env::temp_dir();
-    scratch_path.push(format!("nirdosha_suggest_contracts_{}_{fn_name}.nir", std::process::id()));
-    let spliced = format!("{source}\n\n{suggestion}\n");
-    if let Err(e) = std::fs::write(&scratch_path, &spliced) {
-        eprintln!("error writing scratch file: {e}");
-        return ExitCode::FAILURE;
-    }
-    let verdict = run_verify_pipeline(scratch_path.to_str().expect("temp_dir()-rooted path is always valid UTF-8 on every platform this ships for"));
-    let _ = std::fs::remove_file(&scratch_path);
-
-    let recommendation = match verdict.verdict {
-        ProofVerdict::Proved => "PROVED -- Z3 confirmed this contract holds for every input; safe to add as-is",
-        ProofVerdict::Disproved => "DISPROVED -- this suggestion is a false statement about the function (see the counterexample in contracts.obligations); do not use it as-is",
-        ProofVerdict::Unknown => "UNKNOWN -- Z3 couldn't decide this one; review it by hand before trusting it",
-    };
-    let report = serde_json::json!({
-        "file": path,
-        "fn_name": fn_name,
-        "suggested_contract": suggestion,
-        "verdict": verdict,
-        "recommendation": recommendation,
-    });
-    println!("{}", serde_json::to_string_pretty(&report).expect("this JSON value always serializes"));
-    eprintln!("{recommendation}");
-    match verdict.verdict {
-        ProofVerdict::Proved => ExitCode::SUCCESS,
-        ProofVerdict::Disproved => ExitCode::FAILURE,
-        ProofVerdict::Unknown => ExitCode::from(2),
-    }
+    // `nirdosha suggest-contracts`'s LLM client (`Activation`/
+    // `resolve_activation`/`LlmClient`/`suggest_contract`) used to live
+    // in `hi_llm.rs`, which moved to the standalone `nirdosha-hi` crate
+    // 2026-09-16 along with the rest of `hi` -- this compiler binary no
+    // longer depends on it. This command is temporarily unavailable
+    // pending a small shared `nirdosha-llm-client` crate (the one real
+    // entanglement the `hi` extraction didn't yet resolve: `suggest-
+    // contracts` is the only native-only feature that ever needed an
+    // LLM call). Disclosed here, not silently broken -- every check
+    // above this point (file/fn exist, no pre-existing `validate`
+    // block) still runs and still reports its own real failure first.
+    eprintln!("nirdosha suggest-contracts: temporarily unavailable -- its LLM client moved to the standalone nirdosha-hi crate on 2026-09-16 and hasn't been re-extracted into a shared crate this binary can use yet");
+    ExitCode::FAILURE
 }
 
-/// Routes one already-parsed JSON-RPC message. Returns `None` for a
-/// notification (`id` absent from the original request) -- per the MCP
-/// stdio transport spec the server must never write a response for
-/// one, `notifications/initialized` above all (sent right after
-/// `initialize`, never expecting an answer; every tool call here is
-/// already independently stateless, so there's no session flag to set
-/// in response to it either).
-fn mcp_dispatch(method: &str, params: &serde_json::Value, id: Option<&serde_json::Value>, log: &mut McpCallLog) -> Option<serde_json::Value> {
-    let id = id?.clone();
-    let result = match method {
-        "initialize" => Ok(serde_json::json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "nirdosha", "version": env!("CARGO_PKG_VERSION") },
-        })),
-        "ping" => Ok(serde_json::json!({})),
-        "tools/list" => Ok(tools_list()),
-        "tools/call" => tools_call(params, log),
-        other => Err((-32601, format!("method not found: {other}"))),
-    };
-    Some(match result {
-        Ok(result) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err((code, message)) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
-    })
-}
-
-/// Writes one MCP message to `stdout` -- messages are newline-delimited
-/// and **must not** contain an embedded newline (MCP stdio transport
-/// spec), so this is `to_string` (compact), never `to_string_pretty`,
-/// as a correctness requirement, not a style choice.
-fn write_mcp_message(stdout: &mut impl std::io::Write, value: &serde_json::Value) {
-    let _ = writeln!(stdout, "{}", serde_json::to_string(value).expect("an MCP response always serializes"));
-    let _ = stdout.flush();
-}
-
-/// `nirdosha mcp` -- `nirdosha-master-plan.md` Part 3 Sprint 1's MCP
-/// server (parity target: Acutis, Imandra, Kōdo), stdio transport
-/// (JSON-RPC 2.0, newline-delimited -- the transport MCP clients
-/// **SHOULD** support, and the only one that makes sense for a server
-/// an MCP client launches as a subprocess rather than one serving many
-/// remote clients). Reads one JSON-RPC message per line from stdin
-/// until stdin closes (the client's own documented shutdown sequence:
-/// close stdin, wait, `SIGTERM`, `SIGKILL` -- this loop's `for line in
-/// ...lines()` ending is exactly what "stdin closes" looks like from
-/// here), writes at most one response per request to stdout, and
-/// writes nothing at all for a notification. Every tool call
-/// (`tools_call`) reuses the identical, already-tested `verify`/
-/// `fix` pipeline the CLI commands run -- this is a second transport
-/// for the same logic, not a second implementation of it -- and every
-/// call from this wire is recorded in the disclosed NDJSON call log
-/// (`McpCallLog`, surface `"mcp-stdio"`), exactly as `nirdosha hi`'s
-/// embedded calls are in its own (surface `"hi-console"`), so any
-/// session is reconstructible from one log format regardless of
-/// which surface drove it.
-fn cmd_mcp(_args: impl Iterator<Item = String>) -> ExitCode {
-    let mut log = McpCallLog::new("mcp-stdio");
-    eprintln!("[nirdosha mcp] tool-call log: {}", log.path().display());
-    log.log_session_start(serde_json::json!({
-        "protocol": "mcp-stdio-2025-06-18",
-        "serverInfo": { "name": "nirdosha", "version": env!("CARGO_PKG_VERSION") },
-    }));
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in std::io::BufRead::lines(stdin.lock()) {
-        let Ok(line) = line else { break };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let request: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(e) => {
-                write_mcp_message(
-                    &mut stdout,
-                    &serde_json::json!({ "jsonrpc": "2.0", "id": serde_json::Value::Null, "error": { "code": -32700, "message": format!("parse error: {e}") } }),
-                );
-                continue;
-            }
-        };
-        let id = request.get("id");
-        let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let empty_params = serde_json::Value::Null;
-        let params = request.get("params").unwrap_or(&empty_params);
-        if let Some(response) = mcp_dispatch(method, params, id, &mut log) {
-            write_mcp_message(&mut stdout, &response);
-        }
-    }
-    ExitCode::SUCCESS
-}
-
-/// `nirdosha plugin install`'s shape-based dispatch: a signed envelope
-/// (`nirdosha plugin sign`'s own output) is a JSON object carrying
-/// `manifest_json`/`signature`/`public_key` at the top level, which no
-/// plain pack manifest does (a `PackManifest` has `id`/`name`/
-/// `invariants`/... instead) -- `None` for anything that doesn't parse
-/// as that exact shape, so a plain manifest falls straight through to
-/// the existing unsigned install path unchanged.
-fn parse_signed_pack_envelope(bytes: &[u8]) -> Option<nirdosha::hi_plugin::SignedPackEnvelope> {
-    serde_json::from_slice(bytes).ok()
-}
-
-fn cmd_plugin(mut args: impl Iterator<Item = String>) -> ExitCode {
-    let Some(sub) = args.next() else {
-        eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json> | sign <pack.json> --key <key.pk8> --identity <name> | list | revoke <pack-id>");
-        return ExitCode::FAILURE;
-    };
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error resolving the current directory: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let conn = match nirdosha::hi_graph::open(&cwd) {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("{msg}");
-            return ExitCode::FAILURE;
-        }
-    };
-    match sub.as_str() {
-        "install" => {
-            let mut dry_run = false;
-            let mut path: Option<String> = None;
-            for arg in args {
-                if arg == "--dry-run" {
-                    dry_run = true;
-                } else if path.is_none() {
-                    path = Some(arg);
-                } else {
-                    eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json>");
-                    return ExitCode::FAILURE;
-                }
-            }
-            let Some(path) = path else {
-                eprintln!("usage: nirdosha plugin install [--dry-run] <pack.json>");
-                return ExitCode::FAILURE;
-            };
-            let bytes = match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("reading {path}: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            if dry_run {
-                match nirdosha::hi_plugin::dry_run_install(&conn, &cwd, &bytes, &format!("dry-run {path}"),
-                ) {
-                    Ok(id) => {
-                        println!("dry-run ok: pack {id} from {path} (load + own contracts proved against a stub program)");
-                        ExitCode::SUCCESS
-                    }
-                    Err(msg) => {
-                        eprintln!("dry-run failed: {msg}");
-                        ExitCode::FAILURE
-                    }
-                }
-            } else if let Some(envelope) = parse_signed_pack_envelope(&bytes) {
-                // RFC 0016 Phase 4: a signed envelope (`nirdosha plugin
-                // sign`'s own output) installs through the verify-then-
-                // install path instead of the plain one -- detected by
-                // shape (this file carries `manifest_json`/`signature`/
-                // `public_key` at the top level, which no plain pack
-                // manifest does), not by a separate flag the caller has
-                // to remember to pass.
-                match nirdosha::hi_plugin::verify_and_install_signed_pack(&conn, &cwd, &envelope, &path) {
-                    Ok(id) => {
-                        println!("installed signed pack {id} from {path}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(msg) => {
-                        eprintln!("install failed: {msg}");
-                        ExitCode::FAILURE
-                    }
-                }
-            } else {
-                match nirdosha::hi_plugin::install_pack_from_bytes(&conn, &cwd, &bytes, &path,
-                ) {
-                    Ok(id) => {
-                        println!("installed pack {id} from {path}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(msg) => {
-                        eprintln!("install failed: {msg}");
-                        ExitCode::FAILURE
-                    }
-                }
-            }
-        }
-        "sign" => {
-            let mut key_path: Option<String> = None;
-            let mut identity: Option<String> = None;
-            let mut out: Option<String> = None;
-            let mut manifest_path: Option<String> = None;
-            while let Some(a) = args.next() {
-                match a.as_str() {
-                    "--key" => key_path = args.next(),
-                    "--identity" => identity = args.next(),
-                    "-o" => out = args.next(),
-                    other if manifest_path.is_none() => manifest_path = Some(other.to_string()),
-                    other => {
-                        eprintln!("unknown argument `{other}` -- usage: nirdosha plugin sign <pack.json> --key <key.pk8> --identity <name> [-o <signed-pack.json>]");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            }
-            let (Some(manifest_path), Some(key_path), Some(identity)) = (manifest_path, key_path, identity) else {
-                eprintln!("usage: nirdosha plugin sign <pack.json> --key <key.pk8> --identity <name> [-o <signed-pack.json>]");
-                return ExitCode::FAILURE;
-            };
-            let bytes = match std::fs::read(&manifest_path) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("reading {manifest_path}: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            match nirdosha::hi_plugin::sign_pack(&bytes, &key_path, identity) {
-                Ok(envelope) => {
-                    let json = serde_json::to_string_pretty(&envelope).expect("SignedPackEnvelope always serializes");
-                    let out_path = out.unwrap_or_else(|| format!("{manifest_path}.signed.json"));
-                    if let Err(e) = std::fs::write(&out_path, &json) {
-                        eprintln!("writing {out_path}: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                    println!("wrote {out_path} -- install it with `nirdosha plugin install {out_path}`");
-                    ExitCode::SUCCESS
-                }
-                Err(msg) => {
-                    eprintln!("signing failed: {msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        "list" => {
-            match nirdosha::hi_plugin::list_packs(&conn) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        "revoke" => {
-            let Some(id) = args.next() else {
-                eprintln!("usage: nirdosha plugin revoke <pack-id>");
-                return ExitCode::FAILURE;
-            };
-            match nirdosha::hi_plugin::revoke_pack(&conn, &cwd, &id) {
-                Ok(()) => {
-                    println!("revoked pack {id}");
-                    ExitCode::SUCCESS
-                }
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        other => {
-            eprintln!("unknown plugin subcommand `{other}` -- use install, sign, list, or revoke");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// docs/goal.md row 9: hands back the parsed `Program` as JSON, the same
-/// `Serialize`/`Deserialize`-derived shape `typeck.rs::validate_fragment`
-/// expects a single `Expr` fragment in (see its doc comment) — an agent
-/// or tool can round-trip a whole program's structure, or splice one
-/// fragment back in for isolated re-validation. Deliberately parse-only,
-/// not `typecheck_and_own`'s full pipeline: the AST of a program that
-/// doesn't yet typecheck is still a legitimate thing to want to inspect
-/// (e.g. debugging *why* generation went wrong), so this doesn't gate on
-/// it the way `build`/`emit-llvm` do.
 fn cmd_emit_ast(mut args: impl Iterator<Item = String>) -> ExitCode {
     let Some(path) = args.next() else {
         eprintln!("usage: nirdosha emit-ast <file.nir>");

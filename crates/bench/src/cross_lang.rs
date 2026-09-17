@@ -25,7 +25,7 @@
 //! all (confirmed by grep: zero `forall`/quantifier handling anywhere
 //! in `contract_check.rs`), not a narrower version of the same thing.
 
-use nirdosha::hi_llm::{self, LlmClient};
+use nirdosha_hi::hi_llm::{self, LlmClient};
 use serde::Serialize;
 use std::path::Path;
 use std::process::Command;

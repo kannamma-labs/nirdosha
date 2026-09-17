@@ -919,14 +919,17 @@ pub struct CoverageFailure {
 }
 
 /// Phase 1's demand convention: an attribute line beginning with
-/// `validate contract` (optionally with a `:` after) or `contract:` is a
-/// **proof demand** -- the attribute prose says what must hold; the gate
-/// requires the named unit's fn to carry a `validate` block that Z3
-/// actually PROVES. Returns the demand text (everything after the marker,
-/// trimmed) for attribution. Deliberately a fixed, documented convention
-/// rather than fuzzy matching: Phase 2's pack manifests carry structured
-/// demands, and this form is what `:attach` writes when a human states the
-/// law by hand (`validate contract balance_nonnegative: ...`).
+/// `validate contract` (optionally with a `:` after) or `contract:` is
+/// a **proof demand** -- the attribute prose says what must hold.
+/// Returns the demand text (everything after the marker, trimmed) for
+/// attribution in `graph_to_json`'s `proof_demand` field and the
+/// generate prompt (`units_prompt`) -- still real, informational
+/// signal to the model even though nothing here PROVES it holds
+/// anymore (see the note below). Deliberately a fixed, documented
+/// convention rather than fuzzy matching: Phase 2's pack manifests
+/// carry structured demands, and this form is what `:attach` writes
+/// when a human states the law by hand (`validate contract
+/// balance_nonnegative: ...`).
 pub fn demanded_contract(attr_line: &str) -> Option<&str> {
     let t = attr_line.trim();
     // `strip_prefix("validate contract")` alone matches `validate
@@ -948,193 +951,49 @@ pub fn demanded_contract(attr_line: &str) -> Option<&str> {
     }
 }
 
-/// The coverage gate itself: parse `source`, then require that (1) every
-/// confirmed fn unit whose attributes carry a proof demand actually has a
-/// `validate` block on its fn in the draft, and (2) every demanded fn's
-/// contract PROVES -- no counterexample, non-vacuous, within the engine's
-/// deterministic fuel, inside the provable subset. Parses its own copy of
-/// the source because the generate loop only holds a `&str` (the parse is
-/// cheap next to the LLM call that produced it); publish's re-check calls
-/// [`contract_coverage_check_program`] with its already-loaded `Program`.
-/// Programs from graphs where no unit demands anything pass untouched --
-/// every existing project is unaffected until someone states a law.
-pub fn contract_coverage_check(source: &str, units: &[crate::hi_graph::CandidateUnit]) -> Result<(), CoverageFailure> {
-    // Cheap check first: `check_mandatory_primitive_coverage` already
-    // bails before lexing when nothing demands anything (its own
-    // `mandatory_fns.is_empty()` guard) -- this gate used to lex AND
-    // parse the full source on every single attempt before discovering
-    // the same "nothing demanded" answer inside
-    // `contract_coverage_check_program`, wasted work on every generate
-    // call for the (very common) project with no proof demands at all.
-    if !units.iter().any(|u| u.kind == "fn" && u.attributes.iter().any(|attr| attr.lines().any(|line| demanded_contract(line).is_some()))) {
-        return Ok(());
-    }
-    let toks = crate::token::Lexer::new(source).tokenize();
-    let toks = match toks {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(CoverageFailure {
-                class: CoverageFailureClass::ContractViolated,
-                diagnostic: format!("contract coverage failure: the source no longer lexes, so demanded contracts cannot be checked: {e:?}"),
-            })
-        }
-    };
-    let program = match crate::parser::Parser::new(toks).parse_program() {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(CoverageFailure {
-                class: CoverageFailureClass::ContractViolated,
-                diagnostic: format!("contract coverage failure: the source no longer parses, so demanded contracts cannot be checked: {e:?}"),
-            })
-        }
-    };
-    contract_coverage_check_program(&program, units)
-}
+/// **Deleted 2026-09-16 (the `hi` v2 extraction):** the Z3-backed
+/// `contract_coverage_check`/`contract_coverage_check_program` pair
+/// (RFC 0016 Phase 1's provability gate, "did the demanded `validate`
+/// block actually PROVE"). Required this crate's own native AST/Z3
+/// proof engine, which no longer exists here at all -- there is no v2
+/// equivalent yet (`v2_verify.rs`'s own doc comment: no Z3/SMT pipeline
+/// for v2, Phase 4 of the migration doc is still open). Rather than
+/// fake a check with no checker behind it, this gate is honestly absent
+/// for v2 today; `check_mandatory_primitive_coverage`/
+/// `check_primitive_exclusivity_coverage` below still cover the purely
+/// syntactic half of RFC 0016 Phase 3 (a mandatory primitive must be
+/// called; a protected struct may only be constructed by one).
+/// `demanded_contract` above survives -- still real, informational
+/// signal for the generate prompt even with no prover behind it.
+///
 
-/// [`contract_coverage_check`] against an already-parsed program -- what
-/// `handle_publish`'s re-check calls with its own loaded `Program`, so the
-/// gate runs identically at generate time (where the model can repair) and
-/// at publish time (where a hand-edited file can't sneak past).
-pub fn contract_coverage_check_program(program: &crate::ast::Program, units: &[crate::hi_graph::CandidateUnit]) -> Result<(), CoverageFailure> {
-    // (fn_name, demand text) for every confirmed fn unit carrying a proof
-    // demand. Only fn units can demand: a `validate` block targets a fn.
-    let mut demanded_fns: Vec<(String, String)> = Vec::new();
-    for u in units {
-        if u.kind != "fn" {
-            continue;
-        }
-        for attr in &u.attributes {
-            for line in attr.lines() {
-                if let Some(demand) = demanded_contract(line) {
-                    demanded_fns.push((u.name.clone(), demand.to_string()));
-                }
-            }
-        }
-    }
-    if demanded_fns.is_empty() {
-        return Ok(());
-    }
-    let demanded_names: Vec<&str> = demanded_fns.iter().map(|(n, _)| n.as_str()).collect();
-
-    let mut failures: Vec<(CoverageFailureClass, String, Option<(usize, usize)>)> = Vec::new();
-
-    // (1) Presence: each demanded fn must exist AND carry a validate block.
-    let mut reported_dropped_fns: Vec<&str> = Vec::new();
-    for (fn_name, demand) in &demanded_fns {
-        match program.fns.iter().find(|f| &f.name == fn_name) {
-            None => {
-                if !reported_dropped_fns.contains(&fn_name.as_str()) {
-                    reported_dropped_fns.push(fn_name);
-                    failures.push((
-                        CoverageFailureClass::ContractDropped,
-                        format!("the confirmed unit `{fn_name}` (demand: `{demand}`) demands a proving `validate` block, but the draft has no fn `{fn_name}` at all -- the unit itself was dropped"),
-                        None,
-                    ));
-                }
-            }
-            Some(f) => {
-                if !program.validates.iter().any(|v| &v.fn_name == fn_name) && !reported_dropped_fns.contains(&fn_name.as_str()) {
-                    reported_dropped_fns.push(fn_name);
-                    failures.push((
-                        CoverageFailureClass::ContractDropped,
-                        format!("the confirmed unit `{fn_name}` (demand: `{demand}`) demands a proving `validate` block, but the draft's fn `{fn_name}` carries none -- write `validate {fn_name} {{ pre: ... post: ... }}`; it must PROVE, not merely parse"),
-                        Some((f.span.line, f.span.col)),
-                    ));
-                }
-            }
-        }
-    }
-
-    // (2) Proof: every demanded fn's validate outcomes must hold. This runs
-    // even for fns whose block was just reported missing -- a missing block
-    // has no outcomes, so the loop below simply finds nothing for it.
-    // NOTE on `Unsupported`: `contract_error_message` deliberately returns
-    // `None` for it (check_program_contracts' long-standing "never an error
-    // there" policy), but a DEMANDED contract is not optional -- the gate
-    // maps Unsupported to `ContractUnprovable` with its own message instead
-    // of skipping it, which is why that arm is handled here and not via the
-    // shared helper.
-    let outcomes = crate::contract_check::run_program_validates(program);
-    for outcome in &outcomes {
-        if !demanded_names.contains(&outcome.fn_name.as_str()) {
-            continue; // a present-but-undemanded contract is verify's report, not the gate's scope
-        }
-        let (class, message): (CoverageFailureClass, String) = match &outcome.result {
-            crate::contract_check::ContractCheckResult::Proved => continue,
-            crate::contract_check::ContractCheckResult::Unsupported(msg) => {
-                (CoverageFailureClass::ContractUnprovable, format!("the proof engine can't model this contract's shape: {msg}"))
-            }
-            crate::contract_check::ContractCheckResult::VacuousPrecondition => (CoverageFailureClass::VacuousContract, crate::contract_check::contract_error_message(outcome).expect("VacuousPrecondition always carries a message")),
-            crate::contract_check::ContractCheckResult::EngineLimit { .. } => (CoverageFailureClass::EngineLimit, crate::contract_check::contract_error_message(outcome).expect("EngineLimit always carries a message")),
-            crate::contract_check::ContractCheckResult::Counterexample { .. }
-            | crate::contract_check::ContractCheckResult::UnboundIdentifier { .. }
-            | crate::contract_check::ContractCheckResult::NoSuchFunction(_)
-            | crate::contract_check::ContractCheckResult::PredicateParseError(_) => (CoverageFailureClass::ContractViolated, crate::contract_check::contract_error_message(outcome).expect("failure classes always carry a message")),
-        };
-        let span = program
-            .validates
-            .iter()
-            .find(|v| v.fn_name == outcome.fn_name)
-            .map(|v| (v.span.line, v.span.col));
-        let mut line = format!("the confirmed unit `{}` demands a `validate` contract that proves; its contract failed: {}", outcome.fn_name, message);
-        if class == CoverageFailureClass::ContractUnprovable {
-            line.push_str(" -- a demanded contract is not optional: rewrite it in the provable subset (integer-only params/result, linear arithmetic, no loops/calls)");
-        }
-        failures.push((class, line, span));
-    }
-
-    if failures.is_empty() {
-        return Ok(());
-    }
-    let machine: Vec<String> = failures
-        .iter()
-        .map(|(_, message, span)| machine_error("coverage", span.map(|s| s.0), span.map(|s| s.1), message))
-        .collect();
-    // EngineLimit dominates the run's class (RFC 0016): when the engine
-    // couldn't decide *any* demanded contract, the model must not be charged
-    // budget for work it cannot influence -- even if other failures are
-    // also present, the escalation message carries the full list.
-    let class = if failures.iter().any(|(c, _, _)| *c == CoverageFailureClass::EngineLimit) {
-        CoverageFailureClass::EngineLimit
-    } else {
-        failures[0].0.clone()
-    };
-    Err(CoverageFailure {
-        class,
-        diagnostic: format!(
-            "contract coverage failure: {}\nmachine-readable errors: [{}]",
-            failures.iter().map(|(_, m, _)| m.as_str()).collect::<Vec<_>>().join(" "),
-            machine.join(", ")
-        ),
-    })
-}
-
-/// RFC 0016 Phase 3's mandatory-primitive gate: every fn a governing
-/// pack marks `mandatory_fns` must (1) have at least one real call site
-/// somewhere in the draft (`contract_check::collect_call_names` --
-/// "the model wires the ledger" needs the wiring to actually exist, not
-/// just the primitive sitting unused) and (2) every such call site must
-/// satisfy the primitive's own precondition
-/// (`contract_check::check_mandatory_primitive_call_sites`'s real
-/// interprocedural obligation, not a vacuous axiom). A no-op (`Ok(())`
-/// immediately) when nothing installed declares any mandatory
-/// primitives -- every project without a Phase-3-carrying pack is
-/// unaffected, same "no demand, no gate" contract `contract_coverage_
-/// check` itself already has.
+/// RFC 0016 Phase 3's mandatory-primitive gate, syntactic half only
+/// (2026-09-16, the `hi` v2 extraction): every fn a governing pack
+/// marks `mandatory_fns` must have at least one real call site
+/// somewhere in the draft -- "the model wires the ledger" needs the
+/// wiring to actually exist, not just the primitive sitting unused.
+/// The native version's other half (does every such call site satisfy
+/// the primitive's own precondition, proved via this crate's own
+/// Z3-backed `contract_check`) has no v2 equivalent -- dropped
+/// honestly, not silently declared covered (see this module's own note
+/// just above on why). A no-op (`Ok(())` immediately) when nothing
+/// installed declares any mandatory primitives.
 pub fn check_mandatory_primitive_coverage(source: &str, mandatory_fns: &std::collections::HashSet<String>) -> Result<(), CoverageFailure> {
     if mandatory_fns.is_empty() {
         return Ok(());
     }
-    let toks = crate::token::Lexer::new(source).tokenize().map_err(|e| CoverageFailure {
+    let file = syn::parse_file(source).map_err(|e| CoverageFailure {
         class: CoverageFailureClass::ContractViolated,
-        diagnostic: format!("contract coverage failure: the source no longer lexes, so mandatory-primitive coverage cannot be checked: {e:?}"),
-    })?;
-    let program = crate::parser::Parser::new(toks).parse_program().map_err(|e| CoverageFailure {
-        class: CoverageFailureClass::ContractViolated,
-        diagnostic: format!("contract coverage failure: the source no longer parses, so mandatory-primitive coverage cannot be checked: {e:?}"),
+        diagnostic: format!("contract coverage failure: the source no longer parses, so mandatory-primitive coverage cannot be checked: {e}"),
     })?;
 
-    let called = crate::contract_check::collect_call_names(&program);
+    let mut called: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &file.items {
+        if let syn::Item::Fn(f) = item {
+            let (fn_called, _constructed) = crate::hi_graph::collect_calls_and_constructs(&f.block);
+            called.extend(fn_called);
+        }
+    }
     let mut missing: Vec<&String> = mandatory_fns.iter().filter(|name| !called.contains(name.as_str())).collect();
     missing.sort();
     if let Some(name) = missing.first() {
@@ -1146,166 +1005,49 @@ pub fn check_mandatory_primitive_coverage(source: &str, mandatory_fns: &std::col
             ),
         });
     }
-
-    let outcomes = crate::contract_check::check_mandatory_primitive_call_sites(&program, mandatory_fns);
-    for outcome in &outcomes {
-        match &outcome.result {
-            crate::contract_check::ContractCheckResult::Proved | crate::contract_check::ContractCheckResult::Unsupported(_) => {}
-            crate::contract_check::ContractCheckResult::EngineLimit { .. } => {
-                return Err(CoverageFailure {
-                    class: CoverageFailureClass::EngineLimit,
-                    diagnostic: format!(
-                        "contract coverage failure: {}",
-                        crate::contract_check::contract_error_message(outcome).expect("EngineLimit always carries a message")
-                    ),
-                });
-            }
-            other => {
-                return Err(CoverageFailure {
-                    class: CoverageFailureClass::ContractViolated,
-                    diagnostic: format!(
-                        "contract coverage failure: in `{}`, a call site may violate a mandatory certified primitive's own precondition ({other:?}) -- guard the call so the primitive's precondition provably holds before it's invoked\nmachine-readable errors: [{}]",
-                        outcome.fn_name,
-                        machine_error("mandatory_primitive_call_site", None, None, &format!("{:?}", other))
-                    ),
-                });
-            }
-        }
-    }
     Ok(())
 }
 
-/// RFC 0016 Phase 3's other half: `primitive_exclusivity`
-/// (`contract_check::check_primitive_exclusivity`'s own doc comment for
-/// the full reasoning, including why "constructs the protected struct"
-/// is this language's complete reading of the RFC's "any write...
-/// outside certified primitive units", not a narrowed stand-in for it).
-/// A no-op when no active pack declares any `protected_structs` --
-/// same "no demand, no gate" contract every other Phase-3 gate here has.
+/// RFC 0016 Phase 3's other half, syntactic version only: a protected
+/// struct's literal construction (`syn::ExprStruct`, e.g. `Account {
+/// ... }`) may only appear inside the body of one of `mandatory_fns` --
+/// anywhere else is "the model constructed its own protected value
+/// instead of calling the certified primitive." A no-op when no active
+/// pack declares any `protected_structs`.
 pub fn check_primitive_exclusivity_coverage(source: &str, protected_structs: &std::collections::HashSet<String>, mandatory_fns: &std::collections::HashSet<String>) -> Result<(), CoverageFailure> {
     if protected_structs.is_empty() {
         return Ok(());
     }
-    let toks = crate::token::Lexer::new(source).tokenize().map_err(|e| CoverageFailure {
+    let file = syn::parse_file(source).map_err(|e| CoverageFailure {
         class: CoverageFailureClass::ContractViolated,
-        diagnostic: format!("contract coverage failure: the source no longer lexes, so primitive-exclusivity coverage cannot be checked: {e:?}"),
-    })?;
-    let program = crate::parser::Parser::new(toks).parse_program().map_err(|e| CoverageFailure {
-        class: CoverageFailureClass::ContractViolated,
-        diagnostic: format!("contract coverage failure: the source no longer parses, so primitive-exclusivity coverage cannot be checked: {e:?}"),
+        diagnostic: format!("contract coverage failure: the source no longer parses, so primitive-exclusivity coverage cannot be checked: {e}"),
     })?;
 
-    let violations = crate::contract_check::check_primitive_exclusivity(&program, protected_structs, mandatory_fns);
-    if let Some(msg) = violations.first() {
-        return Err(CoverageFailure {
-            class: CoverageFailureClass::ContractViolated,
-            diagnostic: format!(
-                "contract coverage failure: {msg}\nmachine-readable errors: [{}]",
-                machine_error("primitive_exclusivity", None, None, msg)
-            ),
-        });
+    for item in &file.items {
+        let syn::Item::Fn(f) = item else { continue };
+        let fn_name = f.sig.ident.to_string();
+        if mandatory_fns.contains(&fn_name) {
+            continue;
+        }
+        let (_called, constructed) = crate::hi_graph::collect_calls_and_constructs(&f.block);
+        if let Some(name) = protected_structs.iter().find(|name| constructed.contains(name.as_str())) {
+            let msg = format!("fn `{fn_name}` constructs `{name}` directly -- `{name}` is a protected struct: only a mandatory certified primitive may construct it");
+            return Err(CoverageFailure {
+                class: CoverageFailureClass::ContractViolated,
+                diagnostic: format!("contract coverage failure: {msg}\nmachine-readable errors: [{}]", machine_error("primitive_exclusivity", None, None, &msg)),
+            });
+        }
     }
     Ok(())
 }
 
-/// Screen-derivation coverage: a confirmed `screen`-kind unit whose
-/// backing struct has none of the `list_<snake>`/`create_<snake>`/
-/// `update_<snake>`/`delete_<snake>`/`get_<snake>` convention fns (and no
-/// `screen <Struct> { list: other_fn, ... }` override naming a real one
-/// either) is exactly the shape `ui_gen::build_screens` silently treats
-/// as "no convention fn at all -- not a screen, just a data type"
-/// (`ui_gen.rs`'s own `if actions.is_empty() { continue; }`): the
-/// `screen { ... }` block parses and typechecks fine, but the served app
-/// never shows it at all -- no compile error, no self-repair trigger,
-/// just a manifest with one fewer entry than the model promised. Field
-/// failure 2026-09-13: a generated fintech app's five `screen` blocks
-/// all lacked a matching fn (its landing-data getters were named
-/// `get_<x>_landing_data` returning `Text`, not `get_<x>_landing_screen`
-/// returning the screen struct), so the served app rendered "No screens
-/// derived" and login had nowhere to go. Reuses `ui_gen::to_snake_case`/
-/// `find_screen_decl` rather than re-deriving the convention, so this
-/// gate can never drift from what `build_screens` itself checks.
-///
-/// Deliberately does NOT re-validate a named fn's signature the way
-/// `build_action` does (right struct type, right param shape) -- that
-/// narrower "wrong-shaped backing fn" case is a pre-existing gap this
-/// pass doesn't newly claim to close; it only catches the total-absence
-/// case the field failure above actually was.
-pub fn check_screen_derivation_coverage(source: &str, units: &[crate::hi_graph::CandidateUnit]) -> Result<(), CoverageFailure> {
-    let screen_units: Vec<&crate::hi_graph::CandidateUnit> = units.iter().filter(|u| u.kind == "screen").collect();
-    if screen_units.is_empty() {
-        return Ok(());
-    }
-    let toks = crate::token::Lexer::new(source).tokenize();
-    let toks = match toks {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(CoverageFailure {
-                class: CoverageFailureClass::ContractViolated,
-                diagnostic: format!("contract coverage failure: the source no longer lexes, so screen derivation cannot be checked: {e:?}"),
-            })
-        }
-    };
-    let program = match crate::parser::Parser::new(toks).parse_program() {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(CoverageFailure {
-                class: CoverageFailureClass::ContractViolated,
-                diagnostic: format!("contract coverage failure: the source no longer parses, so screen derivation cannot be checked: {e:?}"),
-            })
-        }
-    };
-
-    let mut failures: Vec<String> = Vec::new();
-    for u in &screen_units {
-        // The unit's own struct is missing entirely (the whole screen was
-        // dropped, not just its backing fn) -- typeck's `check_screen`
-        // already requires a `screen <Struct> { ... }` block's `<Struct>`
-        // to exist, so reaching a parseable, typechecked draft with no
-        // such struct means the model dropped the `screen` block too.
-        if !program.structs.iter().any(|s| s.name == u.name) {
-            failures.push(format!(
-                "the confirmed screen unit `{}` (driving text: \"{}\") is entirely absent from the draft -- neither its struct nor a `screen {{ ... }}` block for it exist",
-                u.name, u.driving_text
-            ));
-            continue;
-        }
-        let snake = crate::ui_gen::to_snake_case(&u.name);
-        let decl = crate::ui_gen::find_screen_decl(&program, &u.name);
-        let crud_kinds = ["list", "create", "update", "delete", "get"];
-        let has_backing_fn = crud_kinds.iter().any(|kind| {
-            // A `screen { <kind>: other_fn }` override names a real fn
-            // directly; absent that, the inferred `<kind>_<snake>` name
-            // must resolve -- exactly `build_screens`' own two-step
-            // lookup (`crud_fn_name`), just read back here instead of
-            // re-run.
-            let target = decl
-                .and_then(|d| d.entries.iter().find(|(k, _)| k == kind))
-                .and_then(|(_, v)| if let crate::ast::Expr::Ident(n, _) = v { Some(n.clone()) } else { None })
-                .unwrap_or_else(|| format!("{kind}_{snake}"));
-            program.fns.iter().any(|f| f.name == target)
-        });
-        if !has_backing_fn {
-            failures.push(format!(
-                "the confirmed screen unit `{}` (driving text: \"{}\") has no `list_{snake}`/`create_{snake}`/`update_{snake}`/`delete_{snake}`/`get_{snake}` fn anywhere in the draft, and its `screen {{ ... }}` block names no override either -- `ui_gen`'s manifest builder treats a screen with no backing fn as \"not a screen, just a data type\" and drops it silently: the served app never shows it (\"No screens derived\" if it was the only one) and anything routed to it (a post-login redirect, a landing rule) has nowhere to go",
-                u.name, u.driving_text
-            ));
-        }
-    }
-
-    if failures.is_empty() {
-        return Ok(());
-    }
-    let machine: Vec<String> = failures.iter().map(|m| machine_error("screen_derivation", None, None, m)).collect();
-    Err(CoverageFailure {
-        class: CoverageFailureClass::ContractDropped,
-        diagnostic: format!(
-            "contract coverage failure: {}\nmachine-readable errors: [{}]",
-            failures.join(" "),
-            machine.join(", ")
-        ),
-    })
-}
+// Screen-derivation coverage (native `screen { ... }` block +
+// `list_<snake>`/`create_<snake>`/... convention-fn naming) was
+// deleted here 2026-09-16 (the `hi` v2 extraction): a v2 UI is wired
+// through `nirdosha_rt::*!` archetype macros, checked by `rustc` at
+// compile time (`get_ui_conventions`'s own doc), not a naming-
+// convention scanner over a native `screen` block -- there is nothing
+// of this shape left to check for v2, so nothing was ported.
 
 /// How one failed attempt charges the repair budget (RFC 0016 Phase 1's
 /// VIOLATED/ENGINE_LIMIT split, extracted pure so the discipline itself is
@@ -2115,67 +1857,12 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
         attempt += 1;
         let raw = client.complete_with_tools(&mut history, &mut mcp_log).map_err(|e| format!("couldn't reach the model: {e}"))?;
         let source = extract_nir_source(&raw);
-        // RFC 0016 Phase 3: certified-primitive prelude.  Real code, not
-        // a template -- prepended before anything else touches `source`
-        // so `inject_pack_validates_into_source`/typecheck/the coverage
-        // gate all see the combined program, exactly the shape it will
-        // actually compile as.  A model that tries to redeclare a
-        // primitive's name fails typecheck with `DuplicateFn`, same as
-        // any other name collision -- no separate reserved-namespace
-        // check needed (`prepend_pack_primitives`'s own doc comment).
-        let source = match crate::hi_plugin::prepend_pack_primitives(conn, root, &source) {
-            Ok(s) => s,
-            Err(e) => return Err(format!("failed to load certified primitives from an installed pack: {e}")),
-        };
-        // RFC 0016 Phase 2: 5a pack injection.  If a demanded fn is
-        // present but the model forgot its contract, the pack's sealed
-        // template is appended.  A signature mismatch is a coverage
-        // failure (the model violated the domain law's exact shape).
-        let source = match crate::hi_plugin::inject_pack_validates_into_source(root, &source) {
-            Ok(s) => s,
-            Err(failure) => {
-                let diagnostic = failure.diagnostic;
-                promote_validated_hints(&provisional_hints, &diagnostic, hint_cache);
-                last_diagnostic = diagnostic.clone();
-                let class = failure.class;
-                match charge_budget(
-                    &mut violation_budget,
-                    &mut engine_limit_simplifications,
-                    class.clone(),
-                ) {
-                    BudgetCharge::Continue => {
-                        // Unlike the main check loop below, this arm used to
-                        // push straight to the next attempt with no
-                        // `on_log` call at all -- an operator watching the
-                        // run had no visibility into WHY a round was
-                        // spent when the failure came from pack injection
-                        // rather than a compile/coverage check.
-                        on_log(&format!("attempt {attempt}/{MAX_SELF_REPAIR_ATTEMPTS} failed pack-injection, asking the model to fix it..."));
-                        history.push(ChatMessage::assistant(source));
-                        let (hint, new_provisional) = corrective_hint_for(&diagnostic, hint_cache, client);
-                        provisional_hints = new_provisional;
-                        history.push(ChatMessage::user(format!("That attempt failed with this diagnostic:\n{diagnostic}\nFix it and reply with the corrected, complete `.nir` source only.{hint}")));
-                    }
-                    BudgetCharge::StopGiveUp => break,
-                    BudgetCharge::StopEscalate => {
-                        // Not currently reachable: every
-                        // `inject_pack_validates_into_source` failure
-                        // classifies as `ContractViolated`
-                        // (`hi_plugin.rs`'s own two `Err` arms), and
-                        // `charge_budget` only ever returns `StopEscalate`
-                        // for `EngineLimit` -- so this text used to
-                        // unconditionally claim "the model's one
-                        // off-budget simplification attempt did not clear
-                        // it" for a class that never earns one. Kept
-                        // generic (no false claim of a simplification
-                        // attempt that never happened) so a future class
-                        // added to this call site doesn't inherit a lie.
-                        return Err(format!("escalated to the operator (RFC 0016): a pack-injection failure could not be resolved within budget. Diagnostic, verbatim:\n{last_diagnostic}\nOperator options: state a weaker-but-provable demand on the unit, raise the fuel (`nirdosha::contract_check::set_proof_fuel_rlimit`), or waive the demand (`:waive`) and re-generate."));
-                    }
-                }
-                continue;
-            }
-        };
+        // RFC 0016 Phase 2/3's pack-injection prelude (`prepend_pack_
+        // primitives`/`inject_pack_validates_into_source`) was native-
+        // `.nir`-shaped (Z3-provable sealed primitive code/templates)
+        // and was deleted here 2026-09-16 (the `hi` v2 extraction) --
+        // no v2 pack-law story exists yet, so the draft goes straight
+        // to the build/coverage checks below unmodified.
         // Every draft is persisted BEFORE the check runs (2026-09-11,
         // born from the user's "take out the first generated code"
         // instruction): until now a failed attempt existed only in
@@ -2199,36 +1886,27 @@ pub fn generate_program(conn: &rusqlite::Connection, root: &Path, client: &LlmCl
             }
         };
         // The gate order is load-bearing: build checks first (a draft that
-        // doesn't compile has no meaningful contracts to check), then the
-        // coverage gate on the compiled draft (RFC 0016 Phase 1) -- a
-        // program that typechecks but proves nothing about its money math
-        // no longer passes, which is the demonstrated seam this closes --
-        // then mandatory-primitive coverage, then primitive-exclusivity
-        // (RFC 0016 Phase 3's other half: a call site can satisfy
-        // `transfer`'s own precondition and the model can *still* have
-        // hand-rolled a second, unguarded `Account` construction
-        // elsewhere in the same draft -- these are independent failure
-        // modes, not a subset of each other), then screen-derivation
-        // coverage (field failure 2026-09-13: a `screen` block with no
-        // backing `list_`/`get_`/etc. fn compiles and proves everything
-        // demanded of it, but the served app silently drops the screen).
+        // doesn't compile has nothing meaningful to check next), then
+        // mandatory-primitive coverage, then primitive-exclusivity (RFC
+        // 0016 Phase 3's other half: the model can call `transfer` AND
+        // still have hand-rolled a second, unguarded `Account`
+        // construction elsewhere in the same draft -- independent
+        // failure modes, not a subset of each other). No Z3-backed
+        // contract-provability gate and no screen-derivation gate here
+        // anymore (2026-09-16, the `hi` v2 extraction) -- neither has a
+        // v2 equivalent yet (see `check_mandatory_primitive_coverage`'s
+        // own doc comment on the provability half specifically).
         let outcome: Result<(), (String, Option<CoverageFailureClass>)> = match typecheck_and_build_check(&source) {
             Err(diagnostic) => Err((diagnostic, None)),
-            Ok(()) => match contract_coverage_check(&source, units) {
-                Err(failure) => Err((failure.diagnostic, Some(failure.class))),
-                Ok(()) => match crate::hi_plugin::active_mandatory_primitive_names(conn, root) {
-                    Err(e) => Err((format!("could not determine this project's mandatory primitives: {e}"), None)),
-                    Ok(mandatory_fns) => match check_mandatory_primitive_coverage(&source, &mandatory_fns) {
-                        Err(failure) => Err((failure.diagnostic, Some(failure.class))),
-                        Ok(()) => match crate::hi_plugin::active_protected_struct_names(conn, root) {
-                            Err(e) => Err((format!("could not determine this project's protected structs: {e}"), None)),
-                            Ok(protected_structs) => match check_primitive_exclusivity_coverage(&source, &protected_structs, &mandatory_fns) {
-                                Err(failure) => Err((failure.diagnostic, Some(failure.class))),
-                                Ok(()) => match check_screen_derivation_coverage(&source, units) {
-                                    Err(failure) => Err((failure.diagnostic, Some(failure.class))),
-                                    Ok(()) => Ok(()),
-                                },
-                            },
+            Ok(()) => match crate::hi_plugin::active_mandatory_primitive_names(conn, root) {
+                Err(e) => Err((format!("could not determine this project's mandatory primitives: {e}"), None)),
+                Ok(mandatory_fns) => match check_mandatory_primitive_coverage(&source, &mandatory_fns) {
+                    Err(failure) => Err((failure.diagnostic, Some(failure.class))),
+                    Ok(()) => match crate::hi_plugin::active_protected_struct_names(conn, root) {
+                        Err(e) => Err((format!("could not determine this project's protected structs: {e}"), None)),
+                        Ok(protected_structs) => match check_primitive_exclusivity_coverage(&source, &protected_structs, &mandatory_fns) {
+                            Err(failure) => Err((failure.diagnostic, Some(failure.class))),
+                            Ok(()) => Ok(()),
                         },
                     },
                 },
@@ -3073,36 +2751,6 @@ machine-readable errors: [{\"col\":58,\"line\":16,\"message\":\"16:58: expected 
         assert!(err.contains("not an i64"), "the offending source text should appear in rustc's own quoted snippet, got:\n{err}");
     }
 
-    // =========================================================================
-    // RFC 0016 Phase 1: the contract coverage gate.
-    //
-    // One lock serializes every test that runs a proof (the fuel override
-    // is process-global, and tests run in parallel threads within this
-    // binary -- without the lock, the engine-limit test's starved fuel
-    // could flip a concurrently-running prove test to EngineLimit).
-    static COVERAGE_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn demand_unit(name: &str, demand: &str) -> crate::hi_graph::CandidateUnit {
-        crate::hi_graph::CandidateUnit {
-            id: format!("code:fn:{name}"),
-            kind: "fn".to_string(),
-            name: name.to_string(),
-            driving_text: format!("{name} does money math"),
-            attributes: vec![format!("validate contract {demand}")],
-        }
-    }
-
-    const CHARGED_WITH_CONTRACT: &str = r#"
-fn charge_cents(amount_cents: i64, balance_cents: i64) -> i64 {
-    return balance_cents - amount_cents
-}
-
-validate charge_cents {
-    pre: amount_cents >= 0 && amount_cents <= balance_cents
-    post: result >= 0
-}
-"#;
-
     #[test]
     fn demanded_contract_recognizes_the_canonical_forms() {
         assert_eq!(demanded_contract("validate contract balance_nonnegative: result >= 0").unwrap(), "balance_nonnegative: result >= 0");
@@ -3122,6 +2770,18 @@ validate charge_cents {
         assert_eq!(demanded_contract("validate contractor availability first"), None);
     }
 
+    // =========================================================================
+    // RFC 0016 Phase 3's syntactic coverage gates (mandatory-primitive
+    // call-existence, primitive-exclusivity) -- see the doc comment
+    // above `check_mandatory_primitive_coverage`'s definition for why
+    // this is a v2-scoped subset of what the retired native gates
+    // checked. No Z3 engine exists here, so unlike the old suite this
+    // lock is no longer serializing against a shared proof-fuel
+    // override -- kept anyway since it costs nothing and these still
+    // share `HashSet`-typed test fixtures a stray parallel mutation
+    // could otherwise corrupt.
+    static COVERAGE_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn mandatory_primitive_coverage_passes_when_nothing_is_mandatory() {
         let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -3130,15 +2790,10 @@ validate charge_cents {
 
     const TRANSFER_WITH_MAIN: &str = r#"
 fn transfer(amount: i64) -> i64 {
-    return amount
+    amount
 }
 
-validate transfer {
-    pre: amount > 0
-    post: result == amount
-}
-
-fn main() requires(public) { }
+fn main() {}
 "#;
 
     #[test]
@@ -3152,57 +2807,27 @@ fn main() requires(public) { }
     }
 
     #[test]
-    fn mandatory_primitive_coverage_flags_an_unguarded_call_site() {
+    fn mandatory_primitive_coverage_passes_when_the_primitive_is_called() {
         let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut mandatory = std::collections::HashSet::new();
         mandatory.insert("transfer".to_string());
         let source = r#"
 fn transfer(amount: i64) -> i64 {
-    return amount
-}
-
-validate transfer {
-    pre: amount > 0
-    post: result == amount
+    amount
 }
 
 fn pay(amount: i64) -> i64 {
-    return transfer(amount)
+    transfer(amount)
 }
 
-fn main() requires(public) { }
+fn main() {}
 "#;
-        let failure = check_mandatory_primitive_coverage(source, &mandatory).expect_err("an unguarded call can violate transfer's own precondition");
-        assert_eq!(failure.class, CoverageFailureClass::ContractViolated);
-        assert!(failure.diagnostic.contains("may violate"), "got: {}", failure.diagnostic);
+        check_mandatory_primitive_coverage(source, &mandatory).expect("transfer is called from pay");
     }
 
-    #[test]
-    fn mandatory_primitive_coverage_passes_a_guarded_call_site() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut mandatory = std::collections::HashSet::new();
-        mandatory.insert("transfer".to_string());
-        let source = r#"
-fn transfer(amount: i64) -> i64 {
-    return amount
-}
-
-validate transfer {
-    pre: amount > 0
-    post: result == amount
-}
-
-fn pay(amount: i64) -> i64 {
-    return if amount > 0 { transfer(amount) } else { 0 }
-}
-
-fn main() requires(public) { }
-"#;
-        check_mandatory_primitive_coverage(source, &mandatory).expect("the guard establishes transfer's own precondition before the call");
-    }
-
-    /// RFC 0016 Phase 3's `primitive_exclusivity`: a protected struct
-    /// constructed only inside its own certified primitive passes.
+    /// RFC 0016 Phase 3's `primitive_exclusivity`, syntactic version: a
+    /// protected struct constructed only inside its own certified
+    /// primitive passes.
     #[test]
     fn primitive_exclusivity_coverage_passes_when_only_the_primitive_constructs_the_protected_struct() {
         let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -3216,10 +2841,10 @@ struct Account {
 }
 
 fn charge_cents(balance_cents: i64, amount: i64) -> Account {
-    return Account(balance_cents - amount)
+    Account { balance_cents: balance_cents - amount }
 }
 
-fn main() requires(public) { }
+fn main() {}
 "#;
         check_primitive_exclusivity_coverage(source, &protected, &mandatory).expect("only the certified primitive constructs Account");
     }
@@ -3243,156 +2868,25 @@ struct Account {
 }
 
 fn charge_cents(balance_cents: i64, amount: i64) -> Account {
-    return Account(balance_cents - amount)
+    Account { balance_cents: balance_cents - amount }
 }
 
 fn bad_charge(balance_cents: i64, amount: i64) -> Account {
-    return Account(balance_cents - amount)
+    Account { balance_cents: balance_cents - amount }
 }
 
-fn main() requires(public) { }
+fn main() {}
 "#;
         let failure = check_primitive_exclusivity_coverage(source, &protected, &mandatory).expect_err("bad_charge bypasses the certified primitive");
         assert_eq!(failure.class, CoverageFailureClass::ContractViolated);
         assert!(failure.diagnostic.contains("bad_charge"), "must name the offending fn: {}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("is a pack-protected type"), "got: {}", failure.diagnostic);
+        assert!(failure.diagnostic.contains("protected struct"), "got: {}", failure.diagnostic);
     }
 
     #[test]
     fn primitive_exclusivity_coverage_passes_when_nothing_is_protected() {
         let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        check_primitive_exclusivity_coverage("fn main() requires(public) { }", &std::collections::HashSet::new(), &std::collections::HashSet::new()).expect("empty protected set is always a no-op");
-    }
-
-    #[test]
-    fn coverage_check_passes_when_nothing_is_demanded() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // The compat property: every existing graph (no demand
-        // attributes anywhere) passes the gate untouched -- the gate
-        // is inert until someone states a law.
-        let units = vec![crate::hi_graph::CandidateUnit {
-            id: "code:fn:double".to_string(),
-            kind: "fn".to_string(),
-            name: "double".to_string(),
-            driving_text: "doubles".to_string(),
-            attributes: vec!["fast".to_string()],
-        }];
-        contract_coverage_check(CHARGED_WITH_CONTRACT, &units).expect("no demands means no gate");
-    }
-
-    #[test]
-    fn coverage_check_passes_when_the_demanded_contract_proves() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let units = vec![demand_unit("charge_cents", "balance_nonnegative: result >= 0")];
-        contract_coverage_check(CHARGED_WITH_CONTRACT, &units).expect("a demanded, proving contract must pass the gate");
-    }
-
-    #[test]
-    fn coverage_check_flags_a_dropped_contract() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let no_contract = CHARGED_WITH_CONTRACT
-            .split("validate charge_cents")
-            .next()
-            .unwrap()
-            .to_string();
-        let units = vec![demand_unit("charge_cents", "balance_nonnegative: result >= 0")];
-        let failure = contract_coverage_check(&no_contract, &units).expect_err("a dropped demanded contract must fail");
-        assert_eq!(failure.class, CoverageFailureClass::ContractDropped);
-        assert!(failure.diagnostic.contains("carries none"), "the hint-arm marker must appear, got:\n{}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("balance_nonnegative"), "the demand text must be attributed, got:\n{}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("machine-readable errors: ["), "the structured block must ride along, got:\n{}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("\"stage\":\"coverage\""), "coverage-stage entries expected, got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn coverage_check_flags_a_dropped_fn() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // The unit itself was dropped from the draft: a stronger
-        // dropped case than a present fn with no contract.
-        let units = vec![demand_unit("authorize_payment_cents", "no overspend")];
-        let failure = contract_coverage_check(CHARGED_WITH_CONTRACT, &units).expect_err("a demanded unit absent from the draft must fail");
-        assert_eq!(failure.class, CoverageFailureClass::ContractDropped);
-        assert!(failure.diagnostic.contains("no fn `authorize_payment_cents`"), "got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn coverage_check_flags_a_violated_contract() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let violated = r#"
-fn double(x: i32) -> i32 {
-    return x * 2
-}
-
-validate double {
-    post: result > x
-}
-"#;
-        let units = vec![demand_unit("double", "always increases")];
-        let failure = contract_coverage_check(violated, &units).expect_err("a demanded contract the fn breaks must fail");
-        assert_eq!(failure.class, CoverageFailureClass::ContractViolated);
-        assert!(failure.diagnostic.contains("violated when"), "the real counterexample wording must ride along, got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn coverage_check_flags_a_vacuous_contract() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let vacuous = r#"
-fn double(x: i32) -> i32 {
-    return x * 2
-}
-
-validate double {
-    pre: x > 10 && x < 5
-    post: result > 0
-}
-"#;
-        let units = vec![demand_unit("double", "positive inputs stay positive")];
-        let failure = contract_coverage_check(vacuous, &units).expect_err("a vacuous demanded contract must fail");
-        assert_eq!(failure.class, CoverageFailureClass::VacuousContract);
-        assert!(failure.diagnostic.contains("vacuously"), "the vacuity wording must ride along, got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn coverage_check_classifies_engine_limit_and_it_dominates_the_class() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let hard = r#"
-fn double(x: i32) -> i32 {
-    return x * 2
-}
-
-validate double {
-    post: result > x
-}
-"#;
-        let units = vec![demand_unit("double", "always increases")];
-        crate::contract_check::set_proof_fuel_rlimit(1);
-        let failure = contract_coverage_check(hard, &units).expect_err("a fuel-starved demanded contract must fail closed");
-        crate::contract_check::set_proof_fuel_rlimit(0); // restore BEFORE any assertion can bail
-        assert_eq!(failure.class, CoverageFailureClass::EngineLimit, "engine limit, never a silent Proved, never a violation");
-        assert!(failure.diagnostic.contains("engine limit"), "the hint-arm marker must appear, got:\n{}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("rlimit=1"), "the fuel actually in force must be reported, got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn coverage_check_flags_an_unprovable_demanded_contract() {
-        let _g = COVERAGE_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // A demanded contract is not optional, so `Unsupported` from the
-        // walker is a rewrite instruction -- unlike verify's long-standing
-        // policy of reporting unsupported contracts without failing.
-        let unprovable = r#"
-fn rate(base: f64) -> i64 {
-    return 0
-}
-
-validate rate {
-    pre: base > 1.0
-    post: result >= 0
-}
-"#;
-        let units = vec![demand_unit("rate", "rate never negative")];
-        let failure = contract_coverage_check(unprovable, &units).expect_err("a demanded contract outside the provable subset must fail");
-        assert_eq!(failure.class, CoverageFailureClass::ContractUnprovable);
-        assert!(failure.diagnostic.contains("provable subset"), "the hint-arm marker must appear, got:\n{}", failure.diagnostic);
+        check_primitive_exclusivity_coverage("fn main() {}", &std::collections::HashSet::new(), &std::collections::HashSet::new()).expect("empty protected set is always a no-op");
     }
 
     #[test]
@@ -3523,127 +3017,4 @@ validate rate {
         assert!(json.contains("no_overdraft: result <= balance_cents"), "the second demand line must also appear in proof_demand, got:\n{json}");
     }
 
-    fn screen_unit(name: &str, driving_text: &str) -> crate::hi_graph::CandidateUnit {
-        crate::hi_graph::CandidateUnit {
-            id: format!("code:screen:{name}"),
-            kind: "screen".to_string(),
-            name: name.to_string(),
-            driving_text: driving_text.to_string(),
-            attributes: vec![],
-        }
-    }
-
-    #[test]
-    fn screen_derivation_coverage_passes_when_nothing_is_a_screen_unit() {
-        let units = vec![demand_unit("charge_cents", "result >= 0")];
-        check_screen_derivation_coverage("fn main() requires(public) { }", &units).expect("no screen units means no gate");
-    }
-
-    #[test]
-    fn screen_derivation_coverage_passes_with_a_conventionally_named_getter() {
-        let units = vec![screen_unit("EmployeeLandingScreen", "Shows an employee their own requests.")];
-        let source = r#"
-struct EmployeeLandingScreen {
-    request_count: i64,
-}
-
-fn get_employee_landing_screen() -> EmployeeLandingScreen requires(public) {
-    return EmployeeLandingScreen(0)
-}
-
-screen EmployeeLandingScreen {
-    title: "Employee Landing"
-    field request_count { label: "Requests" }
-}
-
-fn main() requires(public) { }
-"#;
-        check_screen_derivation_coverage(source, &units).expect("a get_<snake> fn satisfies the convention");
-    }
-
-    #[test]
-    fn screen_derivation_coverage_passes_with_an_explicit_override() {
-        let units = vec![screen_unit("EmployeeLandingScreen", "Shows an employee their own requests.")];
-        let source = r#"
-struct EmployeeLandingScreen {
-    request_count: i64,
-}
-
-fn build_employee_landing() -> EmployeeLandingScreen requires(public) {
-    return EmployeeLandingScreen(0)
-}
-
-screen EmployeeLandingScreen {
-    title: "Employee Landing"
-    get: build_employee_landing
-    field request_count { label: "Requests" }
-}
-
-fn main() requires(public) { }
-"#;
-        check_screen_derivation_coverage(source, &units).expect("a `get: <fn>` override naming a real fn satisfies the convention");
-    }
-
-    #[test]
-    fn screen_derivation_coverage_flags_a_screen_with_no_backing_fn() {
-        // The exact field failure this gate exists for: a `screen` block
-        // (and its backing struct) declared, but every convention name
-        // (`list_/create_/update_/delete_/get_employee_landing_screen`)
-        // unmatched by any real fn -- `ui_gen::build_screens` would
-        // silently drop this screen from the served manifest.
-        let units = vec![screen_unit("EmployeeLandingScreen", "Shows an employee their own requests.")];
-        let source = r#"
-struct EmployeeLandingScreen {
-    request_count: i64,
-}
-
-fn get_employee_landing_data() -> str requires(public) {
-    return "employee landing data"
-}
-
-screen EmployeeLandingScreen {
-    title: "Employee Landing"
-    field request_count { label: "Requests" }
-}
-
-fn main() requires(public) { }
-"#;
-        let failure = check_screen_derivation_coverage(source, &units).expect_err("a screen with no matching convention fn must fail");
-        assert_eq!(failure.class, CoverageFailureClass::ContractDropped);
-        assert!(failure.diagnostic.contains("manifest builder treats a screen with no backing fn"), "the hint-arm marker must appear, got:\n{}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("get_employee_landing_screen"), "the exact expected convention name must be named, got:\n{}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("Shows an employee their own requests."), "the unit's own driving text must be attributed, got:\n{}", failure.diagnostic);
-        assert!(failure.diagnostic.contains("machine-readable errors: ["), "the structured block must ride along, got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn screen_derivation_coverage_flags_a_dropped_screen_unit() {
-        // Stronger than the no-backing-fn case: the struct/screen block
-        // are absent from the draft entirely, not merely unwired.
-        let units = vec![screen_unit("AdminLandingScreen", "Summary counts for an admin.")];
-        let source = "fn main() requires(public) { }";
-        let failure = check_screen_derivation_coverage(source, &units).expect_err("a dropped screen unit must fail");
-        assert_eq!(failure.class, CoverageFailureClass::ContractDropped);
-        assert!(failure.diagnostic.contains("is entirely absent from the draft"), "got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn self_repair_hint_names_the_screen_convention_for_a_missing_backing_fn() {
-        let units = vec![screen_unit("EmployeeLandingScreen", "Shows an employee their own requests.")];
-        let source = r#"
-struct EmployeeLandingScreen {
-    request_count: i64,
-}
-
-screen EmployeeLandingScreen {
-    title: "Employee Landing"
-    field request_count { label: "Requests" }
-}
-
-fn main() requires(public) { }
-"#;
-        let failure = check_screen_derivation_coverage(source, &units).expect_err("no backing fn at all must fail");
-        let hint = self_repair_hint(&failure.diagnostic);
-        assert!(hint.contains("get_<snake(Struct)>"), "the hint must teach the naming convention, got:\n{hint}");
-    }
 }

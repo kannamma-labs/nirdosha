@@ -19,16 +19,6 @@ serde_json = "1"
 
 [dependencies]
 z3 = "0.20.2"
-# v2 (Rust + `nirdosha:*` comment layer) support for `hi`'s MCP tool
-# surface (`v2_verify.rs`): the same in-process contract scanner
-# `cargo nirdosha verify` runs, reused as a library rather than shelled
-# out to, so `verify_code`/`fix`/`certify_code` can check a v2 source
-# string's declared-vs-actual claims without a subprocess.
-cargo-nirdosha = { path = "../cargo-nirdosha" }
-# `v2_verify.rs`'s `describe_v2_source`: parses a v2 candidate as plain
-# Rust to extract its fn/struct/enum signatures, the same way
-# `cargo-nirdosha` itself parses source for contracts.
-syn = { version = "2", features = ["full"] }
 # The pure isolation-anomaly-detection algorithm (Direct Serialization
 # Graph), shared verbatim with `crates/runtime-kernels`'s own live FFI
 # wiring (`kernel::isolation_check`) -- an ordinary root-workspace
@@ -40,36 +30,17 @@ syn = { version = "2", features = ["full"] }
 # hits). Backs `nirdosha check-isolation` and certificate isolation-
 # violation attachment (`mcp_tools::Certificate::isolation_violations`).
 nirdosha-isolation-core = { path = "../isolation-core" }
-# Used by `hi_server.rs`'s own test suite to make real HTTP requests
-# against its `tiny_http` server (blocking -- this CLI has no async
-# runtime; `rustls-tls` needs no new system TLS dependency). Same
-# crate+version `crates/presence-gateway/Cargo.toml` already pins, so
-# this is feature-additive to an already-resolved workspace dependency,
-# not a new one to the tree.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+# Ed25519 signing/verification (certificate/pack signing) and the
+# SHA-256 hashing `verify_pipeline.rs`'s `Certificate`/`sha256_hex` use
+# -- extracted into its own crate 2026-09-16 so `crates/nirdosha-hi`
+# (domain-pack signing) can share the same backend without depending on
+# this crate (see that crate's own Cargo.toml for the `fips` feature
+# this pulled its own copy of).
+nirdosha-audit = { path = "../nirdosha-audit" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 native-tls = "0.2"
 base64 = "0.22"
-hmac = "0.12"
-sha2 = "0.10"
-ring = "0.17"
-# `crypto_backend.rs`'s FIPS swap (2026-09) -- `SECURITY.md`/`ROADMAP.md`'s
-# disclosed gap: `ring` is not a NIST CMVP-validated cryptographic
-# module, so a government/regulated deployment requiring FIPS-140-3-
-# validated crypto for Ed25519 pack/certificate signing (`hi_plugin.rs`,
-# `mcp_tools.rs`) can't use it as-is. `aws-lc-rs` mirrors `ring`'s own
-# `rand`/`signature` API closely enough that `crypto_backend.rs` is a
-# pure re-export shim, not a rewrite -- confirmed with a real scratch
-# build in this environment before touching this file: `cmake`/`go`/
-# `clang` (aws-lc-fips-sys's real build-time requirement) are present,
-# and `Ed25519KeyPair::generate_pkcs8`/`sign`/`UnparsedPublicKey::verify`
-# plus a SHA-256 test vector all work identically under the `fips`
-# feature. Optional and off by default -- a normal build is completely
-# unaffected; `cargo build --features fips` (or `--no-default-features
-# --features fips` in `runtime-kernels`, see that crate's own Cargo.toml)
-# opts a regulated deployment in.
-aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
 redis = "0.27"
 tiny_http = "0.12"
@@ -90,18 +61,9 @@ r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24", default-features = false, features = ["bundled"] }
 r2d2_postgres = "0.18"
 signal-hook = { version = "0.4", default-features = false }
-# `linux-body`: on Linux (WebKitGTK), `wry`'s custom-protocol handler
-# silently reads an *empty* body for every POST request unless this
-# feature is on (`webkit2gtk`'s `v2_40` API is what actually exposes
-# reading a URI-scheme request's HTTP body) -- confirmed by a real
-# failure, not a guess: `hi_api.rs`'s POST routes (rfcs/0014's Build/
-# Generate/Publish write surface) all reported "missing required body
-# param" from inside the real build-mode window, even though the
-# page's own `fetch(..., {method:'POST', body:...})` calls were sending
-# one. macOS (WKWebView)/Windows (WebView2) read the body unconditionally
-# already -- this feature only changes the Linux backend's behavior.
-wry = { version = "0.57.0", features = ["linux-body"] }
-tao = "0.37.0"
+# `wry`/`tao` (the native build-mode window) moved to `crates/
+# nirdosha-hi` with the rest of `hi_window.rs` 2026-09-16 -- this crate
+# no longer opens any window at all.
 
 # `dist`: statically vendors Z3 (compiles it from source via `z3-src`)
 # instead of dynamically linking the system `libz3` — same pattern as
@@ -110,11 +72,11 @@ tao = "0.37.0"
 # system z3 via pkg-config since the vendored build is much slower.
 [features]
 dist = ["z3/vendored"]
-# See `aws-lc-rs`'s own comment above and `crypto_backend.rs`'s module
-# doc. `cargo build --features fips` swaps Ed25519 pack/certificate
-# signing from `ring` to `aws-lc-rs`'s CMVP-validatable module; every
-# other dependency, and the default (non-`fips`) build, is unaffected.
-fips = ["dep:aws-lc-rs"]
+# `nirdosha-audit`'s own `fips` feature (Ed25519/SHA-256 via `aws-lc-rs`
+# instead of `ring`) -- forwarded here so `cargo build --features fips`
+# still works from this crate exactly as it did before crypto_backend.rs
+# moved there 2026-09-16.
+fips = ["nirdosha-audit/fips"]
 
 # rfcs/0009-ui-catalog-extensibility.md Phase B's real, separately-
 # compiled reference UI component -- `tests/ui_plugin_examples.rs`'s

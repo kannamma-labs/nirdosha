@@ -168,60 +168,23 @@ fn validate_compliance_profiles(manifest: &PackManifest) -> Result<(), String> {
     Ok(())
 }
 
-/// RFC 0016 Phase 3: a pack's `primitives_nir` must parse, typecheck
-/// (never execute -- "a pack is data until the graph says otherwise"),
-/// and every `validate` block inside it must independently PROVE, at
-/// install time. A pack whose own certified primitives don't prove
-/// themselves is refused here, before anything is written -- the same
-/// fail-closed-cuts-both-ways posture `dry_run_install`'s stub-check
-/// gives 5a invariants, now for real code with real bodies instead of a
-/// synthesized stub.
+/// RFC 0016 Phase 3's `primitives_nir` (a pack shipping literal native
+/// `.nir` source for "certified primitive" functions, Z3-proved at
+/// install time) was a native-`.nir`-only concept -- there is no v2
+/// equivalent, and this crate no longer depends on the native compiler
+/// at all (2026-09-16's `hi` extraction). No installed pack ships
+/// `primitives_nir` today (`banking-v0`/`fapi-2.0` both omit it), so
+/// this refuses loudly rather than silently accepting an unprovable
+/// pack, in the one case that would actually matter: a pack that DOES
+/// set it.
 fn validate_primitives_nir(manifest: &PackManifest) -> Result<(), String> {
-    let Some(src) = &manifest.primitives_nir else { return Ok(()) };
-    let toks = crate::token::Lexer::new(src).tokenize().map_err(|e| format!("pack `{}`'s primitives_nir failed to lex: {e:?}", manifest.id))?;
-    let program = crate::parser::Parser::new(toks).parse_program().map_err(|e| format!("pack `{}`'s primitives_nir failed to parse: {e:?}", manifest.id))?;
-    crate::typeck::typecheck_optional_main(&program).map_err(|e| format!("pack `{}`'s primitives_nir failed to typecheck: {e:?}", manifest.id))?;
-    let outcomes = crate::contract_check::run_program_validates(&program);
-    for outcome in &outcomes {
-        if outcome.result != crate::contract_check::ContractCheckResult::Proved {
-            return Err(format!(
-                "pack `{}`'s primitives_nir carries a `validate {}` block that does not prove -- a certified primitive's own contract must hold before it can ever be shipped as sealed law",
-                manifest.id, outcome.fn_name
-            ));
-        }
-    }
-    for name in &manifest.mandatory_fns {
-        if !program.fns.iter().any(|f| &f.name == name) {
-            return Err(format!("pack `{}` lists `{name}` in mandatory_fns, but primitives_nir declares no such fn", manifest.id));
-        }
+    if manifest.primitives_nir.is_some() {
+        return Err(format!(
+            "pack `{}` declares `primitives_nir`, but this toolchain no longer has a native `.nir` compiler to parse/typecheck/prove it against (hi was split out of the native compiler crate 2026-09-16) -- ship a pack with no `primitives_nir` (mandatory_fns/protected_structs alone still work), or install it against the native `nirdosha` compiler's own pack tooling if one still exists for it",
+            manifest.id
+        ));
     }
     Ok(())
-}
-
-/// RFC 0016 Phase 3's prelude prepend: every active pack's
-/// `primitives_nir` text, concatenated ahead of `source` -- "the model
-/// wires the ledger; it does not write it" only holds once the ledger's
-/// real code is actually present in the draft before typecheck ever
-/// runs, exactly like `generate_program`'s existing prelude-style
-/// `inject_pack_validates_into_source` call, just with real bodies
-/// instead of templates. A model that tries to redeclare a primitive's
-/// name gets `typeck::TypeErrorKind::DuplicateFn` for free -- the
-/// reserved-namespace guarantee needs no separate check, since the
-/// combined source is one program to the parser/typechecker either way.
-pub fn prepend_pack_primitives(conn: &rusqlite::Connection, root: &Path, source: &str) -> Result<String, String> {
-    let packs = active_pack_manifests(conn, root)?;
-    let mut prelude = String::new();
-    for pack in &packs {
-        if let Some(primitives) = &pack.primitives_nir {
-            prelude.push_str(&format!("// -- certified primitives from pack `{}`, sealed law, not the model's to rewrite --\n", pack.id));
-            prelude.push_str(primitives);
-            prelude.push('\n');
-        }
-    }
-    if prelude.is_empty() {
-        return Ok(source.to_string());
-    }
-    Ok(format!("{prelude}{source}"))
 }
 
 /// Every active pack's `mandatory_fns` -- the set
@@ -360,80 +323,29 @@ pub fn install_pack_from_bytes(
 }
 
 /// The `--dry-run` guard the RFC's "fail-closed cuts both ways" section
-/// demands: perform the full load, then run the pack's own contracts
-/// against a stub program *before* writing anything real, rolling back
-/// even on success (`revoke_pack`) so a dry run never persists. A pack
-/// whose own contracts are unprovable would otherwise pass `install`
-/// clean and only brick generation later, under a real user's draft --
-/// this catches it before deploy, over a program this loader
-/// synthesizes itself, not the user's.
+/// demands: perform the full load, rolling back even on success
+/// (`revoke_pack`) so a dry run never persists.
+///
+/// **Real, disclosed reduction (2026-09-16, the `hi` v2 extraction):**
+/// this used to also run the pack's own contracts against a synthesized
+/// stub program via this crate's own Z3-backed `contract_check`, before
+/// `hi` had no native compiler dependency at all. There is no such
+/// proof engine here anymore (nor a v2 equivalent yet), so a dry run
+/// today only proves `install_pack_from_bytes`'s own checks (manifest
+/// schema, declared compliance-profile kinds) -- a pack whose
+/// `invariants[].validates` claims are internally contradictory is no
+/// longer caught here. `nirdosha`'s native `verify`/`certify` pipeline
+/// (`crates/compiler`) still proves a *generated program's* `validate`
+/// blocks; only this pack-authoring-time pre-check is gone.
 pub fn dry_run_install(
     conn: &rusqlite::Connection,
     root: &Path,
     bytes: &[u8],
     source_desc: &str,
 ) -> Result<String, String> {
-    let manifest: PackManifest = serde_json::from_slice(bytes).map_err(|e| format!("parsing pack manifest from {source_desc}: {e}"))?;
-    check_pack_contracts_against_stub(&manifest)?;
     let id = install_pack_from_bytes(conn, root, bytes, source_desc)?;
     let _ = revoke_pack(conn, root, &id);
     Ok(id)
-}
-
-/// Runs every invariant's own `pre`/`post` against a stub body this
-/// loader synthesizes from the invariant's contract text -- the "stub
-/// program" the RFC's dry-run guard names. A pack with a contradictory
-/// `pre`, a vacuous precondition, or a `post` its own named arithmetic
-/// doesn't actually satisfy would fail here, before any real draft is
-/// ever generated under it.
-///
-/// **v1 scope, disclosed, not silent:** the stub body for an invariant
-/// is synthesized only from a `post` entry of the exact literal form
-/// `result == <expr>` -- the one shape every invariant in
-/// `banking-v0.json` already uses, since it is the only case a body can
-/// be derived from the contract text alone with no other source of
-/// truth for "what the fn does". An invariant without that exact form
-/// is skipped here (neither proved nor failed) -- a real gap, not a
-/// silently-claimed guarantee; a future pack format that ships real
-/// primitive bodies (RFC 0016 Phase 3's `pack.invariants.nir`) replaces
-/// this synthesis with the pack's own real code.
-fn check_pack_contracts_against_stub(manifest: &PackManifest) -> Result<(), String> {
-    let mut source = String::new();
-    let mut checked_any = false;
-    for inv in &manifest.invariants {
-        if inv.kind != "fn" {
-            continue;
-        }
-        let Some(body_expr) = inv.validates.iter().flat_map(|v| v.post.iter()).find_map(|p| p.trim().strip_prefix("result == ").map(|rest| rest.trim().to_string())) else {
-            continue;
-        };
-        let params = inv.signature.params.iter().map(|(n, t)| format!("{n}: {t}")).collect::<Vec<_>>().join(", ");
-        source.push_str(&format!("fn {}({params}) -> {} {{\n    return {body_expr}\n}}\n\n", inv.name, inv.signature.ret));
-        for tmpl in &inv.validates {
-            source.push_str(&render_validate_template(tmpl));
-            source.push('\n');
-        }
-        checked_any = true;
-    }
-    if !checked_any {
-        return Ok(());
-    }
-    source.push_str("fn main() requires(public) { }\n");
-
-    let toks = crate::token::Lexer::new(&source).tokenize().map_err(|e| format!("dry-run stub program failed to lex (this is a bug in the stub synthesis, not the pack): {e:?}"))?;
-    let program = crate::parser::Parser::new(toks).parse_program().map_err(|e| format!("dry-run stub program failed to parse (this is a bug in the stub synthesis, not the pack): {e:?}"))?;
-    crate::typeck::typecheck(&program).map_err(|e| format!("dry-run stub program failed to typecheck against the pack's own declared signatures: {e:?}"))?;
-
-    let outcomes = crate::contract_check::run_program_validates(&program);
-    for outcome in &outcomes {
-        if outcome.result != crate::contract_check::ContractCheckResult::Proved {
-            return Err(format!(
-                "dry-run: pack invariant `{}` does not prove against its own stub implementation ({:?}) -- this pack would brick every real generate run under it",
-                outcome.fn_name, outcome.result
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Re-load every installed pack that has not been revoked, verifying
@@ -528,82 +440,6 @@ fn load_domain_pack(
     Ok(())
 }
 
-/// Inject any missing pack `validate` templates into a generated source
-/// string.  Returns the (possibly augmented) source, or a coverage
-/// failure if a demanded fn has the wrong signature.
-///
-/// This is 5a's "injected mode": the model's code is checked against
-/// the sealed law; if it forgot a contract, the pack supplies it.  If
-/// the model already wrote the contract, injection is a no-op for that
-/// fn.
-pub fn inject_pack_validates_into_source(
-    root: &Path,
-    source: &str,
-) -> Result<String, crate::hi_llm::CoverageFailure> {
-    let packs = list_installed_pack_manifests(root).map_err(|e| crate::hi_llm::CoverageFailure {
-        class: crate::hi_llm::CoverageFailureClass::ContractViolated,
-        diagnostic: format!("contract coverage failure: could not read installed domain packs: {e}"),
-    })?;
-    if packs.is_empty() {
-        return Ok(source.to_string());
-    }
-
-    // Parse once to discover fn signatures and existing validate blocks.
-    let toks = match crate::token::Lexer::new(source).tokenize() {
-        Ok(t) => t,
-        Err(_) => return Ok(source.to_string()), // let typecheck report parse errors in its own voice
-    };
-    let program = match crate::parser::Parser::new(toks).parse_program() {
-        Ok(p) => p,
-        Err(_) => return Ok(source.to_string()),
-    };
-
-    let mut injections: Vec<String> = Vec::new();
-    for (manifest, _sha256) in &packs {
-        for inv in &manifest.invariants {
-            if inv.kind != "fn" {
-                continue;
-            }
-            let Some(fndecl) = program.fns.iter().find(|f| f.name == inv.name) else {
-                continue;
-            };
-            // If the model already wrote any validate block for this fn,
-            // trust that one (the coverage gate will still prove it).
-            if program.validates.iter().any(|v| v.fn_name == inv.name) {
-                continue;
-            }
-            // Signature guard: the pack declares the exact param names the
-            // contract predicates reference.
-            if !signature_matches(fndecl, &inv.signature) {
-                return Err(crate::hi_llm::CoverageFailure {
-                    class: crate::hi_llm::CoverageFailureClass::ContractViolated,
-                    diagnostic: format!(
-                        "contract coverage failure: pack `{}` demands fn `{}` with signature `{}`, but the draft uses a different signature -- the domain law requires the exact parameter names its contracts reference",
-                        manifest.id,
-                        inv.name,
-                        pack_signature_text(&inv.signature)
-                    ),
-                });
-            }
-            for tmpl in &inv.validates {
-                injections.push(render_validate_template(tmpl));
-            }
-        }
-    }
-
-    if injections.is_empty() {
-        return Ok(source.to_string());
-    }
-    let mut out = source.trim_end().to_string();
-    out.push('\n');
-    out.push_str("// Domain-law validate blocks injected by installed packs:\n");
-    for block in injections {
-        out.push_str(&block);
-        out.push('\n');
-    }
-    Ok(out)
-}
-
 /// List installed, non-revoked packs by reading `.nir/plugins/*/pack.json`
 /// directly (the graph only stores the units; the manifest file holds the
 /// templates).
@@ -628,49 +464,6 @@ fn list_installed_pack_manifests(root: &Path) -> Result<Vec<(PackManifest, Strin
         out.push((manifest, sha256));
     }
     Ok(out)
-}
-
-fn signature_matches(fndecl: &crate::ast::FnDecl, sig: &PackSignature) -> bool {
-    if !type_name_matches(&fndecl.ret, &sig.ret) {
-        return false;
-    }
-    if fndecl.params.len() != sig.params.len() {
-        return false;
-    }
-    for (p, (name, ty)) in fndecl.params.iter().zip(sig.params.iter()) {
-        if p.name != *name {
-            return false;
-        }
-        if !type_name_matches(&p.ty, ty) {
-            return false;
-        }
-    }
-    true
-}
-
-fn type_name_matches(ty: &crate::ast::Ty, name: &str) -> bool {
-    crate::ast::Ty::from_name(name).as_ref() == Some(ty)
-}
-
-fn pack_signature_text(sig: &PackSignature) -> String {
-    let params: Vec<String> = sig
-        .params
-        .iter()
-        .map(|(n, t)| format!("{n}: {t}"))
-        .collect();
-    format!("fn {}({}) -> {}", "name", params.join(", "), sig.ret)
-}
-
-fn render_validate_template(tmpl: &ValidateTemplate) -> String {
-    let mut out = format!("validate {} {{\n", tmpl.fn_name);
-    if let Some(pre) = &tmpl.pre {
-        out.push_str(&format!("    pre: {}\n", pre));
-    }
-    for post in &tmpl.post {
-        out.push_str(&format!("    post: {}\n", post));
-    }
-    out.push_str("}\n");
-    out
 }
 
 fn iso_now() -> String {
@@ -812,51 +605,6 @@ fn active_pack_manifests(conn: &rusqlite::Connection, root: &Path) -> Result<Vec
     Ok(all.into_iter().filter(|(m, _)| active_ids.contains(&m.id)).map(|(m, _)| m).collect())
 }
 
-/// Real per-invariant attribution: which *specific* active pack
-/// demanded which *specific* proved contract in `program` -- RFC 0016's
-/// "generation audit and governing-set snapshot," previously only a
-/// flat `Certificate::governing_packs` (which pack(s) are active, not
-/// which one demanded which proved contract). Named by an existing
-/// test comment (`hi_api.rs::fintech_app_under_the_banking_pack_
-/// publishes_...`) as separate future work; built for real 2026-09-15.
-///
-/// **Computed post-hoc from the final published `program`, not
-/// injection-time provenance -- deliberately.** Whether a `validate`
-/// block for a pack-demanded fn was actually written by `inject_pack_
-/// validates_into_source` or independently authored by the model to
-/// match that pack's own demanded signature, the pack's invariant is
-/// equally satisfied and equally real to attribute: this answers
-/// "which pack governed this artifact" (the RFC's own question), not
-/// "which pack's own injector literally wrote this text" (a narrower,
-/// less useful question this function deliberately doesn't ask).
-///
-/// **Real, disclosed edge case, not hidden**: if two active packs both
-/// declare a `kind: "fn"` invariant for the identically-named fn, this
-/// returns one entry per pack (not deduplicated) -- an unusual but real
-/// governance fact (two packs both claiming the same contract) worth
-/// keeping visible, matching this RFC's own `primitive_exclusivity`
-/// discipline of surfacing a collision rather than silently picking one
-/// winner.
-pub fn governing_invariants(conn: &rusqlite::Connection, root: &Path, program: &crate::ast::Program) -> Result<Vec<crate::mcp_tools::GoverningInvariant>, String> {
-    let packs = active_pack_manifests(conn, root)?;
-    let mut out: Vec<crate::mcp_tools::GoverningInvariant> = Vec::new();
-    for manifest in &packs {
-        for inv in &manifest.invariants {
-            if inv.kind != "fn" {
-                continue;
-            }
-            if program.validates.iter().any(|v| v.fn_name == inv.name) {
-                out.push(crate::mcp_tools::GoverningInvariant { fn_name: inv.name.clone(), pack_id: manifest.id.clone() });
-            }
-        }
-    }
-    // Deterministic order -- matches `Certificate`'s own "no timestamp,
-    // no random nonce, always the same bytes for the same input"
-    // discipline (`nfr_commitments_from_program`'s own doc comment).
-    out.sort_by(|a, b| (a.pack_id.as_str(), a.fn_name.as_str()).cmp(&(b.pack_id.as_str(), b.fn_name.as_str())));
-    Ok(out)
-}
-
 /// RFC 0016's FAPI wiring: `true` if any active pack's compliance
 /// profile declares the `sender_constrained_tokens` wiring requirement
 /// -- `main.rs::cmd_build` reads this to decide whether to pass
@@ -868,82 +616,6 @@ pub fn governing_invariants(conn: &rusqlite::Connection, root: &Path, program: &
 pub fn wiring_requires_sender_constrained_tokens(conn: &rusqlite::Connection, root: &Path) -> Result<bool, String> {
     let packs = active_pack_manifests(conn, root)?;
     Ok(packs.iter().any(|m| m.compliance_profiles.iter().any(|p| p.wiring_requirements.iter().any(|w| w.kind == "sender_constrained_tokens"))))
-}
-
-/// RFC 0016's "What certification emits" — real for the first time
-/// 2026-09-15. `check_static_rules`/`ComplianceProfile` were built and
-/// unit-tested against a real FAPI 2.0 pack fixture, but nothing in the
-/// actual generate/publish/certify pipeline ever called
-/// `check_static_rules`, and `Certificate` had no field to carry the
-/// result even if it had — the RFC's own worked example (`packs: ...`,
-/// `compliance: fapi-2.0-security-profile ...`) was aspirational, not
-/// produced by any real code path. This is that missing wiring: every
-/// active pack's compliance profile, checked for real against the
-/// program actually being published.
-///
-/// **A failed `static_rule` refuses the whole call, it does not get
-/// silently omitted or recorded as unsatisfied** — mirrors `hi_api::
-/// handle_publish`'s own `contract_coverage_check_program` "publish
-/// refused" discipline just above it, for the same reason: RFC 0016
-/// says a `static_rule` "turns compiler behavior into an *attested
-/// claim*" for this specific artifact — attesting a claim you already
-/// know is false would be strictly worse than never having built this
-/// feature at all. `wiring_requirement`/`external_conformance` are
-/// never behaviorally checkable at publish time by design (see
-/// `ComplianceProfileReport`'s own doc comments in `mcp_tools.rs` for
-/// exactly what each tier does and doesn't claim), so they're always
-/// reported, never a refusal reason.
-pub fn compliance_profile_reports(conn: &rusqlite::Connection, root: &Path, program: &crate::ast::Program) -> Result<Vec<crate::mcp_tools::ComplianceProfileReport>, String> {
-    let packs = active_pack_manifests(conn, root)?;
-    let mut out: Vec<crate::mcp_tools::ComplianceProfileReport> = Vec::new();
-    for manifest in &packs {
-        for profile in &manifest.compliance_profiles {
-            if let Err(errors) = check_static_rules(program, profile) {
-                return Err(format!(
-                    "publish refused -- pack `{}`'s compliance profile `{}` v{} declares a static_rule that does not hold for this artifact: {}",
-                    manifest.id,
-                    profile.name,
-                    profile.version,
-                    errors.join("; ")
-                ));
-            }
-            out.push(crate::mcp_tools::ComplianceProfileReport {
-                pack_id: manifest.id.clone(),
-                profile_name: profile.name.clone(),
-                profile_version: profile.version.clone(),
-                static_rules: profile
-                    .static_rules
-                    .iter()
-                    .map(|r| crate::mcp_tools::ComplianceRequirementReport {
-                        kind: r.kind.clone(),
-                        evidence_tier: crate::mcp_tools::ComplianceRequirementReport::STATIC_RULE_EVIDENCE_TIER.to_string(),
-                    })
-                    .collect(),
-                wiring_requirements: profile
-                    .wiring_requirements
-                    .iter()
-                    .map(|w| crate::mcp_tools::ComplianceRequirementReport {
-                        kind: w.kind.clone(),
-                        evidence_tier: crate::mcp_tools::ComplianceRequirementReport::WIRING_REQUIREMENT_EVIDENCE_TIER.to_string(),
-                    })
-                    .collect(),
-                external_conformance: profile
-                    .external_conformance
-                    .iter()
-                    .map(|e| crate::mcp_tools::ExternalConformanceReport {
-                        kind: e.kind.clone(),
-                        description: e.description.clone(),
-                        evidence_tier: crate::mcp_tools::ExternalConformanceReport::EVIDENCE_TIER.to_string(),
-                    })
-                    .collect(),
-            });
-        }
-    }
-    // Deterministic order -- matches `governing_invariants`'s own
-    // "no timestamp, no random nonce, always the same bytes for the
-    // same input" discipline.
-    out.sort_by(|a, b| (a.pack_id.as_str(), a.profile_name.as_str()).cmp(&(b.pack_id.as_str(), b.profile_name.as_str())));
-    Ok(out)
 }
 
 /// The config-sidecar half of `wiring_requirement`: every active pack's
@@ -984,74 +656,6 @@ pub fn render_wiring_config(conn: &rusqlite::Connection, root: &Path) -> Result<
     Ok(Some(serde_json::json!({ "compliance_wiring": profiles_out })))
 }
 
-/// `static_rule` kinds this toolchain actually checks -- `exposed_
-/// mutating_requires_role`/`deny_by_default_exposure` are already
-/// unconditionally compiler-enforced (`typeck::check_serve_exposure`'s
-/// own `ExposedMutatingFnMissingRequires` hard error means a program
-/// that reached this point structurally cannot violate them); re-
-/// checking here turns "the compiler already guarantees this" into an
-/// *attested claim* for the profile, per this RFC's own "Honest
-/// scoping" table, rather than silently trusting it held.
-/// `no_plaintext_secret_params` is new and genuinely enforced here: no
-/// exposed fn may take a plain `str` parameter whose name suggests it
-/// carries a raw secret. **Disclosed, narrow heuristic**: a fixed
-/// substring deny-list on the parameter's declared name, nothing about
-/// its actual runtime value -- a real name-based lint, not a data-flow
-/// analysis, the same class of narrowing this codebase discloses
-/// elsewhere rather than overclaiming.
-const PLAINTEXT_SECRET_PARAM_NAME_SUBSTRINGS: &[&str] = &["password", "secret", "api_key", "apikey", "private_key"];
-
-pub fn check_static_rules(program: &crate::ast::Program, profile: &ComplianceProfile) -> Result<(), Vec<String>> {
-    let mut errors = Vec::new();
-    let exposed = crate::typeck::exposed_fn_names(program);
-    for rule in &profile.static_rules {
-        match rule.kind.as_str() {
-            "exposed_mutating_requires_role" => {
-                for name in &exposed {
-                    if !(name.starts_with("create_") || name.starts_with("update_") || name.starts_with("delete_")) {
-                        continue;
-                    }
-                    let Some(f) = program.fns.iter().find(|f| &f.name == name) else { continue };
-                    if f.requires.is_none() && !f.explicit_public {
-                        errors.push(format!("static_rule `exposed_mutating_requires_role` (profile `{}`): exposed fn `{}` has no `requires(...)` gate", profile.name, f.name));
-                    }
-                }
-            }
-            "deny_by_default_exposure" => {
-                // Structurally guaranteed by `typeck.rs`'s own exposure
-                // model (only names in `serve { expose ... }` or a
-                // `screen`'s list/create/update/delete/action bindings
-                // are ever reachable at all) -- nothing to check that
-                // isn't already true of any program that parsed.
-            }
-            "no_plaintext_secret_params" => {
-                // A bare `str` param can never reach here at all --
-                // `typeck::TypeErrorKind::StrInFnSignature` rejects `str`
-                // crossing a function boundary categorically, so this
-                // checks the parameter's *name* regardless of its
-                // (necessarily wrapped, e.g. `Text`) type: a client-
-                // suppliable parameter named like a raw secret is the
-                // real risk signal whether it arrives as `Text` or any
-                // other single-field wrapper, not the exact wire shape.
-                for name in &exposed {
-                    let Some(f) = program.fns.iter().find(|f| &f.name == name) else { continue };
-                    for p in &f.params {
-                        let lower = p.name.to_lowercase();
-                        if PLAINTEXT_SECRET_PARAM_NAME_SUBSTRINGS.iter().any(|s| lower.contains(s)) {
-                            errors.push(format!(
-                                "static_rule `no_plaintext_secret_params` (profile `{}`): exposed fn `{}` takes a parameter `{}`, whose name suggests it carries a raw secret",
-                                profile.name, f.name, p.name
-                            ));
-                        }
-                    }
-                }
-            }
-            other => errors.push(format!("static_rule kind `{other}` has no checker (this should have been caught at pack load -- a bug if seen)")),
-        }
-    }
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
-}
-
 // ===========================================================================
 // RFC 0016 Phase 4 (issue #59, `docs/research/2026-09-competitive-
 // verification-and-signing-landscape.md` §5): Sigstore-*pattern* pack
@@ -1086,7 +690,7 @@ pub fn check_static_rules(program: &crate::ast::Program, profile: &CompliancePro
 // verifying one is something an operator chooses to require.
 
 /// One signed pack, ready to install or to write to disk -- the pack
-/// analogue of `mcp_tools::SignedCertificate`, same shape, same
+/// analogue of the native compiler crate's `verify_pipeline::SignedCertificate`, same shape, same
 /// `#[serde(flatten)]`-free plain-fields style (a pack has no existing
 /// unsigned JSON shape to stay compatible with the way `Certificate`
 /// does, so there's nothing to flatten onto). `manifest_bytes` is the
@@ -1099,7 +703,7 @@ pub struct SignedPackEnvelope {
     /// The pack manifest's raw JSON text, verbatim.
     pub manifest_json: String,
     /// `String`, not `&'static str`: this struct derives `Deserialize`
-    /// (`main.rs`'s own install-side parse) -- `mcp_tools::Certificate::
+    /// (`main.rs`'s own install-side parse) -- the native compiler crate's `verify_pipeline::Certificate::
     /// evidence_tier`'s own doc comment is the precedent for exactly
     /// this choice, and its own reasoning applies verbatim here.
     pub signature_algorithm: String,
@@ -1118,7 +722,7 @@ pub struct SignedPackEnvelope {
 
 /// Author-side: signs `manifest_bytes` (a pack's raw JSON, exactly as
 /// `install_pack_from_bytes` accepts it) with the Ed25519 private key
-/// at `key_path`, reusing `mcp_tools::sign_bytes` -- the same primitive
+/// at `key_path`, reusing `nirdosha_audit::signing::sign_bytes` -- the same primitive
 /// `nirdosha certify --sign` uses, one Ed25519 implementation in this
 /// crate for both certificates and packs.
 pub fn sign_pack(manifest_bytes: &[u8], key_path: &str, signer_identity: String) -> Result<SignedPackEnvelope, String> {
@@ -1128,7 +732,7 @@ pub fn sign_pack(manifest_bytes: &[u8], key_path: &str, signer_identity: String)
     // silently produce a validly-signed envelope around garbage that
     // only fails later, at someone else's install time.
     let _: PackManifest = serde_json::from_str(&manifest_json).map_err(|e| format!("not a valid pack manifest: {e}"))?;
-    let (public_key, signature) = crate::mcp_tools::sign_bytes(manifest_bytes, key_path)?;
+    let (public_key, signature) = nirdosha_audit::signing::sign_bytes(manifest_bytes, key_path)?;
     Ok(SignedPackEnvelope { manifest_json, signature_algorithm: "ed25519".to_string(), public_key, signature, signer_identity })
 }
 
@@ -1230,7 +834,7 @@ fn append_pack_signing_log(pack_id: &str, sha256: &str, signer_identity: &str, t
 /// operator-side list-hygiene question this module doesn't referee.
 pub fn verify_and_install_signed_pack(conn: &rusqlite::Connection, root: &Path, envelope: &SignedPackEnvelope, source_desc: &str) -> Result<String, String> {
     let manifest_bytes = envelope.manifest_json.as_bytes();
-    let valid = crate::mcp_tools::verify_bytes(manifest_bytes, &envelope.public_key, &envelope.signature)?;
+    let valid = nirdosha_audit::signing::verify_bytes(manifest_bytes, &envelope.public_key, &envelope.signature)?;
     if !valid {
         return Err(format!("{source_desc}: signature does not verify against the embedded public key -- refusing to install"));
     }
@@ -1256,7 +860,7 @@ pub fn verify_and_install_signed_pack(conn: &rusqlite::Connection, root: &Path, 
 /// verbatim, plus a derived `trust_indicator` ("signed"/"unsigned") --
 /// `agent-skills/nirdosha/hi_ux_redesign_options.md`'s "trust indicator
 /// (who signed it...)" mockup, previously never wired to this function
-/// (this doc comment's own prior text said so). `mcp_tools::
+/// (this doc comment's own prior text said so). the native compiler crate's `verify_pipeline::
 /// Certificate::governing_packs` attributing not just *which* packs
 /// governed an artifact but who sealed them is still real, separate
 /// follow-up work -- this wiring is the UI-facing half, not the
@@ -1278,24 +882,6 @@ mod tests {
         path
     }
 
-    fn parse_and_typecheck(src: &str) -> crate::ast::Program {
-        let toks = crate::token::Lexer::new(src).tokenize().expect("lex should succeed");
-        let program = crate::parser::Parser::new(toks).parse_program().expect("parse should succeed");
-        crate::typeck::typecheck(&program).expect("should typecheck cleanly");
-        program
-    }
-
-    const TRANSFER_PRIMITIVE_NIR: &str = r#"
-fn transfer(amount: i64) -> i64 {
-    return amount
-}
-
-validate transfer {
-    pre: amount > 0
-    post: result == amount
-}
-"#;
-
     fn pack_with_primitives(id: &str, primitives_nir: &str, mandatory_fns: &[&str]) -> String {
         serde_json::json!({
             "id": id,
@@ -1306,70 +892,29 @@ validate transfer {
         .to_string()
     }
 
-    #[test]
-    fn a_pack_whose_primitives_nir_proves_itself_installs_cleanly() {
-        let dir = scratch_dir("primitives_prove");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        let bytes = pack_with_primitives("ledger-v0", TRANSFER_PRIMITIVE_NIR, &["transfer"]);
-        let id = install_pack_from_bytes(&conn, &dir, bytes.as_bytes(), "test").expect("a primitive whose own validate block proves must install");
-        assert_eq!(id, "ledger-v0");
+    fn pack_with_mandatory_fns(id: &str, mandatory_fns: &[&str]) -> String {
+        serde_json::json!({
+            "id": id,
+            "name": format!("test pack {id}"),
+            "mandatory_fns": mandatory_fns,
+        })
+        .to_string()
     }
 
     #[test]
-    fn a_pack_whose_primitives_nir_does_not_prove_itself_refuses_to_install() {
-        let dir = scratch_dir("primitives_dont_prove");
+    fn a_pack_declaring_primitives_nir_refuses_to_install() {
+        // `primitives_nir` (native `.nir` source, Z3-proved at install
+        // time) has no v2 equivalent -- this crate has no native
+        // compiler dependency at all since the 2026-09-16 `hi`
+        // extraction. Refusing loudly here (rather than silently
+        // accepting an unprovable pack) is the honest behavior; no
+        // installed pack ships `primitives_nir` today.
+        let dir = scratch_dir("primitives_nir_unsupported");
         let conn = crate::hi_graph::open(&dir).expect("open");
-        let broken = r#"
-fn transfer(amount: i64) -> i64 {
-    return amount
-}
-
-validate transfer {
-    pre: amount > 0
-    post: result == amount + 1
-}
-"#; // off-by-one: the primitive's own postcondition is simply false.
-        let bytes = pack_with_primitives("broken-ledger", broken, &["transfer"]);
-        let err = install_pack_from_bytes(&conn, &dir, bytes.as_bytes(), "test").expect_err("a primitive that doesn't prove its own contract must refuse to install");
-        assert!(err.contains("transfer"), "got: {err}");
+        let bytes = pack_with_primitives("ledger-v0", "fn transfer(amount: i64) -> i64 { return amount }", &["transfer"]);
+        let err = install_pack_from_bytes(&conn, &dir, bytes.as_bytes(), "test").expect_err("a pack declaring primitives_nir must be refused");
+        assert!(err.contains("primitives_nir"), "got: {err}");
         assert!(installed_pack_ids(&conn).expect("list").is_empty());
-    }
-
-    #[test]
-    fn a_pack_listing_a_mandatory_fn_not_present_in_primitives_nir_refuses_to_install() {
-        let dir = scratch_dir("primitives_missing_mandatory");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        let bytes = pack_with_primitives("ledger-v0-2", TRANSFER_PRIMITIVE_NIR, &["transfer", "post_entry"]);
-        let err = install_pack_from_bytes(&conn, &dir, bytes.as_bytes(), "test").expect_err("mandatory_fns naming a fn absent from primitives_nir must refuse to load");
-        assert!(err.contains("post_entry"), "got: {err}");
-    }
-
-    #[test]
-    fn prepend_pack_primitives_prepends_every_active_packs_primitives_nir() {
-        let dir = scratch_dir("prepend_primitives");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        install_pack_from_bytes(&conn, &dir, pack_with_primitives("ledger-v0-3", TRANSFER_PRIMITIVE_NIR, &["transfer"]).as_bytes(), "test").expect("install");
-
-        let model_draft = "fn main() requires(public) {\n    print(\"x\", transfer(500))\n}\n";
-        let combined = prepend_pack_primitives(&conn, &dir, model_draft).expect("prepend");
-        assert!(combined.contains("fn transfer(amount: i64) -> i64"), "got:\n{combined}");
-        assert!(combined.contains("validate transfer"), "got:\n{combined}");
-        assert!(combined.ends_with(model_draft), "the model's own draft must still be present, unmodified, at the end:\n{combined}");
-
-        // The combined source must actually typecheck as one program (the
-        // real thing generate_program feeds to typecheck_and_build_check).
-        let toks = crate::token::Lexer::new(&combined).tokenize().expect("lex");
-        let program = crate::parser::Parser::new(toks).parse_program().expect("parse");
-        crate::typeck::typecheck(&program).expect("the combined program must typecheck");
-    }
-
-    #[test]
-    fn prepend_pack_primitives_is_a_no_op_when_no_active_pack_has_any() {
-        let dir = scratch_dir("prepend_primitives_none");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        ensure_default_packs(&conn, &dir).expect("banking-v0 has no primitives_nir");
-        let source = "fn main() requires(public) { }\n";
-        assert_eq!(prepend_pack_primitives(&conn, &dir, source).expect("prepend"), source);
     }
 
     #[test]
@@ -1378,7 +923,7 @@ validate transfer {
         let conn = crate::hi_graph::open(&dir).expect("open");
         assert!(active_mandatory_primitive_names(&conn, &dir).expect("check").is_empty());
 
-        let id = install_pack_from_bytes(&conn, &dir, pack_with_primitives("ledger-v0-4", TRANSFER_PRIMITIVE_NIR, &["transfer"]).as_bytes(), "test").expect("install");
+        let id = install_pack_from_bytes(&conn, &dir, pack_with_mandatory_fns("ledger-v0-4", &["transfer"]).as_bytes(), "test").expect("install");
         let names = active_mandatory_primitive_names(&conn, &dir).expect("check");
         assert!(names.contains("transfer"), "got: {names:?}");
 
@@ -1399,7 +944,6 @@ validate transfer {
             "id": "ledger-v0-protected",
             "name": "test pack with a protected struct",
             "mandatory_fns": ["transfer"],
-            "primitives_nir": TRANSFER_PRIMITIVE_NIR,
             "protected_structs": ["Account"],
         })
         .to_string();
@@ -1412,43 +956,12 @@ validate transfer {
     }
 
     #[test]
-    fn dry_run_install_proves_the_banking_pack_against_its_own_stub_and_does_not_persist() {
+    fn dry_run_install_installs_the_banking_pack_and_does_not_persist() {
         let dir = scratch_dir("dry_run_banking_v0");
         let conn = crate::hi_graph::open(&dir).expect("open");
-        let id = dry_run_install(&conn, &dir, BANKING_V0_JSON.as_bytes(), "dry-run test").expect("banking-v0's own contracts must prove against its own stub");
+        let id = dry_run_install(&conn, &dir, BANKING_V0_JSON.as_bytes(), "dry-run test").expect("banking-v0 must install");
         assert_eq!(id, "banking-v0");
         assert!(installed_pack_ids(&conn).expect("list").is_empty(), "a dry run must not persist the pack");
-    }
-
-    #[test]
-    fn dry_run_install_refuses_a_pack_whose_own_contract_does_not_prove() {
-        let dir = scratch_dir("dry_run_broken_pack");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        // `result == balance_cents - amount_cents` (the stub body) does
-        // not satisfy `post: result == balance_cents + amount_cents` --
-        // a pack author's typo (credit's contract pasted onto charge's
-        // invariant), exactly the class of mistake this guard exists to
-        // catch before deploy, not after.
-        let broken = r#"{
-  "id": "broken-v0",
-  "name": "Broken pack (test fixture)",
-  "invariants": [
-    {
-      "kind": "fn",
-      "name": "charge_cents",
-      "signature": { "params": [["balance_cents", "i64"], ["amount_cents", "i64"]], "ret": "i64" },
-      "attributes": [],
-      "validates": [
-        { "fn_name": "charge_cents", "pre": "balance_cents >= 0 && amount_cents >= 0", "post": ["result == balance_cents - amount_cents", "result == balance_cents + amount_cents"] }
-      ]
-    }
-  ],
-  "relations": [],
-  "mandatory_fns": ["charge_cents"]
-}"#;
-        let err = dry_run_install(&conn, &dir, broken.as_bytes(), "dry-run test").expect_err("a self-contradictory post-condition must fail dry-run");
-        assert!(err.contains("charge_cents"), "the refusal must name the offending invariant: {err}");
-        assert!(installed_pack_ids(&conn).expect("list").is_empty(), "a failed dry run must not persist anything either");
     }
 
     #[test]
@@ -1456,89 +969,6 @@ validate transfer {
         let manifest = default_banking_manifest();
         assert_eq!(manifest.id, "banking-v0");
         assert!(manifest.invariants.iter().any(|i| i.name == "charge_cents"));
-    }
-
-    #[test]
-    fn inject_pack_validates_adds_missing_contract_blocks() {
-        let dir = scratch_dir("inject_validates");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        ensure_default_packs(&conn, &dir).expect("ensure default packs");
-
-        let source = r#"
-fn charge_cents(balance_cents: i64, amount_cents: i64) -> i64 {
-    return balance_cents - amount_cents
-}
-
-fn credit_cents(balance_cents: i64, amount_cents: i64) -> i64 {
-    return balance_cents + amount_cents
-}
-
-fn net_change_cents(credits: i64, debits: i64) -> i64 {
-    return credits - debits
-}
-
-fn main() requires(public) {
-    print("charge", charge_cents(1000, 200))
-}
-"#;
-
-        let injected = inject_pack_validates_into_source(&dir, source).expect("injection should succeed");
-        assert!(injected.contains("validate charge_cents"), "injected source must contain the charge_cents contract, got:\n{injected}");
-        assert!(injected.contains("validate credit_cents"), "injected source must contain the credit_cents contract, got:\n{injected}");
-        assert!(injected.contains("validate net_change_cents"), "injected source must contain the net_change_cents contract, got:\n{injected}");
-
-        let units = crate::hi_graph::confirmed_units(&conn, None).expect("confirmed_units");
-        crate::hi_llm::contract_coverage_check(&injected, &units).expect("the injected contracts must prove");
-    }
-
-    #[test]
-    fn inject_pack_validates_rejects_a_wrong_signature() {
-        let dir = scratch_dir("inject_signature_mismatch");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        ensure_default_packs(&conn, &dir).expect("ensure default packs");
-
-        // The pack demands `charge_cents(balance_cents, amount_cents)`;
-        // this draft renames the params, so the contract predicates would
-        // reference unbound identifiers.
-        let source = r#"
-fn charge_cents(bal: i64, amt: i64) -> i64 {
-    return bal - amt
-}
-
-fn main() requires(public) {
-    print("charge", charge_cents(1000, 200))
-}
-"#;
-
-        let failure = inject_pack_validates_into_source(&dir, source).expect_err("wrong signature must fail");
-        assert_eq!(failure.class, crate::hi_llm::CoverageFailureClass::ContractViolated);
-        assert!(failure.diagnostic.contains("different signature"), "got:\n{}", failure.diagnostic);
-    }
-
-    #[test]
-    fn inject_pack_validates_skips_when_the_model_already_wrote_the_contract() {
-        let dir = scratch_dir("inject_no_duplicate");
-        let conn = crate::hi_graph::open(&dir).expect("open");
-        ensure_default_packs(&conn, &dir).expect("ensure default packs");
-
-        let source = r#"
-fn charge_cents(balance_cents: i64, amount_cents: i64) -> i64 {
-    return balance_cents - amount_cents
-}
-
-validate charge_cents {
-    pre: balance_cents >= 0 && amount_cents >= 0 && amount_cents <= balance_cents
-    post: result == balance_cents - amount_cents
-}
-
-fn main() requires(public) {
-    print("charge", charge_cents(1000, 200))
-}
-"#;
-
-        let injected = inject_pack_validates_into_source(&dir, source).expect("injection should succeed");
-        let count = injected.matches("validate charge_cents").count();
-        assert_eq!(count, 1, "the model's own validate block must not be duplicated");
     }
 
     #[test]
@@ -1616,68 +1046,13 @@ fn main() requires(public) {
         assert!(render_wiring_config(&conn, &dir).expect("render").is_none());
     }
 
-    #[test]
-    fn check_static_rules_flags_a_plaintext_secret_parameter_on_an_exposed_fn() {
-        let source = r#"
-struct Text { value: str }
-
-fn login(username: Text, password: Text) -> bool {
-    return true
-}
-
-fn main() requires(public) { }
-
-serve {
-    expose login
-}
-"#;
-        let program = parse_and_typecheck(source);
-        let profile = ComplianceProfile {
-            name: "test".to_string(),
-            version: "1".to_string(),
-            static_rules: vec![StaticRule { kind: "no_plaintext_secret_params".to_string() }],
-            wiring_requirements: Vec::new(),
-            external_conformance: Vec::new(),
-        };
-        let errors = check_static_rules(&program, &profile).expect_err("a plaintext `password: str` param on an exposed fn must be flagged");
-        assert!(errors.iter().any(|e| e.contains("password")), "got: {errors:?}");
-    }
-
-    #[test]
-    fn check_static_rules_passes_a_clean_program() {
-        let source = r#"
-fn get_status(id: i64) -> i64 {
-    return id
-}
-
-fn main() requires(public) { }
-
-serve {
-    expose get_status
-}
-"#;
-        let program = parse_and_typecheck(source);
-        let profile = ComplianceProfile {
-            name: "test".to_string(),
-            version: "1".to_string(),
-            static_rules: vec![
-                StaticRule { kind: "exposed_mutating_requires_role".to_string() },
-                StaticRule { kind: "deny_by_default_exposure".to_string() },
-                StaticRule { kind: "no_plaintext_secret_params".to_string() },
-            ],
-            wiring_requirements: Vec::new(),
-            external_conformance: Vec::new(),
-        };
-        check_static_rules(&program, &profile).expect("a clean program must pass every checked static rule");
-    }
-
     /// A fresh Ed25519 keypair for pack-signing tests, mirroring
     /// `nirdosha keygen`'s own `generate_pkcs8` call -- written to a
-    /// real file since `sign_pack`/`mcp_tools::sign_bytes` both take a
+    /// real file since `sign_pack`/`nirdosha_audit::signing::sign_bytes` both take a
     /// key *path*, the same interface `nirdosha certify --sign` uses.
     fn generate_test_key(dir: &std::path::Path) -> std::path::PathBuf {
-        let rng = crate::crypto_backend::rand::SystemRandom::new();
-        let pkcs8 = crate::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
+        let rng = nirdosha_audit::crypto_backend::rand::SystemRandom::new();
+        let pkcs8 = nirdosha_audit::crypto_backend::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("key generation");
         let path = dir.join("signer.pk8");
         std::fs::write(&path, pkcs8.as_ref()).expect("write key");
         path

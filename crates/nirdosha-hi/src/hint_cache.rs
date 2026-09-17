@@ -216,7 +216,7 @@ impl HintCache {
         // codebase already had a log for. Was a flat, non-chained JSONL
         // append before this session; see `audit_chain.rs`'s own module
         // doc for why this call site, not a bigger rewrite.
-        crate::audit_chain::append_entry(&log_path(&self.path), serde_json::json!({ "pattern": pattern, "hint": hint }), now_unix());
+        nirdosha_audit::audit_chain::append_entry(&log_path(&self.path), serde_json::json!({ "pattern": pattern, "hint": hint }), now_unix());
     }
 }
 
@@ -337,7 +337,7 @@ impl RuntimeLessons {
         // (`record_success`'s own identical trail, just above), arguably
         // more so: it's an explicit override with no automatic "proof"
         // step behind it at all.
-        crate::audit_chain::append_entry(&self.path.with_file_name("self_repair_runtime_lessons_audit.jsonl"), serde_json::json!({ "incident_kind": incident_kind, "hint": hint }), now_unix());
+        nirdosha_audit::audit_chain::append_entry(&self.path.with_file_name("self_repair_runtime_lessons_audit.jsonl"), serde_json::json!({ "incident_kind": incident_kind, "hint": hint }), now_unix());
     }
 }
 

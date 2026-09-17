@@ -1,6 +1,6 @@
 //! `nirdosha-master-plan.md` Part 3 Sprint 2's "Benchmark harness v1":
 //! pass@1 and self-repair-rate, measured for real against a real LLM
-//! (`nirdosha::hi_llm::generate_from_task_prompt`, the exact
+//! (`nirdosha_hi::hi_llm::generate_from_task_prompt`, the exact
 //! generate/self-repair loop `nirdosha hi`'s own Generate mode uses),
 //! scored by `nirdosha certify`'s own JSON verdict -- never a second,
 //! bench-local notion of "correct" that could drift from what the
@@ -32,7 +32,7 @@
 //! against a real model, self-repaired against real compiler
 //! diagnostics, certified by the real `nirdosha certify`.
 
-use nirdosha::hi_llm;
+use nirdosha_hi::hi_llm;
 use serde::Serialize;
 
 mod cross_lang;

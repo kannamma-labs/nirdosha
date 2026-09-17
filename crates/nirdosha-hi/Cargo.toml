@@ -1,0 +1,44 @@
+[package]
+name = "nirdosha-hi"
+version = "0.1.0"
+edition = "2024"
+description = "The nirdosha hi agentic build console -- a knowledge-graph-driven generate/publish/preview loop over v2 (real Rust + nirdosha_rt macros) source. Standalone since 2026-09-16: no dependency on the native nirdosha compiler crate."
+
+[[bin]]
+name = "nirdosha-hi"
+path = "src/main.rs"
+
+[lib]
+name = "nirdosha_hi"
+path = "src/lib.rs"
+
+[dependencies]
+# v2 build/verify: the same in-process contract scanner `cargo nirdosha
+# verify` runs, reused as a library (`v2_verify.rs`) so `verify_code`/
+# `fix`/`certify_code`/`build_project`/`publish_project` can check a v2
+# source string's declared-vs-actual claims without a subprocess.
+cargo-nirdosha = { path = "../cargo-nirdosha" }
+# `v2_verify.rs`'s `build_project`/`ensure_scratch_package` build a real
+# v2 candidate against this crate as its own `nirdosha-rt` path
+# dependency.
+nirdosha-rt = { path = "../nirdosha-rt" }
+nirdosha-audit = { path = "../nirdosha-audit" }
+# Parses v2 (plain Rust) candidates: `v2_verify::describe_v2_source`,
+# `hi_graph::code_units_in_file`'s syntactic knowledge-graph sync, and
+# the syntactic mandatory-primitive/primitive-exclusivity coverage
+# checks in `hi_llm.rs`. "visit" for `syn::visit::Visit`-based call/
+# construct-site walks.
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+base64 = "0.22"
+# `hi_window.rs`'s native build-mode window; `hi_api.rs`'s custom-
+# protocol handler needs `linux-body` for the same reason the native
+# compiler crate's own copy of this dependency did (WebKitGTK silently
+# drops a POST body without it).
+wry = { version = "0.57.0", features = ["linux-body"] }
+tao = "0.37.0"
+tiny_http = "0.12"

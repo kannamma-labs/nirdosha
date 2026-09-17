@@ -6,6 +6,9 @@ publish = false
 description = "nirdosha-master-plan.md Part 3 Sprint 2's benchmark harness v1 -- pass@1 and self-repair-rate over a real LLM, scored by nirdosha certify's own JSON verdict."
 
 [dependencies]
-nirdosha = { path = "../compiler" }
+# `hi_llm.rs` (and everything it needs) moved to the standalone
+# `nirdosha-hi` crate 2026-09-16 -- this harness only ever used
+# `nirdosha::hi_llm`, never the native compiler crate directly.
+nirdosha-hi = { path = "../nirdosha-hi" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -50,7 +50,7 @@ pub fn hi_dir(root: &Path) -> PathBuf {
 /// swap point as this crate's Ed25519 signing, not a separate plain
 /// `sha2` call left behind.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    crate::crypto_backend::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    nirdosha_audit::crypto_backend::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Creates `.nir/` and `.nir/content/` if absent, opens (or creates)
@@ -182,70 +182,39 @@ struct CodeUnit {
     col: usize,
 }
 
-fn hash_item<T: serde::Serialize>(item: &T) -> Result<String, String> {
-    let json = serde_json::to_vec(item).map_err(|e| format!("serializing AST item: {e}"))?;
-    Ok(sha256_hex(&json))
+fn hash_tokens<T: quote::ToTokens>(item: &T) -> String {
+    sha256_hex(item.to_token_stream().to_string().as_bytes())
 }
 
 /// Parses one file's own declared items (no `use` resolution -- see
-/// this module's doc comment for why) and hashes each one's own AST
-/// subtree, whitespace/comment-insensitive by construction because
-/// it's computed post-parse, the same property
-/// `docs/nirdosha-agent-api.md` E1's `ast_hash` already documents at
-/// the whole-program level.
-fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, crate::ast::Program), String> {
+/// this module's doc comment for why) and hashes each one's own token
+/// stream, whitespace/comment-insensitive by construction (re-rendered
+/// via `quote`, not a byte slice of the original source).
+///
+/// v2 (real Rust, `syn`-parsed) since 2026-09-16's `hi` extraction --
+/// no native `.nir` prelude-seeding to filter out here (unlike the
+/// retired native parser, `syn::parse_file` never injects anything a
+/// file didn't actually write), and no native "screen" unit kind: a v2
+/// screen is a `nirdosha_rt::*_screens!`/`dashboard!`/... macro
+/// invocation, not a `screen { ... }` block, so it isn't extracted as
+/// its own `CodeUnit` kind yet -- a real, disclosed gap, not silently
+/// claimed coverage.
+fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let toks = crate::token::Lexer::new(&src)
-        .tokenize()
-        .map_err(|e| format!("lex error in {}: {}:{}: {}", path.display(), e.span.line, e.span.col, e.message))?;
-    let program = crate::parser::Parser::new(toks)
-        .parse_program()
-        .map_err(|e| format!("parse error in {}: {}:{}: {}", path.display(), e.span.line, e.span.col, e.message))?;
+    let file = syn::parse_file(&src).map_err(|e| format!("parse error in {}: {e}", path.display()))?;
 
-    // `parser::parse_program` seeds `ast::prelude_structs`/
-    // `prelude_enums` (Option/Result/Money/HttpResponse/... -- Row 11
-    // layer 7's prelude) into *every* `Program`, before any of a file's
-    // own declarations -- language-level vocabulary, not this project's
-    // code, so it must never show up as a `CodeUnit` (every file would
-    // otherwise report the same ~15 "units" on its very first sync).
-    // Filtered by (name, content_hash) together, not name alone: a
-    // user-defined type that legitimately shadows a prelude name (their
-    // own `struct Money` with different fields, say) has a different
-    // hash than the real prelude `Money` and must survive filtering --
-    // name-only filtering silently dropped it before this fix.
-    let mut prelude_struct_hashes: HashSet<(String, String)> = HashSet::new();
-    for s in crate::ast::prelude_structs() {
-        let hash = hash_item(&s)?;
-        prelude_struct_hashes.insert((s.name, hash));
+    let mut units = Vec::with_capacity(file.items.len());
+    for item in &file.items {
+        let (qualified_name, kind): (String, &'static str) = match item {
+            syn::Item::Fn(f) => (f.sig.ident.to_string(), "fn"),
+            syn::Item::Struct(s) => (s.ident.to_string(), "struct"),
+            syn::Item::Enum(e) => (e.ident.to_string(), "enum"),
+            _ => continue,
+        };
+        let start = syn::spanned::Spanned::span(item).start();
+        units.push(CodeUnit { qualified_name, kind, content_hash: hash_tokens(item), line: start.line, col: start.column });
     }
-    let mut prelude_enum_hashes: HashSet<(String, String)> = HashSet::new();
-    for e in crate::ast::prelude_enums() {
-        let hash = hash_item(&e)?;
-        prelude_enum_hashes.insert((e.name, hash));
-    }
-
-    let mut units = Vec::with_capacity(program.fns.len() + program.structs.len() + program.enums.len() + program.screens.len());
-    for f in &program.fns {
-        units.push(CodeUnit { qualified_name: f.name.clone(), kind: "fn", content_hash: hash_item(f)?, line: f.span.line, col: f.span.col });
-    }
-    for s in &program.structs {
-        let hash = hash_item(s)?;
-        if prelude_struct_hashes.contains(&(s.name.clone(), hash.clone())) {
-            continue;
-        }
-        units.push(CodeUnit { qualified_name: s.name.clone(), kind: "struct", content_hash: hash, line: s.span.line, col: s.span.col });
-    }
-    for e in &program.enums {
-        let hash = hash_item(e)?;
-        if prelude_enum_hashes.contains(&(e.name.clone(), hash.clone())) {
-            continue;
-        }
-        units.push(CodeUnit { qualified_name: e.name.clone(), kind: "enum", content_hash: hash, line: e.span.line, col: e.span.col });
-    }
-    for sc in &program.screens {
-        units.push(CodeUnit { qualified_name: sc.struct_name.clone(), kind: "screen", content_hash: hash_item(sc)?, line: sc.span.line, col: sc.span.col });
-    }
-    Ok((units, program))
+    Ok((units, file))
 }
 
 pub fn code_unit_node_id(kind: &str, qualified_name: &str) -> String {
@@ -280,7 +249,7 @@ impl SyncReport {
 /// inferred knowledge stay separate" principle.
 fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
     let mut report = SyncReport { files_scanned: 1, ..Default::default() };
-    let (units, program) = code_units_in_file(path)?;
+    let (units, file) = code_units_in_file(path)?;
     report.units_seen = units.len();
     let source_ref = path.display().to_string();
 
@@ -353,12 +322,13 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
     // gives it is the literal string `'exposed'`; a later, unrelated
     // use of `status` must not silently repurpose that string for
     // something else.
-    if let Some(serve) = &program.serve_config {
-        for (name, _) in &serve.expose {
-            let fn_id = code_unit_node_id("fn", name);
-            conn.execute("UPDATE nodes SET status = 'exposed' WHERE id = ?1", [&fn_id]).map_err(|e| format!("marking {fn_id} exposed: {e}"))?;
-        }
-    }
+    // v2 exposure is a `#[nirdosha_rt::contract(...)]`-gated fn reached
+    // through a `nirdosha_rt::*!` archetype macro invocation, not a
+    // native `serve { expose ... }` list -- there is no macro-expansion
+    // step here to recognize that shape yet, so `nodes.status =
+    // 'exposed'` is never set for v2 code. A real, disclosed gap, not a
+    // silently narrower claim: nothing downstream (`impact`, the graph
+    // UI) currently depends on this flag being set to function at all.
 
     // rfcs/0014's 2026-09-14 amendment: real call-graph edges for
     // synced code, not just LLM-decompose's own `depends_on` edges
@@ -382,13 +352,14 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
     // yet synced anywhere records no edge; a later sync of that file
     // fills it in the same way `possibly_stale` flags catch up after
     // the fact elsewhere in this function, not retroactively.
-    const CALLABLE_KINDS: [&str; 4] = ["fn", "struct", "enum", "screen"];
-    for f in &program.fns {
-        let caller_id = code_unit_node_id("fn", &f.name);
-        let mut called: HashSet<String> = HashSet::new();
-        crate::contract_check::collect_call_names_stmts(&f.body.stmts, &mut called);
-        for name in &called {
-            if name == &f.name {
+    const CALLABLE_KINDS: [&str; 3] = ["fn", "struct", "enum"];
+    for item in &file.items {
+        let syn::Item::Fn(f) = item else { continue };
+        let caller_name = f.sig.ident.to_string();
+        let caller_id = code_unit_node_id("fn", &caller_name);
+        let (called, constructed) = collect_calls_and_constructs(&f.block);
+        for name in called.union(&constructed) {
+            if name == &caller_name {
                 continue; // recursion isn't a graph edge worth drawing to itself
             }
             for kind in CALLABLE_KINDS {
@@ -403,6 +374,58 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
     }
 
     Ok(report)
+}
+
+/// The v2 analogue of the retired native `contract_check::
+/// collect_call_names_stmts`: every bare-fn-call target
+/// (`syn::ExprCall` over a plain path, e.g. `charge_cents(...)`) and
+/// every struct-literal construction (`syn::ExprStruct`, e.g. `Account
+/// { ... }`) inside `block`, by the last path segment's own name --
+/// good enough for this module's "does a `CodeUnit` node with this
+/// name already exist" edge check, not a full name-resolution pass.
+/// Deliberately does not walk into nested item definitions (a local
+/// `fn`/`struct` inside the block) -- `syn::visit::Visit`'s default
+/// `visit_item_*` no-ops already give us that for free by only being
+/// overridden for the two expression kinds below.
+/// `pub(crate)` since `hi_llm`'s syntactic mandatory-primitive/
+/// primitive-exclusivity coverage checks (the v2 replacements for the
+/// retired native `contract_check::collect_call_names`/
+/// `check_primitive_exclusivity`) walk fn bodies the same way this
+/// module's own `sync_file` does, and must never drift from it --
+/// one walk, two call sites, not a second hand-rolled copy.
+/// `called` collects bare-fn-call targets (`syn::ExprCall` over a
+/// plain path, e.g. `charge_cents(...)`); `constructed` collects
+/// struct-literal construction (`syn::ExprStruct`, e.g. `Account {
+/// ... }`) -- kept as two separate sets because a v2 "does this call
+/// a mandatory fn" question and a "does this construct a protected
+/// struct" question are genuinely different questions in real Rust
+/// (unlike the retired native `.nir`, which had no separate literal-
+/// construction expression form at all).
+pub(crate) fn collect_calls_and_constructs(block: &syn::Block) -> (HashSet<String>, HashSet<String>) {
+    struct Collector<'a> {
+        called: &'a mut HashSet<String>,
+        constructed: &'a mut HashSet<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = node.func.as_ref() {
+                if let Some(seg) = p.path.segments.last() {
+                    self.called.insert(seg.ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            if let Some(seg) = node.path.segments.last() {
+                self.constructed.insert(seg.ident.to_string());
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+    }
+    let mut called = HashSet::new();
+    let mut constructed = HashSet::new();
+    syn::visit::Visit::visit_block(&mut Collector { called: &mut called, constructed: &mut constructed }, block);
+    (called, constructed)
 }
 
 const SKIP_DIRS: &[&str] = &[".nir", ".git", "target", "node_modules"];
@@ -1324,54 +1347,12 @@ mod tests {
     }
 
     #[test]
-    fn a_struct_shadowing_a_prelude_name_with_different_fields_survives_filtering() {
-        let dir = scratch_dir("prelude_shadow");
-        // "Money" is a real prelude struct name (`ast::prelude_structs`)
-        // -- redeclaring it with different fields must NOT be silently
-        // dropped by prelude filtering, only the real, unmodified
-        // prelude Money should ever be.
-        write_nir(&dir, "a.nir", "struct Money { cents: i64 }\n");
-        let conn = open(&dir).expect("open");
-        let report = sync(&conn, &dir, &[]).expect("sync");
-        assert_eq!(report.units_added, 1, "a user-defined Money with different fields than the real prelude Money must survive prelude filtering");
-    }
-
-    #[test]
-    fn code_units_parse_path_matches_loader_for_an_import_free_file() {
-        // `code_units_in_file` deliberately bypasses `loader::
-        // load_program` (see this module's own doc comment) -- for a
-        // file with no `use` directives, the two parse paths must still
-        // agree item-for-item, or the hi graph's view of a project has quietly
-        // diverged from what the compiler itself sees.
-        let dir = scratch_dir("parse_path_parity");
-        let path = write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n");
-        let path_str = path.to_str().expect("utf8 path");
-
-        let (loader_program, _src) = crate::loader::load_program(path_str).expect("loader parse");
-        let prelude_s: HashSet<String> = crate::ast::prelude_structs().into_iter().map(|s| s.name).collect();
-        let prelude_e: HashSet<String> = crate::ast::prelude_enums().into_iter().map(|e| e.name).collect();
-        let mut expected: Vec<(&str, String)> = Vec::new();
-        for f in &loader_program.fns {
-            expected.push(("fn", f.name.clone()));
-        }
-        for s in &loader_program.structs {
-            if !prelude_s.contains(&s.name) {
-                expected.push(("struct", s.name.clone()));
-            }
-        }
-        for e in &loader_program.enums {
-            if !prelude_e.contains(&e.name) {
-                expected.push(("enum", e.name.clone()));
-            }
-        }
-
-        let (units, _program) = code_units_in_file(&path).expect("code_units_in_file parse");
+    fn code_units_in_file_extracts_fn_struct_and_enum_by_name() {
+        let dir = scratch_dir("code_units_v2");
+        let path = write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n");
+        let (units, _file) = code_units_in_file(&path).expect("code_units_in_file parse");
         let actual: Vec<(&str, String)> = units.iter().map(|u| (u.kind, u.qualified_name.clone())).collect();
-
-        assert_eq!(actual.len(), expected.len(), "expected {expected:?}, got {actual:?}");
-        for item in &expected {
-            assert!(actual.contains(item), "missing {item:?} in {actual:?}");
-        }
+        assert_eq!(actual, vec![("fn", "add".to_string()), ("struct", "Point".to_string()), ("enum", "Color".to_string())]);
     }
 
     #[test]
