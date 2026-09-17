@@ -25,6 +25,29 @@ A, Track B, Track C below) — but the specs themselves stay put.
 
 ## V2 issue fixes
 
+- `[DONE]` **2026-09-17, GitHub #73: macro-time workflow/state-machine
+  conformance checking.** Depended on issue #70's "item 4" gap
+  (a general `workflow!` macro) actually landing first — confirmed by
+  reading `wizard.rs` directly that it's a linear multi-step form with
+  no states/events/transitions/terminal concept at all, so it couldn't
+  host `workflow_conformance.rs`'s real algorithm without comparing
+  fundamentally mismatched shapes. Built the missing prerequisite:
+  `nirdosha_rt::workflow! { name: .., data: [..], states: [state X {
+  on_entry: [..], on Event -> Y }, ..] }` (`nirdosha-macros/src/
+  workflow.rs`) generates a state enum and a pure `advance_<name>`
+  transition function; every `on .. -> Target` naming an undeclared
+  state is a real macro-expansion-time `compile_error!`, verified.
+  Then landed #73's own ask on top: an optional `against =
+  "spec.json"` clause runs the same finite set/relation-equality
+  conformance check `workflow_conformance.rs` documents needing no
+  solver for, ported to `nirdosha-contract-core::workflow_spec` (6 fast
+  unit tests) and wired into the macro — a real spec/declaration
+  mismatch is a `compile_error!` naming the exact missing/extra state,
+  transition, or data field, verified against a real mismatched
+  fixture. `on_entry`/`on_exit` stay plain labels compared by count
+  only, matching `workflow_conformance.rs`'s own stated scope limit
+  (no action-name-to-real-call binding attempted, in either compiler).
+
 - `[PARTIAL]` **2026-09-17, GitHub #72: reduce `nirdosha-driver`'s
   `rustc_private` churn surface.** The `stable_mir`/`rustc_smir`
   migration itself is **blocked in this environment**: confirmed by

@@ -1,0 +1,18 @@
+{
+  "id": "wf-1",
+  "name": "Onboarding",
+  "data": [
+    { "field": "applicant_name", "type": "String" }
+  ],
+  "states": [
+    { "name": "Draft", "terminal": false, "on_entry": [], "on_exit": [] },
+    { "name": "UnderReview", "terminal": false, "on_entry": [], "on_exit": [] },
+    { "name": "Approved", "terminal": true, "on_entry": ["notify"], "on_exit": [] }
+  ],
+  "transitions": [
+    { "from": "Draft", "event": "Submit", "to": "UnderReview", "link": false },
+    { "from": "UnderReview", "event": "Approve", "to": "Approved", "link": false },
+    { "from": "UnderReview", "event": "Reject", "to": "Draft", "link": false }
+  ],
+  "routing_fn": null
+}

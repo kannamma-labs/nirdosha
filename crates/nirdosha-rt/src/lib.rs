@@ -25,6 +25,7 @@
 
 pub use nirdosha_macros::{
     categorical_actions, communication_feed, contract, crud_screens, dashboard, kanban_board, landing, settings_screen, wizard,
+    workflow,
 };
 
 pub mod dashboard;

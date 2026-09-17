@@ -47,6 +47,7 @@ mod landing;
 mod settings_screen;
 mod util;
 mod wizard;
+mod workflow;
 
 use nirdosha_contract_core as cc;
 use proc_macro::TokenStream;
@@ -116,6 +117,15 @@ pub fn communication_feed(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn landing(input: TokenStream) -> TokenStream {
     landing::expand(input)
+}
+
+/// See `workflow::expand`'s module doc — issue #70's "item 4" general
+/// state-machine substitute for `.nir`'s `workflow { .. }` top-level
+/// form, and issue #73's macro-time conformance check against an
+/// extracted spec via its optional `against = "spec.json"` clause.
+#[proc_macro]
+pub fn workflow(input: TokenStream) -> TokenStream {
+    workflow::expand(input)
 }
 
 fn expand(
