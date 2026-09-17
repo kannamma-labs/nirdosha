@@ -223,10 +223,10 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
             if !errors.is_empty() { return Err(errors); }
             let mut entity = #entity { id: 0, #( #field_idents ),*, ..Default::default() };
             entity.id = ::nirdosha_rt::screens::next_id();
-            let mut store = #store().lock().unwrap();
-            store.push(entity.clone());
-            store.sort_by_key(|e: &#entity| ::std::cmp::Reverse(e.id));
-            drop(store);
+            #store().with(|store| {
+                store.push(entity.clone());
+                store.sort_by_key(|e: &#entity| ::std::cmp::Reverse(e.id));
+            });
             #publish
             Ok(entity)
         }
@@ -234,7 +234,7 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
 
     let view_body = quote! {
         #view_revision
-        let messages: Vec<::serde_json::Value> = #store().lock().unwrap().iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+        let messages: Vec<::serde_json::Value> = #store().with(|store| store.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect());
         let html = ::nirdosha_rt::feed::feed_html(#title, #refresh, #path, &__fields(), &messages);
         #view_live
         ::nirdosha_rt::Response::html(200, html)
@@ -249,7 +249,7 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
 
     let api_body = quote! {
         #wait
-        let messages: Vec<::serde_json::Value> = #store().lock().unwrap().iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+        let messages: Vec<::serde_json::Value> = #store().with(|store| store.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect());
         #[allow(unused_mut)]
         let mut response = ::nirdosha_rt::Response::json(200, &::serde_json::Value::Array(messages));
         #revision_header

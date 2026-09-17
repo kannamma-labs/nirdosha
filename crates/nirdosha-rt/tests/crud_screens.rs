@@ -9,8 +9,8 @@
 //! deterministic session is the honest model, not a workaround.
 
 use nirdosha_rt::{Auth, Request, Response, Router};
+use nirdosha_rt::prelude::SharedTable;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 nirdosha_rt::roles! {
     Admin = "admin";
@@ -23,9 +23,9 @@ struct Widget {
     price_cents: i64,
 }
 
-fn widget_store() -> &'static Mutex<HashMap<i64, Widget>> {
-    static STORE: OnceLock<Mutex<HashMap<i64, Widget>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+fn widget_store() -> &'static SharedTable<i64, Widget> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, Widget>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 nirdosha_rt::crud_screens! {

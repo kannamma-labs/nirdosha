@@ -28,16 +28,15 @@ enum IncidentState {
 #[derive(Clone)]
 struct IncidentData {}
 
-fn instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, IncidentState>> {
-    static STORE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<i64, IncidentState>>,
-    > = std::sync::OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+use nirdosha_rt::prelude::SharedTable;
+fn instances() -> &'static SharedTable<i64, IncidentState> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, IncidentState>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 fn start_incident(_identity: Option<VerifiedIdentity>, _data: IncidentData) -> Result<i64, WorkflowActionError> {
     let id = new_instance_id();
-    instances().lock().unwrap().insert(id, IncidentState::Open);
+    instances().insert(id, IncidentState::Open);
     notify_all_channels(id);
     Ok(id)
 }
@@ -49,17 +48,16 @@ fn advance_incident(
     event: IncidentEvent,
     _payload: Json,
 ) -> Result<bool, WorkflowActionError> {
-    let mut store = instances().lock().unwrap();
-    let state = store
-        .get_mut(&instance_id)
-        .ok_or(WorkflowActionError::InstanceNotFound)?;
-    match (&state, &event) {
-        (IncidentState::Open, IncidentEvent::Resolve) => {
-            *state = IncidentState::Resolved;
-            Ok(true)
+    instances().update(&instance_id, |state| {
+        let state = state.ok_or(WorkflowActionError::InstanceNotFound)?;
+        match (&state, &event) {
+            (IncidentState::Open, IncidentEvent::Resolve) => {
+                *state = IncidentState::Resolved;
+                Ok(true)
+            }
+            _ => Err(WorkflowActionError::NoSuchTransition),
         }
-        _ => Err(WorkflowActionError::NoSuchTransition),
-    }
+    })
 }
 
 fn notify_with_conn(conn: nirdosha_v2::DbConn, mq_conn: nirdosha_v2::MqConn, _instance_id: i64) {

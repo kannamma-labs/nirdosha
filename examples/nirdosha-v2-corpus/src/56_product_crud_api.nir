@@ -10,7 +10,7 @@
 //! independent input).
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use nirdosha_rt::prelude::SharedTable;
 
 use nirdosha_rt::{Request, Response, RoleProof, Router};
 use nirdosha_v2::{auth_from_identity, mask_unless, new_instance_id, oidc_validate_token};
@@ -34,9 +34,9 @@ struct Product {
     is_approved: bool,
 }
 
-fn product_store() -> &'static Mutex<HashMap<i64, Product>> {
-    static STORE: OnceLock<Mutex<HashMap<i64, Product>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+fn product_store() -> &'static SharedTable<i64, Product> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, Product>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 // --- per-field validators, each independently testable/reportable ---
@@ -89,7 +89,7 @@ fn create_product(name: String, price_cents: i64, cost_cents: i64) -> Result<Pro
         cost_cents,
         is_approved: false,
     };
-    product_store().lock().unwrap().insert(product.id, product.clone());
+    product_store().insert(product.id, product.clone());
     Ok(product)
 }
 
@@ -105,11 +105,12 @@ fn update_product(id: i64, price_cents: i64, cost_cents: i64) -> Result<Product,
     if !errors.is_empty() {
         return Err(errors);
     }
-    let mut store = product_store().lock().unwrap();
-    let product = store.get_mut(&id).ok_or_else(|| vec!["not found"])?;
-    product.price_cents = price_cents;
-    product.cost_cents = cost_cents;
-    Ok(product.clone())
+    product_store().update(&id, |product| {
+        let product = product.ok_or_else(|| vec!["not found"])?;
+        product.price_cents = price_cents;
+        product.cost_cents = cost_cents;
+        Ok(product.clone())
+    })
 }
 
 // --- reads: public, but cost_cents masking is optional-proof-gated ---
@@ -125,15 +126,14 @@ fn product_json(p: &Product, admin_proof: Option<&RoleProof<nirdosha_roles::Admi
 }
 
 fn list_products(admin_proof: Option<&RoleProof<nirdosha_roles::Admin>>) -> serde_json::Value {
-    let store = product_store().lock().unwrap();
-    let mut items: Vec<&Product> = store.values().collect();
-    items.sort_by_key(|p| p.id);
+    // snapshot is sorted by key — the products' own `id` — so the list
+    // is deterministic without the old sort_by_key.
+    let items: Vec<Product> = product_store().snapshot().into_iter().map(|(_, p)| p).collect();
     serde_json::json!(items.iter().map(|p| product_json(p, admin_proof)).collect::<Vec<_>>())
 }
 
 fn get_product(id: i64, admin_proof: Option<&RoleProof<nirdosha_roles::Admin>>) -> Option<serde_json::Value> {
-    let store = product_store().lock().unwrap();
-    store.get(&id).map(|p| product_json(p, admin_proof))
+    product_store().get(&id).map(|p| product_json(&p, admin_proof))
 }
 
 // --- categorical action: is_approved -> two independently role-gated

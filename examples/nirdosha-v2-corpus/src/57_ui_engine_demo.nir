@@ -6,7 +6,7 @@
 //! every screen genuinely reads/writes it.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use nirdosha_rt::prelude::SharedTable;
 
 use nirdosha_v2::{auth_from_identity, oidc_validate_token};
 
@@ -25,9 +25,9 @@ struct Product {
     is_approved: bool,
 }
 
-fn product_store() -> &'static Mutex<HashMap<i64, Product>> {
-    static STORE: OnceLock<Mutex<HashMap<i64, Product>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+fn product_store() -> &'static SharedTable<i64, Product> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, Product>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 // --- CRUD screens: List, Detail, Create form, Edit form, Delete
@@ -60,17 +60,16 @@ nirdosha_rt::categorical_actions! {
 // --- dashboard: reads the same store the CRUD screens and categorical
 // actions just wrote to.
 fn stat_total_products() -> i64 {
-    product_store().lock().unwrap().len() as i64
+    product_store().len() as i64
 }
 
 fn stat_approved_products() -> i64 {
-    product_store().lock().unwrap().values().filter(|p| p.is_approved).count() as i64
+    product_store().snapshot().iter().filter(|(_, p)| p.is_approved).count() as i64
 }
 
 fn chart_products_by_status() -> String {
-    let store = product_store().lock().unwrap();
-    let approved = store.values().filter(|p| p.is_approved).count();
-    let pending = store.len() - approved;
+    let approved = product_store().snapshot().iter().filter(|(_, p)| p.is_approved).count();
+    let pending = product_store().len() - approved;
     serde_json::json!([
         {"label": "Approved", "value": approved},
         {"label": "Pending", "value": pending},

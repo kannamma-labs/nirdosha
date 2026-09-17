@@ -3,7 +3,7 @@
 //! derived, never consulted for the enforcement above.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use nirdosha_rt::prelude::SharedTable;
 
 nirdosha_rt::roles! {
     Approver = "approver";
@@ -16,12 +16,12 @@ struct Widget {
     is_approved: bool,
 }
 
-fn widget_store() -> &'static Mutex<HashMap<i64, Widget>> {
-    static STORE: OnceLock<Mutex<HashMap<i64, Widget>>> = OnceLock::new();
+fn widget_store() -> &'static SharedTable<i64, Widget> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, Widget>> = std::sync::OnceLock::new();
     STORE.get_or_init(|| {
-        let mut m = HashMap::new();
-        m.insert(1, Widget { id: 1, is_approved: false });
-        Mutex::new(m)
+        let s = SharedTable::new();
+        s.insert(1, Widget { id: 1, is_approved: false });
+        s
     })
 }
 

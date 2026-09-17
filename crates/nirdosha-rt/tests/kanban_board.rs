@@ -6,7 +6,7 @@
 
 use nirdosha_rt::{Auth, PathParams, Request, Response, Router};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use nirdosha_rt::prelude::SharedTable;
 
 nirdosha_rt::roles! {
     Lead = "lead";
@@ -19,22 +19,23 @@ struct Ticket {
     status: String,
 }
 
-fn ticket_store() -> &'static Mutex<HashMap<i64, Ticket>> {
-    static STORE: std::sync::OnceLock<Mutex<HashMap<i64, Ticket>>> = std::sync::OnceLock::new();
+fn ticket_store() -> &'static SharedTable<i64, Ticket> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, Ticket>> = std::sync::OnceLock::new();
     STORE.get_or_init(|| {
-        let mut m = HashMap::new();
-        m.insert(1, Ticket { id: 1, title: "Fix bug".to_string(), status: "backlog".to_string() });
-        m.insert(2, Ticket { id: 2, title: "Ship feature".to_string(), status: "in_progress".to_string() });
-        Mutex::new(m)
+        let s = SharedTable::new();
+        s.insert(1, Ticket { id: 1, title: "Fix bug".to_string(), status: "backlog".to_string() });
+        s.insert(2, Ticket { id: 2, title: "Ship feature".to_string(), status: "in_progress".to_string() });
+        s
     })
 }
 
 #[nirdosha_rt::contract(requires(role = "lead"))]
 fn move_ticket(id: i64, to: &str) -> Result<Ticket, &'static str> {
-    let mut store = ticket_store().lock().unwrap();
-    let ticket = store.get_mut(&id).ok_or("not found")?;
-    ticket.status = to.to_string();
-    Ok(ticket.clone())
+    ticket_store().update(&id, |ticket| {
+        let ticket = ticket.ok_or("not found")?;
+        ticket.status = to.to_string();
+        Ok(ticket.clone())
+    })
 }
 
 nirdosha_rt::kanban_board! {
@@ -107,11 +108,11 @@ fn moving_a_card_goes_through_the_apps_own_gated_endpoint_not_the_board() {
     // function, wholly independent of the board's own (public) access.
     let denied = dispatch("POST", "/tickets/1/move/done", None);
     assert_eq!(denied.status, 403);
-    assert_eq!(ticket_store().lock().unwrap()[&1].status, "backlog");
+    assert_eq!(ticket_store().get(&1).unwrap().status, "backlog");
 
     let ok = dispatch("POST", "/tickets/1/move/done", Some("lead"));
     assert_eq!(ok.status, 204);
-    assert_eq!(ticket_store().lock().unwrap()[&1].status, "done");
+    assert_eq!(ticket_store().get(&1).unwrap().status, "done");
 
     // The board reflects the move on next render.
     let after = dispatch("GET", "/board", None);

@@ -27,7 +27,7 @@
 //! live in the real `nirdosha-rt` prelude.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use nirdosha_rt::prelude::SharedCell;
 
 // ---------------------------------------------------------------------------
 // Verified identity — .nir's runtime-role model (fixture JWKS flow).
@@ -214,10 +214,10 @@ struct DbStore {
     last_insert_table: Option<String>,
 }
 
-fn global_store() -> &'static Mutex<DbStore> {
-    static STORE: std::sync::OnceLock<Mutex<DbStore>> = std::sync::OnceLock::new();
+fn global_store() -> &'static SharedCell<DbStore> {
+    static STORE: std::sync::OnceLock<SharedCell<DbStore>> = std::sync::OnceLock::new();
     STORE.get_or_init(|| {
-        Mutex::new(DbStore {
+        SharedCell::new(DbStore {
             tables: HashMap::new(),
             rowids: HashMap::new(),
             last_insert_table: None,
@@ -244,7 +244,7 @@ pub fn db_connect(path: &str) -> Result<DbConn, String> {
 }
 
 fn with_store<T>(f: impl FnOnce(&mut DbStore) -> T) -> T {
-    f(&mut global_store().lock().unwrap())
+    global_store().with(f)
 }
 
 /// `db_execute(conn, sql, params)` — fixture body understands the

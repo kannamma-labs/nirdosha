@@ -215,7 +215,7 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
             )*
             let mut entity = #entity { id: 0, #( #all_field_idents ),*, ..Default::default() };
             entity.id = ::nirdosha_rt::screens::next_id();
-            #store().lock().unwrap().insert(entity.id, entity.clone());
+            #store().insert(entity.id, entity.clone());
             entity
         }
 
@@ -223,9 +223,9 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
             vec![ #( ::nirdosha_rt::screens::FieldSpec { name: #all_field_names, input_type: #all_input_types } ),* ]
         }
 
-        fn __wizard_state() -> &'static ::std::sync::Mutex<::std::collections::HashMap<String, ::std::collections::HashMap<String, String>>> {
-            static STATE: ::std::sync::OnceLock<::std::sync::Mutex<::std::collections::HashMap<String, ::std::collections::HashMap<String, String>>>> = ::std::sync::OnceLock::new();
-            STATE.get_or_init(|| ::std::sync::Mutex::new(::std::collections::HashMap::new()))
+        fn __wizard_state() -> &'static ::nirdosha_rt::prelude::SharedTable<String, ::std::collections::HashMap<String, String>> {
+            static STATE: ::std::sync::OnceLock<::nirdosha_rt::prelude::SharedTable<String, ::std::collections::HashMap<String, String>>> = ::std::sync::OnceLock::new();
+            STATE.get_or_init(|| ::nirdosha_rt::prelude::SharedTable::new())
         }
     };
 
@@ -272,7 +272,7 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
 
         let get_body = quote! {
             let existing: ::std::collections::HashMap<String, String> = req.cookie(#cookie_name)
-                .and_then(|sid| __wizard_state().lock().unwrap().get(&sid).cloned())
+                .and_then(|sid| __wizard_state().get(&sid))
                 .unwrap_or_default();
             ::nirdosha_rt::Response::html(200, ::nirdosha_rt::wizard::wizard_step_html(#step_title, #step_no, #total_steps, #step_path, &#fields_fn_name(), &existing, &[]))
         };
@@ -288,10 +288,10 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
                     Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::wizard::wizard_step_html(#step_title, #step_no, #total_steps, #step_path, &#fields_fn_name(), &values, &errors)),
                     Ok(canonical) => {
                         let sid = req.cookie(#cookie_name).unwrap_or_default();
-                        let mut merged = __wizard_state().lock().unwrap().get(&sid).cloned().unwrap_or_default();
+                        let mut merged = __wizard_state().get(&sid).unwrap_or_default();
                         merged.extend(canonical);
                         let entity = __finalize(#finalize_arg &merged);
-                        __wizard_state().lock().unwrap().remove(&sid);
+                        __wizard_state().remove(&sid);
                         let mut resp = ::nirdosha_rt::Response::redirect(format!("{}/{}", #next_step_path_str, entity.id));
                         resp.extra_headers.push(("Set-Cookie".to_string(), format!("{}=; Path=/; Max-Age=0", #cookie_name)));
                         resp
@@ -306,10 +306,9 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
                 Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::wizard::wizard_step_html(#step_title, #step_no, #total_steps, #step_path, &#fields_fn_name(), &values, &errors)),
                 Ok(canonical) => {
                     let sid = req.cookie(#cookie_name).unwrap_or_else(::nirdosha_rt::wizard::generate_wizard_run_id);
-                    let mut state = __wizard_state().lock().unwrap();
-                    let entry = state.entry(sid.clone()).or_default();
-                    entry.extend(canonical);
-                    drop(state);
+                    __wizard_state().upsert_with(sid.clone(), |entry| {
+                        entry.extend(canonical);
+                    });
                     let mut resp = ::nirdosha_rt::Response::redirect(#next_step_path_str);
                     resp.extra_headers.push(("Set-Cookie".to_string(), format!("{}={}; HttpOnly; Path=/", #cookie_name, sid)));
                     resp
@@ -333,9 +332,9 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
                 Some(id) => id,
                 None => return ::nirdosha_rt::Response::bad_request("id must be an integer"),
             };
-            match #store().lock().unwrap().get(&id) {
+            match #store().get(&id) {
                 Some(entity) => {
-                    let row = ::serde_json::to_value(entity).unwrap();
+                    let row = ::serde_json::to_value(&entity).unwrap();
                     ::nirdosha_rt::Response::html(200, ::nirdosha_rt::wizard::wizard_done_html("Done", &__all_fields(), &row))
                 }
                 None => ::nirdosha_rt::Response::not_found(),

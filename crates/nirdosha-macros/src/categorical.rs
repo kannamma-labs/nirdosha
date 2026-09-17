@@ -119,7 +119,12 @@ fn expand_parsed(input: CategoricalInput) -> TokenStream2 {
 
     // Road 1: authoritative. One independently role-gated function per
     // value, using the exact same `#[contract(requires(role = ..))]`
-    // mechanism as everything else in the dialect.
+    // mechanism as everything else in the dialect. The store is the
+    // dialect's managed primitive (`nirdosha_rt::prelude::SharedTable`)
+    // — the dialect-wide raw-lock deny (`nirdosha-contract-core/src/
+    // scan.rs::LOCK_DENIES`) forbids a `Mutex`-backed store, so the
+    // generated code goes through `update`'s complete-method critical
+    // section, never a hand-written `.lock()`.
     let road1 = input.actions.iter().map(|arm| {
         let pat = &arm.pat;
         let fn_name = &arm.fn_name;
@@ -127,10 +132,11 @@ fn expand_parsed(input: CategoricalInput) -> TokenStream2 {
         quote! {
             #[nirdosha_rt::contract(requires(role = #role))]
             fn #fn_name(id: i64) -> Result<#entity, &'static str> {
-                let mut __nirdosha_store = #store().lock().unwrap();
-                let __nirdosha_entity = __nirdosha_store.get_mut(&id).ok_or("not found")?;
-                __nirdosha_entity.#field = #pat;
-                Ok(__nirdosha_entity.clone())
+                #store().update(&id, |__nirdosha_entity| {
+                    let __nirdosha_entity = __nirdosha_entity.ok_or("not found")?;
+                    __nirdosha_entity.#field = #pat;
+                    Ok(__nirdosha_entity.clone())
+                })
             }
         }
     });

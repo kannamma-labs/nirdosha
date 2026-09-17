@@ -36,7 +36,7 @@ If a new mechanism can't be expressed as one of the three real
 | `effects(pure)` | fast local scan in the macro: an obvious lie is a `compile_error!` even here | full source verification of every claim, incl. hand-written doc contracts |
 | `requires(role)` | **enforced by types** — unforgeable proof token, uncallable without a minted proof | same enforcement + the claim is verified and recorded |
 | `nfr(..)` | enforced by an injected runtime guard (latency recorded, concurrency gated) | same + SLA lands in the certificate |
-| dialect rules (`unsafe`, raw threads) | not enforced (plain Rust) | **build errors** |
+| dialect rules (`unsafe`, raw threads, raw locks) | not enforced (plain Rust) | **build errors** |
 | Certificate | none | `<target>/nirdosha/contract-report-<pkg>.json` |
 | Lying program | builds and runs | **refused, with exact lines named** |
 
@@ -177,7 +177,7 @@ injected proof parameter does not resolve.
 | undeclared role in `requires` | fails to compile (type resolves nowhere) | same | same |
 | unverified third-party call in a pure fn | runs | passes (string scan can't know) | **refused (default-deny)** |
 | recursion + checked arithmetic in a pure fn | runs | passes | **passes** (back-edges contribute nothing; overflow is the documented guard) |
-| unsafe / raw threads | runs | **refused** | refused (same rules, spans from MIR) |
+| unsafe / raw threads / raw locks | runs | **refused** | refused (same rules, spans from MIR) |
 | SLA breach (`nfr(latency_ms)`) | invisible | `cargo nirdosha bench` gates p95 under the real workload | same (Stage 2.5 binds Z3-guided synthetic benches) |
 
 ## 6. Crate map

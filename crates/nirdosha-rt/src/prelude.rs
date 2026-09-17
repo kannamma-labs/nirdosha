@@ -24,6 +24,7 @@
 //! | `Vector(f64, N)` / `dot` / `norm` | [`Vector`] |
 //! | `Matrix(f64, R, C)` / `transpose` / `det` | [`Matrix`] |
 //! | `txn_id` (saga idempotency key) | [`txn_id`] |
+//! | *(dialect-only, no `.nir` construct)* | [`SharedTable`] / [`SharedCell`] — the managed replacements for a raw `std::sync::Mutex` table |
 
 use std::fmt;
 use std::path::Path;
@@ -1114,5 +1115,153 @@ impl Stoppable for TcpListener {
     fn stop(self) -> i64 {
         drop(self);
         0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SharedTable / SharedCell — the managed replacements for a raw
+// `std::sync::Mutex` table. Raw locks are denied by the dialect's
+// dialect-wide deny set (`nirdosha-contract-core/src/scan.rs::
+// dialect_denies`); the `Mutex` here lives inside the runtime, which
+// is exempt (`toolchain = true`) — the same move `Chan`'s queue made.
+//
+// The guarantee these types buy: every critical section is one
+// complete method. No lock guard is a reachable type in dialect
+// code, so a guard can never be held across an arbitrary span, and
+// no second lock can ever be acquired while one is held — nested
+// locks, the classic lock-order deadlock, are structurally
+// impossible. All access is serialized through the one internal
+// lock, so there are no races. Values are read out by clone (`get`/
+// `snapshot`), never by reference, precisely so nothing observable
+// escapes the method's atomicity window.
+// ---------------------------------------------------------------------------
+
+/// A keyed shared table — the managed replacement for the
+/// `OnceLock<Mutex<HashMap<K, V>>>` + scoped `.lock().unwrap()`
+/// pattern (the corpus's `instances()`/`product_store()` tables).
+/// Handles are copyable like [`Chan`]'s (each copy is a new handle to
+/// the same table). Every method completes its critical section
+/// internally — see the module-level guarantee note above.
+#[derive(Clone)]
+pub struct SharedTable<K, V> {
+    inner: Arc<Mutex<std::collections::HashMap<K, V>>>,
+}
+
+impl<K, V> SharedTable<K, V>
+where
+    K: Eq + std::hash::Hash + Clone,
+    V: Clone,
+{
+    /// `SharedTable::<K, V>::new()` — empty table.
+    pub fn new() -> Self {
+        Self { inner: Arc::new(Mutex::new(std::collections::HashMap::new())) }
+    }
+
+    /// Insert (or overwrite) `k`. Returns the previous value, if any.
+    pub fn insert(&self, k: K, v: V) -> Option<V> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).insert(k, v)
+    }
+
+    /// Clone out by key — the only read form. No reference to the
+    /// stored value ever escapes, so no read can observe a partial
+    /// concurrent write.
+    pub fn get(&self, k: &K) -> Option<V> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).get(k).cloned()
+    }
+
+    /// Atomic read-modify-write: `f` sees the entry (or `None` if
+    /// absent) under the table's one lock and its return value comes
+    /// back. This is the dialect spelling of the scoped
+    /// `let mut store = ..lock().unwrap(); ..get_mut(..)..` blocks —
+    /// the state check + mutation happens inside the critical
+    /// section, never outside it.
+    pub fn update<R>(&self, k: &K, f: impl FnOnce(Option<&mut V>) -> R) -> R {
+        let mut table = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        f(table.get_mut(k))
+    }
+
+    /// Remove and return `k`'s value, if present.
+    pub fn remove(&self, k: &K) -> Option<V> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).remove(k)
+    }
+
+    /// Get-or-create-and-mutate: `f` sees the entry under the table's
+    /// one lock, with `V::default()` inserted first if `k` was absent —
+    /// the dialect spelling of `map.entry(k).or_default()` blocks
+    /// (the wizard's per-session state accumulation). Unlike `update`,
+    /// `k` is consumed: absent keys become present.
+    pub fn upsert_with<R>(&self, k: K, f: impl FnOnce(&mut V) -> R) -> R
+    where
+        V: Default,
+    {
+        let mut table = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = table.entry(k).or_default();
+        f(entry)
+    }
+
+    /// Number of entries.
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// True when the table holds no entries.
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    /// All entries, **sorted by key** — a `HashMap` iteration order
+    /// would make otherwise-identical programs diverge run to run,
+    /// and the dialect's determinism row forbids that. This is the
+    /// spelling of the corpus's `store.values().collect()` /
+    /// `for (k, v) in store.iter()` loops (and of filter-count:
+    /// `snapshot().iter().filter(...).count()`).
+    pub fn snapshot(&self) -> Vec<(K, V)>
+    where
+        K: Ord,
+    {
+        let table = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(K, V)> = table.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+}
+
+/// A single shared value — the managed replacement for a
+/// `OnceLock<Mutex<T>>` singleton holding a struct (the corpus's
+/// `global_store()`/`with_store` pattern). Intended to live behind a
+/// `std::sync::OnceLock` (init-once, not a contended lock, and not
+/// denied). Same guarantee as [`SharedTable`]: the critical section
+/// is the whole method, and no guard ever escapes.
+pub struct SharedCell<T> {
+    value: Mutex<T>,
+}
+
+impl<T> SharedCell<T> {
+    /// Wrap an initial value.
+    pub fn new(value: T) -> Self {
+        Self { value: Mutex::new(value) }
+    }
+
+    /// The only write/read form: `f` sees `&mut T` under the one
+    /// lock and its return value comes back — the dialect spelling of
+    /// `with_store(|store| ..)`.
+    pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut value)
+    }
+
+    /// Replace the value, returning the old one.
+    pub fn replace(&self, value: T) -> T {
+        let mut guard = self.value.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::replace(&mut guard, value)
+    }
+
+    /// Clone out the current value (the only read form, so nothing
+    /// observable escapes the atomicity window).
+    pub fn get_clone(&self) -> T
+    where
+        T: Clone,
+    {
+        self.value.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }

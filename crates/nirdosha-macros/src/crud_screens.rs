@@ -277,26 +277,25 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         fn __create(values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, Vec<String>> {
             let mut entity = __parse(values)?;
             entity.id = ::nirdosha_rt::screens::next_id();
-            #store().lock().unwrap().insert(entity.id, entity.clone());
+            #store().insert(entity.id, entity.clone());
             Ok(entity)
         }
 
         #update_attr
         fn __update(id: i64, values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, Vec<String>> {
             let parsed = __parse(values)?;
-            let mut store = #store().lock().unwrap();
-            match store.get_mut(&id) {
+            #store().update(&id, |entity| match entity {
                 Some(entity) => {
                     #( entity.#field_idents = parsed.#field_idents; )*
                     Ok(entity.clone())
                 }
                 None => Err(vec!["not found".to_string()]),
-            }
+            })
         }
 
         #delete_attr
         fn __delete(id: i64) -> bool {
-            #store().lock().unwrap().remove(&id).is_some()
+            #store().remove(&id).is_some()
         }
 
         /// `?q=` filters rows generically across every declared field,
@@ -307,9 +306,9 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         fn __matching_rows(req: &::nirdosha_rt::Request) -> Vec<#entity> {
             let q = req.query().get("q").map(|s| s.to_lowercase());
             let mut rows: Vec<#entity> = #store()
-                .lock()
-                .unwrap()
-                .values()
+                .snapshot()
+                .into_iter()
+                .map(|(_, e)| e)
                 .filter(|e| match &q {
                     None => true,
                     Some(needle) if needle.is_empty() => true,
@@ -318,7 +317,6 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
                         searchable.iter().any(|v| v.to_lowercase().contains(needle))
                     }
                 })
-                .cloned()
                 .collect();
             rows.sort_by_key(|e| e.id);
             rows
@@ -361,9 +359,9 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     let detail_html_route = route("get", &input.read, &id_path, "Detail", |_| {
         quote! {
             let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            match #store().lock().unwrap().get(&id) {
+            match #store().get(&id) {
                 Some(entity) => {
-                    let row = ::serde_json::to_value(entity).unwrap();
+                    let row = ::serde_json::to_value(&entity).unwrap();
                     ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::detail_html(#title, #path, id, &__fields(), &row, #can_update, #can_delete))
                 }
                 None => ::nirdosha_rt::Response::not_found(),
@@ -373,8 +371,8 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     let detail_api_route = route("get", &input.read, &api_id_path, "Detail (JSON)", |_| {
         quote! {
             let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            match #store().lock().unwrap().get(&id) {
-                Some(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(entity).unwrap()),
+            match #store().get(&id) {
+                Some(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
                 None => ::nirdosha_rt::Response::not_found(),
             }
         }
@@ -412,9 +410,9 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     let edit_form_route = route("get", &input.update, &edit_path, "Edit form", |_| {
         quote! {
             let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            match #store().lock().unwrap().get(&id) {
+            match #store().get(&id) {
                 Some(entity) => {
-                    let row = ::serde_json::to_value(entity).unwrap();
+                    let row = ::serde_json::to_value(&entity).unwrap();
                     let values = ::nirdosha_rt::screens::row_to_form_values(&__fields(), &row);
                     ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#edit_title, &format!("{}/{}/edit", #path, id), &__fields(), &values, &[]))
                 }

@@ -2,9 +2,13 @@
 //! archetype: a single, always-present record (no list, no id, no
 //! delete) — "the current settings," not a collection. Reuses
 //! `crud_screens!`'s `ParseField`/validation machinery, but the
-//! datasource is a bare `fn() -> &'static Mutex<Entity>`, not a
-//! `Mutex<HashMap<i64, Entity>>` — there's exactly one row, so there's
-//! no id to key it by.
+//! datasource is a bare `fn() -> &'static SharedCell<Entity>` (the
+//! managed singleton, `nirdosha_rt::prelude::SharedCell`), not a keyed
+//! `SharedTable<i64, Entity>` — there's exactly one row, so there's
+//! no id to key it by. (Pre-deny, this was a raw `Mutex<Entity>`;
+//! the dialect-wide raw-lock deny — `nirdosha-contract-core/src/
+//! scan.rs::LOCK_DENIES`, issue #77 — moved it onto the managed
+//! primitive, the same move `Chan`'s queue made.)
 //!
 //! ```ignore
 //! nirdosha_rt::settings_screen! {
@@ -171,28 +175,29 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
                 };
             )*
             if !errors.is_empty() { return Err(errors); }
-            let mut current = #store().lock().unwrap();
-            #( current.#field_idents = #field_idents; )*
-            Ok(current.clone())
+            #store().with(|current| {
+                #( current.#field_idents = #field_idents; )*
+                Ok(current.clone())
+            })
         }
     };
 
     let view_route = route("get", &input.access, &path, &title, |_| {
         quote! {
-            let entity = #store().lock().unwrap().clone();
+            let entity = #store().get_clone();
             let row = ::serde_json::to_value(&entity).unwrap();
             ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::settings_view_html(#title, #edit_path, &__fields(), &row, true))
         }
     });
     let view_api_route = route("get", &input.access, &api_path, &format!("{title} (JSON)"), |_| {
         quote! {
-            let entity = #store().lock().unwrap().clone();
+            let entity = #store().get_clone();
             ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap())
         }
     });
     let edit_form_route = route("get", &input.access, &edit_path, "Edit form", |_| {
         quote! {
-            let entity = #store().lock().unwrap().clone();
+            let entity = #store().get_clone();
             let row = ::serde_json::to_value(&entity).unwrap();
             let values = ::nirdosha_rt::screens::row_to_form_values(&__fields(), &row);
             ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#title, #edit_path, &__fields(), &values, &[]))

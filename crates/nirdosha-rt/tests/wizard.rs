@@ -4,8 +4,8 @@
 //! redirects to the next step.
 
 use nirdosha_rt::{Auth, Request, Response, Router};
+use nirdosha_rt::prelude::SharedTable;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 nirdosha_rt::roles! {
     Admin = "admin";
@@ -19,9 +19,9 @@ struct Employee {
     salary: f64,
 }
 
-fn employee_store() -> &'static Mutex<HashMap<i64, Employee>> {
-    static STORE: std::sync::OnceLock<Mutex<HashMap<i64, Employee>>> = std::sync::OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+fn employee_store() -> &'static SharedTable<i64, Employee> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, Employee>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 nirdosha_rt::wizard! {
@@ -95,7 +95,7 @@ fn wizard_full_session() {
 
     // 6. The store has nothing yet -- a rejected final step must not
     // create a half-finished entity.
-    assert!(employee_store().lock().unwrap().is_empty());
+    assert!(employee_store().is_empty());
 
     // 7. Completing step 2 assembles the FULL entity (step 1's answers
     // plus step 2's), inserts it into the shared datasource, clears the
@@ -108,9 +108,9 @@ fn wizard_full_session() {
     assert!(cleared_cookie.contains("Max-Age=0"), "got: {cleared_cookie}");
 
     {
-        let store = employee_store().lock().unwrap();
+        let store = employee_store().snapshot();
         assert_eq!(store.len(), 1);
-        let employee = store.values().next().unwrap();
+        let employee = &store[0].1;
         assert_eq!(employee.name, "Alice");
         assert_eq!(employee.department, "Engineering");
         assert_eq!(employee.salary, 95000.0);

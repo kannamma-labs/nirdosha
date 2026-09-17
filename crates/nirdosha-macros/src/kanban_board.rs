@@ -163,12 +163,15 @@ fn expand_parsed(input: KanbanInput) -> TokenStream2 {
     let asset_path = quote! { #asset_path_str };
 
     let view_body = quote! {
-        let store = #store().lock().unwrap();
-        let cards: Vec<::nirdosha_rt::board::Card> = store.values().map(|entity| ::nirdosha_rt::board::Card {
-            id: entity.id,
-            title: entity.#title_field.to_string(),
-            column: entity.#column_field.to_string(),
-        }).collect();
+        let cards: Vec<::nirdosha_rt::board::Card> = #store()
+            .snapshot()
+            .into_iter()
+            .map(|(_, entity)| ::nirdosha_rt::board::Card {
+                id: entity.id,
+                title: entity.#title_field.to_string(),
+                column: entity.#column_field.to_string(),
+            })
+            .collect();
         let columns: &[&str] = &[ #(#columns),* ];
         ::nirdosha_rt::Response::html(200, ::nirdosha_rt::board::board_html(#title, columns, &cards, #asset_path))
     };

@@ -25,6 +25,9 @@ fn log_decision(instance_id: i64, amount: i64) {
 }
 
 /// nirdosha:workflow {"name":"Approval","data":{"struct":"ApprovalData","fields":{"amount":"i64"}},"states":{"Pending":{"owner":"finance_director","transitions":{"Approve":"Approved","Reject":"Rejected"}},"Approved":{"terminal":true,"on_entry":"log_decision"},"Rejected":{"terminal":true}}}
+// `Clone`: SharedTable reads clone values out (no reference escapes the
+// critical section).
+#[derive(Clone)]
 struct ApprovalData {
     amount: i64,
 }
@@ -42,11 +45,10 @@ enum ApprovalState {
     Rejected,
 }
 
-fn instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, (ApprovalData, ApprovalState)>> {
-    static STORE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<i64, (ApprovalData, ApprovalState)>>,
-    > = std::sync::OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+use nirdosha_rt::prelude::SharedTable;
+fn instances() -> &'static SharedTable<i64, (ApprovalData, ApprovalState)> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, (ApprovalData, ApprovalState)>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 // `workflow_lower`'s synthesized `start_<w>`.
@@ -55,7 +57,7 @@ fn start_approval(
     data: ApprovalData,
 ) -> Result<i64, WorkflowActionError> {
     let id = new_instance_id();
-    instances().lock().unwrap().insert(id, (data, ApprovalState::Pending));
+    instances().insert(id, (data, ApprovalState::Pending));
     Ok(id)
 }
 
@@ -72,24 +74,27 @@ fn advance_approval(
     if !identity.roles.iter().any(|r| r == "finance_director") {
         return Err(WorkflowActionError::NotStateOwner);
     }
-    let mut store = instances().lock().unwrap();
-    let Some((data, state)) = store.get_mut(&instance_id) else {
-        return Err(WorkflowActionError::NoSuchTransition);
-    };
-    if *state != ApprovalState::Pending {
-        return Err(WorkflowActionError::NoSuchTransition);
-    }
-    let approved = match decision {
-        ApprovalEvent::Approve => true,
-        ApprovalEvent::Reject => false,
-    };
-    let amount = data.amount;
-    *state = if approved {
-        ApprovalState::Approved
-    } else {
-        ApprovalState::Rejected
-    };
-    drop(store);
+    let (approved, amount) = instances().update(&instance_id, |entry| {
+        let Some((data, state)) = entry else {
+            return Err(WorkflowActionError::NoSuchTransition);
+        };
+        if *state != ApprovalState::Pending {
+            return Err(WorkflowActionError::NoSuchTransition);
+        }
+        let approved = match decision {
+            ApprovalEvent::Approve => true,
+            ApprovalEvent::Reject => false,
+        };
+        let amount = data.amount;
+        *state = if approved {
+            ApprovalState::Approved
+        } else {
+            ApprovalState::Rejected
+        };
+        Ok((approved, amount))
+    })?;
+    // The on_entry log runs after the update returns — outside the
+    // critical section, exactly where the old `drop(store)` placed it.
     if approved {
         log_decision(instance_id, amount); // Approved's on_entry
     }

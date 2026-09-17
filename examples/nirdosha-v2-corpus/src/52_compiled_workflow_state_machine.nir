@@ -4,6 +4,7 @@
 //! `start_ticket`/`advance_ticket`/`TicketEvent`/`TicketData` the
 //! proprietary compiler will generate, hand-written here.
 
+use nirdosha_rt::prelude::SharedTable;
 use nirdosha_v2::{identity_with_roles, json_parse, new_instance_id, VerifiedIdentity, WorkflowActionError};
 
 #[derive(Clone)]
@@ -23,11 +24,9 @@ enum TicketState {
 #[derive(Clone)]
 struct TicketData {}
 
-fn instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, TicketState>> {
-    static STORE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<i64, TicketState>>,
-    > = std::sync::OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+fn instances() -> &'static SharedTable<i64, TicketState> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, TicketState>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 fn log_opened(instance_id: i64) {
@@ -50,7 +49,7 @@ fn log_closed(instance_id: i64) {
 // before this returns, for real.
 fn start_ticket(_identity: Option<VerifiedIdentity>, _data: TicketData) -> Result<i64, WorkflowActionError> {
     let id = new_instance_id();
-    instances().lock().unwrap().insert(id, TicketState::Open);
+    instances().insert(id, TicketState::Open);
     log_opened(id);
     Ok(id)
 }
@@ -62,11 +61,9 @@ fn advance_ticket(
     event: TicketEvent,
     _payload: String,
 ) -> Result<bool, WorkflowActionError> {
-    let mut store = instances().lock().unwrap();
-    let state = store
-        .get_mut(&instance_id)
-        .ok_or(WorkflowActionError::InstanceNotFound)?;
-    match (&state, &event) {
+    instances().update(&instance_id, |state| {
+        let state = state.ok_or(WorkflowActionError::InstanceNotFound)?;
+        match (&state, &event) {
         (TicketState::Open, TicketEvent::Start) => {
             log_left_open(instance_id);
             *state = TicketState::InProgress;
@@ -80,7 +77,8 @@ fn advance_ticket(
         }
         // `Closed` is terminal — any event is a real Err, never a trap.
         _ => Err(WorkflowActionError::NoSuchTransition),
-    }
+        }
+    })
 }
 
 fn advance_now(

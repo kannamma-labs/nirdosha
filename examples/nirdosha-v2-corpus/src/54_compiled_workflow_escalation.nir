@@ -28,11 +28,18 @@ struct InstanceRecord {
     entered_at: std::time::Instant,
 }
 
-fn instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, InstanceRecord>> {
-    static STORE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<i64, InstanceRecord>>,
-    > = std::sync::OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+// `SharedTable` reads clone values out (no reference escapes the
+// critical section), so the record itself is `Clone`.
+impl Clone for InstanceRecord {
+    fn clone(&self) -> Self {
+        InstanceRecord { state: self.state.clone(), entered_at: self.entered_at }
+    }
+}
+
+use nirdosha_rt::prelude::SharedTable;
+fn instances() -> &'static SharedTable<i64, InstanceRecord> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, InstanceRecord>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 /// Per-state SLA, like the declaration reads: only `Open` has one.
@@ -57,7 +64,7 @@ fn log_resolved(instance_id: i64) {
 
 fn start_incident(_identity: Option<VerifiedIdentity>, _data: IncidentData) -> Result<i64, WorkflowActionError> {
     let id = new_instance_id();
-    instances().lock().unwrap().insert(
+    instances().insert(
         id,
         InstanceRecord { state: IncidentState::Open, entered_at: std::time::Instant::now() },
     );
@@ -71,34 +78,32 @@ fn advance_incident(
     event: IncidentEvent,
     _payload: Json,
 ) -> Result<bool, WorkflowActionError> {
-    let mut store = instances().lock().unwrap();
-    let record = store
-        .get_mut(&instance_id)
-        .ok_or(WorkflowActionError::InstanceNotFound)?;
-    match (&record.state, &event) {
-        (IncidentState::Open, IncidentEvent::Escalate) => {
-            record.state = IncidentState::Escalated;
-            record.entered_at = std::time::Instant::now();
-            log_escalated(instance_id);
-            Ok(true)
+    instances().update(&instance_id, |record| {
+        let record = record.ok_or(WorkflowActionError::InstanceNotFound)?;
+        match (&record.state, &event) {
+            (IncidentState::Open, IncidentEvent::Escalate) => {
+                record.state = IncidentState::Escalated;
+                record.entered_at = std::time::Instant::now();
+                log_escalated(instance_id);
+                Ok(true)
+            }
+            (IncidentState::Open, IncidentEvent::Resolve)
+            | (IncidentState::Escalated, IncidentEvent::Resolve) => {
+                record.state = IncidentState::Resolved;
+                record.entered_at = std::time::Instant::now();
+                log_resolved(instance_id);
+                Ok(true)
+            }
+            _ => Err(WorkflowActionError::NoSuchTransition),
         }
-        (IncidentState::Open, IncidentEvent::Resolve)
-        | (IncidentState::Escalated, IncidentEvent::Resolve) => {
-            record.state = IncidentState::Resolved;
-            record.entered_at = std::time::Instant::now();
-            log_resolved(instance_id);
-            Ok(true)
-        }
-        _ => Err(WorkflowActionError::NoSuchTransition),
-    }
+    })
 }
 
 /// The synthesized `list_<workflow>_overdue` — real per-state SLA
 /// checking against real wall-clock age.
 fn list_incident_overdue() -> Result<Json, String> {
-    let store = instances().lock().unwrap();
     let mut rows = Vec::new();
-    for (id, record) in store.iter() {
+    for (id, record) in instances().snapshot() {
         if let Some(sla) = sla_seconds(&record.state) {
             let age = record.entered_at.elapsed().as_secs();
             if age >= sla {

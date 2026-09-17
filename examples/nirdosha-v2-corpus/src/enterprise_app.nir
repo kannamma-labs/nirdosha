@@ -393,6 +393,9 @@ fn finalize_purchase_order(instance_id: i64, po_id: i64) -> bool {
 }
 
 /// nirdosha:workflow {"name":"PoApproval","data":{"struct":"PoApprovalData","fields":{"po_id":"i64"}},"states":{"PendingApproval":{"owner":"finance_director","transitions":{"Approve":"Approved","Reject":"Rejected"}},"Approved":{"terminal":true,"on_entry":"finalize_purchase_order"},"Rejected":{"terminal":true}}}
+// `Clone`: SharedTable reads clone values out (no reference escapes the
+// critical section).
+#[derive(Clone)]
 struct PoApprovalData {
     po_id: i64,
 }
@@ -409,11 +412,10 @@ enum PoApprovalState {
     Rejected,
 }
 
-fn po_instances() -> &'static std::sync::Mutex<std::collections::HashMap<i64, (PoApprovalData, PoApprovalState)>> {
-    static STORE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<i64, (PoApprovalData, PoApprovalState)>>,
-    > = std::sync::OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+use nirdosha_rt::prelude::SharedTable;
+fn po_instances() -> &'static SharedTable<i64, (PoApprovalData, PoApprovalState)> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, (PoApprovalData, PoApprovalState)>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
 }
 
 fn start_po_approval(
@@ -421,7 +423,7 @@ fn start_po_approval(
     data: PoApprovalData,
 ) -> Result<i64, WorkflowActionError> {
     let id = new_instance_id();
-    po_instances().lock().unwrap().insert(id, (data, PoApprovalState::PendingApproval));
+    po_instances().insert(id, (data, PoApprovalState::PendingApproval));
     Ok(id)
 }
 
@@ -434,24 +436,27 @@ fn advance_po_approval(
     if !identity.roles.iter().any(|r| r == "finance_director") {
         return Err(WorkflowActionError::NotStateOwner);
     }
-    let mut store = po_instances().lock().unwrap();
-    let Some((data, state)) = store.get_mut(&instance_id) else {
-        return Err(WorkflowActionError::NoSuchTransition);
-    };
-    if *state != PoApprovalState::PendingApproval {
-        return Err(WorkflowActionError::NoSuchTransition);
-    }
-    let approved = match decision {
-        PoApprovalEvent::Approve => true,
-        PoApprovalEvent::Reject => false,
-    };
-    let po_id = data.po_id;
-    *state = if approved {
-        PoApprovalState::Approved
-    } else {
-        PoApprovalState::Rejected
-    };
-    drop(store);
+    let (approved, po_id) = po_instances().update(&instance_id, |entry| {
+        let Some((data, state)) = entry else {
+            return Err(WorkflowActionError::NoSuchTransition);
+        };
+        if *state != PoApprovalState::PendingApproval {
+            return Err(WorkflowActionError::NoSuchTransition);
+        }
+        let approved = match decision {
+            PoApprovalEvent::Approve => true,
+            PoApprovalEvent::Reject => false,
+        };
+        let po_id = data.po_id;
+        *state = if approved {
+            PoApprovalState::Approved
+        } else {
+            PoApprovalState::Rejected
+        };
+        Ok((approved, po_id))
+    })?;
+    // The on_entry side effect runs after the update returns — outside
+    // the critical section, exactly where the old `drop(store)` put it.
     if approved {
         finalize_purchase_order(instance_id, po_id); // Approved's on_entry
     }

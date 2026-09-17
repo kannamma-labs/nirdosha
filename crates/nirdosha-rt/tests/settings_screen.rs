@@ -2,7 +2,7 @@
 //! no list/create/delete, no id — RFC 0009 Track C's Settings archetype.
 
 use nirdosha_rt::{Auth, Request, Response, Router};
-use std::sync::Mutex;
+use nirdosha_rt::prelude::SharedCell;
 
 nirdosha_rt::roles! {
     Admin = "admin";
@@ -15,10 +15,10 @@ struct AppSettings {
     maintenance_mode: bool,
 }
 
-fn app_settings_store() -> &'static Mutex<AppSettings> {
-    static STORE: std::sync::OnceLock<Mutex<AppSettings>> = std::sync::OnceLock::new();
+fn app_settings_store() -> &'static nirdosha_rt::prelude::SharedCell<AppSettings> {
+    static STORE: std::sync::OnceLock<nirdosha_rt::prelude::SharedCell<AppSettings>> = std::sync::OnceLock::new();
     STORE.get_or_init(|| {
-        Mutex::new(AppSettings {
+        SharedCell::new(AppSettings {
             site_name: "Acme".to_string(),
             max_upload_mb: 10,
             maintenance_mode: false,

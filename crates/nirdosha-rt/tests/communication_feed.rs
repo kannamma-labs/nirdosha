@@ -4,7 +4,7 @@
 //! module doc on `nirdosha_rt::feed` for why).
 
 use nirdosha_rt::{Auth, Request, Response, Router};
-use std::sync::Mutex;
+use nirdosha_rt::prelude::SharedCell;
 
 nirdosha_rt::roles! {
     Member = "member";
@@ -17,9 +17,9 @@ struct Message {
     body: String,
 }
 
-fn message_store() -> &'static Mutex<Vec<Message>> {
-    static STORE: std::sync::OnceLock<Mutex<Vec<Message>>> = std::sync::OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(Vec::new()))
+fn message_store() -> &'static SharedCell<Vec<Message>> {
+    static STORE: std::sync::OnceLock<SharedCell<Vec<Message>>> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| SharedCell::new(Vec::new()))
 }
 
 nirdosha_rt::communication_feed! {

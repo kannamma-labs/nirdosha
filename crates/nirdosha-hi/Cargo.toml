@@ -42,3 +42,12 @@ base64 = "0.22"
 wry = { version = "0.57.0", features = ["linux-body"] }
 tao = "0.37.0"
 tiny_http = "0.12"
+
+# The agentic console is part of the dialect's own toolchain (the
+# verifier doesn't lint itself, same precedent as `crates/nirdosha-rt`):
+# its host-side caches/plugin registries legitimately use `std::sync::
+# Mutex` internally, which the dialect-wide raw-lock deny (issue #77)
+# would otherwise refuse. Application/dialect crates never get this
+# exemption — they get `nirdosha_rt::prelude::SharedTable`/`SharedCell`.
+[package.metadata.nirdosha-rt]
+toolchain = true

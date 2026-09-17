@@ -213,9 +213,9 @@ struct Message {
     body: String,
 }
 
-fn messages() -> &'static Mutex<Vec<Message>> {
-    static STORE: std::sync::OnceLock<Mutex<Vec<Message>>> = std::sync::OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(Vec::new()))
+fn messages() -> &'static nirdosha_rt::prelude::SharedCell<Vec<Message>> {
+    static STORE: std::sync::OnceLock<nirdosha_rt::prelude::SharedCell<Vec<Message>>> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| nirdosha_rt::prelude::SharedCell::new(Vec::new()))
 }
 
 nirdosha_rt::communication_feed! {
