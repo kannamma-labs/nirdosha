@@ -2,6 +2,14 @@
 //! A check is proven only if every path reaching it proves the condition.
 //! Cycles, excessive path expansion, and unknown control flow discard ALL
 //! results for the body. No finite unrolling is mistaken for induction.
+//!
+//! `requires(expr)`/`ensures(expr)` (issue #68) ride the same VC IR: a
+//! `requires` predicate is assumed once, right after the entry state is
+//! built, exactly like an already-passed `Assert` guard; an `ensures`
+//! predicate is checked at every `Return` the path walk actually
+//! reaches, exactly like an `Assert` condition -- one more root over the
+//! shared `Engine`, not a second prover.
+use nirdosha_contract_core::model::Contract;
 use nirdosha_smt_core::{Engine, IntType, Number, Op};
 use rustc_middle::{
     mir::*,
@@ -16,6 +24,12 @@ pub struct Report {
     pub checks: BTreeMap<usize, Check>,
     pub queries: usize,
     pub limitation: Option<&'static str>,
+    /// A `requires`/`ensures` predicate that doesn't parse, uses
+    /// unsupported syntax, or names something that isn't `result` or one
+    /// of this function's own parameters. Unlike `limitation` (a sound
+    /// "can't prove it" outcome), this is a hard error: the contract
+    /// itself is malformed, not merely unprovable.
+    pub contract_error: Option<String>,
 }
 pub struct Check {
     pub kind: &'static str,
@@ -46,7 +60,7 @@ enum Val {
 }
 type State = Vec<Val>;
 
-pub fn analyze(tcx: TyCtxt<'_>, did: LocalDefId) -> Report {
+pub fn analyze(tcx: TyCtxt<'_>, did: LocalDefId, contract: Option<&Contract>) -> Report {
     if tcx.is_coroutine(did.to_def_id()) {
         return Report {
             limitation: Some("coroutine"),
@@ -62,6 +76,18 @@ pub fn analyze(tcx: TyCtxt<'_>, did: LocalDefId) -> Report {
     }
     let body = mir.borrow();
     let engine = Engine::new();
+    let ensures = match contract.and_then(|c| c.ensures.as_ref()) {
+        Some(ensures) => match syn::parse_str::<syn::Expr>(&ensures.expr) {
+            Ok(expr) => Some(expr),
+            Err(e) => {
+                return Report {
+                    contract_error: Some(format!("ensures(..): {e}")),
+                    ..Report::default()
+                };
+            }
+        },
+        None => None,
+    };
     let mut walk = Walk {
         tcx,
         body: &body,
@@ -69,8 +95,27 @@ pub fn analyze(tcx: TyCtxt<'_>, did: LocalDefId) -> Report {
         engine,
         report: Report::default(),
         steps: 0,
+        ensures,
     };
-    let state = body.local_decls.iter().map(|d| walk.fresh(d.ty)).collect();
+    let state: State = body.local_decls.iter().map(|d| walk.fresh(d.ty)).collect();
+    if let Some(requires) = contract.and_then(|c| c.requires.as_ref()).and_then(|r| r.expr.as_deref()) {
+        match syn::parse_str::<syn::Expr>(requires) {
+            Ok(expr) => match walk.eval_predicate(&expr, &state, IntType::BOOL) {
+                Ok(n) => {
+                    let p = walk.engine.test(&n, true);
+                    walk.engine.assume(&p);
+                }
+                Err(e) => {
+                    walk.report.contract_error = Some(format!("requires(..): {e}"));
+                    return walk.report;
+                }
+            },
+            Err(e) => {
+                walk.report.contract_error = Some(format!("requires(..): {e}"));
+                return walk.report;
+            }
+        }
+    }
     walk.block(START_BLOCK, state, &mut Vec::new());
     walk.report.queries = walk.engine.queries();
     if walk.report.limitation.is_some() {
@@ -87,6 +132,9 @@ struct Walk<'a, 'tcx> {
     engine: Engine,
     report: Report,
     steps: usize,
+    /// This function's own `ensures(..)` predicate, pre-parsed once;
+    /// checked at every `Return` terminator the path walk reaches.
+    ensures: Option<syn::Expr>,
 }
 impl<'tcx> Walk<'_, 'tcx> {
     fn int_type(&self, ty: Ty<'tcx>) -> Option<IntType> {
@@ -130,6 +178,107 @@ impl<'tcx> Walk<'_, 'tcx> {
             v
         }
     }
+    /// Resolve a `requires`/`ensures` identifier against this function's
+    /// own MIR locals. `result` is the return place; every other name
+    /// must be a source-level parameter name (via debug info) -- an
+    /// unresolved identifier is refused, never silently left unproven.
+    fn contract_local(&self, name: &str) -> Option<Local> {
+        if name == "result" {
+            return Some(RETURN_PLACE);
+        }
+        self.body.var_debug_info.iter().find_map(|info| {
+            if info.name.as_str() != name {
+                return None;
+            }
+            match &info.value {
+                VarDebugInfoContents::Place(place)
+                    if place.projection.is_empty()
+                        && place.local.index() >= 1
+                        && place.local.index() <= self.body.arg_count =>
+                {
+                    Some(place.local)
+                }
+                _ => None,
+            }
+        })
+    }
+
+    /// Evaluate the restricted `predicate::check_predicate_shape` subset
+    /// against `state`. `hint` types a bare integer literal when neither
+    /// operand names a local with a real MIR type (e.g. `1 + 1`); an
+    /// identifier or the other side of a binary op always overrides it,
+    /// so a mismatched hint can only affect a literal-only sub-expression.
+    fn eval_predicate(&self, expr: &syn::Expr, state: &State, hint: IntType) -> Result<Number, String> {
+        match expr {
+            syn::Expr::Paren(e) => self.eval_predicate(&e.expr, state, hint),
+            syn::Expr::Group(e) => self.eval_predicate(&e.expr, state, hint),
+            syn::Expr::Path(p) => {
+                let name = p
+                    .path
+                    .get_ident()
+                    .ok_or_else(|| "expected a plain identifier".to_string())?
+                    .to_string();
+                let local = self.contract_local(&name).ok_or_else(|| {
+                    format!("`{name}` is not `result` or one of this function's own parameters")
+                })?;
+                match self.place(Place::from(local), state) {
+                    Val::Scalar(n) => Ok(n),
+                    _ => Err(format!("`{name}` is not an integer or boolean value")),
+                }
+            }
+            syn::Expr::Lit(l) => match &l.lit {
+                syn::Lit::Int(i) => {
+                    let bits: i128 = i.base10_parse().map_err(|e| e.to_string())?;
+                    Ok(self.engine.constant(bits as u128, hint))
+                }
+                syn::Lit::Bool(b) => Ok(self.engine.constant(b.value as u128, IntType::BOOL)),
+                _ => Err("requires/ensures literals must be integers or booleans".into()),
+            },
+            syn::Expr::Unary(u) => {
+                let inner_hint = if matches!(u.op, syn::UnOp::Not(_)) {
+                    IntType::BOOL
+                } else {
+                    hint
+                };
+                let n = self.eval_predicate(&u.expr, state, inner_hint)?;
+                match u.op {
+                    syn::UnOp::Neg(_) => Ok(self.engine.negate(&n)),
+                    syn::UnOp::Not(_) => Ok(self.engine.invert(&n)),
+                    _ => Err("unsupported unary operator in requires/ensures".into()),
+                }
+            }
+            syn::Expr::Binary(b) => {
+                let op = match b.op {
+                    syn::BinOp::Add(_) => Op::Add,
+                    syn::BinOp::Sub(_) => Op::Sub,
+                    syn::BinOp::Mul(_) => Op::Mul,
+                    syn::BinOp::Div(_) => Op::Div,
+                    syn::BinOp::Rem(_) => Op::Rem,
+                    syn::BinOp::Eq(_) => Op::Eq,
+                    syn::BinOp::Ne(_) => Op::Ne,
+                    syn::BinOp::Lt(_) => Op::Lt,
+                    syn::BinOp::Le(_) => Op::Le,
+                    syn::BinOp::Gt(_) => Op::Gt,
+                    syn::BinOp::Ge(_) => Op::Ge,
+                    syn::BinOp::And(_) => Op::And,
+                    syn::BinOp::Or(_) => Op::Or,
+                    _ => return Err("unsupported operator in requires/ensures".into()),
+                };
+                let bool_op = matches!(op, Op::And | Op::Or);
+                let left_hint = if bool_op { IntType::BOOL } else { hint };
+                let left = self.eval_predicate(&b.left, state, left_hint)?;
+                let right_hint = if bool_op { IntType::BOOL } else { left.ty };
+                let right = self.eval_predicate(&b.right, state, right_hint)?;
+                Ok(self.engine.binary(op, &left, &right).0)
+            }
+            _ => Err(
+                "unsupported expression in requires/ensures — only identifiers, integer/bool \
+                 literals, arithmetic, comparisons, &&, ||, unary -/!, and parens are supported"
+                    .into(),
+            ),
+        }
+    }
+
     fn operand(&self, op: &Operand<'tcx>, state: &State) -> Val {
         match op {
             Operand::Copy(p) | Operand::Move(p) => self.place(*p, state),
@@ -336,8 +485,37 @@ impl<'tcx> Walk<'_, 'tcx> {
                     self.block(*target, state, path);
                 }
             }
-            TerminatorKind::Return
-            | TerminatorKind::Unreachable
+            TerminatorKind::Return => {
+                if let Some(expr) = self.ensures.clone() {
+                    let proven = match self.eval_predicate(&expr, &state, IntType::BOOL) {
+                        Ok(n) => {
+                            let p = self.engine.test(&n, true);
+                            self.engine.prove(&p)
+                        }
+                        Err(e) => {
+                            self.report
+                                .contract_error
+                                .get_or_insert(format!("ensures(..): {e}"));
+                            false
+                        }
+                    };
+                    let location = self
+                        .tcx
+                        .sess
+                        .source_map()
+                        .span_to_diagnostic_string(term.source_info.span);
+                    self.report
+                        .checks
+                        .entry(bb.index())
+                        .and_modify(|c| c.proven &= proven)
+                        .or_insert(Check {
+                            kind: "ensures",
+                            proven,
+                            location,
+                        });
+                }
+            }
+            TerminatorKind::Unreachable
             | TerminatorKind::UnwindResume
             | TerminatorKind::UnwindTerminate(_)
             | TerminatorKind::TailCall { .. } => {}

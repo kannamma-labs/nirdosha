@@ -129,6 +129,8 @@ fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>
         return Compilation::Continue;
     }
 
+    let claim_by_did: HashMap<LocalDefId, &cc::model::Contract> =
+        claims.iter().map(|(did, c)| (*did, c)).collect();
     let numeric: HashMap<_, _> = tcx
         .mir_keys(())
         .iter()
@@ -140,7 +142,7 @@ fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>
                     | rustc_hir::def::DefKind::Closure
             )
         })
-        .map(|did| (*did, numeric::analyze(tcx, *did)))
+        .map(|did| (*did, numeric::analyze(tcx, *did, claim_by_did.get(did).copied())))
         .collect();
     let mut errors = false;
 
@@ -163,6 +165,34 @@ fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>
                 )
                 .emit();
             errors = true;
+        }
+        let report = numeric.get(did);
+        if let Some(err) = report.and_then(|r| r.contract_error.as_ref()) {
+            tcx.dcx()
+                .struct_span_err(
+                    tcx.def_span(did.to_def_id()),
+                    format!("invalid nirdosha:contract — {err}"),
+                )
+                .emit();
+            errors = true;
+        } else if contract.ensures.is_some() {
+            let checks: Vec<_> = report
+                .into_iter()
+                .flat_map(|r| r.checks.values())
+                .filter(|c| c.kind == "ensures")
+                .collect();
+            if checks.is_empty() || !checks.iter().all(|c| c.proven) {
+                tcx.dcx()
+                    .struct_span_err(
+                        tcx.def_span(did.to_def_id()),
+                        format!(
+                            "fn `{}` claims ensures(..) but Z3 cannot prove it holds on every return path",
+                            tcx.def_path_str(did.to_def_id())
+                        ),
+                    )
+                    .emit();
+                errors = true;
+            }
         }
         if contract.claims_pure() {
             // Each root gets its own traversal. Caching an incomplete result

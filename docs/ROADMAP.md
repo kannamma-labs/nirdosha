@@ -25,6 +25,23 @@ A, Track B, Track C below) — but the specs themselves stay put.
 
 ## V2 issue fixes
 
+- `[DONE]` **2026-09-17, GitHub #68: `requires(expr)`/`ensures(expr)`
+  Hoare pre/post conditions.** `nirdosha-contract-core`'s `Requires` now
+  carries a role *or* a boolean expression; a new `Ensures` clause holds
+  a postcondition over `result`. The attribute macro accepts both forms,
+  emits a dead sibling fn so plain rustc type-checks the predicate
+  against the real fn's parameter/return types at macro-expansion time
+  (a real `compile_error!`-grade diagnostic for an undeclared identifier
+  or non-boolean expression, not deferred to Stage 2), and still emits
+  the portable doc encoding. `nirdosha-driver` resolves the predicate's
+  identifiers against real MIR locals and discharges it over the same
+  Z3 VC IR issue #67 built: `requires` is assumed once at function
+  entry, `ensures` is checked at every `Return` the path walk reaches.
+  Supported grammar: identifiers, integer/bool literals, arithmetic,
+  comparisons, `&&`/`||`, unary `-`/`!`, parens — no field/index/method
+  access yet (needs a heavier VC encoding than item 1 provides).
+  Contract-core, macro-expansion, and driver-level MIR tests all pass.
+
 - `[DONE]` **2026-09-17, GitHub #67: MIR numeric proof discharge.**
   Shared Rust integer encoder, path-sensitive MIR assertions, explicit
   interval fallback, and bound per-assertion certificates verified. Z3,

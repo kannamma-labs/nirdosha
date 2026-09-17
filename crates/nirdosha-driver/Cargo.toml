@@ -14,6 +14,12 @@ path = "src/main.rs"
 nirdosha-contract-core = { path = "../nirdosha-contract-core" }
 nirdosha-smt-core = { path = "../nirdosha-smt-core", default-features = false }
 serde_json = "1"
+# Re-parses a `requires(expr)`/`ensures(expr)` predicate's doc-encoded
+# source string (nirdosha-contract-core's macro-time parse only travels
+# as text through rustdoc JSON) into the same `syn::Expr` shape
+# `predicate::check_predicate_shape` already validated, then resolves its
+# identifiers against real MIR locals -- issue #68.
+syn = { version = "2", features = ["full"] }
 
 [features]
 default = ["smt"]

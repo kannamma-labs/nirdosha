@@ -177,14 +177,56 @@ fn expand(
     }
 
     // --- capability injection: requires(role) becomes an unforgeable proof parameter ---
-    if let Some(requires) = &contract.requires {
-        let ident = match cc::role::role_ident(&requires.role, fn_item.sig.ident.span()) {
+    if let Some(role) = contract.requires.as_ref().and_then(|r| r.role.as_deref()) {
+        let ident = match cc::role::role_ident(role, fn_item.sig.ident.span()) {
             Ok(i) => i,
             Err(e) => return e.to_compile_error(),
         };
         let param: syn::FnArg =
             syn::parse_quote!(__nirdosha_role_proof: &::nirdosha_rt::RoleProof<crate::nirdosha_roles::#ident>);
         fn_item.sig.inputs.insert(0, param);
+    }
+
+    // --- requires(expr)/ensures(expr) (issue #68): a dead sibling fn with
+    // this fn's own original parameter list (and, for ensures, a `result:
+    // <ReturnType>` parameter) whose body is just the predicate. It is
+    // never called -- Stage 2's MIR pass does the real Z3 proof -- but it
+    // forces plain rustc to type-check the predicate against this fn's
+    // real parameter/return types right now, at macro-expansion time: an
+    // undeclared identifier or a non-boolean expression is a real,
+    // well-spanned compile_error!-grade diagnostic under *both*
+    // compilers, exactly like every other contract clause here.
+    let original_inputs = fn_item.sig.inputs.clone();
+    let generics = &fn_item.sig.generics;
+    let where_clause = &fn_item.sig.generics.where_clause;
+    let mut predicate_checkers = Vec::new();
+    if let Some(expr_src) = contract.requires.as_ref().and_then(|r| r.expr.as_deref()) {
+        let expr: syn::Expr = match syn::parse_str(expr_src) {
+            Ok(e) => e,
+            Err(e) => return e.to_compile_error(),
+        };
+        let checker_name =
+            quote::format_ident!("__nirdosha_requires_check_{}", fn_item.sig.ident);
+        predicate_checkers.push(quote! {
+            #[allow(dead_code, unused_variables)]
+            fn #checker_name #generics(#original_inputs) -> bool #where_clause { #expr }
+        });
+    }
+    if let Some(ensures) = &contract.ensures {
+        let expr: syn::Expr = match syn::parse_str(&ensures.expr) {
+            Ok(e) => e,
+            Err(e) => return e.to_compile_error(),
+        };
+        let ret_ty: syn::Type = match &fn_item.sig.output {
+            syn::ReturnType::Default => syn::parse_quote!(()),
+            syn::ReturnType::Type(_, ty) => (**ty).clone(),
+        };
+        let checker_name =
+            quote::format_ident!("__nirdosha_ensures_check_{}", fn_item.sig.ident);
+        predicate_checkers.push(quote! {
+            #[allow(dead_code, unused_variables)]
+            fn #checker_name #generics(#original_inputs, result: #ret_ty) -> bool #where_clause { #expr }
+        });
     }
 
     // --- runtime injection: nfr(..) wraps the body in a Drop-based guard ---
@@ -241,6 +283,7 @@ fn expand(
     let doc = contract.doc_string();
     quote! {
         #crud_assertion
+        #(#predicate_checkers)*
         #[doc = #doc]
         #fn_item
     }

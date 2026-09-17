@@ -25,6 +25,7 @@ pub mod declarations;
 pub mod evidence;
 pub mod model;
 pub mod parse;
+pub mod predicate;
 pub mod provenance;
 pub mod role;
 pub mod scan;

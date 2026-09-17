@@ -29,15 +29,36 @@ pub struct Contract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<Requires>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ensures: Option<Ensures>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nfr: Option<Nfr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crud: Option<Crud>,
 }
 
+/// Either a role gate (`requires(role = "hr_staff")`, unforgeable-proof
+/// injection, checked by the type system) or a numeric precondition
+/// (`requires(idx < len)`, assumed before the body's own MIR proof
+/// obligations and discharged by the same Z3 VC IR item 1 built —
+/// issue #68). Exactly one of the two, never both or neither: a single
+/// `requires(..)` clause is one claim, not a bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requires {
-    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expr: Option<String>,
+}
+
+/// `ensures(result >= 0)` — a postcondition over the function's own
+/// return value (`result`) and parameters, checked against *every*
+/// `return` MIR reaches, the same "claim about every path" semantics
+/// `.nir`'s `contract_check.rs` already uses (issue #68).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ensures {
+    pub expr: String,
 }
 
 /// Every CRUD operation name a `Crud` gate may name, and a `policy!`'s
@@ -100,9 +121,29 @@ impl Contract {
             }
         }
         if let Some(req) = &self.requires {
-            if let Err(msg) = crate::role::validate_role_name(&req.role) {
-                issues.push(format!("requires(role = ...) — {msg}"));
+            match (&req.role, &req.expr) {
+                (Some(role), None) => {
+                    if let Err(msg) = crate::role::validate_role_name(role) {
+                        issues.push(format!("requires(role = ...) — {msg}"));
+                    }
+                }
+                (None, Some(expr)) => {
+                    if let Err(msg) = crate::predicate::parse_predicate(expr) {
+                        issues.push(format!("requires({expr}) — {msg}"));
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    issues.push("requires(..) takes a role or an expression, not both".into())
+                }
+                (None, None) => {
+                    issues.push("requires(..) needs a role or a boolean expression".into())
+                }
             }
+        }
+        if let Some(ens) = &self.ensures
+            && let Err(msg) = crate::predicate::parse_predicate(&ens.expr)
+        {
+            issues.push(format!("ensures({}) — {msg}", ens.expr));
         }
         if let Some(nfr) = &self.nfr {
             if nfr.latency_ms.is_some_and(|v| v <= 0.0) {
@@ -136,7 +177,11 @@ mod tests {
         let c = Contract {
             effects: Some(vec!["pure".into()]),
             requires: Some(Requires {
-                role: "hr_staff".into(),
+                role: Some("hr_staff".into()),
+                expr: None,
+            }),
+            ensures: Some(Ensures {
+                expr: "result >= 0".into(),
             }),
             nfr: Some(Nfr {
                 latency_ms: Some(50.0),
