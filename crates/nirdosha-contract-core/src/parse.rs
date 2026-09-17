@@ -9,6 +9,7 @@
 //!             | requires "(" predicate ")"
 //!             | ensures "(" predicate ")"
 //!             | nfr "(" nfr_item ("," nfr_item)* ")"
+//!             | resource "(" "kind" "=" string ")"
 //! nfr_item   := "latency_ms" "=" number | "concurrency_max" "=" number
 //! predicate  := -- the `predicate::check_predicate_shape` subset: idents,
 //!                  int/bool literals, arithmetic, comparisons, &&, ||,
@@ -18,7 +19,7 @@
 //! Unknown clauses are hard errors — in the dialect, a contract is a
 //! checked declaration, so a typo can never degrade into a comment.
 
-use crate::model::{Contract, Crud, Ensures, Nfr, Requires};
+use crate::model::{Contract, Crud, Ensures, Nfr, Requires, Resource};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
 pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
@@ -58,6 +59,7 @@ pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
             "ensures" => contract.ensures = Some(parse_ensures(&group)?),
             "nfr" => contract.nfr = Some(parse_nfr(&group)?),
             "crud" => contract.crud = Some(parse_crud(&group)?),
+            "resource" => contract.resource = Some(parse_resource(&group)?),
             other => {
                 return Err(syn::Error::new(
                     span,
@@ -66,7 +68,8 @@ pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
                          effects(pure, io, net, ...), requires(role = \"name\") or \
                          requires(<bool expr>), ensures(<bool expr>), \
                          nfr(latency_ms = N, concurrency_max = N), \
-                         crud(op = \"delete\", policy = \"name\")"
+                         crud(op = \"delete\", policy = \"name\"), \
+                         resource(kind = \"name\")"
                     ),
                 ))
             }
@@ -290,6 +293,32 @@ fn parse_crud(group: &proc_macro2::Group) -> syn::Result<Crud> {
     Ok(Crud { op, policy })
 }
 
+/// `resource(kind = "lock")` — single required key, same shape as
+/// `requires(role = "...")`'s three-token pattern.
+fn parse_resource(group: &proc_macro2::Group) -> syn::Result<Resource> {
+    let trees: Vec<TokenTree> = group.stream().into_iter().collect();
+    let [TokenTree::Ident(id), TokenTree::Punct(eq), TokenTree::Literal(lit)] = trees.as_slice()
+    else {
+        return Err(syn::Error::new(
+            group.span(),
+            "resource(..) currently supports exactly one key: resource(kind = \"lock\")",
+        ));
+    };
+    if id != "kind" || eq.as_char() != '=' {
+        return Err(syn::Error::new(
+            group.span(),
+            "resource(..) currently supports exactly one key: resource(kind = \"lock\")",
+        ));
+    }
+    match syn::Lit::new(lit.clone()) {
+        syn::Lit::Str(s) => Ok(Resource { kind: s.value() }),
+        _ => Err(syn::Error::new(
+            lit.span(),
+            "resource kinds are string literals: resource(kind = \"lock\")",
+        )),
+    }
+}
+
 fn parse_number(lit: &proc_macro2::Literal, span: proc_macro2::Span) -> syn::Result<f64> {
     match syn::Lit::new(lit.clone()) {
         syn::Lit::Int(i) => i.base10_parse::<f64>().map_err(|_| err(span)),
@@ -334,6 +363,15 @@ mod tests {
         .unwrap();
         assert_eq!(c.requires.as_ref().unwrap().expr.as_deref(), Some("idx < len"));
         assert_eq!(c.ensures.as_ref().unwrap().expr, "result >= 0");
+    }
+
+    // issue #69: `resource(kind = "..")` — no such clause exists yet, so
+    // this is the red test: `parse_contract` errors "unknown contract
+    // clause `resource`" until the parser/model grow this clause.
+    #[test]
+    fn parses_resource_clause() {
+        let c = parse_contract(quote! { resource(kind = "lock") }).unwrap();
+        assert_eq!(c.resource.unwrap().kind, "lock");
     }
 
     #[test]

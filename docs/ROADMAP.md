@@ -25,6 +25,29 @@ A, Track B, Track C below) — but the specs themselves stay put.
 
 ## V2 issue fixes
 
+- `[DONE]` **2026-09-17, GitHub #69: domain-specific affine/resource
+  checking via `rustc_mir_dataflow`.** A new `resource(kind = "..")`
+  contract clause: a real `rustc_mir_dataflow` forward "may still hold
+  an acquired, unreleased resource" analysis (`nirdosha-driver/src/
+  dataflow.rs`) proves every `nirdosha_rt::resource::acquire()` this
+  fn's own body produces is matched by a `release()` on every reachable
+  path — leaked resources, double-acquire (a reassignment or second
+  acquire while one is still held), and release-without-acquire are all
+  hard compile errors. Two real bugs surfaced and were fixed while
+  building the test fixtures: drop elaboration routinely lowers even a
+  direct `release(r)` into a fresh-temp move (`_2 = move _1;
+  release(move _2)`), which (1) needs the move-propagation logic to
+  clear the *source* local's bit, not just set the destination's, and
+  (2) means a double-acquire from reassignment shows up as a plain
+  `Assign` statement clobbering an already-held local, not as a second
+  `acquire()` call site — both are checked now. Unlike `numeric.rs`'s
+  hand-rolled path-sensitive walker, this domain is a monotone bitset
+  lattice, so loops are supported (real fixpoint iteration, not
+  unrolling). Scope: intra-procedural only — a resource acquired in one
+  function and released in another is out of scope for this pass (flagged
+  as release-without-acquire from the releasing function's own point of
+  view), and `kind` is currently a diagnostic label only, not a filter.
+
 - `[DONE]` **2026-09-17, GitHub #68: `requires(expr)`/`ensures(expr)`
   Hoare pre/post conditions.** `nirdosha-contract-core`'s `Requires` now
   carries a role *or* a boolean expression; a new `Ensures` clause holds

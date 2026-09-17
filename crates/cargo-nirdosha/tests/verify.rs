@@ -189,6 +189,7 @@ fn bench_gates_hold_and_breach() {
             effects: Some(vec!["pure".into()]),
             requires: None,
             ensures: None,
+            resource: None,
             nfr: Some(Nfr {
                 error_rate_max: None,
                 throughput_min_per_sec: None,

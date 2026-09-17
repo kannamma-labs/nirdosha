@@ -33,6 +33,7 @@ pub mod policy;
 pub mod prelude;
 #[cfg(feature = "native")]
 pub mod native;
+pub mod resource;
 pub mod role;
 pub mod board;
 pub mod feed;
@@ -42,6 +43,7 @@ pub mod wizard;
 
 pub use nfr::{enter, events, reset_events, Guard, Limits, NfrEvent};
 pub use policy::{crud_forbidden, requires_encryption, Policy};
+pub use resource::{acquire, release, Resource};
 pub use role::{Auth, AuthError, Role, RoleProof};
 pub use web::{html_escape, page_shell, NavLink, PathParams, Request, Response, Router};
 

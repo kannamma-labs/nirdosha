@@ -34,6 +34,8 @@ pub struct Contract {
     pub nfr: Option<Nfr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crud: Option<Crud>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<Resource>,
 }
 
 /// Either a role gate (`requires(role = "hr_staff")`, unforgeable-proof
@@ -75,6 +77,21 @@ pub const KNOWN_CRUD_OPS: &[&str] = &["create", "read", "update", "delete"];
 pub struct Crud {
     pub op: String,
     pub policy: String,
+}
+
+/// `resource(kind = "lock")` — this fn's own body must acquire and
+/// release every value it gets from `nirdosha_rt::resource::acquire`
+/// through `nirdosha_rt::resource::release` on *every* path, checked by
+/// a real `rustc_mir_dataflow` forward analysis over pre-optimization
+/// MIR (issue #69), the same "every path" semantics `requires`/`ensures`
+/// (issue #68) already use. `kind` is a free-text label for diagnostics
+/// today — every acquire/release pair in a `resource(..)`-claiming fn's
+/// body is tracked regardless of the payload type; it does not yet
+/// select among multiple concurrently-tracked resource kinds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resource {
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -164,6 +181,11 @@ impl Contract {
                 issues.push(format!("crud(policy = ...) — {msg}"));
             }
         }
+        if let Some(resource) = &self.resource
+            && resource.kind.is_empty()
+        {
+            issues.push("resource(kind = ...) — kind must not be empty".into());
+        }
         issues
     }
 }
@@ -192,6 +214,9 @@ mod tests {
             crud: Some(Crud {
                 op: "delete".into(),
                 policy: "financial_us".into(),
+            }),
+            resource: Some(Resource {
+                kind: "lock".into(),
             }),
         };
         let doc = c.doc_string();

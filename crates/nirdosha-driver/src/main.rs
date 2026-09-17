@@ -40,12 +40,15 @@
 extern crate rustc_ast;
 extern crate rustc_driver;
 extern crate rustc_hir;
+extern crate rustc_index;
 extern crate rustc_interface;
 extern crate rustc_middle;
+extern crate rustc_mir_dataflow;
 extern crate rustc_span;
 
 use std::collections::{HashMap, HashSet};
 
+mod dataflow;
 mod numeric;
 mod proof_certificate;
 use std::process::ExitCode;
@@ -192,6 +195,43 @@ fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>
                     )
                     .emit();
                 errors = true;
+            }
+        }
+        if contract.resource.is_some() {
+            match dataflow::analyze(tcx, *did, Some(contract)) {
+                dataflow::Report::NotClaimed | dataflow::Report::Clean => {}
+                dataflow::Report::Unsupported(reason) => {
+                    tcx.dcx()
+                        .struct_span_err(
+                            tcx.def_span(did.to_def_id()),
+                            format!(
+                                "fn `{}` claims resource(..) but its acquire/release discipline cannot be checked: {reason}",
+                                tcx.def_path_str(did.to_def_id())
+                            ),
+                        )
+                        .emit();
+                    errors = true;
+                }
+                dataflow::Report::Violations(violations) => {
+                    let mut diag = tcx.dcx().struct_span_err(
+                        tcx.def_span(did.to_def_id()),
+                        format!(
+                            "fn `{}` claims resource(..) but its acquire/release discipline is violated",
+                            tcx.def_path_str(did.to_def_id())
+                        ),
+                    );
+                    for v in &violations {
+                        let reason = match v.kind {
+                            "leaked" => "a resource is acquired but never released on this path",
+                            "double_acquire" => "acquire() called while a resource from an earlier acquire() is still held",
+                            "release_without_acquire" => "release() called on a value this fn never saw acquire() produce",
+                            other => other,
+                        };
+                        diag.note(format!("{reason} — {}", v.location));
+                    }
+                    diag.emit();
+                    errors = true;
+                }
             }
         }
         if contract.claims_pure() {
