@@ -25,6 +25,26 @@ A, Track B, Track C below) — but the specs themselves stay put.
 
 ## V2 issue fixes
 
+- `[PARTIAL]` **2026-09-17, GitHub #72: reduce `nirdosha-driver`'s
+  `rustc_private` churn surface.** The `stable_mir`/`rustc_smir`
+  migration itself is **blocked in this environment**: confirmed by
+  searching the installed sysroot (both the compiled `.rlib`s and the
+  vendored `rustc-src`) — neither crate ships in the pinned nightly's
+  `rustc-dev` component at all, so there is nothing to migrate onto
+  today, not merely partial coverage to work around. Landed the two
+  asks that don't depend on it: (1) a startup toolchain-version guard
+  (issue #65 item 9) — under `RUSTC_WORKSPACE_WRAPPER`, cargo hands the
+  driver the *active* toolchain's own `rustc` path; a mismatch against
+  `NIRDOSHA_RUSTC_VERSION` (embedded by `build.rs` at build time) now
+  fails closed with an actionable "rebuild against this toolchain"
+  message before `run_compiler` ever links against it, instead of
+  risking a symbol/ABI mismatch in-process; (2) `deep-effects-next-nightly`
+  (`.github/workflows/v2-guarantees.yml`), a daily job building against
+  a floating `nightly` (not the pinned one) so a breaking
+  `rustc_private` change is caught the day it lands upstream, matching
+  Miri/Clippy's own toolstate-bot practice — `continue-on-error`, an
+  early-warning signal rather than a merge gate.
+
 - `[DONE]` **2026-09-17, GitHub #71: curated std/core/alloc effect
   summary table.** Stage 2 rejected *every* external call by name,
   including `Vec::push`, `.iter().map(..)`, and the dialect's own

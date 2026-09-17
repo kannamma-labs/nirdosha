@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Issue #72: catch rustc_private API churn the same day it lands
+    # upstream, not on the next pin bump. Runs against whatever
+    # `nightly` currently resolves to, separately from `deep-effects`'s
+    # pinned `nightly-2026-08-18` above -- the same toolstate-bot
+    # practice Miri/Clippy already run inside rust-lang/rust's own CI.
+    - cron: "17 5 * * *"
+  workflow_dispatch: {}
 
 jobs:
   certificate-policy:
@@ -38,3 +46,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Authorization, crash recovery and process lifecycle
         run: cargo test --locked -p nirdosha-rt --features native --test native_guarantees
+
+  # Issue #72: nirdosha-driver links rustc_private and is pinned to one
+  # exact nightly build (`deep-effects` above). This job builds and
+  # tests it against a *floating* `nightly` instead, so a breaking
+  # rustc_private change is caught the day it lands, not discovered
+  # cold on the next deliberate pin bump. `continue-on-error`: this is
+  # an early-warning signal, not a merge gate -- floating nightly churn
+  # is expected and not this branch's fault to fix on the spot.
+  deep-effects-next-nightly:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustc-dev, llvm-tools-preview
+      - name: Same effect-rejection suite, against tomorrow's nightly
+        run: cargo test --locked -p nirdosha-driver --test effects

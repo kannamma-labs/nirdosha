@@ -164,7 +164,21 @@ injected proof parameter does not resolve.
 - **The driver is nightly + `rustc-dev` only** (it links
   `rustc_private`, pinned to the toolchain it was built against — the
   Clippy/Miri maintenance model). Stage 1 verification and everything
-  the runtime enforces by types are stable and work everywhere.
+  the runtime enforces by types are stable and work everywhere. A
+  version-check guard (issue #65 item 9 / #72) fails `--deep` closed
+  with an actionable "rebuild against this toolchain" message on a
+  mismatch, instead of the undefined behavior a symbol/ABI mismatch
+  would otherwise risk; `deep-effects-next-nightly`
+  (`.github/workflows/v2-guarantees.yml`) builds against a floating
+  `nightly` daily so a breaking `rustc_private` change is caught the
+  day it lands, not discovered cold on the next deliberate pin bump.
+  Migrating the MIR walk itself onto `stable_mir`/`rustc_smir` (issue
+  #72's other ask, to shrink how much of this churn surface exists at
+  all) is blocked in this environment: neither crate ships in the
+  pinned nightly's `rustc-dev` component today (confirmed by searching
+  the installed sysroot — no `stable_mir`/`rustc_smir` `.rlib` or
+  vendored source anywhere in it), so there is currently nothing to
+  migrate onto.
 
 ## 5. What each surface catches (the honest matrix)
 

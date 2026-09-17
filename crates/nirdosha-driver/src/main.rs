@@ -72,6 +72,10 @@ fn main() -> ExitCode {
     if std::env::var_os("NIRDOSHA_DRIVER").is_some()
         && args.get(1).is_some_and(|a| !a.starts_with('-'))
     {
+        if let Err(message) = check_toolchain_version(&args[1]) {
+            eprintln!("nirdosha-driver: {message}");
+            return ExitCode::FAILURE;
+        }
         args.remove(1);
     }
     let mut callbacks = NirdoshaCallbacks { certificate: None };
@@ -87,6 +91,36 @@ fn main() -> ExitCode {
         }
     }
     status
+}
+
+/// Issue #65 item 9 / #72's fallback safety net: this binary links
+/// `rustc_private`, so it is ABI-compatible with only the exact nightly
+/// it was built against (`NIRDOSHA_RUSTC_VERSION`, embedded by
+/// `build.rs`'s own `rustc --version` at build time — see that file).
+/// Under `RUSTC_WORKSPACE_WRAPPER`, cargo hands this fn the *active*
+/// toolchain's own resolved `rustc` path as `args[1]`; if that
+/// toolchain doesn't match, letting `run_compiler` load against it
+/// in-process is a symbol/ABI mismatch — undefined behavior, not a
+/// clean error — so this checks first and fails closed with an
+/// actionable message instead.
+fn check_toolchain_version(rustc_path: &str) -> Result<(), String> {
+    let built_against = env!("NIRDOSHA_RUSTC_VERSION");
+    let output = std::process::Command::new(rustc_path)
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            format!("cannot run `{rustc_path} --version` to check the active toolchain: {e}")
+        })?;
+    let active = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if active != built_against {
+        return Err(format!(
+            "toolchain mismatch: this binary was built against `{built_against}`, but the \
+             active toolchain (`{rustc_path}`) reports `{active}`. rustc_private has no \
+             stable ABI across builds -- rebuild nirdosha-driver against this exact \
+             toolchain before using --deep with it."
+        ));
+    }
+    Ok(())
 }
 
 struct NirdoshaCallbacks {
