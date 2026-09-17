@@ -43,6 +43,7 @@ mod communication_feed;
 mod crud_screens;
 mod dashboard;
 mod kanban_board;
+mod landing;
 mod settings_screen;
 mod util;
 mod wizard;
@@ -106,6 +107,15 @@ pub fn kanban_board(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn communication_feed(input: TokenStream) -> TokenStream {
     communication_feed::expand(input)
+}
+
+/// See `landing::expand`'s module doc — issue #70's substitute for
+/// `.nir`'s `landing { .. }` top-level form: first-match-wins
+/// `role(..) -> target` rules picking a post-login redirect, with a
+/// required `default` catch-all.
+#[proc_macro]
+pub fn landing(input: TokenStream) -> TokenStream {
+    landing::expand(input)
 }
 
 fn expand(

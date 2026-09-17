@@ -24,7 +24,7 @@
 //! ```
 
 pub use nirdosha_macros::{
-    categorical_actions, communication_feed, contract, crud_screens, dashboard, kanban_board, settings_screen, wizard,
+    categorical_actions, communication_feed, contract, crud_screens, dashboard, kanban_board, landing, settings_screen, wizard,
 };
 
 pub mod dashboard;
