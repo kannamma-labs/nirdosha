@@ -194,11 +194,8 @@ fn hash_tokens<T: quote::ToTokens>(item: &T) -> String {
 /// v2 (real Rust, `syn`-parsed) since 2026-09-16's `hi` extraction --
 /// no native `.nir` prelude-seeding to filter out here (unlike the
 /// retired native parser, `syn::parse_file` never injects anything a
-/// file didn't actually write), and no native "screen" unit kind: a v2
-/// screen is a `nirdosha_rt::*_screens!`/`dashboard!`/... macro
-/// invocation, not a `screen { ... }` block, so it isn't extracted as
-/// its own `CodeUnit` kind yet -- a real, disclosed gap, not silently
-/// claimed coverage.
+/// file didn't actually write). A screen is identified by the UI
+/// macro's `mount_<ScreenName>` function, giving it a graph identity.
 fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let file = syn::parse_file(&src).map_err(|e| format!("parse error in {}: {e}", path.display()))?;
@@ -209,12 +206,34 @@ fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File), String>
             syn::Item::Fn(f) => (f.sig.ident.to_string(), "fn"),
             syn::Item::Struct(s) => (s.ident.to_string(), "struct"),
             syn::Item::Enum(e) => (e.ident.to_string(), "enum"),
+            syn::Item::Macro(m) => {
+                let Some(name) = screen_name_from_macro(m) else { continue };
+                (name, "screen")
+            }
             _ => continue,
         };
         let start = syn::spanned::Spanned::span(item).start();
         units.push(CodeUnit { qualified_name, kind, content_hash: hash_tokens(item), line: start.line, col: start.column });
     }
     Ok((units, file))
+}
+
+const UI_MACROS: &[&str] = &["crud_screens", "dashboard", "kanban_board", "wizard", "settings_screen", "communication_feed"];
+
+pub(crate) fn screen_name_from_macro(item: &syn::ItemMacro) -> Option<String> {
+    let macro_name = item.mac.path.segments.last()?.ident.to_string();
+    if !UI_MACROS.contains(&macro_name.as_str()) || item.mac.path.segments.first()?.ident != "nirdosha_rt" {
+        return None;
+    }
+    let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<String> {
+        let key: syn::Ident = input.parse()?;
+        input.parse::<syn::Token![:]>()?;
+        let mount: syn::Ident = input.parse()?;
+        if key != "mount" { return Err(input.error("expected mount")); }
+        while !input.is_empty() { let _: proc_macro2::TokenTree = input.parse()?; }
+        Ok(mount.to_string())
+    };
+    syn::parse::Parser::parse2(parser, item.mac.tokens.clone()).ok()?.strip_prefix("mount_").filter(|name| !name.is_empty()).map(str::to_string)
 }
 
 pub fn code_unit_node_id(kind: &str, qualified_name: &str) -> String {
@@ -1353,6 +1372,21 @@ mod tests {
         let (units, _file) = code_units_in_file(&path).expect("code_units_in_file parse");
         let actual: Vec<(&str, String)> = units.iter().map(|u| (u.kind, u.qualified_name.clone())).collect();
         assert_eq!(actual, vec![("fn", "add".to_string()), ("struct", "Point".to_string()), ("enum", "Color".to_string())]);
+    }
+
+    #[test]
+    fn screen_macro_syncs_under_its_confirmed_identity() {
+        let dir = scratch_dir("screen_macro_sync");
+        let path = write_nir(&dir, "a.nir", "nirdosha_rt::dashboard! { mount: mount_TaskListScreen, path: \"/tasks\", title: \"Tasks\", widgets {} }\n");
+        let (units, _) = code_units_in_file(&path).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].kind, "screen");
+        assert_eq!(units[0].qualified_name, "TaskListScreen");
+        let conn = open(&dir).unwrap();
+        let id = add_candidate(&conn, "screen", "TaskListScreen", "list tasks", "test").unwrap();
+        confirm_node(&conn, &id).unwrap();
+        sync(&conn, &dir, &[path.display().to_string()]).unwrap();
+        assert_eq!(lock_units_after_sync(&conn, &[id.clone()]).unwrap(), vec![id]);
     }
 
     #[test]

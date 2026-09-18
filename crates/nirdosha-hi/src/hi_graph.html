@@ -329,7 +329,7 @@
 <div id="preview-rail">
   <div class="ask-head"><span>Preview &middot; the real compiled app, running locally -- not a mockup</span><button type="button" id="preview-close" class="rail-close" title="close">✕</button></div>
   <div id="preview-body">
-    <div class="sub" style="padding:12px 14px 0;">Builds and runs `.nir/generated/hi_preview` -- the exact code the confirmed graph would Publish, minus the deploy step. Runs in demo mode: the app's own login screen lets you pick a role/claim to preview as, real role gates included.</div>
+    <div class="sub" style="padding:12px 14px 0;">Builds and runs the generated app locally, then opens its first screen. Login and role behavior come from the generated app.</div>
     <div id="preview-status" class="form-status" style="padding:8px 14px;"></div>
     <div id="preview-controls" style="padding:0 14px 12px;display:flex;gap:8px;">
       <button type="button" id="preview-start-btn">Start Preview</button>
@@ -2253,21 +2253,19 @@
   // binary and runs it as a process `hi` itself owns -- this rail is
   // just a thin client over that: a Start/Stop button and an iframe,
   // nothing here talks to identity/roles at all. The served app's own
-  // demo-mode login screen (already real, `ui_gen.rs`'s generated
-  // output) is what lets someone pick a role to preview as -- see
-  // `hi_preview.rs`'s own doc comment for why that needed zero new
-  // work here.
+  // login behavior depends on whether the generated app registered one.
   function setPreviewStatus(text) {
     document.getElementById('preview-status').textContent = text;
   }
 
-  function showPreviewRunning(port) {
+  function showPreviewRunning(port, path) {
     document.getElementById('preview-start-btn').textContent = 'Restart Preview';
     document.getElementById('preview-stop-btn').style.display = '';
     const frame = document.getElementById('preview-frame');
     frame.style.display = 'block';
-    frame.src = 'http://127.0.0.1:' + port + '/';
-    setPreviewStatus('running on http://127.0.0.1:' + port + ' -- use the app\'s own login screen to pick a role.');
+    const url = 'http://127.0.0.1:' + port + (path || '/');
+    frame.src = url;
+    setPreviewStatus('running on ' + url);
   }
 
   function showPreviewStopped(message) {
@@ -2281,7 +2279,7 @@
 
   function refreshPreviewStatusOnOpen() {
     fetch('/api/preview/status').then(r => r.json()).then(status => {
-      if (status.running) showPreviewRunning(status.port);
+      if (status.running) showPreviewRunning(status.port, status.path);
       else showPreviewStopped('not running -- click Start Preview to build and run the confirmed graph\'s current generated code.');
     }).catch(err => reportError('preview status', err));
   }
@@ -2309,7 +2307,7 @@
           showPreviewStopped('failed to start: ' + (body.error || 'unknown error'));
           return;
         }
-        showPreviewRunning(body.port);
+        showPreviewRunning(body.port, body.path);
       })
       .catch(err => { btn.disabled = false; showPreviewStopped(String(err)); reportError('preview start', err); });
   }

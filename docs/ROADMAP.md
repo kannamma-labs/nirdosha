@@ -47,6 +47,27 @@ A, Track B, Track C below) — but the specs themselves stay put.
 
 ## V2 issue fixes
 
+- `[DONE]` **2026-09-18, Hi graph screen generation and preview.**
+  Generate still makes one whole-program LLM request per attempt; it
+  does not fill function bodies one at a time. Its graph prompt now uses
+  v2 Rust UI macros, with a stable `mount_<ScreenName>` mapping for each
+  confirmed screen. A graph-coverage gate rejects omitted units,
+  unmounted screens, and `main` without `.serve(<literal port>)` before
+  a compiling console fallback can be locked. Graph sync tracks each
+  UI macro as its screen unit. Preview rejects a source with no listener
+  and waits for the child to bind before reporting success. This does
+  not implement RFC 0021's proposed typed, incremental body emission.
+  Follow-up 2026-09-18: four saved generation attempts used
+  `SharedTable.iter()` or `.values()` even though its read API is
+  `snapshot()`. Generate now repairs those exact calls when the callee
+  is declared to return `SharedTable`, preserving source comments;
+  the system prompt also states the API explicitly.
+  Follow-up 2026-09-18: preview previously opened `/` even when the
+  compiled app only mounted `/tasks`, `/projects`, etc., yielding a 404.
+  It now derives the first UI macro's route and returns it in both start
+  and status responses; the rail opens that route and describes login
+  according to the generated app rather than promising demo login.
+
 - `[DONE]` **2026-09-17, GitHub #73: macro-time workflow/state-machine
   conformance checking.** Depended on issue #70's "item 4" gap
   (a general `workflow!` macro) actually landing first — confirmed by

@@ -1,30 +1,14 @@
-//! github #45 ("hi: live-preview build mode"), the half of it this pass
-//! actually ships: `hi` owning the served app's process lifecycle, so
-//! "run the real compiled app" stops meaning "a human runs the binary
-//! themselves in another terminal." **Deliberately not** the harder
-//! half the issue also asked for (right-click a live field to attach
-//! `requires(role:)`) -- that needs source-location metadata threaded
-//! through `ui_gen.rs`/codegen into the rendered HTML, real compiler
-//! surface, tracked as its own follow-up rather than attempted here.
-//!
-//! `hi_api::handle_preview_start` builds a real, *servable* binary
-//! (`codegen::build_serve`, the same pipeline `nirdosha build --serve`
-//! already uses -- unlike `handle_publish`'s plain `codegen::build`,
-//! which produces a one-shot binary with no HTTP listener at all) and
-//! calls [`restart`] to run it. Demo-mode identity needs zero new work
-//! here: `compiled_serve::ServeConfig::default()` already turns on
-//! `demo_mode` whenever no real OIDC env vars are set (`auth_providers_
-//! from_env`), so a plain, env-var-free `spawn` gets the exact
-//! self-service role/claim picker (`/api/_demo_login`) `ui_gen.rs`'s
-//! own generated login screen already renders when `demo_mode` is true
-//! -- "preview as employee/finance director" is the served app's own
-//! same-origin UI, not something this rail has to build.
+//! Hi owns the v2 app preview process. The app is a real compiled Rust
+//! binary; its own `Router::serve` binds the literal port in `main`.
+//! Login and role behavior are whatever the generated app registered.
+//! Preview waits for the port before reporting success and remembers
+//! the first mounted UI route for the preview iframe.
 //!
 //! One live preview process per `hi` session, matching `hi_window::open`'s
 //! own "one process, one project" shape -- a second `:preview` call
 //! kills whatever's running first, never runs two at once.
 
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -36,6 +20,7 @@ use std::sync::Mutex;
 struct PreviewState {
     child: Child,
     port: u16,
+    path: String,
 }
 
 impl Drop for PreviewState {
@@ -63,31 +48,43 @@ pub fn pick_free_port() -> Result<u16, String> {
     listener.local_addr().map(|addr| addr.port()).map_err(|e| format!("reading the bound preview port back: {e}"))
 }
 
-/// Kills any preview process already running, then spawns `binary_path`
-/// (built with that exact `port` baked in via `ServeCodegenOptions` --
-/// codegen embeds the port as a constant argument to `nir_compiled_
-/// serve_run`, it isn't a runtime flag the child reads) and records it
-/// as the current one. No environment overrides: an ordinary `spawn`
-/// with no `--oidc-*`/`--jwks-file` env set is exactly what keeps the
-/// child in demo mode (`compiled_serve::auth_providers_from_env`'s own
-/// default), the same "nothing extra to configure" identity story
-/// RFC 0014's 2026-09-14 amendment describes.
-pub fn restart(binary_path: &Path, port: u16) -> Result<(), String> {
-    let child = Command::new(binary_path).spawn().map_err(|e| format!("starting the preview server ({}): {e}", binary_path.display()))?;
+/// Replaces the current v2 preview process, then waits until the new
+/// binary listens on the literal port in its `main().serve(port)` call.
+/// A process that exits or never binds returns an error to the UI.
+pub fn restart(binary_path: &Path, port: u16, path: &str) -> Result<(), String> {
     let mut guard = CURRENT.lock().map_err(|_| "preview process lock was poisoned by an earlier panic".to_string())?;
-    // Replacing `*guard` drops the previous `Some(PreviewState)` (if
-    // any) right here, which is what actually kills the old process --
-    // done AFTER the new child is already spawned so a failed spawn
-    // above never tears down a preview that was working.
-    *guard = Some(PreviewState { child, port });
-    Ok(())
+    // The new server may use the same literal port as the old one.
+    *guard = None;
+    let mut child = Command::new(binary_path).spawn().map_err(|e| format!("starting the preview server ({}): {e}", binary_path.display()))?;
+    let address = (std::net::Ipv4Addr::LOCALHOST, port);
+    for _ in 0..40 {
+        if let Some(status) = child.try_wait().map_err(|e| format!("checking preview process: {e}"))? {
+            return Err(format!("preview server exited before listening on port {port} ({status})"));
+        }
+        if TcpStream::connect(address).is_ok() {
+            *guard = Some(PreviewState { child, port, path: path.to_string() });
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(format!("preview server did not listen on port {port} within 2 seconds"))
 }
 
 /// The currently running preview's port, if any -- `hi_api`'s own
 /// `/api/preview/status` route, and what the Preview rail polls after
 /// a Start/Rebuild to know when the iframe has something to point at.
 pub fn status() -> Option<u16> {
-    CURRENT.lock().ok().and_then(|guard| guard.as_ref().map(|s| s.port))
+    let mut guard = CURRENT.lock().ok()?;
+    let exited = guard.as_mut().and_then(|state| state.child.try_wait().ok()).flatten().is_some();
+    if exited { *guard = None; }
+    guard.as_ref().map(|state| state.port)
+}
+
+pub fn path() -> Option<String> {
+    status()?;
+    CURRENT.lock().ok()?.as_ref().map(|state| state.path.clone())
 }
 
 /// Stops the current preview process, if any -- `hi_api`'s own

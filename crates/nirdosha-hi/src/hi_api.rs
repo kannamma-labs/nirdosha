@@ -182,7 +182,8 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         }
         "/api/preview/status" => {
             let port = crate::hi_preview::status();
-            ApiResponse::json(&serde_json::json!({ "running": port.is_some(), "port": port }))
+            let path = crate::hi_preview::path();
+            ApiResponse::json(&serde_json::json!({ "running": port.is_some(), "port": port, "path": path }))
         }
         _ => ApiResponse::error(404, "not found"),
     }
@@ -592,16 +593,15 @@ fn handle_publish(root: &Path, _conn: &Connection) -> ApiResponse {
 /// Github #45's "ship now" half: build a real, `cargo`-produced v2
 /// binary (`v2_verify::preview_start`, which itself calls `v2_verify::
 /// build_project`) and run it via `hi_preview::restart` -- "preview"
-/// here means "run the real thing," not a mockup. Demo-mode identity
-/// is the served app's own login screen, same as before; nothing here
-/// has to know about roles/claims at all.
+/// here means "run the real thing," not a mockup. Authentication comes
+/// from the generated app; the preview API reports its first UI route.
 fn handle_preview_start(root: &Path, _conn: &Connection) -> ApiResponse {
     let source_path = crate::hi_llm::generated_source_path(root);
     if !source_path.exists() {
         return ApiResponse::error(400, "nothing generated yet -- run :generate first");
     }
     match crate::v2_verify::preview_start(root, &source_path) {
-        Ok(port) => ApiResponse::json(&serde_json::json!({ "ok": true, "port": port })),
+        Ok((port, path)) => ApiResponse::json(&serde_json::json!({ "ok": true, "port": port, "path": path })),
         Err(e) => ApiResponse::json(&serde_json::json!({ "ok": false, "error": e })),
     }
 }
@@ -1128,7 +1128,7 @@ mod tests {
         crate::hi_graph::open(&dir).expect("open");
         let out_path = crate::hi_llm::generated_source_path(&dir);
         std::fs::create_dir_all(out_path.parent().unwrap()).expect("mkdir");
-        std::fs::write(&out_path, "fn main() {\n    let router = nirdosha_rt::Router::new(|_| nirdosha_rt::Auth::login(\"anon\", &[]));\n    router.serve(18099);\n}\n").expect("write");
+        std::fs::write(&out_path, "fn count_tasks() -> i64 { 1 }\nnirdosha_rt::dashboard! { mount: mount_TaskListScreen, path: \"/tasks\", title: \"Tasks\", refresh_seconds: 30, widgets { Metric { label: \"Tasks\", fn: count_tasks }, } }\nfn main() {\n    let router = nirdosha_rt::Router::new(|_| nirdosha_rt::Auth::login(\"anon\", &[]));\n    let router = mount_TaskListScreen(router);\n    router.serve(18099);\n}\n").expect("write");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let resp = handle(&dir, "POST", "/api/preview/start", "", b"");
@@ -1137,11 +1137,15 @@ mod tests {
             assert_eq!(json["ok"], serde_json::json!(true), "a servable program must start a preview: {body}");
             let port = json["port"].as_u64().expect("a successful start reports a port");
             assert_ne!(port, 0);
+            assert_eq!(json["path"], "/tasks");
+            let page = reqwest::blocking::get(format!("http://127.0.0.1:{port}/tasks")).expect("preview screen responds");
+            assert_eq!(page.status(), 200);
 
             let status_resp = handle(&dir, "GET", "/api/preview/status", "", b"");
             let status: serde_json::Value = serde_json::from_slice(&status_resp.body).expect("valid JSON");
             assert_eq!(status["running"], serde_json::json!(true));
             assert_eq!(status["port"].as_u64(), Some(port));
+            assert_eq!(status["path"], "/tasks");
         }));
 
         let stop_resp = handle(&dir, "POST", "/api/preview/stop", "", b"");

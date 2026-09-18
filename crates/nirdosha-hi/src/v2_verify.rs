@@ -285,11 +285,7 @@ pub fn certificate_json(source: &str, verdict: &V2Verdict) -> serde_json::Value 
 }
 
 /// Discovers the port a v2 app's generated `main()` hardcodes in its
-/// own `.serve(<port>)` call (`router.serve(8096)`, the only convention
-/// that exists today -- v2 has no `PORT` env-var reading convention
-/// yet, a real, disclosed limitation: [`preview_start`] cannot pick a
-/// free port the way the native preview's `hi_preview::pick_free_port`
-/// does). `None` (falls back to 8080) when no such call is found.
+/// own `.serve(<port>)` call in `main`. V2 has no runtime port override.
 fn discover_serve_port(source: &str) -> Option<u16> {
     let file = syn::parse_file(source).ok()?;
     struct Finder(Option<u16>);
@@ -304,15 +300,60 @@ fn discover_serve_port(source: &str) -> Option<u16> {
         }
     }
     let mut finder = Finder(None);
-    syn::visit::Visit::visit_file(&mut finder, &file);
+    let main = file.items.iter().find_map(|item| match item {
+        syn::Item::Fn(f) if f.sig.ident == "main" => Some(&f.block),
+        _ => None,
+    })?;
+    syn::visit::Visit::visit_block(&mut finder, main);
     finder.0
 }
 
+/// The first route a generated UI macro mounts is the preview landing
+/// page. UI macros encode their route as a top-level `path: "..."`
+/// entry; nested field/action paths do not count.
+fn discover_preview_path(source: &str) -> Option<String> {
+    let file = syn::parse_file(source).ok()?;
+    for item in &file.items {
+        let syn::Item::Macro(item) = item else { continue };
+        if crate::hi_graph::screen_name_from_macro(item).is_none() { continue; }
+        let mut tokens = item.mac.tokens.clone().into_iter();
+        while let Some(token) = tokens.next() {
+            let proc_macro2::TokenTree::Ident(key) = token else { continue };
+            if key != "path" { continue; }
+            if !matches!(tokens.next(), Some(proc_macro2::TokenTree::Punct(colon)) if colon.as_char() == ':') { continue; }
+            let Some(proc_macro2::TokenTree::Literal(value)) = tokens.next() else { continue };
+            let path = syn::parse2::<syn::LitStr>(proc_macro2::TokenTree::Literal(value).into()).ok()?.value();
+            if path.starts_with('/') && path != "/" { return Some(path); }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod preview_port_tests {
+    use super::{discover_serve_port, discover_preview_path};
+
+    #[test]
+    fn preview_only_accepts_a_literal_serve_in_main() {
+        assert_eq!(discover_serve_port("fn main() { println!(\"done\"); }"), None);
+        assert_eq!(discover_serve_port("fn unused() { router.serve(8080); } fn main() {}"), None);
+        assert_eq!(discover_serve_port("fn main() { router.serve(8096); }"), Some(8096));
+    }
+
+    #[test]
+    fn preview_path_uses_the_first_real_ui_route() {
+        let source = "nirdosha_rt::crud_screens! { mount: mount_TaskListScreen, entity: Task, store: task_store, path: \"/tasks\", fields: [ title: String ] }\nnirdosha_rt::dashboard! { mount: mount_DashboardScreen, path: \"/dashboard\", widgets {} }\nfn main() { router.serve(8080); }";
+        assert_eq!(discover_preview_path(source).as_deref(), Some("/tasks"));
+        assert_eq!(discover_preview_path("fn main() {}"), None);
+    }
+}
+
 /// Builds `root`'s generated source for real and, if it passes, starts
-/// (or restarts -- `hi_preview::restart` kills any previous preview
-/// first) it as the live preview process, on whatever port its own
-/// `.serve(N)` call names (default `8080`). Returns that port.
-pub fn preview_start(root: &Path, generated_source_path: &Path) -> Result<u16, String> {
+/// (or restarts) it on the literal port named by `main`'s `.serve(N)`.
+pub fn preview_start(root: &Path, generated_source_path: &Path) -> Result<(u16, String), String> {
+    let source = std::fs::read_to_string(generated_source_path).map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
+    let port = discover_serve_port(&source).ok_or("preview requires main() to call .serve(<literal port>); the generated program exits without starting an HTTP server")?;
+    let path = discover_preview_path(&source).unwrap_or_else(|| "/".to_string());
     let (verdict, binary_path) = build_project(root, generated_source_path)?;
     if !verdict.passed() {
         return Err(format!(
@@ -322,10 +363,8 @@ pub fn preview_start(root: &Path, generated_source_path: &Path) -> Result<u16, S
             verdict.build_diagnostic.as_deref().map(|d| format!("\n{d}")).unwrap_or_default()
         ));
     }
-    let source = std::fs::read_to_string(generated_source_path).map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
-    let port = discover_serve_port(&source).unwrap_or(8080);
-    crate::hi_preview::restart(&binary_path, port)?;
-    Ok(port)
+    crate::hi_preview::restart(&binary_path, port, &path)?;
+    Ok((port, path))
 }
 
 /// A curated structural summary of a v2 candidate — the v2 analogue of
@@ -396,4 +435,3 @@ fn nirdosha_doc_comments(attrs: &[syn::Attribute], owner: &str) -> Vec<serde_jso
     }
     out
 }
-
