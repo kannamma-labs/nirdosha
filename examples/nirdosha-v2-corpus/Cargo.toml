@@ -7,6 +7,11 @@ publish = false
 
 [dependencies]
 nirdosha-rt = { path = "../../crates/nirdosha-rt" }
+# Required so that guard proc-macro expansions (which emit `::nirdosha_guard_registry::…`
+# paths) can resolve the crate name. Even though nirdosha-rt already depends on
+# nirdosha-guard-registry transitively, Rust's name resolution for expanded code
+# requires a direct dependency entry here.
+nirdosha-guard-registry = { path = "../../crates/nirdosha-guard-registry" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
