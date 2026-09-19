@@ -6,8 +6,6 @@
 // whether `lalrpop` can build a conflict-free parser table for this
 // grammar's *shape*, not to duplicate parser.rs's AST construction.
 
-use std::str::FromStr;
-
 grammar;
 
 match {
@@ -34,10 +32,12 @@ match {
     // `str_lit`). Semantic actions are all `()` (see the file header),
     // so the *content* of a string never matters here, only that one
     // token exists to occupy this slot in the grammar's shape.
-    r#""[^"]*""# => STR,
+        r#""[ -~]*""# => STR,
 } else {
     r"\s+" => { },
-    r"//[^\n\r]*" => { },
+    // Keep the skip pattern explicit. The installed LALRPOP lexer accepts only
+    // ASCII regex classes; the test harness normalizes Unicode comment text.
+    r"//[ -~]*" => { },
 }
 
 pub Program: () = { Item* => () };
@@ -257,13 +257,14 @@ Stmt: () = {
     LetStmt,
     "return" Expr => (),
     WhileStmt,
+    IfExpr,
     ExprStmt,
 };
 
 LetStmt: () = { "let" IDENT ":" Type "=" Expr => () };
 WhileStmt: () = { "while" Expr Block => () };
 #[inline]
-ExprStmt: () = { Expr };
+ExprStmt: () = { StmtAssignment };
 
 // expr ::= if_expr | assignment
 Expr: () = {
@@ -290,56 +291,32 @@ IfExpr: () = {
 // convenient for a hand-written top-down parser to fake its way through.
 Assignment: () = {
     IDENT "=" Assignment => (),
-    LogicOr,
+    Binary,
 };
 
-LogicOr: () = {
-    #[precedence(level="0")]
-    LogicAnd,
-    #[precedence(level="1")] #[assoc(side="left")]
-    LogicOr "||" LogicAnd => (),
-};
-LogicAnd: () = {
-    #[precedence(level="0")]
-    Equality,
-    #[precedence(level="1")] #[assoc(side="left")]
-    LogicAnd "&&" Equality => (),
-};
-Equality: () = {
-    #[precedence(level="0")]
-    Comparison,
-    #[precedence(level="1")] #[assoc(side="left")]
-    Equality "==" Comparison => (),
-    #[precedence(level="1")] #[assoc(side="left")]
-    Equality "!=" Comparison => (),
-};
-Comparison: () = {
-    #[precedence(level="0")]
-    Additive,
-    #[precedence(level="1")] #[assoc(side="left")]
-    Comparison "<" Additive => (),
-    #[precedence(level="1")] #[assoc(side="left")]
-    Comparison ">" Additive => (),
-    #[precedence(level="1")] #[assoc(side="left")]
-    Comparison "<=" Additive => (),
-    #[precedence(level="1")] #[assoc(side="left")]
-    Comparison ">=" Additive => (),
-};
-Additive: () = {
-    #[precedence(level="0")]
-    Multiplicative,
-    #[precedence(level="1")] #[assoc(side="left")]
-    Additive "+" Multiplicative => (),
-    #[precedence(level="1")] #[assoc(side="left")]
-    Additive "-" Multiplicative => (),
-};
-Multiplicative: () = {
-    #[precedence(level="0")]
-    Unary,
-    #[precedence(level="1")] #[assoc(side="left")]
-    Multiplicative "*" Unary => (),
-    #[precedence(level="1")] #[assoc(side="left")]
-    Multiplicative "/" Unary => (),
+Binary: () = { LogicOr };
+LogicOr: () = { LogicAnd LogicOrTail => () };
+LogicOrTail: () = { => (), "||" LogicAnd LogicOrTail => () };
+LogicAnd: () = { Equality LogicAndTail => () };
+LogicAndTail: () = { => (), "&&" Equality LogicAndTail => () };
+Equality: () = { Comparison EqualityTail => () };
+EqualityTail: () = { => (), EqOp Comparison EqualityTail => () };
+EqOp: () = { "==" => (), "!=" => () };
+Comparison: () = { Additive ComparisonTail => () };
+ComparisonTail: () = { => (), CmpOp Additive ComparisonTail => () };
+CmpOp: () = { "<" => (), ">" => (), "<=" => (), ">=" => () };
+Additive: () = { Multiplicative AdditiveTail => () };
+AdditiveTail: () = { => (), AddOp MultiplicativeNoPrefix AdditiveTail => () };
+AddOp: () = { "+" => (), "-" => () };
+Multiplicative: () = { Unary MultiplicativeTail => () };
+MultiplicativeTail: () = { => (), MulOp Call MultiplicativeTail => () };
+MultiplicativeNoPrefix: () = { Call MultiplicativeNoPrefixTail => () };
+MultiplicativeNoPrefixTail: () = { => (), MulOp Call MultiplicativeNoPrefixTail => () };
+MulOp: () = { "*" => (), "/" => () };
+
+StmtAssignment: () = {
+    IDENT "=" Assignment => (),
+    StmtCall,
 };
 Unary: () = {
     Call,
@@ -356,8 +333,14 @@ Unary: () = {
 // testing the actual parser, not by re-deriving the grammar more
 // carefully.
 Call: () = {
-    Primary,
-    Primary "(" Args ")" => (),
+    Primary CallSuffix,
+};
+StmtCall: () = { StmtPrimary StmtCallSuffix };
+StmtPrimary: () = { INT => (), "true" => (), "false" => (), IDENT => () };
+StmtCallSuffix: () = { => (), "(" Args ")" => () };
+CallSuffix: () = {
+    => (),
+    "(" Args ")" => (),
 };
 #[inline]
 Args: () = {

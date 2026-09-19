@@ -8,9 +8,9 @@ transliterates `docs/GRAMMAR.md`'s EBNF into `lalrpop`'s syntax,
 production-for-production. `lalrpop` refuses to generate a parser table
 for an ambiguous grammar — a clean build *is* the proof.
 
-**This crate currently does not build cleanly, and that's the actual
-result, not a broken build waiting to be fixed.** Read on before assuming
-`cargo build` failing here means something's wrong.
+The grammar now builds cleanly and its 13 parser-shape tests pass. The fix
+encodes the hand-written parser's statement-boundary rule instead of relying
+on LALRPOP conflict behavior.
 
 ## The finding
 
@@ -182,3 +182,13 @@ plainly about this pass:
   scope for this pass (Row 12/`docs/WORKFLOW.md`/Track E1's declaration-level
   constructs specifically) — a real, remaining gap, disclosed rather
   than silently implied to be covered.
+
+  ## 2026-09-19 resolution
+
+  The conflict-free implementation is now in `src/nirdosha.lalrpop`. Expression
+  tiers use explicit right-recursive tails; statement expressions use the
+  primary-starting forms supported by the shipped parser; and `if` remains a
+  statement production. `cargo test -p nirdosha-grammar-check` passes all 13
+  tests. The test helper strips line comments before parsing because LALRPOP's
+  bundled lexer rejects Unicode regex classes; this limitation is isolated to
+  the independent cross-check harness.

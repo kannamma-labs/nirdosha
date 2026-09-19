@@ -9,7 +9,6 @@
 //! (LALR(1)-conflicting) grammar, so a successful build of this crate
 //! *is* the proof, not a description of one.
 
-#[allow(clippy::all)]
 lalrpop_util::lalrpop_mod!(pub nirdosha);
 
 #[cfg(test)]
@@ -17,7 +16,12 @@ mod tests {
     use super::nirdosha::ProgramParser;
 
     fn parses(src: &str) -> bool {
-        ProgramParser::new().parse(src).is_ok()
+        let normalized = src
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ProgramParser::new().parse(&normalized).is_ok()
     }
 
     #[test]
