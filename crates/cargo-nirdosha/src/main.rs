@@ -54,6 +54,9 @@ fn main() -> ExitCode {
         "keygen" => keygen_cli(rest),
         "verify-certificate" => verify_certificate_cli(rest),
         "verify" => {
+            if rest.iter().any(|arg| arg == "--guard") {
+                return verify_guard_cli(rest);
+            }
             let workspace = rest.iter().any(|a| a == "--workspace" || a == "--all");
             // `--provenance` (G6): additionally binds the resolved
             // dependency closure (Cargo.lock) and toolchain into the
@@ -149,6 +152,29 @@ fn main() -> ExitCode {
             delegate(s, rest)
         }
     }
+}
+
+fn verify_guard_cli(args: &[String]) -> ExitCode {
+    let path = flag_value(args, "--registry-json").unwrap_or_else(|| "nirdosha-registry.json".into());
+    let json = match std::fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("nirdosha: cannot read guard registry {path}: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let registry = match nirdosha_guard_verify::RegistryView::from_json(&json) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("nirdosha: invalid guard registry {path}: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let findings = nirdosha_guard_verify::verify(&registry);
+    for finding in &findings {
+        eprintln!("{} {:?}: {}", finding.pass, finding.severity, finding.message);
+    }
+    if findings.iter().any(|finding| finding.severity == nirdosha_guard_verify::Severity::Error) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
 /// Explicit consumer gate, deliberately independent of Cargo metadata.
