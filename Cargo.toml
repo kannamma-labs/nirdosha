@@ -25,6 +25,7 @@ members = [
     # and GraphStore port — plus the composition/query proc-macros and the
     # two GraphStore drivers (embedded + remote).
     "crates/nirdosha-lineage",
+    "crates/nirdosha-lineage-macros",
     # RFC 0023 §1C: federated reads, catalog routing, and budget coordination.
     "crates/nirdosha-guard-federation",
     # RFC 0023 macros: policy!, #[dataset], #[classify], etc.
