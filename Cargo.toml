@@ -31,6 +31,10 @@ members = [
     "crates/nirdosha-guard-macros",
     # RFC 0023 §1C.3 / RFC 0024: first-class guarded MCP surface for agents.
     "crates/nirdosha-guard-mcp",
+    # RFC 0023/0025 substrate: catalog record registry (linkme slices),
+    # module interconnection contract (GuardClient, StoreDriver SPI,
+    # guarded_apply), and the V-pass / conformance verify engine.
+    "crates/nirdosha-guard-registry",
     # Pure, dependency-light transaction-isolation-anomaly detection
     # (the Direct Serialization Graph algorithm), shared verbatim by
     # `crates/runtime-kernels` (the live FFI-hooked path, via its own
