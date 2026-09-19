@@ -21,6 +21,10 @@ members = [
     "crates/nirdosha-audit",
     # RFC 0023: store-agnostic access-control IR and invariants.
     "crates/nirdosha-guard-core",
+    # RFC 0026: vendor-free observed-lineage types, collector, projection,
+    # and GraphStore port — plus the composition/query proc-macros and the
+    # two GraphStore drivers (embedded + remote).
+    "crates/nirdosha-lineage",
     # RFC 0023 §1C: federated reads, catalog routing, and budget coordination.
     "crates/nirdosha-guard-federation",
     # RFC 0023 macros: policy!, #[dataset], #[classify], etc.
