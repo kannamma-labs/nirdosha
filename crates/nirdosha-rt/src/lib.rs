@@ -33,6 +33,15 @@ pub use nirdosha_guard_macros::{
     invariant, materialize, mask_transform, policy as guard_policy, purpose, reference,
     relation,
 };
+pub use nirdosha_guard_registry as guard_registry;
+
+// RFC 0026: the metadata plane. The lineage crate itself is re-exported as a
+// submodule (types, collector, projection, GraphStore); the macro surface is
+// the parse scaffold — expansion lands per the RFC's phasing.
+pub use nirdosha_lineage_macros::{
+    data_contract, lineage_query, migration_plan, policy_simulation,
+};
+pub use nirdosha_lineage as lineage;
 
 pub mod dashboard;
 pub mod nfr;

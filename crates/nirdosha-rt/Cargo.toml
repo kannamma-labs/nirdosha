@@ -52,6 +52,9 @@ fleet-rate-limit = ["dep:redis"]
 [dependencies]
 nirdosha-macros = { path = "../nirdosha-macros" }
 nirdosha-guard-macros = { path = "../nirdosha-guard-macros" }
+nirdosha-guard-registry = { path = "../nirdosha-guard-registry" }
+nirdosha-lineage = { path = "../nirdosha-lineage" }
+nirdosha-lineage-macros = { path = "../nirdosha-lineage-macros" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nirdosha-runtime-kernels = { path = "../runtime-kernels", optional = true }
@@ -65,6 +68,11 @@ tokio-rustls = { version = "0.26", optional = true }
 redis = { version = "0.27", default-features = false, features = ["script"], optional = true }
 
 [dev-dependencies]
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+nirdosha-guard-mic = { path = "../nirdosha-guard-mic" }
+nirdosha-guard-verify = { path = "../nirdosha-guard-verify" }
+nirdosha-guard-federation = { path = "../nirdosha-guard-federation" }
+nirdosha-guard-mcp = { path = "../nirdosha-guard-mcp" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 jsonwebtoken = "9"
 proptest = "1"
