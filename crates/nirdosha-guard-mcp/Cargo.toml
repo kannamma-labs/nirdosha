@@ -9,7 +9,8 @@ license = "MIT"
 [dependencies]
 nirdosha-guard-core = { path = "../nirdosha-guard-core" }
 nirdosha-guard-federation = { path = "../nirdosha-guard-federation" }
+nirdosha-guard-registry = { path = "../nirdosha-guard-registry" }
+serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-serde_json = "1"

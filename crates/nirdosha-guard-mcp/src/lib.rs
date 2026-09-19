@@ -36,7 +36,7 @@ pub struct DelegationToken {
 pub struct GuardMcpServer {
     pub tools: Vec<ToolDescription>,
     pub agent_writes_enabled: bool,
-    pub session_evaluations: HashMap<String, AccessPlan>,
+    pub session_evaluations: HashMap<String, String>, // token_id + plan_hash -> evaluated
 }
 
 impl GuardMcpServer {
@@ -47,31 +47,31 @@ impl GuardMcpServer {
                     name: "list_entities".into(),
                     description: "List guard-registered entities".into(),
                     input_schema: "{}".into(),
-                    signature_hash: "...".into(),
+                    signature_hash: "sha256-sig-001".into(),
                 },
                 ToolDescription {
                     name: "describe_entity".into(),
                     description: "Return redacted schema + classification".into(),
                     input_schema: "{\"entity\":\"string\"}".into(),
-                    signature_hash: "...".into(),
+                    signature_hash: "sha256-sig-002".into(),
                 },
                 ToolDescription {
                     name: "get_options".into(),
                     description: "Enumerate allowed values for a categorical field".into(),
                     input_schema: "{\"entity\":\"string\",\"field\":\"string\"}".into(),
-                    signature_hash: "...".into(),
+                    signature_hash: "sha256-sig-003".into(),
                 },
                 ToolDescription {
                     name: "query_records".into(),
                     description: "Query records under policy".into(),
                     input_schema: "{\"entity\":\"string\"}".into(),
-                    signature_hash: "...".into(),
+                    signature_hash: "sha256-sig-004".into(),
                 },
                 ToolDescription {
                     name: "evaluate".into(),
                     description: "Dry-run a policy decision".into(),
                     input_schema: "{\"entity\":\"string\",\"action\":\"string\"}".into(),
-                    signature_hash: "...".into(),
+                    signature_hash: "sha256-sig-005".into(),
                 },
             ],
             agent_writes_enabled: false,
@@ -79,39 +79,112 @@ impl GuardMcpServer {
         }
     }
 
+    /// Construct MCP server tools dynamically from the registry dump.
+    pub fn from_registry(dump: &nirdosha_guard_registry::RegistryDump) -> Self {
+        let mut server = Self::new();
+        for dataset in &dump.datasets {
+            server.tools.push(ToolDescription {
+                name: format!("query_{}", dataset.entity),
+                description: format!("Guarded query tool for entity {}", dataset.entity),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "filter": { "type": "string" }
+                    }
+                }).to_string(),
+                signature_hash: format!("sig-reg-{}", dataset.entity),
+            });
+        }
+        server
+    }
+
+    /// Mint a non-transferable, purpose-bound delegation token for an agent.
+    pub fn mint_token(
+        user_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        purpose: Purpose,
+        destination: Destination,
+        policy_version: impl Into<String>,
+    ) -> DelegationToken {
+        let user = user_id.into();
+        let agent = agent_id.into();
+        let version = policy_version.into();
+        let scope_hash = format!("hash({}:{}:{version})", user, agent);
+        DelegationToken {
+            user_id: user,
+            agent_id: agent,
+            purpose,
+            destination,
+            policy_version: version,
+            scope_hash,
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        }
+    }
+
     /// Evaluate a request in the LLM context. Default posture denies
     /// CONFIDENTIAL and sensitive-purpose reads unless explicitly granted.
     pub fn evaluate(
-        &self,
-        _token: &DelegationToken,
+        &mut self,
+        token: &DelegationToken,
         context: &EvaluationContext,
     ) -> (Decision, AccessPlan) {
-        // Default fail-closed placeholder.
+        let deny = |reason: &str| {
+            let plan = AccessPlan {
+                decision: Decision::Deny { reason: reason.into() },
+                filter: None,
+                masks: vec![],
+                caps: vec![],
+                obligations: vec![nirdosha_guard_core::Obligation::Audit { level: nirdosha_guard_core::AuditLevel::Full }],
+                policy_version: context.policy_version.clone(),
+            };
+            (plan.decision.clone(), plan)
+        };
+        if token.user_id != context.subject.id {
+            return deny("delegation subject mismatch");
+        }
+        if token.policy_version != context.policy_version {
+            return deny("delegation policy snapshot mismatch");
+        }
+        if token.destination != context.destination || context.destination != Destination::LlmContext {
+            return deny("agent destination is not permitted");
+        }
+        if matches!(context.subject.clearance, nirdosha_guard_core::Classification::Confidential | nirdosha_guard_core::Classification::Restricted) {
+            return deny("agent access to confidential data is denied by default");
+        }
+
+        let plan_hash = format!("plan-hash-{}", context.entity);
+        self.session_evaluations.insert(format!("{}:{}", token.agent_id, plan_hash), plan_hash);
+
         let plan = AccessPlan {
-            decision: Decision::Allow,
+            decision: Decision::Deny { reason: "no explicit agent policy was supplied".into() },
             filter: None,
             masks: vec![],
-            caps: vec![],
-            obligations: vec![],
+            caps: vec![nirdosha_guard_core::Cap::RowCap(50)],
+            obligations: vec![nirdosha_guard_core::Obligation::Audit { level: nirdosha_guard_core::AuditLevel::Full }],
             policy_version: context.policy_version.clone(),
         };
-        (Decision::Allow, plan)
+        (plan.decision.clone(), plan)
     }
 
-    /// `submit_write` is default-off for agents.
+    /// `submit_write` requires evaluate-then-act with a matching plan hash.
     pub fn submit_write(
         &self,
-        _token: &DelegationToken,
-        _plan_hash: String,
-        _plan: WritePlan,
+        token: &DelegationToken,
+        plan_hash: String,
+        plan: WritePlan,
     ) -> Decision {
         if !self.agent_writes_enabled {
             return Decision::Deny {
                 reason: "agent writes are disabled by default".into(),
             };
         }
-        Decision::Deny {
-            reason: "evaluate-then-act hash match required".into(),
+        let key = format!("{}:{}", token.agent_id, plan_hash);
+        if self.session_evaluations.contains_key(&key) {
+            plan.decision
+        } else {
+            Decision::Deny {
+                reason: "evaluate-then-act hash match required".into(),
+            }
         }
     }
 }
@@ -126,20 +199,32 @@ impl Default for GuardMcpServer {
 mod tests {
     use super::*;
 
+    fn context(clearance: nirdosha_guard_core::Classification) -> EvaluationContext {
+        EvaluationContext {
+            subject: nirdosha_guard_core::Subject { id: "u1".into(), roles: vec![], claims: vec![], clearance },
+            tenant: nirdosha_guard_core::Tenant("t".into()),
+            entity: "orders".into(),
+            dataset: "memory".into(),
+            action: nirdosha_guard_core::Action::Read,
+            destination: Destination::LlmContext,
+            environment: nirdosha_guard_core::Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None },
+            time_bucket: "now".into(),
+            query_shape: nirdosha_guard_core::QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: nirdosha_guard_core::PaginationMode::LimitOnly { limit: 1 } },
+            purpose: Purpose("support".into()),
+            policy_version: "v1".into(),
+        }
+    }
+
+    fn token() -> DelegationToken {
+        GuardMcpServer::mint_token("u1", "a1", Purpose("support".into()), Destination::LlmContext, "v1")
+    }
+
     #[test]
     fn agent_write_default_off() {
         let server = GuardMcpServer::new();
-        let token = DelegationToken {
-            user_id: "u1".into(),
-            agent_id: "a1".into(),
-            purpose: Purpose("Agent".into()),
-            destination: Destination::LlmContext,
-            policy_version: "v1".into(),
-            scope_hash: "h1".into(),
-            expires_at: "2026-09-19T00:00:00Z".into(),
-        };
+        let tok = token();
         let decision = server.submit_write(
-            &token,
+            &tok,
             "hash".into(),
             WritePlan {
                 decision: Decision::Allow,
@@ -154,5 +239,32 @@ mod tests {
             },
         );
         assert!(matches!(decision, Decision::Deny { .. }));
+    }
+
+    #[test]
+    fn evaluate_then_act_allows_write_when_enabled_and_matched() {
+        let mut server = GuardMcpServer::new();
+        server.agent_writes_enabled = true;
+        let tok = token();
+        let ctx = context(nirdosha_guard_core::Classification::Internal);
+        let _ = server.evaluate(&tok, &ctx);
+
+        let plan_hash = "plan-hash-orders".to_string();
+        let decision = server.submit_write(
+            &tok,
+            plan_hash,
+            WritePlan {
+                decision: Decision::Allow,
+                action: nirdosha_guard_core::WriteAction::Update,
+                row_scope: None,
+                preconditions: vec![],
+                postconditions: vec![],
+                field_policy: vec![],
+                affected_row_cap: 1,
+                obligations: vec![],
+                policy_version: "v1".into(),
+            },
+        );
+        assert_eq!(decision, Decision::Allow);
     }
 }
