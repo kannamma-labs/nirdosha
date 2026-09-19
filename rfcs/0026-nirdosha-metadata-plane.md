@@ -308,6 +308,13 @@ Rules:
 - **Policy-version stability.** The edge key includes `policy_version`; a new
   policy version creates a new edge, so historical and current flows are not
   silently merged.
+- **Merge identity is explicit.** `EdgeKey` is exactly
+  `(edge_type, src, dst, policy_version, purpose, authority)`. Purpose and
+  authority are key dimensions, never mergeable metadata: queries can filter
+  by purpose, and MP-7 prevents trust levels from being combined. Metadata
+  attached to one key is keep-first and therefore immutable under a
+  chain-ordered projection; per-observation completeness and degradation stay
+  available through chain replay.
 
 ### 6.3 Projection and reconstruction
 
@@ -338,9 +345,12 @@ crates/
 └── nirdosha-lineage-sink-*/     # Phase 4 federation sinks (Appendix A)
 ```
 
-`nirdosha-lineage` depends only on `nirdosha-guard-core`, `nirdosha-audit`,
-and `nirdosha-guard-federation` — it is subject to the same workspace lint as
-`policy/*` (no vendor crates; RFC 0025 N-A4).
+`nirdosha-lineage` depends only on `nirdosha-guard-core` and
+`nirdosha-audit` in Phase 1; the federation dependency is added with the
+declared-graph join. It is subject to the same workspace lint as `policy/*`
+(no vendor crates; RFC 0025 N-A4). The embedded and remote crates are the two
+GraphStore drivers required by V8; they are separate from the projection
+cache and do not become a second source of truth.
 
 **Why `nirdosha-lineage-macros` is a separate crate.** Lineage is a
 separate plane from guard policy. Folding these macros into
@@ -369,30 +379,25 @@ v1.3.0?" is a graph query forever.
 ### 7.1 SPI extension (additive to RFC 0025 §7.5)
 
 ```rust
-// Additive to the existing StoreDriver trait; no existing method changes.
-
-pub struct LineageObservations {
-    pub sources: Vec<EntityRef>,     // datasets/keys actually read (row-level)
-    pub sink: EntityRef,               // what was written
-    pub transformation: TransformId,   // policy/window/model/matcher that produced it
+// Additive to guard-core. Drivers pre-tokenize keys; raw RESTRICTED values
+// never enter the metadata plane.
+pub struct LineageEntity {
+  pub entity: EntityId,
+  pub keys: Vec<String>,
 }
 
-#[async_trait]
-pub trait StoreDriver {
-    // … existing methods (RFC 0025 §7.5) …
-
-    /// Pure, cheap, called by the kernel after execution. Reports only what the
-    /// driver uniquely knows: row-level source attribution. Everything else —
-    /// subject, action, purpose, decision, receipt — is merged kernel-side.
-    async fn lineage(&self, p: &Prepared) -> LineageObservations {
-        LineageObservations {
-            sources: vec![],
-            sink: EntityRef { node: p.target_node.clone(), keys: None },
-            transformation: TransformId::Policy(p.policy_id.clone()),
-        }
-    }
+pub struct LineageFacts {
+  pub sources: Vec<LineageEntity>,
+  pub sink_keys: Vec<String>,
 }
 ```
+
+The Phase-2 MIC adds `StoreDriver::lineage()` and maps its evaluation context
+and snapshot version into the collector's explicit context parameters. The
+Phase-1 lineage crate does not depend on the context's field layout. Node
+resolution is collector-owned; drivers report only row-level sources and
+optional sink-key refinement. There is no `LineageObservations` bridge type,
+async SPI, or driver-owned sink identity.
 
 Scope rules:
 
@@ -541,6 +546,9 @@ into the MCP registry like any other tool (RFC 0023 §1C.3; RFC 0024 §6 signed
 build-time descriptions), keeping verify pass V6 in lockstep.
 
 ### 9.2 Macro grammar and expansion
+
+The illustrative yield-list grammar from the earlier draft is superseded by
+the typed view form below: `view name(params) -> Row { field: Type [filter] }`.
 
 ```rust
 nirdosha_rt::lineage_query! {
@@ -942,11 +950,18 @@ The following are genuinely open but not blocking for Draft:
 5. Reconstruction SLA as a catalog-attested GraphStore capability?
 6. Should `ExternalClaimed` edges require a guarded `link_external_lineage`
    action before they are joined to kernel-attested nodes? (Leaning yes.)
+7. Should tenant become an `EdgeKey` dimension for cross-tenant projections,
+  or remain a query/reconciliation constraint?
+8. How should watermark/degraded observations contribute to `EdgeStats`
+  beyond the current sampled flag and chain-replay visibility?
+9. What canonical external-ingress node represents a zero-source flow while
+  preserving the distinction between unknown source and genuine ingress?
 
 Load-bearing questions resolved in this version:
 
-- Edge statistics are keyed by `(edge_type, src, dst, policy_version)`; a new
-  policy version starts a new edge.
+- Edge statistics are keyed by
+  `(edge_type, src, dst, policy_version, purpose, authority)`; a new policy
+  version, purpose, or authority starts a new edge.
 - Dormant aging thresholds live in policy records, making them replayable.
 - `KernelIssuance` edges persist as historical records with a `revoked_at`
   annotation; they do not auto-expire.
