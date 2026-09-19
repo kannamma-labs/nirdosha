@@ -304,3 +304,7 @@ path = "src/fintech_canon/13_masked_account_pii.nir"
 name = "v2_58_ui_showcase"
 path = "src/58_ui_showcase.nir"
 
+
+[[bin]]
+name = "v2_60_data_guard"
+path = "src/60_data_guard.nir"

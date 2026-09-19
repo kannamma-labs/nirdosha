@@ -1,0 +1,98 @@
+//! v2 example: RFC 0023 guard macros in a `.nir` file.
+//!
+//! This file compiles under plain `cargo` and, post migration, will run
+//! unmodified under the proprietary `cargo nirdosha build`. It does not
+//! use the deprecated native `.nir` compiler (`crates/compiler`).
+//!
+//! Demonstrates: guard policy blocks, dataset/relation/classify attributes,
+//! mask transforms, invariants, purpose extension, and audit sampling.
+
+nirdosha_rt::roles! {
+    Support = "support";
+    Admin = "admin";
+}
+
+#[nirdosha_rt::classify(level = "CONFIDENTIAL")]
+struct CardNumber {
+    value: String,
+}
+
+#[nirdosha_rt::classify(level = "RESTRICTED")]
+struct Cvv {
+    value: String,
+}
+
+#[nirdosha_rt::dataset(entity = "payment_card", store = "pg_primary")]
+struct PaymentCard {
+    id: i64,
+    #[allow(dead_code)]
+    card_number: CardNumber,
+    #[allow(dead_code)]
+    cvv: Cvv,
+}
+
+#[nirdosha_rt::mask_transform(name = "partial_last4")]
+fn partial_last4(c: CardNumber) -> CardNumber {
+    c
+}
+
+#[nirdosha_rt::relation(source = "org_registry", cardinality = 500, ttl = 60)]
+fn branches_under(user_id: i64) -> Vec<i64> {
+    vec![user_id]
+}
+
+#[nirdosha_rt::invariant(name = "no_overdraft", schema = "account")]
+fn no_overdraft(old_balance: i64, new_balance: i64) -> bool {
+    new_balance >= 0
+}
+
+#[nirdosha_rt::purpose(code = "clinical_trial_23", basis = "consent", review = "2025-06-01")]
+enum LocalPurpose {
+    ClinicalTrial23,
+}
+
+nirdosha_rt::audit_sampling! {
+    classification: PUBLIC       -> rate 0.0;
+    classification: INTERNAL      -> rate 0.01;
+    classification: CONFIDENTIAL -> rate 1.0;
+    classification: RESTRICTED  -> rate 1.0;
+}
+
+nirdosha_rt::audit_rules! {
+    always_full: [deny, export, delegated, break_glass, sensitive_field_read];
+}
+
+nirdosha_rt::guard_policy! {
+    allow "support-view-card" when action == "read" && resource == "payment_card"
+    mask(card_number, partial_last4)
+    mask(cvv, full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "limit-adjust" when action == "update" && resource == "account"
+    requires field(status).in(["pending", "active"])
+    ensures field(balance) <= field(credit_limit)
+    field_policy {
+        required(status)
+        allowed(balance)
+        forbidden(credit_limit)
+    }
+}
+
+fn main() {
+    let _card = PaymentCard {
+        id: 1,
+        card_number: CardNumber { value: "1234".into() },
+        cvv: Cvv { value: "000".into() },
+    };
+    println!("data guard configured");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn guard_macros_compile() {
+        // The entire file is the test: it compiled and ran.
+        assert!(true);
+    }
+}

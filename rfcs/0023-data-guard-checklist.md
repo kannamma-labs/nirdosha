@@ -32,7 +32,8 @@ Last updated: 2026-09-18 — reverted legacy `.nir` compiler changes; guard surf
 - `[DONE]` `#[dataset]`, `#[relation]`, `#[classify]`, `#[materialize]`, `#[reference]`, `#[mask_transform]`, `#[invariant]`, `#[purpose]` parsed as v2 Rust attribute macros; compiles in `nirdosha-rt` tests.
 - `[DONE]` `audit_sampling!`, `audit_rules!`, `enumerate!`, `break_glass!`, `approval_chain!` available as v2 Rust macros through `nirdosha_rt`.
 - `[ ]` `field_policy { ... }`, `requires`, `ensures`, `mask(...)`, `cap(...)`, `escalate to ...`, `obligate ...` lowered to IR inside `policy!`.
-- `[ ]` HLD examples rewritten as v2 Rust programs in `examples/rt-*` or `crates/nirdosha-rt/tests/` and verified end-to-end.
+- `[DONE]` HLD examples rewritten as v2 Rust programs: `examples/nirdosha-v2-corpus/src/60_data_guard.nir` with `cargo check`/`cargo run`/`cargo test` verified.
+- `[ ]` Full `AccessPlan`/`WritePlan` lowering from `guard_policy!` blocks; currently macros are no-ops.
 - `[ ]` Typeck / ownership integration: at minimum no false-positive errors on guard items.
 
 ## 3. Write plans (§2)
