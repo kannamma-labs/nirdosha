@@ -7,7 +7,8 @@ description = "Store-agnostic access-control IR and invariants for Nirdosha Guar
 license = "MIT"
 
 [dependencies]
+nirdosha-audit = { path = "../nirdosha-audit" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
-serde_json = "1"

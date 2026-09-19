@@ -314,6 +314,8 @@ dependencies = [
  "base64",
  "nirdosha-audit",
  "nirdosha-contract-core",
+ "nirdosha-guard-registry",
+ "nirdosha-guard-verify",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1799,6 +1801,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "linkme"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3045e122bd98aef8ec3ad58ce84f0791f64e70163d1a02710af4aa11a4d54cc5"
+dependencies = [
+ "linkme-impl",
+]
+
+[[package]]
+name = "linkme-impl"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77060ebe535362c3da75682cd17b0431017b6e7c5661e714fc69a7ad017d1301"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2004,6 +2026,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "signal-hook",
  "tiny_http",
  "z3",
@@ -2089,6 +2112,7 @@ dependencies = [
 name = "nirdosha-guard-core"
 version = "0.1.0"
 dependencies = [
+ "nirdosha-audit",
  "serde",
  "serde_json",
 ]
@@ -2118,6 +2142,42 @@ version = "0.1.0"
 dependencies = [
  "nirdosha-guard-core",
  "nirdosha-guard-federation",
+ "nirdosha-guard-registry",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nirdosha-guard-mic"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-audit",
+ "nirdosha-guard-core",
+ "nirdosha-guard-registry",
+ "nirdosha-lineage",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nirdosha-guard-registry"
+version = "0.1.0"
+dependencies = [
+ "linkme",
+ "nirdosha-guard-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nirdosha-guard-verify"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-audit",
+ "nirdosha-guard-core",
+ "nirdosha-guard-mic",
+ "nirdosha-guard-registry",
+ "nirdosha-lineage",
  "serde",
  "serde_json",
 ]
@@ -2151,6 +2211,25 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nirdosha-lineage"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-audit",
+ "nirdosha-guard-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nirdosha-lineage-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2198,7 +2277,15 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "jsonwebtoken",
+ "nirdosha-guard-core",
+ "nirdosha-guard-federation",
  "nirdosha-guard-macros",
+ "nirdosha-guard-mcp",
+ "nirdosha-guard-mic",
+ "nirdosha-guard-registry",
+ "nirdosha-guard-verify",
+ "nirdosha-lineage",
+ "nirdosha-lineage-macros",
  "nirdosha-macros",
  "nirdosha-runtime-kernels",
  "proptest",
@@ -2252,6 +2339,7 @@ version = "0.1.0"
 name = "nirdosha-v2-corpus"
 version = "0.1.0"
 dependencies = [
+ "nirdosha-guard-registry",
  "nirdosha-rt",
  "serde",
  "serde_json",

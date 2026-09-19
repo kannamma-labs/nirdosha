@@ -1,0 +1,89 @@
+//! Minimal exact-match policy evaluator.
+//!
+//! This is deliberately smaller than a policy frontend. It provides the
+//! deterministic deny-overrides kernel that registry and Cedar adapters can
+//! feed without making the IR depend on either frontend.
+
+use crate::{Action, Condition, Decision, EscalateTarget, EvaluationContext, FilterExpr, Obligation};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyCandidate {
+    pub effect: PolicyEffect,
+    pub subjects: Vec<String>,
+    pub action: Action,
+    pub resource: String,
+    pub purpose: Option<String>,
+    pub conditions: Vec<Condition>,
+    pub filter: Option<FilterExpr>,
+    pub obligations: Vec<Obligation>,
+    pub escalation: Option<EscalateTarget>,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyEffect { Allow, Deny }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationResult {
+    pub decision: Decision,
+    pub obligations: Vec<Obligation>,
+    pub residual_filter: Option<FilterExpr>,
+}
+
+pub fn evaluate(context: &EvaluationContext, policies: &[PolicyCandidate]) -> EvaluationResult {
+    let mut matching = policies.iter().filter(|policy| matches_context(context, policy));
+    let mut obligations = Vec::new();
+    let mut residual_filter = None;
+    let mut allow = false;
+    let mut escalation = None;
+
+    while let Some(policy) = matching.next() {
+        if matches!(policy.effect, PolicyEffect::Deny) {
+            return EvaluationResult { decision: Decision::Deny { reason: format!("policy denied: {}", policy.id) }, obligations: Vec::new(), residual_filter: None };
+        }
+        allow = true;
+        obligations.extend(policy.obligations.clone());
+        residual_filter = residual_filter.or_else(|| policy.filter.clone());
+        escalation = escalation.or_else(|| policy.escalation.clone());
+    }
+
+    if let Some(target) = escalation {
+        return EvaluationResult { decision: Decision::Escalate { to: target }, obligations, residual_filter };
+    }
+    if allow {
+        EvaluationResult { decision: Decision::Allow, obligations, residual_filter }
+    } else {
+        EvaluationResult { decision: Decision::Deny { reason: "deny by default".into() }, obligations: Vec::new(), residual_filter: None }
+    }
+}
+
+fn matches_context(context: &EvaluationContext, policy: &PolicyCandidate) -> bool {
+    let role_match = policy.subjects.is_empty() || policy.subjects.iter().any(|subject| context.subject.roles.iter().any(|role| role == subject));
+    role_match
+        && context.action == policy.action
+        && context.entity == policy.resource
+        && policy.purpose.as_ref().is_none_or(|purpose| purpose == &context.purpose.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Destination, Environment, Purpose, QueryShape, Subject, Tenant, Classification};
+
+    fn context() -> EvaluationContext {
+        EvaluationContext { subject: Subject { id: "u".into(), roles: vec!["analyst".into()], claims: vec![], clearance: Classification::Internal }, tenant: Tenant("t".into()), entity: "orders".into(), dataset: "db".into(), action: Action::Read, destination: Destination::Browser, environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None }, time_bucket: "now".into(), query_shape: QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: crate::PaginationMode::LimitOnly { limit: 10 } }, purpose: Purpose("support".into()), policy_version: "v1".into() }
+    }
+
+    fn candidate(effect: PolicyEffect) -> PolicyCandidate {
+        PolicyCandidate { effect, subjects: vec!["analyst".into()], action: Action::Read, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, id: "orders-read".into() }
+    }
+
+    #[test]
+    fn deny_by_default() { assert!(matches!(evaluate(&context(), &[]).decision, Decision::Deny { .. })); }
+
+    #[test]
+    fn deny_overrides_allow() { assert!(matches!(evaluate(&context(), &[candidate(PolicyEffect::Allow), candidate(PolicyEffect::Deny)]).decision, Decision::Deny { .. })); }
+
+    #[test]
+    fn exact_match_allows() { assert_eq!(evaluate(&context(), &[candidate(PolicyEffect::Allow)]).decision, Decision::Allow); }
+}

@@ -20,6 +20,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod break_glass;
+pub mod cedar;
+pub mod decision_cache;
+pub mod delegation;
+pub mod drivers;
+pub mod evaluator;
+pub mod guard_down;
+pub mod relation_lower;
+pub mod snapshot;
+
 /// A path to a field inside a record, e.g. `customer.address.zip`.
 pub type FieldPath = Vec<String>;
 
@@ -37,6 +47,21 @@ pub type PolicyVersion = String;
 
 /// Opaque source-epoch token for relation freshness.
 pub type SourceEpoch = String;
+
+/// One entity touched at row level, with pre-tokenized keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineageEntity {
+    pub entity: EntityId,
+    pub keys: Vec<String>,
+}
+
+/// Driver-reported lineage enrichment. Kernel-owned fields are intentionally
+/// absent: the driver can report sources and refine sink keys only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LineageFacts {
+    pub sources: Vec<LineageEntity>,
+    pub sink_keys: Vec<String>,
+}
 
 /// Subject identity: the actor requesting access.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -535,6 +560,35 @@ pub struct DatasetRegistryEntry {
     pub store: String,
     pub routing: BindingRouting,
     pub primary_write_binding: bool,
+}
+
+// LineageFacts in scope note: `keys` MUST be pre-tokenized by the driver (the
+// plane never receives raw RESTRICTED values — RFC 0026 §6.1/§13); node
+// resolution is collector-side (nirdosha-lineage), not driver work.
+#[cfg(test)]
+mod lineage_facts_tests {
+    use super::*;
+
+    #[test]
+    fn lineage_facts_default_has_no_enrichment() {
+        let facts = LineageFacts::default();
+        assert!(facts.sources.is_empty());
+        assert!(facts.sink_keys.is_empty());
+    }
+
+    #[test]
+    fn lineage_facts_round_trip_json() {
+        let facts = LineageFacts {
+            sources: vec![LineageEntity {
+                entity: "txn_events".into(),
+                keys: vec!["tok_1".into()],
+            }],
+            sink_keys: vec!["tok_9".into()],
+        };
+        let json = serde_json::to_string(&facts).unwrap();
+        let back: LineageFacts = serde_json::from_str(&json).unwrap();
+        assert_eq!(facts, back);
+    }
 }
 
 #[cfg(test)]
