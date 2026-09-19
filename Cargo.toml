@@ -35,6 +35,7 @@ members = [
     # module interconnection contract (GuardClient, StoreDriver SPI,
     # guarded_apply), and the V-pass / conformance verify engine.
     "crates/nirdosha-guard-registry",
+    "crates/nirdosha-guard-mic",
     # Pure, dependency-light transaction-isolation-anomaly detection
     # (the Direct Serialization Graph algorithm), shared verbatim by
     # `crates/runtime-kernels` (the live FFI-hooked path, via its own
