@@ -1,0 +1,13 @@
+[package]
+name = "nirdosha-lineage-store-embedded"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "Embedded GraphStore driver for the RFC 0026 metadata plane"
+license = "MIT"
+
+[dependencies]
+nirdosha-lineage = { path = "../nirdosha-lineage" }
+
+[dev-dependencies]
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }
