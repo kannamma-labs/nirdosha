@@ -97,6 +97,12 @@ fips = ["nirdosha-audit/fips"]
 # staticlib, nothing to link).
 [dev-dependencies]
 nirdosha-ui-plugin-example-sparkline = { path = "../ui-plugin-example-sparkline" }
+# `tests/in_toto.rs` calls `sha2::{Digest, Sha256}` directly to compute the
+# expected SHA-256 digest independent of the compiler's own implementation,
+# verifying the two agree. `sha2` is already a transitive dependency via
+# `nirdosha-audit`, but test code that references it by crate name requires a
+# direct dev-dependency entry (same version pinned workspace-wide).
+sha2 = "0.10"
 
 # `overflow-checks = true` for release builds used to live here, back
 # when this file was itself the workspace root. It's now at the real

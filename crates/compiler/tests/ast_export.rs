@@ -25,6 +25,13 @@ fn collect_nir_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("failed to read {dir:?}: {e}")) {
         let path = entry.expect("dir entry should read").path();
         if path.is_dir() {
+            // `nirdosha-v2-corpus/` files are Rust-dialect `.nir` (semicolons,
+            // macro calls, `::` paths, etc.) — they are not valid native-syntax
+            // `.nir` source and will fail the native lexer. Skip the whole
+            // directory; it has its own `cargo test -p nirdosha-v2-corpus` suite.
+            if path.file_name().and_then(|n| n.to_str()) == Some("nirdosha-v2-corpus") {
+                continue;
+            }
             collect_nir_files(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("nir") {
             out.push(path);
