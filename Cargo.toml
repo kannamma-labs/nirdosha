@@ -11,12 +11,22 @@ members = [
     # verify" question goes through `nirdosha-hi`'s own `v2_verify.rs`
     # (real `cargo build` + `cargo-nirdosha`), never the native parser.
     "crates/nirdosha-hi",
+    "crates/nirdosha-graph",
+    "crates/nirdosha-workflow",
     # Shared Ed25519 signing + tamper-evident audit-log primitives, used
     # by both `crates/compiler` (certificate/pack signing) and
     # `crates/nirdosha-hi` (the self-repair loop's hint-cache audit
     # trail) -- extracted alongside `nirdosha-hi` for the same reason:
     # neither crate should depend on the other just to share this.
     "crates/nirdosha-audit",
+    # RFC 0023: store-agnostic access-control IR and invariants.
+    "crates/nirdosha-guard-core",
+    # RFC 0023 §1C: federated reads, catalog routing, and budget coordination.
+    "crates/nirdosha-guard-federation",
+    # RFC 0023 macros: policy!, #[dataset], #[classify], etc.
+    "crates/nirdosha-guard-macros",
+    # RFC 0023 §1C.3 / RFC 0024: first-class guarded MCP surface for agents.
+    "crates/nirdosha-guard-mcp",
     # Pure, dependency-light transaction-isolation-anomaly detection
     # (the Direct Serialization Graph algorithm), shared verbatim by
     # `crates/runtime-kernels` (the live FFI-hooked path, via its own

@@ -1,0 +1,15 @@
+[package]
+name = "nirdosha-guard-mcp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "Data-guard MCP server for LLM agents — first-class guarded client"
+license = "MIT"
+
+[dependencies]
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+nirdosha-guard-federation = { path = "../nirdosha-guard-federation" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
