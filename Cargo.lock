@@ -2233,6 +2233,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-lineage-sink-http"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-lineage",
+]
+
+[[package]]
+name = "nirdosha-lineage-sink-jsonl"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-lineage",
+ "serde_json",
+]
+
+[[package]]
 name = "nirdosha-lineage-store-embedded"
 version = "0.1.0"
 dependencies = [

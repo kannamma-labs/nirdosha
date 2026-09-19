@@ -40,6 +40,10 @@ members = [
     "crates/nirdosha-guard-registry",
     "crates/nirdosha-guard-mic",
     "crates/nirdosha-guard-verify",
+    # RFC 0026 §14: LineageSink federation drivers (JSONL file + HTTP batch),
+    # satisfying the two-driver rule for the sink port.
+    "crates/nirdosha-lineage-sink-jsonl",
+    "crates/nirdosha-lineage-sink-http",
     # Pure, dependency-light transaction-isolation-anomaly detection
     # (the Direct Serialization Graph algorithm), shared verbatim by
     # `crates/runtime-kernels` (the live FFI-hooked path, via its own
