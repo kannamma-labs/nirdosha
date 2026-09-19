@@ -37,11 +37,17 @@ pub fn serve(root: &Path) -> Result<ServerHandle, String> {
     let server = Server::http("127.0.0.1:0").map_err(|e| format!("binding local hi server: {e}"))?;
     let port = server.server_addr().to_ip().map(|a| a.port()).ok_or_else(|| "local hi server has no bound IP address".to_string())?;
     let root: PathBuf = root.to_path_buf();
+    // The one legitimate Origin a browser window pointed at this exact
+    // server can ever present -- see `has_foreign_browser_origin`'s own
+    // doc comment for why comparing against it, rather than rejecting
+    // every `Origin` header outright, is still the RFC's DNS-rebinding/
+    // CSRF closure and not a weakening of it.
+    let expected_origin = format!("http://127.0.0.1:{port}");
     thread::Builder::new()
         .name("nirdosha-hi-server".to_string())
         .spawn(move || {
             for mut request in server.incoming_requests() {
-                let response = respond(&root, &mut request);
+                let response = respond(&root, &expected_origin, &mut request);
                 let _ = request.respond(response);
             }
         })
@@ -50,20 +56,33 @@ pub fn serve(root: &Path) -> Result<ServerHandle, String> {
 }
 
 /// rfcs/0014's own hardening list for this fallback mode: "`Origin`
-/// header checking" -- this is a headless/scripting surface, never a
-/// browser-facing one (the browser-facing surface is the wry custom-
-/// protocol handler, which has no network origin to check at all), so
-/// any request carrying an `Origin` header at all -- meaning some page
-/// in an actual browser sent it, not a script or CLI -- is rejected.
-/// Closes the same DNS-rebinding/CSRF class the RFC's "kill the network
-/// port" decision closes for the primary surface.
-fn has_browser_origin(request: &tiny_http::Request) -> bool {
-    request.headers().iter().any(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin"))
+/// header checking" against DNS-rebinding/CSRF. **Origin-allowlisted to
+/// this server's own `http://127.0.0.1:<port>`, not "reject every
+/// `Origin` header" (2026-09-18)**: this module is now also the target
+/// of a real, deliberately-launched browser app-mode window (`main.rs`'s
+/// `launch_app_window`, spawned for the headless `native-window`-less
+/// fallback) -- that window's own page issues ordinary same-origin
+/// `fetch(...)` calls for every button (`hi_graph.html`'s `postForm`),
+/// and a `POST` fetch carries an `Origin` header even same-origin (the
+/// Fetch spec always attaches one to a non-GET/HEAD request), so
+/// rejecting every `Origin` header unconditionally 403'd the app
+/// window's own legitimate button clicks, not just an attacker's. A
+/// DNS-rebinding or CSRF page's own `Origin` is whatever host the
+/// victim actually loaded (`http://evil.example`, or the rebound name
+/// itself) -- never `http://127.0.0.1:<port>` verbatim -- so this still
+/// closes exactly the class the RFC named, just correctly (a same-
+/// origin allowlist, the standard defense), rather than by accident
+/// disabling the one browser surface this fallback exists to serve.
+fn has_foreign_browser_origin(request: &tiny_http::Request, expected_origin: &str) -> bool {
+    request
+        .headers()
+        .iter()
+        .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin") && !h.value.as_str().eq_ignore_ascii_case(expected_origin))
 }
 
-fn respond(root: &Path, request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
-    if has_browser_origin(request) {
-        return to_tiny_http(ApiResponse::error(403, "this local API does not accept browser-originated requests"));
+fn respond(root: &Path, expected_origin: &str, request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
+    if has_foreign_browser_origin(request, expected_origin) {
+        return to_tiny_http(ApiResponse::error(403, "this local API does not accept requests from another origin"));
     }
     let (path, query) = request.url().split_once('?').map(|(p, q)| (p.to_string(), q.to_string())).unwrap_or_else(|| (request.url().to_string(), String::new()));
     let method = request.method().as_str().to_string();
@@ -139,10 +158,11 @@ mod tests {
     }
 
     /// The RFC's own hardening requirement for this fallback mode: a
-    /// request carrying a real `Origin` header (what an actual browser
-    /// page sends, never a CLI/script) is rejected outright.
+    /// request carrying a foreign `Origin` header (what a DNS-rebinding
+    /// or CSRF page sends -- never this server's own page) is rejected
+    /// outright.
     #[test]
-    fn serve_rejects_a_request_carrying_a_browser_origin_header() {
+    fn serve_rejects_a_request_carrying_a_foreign_browser_origin_header() {
         let dir = scratch_dir("origin_http");
         let conn = crate::hi_graph::open(&dir).expect("open");
         drop(conn);
@@ -154,6 +174,27 @@ mod tests {
             .send()
             .expect("request should succeed");
         assert_eq!(resp.status().as_u16(), 403);
+    }
+
+    /// The other half of the same check (2026-09-18): a request whose
+    /// `Origin` matches this exact server's own `http://127.0.0.1:<port>`
+    /// -- what the app-mode browser window `main.rs::launch_app_window`
+    /// opens actually sends on every `POST` button click -- must NOT be
+    /// rejected, or the one browser surface this fallback exists to
+    /// serve would 403 its own legitimate use.
+    #[test]
+    fn serve_accepts_a_request_carrying_its_own_origin_header() {
+        let dir = scratch_dir("own_origin_http");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        drop(conn);
+        let handle = serve(&dir).expect("serve");
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/api/nodes", handle.port))
+            .header("Origin", format!("http://127.0.0.1:{}", handle.port))
+            .send()
+            .expect("request should succeed");
+        assert_eq!(resp.status().as_u16(), 200);
     }
 
     #[test]

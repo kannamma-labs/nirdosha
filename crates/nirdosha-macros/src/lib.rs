@@ -38,12 +38,14 @@
 //! interprocedural proof; until then the scan is deliberately
 //! over-approximate (see `nirdosha-contract-core/src/scan.rs`).
 
+mod app_shell;
 mod categorical;
 mod communication_feed;
 mod crud_screens;
 mod dashboard;
 mod kanban_board;
 mod landing;
+mod login;
 mod settings_screen;
 mod util;
 mod wizard;
@@ -126,6 +128,21 @@ pub fn landing(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn workflow(input: TokenStream) -> TokenStream {
     workflow::expand(input)
+}
+
+/// See `login::expand`'s module doc — a declarative login screen
+/// backed by `Router::with_login`, with explicit `demo` or
+/// `production` modes.
+#[proc_macro]
+pub fn login(input: TokenStream) -> TokenStream {
+    login::expand(input)
+}
+
+/// See `app_shell::expand`'s module doc — a declarative app-level
+/// title/nav/landing shell applied once to the router in `main()`.
+#[proc_macro]
+pub fn app_shell(input: TokenStream) -> TokenStream {
+    app_shell::expand(input)
 }
 
 fn expand(

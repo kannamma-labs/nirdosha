@@ -121,7 +121,7 @@ const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", 
 /// already uses for `?key=value`) -- one encoding, read from whichever
 /// side of the request a given route needs it.
 pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -> ApiResponse {
-    let is_mutating = MUTATING_PATHS.contains(&path);
+    let is_mutating = MUTATING_PATHS.contains(&path) || path == "/api/graph/call";
     if is_mutating {
         if method != "POST" {
             return ApiResponse::error(405, "this route only accepts POST");
@@ -138,6 +138,9 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         "/assets/3d-force-graph.min.js" => return ApiResponse::javascript(FORCE_GRAPH_JS),
         _ => {}
     }
+    if path.starts_with("/api/graph/") || crate::graph_transport::is_typed(root) {
+        return typed_graph_route(root, method, path, query, body);
+    }
     let conn = match crate::hi_graph::open(root) {
         Ok(conn) => conn,
         Err(e) => return ApiResponse::error(500, &e),
@@ -149,6 +152,10 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         },
         "/api/edges" => match list_edges(&conn) {
             Ok(rows) => ApiResponse::json(&rows),
+            Err(e) => ApiResponse::error(500, &e),
+        },
+        "/api/screens" => match list_screens(&conn) {
+            Ok(screens) => ApiResponse::json(&screens),
             Err(e) => ApiResponse::error(500, &e),
         },
         "/api/impact" => match query_param(query, "target") {
@@ -690,12 +697,20 @@ struct NodeRow {
     /// refusal reads as "this is sealed law" instead of "the button is
     /// broken."
     non_waivable: bool,
+    /// Which UI archetype this `screen`-kind node represents (crud,
+    /// dashboard, login, shell, ...). `None` for non-screen nodes.
+    screen_type: Option<String>,
+    /// The route path for screen-kind nodes (`path: "/tasks"`). `None`
+    /// for non-screen nodes or screens that do not declare a path.
+    screen_path: Option<String>,
+    /// For `app_shell`-kind nodes, the JSON nav entries.
+    screen_nav: Option<String>,
 }
 
 fn list_nodes(conn: &Connection) -> Result<Vec<NodeRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, title, status, content_hash, source_ref, line, col, driving_text, created_by, confirmed, locked, waived, waive_reason, attributes, plugin_origin, non_waivable FROM nodes LIMIT ?1",
+            "SELECT id, kind, title, status, content_hash, source_ref, line, col, driving_text, created_by, confirmed, locked, waived, waive_reason, attributes, plugin_origin, non_waivable, screen_type, screen_path, screen_nav FROM nodes LIMIT ?1",
         )
         .map_err(|e| format!("preparing node listing: {e}"))?;
     let rows = stmt
@@ -718,6 +733,9 @@ fn list_nodes(conn: &Connection) -> Result<Vec<NodeRow>, String> {
                 attributes: r.get(14)?,
                 plugin_origin: r.get(15)?,
                 non_waivable: r.get::<_, i64>(16)? != 0,
+                screen_type: r.get(17)?,
+                screen_path: r.get(18)?,
+                screen_nav: r.get(19)?,
             })
         })
         .map_err(|e| format!("listing nodes: {e}"))?
@@ -743,6 +761,131 @@ fn list_edges(conn: &Connection) -> Result<Vec<EdgeRow>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("reading edge row: {e}"))?;
     Ok(rows)
+}
+
+#[derive(Serialize)]
+struct ScreenRow {
+    id: String,
+    name: String,
+    screen_type: String,
+    screen_path: Option<String>,
+    screen_nav: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NavigationRow {
+    source_id: String,
+    target_id: String,
+    label: String,
+    inferred: bool,
+}
+
+#[derive(Serialize)]
+struct ScreenMap {
+    screens: Vec<ScreenRow>,
+    navigations: Vec<NavigationRow>,
+}
+
+/// Screen-only graph payload: every `screen`-kind CodeUnit plus the
+/// navigation edges we can derive from `app_shell!` nav entries.
+/// Navigation edges are labeled `inferred` when we matched a nav href to
+/// a screen path; a synthetic edge from the app shell to every screen
+/// is also included as a fallback so the map is always connected.
+fn list_screens(conn: &Connection) -> Result<ScreenMap, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, title, screen_type, screen_path, screen_nav FROM nodes WHERE kind = 'CodeUnit' AND screen_type IS NOT NULL LIMIT ?1")
+        .map_err(|e| format!("preparing screen listing: {e}"))?;
+    let rows = stmt
+        .query_map([MAX_ROWS], |r| {
+            Ok(ScreenRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                screen_type: r.get(2)?,
+                screen_path: r.get(3)?,
+                screen_nav: r.get(4)?,
+            })
+        })
+        .map_err(|e| format!("listing screens: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading screen row: {e}"))?;
+
+    // Build a path -> screen lookup for inferred nav edges.
+    let path_to_id: std::collections::HashMap<String, String> = rows
+        .iter()
+        .filter_map(|s| s.screen_path.as_ref().map(|p| (p.clone(), s.id.clone())))
+        .collect();
+
+    let mut navigations = Vec::new();
+    let mut shell_id = None;
+    let mut shell_nav_entries: Vec<NavEntryJson> = Vec::new();
+
+    for screen in &rows {
+        if screen.screen_type == "shell" {
+            shell_id = Some(screen.id.clone());
+            if let Some(json) = &screen.screen_nav {
+                if let Ok(entries) = serde_json::from_str::<Vec<NavEntryJson>>(json) {
+                    shell_nav_entries = entries;
+                }
+            }
+        }
+    }
+
+    // If we found an app shell, draw labeled edges from it to screens
+    // whose paths match nav hrefs.
+    if let Some(shell) = &shell_id {
+        for entry in &shell_nav_entries {
+            if let Some(target) = path_to_id.get(&entry.href) {
+                navigations.push(NavigationRow {
+                    source_id: shell.clone(),
+                    target_id: target.clone(),
+                    label: entry.label.clone(),
+                    inferred: false,
+                });
+            }
+        }
+        // Fallback: connect the shell to every screen so the map is
+        // never disconnected, even when paths do not match.
+        for screen in &rows {
+            if screen.id != *shell {
+                navigations.push(NavigationRow {
+                    source_id: shell.clone(),
+                    target_id: screen.id.clone(),
+                    label: "app shell".to_string(),
+                    inferred: true,
+                });
+            }
+        }
+    }
+
+    // Login screen always connects to the landing target if we can
+    // resolve it (landing is a role-based redirect, not a screen, so
+    // this is also marked inferred).
+    let login = rows.iter().find(|s| s.screen_type == "login");
+    let landing = rows.iter().find(|s| s.screen_type == "landing");
+    if let (Some(login), Some(landing), Some(shell)) = (login, landing, shell_id) {
+        navigations.push(NavigationRow {
+            source_id: login.id.clone(),
+            target_id: landing.id.clone(),
+            label: "post-login landing".to_string(),
+            inferred: true,
+        });
+        navigations.push(NavigationRow {
+            source_id: shell.clone(),
+            target_id: login.id.clone(),
+            label: "login".to_string(),
+            inferred: true,
+        });
+    }
+
+    Ok(ScreenMap { screens: rows, navigations })
+}
+
+#[derive(serde::Deserialize)]
+struct NavEntryJson {
+    label: String,
+    href: String,
+    #[allow(dead_code)]
+    role: Option<String>,
 }
 
 #[cfg(test)]
@@ -1165,4 +1308,39 @@ mod tests {
         // route that has nothing to protect with that check.
         assert!(!MUTATING_PATHS.contains(&"/api/suggest"));
     }
+}
+
+fn typed_graph_route(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -> ApiResponse {
+    let result = (|| -> nirdosha_graph::Result<serde_json::Value> {
+        let options=crate::graph_transport::Options::parse(std::iter::empty())?;
+        let access=if method == "POST" { nirdosha_graph::store::Access::reviewer("local") } else { nirdosha_graph::store::Access::read("local") };
+        let graph=nirdosha_graph::Graph::open(root,&options.state,access)?;
+        match path {
+            "/api/graph/head" => Ok(serde_json::json!({"graph":graph.version()?})),
+            "/api/graph/page" => {
+                let mut args=serde_json::json!({});
+                for key in ["snapshot","cursor","filter_hash","view","entity_type","kind"] {
+                    if let Some(value)=query_param(query,key) { args[key]=value.into(); }
+                }
+                graph.page(&args)
+            },
+            "/api/graph/call" => {
+                let text=std::str::from_utf8(body).map_err(|_|nirdosha_graph::Error::new("SCHEMA_INVALID","Expected UTF-8 JSON"))?;
+                let request=nirdosha_graph::hash::parse(text)?;
+                nirdosha_graph::mcp::execute(&graph,request["name"].as_str().unwrap_or(""),&request["arguments"])
+            },
+            "/api/nodes"|"/api/edges" => {
+                let kind=if path.ends_with("nodes") { "node" } else { "edge" };
+                let collection=if kind=="node" { "nodes" } else { "edges" };
+                let mut args=serde_json::json!({"entity_type":kind});let mut out=vec![];
+                loop { let page=graph.page(&args)?;out.extend(page[collection].as_array().unwrap().clone());
+                    if page["next_cursor"].is_null() { break; }
+                    args["cursor"]=page["next_cursor"].clone();args["filter_hash"]=page["filter_hash"].clone();
+                }
+                Ok(serde_json::json!(out))
+            },
+            _=>Err(nirdosha_graph::Error::new("UNSUPPORTED_TARGET","This legacy action is unavailable on a typed graph; use the graph MCP tools")),
+        }
+    })();
+    match result { Ok(value)=>ApiResponse::json(&value),Err(e)=>ApiResponse { status:if e.code=="PROJECT_NOT_INITIALIZED"||e.code=="MIGRATION_REQUIRED" {404}else{400},content_type:"application/json",body:e.envelope().to_string().into_bytes() } }
 }

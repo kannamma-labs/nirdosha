@@ -1231,9 +1231,36 @@
   // after the whole window was closed and reopened.
   let reloadGraph = null;
 
-  function fetchGraphData() {
+  let typedGraph = false;
+  let typedRevision = null;
+  async function fetchGraphData() {
+    const first = await fetch('/api/graph/page');
+    if (first.ok) {
+      typedGraph = true;
+      let page = await first.json();
+      const nodes = [], edges = [];
+      typedRevision = page.graph.revision;
+      while (true) {
+        nodes.push(...page.nodes); edges.push(...page.edges);
+        if (!page.next_cursor) break;
+        const next = await fetch('/api/graph/page?' + new URLSearchParams({cursor:page.next_cursor,filter_hash:page.filter_hash}));
+        if (!next.ok) throw new Error('Graph snapshot expired; refresh to retry.');
+        page = await next.json();
+      }
+      return prepareGraphData(nodes, edges);
+    }
     return Promise.all([fetch('/api/nodes').then(r => r.json()), fetch('/api/edges').then(r => r.json())]).then(([nodes, edges]) => prepareGraphData(nodes, edges));
   }
+  let graphPollBusy = false;
+  setInterval(async () => {
+    if (!typedGraph || !reloadGraph || graphPollBusy) return;
+    graphPollBusy = true;
+    try {
+      const response = await fetch('/api/graph/head');
+      if (response.ok && (await response.json()).graph.revision !== typedRevision) await reloadGraph();
+    } catch (error) { reportError('refreshing graph', error); }
+    finally { graphPollBusy = false; }
+  }, 500);
 
   function prepareGraphData(nodes, edges) {
     const nodeIds = new Set(nodes.map(n => n.id));
@@ -2341,18 +2368,15 @@
   initConsole();
   initPromptScreen();
   buildLegend();
-  Promise.all([
-    fetch('/api/nodes').then(r => r.json()),
-    fetch('/api/edges').then(r => r.json()),
-  ])
-    .then(([nodes, edges]) => {
-      const data = prepareGraphData(nodes, edges);
+  fetchGraphData()
+    .then(data => {
+      const nodes = data.nodes;
       if (hasWebGL() && typeof ForceGraph3D === 'function') {
         run3D(data);
       } else {
         run2D(data);
       }
-      if (hasPromptHistory(nodes)) {
+      if (typedGraph || hasPromptHistory(nodes)) {
         enterBuildMode();
       } else {
         document.getElementById('prompt-screen').classList.add('visible');

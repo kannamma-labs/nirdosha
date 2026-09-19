@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use nirdosha_hi::mcp_tools::{tools_call, tools_list, McpCallLog};
 
@@ -194,7 +194,14 @@ fn cmd_window(cwd: &Path) -> ExitCode {
         eprintln!("hi: built without native-window support (--features native-window to enable it) -- falling back to headless `hi_server.rs`");
         match nirdosha_hi::hi_server::serve(cwd) {
             Ok(handle) => {
-                println!("hi API listening on http://127.0.0.1:{} (Ctrl+C to stop)", handle.port);
+                let url = format!("http://127.0.0.1:{}/", handle.port);
+                if launch_app_window(&url) {
+                    println!("hi running at {url} (opened in a browser app window -- Ctrl+C here to stop)");
+                } else {
+                    println!(
+                        "hi API listening on {url} -- no Chromium-family browser found on PATH to open it as an app window; open that URL yourself. (Ctrl+C to stop)"
+                    );
+                }
                 loop {
                     std::thread::park();
                 }
@@ -205,6 +212,35 @@ fn cmd_window(cwd: &Path) -> ExitCode {
             }
         }
     }
+}
+
+/// Opens `url` in a Chromium-family browser's `--app=` mode -- a plain
+/// window with no address bar, tabs, bookmarks bar, or menu, the
+/// closest a spawned browser process gets to `hi_window.rs`'s real
+/// embedded-webview look. Deliberately not `wry`/`tao`: this adds zero
+/// new build-time dependencies (no GTK/WebKitGTK the way the
+/// `native-window` feature does on Linux) by execing whatever browser
+/// the user already has installed, rather than embedding one.
+/// Firefox's own site-specific-browser support has been inconsistent
+/// across versions and is deliberately not in this list -- a Chromium-
+/// family browser (which all support `--app=`) is a safe, common
+/// assumption on a Linux dev machine; a caller with none of these
+/// installed just gets the plain URL to open by hand (this function's
+/// own `false` return, handled by `cmd_window` above). Returns whether
+/// a candidate browser was actually found and spawned -- never blocks
+/// waiting for it to exit, since the window is meant to run alongside
+/// this process, not in place of it.
+fn launch_app_window(url: &str) -> bool {
+    const CANDIDATES: &[&str] = &["google-chrome-stable", "google-chrome", "chromium", "chromium-browser", "microsoft-edge-stable", "microsoft-edge", "brave-browser"];
+    CANDIDATES.iter().any(|browser| {
+        Command::new(browser)
+            .arg(format!("--app={url}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+    })
 }
 
 fn write_mcp_message(stdout: &mut impl std::io::Write, value: &serde_json::Value) {

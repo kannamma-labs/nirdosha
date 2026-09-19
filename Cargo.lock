@@ -2049,6 +2049,7 @@ version = "0.1.0"
 dependencies = [
  "nirdosha-contract-core",
  "nirdosha-smt-core",
+ "rusqlite",
  "serde_json",
  "syn 2.0.119",
 ]
@@ -2070,13 +2071,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirdosha-graph"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "nirdosha-audit",
+ "quote",
+ "rusqlite",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "syn 2.0.119",
+ "tempfile",
+]
+
+[[package]]
+name = "nirdosha-guard-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nirdosha-guard-federation"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-guard-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nirdosha-guard-macros"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-guard-core",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "nirdosha-guard-mcp"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-guard-core",
+ "nirdosha-guard-federation",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nirdosha-hi"
 version = "0.1.0"
 dependencies = [
  "base64",
  "cargo-nirdosha",
  "nirdosha-audit",
+ "nirdosha-graph",
  "nirdosha-rt",
+ "nirdosha-workflow",
+ "proc-macro2",
  "quote",
  "reqwest",
  "rusqlite",
@@ -2140,13 +2196,21 @@ dependencies = [
 name = "nirdosha-rt"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "jsonwebtoken",
+ "nirdosha-guard-macros",
  "nirdosha-macros",
  "nirdosha-runtime-kernels",
  "proptest",
+ "redis 0.27.6",
  "rusqlite",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -2191,6 +2255,17 @@ dependencies = [
  "nirdosha-rt",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nirdosha-workflow"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-graph",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3280,12 +3355,23 @@ version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
+ "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -3304,6 +3390,7 @@ version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted 0.9.0",

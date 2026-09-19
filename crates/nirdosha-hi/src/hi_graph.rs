@@ -154,6 +154,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     add_column_if_missing(conn, "nodes", "waive_reason", "TEXT")?;
     add_column_if_missing(conn, "nodes", "last_materialized_hash", "TEXT")?;
     add_column_if_missing(conn, "nodes", "attributes", "TEXT")?;
+    // screen-only graph view: which UI archetype this screen-kind node
+    // belongs to (crud, dashboard, login, shell, ...). NULL for non-
+    // screen nodes.
+    add_column_if_missing(conn, "nodes", "screen_type", "TEXT")?;
+    // screen-only graph: the route path for screen-kind nodes, and the
+    // JSON nav entries for app_shell-kind nodes.
+    add_column_if_missing(conn, "nodes", "screen_path", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "screen_nav", "TEXT")?;
     Ok(())
 }
 
@@ -180,6 +188,14 @@ struct CodeUnit {
     content_hash: String,
     line: usize,
     col: usize,
+    /// For `screen`-kind CodeUnits, the UI archetype derived from the
+    /// macro name (e.g. "dashboard", "login", "shell"). `None` for other
+    /// kinds.
+    screen_type: Option<String>,
+    /// The route path declared by a screen-kind macro (`path: "/tasks"`).
+    screen_path: Option<String>,
+    /// For `app_shell`-kind nodes, the JSON nav entries.
+    screen_nav: Option<String>,
 }
 
 fn hash_tokens<T: quote::ToTokens>(item: &T) -> String {
@@ -202,23 +218,150 @@ fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File), String>
 
     let mut units = Vec::with_capacity(file.items.len());
     for item in &file.items {
-        let (qualified_name, kind): (String, &'static str) = match item {
-            syn::Item::Fn(f) => (f.sig.ident.to_string(), "fn"),
-            syn::Item::Struct(s) => (s.ident.to_string(), "struct"),
-            syn::Item::Enum(e) => (e.ident.to_string(), "enum"),
+        let (qualified_name, kind, screen_type, screen_path, screen_nav): (
+            String,
+            &'static str,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = match item {
+            syn::Item::Fn(f) => (f.sig.ident.to_string(), "fn", None, None, None),
+            syn::Item::Struct(s) => (s.ident.to_string(), "struct", None, None, None),
+            syn::Item::Enum(e) => (e.ident.to_string(), "enum", None, None, None),
             syn::Item::Macro(m) => {
                 let Some(name) = screen_name_from_macro(m) else { continue };
-                (name, "screen")
+                let macro_name = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                let st = screen_type_from_macro(&macro_name).to_string();
+                let sp = screen_path_from_macro(&m.mac.tokens);
+                let sn = if macro_name == "app_shell" {
+                    app_shell_nav_from_macro(&m.mac.tokens)
+                } else {
+                    None
+                };
+                (name, "screen", Some(st), sp, sn)
             }
             _ => continue,
         };
         let start = syn::spanned::Spanned::span(item).start();
-        units.push(CodeUnit { qualified_name, kind, content_hash: hash_tokens(item), line: start.line, col: start.column });
+        units.push(CodeUnit {
+            qualified_name,
+            kind,
+            content_hash: hash_tokens(item),
+            line: start.line,
+            col: start.column,
+            screen_type,
+            screen_path,
+            screen_nav,
+        });
     }
     Ok((units, file))
 }
 
-const UI_MACROS: &[&str] = &["crud_screens", "dashboard", "kanban_board", "wizard", "settings_screen", "communication_feed"];
+const UI_MACROS: &[&str] = &[
+    "crud_screens",
+    "dashboard",
+    "kanban_board",
+    "wizard",
+    "settings_screen",
+    "communication_feed",
+    "landing",
+    "login",
+    "app_shell",
+];
+
+fn screen_type_from_macro(macro_name: &str) -> &'static str {
+    match macro_name {
+        "crud_screens" => "crud",
+        "dashboard" => "dashboard",
+        "kanban_board" => "kanban",
+        "wizard" => "wizard",
+        "settings_screen" => "settings",
+        "communication_feed" => "feed",
+        "landing" => "landing",
+        "login" => "login",
+        "app_shell" => "shell",
+        _ => "screen",
+    }
+}
+
+fn screen_path_from_macro(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<Option<String>> {
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![:]>()?;
+            if key == "path" {
+                let path: syn::LitStr = input.parse()?;
+                return Ok(Some(path.value()));
+            } else {
+                // consume the value so we can keep scanning
+                let _: proc_macro2::TokenTree = input.parse()?;
+            }
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(None)
+    };
+    syn::parse::Parser::parse2(parser, tokens.clone()).ok().flatten()
+}
+
+#[derive(serde::Serialize)]
+struct NavEntryJson {
+    label: String,
+    href: String,
+    role: Option<String>,
+}
+
+fn app_shell_nav_from_macro(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<Option<String>> {
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![:]>()?;
+            if key == "nav" {
+                let list;
+                syn::bracketed!(list in input);
+                let mut entries = Vec::new();
+                while !list.is_empty() {
+                    let entry;
+                    syn::braced!(entry in list);
+                    let mut label = None;
+                    let mut href = None;
+                    let mut role = None;
+                    while !entry.is_empty() {
+                        let k: syn::Ident = entry.parse()?;
+                        entry.parse::<syn::Token![:]>()?;
+                        if k == "label" {
+                            label = Some(entry.parse::<syn::LitStr>()?.value());
+                        } else if k == "href" {
+                            href = Some(entry.parse::<syn::LitStr>()?.value());
+                        } else if k == "role" {
+                            role = Some(entry.parse::<syn::LitStr>()?.value());
+                        } else {
+                            let _: proc_macro2::TokenTree = entry.parse()?;
+                        }
+                        if entry.peek(syn::Token![,]) {
+                            entry.parse::<syn::Token![,]>()?;
+                        }
+                    }
+                    if let (Some(label), Some(href)) = (label, href) {
+                        entries.push(NavEntryJson { label, href, role });
+                    }
+                    if list.peek(syn::Token![,]) {
+                        list.parse::<syn::Token![,]>()?;
+                    }
+                }
+                return Ok(serde_json::to_string(&entries).ok());
+            } else {
+                let _: proc_macro2::TokenTree = input.parse()?;
+            }
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(None)
+    };
+    syn::parse::Parser::parse2(parser, tokens.clone()).ok().flatten()
+}
 
 pub(crate) fn screen_name_from_macro(item: &syn::ItemMacro) -> Option<String> {
     let macro_name = item.mac.path.segments.last()?.ident.to_string();
@@ -296,10 +439,10 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
         }
 
         conn.execute(
-            "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, line, col)
-             VALUES (?1, 'CodeUnit', ?2, NULL, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, source_ref = excluded.source_ref, line = excluded.line, col = excluded.col",
-            params![id, u.qualified_name, u.content_hash, source_ref, u.line as i64, u.col as i64],
+            "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, line, col, screen_type, screen_path, screen_nav)
+             VALUES (?1, 'CodeUnit', ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, source_ref = excluded.source_ref, line = excluded.line, col = excluded.col, screen_type = excluded.screen_type, screen_path = excluded.screen_path, screen_nav = excluded.screen_nav",
+            params![id, u.qualified_name, u.content_hash, source_ref, u.line as i64, u.col as i64, u.screen_type, u.screen_path, u.screen_nav],
         )
         .map_err(|e| format!("upserting node {id}: {e}"))?;
 

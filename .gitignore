@@ -48,3 +48,5 @@ nirdosha_transact_log.sqlite*
 scratch/
 
 migrations/*.sql
+.playwright-cli/
+

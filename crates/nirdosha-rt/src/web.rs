@@ -488,10 +488,13 @@ pub struct NavLink {
 /// success — the one thing an app supplies; everything else (the
 /// login form, the session cookie, the logout route, the nav bar's
 /// Login/Logout button) is handled by the router itself.
+/// `landing` optionally picks the post-login redirect target from the
+/// freshly minted session.
 #[derive(Clone)]
 struct LoginConfig {
     path: String,
     verify: Arc<dyn Fn(&str, &str) -> Option<Vec<String>> + Send + Sync>,
+    landing: Option<Arc<dyn Fn(&Auth) -> &'static str + Send + Sync>>,
 }
 
 /// A request → `Response` router with OpenAPI baked into `dispatch`
@@ -506,6 +509,7 @@ pub struct Router {
     routes: Vec<Route>,
     authenticate: Arc<dyn Fn(&Request) -> Auth + Send + Sync>,
     nav: Vec<NavLink>,
+    nav_builder: Option<Arc<dyn Fn(&Auth) -> Vec<NavLink> + Send + Sync>>,
     login: Option<LoginConfig>,
     /// session id → (username, roles). In-memory, shared by clones, lost
     /// on restart — matches this dialect's other fixture-grade stores
@@ -791,6 +795,7 @@ impl Router {
             routes: Vec::new(),
             authenticate: Arc::new(authenticate),
             nav: Vec::new(),
+            nav_builder: None,
             login: None,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             allowed_origins: Vec::new(),
@@ -820,6 +825,14 @@ impl Router {
         self
     }
 
+    /// Same nav bar as `with_nav`, but recomputed per request from the
+    /// current authenticated session. Use this when menu items should
+    /// appear or disappear based on the user's roles or claims.
+    pub fn with_nav_for(mut self, builder: impl Fn(&Auth) -> Vec<NavLink> + Send + Sync + 'static) -> Self {
+        self.nav_builder = Some(Arc::new(builder));
+        self
+    }
+
     /// Real, cookie-based session login — the only way this dialect's
     /// server-rendered screens (no client-side JS) can carry an
     /// identity across requests without an `Authorization` header on
@@ -827,10 +840,30 @@ impl Router {
     /// its submission) and `POST {path}/logout`. `verify` checks a
     /// submitted username/password and returns the session's roles on
     /// success — this crate has no opinion on where credentials live.
+    /// Successful logins redirect to "/" unless `with_login_landing` is
+    /// used.
     pub fn with_login(mut self, path: &'static str, verify: impl Fn(&str, &str) -> Option<Vec<String>> + Send + Sync + 'static) -> Self {
         self.login = Some(LoginConfig {
             path: path.to_string(),
             verify: Arc::new(verify),
+            landing: None,
+        });
+        self
+    }
+
+    /// Same as `with_login`, but the post-login redirect target is
+    /// chosen by `landing(auth)` from the newly created session. Use
+    /// this with `nirdosha_rt::landing!` or `nirdosha_rt::app_shell!`.
+    pub fn with_login_landing(
+        mut self,
+        path: &'static str,
+        verify: impl Fn(&str, &str) -> Option<Vec<String>> + Send + Sync + 'static,
+        landing: impl Fn(&Auth) -> &'static str + Send + Sync + 'static,
+    ) -> Self {
+        self.login = Some(LoginConfig {
+            path: path.to_string(),
+            verify: Arc::new(verify),
+            landing: Some(Arc::new(landing)),
         });
         self
     }
@@ -1111,8 +1144,10 @@ impl Router {
                 let resp = match (login.verify)(&username, &password) {
                     Some(roles) => {
                         let session_id = generate_session_id();
-                        self.sessions.lock().unwrap().insert(session_id.clone(), (username, roles));
-                        let mut resp = Response::redirect("/");
+                        self.sessions.lock().unwrap().insert(session_id.clone(), (username.clone(), roles.clone()));
+                        let auth = Auth::login(username, &roles.iter().map(|r| r.as_str()).collect::<Vec<_>>());
+                        let target = login.landing.as_ref().map(|l| l(&auth)).unwrap_or("/");
+                        let mut resp = Response::redirect(target);
                         resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}={session_id}; {SESSION_COOKIE_ATTRS}")));
                         resp
                     }
@@ -1160,7 +1195,7 @@ impl Router {
     /// `<body>` tag, so a single first-occurrence replace is exact, not
     /// a heuristic.
     fn with_nav_bar(&self, req: &Request, mut response: Response) -> Response {
-        if self.nav.is_empty() && self.login.is_none() {
+        if self.nav.is_empty() && self.nav_builder.is_none() && self.login.is_none() {
             return response;
         }
         if !response.content_type.starts_with("text/html") {
@@ -1172,10 +1207,17 @@ impl Router {
     }
 
     fn render_nav(&self, req: &Request) -> String {
+        let auth = session_auth(&self.sessions, req).unwrap_or_else(|| (self.authenticate)(req));
+        let links: Vec<NavLink> = self
+            .nav_builder
+            .as_ref()
+            .map(|b| b(&auth))
+            .unwrap_or_else(|| self.nav.clone());
+
         let mut html = String::from(
             "<nav style=\"margin:-2rem -2rem 2rem -2rem;padding:0.75rem 2rem;background:#f5f5f5;border-bottom:1px solid #ddd\">",
         );
-        for link in &self.nav {
+        for link in &links {
             html.push_str(&format!("<a href=\"{}\" style=\"margin-right:1.5rem\">{}</a>", link.href, html_escape(link.label)));
         }
         if let Some(login) = &self.login {

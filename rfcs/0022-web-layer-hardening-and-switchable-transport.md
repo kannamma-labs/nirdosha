@@ -1,384 +1,145 @@
-# RFC 0022: Web-layer hardening for `nirdosha-rt` — cookies, CORS, rate limiting, and a switchable async/sync transport
+# Nirdosha Guard — Updated Implementation Plan v2
 
-> Status: **shipped, 2026-09-17**. `crates/nirdosha-rt/src/web.rs` (the
-> live `Router`, not `crates/compiler`'s deprecated `nirdosha build
-> --serve` / `crates/compiled-serve`) now has: `Secure`/`SameSite=Strict`
-> session cookies, real non-wildcard CORS (`with_cors`), fixed-window
-> per-peer-IP rate limiting (`with_rate_limit`), a switchable
-> `serve_until` transport (`Runtime::Async` default, `Runtime::Sync`
-> opt-out via `with_runtime`), and — added the same day, see "Claims-based
-> authorization (update)" below — dialect-wide claims-based
-> authorization (`nirdosha-rt::role::{Claim, ClaimProof}`,
-> `nirdosha_rt::claims!`, `requires(claim = "..", "..")` macro injection,
-> and `web::Router::{get,post,put,delete}_gated_claim`) — and, added the
-> same day again, see "DPoP, TLS, fleet-wide rate limiting, and security
-> headers (update)" below: a real DPoP/RFC 9449 port
-> (`with_sender_constrained_tokens`), real TLS termination (`with_tls`,
-> both transports), a Redis-backed fleet-wide rate limiter
-> (`with_fleet_rate_limit`), and real security headers (CSP,
-> `X-Frame-Options`, HSTS when TLS is active, etc.) on every response.
-> All of it is real, tested end-to-end over real sockets (and, for the
-> fleet-wide limiter, a real Redis), not just unit-tested in isolation —
-> see each update section for the specific test files. Nothing from this
-> RFC's original "Follow-up work" list remains open.
->
-> Cross-references:
-> - `docs/ROADMAP.md`'s 2026-09-17 deprecation note — `crates/compiler`
->   and everything downstream of it (`crates/compiled-serve`,
->   `crates/runtime-kernels`'s DPoP/OIDC wiring as *that* crate's own
->   caller) is deprecated in favor of the v2 Rust dialect
->   (`docs/nirdosha-rt-dialect.md`). This RFC's own work happened on the
->   live path for exactly that reason — see "Why not `compiled-serve`"
->   below for how that shaped the design.
-> - `gaps.md` — the v2-dialect gap inventory this RFC closes four rows
->   of (§3.1 "Real authority boundary," `web.rs`'s previously-missing
->   CORS/rate-limit/TLS-adjacent hardening) and leaves two open (claims-
->   based identity, TLS termination).
-> - `crates/compiled-serve/src/ratelimit.rs`,
->   `crates/compiled-serve/src/lib.rs`'s CORS functions — the reference
->   implementations this RFC ports logic from (not code — see below).
+This revision bakes the review findings and performance design into the plan itself. Three things changed structurally:
 
-## Motivation
+1. **Phase 0 now covers decision semantics** (composition algebra, obligation classes, commit-time re-evaluation) — these were the load-bearing gaps.
+2. **Performance primitives are Phase 0/1, not retrofits** — partitioned audit chains and KV counters are designed in before scale arrives.
+3. **Every phase closes with explicit invariants** — testable statements that CI enforces, so drift is caught mechanically.
 
-A real pentest against any app built on `nirdosha-rt`'s `web::Router`
-would have found, before this RFC: a session cookie with no `Secure`/
-`SameSite` attributes (session-fixation/CSRF-adjacent, the kind of
-finding an automated scanner flags in the first minute); no CORS
-handling at all, meaning any cross-origin `fetch()` targeting a
-deployment behind a permissive reverse proxy had no origin check to
-rely on from the app itself; no rate limiting, so `with_login`'s own
-login endpoint had no bound on brute-force throughput; and no way to
-run the accept loop on anything but one OS thread per connection.
+---
 
-None of this was a deliberate, disclosed design limit the way (for
-example) this router's plain-HTTP-only posture is (TLS termination is
-still, and remains, a deployer's reverse proxy's job — see "Follow-up
-work"). It was simply never built, because the router's own
-development had been focused on route dispatch, sessions, and RBAC
-(`role.rs`'s `RoleProof<R>`), not the transport-adjacent hardening a
-real deployment needs. `crates/compiled-serve` (the deprecated
-`.nir`-compiler path) already had working, tested versions of the
-cookie/CORS/rate-limit logic — this RFC ports that *logic*, rewritten
-against `web.rs`'s own `Request`/`Response` types, onto the router that
-is actually still being built on.
+## Hard invariants (hold across all phases, CI-enforced)
 
-The fourth piece — a switchable transport — came out of a direct
-disagreement mid-session: `web.rs`'s synchronous, thread-per-connection
-`serve_until` was initially described as an intentional design choice
-(paralleling the dialect's own real, disclosed rejection of `async fn`
-in *application* code, since the driver can't yet verify contracts over
-async control flow). The correction: it wasn't a decision, it was just
-what got built first. Most apps this dialect targets are I/O-bound
-(waiting on a database, an upstream HTTP call, a long-poll like
-`communication_feed!`'s own), which is exactly the shape where a
-thread-per-connection model has real, avoidable per-connection
-overhead — and none of that requires touching the dialect's own
-async-verification gap at all, because a route handler can stay an
-ordinary sync closure regardless of what accept loop calls it.
+These are non-negotiable from the first commit:
 
-## Why not `compiled-serve`
+- **I1 — Audit-before-commit:** no state mutation is durably visible without its audit record in the same partition chain. Enforced by: decision record carries `audit_seq`; storage layer refuses commit without a populated `audit_seq`.
+- **I2 — Deny-composition:** `deny` from any layer overrides all `allow`/`escalate` except an active, resource-scoped, time-boxed break-glass grant. Documented in one module (`decision/composition.rs`), tested exhaustively.
+- **I3 — Commit-time re-evaluation:** any mutation that passed through `escalate`/`approval` is re-evaluated at commit against current state. Approval is a *certificate over a diff*, not a license to write.
+- **I4 — Policy snapshot on every decision:** `policy_version` + context snapshots (risk score, screening result, geo) recorded in the decision trace. Reproducibility: `replay(decision_id)` must re-derive the outcome.
+- **I5 — Fail-closed default:** every domain is fail-closed unless a written, expiring exception exists in the bypass registry. Fail-open is data, not config drift.
+- **I6 — Complete mutation inventory:** `cargo nirdosha verify` fails the build if any state-changing path (route, job, consumer, migration, seed) lacks either a guard attribute or an explicit `#[guard_exempt(reason, ticket, expires)]`.
 
-The obvious shortcut — reuse `compiled-serve`'s own already-tested
-`RateLimiter`/CORS code directly, maybe even move it into a shared
-crate both paths depend on — was considered and rejected mid-session,
-after DPoP/FAPI hardening work was mistakenly done *in*
-`compiled-serve` first and had to be reverted. `crates/compiler` (and
-everything downstream: `compiled-serve`, and `runtime-kernels`'s own
-role as `compiled-serve`'s FFI kernel) was marked deprecated in
-`docs/ROADMAP.md` on the same day this work happened, in favor of the
-v2 Rust dialect. Building anything new on a deprecated path, even by
-reusing its code as a dependency, would mean the work ships on a
-component with no future. Every piece in this RFC instead re-implements
-the same *logic* natively in `web.rs`'s own module tree
-(`crates/nirdosha-rt/src/web/ratelimit.rs`, `Router`'s own CORS
-methods), reusing `compiled-serve`'s design (the fixed-window-per-IP
-shape, the non-wildcard origin-reflection shape) as prior art, not as a
-dependency.
+---
 
-`runtime-kernels` itself is not deprecated — `nirdosha-rt`'s own
-`native` feature still depends on it for real FFI kernels (`db`,
-`transact`, `nir_oidc_validate_token`, `nir_dpop_verify`, etc.), and
-that dependency is unaffected by this RFC or by `compiled-serve`'s
-deprecation. Only `compiled-serve` itself (the HTTP server built
-*around* those kernels for the deprecated compiler's `nirdosha build
---serve`) has no future — see "Follow-up work" for what that means for
-a future DPoP port.
+## Phase 0 — Decision core + partitioned audit spine (was: gate skeleton)
 
-## What shipped
+Goal: the semantics are correct before anything builds on them.
 
-### Session cookie hardening
+**Decision algebra (new — this is the heart of v2):**
+- `GuardDecision = Allow { obligations } | Deny { reasons[] } | Escalate { approval_chain, revalidate_at_commit } | Pending { handle, expires_at }`
+- **Obligation classes:** `Blocking` (durable audit — must succeed before commit; failure = deny), `Ordered` (run post-commit in defined order, e.g., notify then index), `BestEffort` (async, never affects outcome).
+- **Composition rules (I2):** explicit precedence table — deny > break-glass-allow > escalate > allow; obligations merged with dedup by `kind+target`; conflicting ordered obligations on same target → deny with `obligation.conflict`.
+- **Escalation depth:** max 1 step-up re-evaluation; second escalation → `Deny { reason: escalation.loop }`. No unbounded loops.
+- **Decision trace schema:** designed for N decisions per request from day one (bulk semantics), each with `policy_version`, context snapshot, layer timings.
 
-`SESSION_COOKIE_ATTRS = "HttpOnly; Secure; SameSite=Strict; Path=/"`
-replaces the previous bare `HttpOnly; Path=/` on both the login-minted
-cookie and the logout-clearing one. `Secure` assumes the same disclosed
-deployment model the rest of this router already has: `web.rs` speaks
-plain HTTP itself; TLS, if any, terminates at a reverse proxy in front
-of it. A browser talking to this process directly over plain HTTP
-would never see the cookie sent back at all — a real, disclosed limit
-of a from-scratch HTTP/1.1 listener with no TLS of its own, not new to
-this RFC.
+**Partitioned audit chain (replaces single-chain design):**
+- Chains partitioned by `(tenant, service)`; each has a monotonic `seq`, hash `h_n = H(h_{n-1}, record_n)`.
+- Periodic **checkpoint root**: Merkle root over all partition heads every N seconds/minutes, anchored to an external timestamp source. Tamper-evidence preserved without global ordering.
+- **Batched writes:** records buffered per partition (window 10–25ms or 64 records), hashed and appended as a batch; async fsync with WAL-tail replay on crash (bounded durability window, documented per domain).
+- Audit store access is itself guarded: reading audit records is a guarded action, audited.
 
-Tested: `session_cookie_carries_secure_and_samesite_attributes` (both
-the login-minted and logout-clearing cookie strings).
+**Guard service skeleton:**
+- `guard::evaluate(subject, action, resource, context) -> GuardDecision`
+- `#[nirdosha_guard(action, resource)]` macro; `mutate!` with `dry_run: true` path returning full trace.
+- Router wiring: `expose!` auto-tags mutating routes.
+- **Decision cache:** keyed on `(subject, action, resource_version, context_bucket, policy_version)`, TTL ≤30s. Disabled by default for financial actions until Phase 2 sign-off.
 
-### CORS
+**Closes:** decision composition ✦ escalation loops ✦ audit-before-commit ✦ audit partitioning ✦ reproducibility ✦ dry-run.
 
-`Router::with_cors(origins: Vec<&'static str>)` — empty (never called)
-means no CORS headers are ever emitted, the same as before this RFC.
-Configured, a request from one of `origins` gets that exact origin
-reflected back plus `Access-Control-Allow-Credentials: true`; any other
-origin gets no CORS headers at all, which every browser treats as a
-hard deny. Never a wildcard — a credentialed response (this router
-always sends one, since every gated route relies on the session
-cookie) reflecting `*` would let any origin ride an authenticated
-user's session. `OPTIONS` preflights are answered before route
-dispatch; origin matching normalizes each side's own default port
-(`https://x` ≡ `https://x:443`).
+---
 
-Tested: `cors_reflects_only_a_configured_origin_never_a_wildcard`,
-`no_cors_configured_means_no_cors_headers_at_all`.
+## Phase 1 — Identity, auth, complete mutation inventory
 
-### Rate limiting
+Goal: know *who*, and prove *nothing bypasses the gate*.
 
-`Router::with_rate_limit(paths, max_per_window, window)` — a fixed-
-window, per-peer-IP limiter (`web/ratelimit.rs`, ported from
-`compiled-serve/src/ratelimit.rs`), most relevant to `with_login`'s own
-login path but takes an arbitrary path list. **Scope, disclosed, not a
-gap**: this only ever triggers through `serve_until`'s real accept
-loop, which is the one source of a real peer IP — `Router::dispatch`
-called directly (this crate's own unit tests, or an app embedding
-`Router` in its own server loop) never rate-limits. It is also, like
-`compiled-serve`'s own limiter, per-process only; a fleet-wide limiter
-would need a shared store and is real, separate follow-up work, not
-silently assumed away.
+- Multi-IdP registry (IdPRegistry config + loader), OIDC discovery, SAML adapter, JWT validation.
+- mTLS/SPIFFE identity verifier for service-to-service.
+- **Session revocation store with cache:** local session cache, TTL 30–60s, revocation propagates within TTL; `CredentialFreshness` and `StepUpMfa` obligations wired into the escalation path (not ad-hoc checks).
+- `rbac_admin!` screens; roles/claims compiled into policy.
+- **Mutation inventory (I6):** static analysis pass listing every `INSERT/UPDATE/DELETE` path — routes, `scheduler!` jobs, queue consumers, migrations, seeds. Every entry either has `#[nirdosha_guard]` or `#[guard_exempt]` with ticket + expiry. **Data-layer backstop:** DB roles deny write access to the application user except through guard-approved connections — so the gate is enforcement, and the DB is the second line, not the only line.
+- Migrations go through the guard as `action = "schema.migrate"` with maker-checker above a severity threshold.
 
-Tested end-to-end over real sockets:
-`rate_limit_denies_past_the_configured_max_from_the_same_peer_and_leaves_other_paths_untouched`
-(`router_concurrency.rs`), plus the ported unit tests in
-`web/ratelimit.rs` itself (window reset, per-IP independence, the
-bounded-tracked-IPs eviction property).
+**Closes:** multi-IdP ✦ OIDC/SAML ✦ mTLS ✦ session revocation ✦ non-HTTP mutation paths ✦ RBAC admin.
 
-### Switchable transport (`Runtime::Async` / `Runtime::Sync`)
+---
 
-`Router::with_runtime(Runtime)`; `Router::new` defaults to
-`Runtime::Async`. Neither variant changes what a route handler looks
-like — still an ordinary sync `Fn(&Request, &PathParams) -> Response`
-either way, and the dialect's own driver keeps rejecting `async fn` in
-application code regardless of which transport a given `Router` runs
-under. Only the accept loop underneath differs:
+## Phase 2 — State, financial controls, KV-backed counters
 
-- **`Runtime::Sync`** (`serve_until_sync`): the original implementation,
-  unchanged — one OS thread per accepted connection, bounded by
-  `ServeConfig::max_connections`.
-- **`Runtime::Async`** (`serve_until_async`, new): a tokio-based accept
-  loop. A `tokio::sync::Semaphore` sized to `max_connections` replaces
-  the thread-count check; each accepted connection becomes a `tokio`
-  task; the one handler call per request goes through
-  `tokio::task::spawn_blocking` rather than being awaited inline —
-  necessary because handlers can legitimately block for a real amount
-  of time (`communication_feed!`'s long-poll wait is exactly that
-  shape), and awaiting one inline would stall that reactor thread's
-  other work. `Response::write_to`'s wire-format logic was extracted
-  into `Response::wire_string()` so both transports serialize a
-  response identically from one definition.
+Goal: domain rules with the performance design built in.
 
-  Contract parity with the sync path, both disclosed and tested: an
-  over-capacity connection is accepted then closed without being
-  handled (never left sitting unaccepted in the kernel backlog until
-  some unrelated timeout — a caller depending on a prompt, explicit
-  close needs exactly this, and the existing
-  `slow_handler_does_not_block_other_routes_and_capacity_is_bounded`
-  test enforces it); shutdown stops accepting first, then every
-  in-flight task is awaited before `serve_until` returns; a panicking
-  handler closes the connection with no response and never takes the
-  server down (a panicking `spawn_blocking` task surfaces as an `Err`
-  on its `JoinHandle`, the same isolation `catch_unwind` gives the sync
-  path).
+- `#[immutable]` + compensating-entry convention for ledger/financial records (direct mutation = hard deny at state layer).
+- `#[workflow_state_machine]` with CI **reachability check** (no dead states, no forbidden transitions reachable).
+- **Type-inferred classification (review fix):** fields typed `Money`, `CardNumber`, `Iban`, `Email`, `Phone` auto-inherit classification from the type; `#[classify]` is for overrides only; CI fails on unclassified sensitive-typed fields.
+- **LimitService on KV counters:** atomic `INCR`+TTL for velocity limits; local in-memory counters with periodic flush for low-stakes limits; strict DB counters only for money-movement caps. Per-tenant fairness limits at the gate entrance.
+- **IdempotencyStore:** key scoped to `(tenant, subject, action)`; duplicate key + different payload → `Deny { idempotency.payload_mismatch }`; concurrent same-key → second request parks on `Pending` until first resolves.
+- `approval_chain!` with quorum + delegation (delegation revocable, chains depth-limited); **commit-time re-evaluation (I3)** implemented here and tested: approve at version N, mutate to N+2 before commit → re-run cheap layers, diff-check approved fields.
+- `scheduler!` for future-dated mutations (validated at schedule time, re-evaluated at fire time).
+- `notification_inbox!`.
 
-  `tokio` sits behind this crate's own `async-runtime` feature,
-  default-on (mirroring the precedent `nirdosha-hi`'s `native-window`
-  feature already set for `wry`/`tao`: a real, usually-wanted
-  dependency, but not a mandatory one for a build with no use for it).
-  A `--no-default-features` build that still requests `Runtime::Async`
-  (including via `Router::new`'s own default) gets a real, honest `Err`
-  naming the missing feature — never a silent downgrade to `Sync`, and
-  never a panic.
+**Closes:** immutable ledger ✦ state machines ✦ sealed/frozen records ✦ thresholds/velocity ✦ dual control ✦ idempotency ✦ scheduled mutations ✦ approval chains ✦ stale-approval hole.
 
-Tested: every pre-existing test in `router_concurrency.rs` (seven
-tests spanning worker isolation, panic recovery, bounded admission,
-concurrent sessions, and `communication_feed!`'s long-poll) now runs
-against the async transport by default, unmodified, and passes — the
-real proof that the two transports are behaviorally equivalent from a
-caller's perspective, not just independently plausible. Plus:
-`router_defaults_to_the_async_runtime_and_with_runtime_overrides_it`
-(unit), `with_runtime_sync_opt_out_still_serves_real_requests_over_real_sockets`
-(integration, real sockets), and
-`async_runtime_without_the_feature_is_a_clear_error_not_a_panic` (only
-compiled under `--no-default-features`).
+---
 
-## Claims-based authorization (update, 2026-09-17)
+## Phase 3 — Context, risk, environment
 
-`gaps.md`'s two claims-based-identity rows — `role.rs`'s `RoleProof<R>`
-had no claims-based sibling at all, so a gated route (or a
-`#[contract(...)]`-annotated function) could require a role but never
-an arbitrary claim — are now closed, the same day this RFC's other
-work shipped. Dialect-wide, not just at the router:
+Goal: dynamic context without becoming the latency tail.
 
-- **`nirdosha-contract-core`**: `naming.rs` (extracted, shared
-  snake_case validation + PascalCase conversion — `role.rs` now
-  delegates to it too, unchanged behavior) and `claim.rs`
-  (`validate_claim_name`/`validate_claim_value`/`claim_ident`, the
-  `requires(claim = "..", "..")` sibling to `role.rs`'s own
-  `requires(role = "..")` mapping: `PascalCase(name) ++
-  PascalCase(value)`, mechanical and total the same way). `Requires`
-  gained a `claim: Option<(String, String)>` field; `Contract::validate`
-  now requires exactly one of `role`/`expr`/`claim`, never more than one
-  or none.
-- **`nirdosha-contract-core::parse`**: `requires(claim = "department",
-  "cardiology")` — the five-token form, tried after the three-token
-  `role = "..."` form and before falling back to parsing the group as a
-  boolean expression.
-- **`nirdosha-rt::role`**: `Claim` (a `NAME`/`VALUE` trait, unlike
-  `Role`'s presence-only `NAME`), `ClaimProof<C>` (same private-
-  constructor design as `RoleProof<R>`), `Auth::with_claim`/
-  `with_claims` (additive builder methods — `Auth::login`'s existing
-  2-arg signature is unchanged, so every pre-existing call site across
-  the dialect still compiles), `Auth::has_claim`/`prove_claim::<C>()`,
-  and a new `AuthError::MissingClaim` variant.
-- **`nirdosha_rt::claims!`**: the `roles!` sibling macro — declares
-  marker types mapping a chosen ident to a `(name, value)` pair.
-- **`nirdosha-macros`**: `requires(claim = ..)` now injects
-  `&ClaimProof<crate::nirdosha_claims::#ident>` as the gated function's
-  first parameter, mirroring the existing role-proof injection exactly
-  (same insertion point, same "uncallable without a minted proof"
-  guarantee).
-- **`web::Router`**: `get_gated_claim`/`post_gated_claim`/
-  `put_gated_claim`/`delete_gated_claim` (mirroring `*_gated`'s own
-  macro-generated shape), `Route.required_claim` for accurate
-  `openapi_document` reporting (a `nirdoshaClaim` security scheme,
-  sibling to the existing `nirdoshaRole` one).
-- **`cargo-nirdosha`**: `guarantee_bundle`'s `gated_exports` reporting
-  fixed to describe a claim-gated function as `"claim:name=value"`
-  rather than silently falling through to `"unknown"` — a real,
-  if minor, correctness gap this change would otherwise have
-  introduced into an existing tool.
+- RequestContext extractor: IP/geo (cached provider responses), device posture, environment separation (prod credentials rejected on non-prod data and vice versa — checked at identity layer).
+- **External call discipline (performance contract):** every external dependency (risk score, sanctions/AML, geo) behind a uniform adapter with: hard timeout (p99 budget), circuit breaker, cached last-good fallback, conservative default + alert on breaker-open.
+- Impossible-travel detector.
+- Risk-score-driven **policy tier selection:** low risk → fast path; elevated → full pipeline with step-up.
+- Load-shedding policy: under overload, layer 5 (risk/context) degrades to cached fallback first; layers 0–2 and audit never shed.
+- SoD DSL with **CI satisfiability check** (no rule sets that make required flows impossible).
 
-Tested end-to-end, not just unit-tested: `crates/nirdosha-rt/tests/
-claims.rs` (a real `#[contract(effects(pure), requires(claim = ..))]`-
-gated function — a session holding the exact claim can call it, a
-session with the same claim *name* but a different *value* cannot, a
-session with no claims at all cannot) and `web.rs`'s own
-`claim_gated_route_enforces_the_real_claim_proof`/
-`openapi_reports_the_same_claim_the_gate_checked`. All pre-existing
-`nirdosha-contract-core`/`nirdosha-macros`/`nirdosha-rt` tests still
-pass unmodified.
+**Closes:** rate limiting ✦ geo-fencing ✦ device posture ✦ env separation ✦ risk gating ✦ watchlist deltas ✦ SoD conflicts.
 
-**Disclosed scope note**: the built-in cookie/session login
-(`Router::with_login`) stays role-only — its `verify` closure returns
-`Vec<String>` roles, no claims, matching the fixture-grade demo-login
-shape it always had. `get_gated_claim` is reachable via a session that
-already carries claims (an app's own `authenticate` closure building
-`Auth` with `.with_claims(..)` from a real token's claim set, the
-production-identity path), not via the built-in username/password
-login form.
+---
 
-## DPoP, TLS, fleet-wide rate limiting, and security headers (update, 2026-09-17)
+## Phase 4 — Compliance, policy ops, governance
 
-All four items this RFC's own "Follow-up work" section originally
-listed as real, disclosed, not-yet-started gaps shipped the same day,
-each a plain-Rust addition to `web.rs`'s own module tree
-(`web/dpop.rs`, `web/dpop_replay.rs`, `web/tls.rs`,
-`web/fleet_ratelimit.rs`), each proven end-to-end over real sockets
-(and, for the fleet-wide limiter, a real disposable Redis container),
-not just unit-tested in isolation.
+Goal: the gate governs itself.
 
-- **DPoP / RFC 9449** (`Router::with_sender_constrained_tokens`).
-  `web/dpop.rs` is a plain-Rust port of `runtime-kernels`'s own
-  `dpop_verify_inner`/`dpop_jwk_thumbprint` — not an FFI call into that
-  crate, since `nirdosha-rt` is plain Rust with no compiled-artifact ABI
-  boundary to cross. `Auth` gained `with_cnf_jkt`/`cnf_jkt` (additive,
-  `Auth::login`'s signature unchanged) so an app's own `authenticate`
-  closure — real production identity verification, which this crate
-  still has no opinion on the format of — can bind a session to a
-  verified token's `cnf.jkt` claim; `Router::check_dpop` then enforces
-  proof-of-possession (`htm`/`htu`/`iat` freshness, `ath`, `cnf.jkt`
-  match, replay via `dpop_replay::DpopReplayCache`) on every bearer-token
-  request once opted in. Fails closed at every step: no `DPoP` header,
-  an unbound token, an invalid proof, or a replayed `jti` are all a real
-  `401`. Proven: `crates/nirdosha-rt/tests/dpop.rs` (full round trip,
-  replay rejection, wrong-key rejection, unbound-token rejection, and
-  confirmation that an anonymous request is untouched by the check
-  entirely) plus `web/dpop.rs`'s own unit tests (ground-truthed against
-  the same fixed P-256 test key and independently-computed JKT
-  `runtime-kernels`'s original tests use).
-- **TLS termination** (`Router::with_tls`). `web/tls.rs`'s `TlsConfig`
-  wraps a real `rustls::ServerConfig` built from PEM cert/key bytes;
-  `Runtime::Sync` terminates it via `rustls::Stream` directly,
-  `Runtime::Async` via `tokio_rustls::TlsAcceptor` — both transports
-  share one `serve_one_async`/`handle_sync_connection`-shaped read-
-  dispatch-write cycle, so the logic isn't duplicated per transport. A
-  deployer's reverse proxy remains fully supported (`with_tls` never
-  called, unchanged default — this crate still has no opinion on which
-  a given deployment should use). `security_headers` now emits
-  `Strict-Transport-Security` exactly when `Router::tls` is actually set
-  — sending that header over a connection this process doesn't itself
-  terminate TLS on would be simply false. Proven over real sockets, both
-  transports, with a real client that validates the server's actual
-  certificate (no disabled verification standing in for "TLS happened"):
-  `crates/nirdosha-rt/tests/tls.rs`, plus a negative test that a
-  plaintext client talking directly to a TLS-terminated server never
-  gets a parsed HTTP response.
-- **Fleet-wide rate limiting** (`Router::with_fleet_rate_limit`).
-  `web/fleet_ratelimit.rs`'s `FleetRateLimiter` is a Redis-backed
-  sibling to `ratelimit.rs`'s own per-process limiter — same fixed-
-  window-per-peer-IP shape, but `INCR`+conditional-`EXPIRE` runs as one
-  atomic Lua script (`redis::Script`) so a crash between the two can
-  never leave a key with no TTL, permanently locking an IP out. A Redis
-  outage fails *open* (logged loudly), a deliberate choice: a rate
-  limiter that can also take the whole fleet down on its own dependency
-  hiccup would trade a real availability outage for a soft abuse bound
-  `with_rate_limit`'s own per-process backstop still partially covers.
-  Proven against a real, disposable `redis:alpine` container during
-  development — `web/fleet_ratelimit.rs`'s own unit tests (window
-  behavior, per-IP independence, and, the one this module exists for,
-  two independent `FleetRateLimiter` handles sharing one count) and
-  `crates/nirdosha-rt/tests/fleet_rate_limit.rs` (the same, over two
-  real HTTP servers). All `#[ignore]`d so the normal suite stays green
-  without a Redis available — run explicitly with one.
-- **Security headers.** Every response now carries
-  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
-  `Referrer-Policy: strict-origin-when-cross-origin`, and a real
-  `Content-Security-Policy` (`default-src 'self'`, `object-src 'none'`,
-  `frame-ancestors 'none'`, `base-uri 'self'` — genuinely restrictive;
-  `script-src`/`style-src` allow `'unsafe-inline'` deliberately, not by
-  oversight, since this dialect's own generated pages
-  (`feed.rs`'s long-poll script, every `style="..."` attribute the
-  screen archetypes emit) rely on inline `<script>`/`style=` today and
-  a stricter policy would break real, first-party output, not just
-  close a hole).
+- Classification-driven compliance defaults (PCI/GDPR/SOX/KYC domains).
+- Consent store for PII mutations; retention enforcement (block delete → route to purge workflow).
+- **PolicyStore:** versioned policies, compiled-artifact signing, `verify-artifact` offline check, `--audit` re-checks policy source hashes.
+- **Shadow mode + backtesting:** new policies run log-only *and* replayed against the last 30–90 days of recorded decisions (`replay(decision_id)` from I4 makes this possible) — deploy with a deny/escalate delta report, not blind.
+- **Bypass/break-glass registry:** resource-scoped, time-boxed, mandatory reason + ticket, auto-expiry, every use generates a post-hoc review task.
+- **Policy test framework:** unit tests per policy + scenario suite (compliance matrix from the original doc becomes executable tests).
+- Observability: deny rate, override rate, latency per layer, audit-lag, checkpoint-root verification job (periodic re-hash of partition chains).
+- FIPS profile wiring; artifact evidence for gate binary + policy bundle.
 
-Every one of these four is behind its own Cargo feature
-(`dpop`/`tls`/`async-runtime` default-on, `fleet-rate-limit` default-off
-given the Redis dependency's weight — see each feature's own `Cargo.toml`
-comment), mirroring the precedent `nirdosha-hi`'s `native-window`
-feature already established: real, usually-wanted capabilities, never
-mandatory for a build with no use for them.
+**Closes:** PCI/GDPR/SOX/KYC ✦ policy versioning ✦ shadow mode ✦ explainability ✦ signed trust chain ✦ observability.
 
-**Real gap found and fixed along the way**: `Runtime::default()` always
-returned `Async` regardless of whether `async-runtime` was actually
-compiled in, so a `--no-default-features` build's own `Router::new()`
-carried a landmine — any `serve_until` call would fail at runtime unless
-`with_runtime(Sync)` was called explicitly every time. `Runtime::default()`
-is now feature-aware (`Async` when compiled in, `Sync` otherwise),
-caught by actually running the full `--no-default-features` test suite
-end to end rather than only the one test written to exercise that
-build's own error path.
+---
 
-**Still open**: none of the four gaps this RFC originally disclosed
-here remain. The next real, disclosed gap is claims-based authorization
-being unreachable through the built-in cookie/session login (see the
-"Claims-based authorization" section's own "disclosed scope note"
-above) and a full FAPI 2.0 profile beyond DPoP (PAR, mandatory PKCE,
-client authentication, OIDF certification) — see the earlier
-conversation's own honest-claim answer on what this codebase can and
-can't say about FAPI compliance; nothing here changes that answer.
+## Phase 5 — External surface & UX
+
+- OpenAPI generation from `#[nirdosha_guard]` metadata (includes the dry-run endpoint — make it public early for integrators).
+- ARIA in generated screens; `search_screen!` over guarded resources; import/export jobs (needs blob type).
+- **Import flow uses bulk semantics from Phase 0:** per-item decisions in one trace, partial-failure report, compensating saga for committed batches.
+
+## Phase 6 — Native compiler / product lane
+
+Unchanged: conditional service embedding, embedded UI assets, high-perf HTTP path, OTLP export, mobile profiles sharing guard policies.
+
+---
+
+## What to build first (concrete order, first 4–6 weeks)
+
+1. `decision/` module: types, composition table (I2), obligation classes, trace schema.
+2. `audit/` module: partitioned chain, batching, checkpoint root, WAL recovery.
+3. `mutate!` macro + `#[nirdosha_guard]` + dry-run.
+4. Commit-time re-evaluation hook (even before approvals exist — the seam matters).
+5. Mutation inventory check in `cargo nirdosha verify` (I6).
+6. Session cache + revocation (identity at coarse level is enough to make audit entries meaningful).
+7. KV counter adapter behind the `LimitService` trait (SQLite-local first, Redis-compatible interface).
+
+## Test matrix additions (from review)
+
+- **Property tests:** composition algebra — random decision sets must never produce both allow and deny.
+- **Crash tests:** kill the process mid-batch; chain must recover via WAL tail with no lost committed mutation.
+- **Concurrency tests:** 2k concurrent mutations on one tenant and one hot account — assert no counter drift, no audit gaps, no duplicate application.
+- **Stale-approval test:** approve → mutate → commit must re-evaluate (I3).
+- **Bypass audit test:** every `#[guard_exempt]` entry expires or fails CI.
+
+The big shift from v1: **semantics and the audit partition design land before any policy layer**, and every phase ends with CI-enforced invariants rather than "screens built." Want me to detail the `decision/` module — the actual Rust types for `GuardDecision`, obligations, and the composition table — as the next concrete artifact?

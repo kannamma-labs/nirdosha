@@ -37,6 +37,10 @@ this list.
 | [0021.b](./0021.b-approval-runtime.md) | Multi-person approval runtime, person-equivalence trust contract, durable ledger and outbox — substantially implemented and now wired in (`nirdosha-hi workflow ...`, `crates/nirdosha-workflow`) |
 | [0021.c](./0021.c-graph-analysis.md) | Analysis findings, checker integration, coverage and evidence freshness — tool surface implemented; real structural/reachability/predicate adapters remain open |
 | [0022](./0022-web-layer-hardening-and-switchable-transport.md) | Web-layer hardening for `nirdosha-rt`'s live `Router` — `Secure`/`SameSite` cookies, real non-wildcard CORS, per-IP and Redis-backed fleet-wide rate limiting, a switchable async/sync `serve_until` transport (async default), dialect-wide claims-based authorization (`Claim`/`ClaimProof`, `requires(claim = ..)`), RFC 9449 DPoP (`with_sender_constrained_tokens`), real TLS termination (`with_tls`), and security headers on every response — shipped |
+| [0023](./0023-data-guard.md) | Store-agnostic access control — one decision surface, store-native enforcement, typed IR, Cedar front-end, relation lowering, federated reads, governed reference data, and a first-class data-guard MCP for LLM agents — proposed, revised |
+| [0024](./0024-hi-and-guard-mcp-integration.md) | `nirdosha-hi` integration with the data-guard MCP — safe composition of graph authoring and live data access, with delegation tokens, evaluate-then-act, and maker-checker policy mutations — proposed |
+| [0025](./0025-nirdosha-rtm-ecosystem.md) | Nirdosha RTM Ecosystem — vendor-neutral modules on the guard kernel, MIC, rustc + macros + drivers architecture, and conformance suite — draft |
+| [0026](./0026-nirdosha-metadata-plane.md) | The Nirdosha Metadata Plane — governed lineage over the guard kernel, declared/observed graph delta, V10, and lineage query/composition macros — draft |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a
