@@ -4,7 +4,15 @@ resolver = "2"
 # exclusion keeps Cargo from auto-enrolling the path dependency as a member.
 exclude = ["crates/runtime-kernels", "crates/compiled-serve"]
 members = [
-    "crates/compiler",
+    # `crates/compiler` (the original interpreted `.nir` language) was
+    # deleted 2026-09-20 -- deprecated in favor of the v2 Rust dialect
+    # below (docs/ROADMAP.md's 2026-09-17 note; see
+    # docs/V2_MIGRATION_ROADMAP.md for how this repo's own frozen copy
+    # relates to the still-actively-developed native compiler product
+    # in a separate repository). `crates/grammar_export` and
+    # `crates/grammar_check` were deleted alongside it -- both existed
+    # solely to validate that deleted grammar.
+    #
     # The `hi` agentic build console, extracted out of `crates/compiler`
     # 2026-09-16 so it has no dependency on the native `.nir` compiler
     # crate at all -- every "does this v2 candidate build/describe/
@@ -13,11 +21,11 @@ members = [
     "crates/nirdosha-hi",
     "crates/nirdosha-graph",
     "crates/nirdosha-workflow",
-    # Shared Ed25519 signing + tamper-evident audit-log primitives, used
-    # by both `crates/compiler` (certificate/pack signing) and
-    # `crates/nirdosha-hi` (the self-repair loop's hint-cache audit
-    # trail) -- extracted alongside `nirdosha-hi` for the same reason:
-    # neither crate should depend on the other just to share this.
+    # Shared Ed25519 signing + tamper-evident audit-log primitives --
+    # used by `crates/nirdosha-hi` (the self-repair loop's hint-cache
+    # audit trail); also once used by the now-deleted `crates/compiler`
+    # (certificate/pack signing), which is why it was extracted as its
+    # own crate rather than living inside `nirdosha-hi`.
     "crates/nirdosha-audit",
     # RFC 0023: store-agnostic access-control IR and invariants.
     "crates/nirdosha-guard-core",
@@ -54,37 +62,41 @@ members = [
     # separate nested workspace's own path dependency on this same
     # crate -- see `crates/runtime-kernels/Cargo.toml`'s own comment on
     # why it can't join *this* workspace, mirroring `compiled-serve`'s
-    # identical reasoning) and `crates/compiler` (`nirdosha check-
-    # isolation` and certificate isolation-violation attachment). No
-    # `[workspace]` table of its own, so it stays an ordinary member
-    # here, not a workspace root the way `runtime-kernels`/
-    # `compiled-serve` had to become to solve the reverse problem.
+    # identical reasoning); also once used by the now-deleted
+    # `crates/compiler` (`nirdosha check-isolation` and certificate
+    # isolation-violation attachment). No `[workspace]` table of its
+    # own, so it stays an ordinary member here, not a workspace root
+    # the way `runtime-kernels`/`compiled-serve` had to become to solve
+    # the reverse problem.
     "crates/isolation-core",
-    "crates/grammar_check",
-    "crates/grammar_export",
     "crates/presence-gateway",
     # rfcs/0008-native-plugin-abi-widening.md Phase 1/4: the first two
     # real, *compiled-path* reference plugins, built against
     # `NativePluginBuiltin` directly (a plain `#[no_mangle] extern "C"`
     # symbol, not the deleted interpreter's `PluginBuiltin` trait) — see
     # each crate's own README for the plugin-author and app-author
-    # sides, and `crates/compiler/tests/native_plugin_examples.rs` for
-    # the automated "compiles and the real binary runs correctly" proof.
+    # sides. Their automated "compiles and the real binary runs
+    # correctly" proof lived in the now-deleted `crates/compiler/tests/
+    # native_plugin_examples.rs` -- a real, disclosed test-coverage loss
+    # from that deletion (2026-09-20), not rebuilt in this pass; these
+    # crates still compile standalone, they just have no integration
+    # harness proving the plugin ABI end to end anymore.
     "crates/plugin-example-native-shout",
     "crates/plugin-example-native-kv",
     # rfcs/0011-uniform-service-provider-model.md Phase 8: the RFC's own
     # closing checklist item -- one real, shipped `call`-shape plugin,
     # proving Phases 3-7's plugin-provider machinery works end to end
     # with real compiled/linked/executed code, not just typechecked
-    # `NativePluginBuiltin` metadata. See its own README and
-    # `crates/compiler/tests/native_plugin_examples.rs`.
+    # `NativePluginBuiltin` metadata. See its own README; its
+    # `crates/compiler/tests/native_plugin_examples.rs` proof is gone
+    # along with that crate (see comment above).
     "crates/plugin-example-native-authed-http",
     # rfcs/0009-ui-catalog-extensibility.md Phase B's real reference UI
     # component -- a genuinely separate crate (not inline Rust in a
     # test file) contributing a `layout { ... }` widget kind. See its
-    # own README and `crates/compiler/tests/ui_plugin_examples.rs` for
-    # the "reads real, separately-compiled bytes" proof, mirroring the
-    # two native-plugin examples above.
+    # own README; its `crates/compiler/tests/ui_plugin_examples.rs`
+    # "reads real, separately-compiled bytes" proof is gone along with
+    # that crate (see comment above).
     "crates/ui-plugin-example-sparkline",
     # `crates/bench` (2026-09) -- nirdosha-master-plan.md Part 3 Sprint 2's
     # "Benchmark harness v1", rebuilt from nothing (the original,

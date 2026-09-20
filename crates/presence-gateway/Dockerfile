@@ -10,20 +10,6 @@
 # ---- build stage --------------------------------------------------------
 FROM rust:1-slim AS build
 
-# `crates/compiler/` has to be present in the build context too -- even
-# though it's only this crate's `[dev-dependencies]` (`Cargo.toml`'s own
-# doc comment: real integration tests spin up a real `nirdosha serve`
-# in-process), Cargo still reads a path dependency's manifest to compute
-# the unified `Cargo.lock` graph even for a plain non-test `build`. It is
-# **not** actually compiled for this image -- `cargo build --release`
-# below only builds this crate's own `[[bin]]`, never a dev-dependency,
-# so none of `compiler`'s own dependencies (z3, postgres, rusqlite, ...)
-# get pulled into this build, confirmed by this image's own build time.
-WORKDIR /src
-COPY crates/compiler/Cargo.toml crates/compiler/Cargo.lock ./compiler/
-COPY crates/compiler/build.rs ./compiler/build.rs
-COPY crates/compiler/src ./compiler/src
-
 WORKDIR /src/presence-gateway
 COPY crates/presence-gateway/Cargo.toml crates/presence-gateway/Cargo.lock ./
 COPY crates/presence-gateway/src ./src
