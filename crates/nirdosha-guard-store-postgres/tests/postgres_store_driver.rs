@@ -59,6 +59,7 @@ fn write_policy(action: Action, resource: &str, tenant: &str) -> PolicyCandidate
         caps: vec![],
         masks: vec![],
         affected_row_cap: None,
+        predicate_use: vec![],
     }
 }
 
@@ -184,6 +185,7 @@ fn prepare_rejects_a_write_plan_with_no_tenant_scope() {
         caps: vec![],
         masks: vec![],
         affected_row_cap: None,
+        predicate_use: vec![],
     };
     let mut client = GuardClient::new(vec![policy], "rls-test-notenant", temp_dir.join("audit.jsonl"));
     let req = EvalRequest { context: context_for("tenant-alpha", "no_scope_row") };
@@ -208,6 +210,7 @@ fn read_policy(resource: &str, tenant: &str, caps: Vec<Cap>) -> PolicyCandidate 
         caps,
         masks: vec![],
         affected_row_cap: None,
+        predicate_use: vec![],
     }
 }
 
@@ -326,6 +329,59 @@ fn create_update_delete_lifecycle_is_enforced_by_real_row_locking() {
         .guarded_apply(&EvalRequest { context: delete_ctx }, &driver, EntityBytes(vec![]), "trace-lc-5", 1_700_001_400)
         .expect("delete must commit");
     assert_eq!(driver.get("lifecycle_row").expect("read back"), None, "the real row must be gone after delete");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+/// Real Postgres proof for `Plan Phase 9`'s query-shape enforcement:
+/// opaque-cursor (keyset) pagination and `CohortFloor` both run as real
+/// SQL, not just against `MemStoreDriver`'s in-memory equivalent.
+#[test]
+#[ignore]
+fn opaque_cursor_pagination_and_cohort_floor_against_real_postgres() {
+    let url = test_url();
+    let driver = PostgresStoreDriver::connect(&url).expect("connect + provision schema");
+    let resources = ["cursor_row_1", "cursor_row_2", "cursor_row_3"];
+    clean_fixture_rows(&url, &resources);
+
+    let temp_dir = std::env::temp_dir().join(format!("nirdosha-pg-driver-cursor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let mut writer = GuardClient::new(
+        resources.iter().map(|r| tenant_scoped_policy(r, "tenant-eta")).collect(),
+        "cursor-seed",
+        temp_dir.join("seed.jsonl"),
+    );
+    for (i, resource) in resources.iter().enumerate() {
+        let req = EvalRequest { context: context_for("tenant-eta", resource) };
+        writer.guarded_apply(&req, &driver, EntityBytes(vec![b'x', i as u8]), format!("trace-cursor-seed-{resource}"), 1_700_002_000 + i as u64).unwrap();
+    }
+
+    // Page 1: RowCap(2) of 3 real rows.
+    let mut reader = GuardClient::new(vec![read_policy("cursor_row_1", "tenant-eta", vec![Cap::RowCap(2)])], "cursor-read-1", temp_dir.join("r1.jsonl"));
+    let read_req = EvalRequest { context: read_context("cursor_row_1", "tenant-eta", Action::Read) };
+    let page1 = reader.guarded_read(&read_req, &driver, "trace-cursor-1", 1_700_002_100).expect("page 1 must be allowed");
+    assert_eq!(page1.rows.len(), 2);
+    let cursor = page1.next_cursor.clone().expect("a truncated real page must return a cursor");
+
+    // Page 2: resume from the real cursor, get the remaining row.
+    let mut cursor_req = read_req.clone();
+    cursor_req.context.query_shape.pagination = nirdosha_guard_core::PaginationMode::OpaqueCursor(cursor);
+    let mut reader2 = GuardClient::new(vec![read_policy("cursor_row_1", "tenant-eta", vec![Cap::RowCap(2)])], "cursor-read-2", temp_dir.join("r2.jsonl"));
+    let page2 = reader2.guarded_read(&cursor_req, &driver, "trace-cursor-2", 1_700_002_200).expect("page 2 must be allowed");
+    assert_eq!(page2.rows.len(), 1, "the real second page must return exactly the one remaining row");
+
+    let mut all: Vec<Vec<u8>> = page1.rows.into_iter().map(|r| r.0).collect();
+    all.extend(page2.rows.into_iter().map(|r| r.0));
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 3, "the two real pages together must cover all three rows exactly once, no duplicates or gaps");
+
+    // CohortFloor: 3 real rows exist; a floor of 10 must refuse the query
+    // against the real database, not return the 3 it found.
+    let mut floor_reader = GuardClient::new(vec![read_policy("cursor_row_1", "tenant-eta", vec![Cap::CohortFloor(10)])], "cursor-floor", temp_dir.join("floor.jsonl"));
+    let floor_result = floor_reader.guarded_read(&read_req, &driver, "trace-cursor-floor", 1_700_002_300);
+    assert!(floor_result.is_err(), "cohort_floor must refuse a real query below the floor, not return a truncated result");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

@@ -40,7 +40,7 @@ use nirdosha_guard_core::{
     AggregateSemantics, CapabilityManifest, FilterNodeKind, LineageFacts, Tenant, Value,
 };
 use nirdosha_guard_core::WriteAction;
-use nirdosha_guard_mic::{EntityBytes, PlanError, PlanIr, Prepared, ReadPlanIr, Receipt, StoreDriver};
+use nirdosha_guard_mic::{EntityBytes, PlanError, PlanIr, Prepared, QueryResult, ReadPlanIr, Receipt, StoreDriver};
 use sha2::{Digest, Sha256};
 
 const TABLE_DDL: &str = r#"
@@ -304,7 +304,7 @@ impl StoreDriver for PostgresStoreDriver {
         Ok(Receipt { store_commit_id: format!("pg-{xmin}"), digest })
     }
 
-    fn query(&self, plan: &ReadPlanIr) -> Result<Vec<EntityBytes>, PlanError> {
+    fn query(&self, plan: &ReadPlanIr) -> Result<QueryResult, PlanError> {
         // Same posture as the write side's "missing tenant scope" refusal
         // (`prepare`, above) and `MemStoreDriver::query`'s identical
         // check: a read plan reaching this driver with no filter at all
@@ -317,27 +317,34 @@ impl StoreDriver for PostgresStoreDriver {
             .ok_or_else(|| PlanError::Rejected("missing tenant scope".into()))?;
         let sql_plan = RdbmsEmitter::compile_plan(filter, SqlDialect::Postgres, &Tenant(tenant.clone()));
 
-        let row_cap = plan.caps.iter().find_map(|cap| match cap {
-            nirdosha_guard_core::Cap::RowCap(n) => Some(*n),
-            _ => None,
-        });
+        let row_cap = plan.caps.iter().find_map(|cap| match cap { nirdosha_guard_core::Cap::RowCap(n) => Some(*n), _ => None });
         // `MaxScanRows` bounds what the engine reads before filtering;
-        // without pushdown-vs-post-filter cost accounting (Plan Phase 9),
-        // this driver treats it the same as `RowCap` — both cap what
-        // comes back, which is honest for a fully-pushed-down `WHERE`
-        // (everything scanned matches the filter already) and merely
-        // conservative otherwise, never permissive.
-        let effective_cap = row_cap
-            .into_iter()
-            .chain(plan.caps.iter().find_map(|cap| match cap {
-                nirdosha_guard_core::Cap::MaxScanRows(n) => Some(*n),
-                _ => None,
-            }))
-            .min();
+        // without pushdown-vs-post-filter cost accounting, this driver
+        // treats it the same as `RowCap` — both cap what comes back,
+        // which is honest for a fully-pushed-down `WHERE` (everything
+        // scanned matches the filter already) and merely conservative
+        // otherwise, never permissive. `MaxScanBytes` has no equivalent
+        // enforcement here — real scan-time byte accounting isn't
+        // available through the plain query interface this driver uses;
+        // only `MaxResultBytes` (checked post-fetch, below) is enforced.
+        let max_scan_rows = plan.caps.iter().find_map(|cap| match cap { nirdosha_guard_core::Cap::MaxScanRows(n) => Some(*n), _ => None });
+        let max_result_bytes = plan.caps.iter().find_map(|cap| match cap { nirdosha_guard_core::Cap::MaxResultBytes(n) => Some(*n as usize), _ => None });
+        let max_execution_ms = plan.caps.iter().find_map(|cap| match cap { nirdosha_guard_core::Cap::MaxExecutionTimeMs(n) => Some(*n), _ => None });
+        let cohort_floor = plan.caps.iter().find_map(|cap| match cap { nirdosha_guard_core::Cap::CohortFloor(n) => Some(*n as i64), _ => None });
+        let effective_cap = row_cap.into_iter().chain(max_scan_rows).min();
 
-        let query = match effective_cap {
-            Some(limit) => format!("SELECT payload FROM guard_entities WHERE {} LIMIT {limit}", sql_plan.where_clause),
-            None => format!("SELECT payload FROM guard_entities WHERE {}", sql_plan.where_clause),
+        let cursor = match &plan.pagination {
+            nirdosha_guard_core::PaginationMode::OpaqueCursor(token) => Some(nirdosha_guard_mic::decode_cursor(token)?),
+            _ => None,
+        };
+        // Keyset pagination on `resource` — I10/§8.4's "opaque cursors
+        // only" applies here exactly as it does in `MemStoreDriver`
+        // (which paginates the same way over its own key-ordered map):
+        // `resource > $cursor` rather than `OFFSET n`, so a page's cost
+        // doesn't grow with how deep into the result set it is.
+        let where_with_cursor = match &cursor {
+            Some(_) => format!("({}) AND \"resource\" > ${}", sql_plan.where_clause, sql_plan.parameters.len() + 1),
+            None => sql_plan.where_clause.clone(),
         };
 
         let mut conn = self.pool.get().map_err(|e| PlanError::Store(e.to_string()))?;
@@ -346,15 +353,71 @@ impl StoreDriver for PostgresStoreDriver {
         // the real tenant for the duration of this one query.
         txn.execute("SELECT set_config('app.tenant', $1, true)", &[&tenant])
             .map_err(|e| PlanError::Store(e.to_string()))?;
-        let boxed_params: Vec<Box<dyn postgres::types::ToSql + Sync + Send>> =
+        if let Some(ms) = max_execution_ms {
+            // Real Postgres enforcement, not an approximation: the server
+            // itself aborts the query past this deadline.
+            txn.execute(&format!("SET LOCAL statement_timeout = {ms}"), &[])
+                .map_err(|e| PlanError::Store(e.to_string()))?;
+        }
+
+        if let Some(floor) = cohort_floor {
+            let count_query = format!("SELECT count(*) FROM guard_entities WHERE {where_with_cursor}");
+            let mut boxed_params: Vec<Box<dyn postgres::types::ToSql + Sync + Send>> =
+                sql_plan.parameters.iter().map(value_to_sql).collect();
+            if let Some(c) = &cursor {
+                boxed_params.push(Box::new(c.clone()));
+            }
+            let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+                boxed_params.iter().map(|b| b.as_ref() as &(dyn postgres::types::ToSql + Sync)).collect();
+            let count: i64 = txn
+                .query_one(count_query.as_str(), &param_refs)
+                .map_err(|e| PlanError::Store(e.to_string()))?
+                .get(0);
+            if count < floor {
+                return Err(PlanError::Rejected(format!("cohort_floor: query would identify {count} entities, below the floor of {floor}")));
+            }
+        }
+
+        let query = format!(
+            "SELECT resource, payload FROM guard_entities WHERE {where_with_cursor} ORDER BY resource{}",
+            effective_cap.map(|limit| format!(" LIMIT {limit}")).unwrap_or_default()
+        );
+        let mut boxed_params: Vec<Box<dyn postgres::types::ToSql + Sync + Send>> =
             sql_plan.parameters.iter().map(value_to_sql).collect();
+        if let Some(c) = &cursor {
+            boxed_params.push(Box::new(c.clone()));
+        }
         let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
             boxed_params.iter().map(|b| b.as_ref() as &(dyn postgres::types::ToSql + Sync)).collect();
         let rows = txn
             .query(query.as_str(), &param_refs)
             .map_err(|e| PlanError::Store(e.to_string()))?;
         txn.commit().map_err(|e| PlanError::Store(e.to_string()))?;
-        Ok(rows.into_iter().map(|row| EntityBytes(row.get::<_, Vec<u8>>(0))).collect())
+
+        let fetched_count = rows.len();
+        let mut result_bytes = 0usize;
+        let mut out = Vec::new();
+        let mut last_resource = None;
+        for row in &rows {
+            let resource: String = row.get(0);
+            let payload: Vec<u8> = row.get(1);
+            result_bytes += payload.len();
+            if max_result_bytes.is_some_and(|cap| result_bytes > cap) {
+                break;
+            }
+            last_resource = Some(resource);
+            out.push(EntityBytes(payload));
+        }
+        // A cursor is only worth returning if the LIMIT was actually hit
+        // (there may be more rows past this page) or MaxResultBytes cut
+        // the page short — otherwise this was the last page.
+        let next_cursor = if (effective_cap.is_some_and(|limit| fetched_count as u64 == limit)) || out.len() < fetched_count {
+            last_resource.map(|resource| nirdosha_guard_mic::encode_cursor(&resource))
+        } else {
+            None
+        };
+
+        Ok(QueryResult { rows: out, next_cursor })
     }
 
     fn lineage(&self) -> LineageFacts {

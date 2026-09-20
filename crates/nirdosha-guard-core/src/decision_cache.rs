@@ -5,25 +5,38 @@ use std::time::{Duration, Instant};
 
 use crate::{Action, Cap, Decision, DecisionCacheKey, FieldMask, FilterExpr, FilterFragment, Value};
 
+/// Everything about a decision worth caching, bundled as one struct rather
+/// than a positional-argument list to `insert()` — that list grew a new
+/// parameter in three phases straight (caps/masks, then
+/// affected_row_cap, then predicate_use) each time evaluation started
+/// producing one more thing a cache hit needs to preserve. One struct
+/// means the next one is a field, not a fourth call-site rewrite.
 #[derive(Debug, Clone)]
-pub struct CachedDecision {
+pub struct CacheableDecision {
     pub decision: Decision,
     pub obligations: Vec<crate::Obligation>,
-    /// `residual_filter`/`caps`/`masks` were dropped on every cache hit
-    /// until now (`get` only ever returned `(decision, obligations)`,
-    /// forcing every caller to substitute `residual_filter: None` and no
-    /// caps/masks) — silently unsound for a cacheable action whose plan
-    /// actually depends on any of the three: a tenant-scoped write would
-    /// be a strange case to cache (writes already aren't cacheable, see
-    /// `insert`'s doc comment) but a *cacheable read* needing its
-    /// `RowCap`/masks enforced on the second, cache-hit request would
-    /// silently lose them. Found wiring Plan Phase 7 (the read path
-    /// actually consumes caps/masks for the first time), fixed here
-    /// rather than reproduced.
     pub residual_filter: Option<FilterExpr>,
     pub caps: Vec<Cap>,
     pub masks: Vec<FieldMask>,
     pub affected_row_cap: Option<u64>,
+    pub predicate_use: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedDecision {
+    pub decision: Decision,
+    pub obligations: Vec<crate::Obligation>,
+    /// `residual_filter`/`caps`/`masks`/`affected_row_cap`/`predicate_use`
+    /// were dropped on every cache hit until Plan Phase 7 (`get` only
+    /// ever returned `(decision, obligations)`) — silently unsound for a
+    /// cacheable action whose plan actually depends on any of them: a
+    /// *cacheable read* needing its `RowCap`/masks enforced on the
+    /// second, cache-hit request would silently lose them.
+    pub residual_filter: Option<FilterExpr>,
+    pub caps: Vec<Cap>,
+    pub masks: Vec<FieldMask>,
+    pub affected_row_cap: Option<u64>,
+    pub predicate_use: Vec<String>,
     inserted_at: Instant,
 }
 
@@ -53,24 +66,22 @@ impl DecisionCache {
     /// read-only by the RFCs that define them (I9 aggregate leak control,
     /// RFC 0026 §9's lineage views, and `policy_simulation!`'s own "results
     /// are read-only").
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert(
-        &mut self,
-        key: DecisionCacheKey,
-        decision: Decision,
-        obligations: Vec<crate::Obligation>,
-        residual_filter: Option<FilterExpr>,
-        caps: Vec<Cap>,
-        masks: Vec<FieldMask>,
-        affected_row_cap: Option<u64>,
-        classification: crate::Classification,
-    ) -> bool {
+    pub fn insert(&mut self, key: DecisionCacheKey, value: CacheableDecision, classification: crate::Classification) -> bool {
         if matches!(key.action, Action::Create | Action::Update | Action::Delete | Action::Migrate | Action::Export | Action::Delegate)
             || classification >= crate::Classification::Restricted
         {
             return false;
         }
-        self.map.insert(key, CachedDecision { decision, obligations, residual_filter, caps, masks, affected_row_cap, inserted_at: Instant::now() });
+        self.map.insert(key, CachedDecision {
+            decision: value.decision,
+            obligations: value.obligations,
+            residual_filter: value.residual_filter,
+            caps: value.caps,
+            masks: value.masks,
+            affected_row_cap: value.affected_row_cap,
+            predicate_use: value.predicate_use,
+            inserted_at: Instant::now(),
+        });
         true
     }
 
@@ -131,11 +142,15 @@ mod tests {
         DecisionCacheKey { subject_id: "u".into(), roles_hash: 1, tenant: Tenant("t".into()), entity: "e".into(), dataset: "d".into(), action, environment_hash: 1, destination: Destination::Browser, time_bucket: "b".into(), query_shape_hash: 1, purpose: Purpose("p".into()), policy_version: "v".into() }
     }
 
+    fn cacheable(decision: Decision) -> CacheableDecision {
+        CacheableDecision { decision, obligations: vec![], residual_filter: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![] }
+    }
+
     #[test]
     fn unsafe_decisions_are_not_cached() {
         let mut cache = DecisionCache::new(Duration::from_secs(60));
-        assert!(!cache.insert(key(Action::Update), Decision::Allow, vec![], None, vec![], vec![], None, crate::Classification::Internal));
-        assert!(!cache.insert(key(Action::Read), Decision::Allow, vec![], None, vec![], vec![], None, crate::Classification::Restricted));
+        assert!(!cache.insert(key(Action::Update), cacheable(Decision::Allow), crate::Classification::Internal));
+        assert!(!cache.insert(key(Action::Read), cacheable(Decision::Allow), crate::Classification::Restricted));
     }
 
     #[test]
@@ -144,7 +159,8 @@ mod tests {
         let filter = FilterExpr::TenantEq { value: Value::Str("t1".into()) };
         let caps = vec![crate::Cap::RowCap(50)];
         let masks = vec![crate::FieldMask { field: vec!["salary".into()], transform: crate::MaskTransform::Full }];
-        assert!(cache.insert(key(Action::Read), Decision::Allow, vec![], Some(filter.clone()), caps.clone(), masks.clone(), None, crate::Classification::Internal));
+        let value = CacheableDecision { decision: Decision::Allow, obligations: vec![], residual_filter: Some(filter.clone()), caps: caps.clone(), masks: masks.clone(), affected_row_cap: None, predicate_use: vec![] };
+        assert!(cache.insert(key(Action::Read), value, crate::Classification::Internal));
         let hit = cache.get(&key(Action::Read)).expect("cache hit");
         assert_eq!(hit.residual_filter, Some(filter));
         assert_eq!(hit.caps, caps);

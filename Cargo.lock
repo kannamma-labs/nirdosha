@@ -1240,6 +1240,7 @@ dependencies = [
 name = "nirdosha-guard-mic"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "nirdosha-audit",
  "nirdosha-guard-core",
  "nirdosha-guard-registry",

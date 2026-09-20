@@ -56,6 +56,7 @@ fn sample_policy() -> PolicyCandidate {
         caps: vec![],
         masks: vec![],
         affected_row_cap: None,
+        predicate_use: vec![],
     }
 }
 

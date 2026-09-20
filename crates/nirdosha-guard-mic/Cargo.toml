@@ -11,3 +11,7 @@ nirdosha-audit = { path = "../nirdosha-audit" }
 nirdosha-lineage = { path = "../nirdosha-lineage" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+# Opaque cursor tokens (I10/§8.4: "opaque cursors only; offset rejected")
+# -- base64-encoding the underlying keyset position keeps it a token to
+# pass back, not a value a caller is meant to construct or interpret.
+base64 = "0.22"

@@ -39,10 +39,16 @@ pub struct PolicyRecord {
 	pub reason: Option<String>,
 	pub destination: Option<Destination>,
 	pub destination_denied_above: Option<Classification>,
-	/// `grant predicate_use(...)` / `grant count_allowed`, kept as their
-	/// original clause text (see `clauses.rs`'s doc comment on why these
-	/// two, specifically, aren't lowered further here).
+	/// `grant predicate_use(...)` / `grant count_allowed`'s original
+	/// clause text, kept alongside the structured `predicate_use`/
+	/// `count_allowed` fields below for anything that still wants the raw
+	/// source.
 	pub grants: Vec<String>,
+	/// Field names `grant predicate_use(...)` allows in non-projection
+	/// clauses (filter/join/grouping/having/ordering/window) despite
+	/// being masked — I15's exception list.
+	pub predicate_use: Vec<String>,
+	pub count_allowed: bool,
 	pub policy_src: String,
 	pub line: u32,
 }
@@ -109,6 +115,7 @@ impl PolicyRegistration {
 			caps: lowered.caps,
 			masks: lowered.masks,
 			affected_row_cap: lowered.affected_row_cap,
+			predicate_use: lowered.predicate_use,
 			id: self.id.to_string(),
 		})
 	}
@@ -141,6 +148,8 @@ impl PolicyRegistration {
 			destination: lowered.destination,
 			destination_denied_above: lowered.destination_denied_above,
 			grants: lowered.grants,
+			predicate_use: lowered.predicate_use,
+			count_allowed: lowered.count_allowed,
 			policy_src: self.source.to_string(),
 			line: self.line,
 		}

@@ -49,6 +49,16 @@ pub struct LoweredClauses {
     pub destination: Option<Destination>,
     pub destination_denied_above: Option<Classification>,
     pub grants: Vec<String>,
+    /// Field names from `grant predicate_use(a, b, c)`, parsed out
+    /// structurally rather than left as raw text in `grants` — I15
+    /// ("masked fields excluded from filter/join/grouping/having/
+    /// ordering/window unless granted") needs a real field list to check
+    /// a `FilterExpr`'s fields against, not a string to re-parse at every
+    /// call site.
+    pub predicate_use: Vec<String>,
+    /// `grant count_allowed` — same reasoning, parsed structurally since
+    /// a caller needs a plain bool, not a string to compare.
+    pub count_allowed: bool,
 }
 
 /// The closed set of clause-starting keywords this grammar recognizes.
@@ -323,6 +333,11 @@ fn lower_filter(input: ParseStream, out: &mut LoweredClauses) -> syn::Result<()>
 /// `grant predicate_use(a, b, c)` / `grant count_allowed`.
 fn lower_grant(input: ParseStream, out: &mut LoweredClauses) -> syn::Result<()> {
     let raw = capture_clause_tail(input)?;
+    if raw == "count_allowed" {
+        out.count_allowed = true;
+    } else if let Some(fields) = raw.strip_prefix("predicate_use(").and_then(|s| s.strip_suffix(')')) {
+        out.predicate_use.extend(fields.split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()));
+    }
     out.grants.push(raw);
     Ok(())
 }

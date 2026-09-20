@@ -30,6 +30,27 @@ pub mod guard_down;
 pub mod relation_lower;
 pub mod snapshot;
 
+/// Collects every field path a `FilterExpr` references, recursing through
+/// boolean combinators. Used for I15 (masked fields excluded from
+/// filter/join/grouping/having/ordering/window unless explicitly granted
+/// via `predicate_use`) — the check needs to know which fields a filter
+/// actually touches, not just that a filter exists.
+pub fn filter_fields(expr: &FilterExpr) -> Vec<&FieldPath> {
+    match expr {
+        FilterExpr::Eq { field, .. }
+        | FilterExpr::In { field, .. }
+        | FilterExpr::Compare { field, .. }
+        | FilterExpr::TimeRange { field, .. }
+        | FilterExpr::Pattern { field, .. }
+        | FilterExpr::RelationIn { field, .. } => vec![field],
+        FilterExpr::TenantEq { .. } => vec![],
+        FilterExpr::And(children) | FilterExpr::Or(children) => {
+            children.iter().flat_map(filter_fields).collect()
+        }
+        FilterExpr::Not(inner) => filter_fields(inner),
+    }
+}
+
 /// Extracts the tenant a `FilterExpr` scopes to, if any — the shared
 /// implementation both `nirdosha-guard-store-postgres` and
 /// `MemStoreDriver` need to enforce tenant isolation on `prepare`/`query`

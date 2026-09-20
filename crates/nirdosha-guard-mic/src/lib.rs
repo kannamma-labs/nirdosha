@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use nirdosha_audit::envelope::{AuditEnvelope, AuditRecordKind, ModuleAuditChain};
 use nirdosha_guard_core::decision_cache::DecisionCache;
 use nirdosha_guard_core::evaluator::{self, EvaluationResult, PolicyCandidate};
-use nirdosha_guard_core::{Cap, CapabilityManifest, Decision, DecisionCacheKey, EvaluationContext, FieldMask, FilterExpr, FilterNodeKind, LineageFacts, Value, WriteAction};
+use nirdosha_guard_core::{Cap, CapabilityManifest, Decision, DecisionCacheKey, EvaluationContext, FieldMask, FilterExpr, FilterNodeKind, LineageFacts, PaginationMode, Value, WriteAction};
 use nirdosha_lineage::collector::{KernelCollector, ObservationContext, PlanFacts};
 use nirdosha_lineage::{Authority, DriverRef, EdgeType, FlowCompleteness, TransformId};
 
@@ -56,6 +56,13 @@ pub struct ReadPlanIr {
 	pub dataset: String,
 	pub filter: Option<FilterExpr>,
 	pub caps: Vec<Cap>,
+	/// From the *request's* `query_shape.pagination`, not the policy —
+	/// pagination is a property of how the caller wants results shaped,
+	/// same as `AccessPlan`'s own design keeps row-level/request-shape
+	/// facts out of policy grants. `PaginationMode::Rejected` never
+	/// reaches a driver: `guarded_read` refuses the request before
+	/// building a plan at all (see its own body).
+	pub pagination: PaginationMode,
 	pub policy_version: String,
 }
 
@@ -90,16 +97,23 @@ pub trait StoreDriver: Send + Sync {
 	fn prepare(&self, ir: &PlanIr) -> Result<Prepared, PlanError>;
 	fn commit(&self, prepared: Prepared, entity: EntityBytes) -> Result<Receipt, PlanError>;
 	/// Executes a read plan and returns the matching rows, capped per
-	/// `plan.caps`'s `RowCap`/`MaxScanRows` (a driver honors what its own
-	/// `CapabilityManifest` attests to supporting — pushdown where
-	/// possible, an L1 post-read cap otherwise; see each implementor).
-	/// Rows are returned as opaque `EntityBytes`, same as the write side —
-	/// this layer doesn't know a concrete entity's field shape (see
-	/// `GuardClient::guarded_read`'s doc comment on why field masking
-	/// therefore can't happen here either).
-	fn query(&self, plan: &ReadPlanIr) -> Result<Vec<EntityBytes>, PlanError>;
+	/// `plan.caps` (`RowCap`, `MaxScanRows`, `MaxScanBytes`,
+	/// `MaxExecutionTimeMs`, `MaxResultBytes`, `CohortFloor` — a driver
+	/// honors what its own `CapabilityManifest` attests to supporting;
+	/// see each implementor for which are real pushdown vs. an L1
+	/// post-read enforcement). Rows are returned as opaque `EntityBytes`,
+	/// same as the write side — this layer doesn't know a concrete
+	/// entity's field shape (see `GuardClient::guarded_read`'s doc
+	/// comment on why field masking therefore can't happen here either).
+	fn query(&self, plan: &ReadPlanIr) -> Result<QueryResult, PlanError>;
 	fn lineage(&self) -> LineageFacts { LineageFacts::default() }
 }
+
+/// What `StoreDriver::query` returns: the matching rows plus an opaque
+/// continuation token if there are more (`PaginationMode::OpaqueCursor`
+/// support — see `ReadOutcome::next_cursor`'s doc comment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryResult { pub rows: Vec<EntityBytes>, pub next_cursor: Option<String> }
 
 /// A successful `guarded_read`: the rows the driver returned, plus the
 /// `FieldMask`s the matching policy granted. Masks are *not* applied to
@@ -114,7 +128,16 @@ pub trait StoreDriver: Send + Sync {
 /// against payload bytes either — there's no `field_policy` on
 /// `PolicyCandidate`/`EvaluationResult` at all yet).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadOutcome { pub rows: Vec<EntityBytes>, pub masks: Vec<FieldMask> }
+pub struct ReadOutcome {
+	pub rows: Vec<EntityBytes>,
+	pub masks: Vec<FieldMask>,
+	/// Opaque continuation token for `PaginationMode::OpaqueCursor` — pass
+	/// it back as the next request's cursor to resume. `None` means there
+	/// is no further page. Never a raw offset (I10/§8.4: "opaque cursors
+	/// only; offset rejected") — each driver defines its own token shape
+	/// and nothing outside that driver is meant to parse it.
+	pub next_cursor: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome { Committed { trace_id: String }, Pending { expires_at: String }, Duplicate { trace_id: String } }
@@ -186,11 +209,20 @@ impl GuardClient {
 	pub fn evaluate(&mut self, request: &EvalRequest) -> EvaluationResult {
 		let key = cache_key(&request.context);
 		if let Some(cached) = self.cache.get(&key) {
-			return EvaluationResult { decision: cached.decision, obligations: cached.obligations, residual_filter: cached.residual_filter, caps: cached.caps, masks: cached.masks, affected_row_cap: cached.affected_row_cap };
+			return EvaluationResult { decision: cached.decision, obligations: cached.obligations, residual_filter: cached.residual_filter, caps: cached.caps, masks: cached.masks, affected_row_cap: cached.affected_row_cap, predicate_use: cached.predicate_use };
 		}
 		let result = evaluator::evaluate(&request.context, &self.policies);
 		if matches!(result.decision, Decision::Allow) {
-			let _ = self.cache.insert(key, result.decision.clone(), result.obligations.clone(), result.residual_filter.clone(), result.caps.clone(), result.masks.clone(), result.affected_row_cap, request.context.subject.clearance.clone());
+			let value = nirdosha_guard_core::decision_cache::CacheableDecision {
+				decision: result.decision.clone(),
+				obligations: result.obligations.clone(),
+				residual_filter: result.residual_filter.clone(),
+				caps: result.caps.clone(),
+				masks: result.masks.clone(),
+				affected_row_cap: result.affected_row_cap,
+				predicate_use: result.predicate_use.clone(),
+			};
+			let _ = self.cache.insert(key, value, request.context.subject.clearance.clone());
 		}
 		result
 	}
@@ -288,6 +320,15 @@ impl GuardClient {
 	/// construction, so `trace_id` is only for audit correlation.
 	pub fn guarded_read<D: StoreDriver>(&mut self, request: &EvalRequest, driver: &D, trace_id: impl Into<String>, now_ms: u64) -> Result<ReadOutcome, Rejected> {
 		let trace_id = trace_id.into();
+		// I10/§8.4: "opaque cursors only; offset rejected." A request
+		// whose pagination was already classified `Rejected` (upstream of
+		// this call — whatever built the EvaluationContext decided the
+		// caller asked for raw offset pagination) is refused before
+		// policies are even evaluated: this is a request-shape violation,
+		// not a decision `evaluate()` should be asked to make.
+		if matches!(request.context.query_shape.pagination, PaginationMode::Rejected) {
+			return Err(Rejected::Failed { reason: "offset pagination is rejected — use an opaque cursor (I10/§8.4)".into() });
+		}
 		let evaluation = self.evaluate(request);
 		let envelope = AuditEnvelope { trace_id: trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: request.context.subject.id.clone(), action: format!("{:?}", request.context.action), resource: request.context.entity.clone(), policy_versions: vec![request.context.policy_version.clone()], decision: format!("{:?}", evaluation.decision), obligations: evaluation.obligations.iter().map(|item| format!("{item:?}")).collect(), kind: AuditRecordKind::Decision, content: serde_json::json!({ "phase": "before_read" }) };
 		match evaluation.decision {
@@ -295,8 +336,30 @@ impl GuardClient {
 			Decision::Escalate { to } => { self.audit.append(&envelope, now_ms); Err(Rejected::Escalated { target: format!("{to:?}") }) }
 			Decision::Pending { .. } => { self.audit.append(&envelope, now_ms); Err(Rejected::Failed { reason: "read cannot be pending — escalation/approval applies to writes, not reads".into() }) }
 			Decision::Allow => {
-				let plan = ReadPlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), filter: evaluation.residual_filter, caps: evaluation.caps, policy_version: request.context.policy_version.clone() };
-				let rows = driver.query(&plan).map_err(|error| Rejected::Failed { reason: format!("{error:?}") })?;
+				// I15: a masked field may not drive a non-projection
+				// clause (filter/join/grouping/having/ordering/window)
+				// unless explicitly granted via `predicate_use`. Checked
+				// here, at plan-build time, before the driver ever sees
+				// the filter — a masked field silently leaking through a
+				// WHERE clause is exactly the class of bug a guard exists
+				// to catch before it reaches a query planner.
+				if let Some(filter) = &evaluation.residual_filter {
+					let masked_fields: std::collections::HashSet<&nirdosha_guard_core::FieldPath> =
+						evaluation.masks.iter().map(|mask| &mask.field).collect();
+					let granted: std::collections::HashSet<&str> =
+						evaluation.predicate_use.iter().map(String::as_str).collect();
+					for field in nirdosha_guard_core::filter_fields(filter) {
+						let is_masked = masked_fields.contains(field);
+						let is_granted = field.len() == 1 && granted.contains(field[0].as_str());
+						if is_masked && !is_granted {
+							self.audit.append(&envelope, now_ms);
+							return Err(Rejected::Failed { reason: format!("I15: field {field:?} is masked and not granted via predicate_use — cannot drive a filter clause") });
+						}
+					}
+				}
+				let plan = ReadPlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), filter: evaluation.residual_filter, caps: evaluation.caps, pagination: request.context.query_shape.pagination.clone(), policy_version: request.context.policy_version.clone() };
+				let query_result = driver.query(&plan).map_err(|error| Rejected::Failed { reason: format!("{error:?}") })?;
+				let rows = query_result.rows;
 				let mut read_envelope = envelope.clone();
 				self.audit.append(&envelope, now_ms);
 				read_envelope.kind = AuditRecordKind::Mutation; // reuses the "effect happened" kind; no separate Read kind exists yet
@@ -329,7 +392,7 @@ impl GuardClient {
 					let lineage = AuditEnvelope { trace_id: observation.trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: observation.subject_id.clone(), action: format!("{:?}", request.context.action), resource: observation.sink.node.catalog_id.clone(), policy_versions: vec![observation.policy_version.clone()], decision: "allow".into(), obligations: vec![], kind: AuditRecordKind::Lineage, content: observation.to_audit_content() };
 					self.audit.append(&lineage, now_ms);
 				}
-				Ok(ReadOutcome { rows, masks: evaluation.masks })
+				Ok(ReadOutcome { rows, masks: evaluation.masks, next_cursor: query_result.next_cursor })
 			}
 		}
 	}
@@ -420,31 +483,157 @@ impl StoreDriver for MemStoreDriver {
 		let id = self.next_commit.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 		Ok(Receipt { store_commit_id: format!("mem-{id}"), digest: [id as u8; 32] })
 	}
-	fn query(&self, plan: &ReadPlanIr) -> Result<Vec<EntityBytes>, PlanError> {
+	fn query(&self, plan: &ReadPlanIr) -> Result<QueryResult, PlanError> {
 		let rows = self.rows.lock().map_err(|_| PlanError::Store("memory store poisoned".into()))?;
+		let filter = plan
+			.filter
+			.as_ref()
+			// No filter at all: RFC 0023's own posture (mirrored by
+			// PostgresStoreDriver::prepare's write-side check) is that an
+			// ungoverned scan is a bug to surface, not a silent
+			// full-table return.
+			.ok_or_else(|| PlanError::Rejected("read plan has no filter — refusing an unscoped scan".into()))?;
+
 		let row_cap = plan.caps.iter().find_map(|cap| match cap { Cap::RowCap(n) => Some(*n as usize), _ => None });
-		let mut matched: Vec<EntityBytes> = Vec::new();
-		for (resource, row) in rows.iter() {
-			let candidate = MemRowView { resource, tenant: row.tenant.as_deref() };
-			let include = match &plan.filter {
-				Some(expr) => match_filter(expr, &candidate),
-				// No filter at all: RFC 0023's own posture (mirrored by
-				// PostgresStoreDriver::prepare's write-side check) is that
-				// an ungoverned scan is a bug to surface, not a silent
-				// full-table return — a read plan reaching a driver with
-				// no filter and no cap is refused here for the same
-				// reason.
-				None => return Err(PlanError::Rejected("read plan has no filter — refusing an unscoped scan".into())),
-			};
-			if include {
-				matched.push(EntityBytes(row.payload.clone()));
-				if row_cap.is_some_and(|cap| matched.len() >= cap) {
-					break;
-				}
+		let max_scan_rows = plan.caps.iter().find_map(|cap| match cap { Cap::MaxScanRows(n) => Some(*n as usize), _ => None });
+		let max_scan_bytes = plan.caps.iter().find_map(|cap| match cap { Cap::MaxScanBytes(n) => Some(*n as usize), _ => None });
+		let max_result_bytes = plan.caps.iter().find_map(|cap| match cap { Cap::MaxResultBytes(n) => Some(*n as usize), _ => None });
+        let max_execution = plan.caps.iter().find_map(|cap| match cap { Cap::MaxExecutionTimeMs(n) => Some(*n), _ => None });
+		let cohort_floor = plan.caps.iter().find_map(|cap| match cap { Cap::CohortFloor(n) => Some(*n as usize), _ => None });
+
+		let start_after = match &plan.pagination {
+			PaginationMode::OpaqueCursor(token) => Some(decode_cursor(token)?),
+			_ => None,
+		};
+
+		// CohortFloor (k-anonymity): count matches first — a query that
+		// would identify fewer than `cohort_floor` entities is refused
+		// outright, not silently truncated or padded. Bounded by the same
+		// scan caps as the real pass below, so counting can't itself
+		// become an unbounded scan.
+		if let Some(floor) = cohort_floor {
+			let count = scan(&rows, filter, start_after.as_deref(), max_scan_rows, max_scan_bytes, max_execution, |_, _| true).0.len();
+			if count < floor {
+				return Err(PlanError::Rejected(format!("cohort_floor: query would identify {count} entities, below the floor of {floor}")));
 			}
 		}
-		Ok(matched)
+
+		let (matched, scanned_past_cap, last_key) = scan(&rows, filter, start_after.as_deref(), max_scan_rows, max_scan_bytes, max_execution, move |matched_so_far, _| {
+			row_cap.map(|cap| matched_so_far < cap).unwrap_or(true)
+		});
+
+		let mut result_bytes = 0usize;
+		let mut out = Vec::new();
+		for (_, payload) in &matched {
+			result_bytes += payload.len();
+			if max_result_bytes.is_some_and(|cap| result_bytes > cap) {
+				break;
+			}
+			out.push(EntityBytes(payload.clone()));
+		}
+
+		// A cursor is only worth returning if the driver actually stopped
+		// short of the end of the store (a cap truncated it, or a row_cap
+		// stopped collection) — otherwise there's nothing left to resume.
+		let next_cursor = if scanned_past_cap || out.len() < matched.len() {
+			last_key.map(|key| encode_cursor(&key))
+		} else {
+			None
+		};
+
+		Ok(QueryResult { rows: out, next_cursor })
 	}
+}
+
+/// Base64-encodes a resource key as an opaque cursor token. `pub` (not
+/// crate-only) so every `StoreDriver` implementor uses the same scheme —
+/// `PostgresStoreDriver::query` reuses this rather than growing its own
+/// encoding that would decode differently for a cursor produced by a
+/// different driver.
+pub fn encode_cursor(resource: &str) -> String {
+	use base64::Engine;
+	base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(resource.as_bytes())
+}
+
+pub fn decode_cursor(token: &str) -> Result<String, PlanError> {
+	use base64::Engine;
+	let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+		.decode(token)
+		.map_err(|_| PlanError::Rejected("malformed opaque cursor".into()))?;
+	String::from_utf8(bytes).map_err(|_| PlanError::Rejected("malformed opaque cursor".into()))
+}
+
+/// Shared scan loop: walks `rows` in key order (skipping past `start_after`
+/// for cursor resumption), applying `filter`, `max_scan_rows`,
+/// `max_scan_bytes`, and a wall-clock `max_execution_ms` deadline, and
+/// calling `keep_going(matches_so_far, resource)` to decide whether to
+/// keep collecting (this is how `RowCap` and the cohort-floor counting
+/// pass share this one loop despite wanting different stop conditions).
+/// Returns the matched `(resource, payload)` pairs, whether the scan
+/// stopped early because of a cap (vs. reaching the end of the store),
+/// and the last resource key examined (for the next cursor).
+#[allow(clippy::type_complexity)]
+fn scan(
+	rows: &BTreeMap<String, MemRow>,
+	filter: &FilterExpr,
+	start_after: Option<&str>,
+	max_scan_rows: Option<usize>,
+	max_scan_bytes: Option<usize>,
+	max_execution_ms: Option<u64>,
+	keep_going: impl Fn(usize, &str) -> bool,
+) -> (Vec<(String, Vec<u8>)>, bool, Option<String>) {
+	let started_at = std::time::Instant::now();
+	let iter: Box<dyn Iterator<Item = (&String, &MemRow)>> = match start_after {
+		Some(cursor) => Box::new(rows.range((std::ops::Bound::Excluded(cursor.to_string()), std::ops::Bound::Unbounded))),
+		None => Box::new(rows.iter()),
+	};
+	let mut matched = Vec::new();
+	let mut scanned_bytes = 0usize;
+	let mut last_examined_key = None;
+	let mut stopped_early = false;
+	// Resume point on an early stop — set explicitly at whichever break
+	// fires, because the right value depends on *why* the scan stopped:
+	// a scan cap (rows/bytes/time) means we genuinely didn't look past
+	// this row, so the next page resumes right after it
+	// (`last_examined_key`, i.e. the row that triggered the cap, updated
+	// below only on the paths that reach it). A `RowCap` stop (via
+	// `keep_going`) means we peeked at a row that *matched* but excluded
+	// it purely because we already had enough results — the next page
+	// must resume after the last row actually *returned*, or it would
+	// silently skip the excluded one. Using the "last examined" row for
+	// both was the bug the opaque-cursor test caught: a RowCap-triggered
+	// stop advanced the cursor one matching row too far, past a row that
+	// was never returned.
+	let mut resume_key = None;
+	for (index, (resource, row)) in iter.enumerate() {
+		if max_scan_rows.is_some_and(|cap| index >= cap) {
+			stopped_early = true;
+			resume_key = last_examined_key.clone();
+			break;
+		}
+		if max_execution_ms.is_some_and(|cap| started_at.elapsed().as_millis() as u64 >= cap) {
+			stopped_early = true;
+			resume_key = last_examined_key.clone();
+			break;
+		}
+		scanned_bytes += row.payload.len();
+		if max_scan_bytes.is_some_and(|cap| scanned_bytes > cap) {
+			stopped_early = true;
+			resume_key = last_examined_key.clone();
+			break;
+		}
+		let candidate = MemRowView { resource, tenant: row.tenant.as_deref() };
+		if match_filter(filter, &candidate) {
+			if !keep_going(matched.len(), resource) {
+				stopped_early = true;
+				resume_key = matched.last().map(|(key, _): &(String, Vec<u8>)| key.clone());
+				break;
+			}
+			matched.push((resource.clone(), row.payload.clone()));
+		}
+		last_examined_key = Some(resource.clone());
+	}
+	(matched, stopped_early, resume_key)
 }
 
 /// The only two "columns" `MemStoreDriver` actually has to filter against
@@ -523,7 +712,7 @@ mod tests {
 	use nirdosha_guard_core::{Action, Classification, Destination, Environment, MaskTransform, PaginationMode, Purpose, QueryShape, Subject, Tenant};
 
 	fn request() -> EvalRequest { EvalRequest { context: EvaluationContext { subject: Subject { id: "u".into(), roles: vec!["analyst".into()], claims: vec![], clearance: Classification::Internal }, tenant: Tenant("t".into()), entity: "orders".into(), dataset: "memory".into(), action: Action::Create, destination: Destination::Browser, environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None }, time_bucket: "now".into(), query_shape: QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: PaginationMode::LimitOnly { limit: 1 } }, purpose: Purpose("support".into()), policy_version: "v1".into() } } }
-	fn policy() -> PolicyCandidate { PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, id: "create-orders".into() } }
+	fn policy() -> PolicyCandidate { PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: "create-orders".into() } }
 
 	#[test]
 	fn guarded_apply_commits_only_after_audit_decision() {
@@ -550,11 +739,11 @@ mod tests {
 	fn write_request(entity: &str, tenant: &str) -> EvalRequest { request_for(Action::Create, entity, tenant) }
 
 	fn tenant_scoped_write_policy(resource: &str, tenant: &str) -> PolicyCandidate {
-		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, id: format!("write-{resource}") }
+		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: format!("write-{resource}") }
 	}
 
 	fn read_policy(resource: &str, tenant: &str, caps: Vec<Cap>, masks: Vec<FieldMask>) -> PolicyCandidate {
-		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Read, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps, masks, affected_row_cap: None, id: format!("read-{resource}") }
+		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Read, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps, masks, affected_row_cap: None, predicate_use: vec![], id: format!("read-{resource}") }
 	}
 
 	fn scratch_dir(name: &str) -> std::path::PathBuf {
@@ -635,7 +824,7 @@ mod tests {
 	}
 
 	fn action_policy(action: Action, resource: &str, tenant: &str) -> PolicyCandidate {
-		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, id: format!("{resource}-policy") }
+		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: format!("{resource}-policy") }
 	}
 
 	#[test]
@@ -748,6 +937,146 @@ mod tests {
 		let mut client = GuardClient::new(vec![action_policy(Action::Export, "report", "tenant-a")], "e", root.join("e.jsonl"));
 		let result = client.guarded_apply(&request_for(Action::Export, "report", "tenant-a"), &driver, EntityBytes(vec![]), "t1", 1_000);
 		assert!(matches!(result, Err(Rejected::Failed { .. })), "export has no new value to write — guarded_apply must refuse it, not silently no-op");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	fn read_request_paginated(entity: &str, tenant: &str, pagination: PaginationMode) -> EvalRequest {
+		let mut req = read_request(entity, tenant);
+		req.context.query_shape.pagination = pagination;
+		req
+	}
+
+	fn seed_rows(driver: &MemStoreDriver, root: &std::path::Path, resources: &[&str], tenant: &str) {
+		let policies: Vec<PolicyCandidate> = resources.iter().map(|r| tenant_scoped_write_policy(r, tenant)).collect();
+		let mut writer = GuardClient::new(policies, "seed", root.join("seed.jsonl"));
+		for resource in resources {
+			writer.guarded_apply(&write_request(resource, tenant), driver, EntityBytes(resource.as_bytes().to_vec()), format!("seed-{resource}"), 1_000).unwrap();
+		}
+	}
+
+	#[test]
+	fn guarded_read_rejects_offset_pagination() {
+		let root = scratch_dir("pagination-rejected");
+		let driver = MemStoreDriver::new();
+		let mut client = GuardClient::new(vec![read_policy("orders", "tenant-a", vec![], vec![])], "r", root.join("r.jsonl"));
+		let result = client.guarded_read(&read_request_paginated("orders", "tenant-a", PaginationMode::Rejected), &driver, "t1", 1_000);
+		assert!(matches!(result, Err(Rejected::Failed { .. })), "PaginationMode::Rejected must be refused before policies are even evaluated");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn guarded_read_opaque_cursor_resumes_where_the_previous_page_left_off() {
+		let root = scratch_dir("cursor-resume");
+		let driver = MemStoreDriver::new();
+		seed_rows(&driver, &root, &["p1", "p2", "p3", "p4"], "tenant-a");
+
+		let mut reader = GuardClient::new(vec![read_policy("orders", "tenant-a", vec![Cap::RowCap(2)], vec![])], "r", root.join("r.jsonl"));
+		let page1 = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t1", 2_000).unwrap();
+		assert_eq!(page1.rows.len(), 2);
+		let cursor = page1.next_cursor.clone().expect("a truncated page must return a cursor");
+
+		let page2 = reader
+			.guarded_read(&read_request_paginated("orders", "tenant-a", PaginationMode::OpaqueCursor(cursor)), &driver, "t2", 3_000)
+			.unwrap();
+		assert_eq!(page2.rows.len(), 2, "the second page must pick up the remaining two rows");
+
+		// No overlap between the two pages.
+		let mut all: Vec<Vec<u8>> = page1.rows.into_iter().map(|r| r.0).collect();
+		all.extend(page2.rows.into_iter().map(|r| r.0));
+		all.sort();
+		all.dedup();
+		assert_eq!(all.len(), 4, "the two pages together must cover all four rows exactly once");
+
+		// The final page has no more data, so no cursor.
+		assert!(page2.next_cursor.is_none() || {
+			let page3 = reader.guarded_read(&read_request_paginated("orders", "tenant-a", PaginationMode::OpaqueCursor(page2.next_cursor.clone().unwrap())), &driver, "t3", 4_000).unwrap();
+			page3.rows.is_empty()
+		});
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn guarded_read_enforces_cohort_floor() {
+		let root = scratch_dir("cohort-floor");
+		let driver = MemStoreDriver::new();
+		seed_rows(&driver, &root, &["c1", "c2"], "tenant-a");
+
+		// Only 2 rows exist; a floor of 5 must refuse the whole query, not
+		// return the 2 it found.
+		let mut reader = GuardClient::new(vec![read_policy("orders", "tenant-a", vec![Cap::CohortFloor(5)], vec![])], "r", root.join("r.jsonl"));
+		let result = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t1", 2_000);
+		assert!(result.is_err(), "cohort_floor must refuse a query that would identify fewer entities than the floor");
+	}
+
+	#[test]
+	fn guarded_read_allows_when_cohort_floor_is_met() {
+		let root = scratch_dir("cohort-floor-ok");
+		let driver = MemStoreDriver::new();
+		seed_rows(&driver, &root, &["c1", "c2", "c3"], "tenant-a");
+
+		let mut reader = GuardClient::new(vec![read_policy("orders", "tenant-a", vec![Cap::CohortFloor(3)], vec![])], "r", root.join("r.jsonl"));
+		let outcome = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t1", 2_000).expect("floor of 3 met by exactly 3 rows");
+		assert_eq!(outcome.rows.len(), 3);
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn guarded_read_max_scan_rows_stops_scanning_before_the_end_of_the_store() {
+		let root = scratch_dir("max-scan-rows");
+		let driver = MemStoreDriver::new();
+		// Ten rows exist; MaxScanRows(3) means the driver examines only
+		// the first 3 (in key order) regardless of how many would
+		// otherwise match — a real bound on scan *work*, distinct from
+		// RowCap's bound on results *returned*.
+		seed_rows(&driver, &root, &["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"], "tenant-a");
+
+		let mut reader = GuardClient::new(vec![read_policy("orders", "tenant-a", vec![Cap::MaxScanRows(3)], vec![])], "r", root.join("r.jsonl"));
+		let outcome = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t1", 2_000).unwrap();
+		assert_eq!(outcome.rows.len(), 3, "only the first 3 scanned rows can possibly match, even though all 10 rows satisfy the tenant filter");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	fn read_policy_with_predicate_use(resource: &str, tenant: &str, predicate_use: Vec<String>) -> PolicyCandidate {
+		let mut policy = read_policy(resource, tenant, vec![], vec![FieldMask { field: vec!["amount".into()], transform: MaskTransform::Full }]);
+		policy.predicate_use = predicate_use;
+		policy
+	}
+
+	#[test]
+	fn i15_rejects_a_masked_field_driving_the_filter() {
+		let root = scratch_dir("i15-reject");
+		let driver = MemStoreDriver::new();
+		// "amount" is masked by the policy below AND is the field the
+		// filter itself keys on — I15 must refuse this, not silently run
+		// the filter over a masked field.
+		let mut policy = read_policy("orders", "tenant-a", vec![], vec![FieldMask { field: vec!["amount".into()], transform: MaskTransform::Full }]);
+		policy.filter = Some(FilterExpr::And(vec![
+			FilterExpr::TenantEq { value: Value::Str("tenant-a".into()) },
+			FilterExpr::Eq { field: vec!["amount".into()], value: Value::Int(100) },
+		]));
+		let mut client = GuardClient::new(vec![policy], "r", root.join("r.jsonl"));
+		let result = client.guarded_read(&read_request("orders", "tenant-a"), &driver, "t1", 1_000);
+		assert!(matches!(result, Err(Rejected::Failed { .. })), "a masked field driving a filter clause must be rejected under I15");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn i15_allows_a_masked_field_in_the_filter_when_predicate_use_grants_it() {
+		let root = scratch_dir("i15-allow");
+		let driver = MemStoreDriver::new();
+		let mut policy = read_policy_with_predicate_use("orders", "tenant-a", vec!["amount".to_string()]);
+		policy.filter = Some(FilterExpr::And(vec![
+			FilterExpr::TenantEq { value: Value::Str("tenant-a".into()) },
+			FilterExpr::Eq { field: vec!["amount".into()], value: Value::Int(100) },
+		]));
+		let mut client = GuardClient::new(vec![policy], "r", root.join("r.jsonl"));
+		// The filter itself won't match anything real in this store
+		// (MemStoreDriver only understands resource/tenant fields, so an
+		// "amount" filter always excludes every row) — the point here is
+		// only that I15 doesn't reject the *plan*, matching
+		// grant predicate_use's actual purpose.
+		let outcome = client.guarded_read(&read_request("orders", "tenant-a"), &driver, "t1", 1_000);
+		assert!(outcome.is_ok(), "predicate_use must let a masked field pass the I15 check: {outcome:?}");
 		let _ = std::fs::remove_dir_all(root);
 	}
 }
