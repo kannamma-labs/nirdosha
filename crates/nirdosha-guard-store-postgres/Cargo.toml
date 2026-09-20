@@ -10,8 +10,9 @@ publish = false
 [dependencies]
 nirdosha-guard-core = { path = "../nirdosha-guard-core" }
 nirdosha-guard-mic = { path = "../nirdosha-guard-mic" }
-postgres = "0.19"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
 postgres-native-tls = "0.5"
 native-tls = "0.2"
 r2d2 = "0.8"
 sha2 = "0.10"
+serde_json = "1"

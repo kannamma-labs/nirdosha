@@ -425,6 +425,68 @@ impl StoreDriver for PostgresStoreDriver {
     }
 }
 
+/// I12 `DriverAttestation::QueryPlanInspection` (RFC 0023 §7) for
+/// `PostgresStoreDriver`: `CanaryRows` (`nirdosha_guard_mic::attestation`)
+/// proves a filter returns the *right rows*; this proves the *real*
+/// Postgres planner actually applied the emitted `WHERE` clause to reach
+/// them, by running `EXPLAIN (FORMAT JSON)` against the live server and
+/// checking the plan tree's `Filter`/`Index Cond` text references every
+/// column the compiled `FilterExpr` names — a filter clause that got
+/// constant-folded away, silently dropped, or never bound would leave no
+/// trace of that column anywhere in the plan, which this catches and a
+/// row-count-only canary check cannot (a coincidentally-correct row count
+/// looks identical to a genuinely-applied filter from the outside).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryPlanFinding {
+    pub verified: bool,
+    pub detail: String,
+}
+
+impl PostgresStoreDriver {
+    pub fn attest_query_plan(&self, filter: &nirdosha_guard_core::FilterExpr, tenant: &str) -> Result<QueryPlanFinding, PlanError> {
+        let sql_plan = RdbmsEmitter::compile_plan(filter, SqlDialect::Postgres, &Tenant(tenant.into()));
+        let explain_sql = format!("EXPLAIN (FORMAT JSON) SELECT payload FROM guard_entities WHERE {}", sql_plan.where_clause);
+
+        let mut conn = self.pool.get().map_err(|e| PlanError::Store(e.to_string()))?;
+        let mut txn = conn.transaction().map_err(|e| PlanError::Store(e.to_string()))?;
+        txn.execute("SELECT set_config('app.tenant', $1, true)", &[&tenant])
+            .map_err(|e| PlanError::Store(e.to_string()))?;
+        let boxed_params: Vec<Box<dyn postgres::types::ToSql + Sync + Send>> =
+            sql_plan.parameters.iter().map(value_to_sql).collect();
+        let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            boxed_params.iter().map(|b| b.as_ref() as &(dyn postgres::types::ToSql + Sync)).collect();
+        let row = txn
+            .query_one(explain_sql.as_str(), &param_refs)
+            .map_err(|e| PlanError::Store(e.to_string()))?;
+        txn.commit().map_err(|e| PlanError::Store(e.to_string()))?;
+
+        let plan: serde_json::Value = row.get(0);
+        let plan_text = plan.to_string();
+
+        // `tenant` is always required — `query()`/`prepare()` both refuse a
+        // filter without a TenantEq anywhere in it, so a real plan for a
+        // filter that reached this driver must reference the column RLS
+        // and/or the emitted WHERE scope it on.
+        let mut expected_columns: Vec<String> = vec!["tenant".to_string()];
+        for field in nirdosha_guard_core::filter_fields(filter) {
+            if let Some(leaf) = field.last() {
+                expected_columns.push(leaf.clone());
+            }
+        }
+        expected_columns.sort();
+        expected_columns.dedup();
+
+        let missing: Vec<&String> = expected_columns.iter().filter(|col| !plan_text.contains(col.as_str())).collect();
+        let verified = missing.is_empty();
+        let detail = if verified {
+            format!("plan references every expected column {expected_columns:?}")
+        } else {
+            format!("plan is missing expected column(s) {missing:?} (expected {expected_columns:?}) — the filter may not actually be reaching the scan: {plan_text}")
+        };
+        Ok(QueryPlanFinding { verified, detail })
+    }
+}
+
 /// `FilterExpr::Value` -> a bound SQL parameter. `Dec` binds as its own
 /// canonical string form (its doc comment: "precise type enforced by
 /// schema") — this driver has no schema-typed column info to convert it

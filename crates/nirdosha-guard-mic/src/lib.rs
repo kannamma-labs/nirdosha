@@ -1,10 +1,11 @@
 //! Synchronous mutation-integrity controller for RFC 0023/0025.
 
+pub mod attestation;
 pub mod exec;
 pub mod shed;
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Mutex;
@@ -172,6 +173,14 @@ pub struct GuardClient {
 	/// `guarded_apply` removes the entry on the matching apply, the same
 	/// "consume once" shape `idempotency` has for trace replay.
 	dry_runs: HashSet<String>,
+	/// I12 dynamic downgrade (RFC 0023 §7): the most recent
+	/// `attestation::attest_canary_rows` findings per driver, keyed by
+	/// `CapabilityManifest::driver_name`. `guarded_read` consults this
+	/// (via `effective_manifest`) instead of trusting a driver's raw
+	/// manifest outright — a driver that has been caught lying about a
+	/// `FilterNodeKind` stays downgraded until re-attested, rather than
+	/// every read silently trusting an unverified claim.
+	attestations: HashMap<String, Vec<attestation::AttestationFinding>>,
 }
 
 impl std::fmt::Debug for GuardClient {
@@ -186,6 +195,7 @@ impl GuardClient {
 			audit: ModuleAuditChain::new(module, audit_path.as_ref()),
 			idempotency: IdempotencyStore::new(),
 			dry_runs: HashSet::new(),
+			attestations: HashMap::new(),
 		}
 	}
 
@@ -318,6 +328,31 @@ impl GuardClient {
 	/// No idempotency check here (unlike `guarded_apply`) — a read has no
 	/// side effect to double-apply; replaying one is harmless by
 	/// construction, so `trace_id` is only for audit correlation.
+	/// Runs I12 canary-row attestation against `driver` and stores the
+	/// findings, keyed by `driver.manifest().driver_name`. `guarded_read`
+	/// consults these findings (`effective_manifest`) to downgrade a
+	/// driver's claimed capabilities to what it was actually observed to
+	/// honor — call this once per driver instance at startup/CI (RFC 0023
+	/// §7), not on every read; a driver's real behavior doesn't change
+	/// between calls, only re-attest after a driver upgrade or fix.
+	pub fn attest_driver<D: StoreDriver>(&mut self, driver: &D) -> Vec<attestation::AttestationFinding> {
+		let findings = attestation::attest_canary_rows(driver);
+		self.attestations.insert(driver.manifest().driver_name.clone(), findings.clone());
+		findings
+	}
+
+	/// The manifest `guarded_read` actually trusts for `driver`: its raw
+	/// claim, downgraded by whatever `attest_driver` most recently found
+	/// it lying about. A driver that has never been attested is trusted
+	/// as claimed — attestation is opt-in instrumentation (RFC 0023 §7),
+	/// not a precondition for every read.
+	fn effective_manifest<D: StoreDriver>(&self, driver: &D) -> nirdosha_guard_core::CapabilityManifest {
+		match self.attestations.get(&driver.manifest().driver_name) {
+			Some(findings) => attestation::downgrade_manifest(driver.manifest(), findings),
+			None => driver.manifest().clone(),
+		}
+	}
+
 	pub fn guarded_read<D: StoreDriver>(&mut self, request: &EvalRequest, driver: &D, trace_id: impl Into<String>, now_ms: u64) -> Result<ReadOutcome, Rejected> {
 		let trace_id = trace_id.into();
 		// I10/§8.4: "opaque cursors only; offset rejected." A request
@@ -354,6 +389,24 @@ impl GuardClient {
 						if is_masked && !is_granted {
 							self.audit.append(&envelope, now_ms);
 							return Err(Rejected::Failed { reason: format!("I15: field {field:?} is masked and not granted via predicate_use — cannot drive a filter clause") });
+						}
+					}
+				}
+				// I12 dynamic downgrade: don't trust a driver's raw claim if
+				// `attest_driver` has caught it lying about a FilterNodeKind
+				// this filter actually needs. Checked against the *attested*
+				// manifest, not `driver.manifest()` directly — a driver that
+				// claims pushdown it doesn't honor (exactly the MemStoreDriver
+				// Compare/TimeRange lie `attestation::attest_canary_rows`
+				// caught) must fail closed here instead of silently returning
+				// whatever unfiltered/mis-filtered rows it happens to produce.
+				if let Some(filter) = &evaluation.residual_filter {
+					let effective_manifest = self.effective_manifest(driver);
+					let supported: std::collections::HashSet<&nirdosha_guard_core::FilterNodeKind> = effective_manifest.supported_filter_nodes.iter().collect();
+					for kind in nirdosha_guard_core::required_filter_node_kinds(filter) {
+						if !supported.contains(&kind) {
+							self.audit.append(&envelope, now_ms);
+							return Err(Rejected::Failed { reason: format!("{:?}", PlanError::CapabilityUnsupported { required: format!("{kind:?}"), attested: format!("{:?}", effective_manifest.supported_filter_nodes) }) });
 						}
 					}
 				}
@@ -430,7 +483,28 @@ pub struct MemStoreDriver {
 impl Default for MemStoreDriver { fn default() -> Self { Self::new() } }
 
 impl MemStoreDriver {
-	pub fn new() -> Self { Self { manifest: CapabilityManifest { schema_version: 1, driver_name: "memory".into(), supported_filter_nodes: vec![FilterNodeKind::Eq, FilterNodeKind::In, FilterNodeKind::Compare, FilterNodeKind::And, FilterNodeKind::Or, FilterNodeKind::Not, FilterNodeKind::TimeRange, FilterNodeKind::Pattern, FilterNodeKind::TenantEq], masking_points: vec![], aggregate_semantics: nirdosha_guard_core::AggregateSemantics::Inline, supports_tenant_eq_native: true }, rows: std::sync::Mutex::new(BTreeMap::new()), next_commit: std::sync::atomic::AtomicU64::new(0), pending_tenants: std::sync::Mutex::new(std::collections::HashMap::new()) } }
+	pub fn new() -> Self {
+		Self {
+			manifest: CapabilityManifest {
+				schema_version: 1,
+				driver_name: "memory".into(),
+				// Honest, not aspirational — matching PostgresStoreDriver's
+				// own stated convention. This used to also claim Compare
+				// and TimeRange; both were lies `attestation::attest_canary_rows`
+				// caught on first run (`match_filter`, below, unconditionally
+				// excludes on both — no column here supports either
+				// comparison honestly). Removed rather than left for the
+				// downgrade mechanism to paper over every time.
+				supported_filter_nodes: vec![FilterNodeKind::Eq, FilterNodeKind::In, FilterNodeKind::And, FilterNodeKind::Or, FilterNodeKind::Not, FilterNodeKind::Pattern, FilterNodeKind::TenantEq],
+				masking_points: vec![],
+				aggregate_semantics: nirdosha_guard_core::AggregateSemantics::Inline,
+				supports_tenant_eq_native: true,
+			},
+			rows: std::sync::Mutex::new(BTreeMap::new()),
+			next_commit: std::sync::atomic::AtomicU64::new(0),
+			pending_tenants: std::sync::Mutex::new(std::collections::HashMap::new()),
+		}
+	}
 	pub fn get(&self, resource: &str) -> Option<Vec<u8>> { self.rows.lock().ok()?.get(resource).map(|row| row.payload.clone()) }
 }
 
@@ -820,6 +894,51 @@ mod tests {
 		let outcome = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t2", 2_000).unwrap();
 		assert_eq!(outcome.rows.len(), 2, "RowCap(2) must cap the returned rows even though 3 exist");
 		assert_eq!(outcome.masks, vec![mask], "masks are handed to the caller, not silently applied to opaque bytes — see ReadOutcome's doc comment");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn guarded_read_fails_closed_when_attestation_has_caught_the_driver_lying_about_a_needed_filter_kind() {
+		// I12 dynamic downgrade: attest_driver's findings must actually
+		// change what guarded_read trusts, not just exist as a standalone
+		// report. MemStoreDriver's own manifest is honest today, so this
+		// uses attestation::tests' pattern directly — inline here, since
+		// that module is private to attestation.rs — of a driver that
+		// truthfully proxies MemStoreDriver but claims Compare support it
+		// doesn't honor.
+		struct LyingDriver(MemStoreDriver, CapabilityManifest);
+		impl StoreDriver for LyingDriver {
+			fn manifest(&self) -> &CapabilityManifest { &self.1 }
+			fn prepare(&self, ir: &PlanIr) -> Result<Prepared, PlanError> { self.0.prepare(ir) }
+			fn commit(&self, prepared: Prepared, entity: EntityBytes) -> Result<Receipt, PlanError> { self.0.commit(prepared, entity) }
+			fn query(&self, plan: &ReadPlanIr) -> Result<QueryResult, PlanError> { self.0.query(plan) }
+		}
+		let root = scratch_dir("read-attest");
+		let inner = MemStoreDriver::new();
+		let mut manifest = inner.manifest().clone();
+		manifest.driver_name = "lying-mem-store-guarded-read".into();
+		manifest.supported_filter_nodes.push(FilterNodeKind::Compare);
+		let driver = LyingDriver(inner, manifest);
+
+		let mut writer = GuardClient::new(vec![tenant_scoped_write_policy("orders", "tenant-a")], "w", root.join("w.jsonl"));
+		writer.guarded_apply(&write_request("orders", "tenant-a"), &driver, EntityBytes(b"row".to_vec()), "t1", 1_000).unwrap();
+
+		let filter = FilterExpr::And(vec![
+			FilterExpr::TenantEq { value: Value::Str("tenant-a".into()) },
+			FilterExpr::Compare { field: vec!["amount".into()], op: nirdosha_guard_core::CompareOp::Gt, value: Value::Int(0) },
+		]);
+		let policy = PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Read, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: Some(filter), obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: "read-orders-compare".into() };
+		let mut reader = GuardClient::new(vec![policy], "r", root.join("r.jsonl"));
+
+		// Before attestation: the driver's raw (lying) manifest claims
+		// Compare support, so the read proceeds — this is the pre-I12-
+		// downgrade baseline nothing checked before this phase.
+		let baseline = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t2", 2_000);
+		assert!(baseline.is_ok(), "an unattested driver is trusted as claimed: {baseline:?}");
+
+		reader.attest_driver(&driver);
+		let after_attestation = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t3", 3_000);
+		assert!(matches!(after_attestation, Err(Rejected::Failed { .. })), "once attested lying about Compare, guarded_read must fail closed instead of trusting the driver's claim: {after_attestation:?}");
 		let _ = std::fs::remove_dir_all(root);
 	}
 

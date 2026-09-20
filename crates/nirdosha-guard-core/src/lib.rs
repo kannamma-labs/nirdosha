@@ -609,6 +609,69 @@ pub enum DriverAttestation {
     QueryPlanInspection,
 }
 
+/// Which `FilterNodeKind`s a `FilterExpr` actually uses — the input
+/// `compute_enforcement_level` needs to decide how much of a filter a
+/// driver's manifest can honestly push down. `RelationIn` needs none:
+/// relations are erased before a driver ever sees a plan (RFC 0023 §4),
+/// so they carry no pushdown requirement of their own by the time this
+/// runs.
+pub fn required_filter_node_kinds(expr: &FilterExpr) -> Vec<FilterNodeKind> {
+    match expr {
+        FilterExpr::Eq { .. } => vec![FilterNodeKind::Eq],
+        FilterExpr::In { .. } => vec![FilterNodeKind::In],
+        FilterExpr::Compare { .. } => vec![FilterNodeKind::Compare],
+        FilterExpr::TimeRange { .. } => vec![FilterNodeKind::TimeRange],
+        FilterExpr::Pattern { .. } => vec![FilterNodeKind::Pattern],
+        FilterExpr::TenantEq { .. } => vec![FilterNodeKind::TenantEq],
+        FilterExpr::RelationIn { .. } => vec![],
+        FilterExpr::And(children) => {
+            let mut kinds: Vec<FilterNodeKind> = children.iter().flat_map(required_filter_node_kinds).collect();
+            kinds.push(FilterNodeKind::And);
+            kinds
+        }
+        FilterExpr::Or(children) => {
+            let mut kinds: Vec<FilterNodeKind> = children.iter().flat_map(required_filter_node_kinds).collect();
+            kinds.push(FilterNodeKind::Or);
+            kinds
+        }
+        FilterExpr::Not(inner) => {
+            let mut kinds = required_filter_node_kinds(inner);
+            kinds.push(FilterNodeKind::Not);
+            kinds
+        }
+    }
+}
+
+/// Selects the capability-ladder level a driver actually achieves for a
+/// given filter, per its `CapabilityManifest`'s claimed
+/// `supported_filter_nodes` — not the driver's own opinion of itself, so
+/// this is the same computation whether the manifest is honest or (see
+/// `DriverAttestation`) has been caught lying and downgraded first.
+/// `L3Pruning` never comes out of this today: it's specific to
+/// partition-pruned columnar storage (RFC 0023's Arrow/Parquet driver,
+/// `[ ]` in the checklist), which neither existing driver is — producing
+/// it here without a driver that actually does pruning would be exactly
+/// the kind of aspirational-not-honest claim this ladder exists to
+/// prevent.
+pub fn compute_enforcement_level(filter: Option<&FilterExpr>, manifest: &CapabilityManifest) -> EnforcementLevel {
+    let Some(filter) = filter else {
+        return EnforcementLevel::L4FullPushdown;
+    };
+    let needed = required_filter_node_kinds(filter);
+    if needed.is_empty() {
+        return EnforcementLevel::L4FullPushdown;
+    }
+    let supported: std::collections::HashSet<&FilterNodeKind> = manifest.supported_filter_nodes.iter().collect();
+    let supported_count = needed.iter().filter(|kind| supported.contains(kind)).count();
+    if supported_count == needed.len() {
+        EnforcementLevel::L4FullPushdown
+    } else if supported_count > 0 {
+        EnforcementLevel::L2ScanTime
+    } else {
+        EnforcementLevel::L1PostRead
+    }
+}
+
 /// A compiled plan plus the driver ladder level it achieved.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompiledPlan<L> {
@@ -711,6 +774,50 @@ mod lineage_facts_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest_supporting(kinds: &[FilterNodeKind]) -> CapabilityManifest {
+        CapabilityManifest {
+            schema_version: 1,
+            driver_name: "test".into(),
+            supported_filter_nodes: kinds.to_vec(),
+            masking_points: vec![],
+            aggregate_semantics: AggregateSemantics::Inline,
+            supports_tenant_eq_native: true,
+        }
+    }
+
+    #[test]
+    fn enforcement_level_is_l4_when_every_node_is_supported() {
+        let filter = FilterExpr::And(vec![
+            FilterExpr::TenantEq { value: Value::Str("t1".into()) },
+            FilterExpr::Eq { field: vec!["resource".into()], value: Value::Str("r1".into()) },
+        ]);
+        let manifest = manifest_supporting(&[FilterNodeKind::TenantEq, FilterNodeKind::Eq, FilterNodeKind::And]);
+        assert_eq!(compute_enforcement_level(Some(&filter), &manifest), EnforcementLevel::L4FullPushdown);
+    }
+
+    #[test]
+    fn enforcement_level_is_l1_when_no_node_is_supported() {
+        let filter = FilterExpr::Compare { field: vec!["amount".into()], op: CompareOp::Gt, value: Value::Int(0) };
+        let manifest = manifest_supporting(&[FilterNodeKind::TenantEq]);
+        assert_eq!(compute_enforcement_level(Some(&filter), &manifest), EnforcementLevel::L1PostRead);
+    }
+
+    #[test]
+    fn enforcement_level_is_l2_when_some_but_not_all_nodes_are_supported() {
+        let filter = FilterExpr::And(vec![
+            FilterExpr::TenantEq { value: Value::Str("t1".into()) },
+            FilterExpr::Compare { field: vec!["amount".into()], op: CompareOp::Gt, value: Value::Int(0) },
+        ]);
+        let manifest = manifest_supporting(&[FilterNodeKind::TenantEq, FilterNodeKind::And]);
+        assert_eq!(compute_enforcement_level(Some(&filter), &manifest), EnforcementLevel::L2ScanTime);
+    }
+
+    #[test]
+    fn enforcement_level_is_l4_with_no_filter_at_all() {
+        let manifest = manifest_supporting(&[]);
+        assert_eq!(compute_enforcement_level(None, &manifest), EnforcementLevel::L4FullPushdown);
+    }
 
     #[test]
     fn round_trip_access_plan_json() {

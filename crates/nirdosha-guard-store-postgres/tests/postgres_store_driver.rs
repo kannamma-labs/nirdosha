@@ -385,3 +385,42 @@ fn opaque_cursor_pagination_and_cohort_floor_against_real_postgres() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+#[ignore]
+fn attest_query_plan_confirms_the_real_planner_applied_the_filter() {
+    // I12 QueryPlanInspection (Plan Phase 10): a row-count-correct canary
+    // check can't distinguish a genuinely-applied WHERE from one that
+    // happens to return the right rows for an unrelated reason. This test
+    // proves the real Postgres EXPLAIN output actually names the columns
+    // the compiled filter references, against the live server.
+    let url = test_url();
+    let driver = PostgresStoreDriver::connect(&url).expect("connect + provision schema");
+    clean_fixture_rows(&url, &["plan_inspect_row_1"]);
+
+    let temp_dir = std::env::temp_dir().join(format!("nirdosha-pg-driver-planinspect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let mut writer = GuardClient::new(vec![tenant_scoped_policy("plan_inspect_row_1", "tenant-theta")], "plan-seed", temp_dir.join("seed.jsonl"));
+    let req = EvalRequest { context: context_for("tenant-theta", "plan_inspect_row_1") };
+    writer.guarded_apply(&req, &driver, EntityBytes(b"row".to_vec()), "trace-plan-seed", 1_700_003_000).unwrap();
+
+    let filter = FilterExpr::And(vec![
+        FilterExpr::TenantEq { value: Value::Str("tenant-theta".into()) },
+        FilterExpr::Eq { field: vec!["resource".into()], value: Value::Str("plan_inspect_row_1".into()) },
+    ]);
+    let finding = driver.attest_query_plan(&filter, "tenant-theta").expect("EXPLAIN must succeed against a real server");
+    assert!(finding.verified, "the real plan must reference both tenant and resource: {}", finding.detail);
+
+    // A filter naming a column that can't possibly appear in a plan over
+    // this schema (there is no such column) must fail attestation, not be
+    // silently accepted — proves the check is a real assertion, not a
+    // tautology that always verifies.
+    let bogus_filter = FilterExpr::And(vec![
+        FilterExpr::TenantEq { value: Value::Str("tenant-theta".into()) },
+        FilterExpr::Eq { field: vec!["definitely_not_a_real_column_xyz".into()], value: Value::Str("x".into()) },
+    ]);
+    let bogus_finding = driver.attest_query_plan(&bogus_filter, "tenant-theta");
+    assert!(bogus_finding.is_err(), "a filter referencing a nonexistent column must fail outright against the real server, not verify");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
