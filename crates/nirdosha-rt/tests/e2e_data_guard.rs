@@ -130,7 +130,7 @@ fn e2e_data_guard_and_metadata_plane_workflow() {
 
 #[test]
 fn full_rfc0023_data_guard_pipeline_workflow() {
-    use nirdosha_guard_core::cedar::{CedarEffect, CedarFrontend, CedarPolicy};
+    use nirdosha_guard_core::cedar::CedarFrontend;
     use nirdosha_guard_core::drivers::datafusion::DataFusionBridge;
     use nirdosha_guard_core::drivers::fga::OpenFgaResolver;
     use nirdosha_guard_core::drivers::rdbms::{DdlAst, RdbmsEmitter, SqlDialect};
@@ -145,15 +145,14 @@ fn full_rfc0023_data_guard_pipeline_workflow() {
 
     let ctx = build_context();
 
-    // 1. Cedar Lowerable-Subset Policy Front-End (§1A)
-    let cedar_frontend = CedarFrontend::new(vec![CedarPolicy {
-        id: "cedar-allow-trade".into(),
-        effect: CedarEffect::Permit,
-        principal_condition: None,
-        action_condition: None,
-        resource_condition: None,
-        when_clause: Some("status == \"active\"".into()),
-    }]);
+    // 1. Cedar Lowerable-Subset Policy Front-End (§1A) — real Cedar policy
+    // text, real principal/resource scope matching (Plan Phase 16),
+    // matching ctx's real subject/entity/tenant rather than a hand-parsed
+    // marker string nothing actually checked against real context data.
+    let cedar_frontend = CedarFrontend::parse(&[
+        r#"permit(principal == User::"user-100", action, resource == Resource::"trade_records") when { context.tenant == "tenant-alpha" };"#,
+    ])
+    .expect("real cedar policy must parse");
     let (cedar_decision, obligations) = cedar_frontend.evaluate(&ctx).expect("cedar evaluation");
     assert_eq!(cedar_decision, nirdosha_guard_core::Decision::Allow);
     assert_eq!(obligations.len(), 1);

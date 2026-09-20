@@ -230,6 +230,28 @@ impl Action {
         }
     }
 
+    /// The inverse of `parse_wire` — the lowercase wire string this
+    /// `Action` came from (or would parse back from). Used anywhere a
+    /// real wire-format string is needed for an `Action` (the Cedar
+    /// frontend's `Action::"<wire>"` entity id, for one) instead of
+    /// `Debug`'s PascalCase, which isn't the same vocabulary
+    /// `parse_wire` accepts.
+    pub fn wire_str(&self) -> &'static str {
+        match self {
+            Action::Read => "read",
+            Action::Create => "create",
+            Action::Update => "update",
+            Action::Delete => "delete",
+            Action::Migrate => "migrate",
+            Action::Export => "export",
+            Action::Enumerate => "enumerate",
+            Action::Aggregate => "aggregate",
+            Action::LineageQuery => "lineage_query",
+            Action::Simulate => "simulate",
+            Action::Delegate => "delegate",
+        }
+    }
+
     /// Maps to the closed `WriteAction` set `WritePlan`/`guarded_apply`
     /// operate on. `None` for every non-mutating `Action` — `guarded_apply`
     /// uses this to refuse a call whose context action isn't actually a
@@ -775,6 +797,13 @@ mod lineage_facts_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_str_round_trips_through_parse_wire_for_every_action() {
+        for action in [Action::Read, Action::Create, Action::Update, Action::Delete, Action::Migrate, Action::Export, Action::Enumerate, Action::Aggregate, Action::LineageQuery, Action::Simulate, Action::Delegate] {
+            assert_eq!(Action::parse_wire(action.wire_str()), Some(action.clone()), "wire_str()/parse_wire() must round-trip for {action:?}");
+        }
+    }
 
     fn manifest_supporting(kinds: &[FilterNodeKind]) -> CapabilityManifest {
         CapabilityManifest {

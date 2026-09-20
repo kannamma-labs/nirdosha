@@ -10,5 +10,6 @@ license = "MIT"
 nirdosha-audit = { path = "../nirdosha-audit" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+cedar-policy = "4"
 
 [dev-dependencies]
