@@ -361,13 +361,62 @@ pub fn guard_roles(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// `approval_chain! { chain name { ... } }`.
+/// Parses `quorum(N, of = [Role, Role, ...])` out of a `TokenStream`'s own
+/// `.to_string()` rendering. Whitespace-insensitive by construction
+/// (strips every whitespace character before searching) rather than
+/// hardcoding a specific spacing convention: `proc_macro::TokenStream`
+/// (what this function actually receives, via `input.to_string()`) and
+/// `proc_macro2::TokenStream` were confirmed, by direct compilation while
+/// developing this function, to *not* format identically (`proc_macro2`
+/// inserts a space before `(` and after `,`; the compiler's own
+/// `proc_macro::TokenStream::to_string()` does not) — the whitespace-
+/// stripping approach is correct under either, and isn't tied to an
+/// internal formatting detail that could shift between compiler versions.
+/// Returns `None` if no `quorum(...)` clause is present, or if it has no
+/// eligible role in `of = [...]` — Plan Phase 15's own
+/// `ApprovalChainRuntime::open` refuses a chain with an empty role list
+/// (`ChainHasNoEligibleRoles`) for the identical reason: a chain that can
+/// never reach quorum shouldn't be silently registered as usable.
+fn parse_quorum_clause(input_str: &str) -> Option<(u8, Vec<String>)> {
+    let compact: String = input_str.chars().filter(|c| !c.is_whitespace()).collect();
+    let after_marker = compact.find("quorum(")?;
+    let args_start = after_marker + "quorum(".len();
+    let rest = &compact[args_start..];
+    let args_end = rest.find(')')?;
+    let args = &rest[..args_end];
+    let comma = args.find(',')?;
+    let quorum: u8 = args[..comma].parse().ok()?;
+    let of_part = &args[comma + 1..];
+    let bracket_start = of_part.find('[')?;
+    let bracket_end = of_part.find(']')?;
+    let roles: Vec<String> = of_part[bracket_start + 1..bracket_end].split(',').map(str::to_string).filter(|role| !role.is_empty()).collect();
+    if roles.is_empty() {
+        return None;
+    }
+    Some((quorum, roles))
+}
+
+/// `approval_chain! { chain name { quorum(N, of = [Role, ...]); timeout(deny); } }`.
+///
+/// Plan Phase 15: previously this only registered the block's raw source
+/// text into `CATALOG` (useful for `cargo nirdosha verify`'s dump, not for
+/// anything that needs the chain's actual quorum/role requirements) — the
+/// separately-declared `APPROVAL_CHAINS` slice existed but nothing ever
+/// populated it, so `RegistryDump.approval_chains` was silently empty
+/// regardless of how many chains a crate declared, and
+/// `Decision::Escalate { to: EscalateTarget::Approval { chain } }` had no
+/// real chain definition to resolve against
+/// (`nirdosha_guard_core::approval_chain::ApprovalChainRuntime`, new this
+/// phase). Now emits both: the existing `CatalogRegistration` (unchanged,
+/// still feeds the dump/verify path) and a real `ApprovalChainRecord`
+/// with the parsed quorum/roles, into `APPROVAL_CHAINS`.
 #[proc_macro]
 pub fn approval_chain(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
     let static_name = catalog_static_name("APPROVAL_CHAIN", &input_str);
+    let record_static_name = catalog_static_name("APPROVAL_CHAIN_RECORD", &input_str);
     let name = extract_named_after(&input_str, "chain", "approval_chain");
-    quote! {
+    let catalog_registration = quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
         #[linkme(crate = ::nirdosha_guard_registry::linkme)]
@@ -376,6 +425,28 @@ pub fn approval_chain(input: TokenStream) -> TokenStream {
             name: #name,
             source: #input_str,
         };
+    };
+    let record_registration = match parse_quorum_clause(&input_str) {
+        Some((quorum, approvers)) => quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::APPROVAL_CHAINS)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #record_static_name: ::nirdosha_guard_registry::ApprovalChainRegistration = ::nirdosha_guard_registry::ApprovalChainRegistration {
+                name: #name,
+                quorum: #quorum,
+                approvers: &[ #(#approvers),* ],
+            };
+        },
+        // No parseable quorum(...) clause: register the raw catalog entry
+        // only, same as before this phase — an honest gap (nothing to
+        // resolve a chain with no real quorum requirement against), not a
+        // silent zero-quorum record that would trivially "approve" with
+        // no approvals at all.
+        None => quote! {},
+    };
+    quote! {
+        #catalog_registration
+        #record_registration
     }
     .into()
 }

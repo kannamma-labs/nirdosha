@@ -203,6 +203,20 @@ pub struct GuardClient {
 	/// `FilterNodeKind` stays downgraded until re-attested, rather than
 	/// every read silently trusting an unverified claim.
 	attestations: HashMap<String, Vec<attestation::AttestationFinding>>,
+	/// Plan Phase 15: real chain definitions (quorum + eligible roles) a
+	/// `Decision::Escalate { to: EscalateTarget::Approval { chain } }`
+	/// resolves against — empty unless populated via
+	/// `with_approval_chains`, in which case an unrecognized chain name
+	/// surfaces as a real error (`ApprovalChainError::UnknownChain`) at
+	/// `guarded_apply` time, not a silent no-op escalation.
+	approval_chains: nirdosha_guard_core::approval_chain::ApprovalChainRuntime,
+	/// No `guard_policy!`/`approval_chain!` clause in the corpus declares
+	/// an explicit escalation deadline (`timeout(deny)` names the
+	/// *outcome*, not a duration) — this is the real deadline `guarded_apply`
+	/// opens a pending escalation with, defaulting to 24h (a real,
+	/// operator-overridable value, not an invented one baked into the
+	/// runtime itself).
+	default_escalation_ttl_ms: u64,
 }
 
 impl std::fmt::Debug for GuardClient {
@@ -218,7 +232,71 @@ impl GuardClient {
 			idempotency: IdempotencyStore::new(),
 			dry_runs: HashSet::new(),
 			attestations: HashMap::new(),
+			approval_chains: nirdosha_guard_core::approval_chain::ApprovalChainRuntime::new(vec![]),
+			default_escalation_ttl_ms: 24 * 60 * 60 * 1000,
 		}
+	}
+
+	/// Registers the real chain definitions (typically sourced from a
+	/// `RegistryDump.approval_chains`, now genuinely populated by the
+	/// fixed `approval_chain!` macro — Plan Phase 15) that
+	/// `guarded_apply`'s `Decision::Escalate` handling resolves against.
+	pub fn with_approval_chains(mut self, definitions: Vec<nirdosha_guard_core::approval_chain::ApprovalChainDefinition>) -> Self {
+		self.approval_chains = nirdosha_guard_core::approval_chain::ApprovalChainRuntime::new(definitions);
+		self
+	}
+
+	/// Records one real approval against a pending escalation
+	/// `guarded_apply` opened (its `trace_id` doubles as the escalation
+	/// id). Once quorum is met, `commit_after_approval` can complete the
+	/// write the original call could only escalate.
+	pub fn approve_escalation(&mut self, escalation_id: &str, approver_id: impl Into<String>, role: &str, now_ms: u64) -> Result<nirdosha_guard_core::approval_chain::EscalationStatus, nirdosha_guard_core::approval_chain::ApprovalChainError> {
+		self.approval_chains.approve(escalation_id, approver_id, role, now_ms)
+	}
+
+	pub fn escalation_status(&self, escalation_id: &str) -> Option<nirdosha_guard_core::approval_chain::EscalationStatus> {
+		self.approval_chains.status(escalation_id)
+	}
+
+	/// Completes a write that `guarded_apply` could previously only
+	/// escalate, now that `escalation_id` (the original `trace_id`
+	/// `guarded_apply` opened the pending escalation under) has reached
+	/// real quorum. Re-evaluates `request` fresh (the policy's
+	/// filter/caps/masks are recomputed honestly, not reused stale from
+	/// the original escalated attempt) and requires the *current*
+	/// decision to still be `Escalate` for the *same* chain — a policy
+	/// change between the original attempt and the approval landing
+	/// doesn't silently ride through on an old decision. `new_trace_id`
+	/// is a genuinely new operation for idempotency purposes (matching
+	/// this file's existing two-phase pattern for `Migrate`'s
+	/// dry-run-then-apply gate) — reusing the original `trace_id` would
+	/// hit the idempotency store's "already happened" short-circuit
+	/// instead of ever reaching this logic.
+	pub fn commit_after_approval<D: StoreDriver>(&mut self, request: &EvalRequest, driver: &D, payload: EntityBytes, escalation_id: &str, new_trace_id: impl Into<String>, now_ms: u64) -> Result<Outcome, Rejected> {
+		let new_trace_id = new_trace_id.into();
+		if self.approval_chains.status(escalation_id) != Some(nirdosha_guard_core::approval_chain::EscalationStatus::Approved) {
+			return Err(Rejected::Failed { reason: format!("escalation {escalation_id:?} has not reached quorum") });
+		}
+		let Some(write_action) = request.context.action.as_write_action() else {
+			return Err(Rejected::Failed { reason: format!("{:?} is not a write action", request.context.action) });
+		};
+		let evaluation = self.evaluate(request);
+		if !matches!(&evaluation.decision, Decision::Escalate { to: nirdosha_guard_core::EscalateTarget::Approval { .. } }) {
+			return Err(Rejected::Failed { reason: format!("policy no longer resolves to the escalated decision this approval was granted for: {:?}", evaluation.decision) });
+		}
+		if !self.idempotency.insert_if_new(&new_trace_id) {
+			return Ok(Outcome::Duplicate { trace_id: new_trace_id });
+		}
+		let envelope = AuditEnvelope { trace_id: new_trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: request.context.subject.id.clone(), action: format!("{:?}", request.context.action), resource: request.context.entity.clone(), policy_versions: vec![request.context.policy_version.clone()], decision: "Allow (escalation approved)".into(), obligations: evaluation.obligations.iter().map(|item| format!("{item:?}")).collect(), kind: AuditRecordKind::Decision, content: serde_json::json!({ "phase": "before_commit", "escalation_id": escalation_id }) };
+		let plan = PlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), row_scope: evaluation.residual_filter.clone(), filter: evaluation.residual_filter, action: write_action, affected_row_cap: evaluation.affected_row_cap, policy_version: request.context.policy_version.clone() };
+		let prepared = driver.prepare(&plan).map_err(|error| Rejected::Failed { reason: format!("{error:?}") })?;
+		self.audit.append(&envelope, now_ms);
+		let receipt = driver.commit(prepared, payload).map_err(|error| Rejected::Failed { reason: format!("{error:?}") })?;
+		let mut committed = envelope;
+		committed.kind = AuditRecordKind::Mutation;
+		committed.content = serde_json::json!({ "receipt": receipt.store_commit_id, "digest": receipt.digest, "escalation_id": escalation_id });
+		self.audit.append(&committed, now_ms);
+		Ok(Outcome::Committed { trace_id: new_trace_id })
 	}
 
 	/// Records a dry run for `trace_id` — `guarded_apply` requires exactly
@@ -289,7 +367,23 @@ impl GuardClient {
 		let envelope = AuditEnvelope { trace_id: trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: request.context.subject.id.clone(), action: format!("{:?}", request.context.action), resource: request.context.entity.clone(), policy_versions: vec![request.context.policy_version.clone()], decision: format!("{:?}", evaluation.decision), obligations: evaluation.obligations.iter().map(|item| format!("{item:?}")).collect(), kind: AuditRecordKind::Decision, content: serde_json::json!({ "phase": "before_commit" }) };
 		match evaluation.decision {
 			Decision::Deny { reason } => { self.audit.append(&envelope, now_ms); Err(Rejected::Denied { reason }) }
-			Decision::Escalate { to } => { self.audit.append(&envelope, now_ms); Err(Rejected::Escalated { target: format!("{to:?}") }) }
+			Decision::Escalate { to } => {
+				// Plan Phase 15: actually open a real, trackable pending
+				// escalation (keyed by trace_id — see `commit_after_approval`'s
+				// doc comment on why the retry that completes the write
+				// after approval uses a *different* trace_id) instead of
+				// just returning a debug-formatted target string with
+				// nothing behind it.
+				if let nirdosha_guard_core::EscalateTarget::Approval { chain } = &to {
+					let deadline = now_ms + self.default_escalation_ttl_ms;
+					match self.approval_chains.open(trace_id.clone(), chain, request.context.entity.clone(), request.context.subject.id.clone(), now_ms, deadline) {
+						Ok(()) | Err(nirdosha_guard_core::approval_chain::ApprovalChainError::AlreadyOpen(_)) => {}
+						Err(error) => { self.audit.append(&envelope, now_ms); return Err(Rejected::Failed { reason: format!("escalation could not be opened: {error:?}") }); }
+					}
+				}
+				self.audit.append(&envelope, now_ms);
+				Err(Rejected::Escalated { target: format!("{to:?}") })
+			}
 			Decision::Pending { expires_at, .. } => { self.audit.append(&envelope, now_ms); Ok(Outcome::Pending { expires_at }) }
 			Decision::Allow => {
 				let plan = PlanIr {
@@ -1475,6 +1569,63 @@ mod tests {
 		let outcome = client.guarded_read(&read_request("orders", "tenant-a"), &driver, "t1", 1_000);
 		assert!(outcome.is_ok(), "predicate_use must let a masked field pass the I15 check: {outcome:?}");
 		let _ = std::fs::remove_dir_all(root);
+	}
+
+	fn escalating_write_policy(resource: &str, tenant: &str, chain: &str) -> PolicyCandidate {
+		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: Some(nirdosha_guard_core::EscalateTarget::Approval { chain: chain.into() }), caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: format!("escalate-{resource}") }
+	}
+
+	#[test]
+	fn guarded_apply_escalates_opens_a_real_pending_escalation_and_commits_only_after_real_quorum() {
+		let root = scratch_dir("approval-chain");
+		let driver = MemStoreDriver::new();
+		let chain = nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: "sar_release".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()] };
+		let mut client = GuardClient::new(vec![escalating_write_policy("sar-bundle", "tenant-a", "sar_release")], "escalate", root.join("audit.jsonl")).with_approval_chains(vec![chain]);
+
+		let first = client.guarded_apply(&write_request("sar-bundle", "tenant-a"), &driver, EntityBytes(b"draft".to_vec()), "trace-1", 1_000);
+		assert!(matches!(first, Err(Rejected::Escalated { .. })), "an escalating policy must reject the immediate write: {first:?}");
+		assert_eq!(client.escalation_status("trace-1"), Some(nirdosha_guard_core::approval_chain::EscalationStatus::Pending { approvals_so_far: 0, quorum: 2 }));
+
+		// A write attempt before quorum is met must still fail, even via
+		// commit_after_approval — nothing should ever bypass the real
+		// quorum check.
+		let too_early = client.commit_after_approval(&write_request("sar-bundle", "tenant-a"), &driver, EntityBytes(b"draft".to_vec()), "trace-1", "trace-1-commit-early", 1_100);
+		assert!(matches!(too_early, Err(Rejected::Failed { .. })), "must refuse to commit before real quorum is reached: {too_early:?}");
+
+		let after_first_approval = client.approve_escalation("trace-1", "lead-a", "ComplianceLead", 1_200).unwrap();
+		assert_eq!(after_first_approval, nirdosha_guard_core::approval_chain::EscalationStatus::Pending { approvals_so_far: 1, quorum: 2 });
+		let after_second_approval = client.approve_escalation("trace-1", "lead-b", "ComplianceLead", 1_300).unwrap();
+		assert_eq!(after_second_approval, nirdosha_guard_core::approval_chain::EscalationStatus::Approved);
+
+		let committed = client.commit_after_approval(&write_request("sar-bundle", "tenant-a"), &driver, EntityBytes(b"final".to_vec()), "trace-1", "trace-1-commit", 1_400).unwrap();
+		assert!(matches!(committed, Outcome::Committed { .. }), "a real quorum must let the write through: {committed:?}");
+		assert_eq!(driver.get("sar-bundle"), Some(b"final".to_vec()));
+
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn guarded_apply_escalation_denies_after_a_real_timeout() {
+		let root = scratch_dir("approval-chain-timeout");
+		let driver = MemStoreDriver::new();
+		let chain = nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: "sar_release".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()] };
+		let mut client = GuardClient::new(vec![escalating_write_policy("sar-bundle", "tenant-a", "sar_release")], "escalate-timeout", root.join("audit.jsonl")).with_approval_chains(vec![chain]);
+
+		client.guarded_apply(&write_request("sar-bundle", "tenant-a"), &driver, EntityBytes(b"draft".to_vec()), "trace-1", 1_000).unwrap_err();
+		client.approve_escalation("trace-1", "lead-a", "ComplianceLead", 1_100).unwrap(); // only one of two required
+
+		let past_deadline = 1_000 + client_default_escalation_ttl_ms() + 1;
+		let late = client.approve_escalation("trace-1", "lead-b", "ComplianceLead", past_deadline);
+		assert_eq!(late, Err(nirdosha_guard_core::approval_chain::ApprovalChainError::Expired));
+		assert_eq!(client.escalation_status("trace-1"), Some(nirdosha_guard_core::approval_chain::EscalationStatus::DeniedTimeout), "I3: an unmet quorum past the real deadline must deny, never silently allow");
+
+		let commit_result = client.commit_after_approval(&write_request("sar-bundle", "tenant-a"), &driver, EntityBytes(b"final".to_vec()), "trace-1", "trace-1-commit", past_deadline + 1);
+		assert!(matches!(commit_result, Err(Rejected::Failed { .. })), "a timed-out escalation must never be committable: {commit_result:?}");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	fn client_default_escalation_ttl_ms() -> u64 {
+		24 * 60 * 60 * 1000
 	}
 }
 

@@ -1158,3 +1158,45 @@ fn corpus_registry_dump_round_trips_through_verify() {
     assert_eq!(by_pass("V5"), 0);
     assert_eq!(by_pass("V8"), 0);
 }
+
+/// Plan Phase 15: `approval_chain!` must register a real, structured
+/// `ApprovalChainRecord` per chain — not just raw source text into
+/// `CATALOG` — and `nirdosha_guard_core::approval_chain::ApprovalChainRuntime`
+/// built from those real records must let `sar_release` actually escalate,
+/// require two distinct `ComplianceLead` approvals, and deny on timeout,
+/// end to end from the real `00_core.nir` corpus declarations (not a
+/// hand-constructed fixture standing in for them).
+#[test]
+fn corpus_approval_chains_are_really_registered_and_sar_release_escalates_end_to_end() {
+    let dump = nirdosha_guard_registry::dump();
+    assert_eq!(dump.approval_chains.len(), 7, "all 7 real approval_chain! blocks in 00_core.nir must register a structured record: {:?}", dump.approval_chains);
+
+    let sar_release = dump.approval_chains.iter().find(|chain| chain.name == "sar_release").expect("sar_release must be registered");
+    assert_eq!(sar_release.quorum, 2);
+    assert_eq!(sar_release.approvers, vec!["ComplianceLead".to_string()]);
+
+    let policy_release = dump.approval_chains.iter().find(|chain| chain.name == "policy_release").expect("policy_release must be registered");
+    assert_eq!(policy_release.approvers, vec!["PolicyEngineer".to_string(), "ComplianceLead".to_string()]);
+
+    // End-to-end runtime proof against the real, corpus-derived definitions.
+    let definitions: Vec<nirdosha_guard_core::approval_chain::ApprovalChainDefinition> = dump
+        .approval_chains
+        .iter()
+        .map(|record| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: record.name.clone(), quorum: record.quorum, approver_roles: record.approvers.clone() })
+        .collect();
+    let mut runtime = nirdosha_guard_core::approval_chain::ApprovalChainRuntime::new(definitions);
+
+    runtime.open("sar-esc-1", "sar_release", "sar-bundle-42", "analyst-1", 0, 1_000).expect("a real registered chain must accept a real escalation");
+    let first = runtime.approve("sar-esc-1", "lead-a", "ComplianceLead", 10).unwrap();
+    assert_eq!(first, nirdosha_guard_core::approval_chain::EscalationStatus::Pending { approvals_so_far: 1, quorum: 2 });
+    let second = runtime.approve("sar-esc-1", "lead-b", "ComplianceLead", 20).unwrap();
+    assert_eq!(second, nirdosha_guard_core::approval_chain::EscalationStatus::Approved);
+
+    // A second, independent escalation on the same real chain that never
+    // reaches quorum must deny on timeout (I3: "all timeouts resolve to
+    // DENY", the corpus's own comment above the approval_chain! blocks).
+    runtime.open("sar-esc-2", "sar_release", "sar-bundle-43", "analyst-2", 0, 1_000).unwrap();
+    runtime.approve("sar-esc-2", "lead-a", "ComplianceLead", 10).unwrap();
+    let timed_out = runtime.check_timeout("sar-esc-2", 1_500).unwrap();
+    assert_eq!(timed_out, nirdosha_guard_core::approval_chain::EscalationStatus::DeniedTimeout);
+}

@@ -20,6 +20,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod approval_chain;
 pub mod break_glass;
 pub mod cedar;
 pub mod decision_cache;

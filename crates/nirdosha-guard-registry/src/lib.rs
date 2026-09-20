@@ -236,6 +236,39 @@ pub struct WorkflowRecord { pub name: String, pub states: Vec<String> }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalChainRecord { pub name: String, pub quorum: u8, pub approvers: Vec<String> }
 
+/// Const-constructible counterpart to [`ApprovalChainRecord`] — what
+/// `approval_chain!` actually emits into a `static` (`APPROVAL_CHAINS`
+/// distributed-slice item), since `String`/`Vec<String>` can't be built
+/// in a `const`/`static` context. `ApprovalChainRecord` (owned) is what a
+/// `RegistryDump` carries and what `nirdosha-guard-core`'s
+/// `ApprovalChainRuntime` (Plan Phase 15) is built from — the same
+/// `*Registration` (const, macro-facing) vs. `*Record` (owned,
+/// runtime-facing) split `PolicyRegistration`/`PolicyRecord` already
+/// establishes for policies.
+///
+/// Before this phase, `ApprovalChainRecord` itself was the slice's item
+/// type — meaning `APPROVAL_CHAINS` could never actually be populated at
+/// all, regardless of whether `approval_chain!` tried to (a `static`
+/// item's value must be a `const` expression, and owned `String`/`Vec`
+/// values aren't). The same construction problem affects `RoleRecord`/
+/// `PortRecord`/`ModelRecord`/`WorkflowRecord`/`DatasetRecord` — none of
+/// which anything in `nirdosha-guard-macros` populates either, for the
+/// identical reason. Out of scope for this phase (which fixes only the
+/// one slice `approval_chain!` reachability actually needs), noted here
+/// so it isn't rediscovered as a surprise later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalChainRegistration {
+	pub name: &'static str,
+	pub quorum: u8,
+	pub approvers: &'static [&'static str],
+}
+
+impl ApprovalChainRegistration {
+	pub fn to_record(&self) -> ApprovalChainRecord {
+		ApprovalChainRecord { name: self.name.to_string(), quorum: self.quorum, approvers: self.approvers.iter().map(|s| s.to_string()).collect() }
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvariantRecord { pub name: String }
 
@@ -270,7 +303,7 @@ pub static MODELS: [ModelRecord] = [..];
 #[linkme::distributed_slice]
 pub static WORKFLOWS: [WorkflowRecord] = [..];
 #[linkme::distributed_slice]
-pub static APPROVAL_CHAINS: [ApprovalChainRecord] = [..];
+pub static APPROVAL_CHAINS: [ApprovalChainRegistration] = [..];
 #[linkme::distributed_slice]
 pub static INVARIANTS: [InvariantRecord] = [..];
 #[linkme::distributed_slice]
@@ -302,7 +335,7 @@ pub fn dump() -> RegistryDump {
 	RegistryDump {
 		policies: records(), datasets: DATASETS.to_vec(), roles: ROLES.to_vec(),
 		ports: PORTS.to_vec(), models: MODELS.to_vec(), workflows: WORKFLOWS.to_vec(),
-		approval_chains: APPROVAL_CHAINS.to_vec(), invariants: INVARIANTS.to_vec(),
+		approval_chains: APPROVAL_CHAINS.iter().map(ApprovalChainRegistration::to_record).collect(), invariants: INVARIANTS.to_vec(),
 		purposes: PURPOSES.to_vec(), driver_manifests: DRIVER_MANIFESTS.to_vec(),
 	}
 }
