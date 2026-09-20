@@ -979,6 +979,7 @@ dependencies = [
  "base64",
  "nirdosha-rt",
  "nirdosha-runtime-kernels",
+ "postgres",
  "ring",
  "serde_json",
  "sha2 0.10.9",

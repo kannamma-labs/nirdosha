@@ -54,6 +54,7 @@ mod ratelimit;
 mod webauthn_cbor;
 mod webauthn_challenge;
 mod webauthn_crypto;
+mod webauthn_postgres_store;
 mod webauthn_store;
 #[cfg(test)]
 mod webauthn_test_support;
@@ -62,6 +63,7 @@ pub use http::MAX_BODY_BYTES;
 pub use identity::{AuthConfig, BearerTokenVerifier, RuntimeKernelsOidcVerifier, VerifiedClaims};
 pub use webauthn_challenge::{ChallengeContext, ChallengeStore};
 pub use webauthn_crypto::{AttestationResult, Es256CborAdapter, PasskeyCryptoAdapter};
+pub use webauthn_postgres_store::PostgresPasskeyCredentialStore;
 pub use webauthn_store::{CredentialStoreError, InMemoryPasskeyCredentialStore, PasskeyCredential, PasskeyCredentialStore};
 
 /// One exposed route's real dispatch target — a plain function pointer,
@@ -335,7 +337,7 @@ fn trusted_proxies_from_env() -> Vec<IpAddr> {
 fn auth_providers_from_env() -> (Vec<AuthConfig>, bool) {
     if let Ok(path) = std::env::var("NIRDOSHA_IDENTITY_PROVIDERS") {
         match load_identity_providers_file(&path) {
-            Ok(providers) if !providers.is_empty() => return (providers, false),
+            Ok(providers) if !providers.is_empty() => return (with_self_issued_provider(providers), false),
             Ok(_) => {
                 eprintln!("nirdosha compiled-serve: NIRDOSHA_IDENTITY_PROVIDERS at {path:?} is an empty list -- falling back to demo mode")
             }
@@ -344,9 +346,48 @@ fn auth_providers_from_env() -> (Vec<AuthConfig>, bool) {
             }
         }
     } else if let Some(auth) = single_provider_from_env() {
-        return (vec![auth], false);
+        return (with_self_issued_provider(vec![auth]), false);
     }
     (vec![AuthConfig::demo()], true)
+}
+
+/// Appends [`identity::AuthConfig::self_issued`] to a *production*
+/// provider list when `NIRDOSHA_SELF_ISSUED_SIGNING_SECRET` is set --
+/// never called for demo mode, which already has its own, separate
+/// self-issuance identity (`AuthConfig::demo()` itself). This is what
+/// lets a real deployment's WebAuthn login mint a real, durable token
+/// after a successful ceremony: the provider list a bearer token is
+/// *verified* against, and the one identity this process can *mint*
+/// with, both include this same entry, the same "one JWKS, both
+/// directions" shape `AuthConfig::demo()` already relies on. Absent env
+/// var: providers pass through unchanged, zero behavior change for
+/// every deployment that doesn't opt in.
+fn with_self_issued_provider(mut providers: Vec<AuthConfig>) -> Vec<AuthConfig> {
+    if let Ok(secret) = std::env::var("NIRDOSHA_SELF_ISSUED_SIGNING_SECRET") {
+        if secret.trim().is_empty() {
+            eprintln!("nirdosha compiled-serve: NIRDOSHA_SELF_ISSUED_SIGNING_SECRET is set but empty -- ignored");
+        } else {
+            providers.push(AuthConfig::self_issued(&secret));
+        }
+    }
+    providers
+}
+
+/// The provider this process can itself mint a token with, if any --
+/// `config.auth`'s single demo entry in demo mode (unchanged from
+/// before this field existed), or the specific
+/// `AuthConfig::self_issued` entry `with_self_issued_provider` appended,
+/// found by its own fixed issuer rather than assumed to be at any
+/// particular index (production `auth` lists can have more than one
+/// real IdP entry ahead of it). `None` means this process holds no
+/// signing key at all -- a real, honest state, not an error by itself;
+/// only WebAuthn's own login/finish handler treats it as one, since
+/// *that* flow specifically needs to mint a token to be useful at all.
+fn self_issuing_provider(config: &ServeConfig) -> Option<&AuthConfig> {
+    if config.demo_mode {
+        return config.auth.first();
+    }
+    config.auth.iter().find(|a| a.issuer == "nirdosha-self-issued")
 }
 
 /// The single-provider case: all three of `NIRDOSHA_JWKS_FILE`/
@@ -818,21 +859,21 @@ fn demo_login_response(req: &http::Request, config: &ServeConfig) -> http::Respo
 /// a minted-but-abandoned challenge doesn't stay redeemable for long.
 const WEBAUTHN_CHALLENGE_WINDOW: Duration = Duration::from_secs(120);
 
-/// The four `/api/webauthn/*` endpoints below are demo-mode only, the
-/// same gate `/api/_demo_login` uses and for the identical underlying
-/// reason: a successful ceremony ends in a real bearer token minted via
-/// `identity::mock_issue_token`, which needs a private signing key this
-/// process holds itself -- true only of `AuthConfig::demo()`'s own
-/// ephemeral key, never of a production `AuthConfig` (which carries only
-/// a verification JWKS, by design -- this server verifies production
-/// tokens, it never issues them). A real production passkey deployment
-/// needs the server to reach some real token-issuance capability after a
-/// successful ceremony; that integration is real, separate follow-up
-/// work, not built here -- stated plainly rather than silently assumed
-/// to already work outside demo mode.
-fn webauthn_gate(config: &ServeConfig) -> Option<http::Response> {
-    if !config.demo_mode {
-        return Some(http::Response::error(404, "not found"));
+/// only ever needed by `webauthn_login_finish_response`: a successful
+/// ceremony ends in a real bearer token minted via
+/// `identity::mock_issue_token`, which needs a private signing key --
+/// `AuthConfig::demo()`'s ephemeral one in demo mode, or a real,
+/// operator-configured `AuthConfig::self_issued` in production
+/// (`NIRDOSHA_SELF_ISSUED_SIGNING_SECRET`, see `self_issuing_provider`).
+/// `register/start`, `register/finish`, and `login/start` mint nothing
+/// and never call this -- they work the same regardless of whether this
+/// process can issue a token at all.
+fn webauthn_signing_gate(config: &ServeConfig) -> Option<http::Response> {
+    if self_issuing_provider(config).is_none() {
+        return Some(http::Response::error(
+            403,
+            "this server has no self-issuance identity configured (set NIRDOSHA_SELF_ISSUED_SIGNING_SECRET, or run in demo mode) -- WebAuthn login cannot mint a token without one",
+        ));
     }
     None
 }
@@ -854,9 +895,6 @@ fn webauthn_rp_id(req: &http::Request) -> String {
 }
 
 fn webauthn_register_start_response(req: &http::Request, config: &ServeConfig) -> http::Response {
-    if let Some(resp) = webauthn_gate(config) {
-        return resp;
-    }
     let body: serde_json::Value = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
         Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
@@ -881,9 +919,6 @@ fn webauthn_register_start_response(req: &http::Request, config: &ServeConfig) -
 }
 
 fn webauthn_register_finish_response(req: &http::Request, config: &ServeConfig) -> http::Response {
-    if let Some(resp) = webauthn_gate(config) {
-        return resp;
-    }
     use base64::Engine as _;
     let body: serde_json::Value = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
@@ -936,9 +971,6 @@ fn webauthn_register_finish_response(req: &http::Request, config: &ServeConfig) 
 }
 
 fn webauthn_login_start_response(req: &http::Request, config: &ServeConfig) -> http::Response {
-    if let Some(resp) = webauthn_gate(config) {
-        return resp;
-    }
     let body: serde_json::Value = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
         Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
@@ -967,7 +999,7 @@ fn webauthn_login_start_response(req: &http::Request, config: &ServeConfig) -> h
 }
 
 fn webauthn_login_finish_response(req: &http::Request, config: &ServeConfig) -> http::Response {
-    if let Some(resp) = webauthn_gate(config) {
+    if let Some(resp) = webauthn_signing_gate(config) {
         return resp;
     }
     use base64::Engine as _;
@@ -1026,10 +1058,14 @@ fn webauthn_login_finish_response(req: &http::Request, config: &ServeConfig) -> 
     if let Err(e) = config.passkey_store.advance_sign_count(subject, new_sign_count) {
         return http::Response::error(500, &format!("login succeeded but the sign counter could not be updated: {e}"));
     }
-    let Some(demo_auth) = config.auth.first() else {
-        return http::Response::error(500, "demo mode is enabled but no identity provider is configured");
+    // `webauthn_signing_gate` above already confirmed one of these exists;
+    // re-deriving it here (rather than threading it through as an
+    // argument) keeps this function's own signature unchanged and this
+    // check colocated with the one place its result is actually used.
+    let Some(signing_auth) = self_issuing_provider(config) else {
+        return http::Response::error(500, "no self-issuance identity configured");
     };
-    match identity::mock_issue_token(subject, demo_auth, &[], &[]) {
+    match identity::mock_issue_token(subject, signing_auth, &[], &[]) {
         Ok(token) => http::Response::ok_text(200, &serde_json::json!({"token": token}).to_string()),
         Err(e) => http::Response::error(500, &format!("login succeeded but a token could not be minted: {e}")),
     }

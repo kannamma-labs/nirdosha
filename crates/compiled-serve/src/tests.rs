@@ -864,3 +864,96 @@ fn replaying_an_already_used_login_assertion_fails() {
     let second = raw_request(addr, &login_finish_req);
     assert_ne!(status_of(&second), 200, "replaying the exact same assertion must not mint a second token: {}", body_of(&second));
 }
+
+/// Outside demo mode, with no `AuthConfig::self_issued` configured, a
+/// successful WebAuthn login must still refuse to mint a token -- a
+/// real, honest `403` naming the actual cause, not a silent 404 (the
+/// old, blanket "WebAuthn is demo-mode-only" gate this replaces) and not
+/// a `500` that looks like an internal bug rather than a configuration
+/// gap. Checked at `register/start` -- if this returns 403 too, the
+/// fix regressed back to gating registration on signing capability,
+/// which register/start never needed.
+#[test]
+fn webauthn_login_finish_without_a_self_issuing_provider_is_refused_not_silently_broken() {
+    let mut config = ServeConfig::default();
+    config.demo_mode = false;
+    config.auth = vec![AuthConfig { jwks_json: r#"{"keys":[]}"#.to_string(), issuer: "real-idp".to_string(), audience: "real-idp".to_string() }];
+    let (addr, _r) = start_test_server(config);
+
+    let start_req = "POST /api/webauthn/register/start HTTP/1.1\r\nHost: example.test\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"subject\":\"eve\"}";
+    assert_eq!(status_of(&raw_request(addr, start_req)), 200, "register/start must work regardless of signing capability");
+
+    // A login/finish this deployment has no way to satisfy for real
+    // (no registered credential either) still reaches the signing gate
+    // first and reports the real cause, not a generic 404/not-found.
+    let login_finish_req = "POST /api/webauthn/login/finish HTTP/1.1\r\nHost: example.test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+    let resp = raw_request(addr, login_finish_req);
+    assert_eq!(status_of(&resp), 403, "body: {}", body_of(&resp));
+    assert!(body_of(&resp).contains("self-issuance"), "body should name the real cause: {}", body_of(&resp));
+}
+
+/// The production counterpart to the demo-mode round trip above: a
+/// `ServeConfig` built the way a real deployment would (`demo_mode =
+/// false`, a durable `AuthConfig::self_issued` in `auth`) can still
+/// complete a full WebAuthn register-then-login ceremony and mint a
+/// real, independently-verifiable token -- proving
+/// `NIRDOSHA_SELF_ISSUED_SIGNING_SECRET`'s whole point (production
+/// WebAuthn login, not just demo mode) actually works end to end, not
+/// just that the gate stopped blocking it.
+#[test]
+fn a_production_serveconfig_with_self_issued_signing_completes_a_real_webauthn_login() {
+    use crate::webauthn_test_support::{attestation_object, authenticator_data, client_data_json, generate_test_key, TEST_RP_ID};
+    use base64::Engine as _;
+
+    let mut config = ServeConfig::default();
+    config.demo_mode = false;
+    config.auth = vec![AuthConfig::self_issued("dGVzdC1zZWNyZXQtZm9yLXNlbGYtaXNzdWVk")];
+    let (addr, _r) = start_test_server(config);
+    let host_header = format!("Host: {TEST_RP_ID}");
+    let origin = format!("http://{TEST_RP_ID}");
+
+    let start_body = r#"{"subject":"carol"}"#;
+    let start_req = format!("POST /api/webauthn/register/start HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{start_body}", start_body.len());
+    let start_resp = raw_request(addr, &start_req);
+    assert_eq!(status_of(&start_resp), 200, "body: {}", body_of(&start_resp));
+    let reg_challenge = serde_json::from_str::<serde_json::Value>(&body_of(&start_resp)).unwrap()["challenge"].as_str().unwrap().to_string();
+
+    let key = generate_test_key();
+    let auth_data = authenticator_data(0, Some((b"carol-cred", &key.x, &key.y)));
+    let att_obj = attestation_object(&auth_data);
+    let reg_client_data = client_data_json("webauthn.create", &reg_challenge, &origin);
+    let finish_body = serde_json::json!({"subject": "carol", "attestation_object": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&att_obj), "client_data_json": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&reg_client_data)}).to_string();
+    let finish_req = format!("POST /api/webauthn/register/finish HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{finish_body}", finish_body.len());
+    assert_eq!(status_of(&raw_request(addr, &finish_req)), 200);
+
+    let login_start_body = r#"{"subject":"carol"}"#;
+    let login_start_req = format!("POST /api/webauthn/login/start HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{login_start_body}", login_start_body.len());
+    let login_start_resp = raw_request(addr, &login_start_req);
+    assert_eq!(status_of(&login_start_resp), 200, "body: {}", body_of(&login_start_resp));
+    let login_challenge = serde_json::from_str::<serde_json::Value>(&body_of(&login_start_resp)).unwrap()["challenge"].as_str().unwrap().to_string();
+    let login_auth_data = authenticator_data(1, None);
+    let login_client_data = client_data_json("webauthn.get", &login_challenge, &origin);
+    let client_data_hash = ring::digest::digest(&ring::digest::SHA256, &login_client_data);
+    let mut signed_bytes = login_auth_data.clone();
+    signed_bytes.extend_from_slice(client_data_hash.as_ref());
+    let rng = ring::rand::SystemRandom::new();
+    let signature = key.key_pair.sign(&rng, &signed_bytes).unwrap();
+    let login_finish_body = serde_json::json!({
+        "subject": "carol",
+        "authenticator_data": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&login_auth_data),
+        "client_data_json": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&login_client_data),
+        "signature": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_ref()),
+    })
+    .to_string();
+    let login_finish_req = format!("POST /api/webauthn/login/finish HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{login_finish_body}", login_finish_body.len());
+    let login_finish_resp = raw_request(addr, &login_finish_req);
+    assert_eq!(status_of(&login_finish_resp), 200, "body: {}", body_of(&login_finish_resp));
+    let token = serde_json::from_str::<serde_json::Value>(&body_of(&login_finish_resp)).unwrap()["token"].as_str().unwrap().to_string();
+
+    // The minted token is real and independently verifiable -- not a
+    // shortcut that only looks like success.
+    let whoami_req = format!("GET /api/_whoami HTTP/1.1\r\n{host_header}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    let whoami_resp = raw_request(addr, &whoami_req);
+    assert_eq!(status_of(&whoami_resp), 200, "body: {}", body_of(&whoami_resp));
+    assert!(body_of(&whoami_resp).contains("\"subject\":\"carol\""), "body: {}", body_of(&whoami_resp));
+}

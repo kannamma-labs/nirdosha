@@ -51,6 +51,32 @@ impl AuthConfig {
         let jwks_json = serde_json::json!({"keys": [{"kid": "demo", "kty": "oct", "k": secret}]}).to_string();
         AuthConfig { jwks_json, issuer: "nirdosha-demo".to_string(), audience: "nirdosha-demo".to_string() }
     }
+
+    /// A durable, operator-controlled self-issuance identity -- the
+    /// production counterpart to [`AuthConfig::demo()`]'s ephemeral one.
+    /// Same HMAC (`kty: "oct"`) shape (the only key type
+    /// [`nir_mock_issue_token`] can sign with), same real
+    /// `nir_oidc_validate_token` verification path on the way back in,
+    /// but built from `secret_base64` -- an operator-supplied secret
+    /// that survives a restart, not 32 random bytes thrown away the
+    /// moment the process exits. This is what lets a real deployment
+    /// (not just demo mode) mint its *own* tokens after a successful
+    /// WebAuthn login: a production `AuthConfig` loaded from a real
+    /// external IdP's JWKS (`load_identity_providers_file`) carries only
+    /// public verification key material and genuinely cannot sign
+    /// anything -- self-issuance needs its own, separate identity, never
+    /// smuggled onto a verify-only one.
+    ///
+    /// `issuer`/`audience` are fixed to `"nirdosha-self-issued"` rather
+    /// than configurable, deliberately: this identity's whole point is
+    /// to be a distinguishable, single, always-known issuer a
+    /// multi-provider `auth` list can route to by name
+    /// (`validate_token`'s own issuer-based dispatch), not one more
+    /// value an operator could accidentally collide with a real IdP's.
+    pub fn self_issued(secret_base64: &str) -> AuthConfig {
+        let jwks_json = serde_json::json!({"keys": [{"kid": "self-issued", "kty": "oct", "k": secret_base64}]}).to_string();
+        AuthConfig { jwks_json, issuer: "nirdosha-self-issued".to_string(), audience: "nirdosha-self-issued".to_string() }
+    }
 }
 
 /// A verified bearer token's full claim set — every field

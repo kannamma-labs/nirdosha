@@ -65,3 +65,10 @@ nirdosha-rt = { path = "../nirdosha-rt" }
 # into it itself, rather than introducing a third backend alongside
 # ADR-0012's ring/aws-lc-rs pair.
 ring = "0.17"
+# Durable WebAuthn credential storage (crate::webauthn_postgres_store):
+# names `postgres::Client`/`postgres::Row` directly to call
+# `nirdosha_runtime_kernels::kernel::db::connect`'s real, pooled, TLS-by-
+# default connection -- already in this workspace's dependency tree
+# transitively (via runtime-kernels), pinned here to the exact same
+# version that crate itself pins, no new provenance story.
+postgres = "0.19.14"
