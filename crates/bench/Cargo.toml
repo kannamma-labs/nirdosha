@@ -9,11 +9,12 @@ description = "nirdosha-master-plan.md Part 3 Sprint 2's benchmark harness v1 --
 # `hi_llm.rs` (and everything it needs) moved to the standalone
 # `nirdosha-hi` crate 2026-09-16 -- this harness only ever used
 # `nirdosha::hi_llm`, never the native compiler crate directly.
-# `default-features = false`: this harness never touches `hi_window.rs`
-# (grep confirms only `hi_llm` is ever imported), so there's no reason
-# to also build `nirdosha-hi`'s default `native-window` feature (`wry`/
-# `tao`, and transitively the entire GTK3/WebKitGTK/soup3/javascriptcore/
-# dbus/x11 stack) just to run this benchmark harness.
-nirdosha-hi = { path = "../nirdosha-hi", default-features = false }
+# `nirdosha-hi`'s `native-window` feature (`wry`/`tao`, and
+# transitively the entire GTK3/WebKitGTK stack) was removed outright
+# 2026-09-20 in favor of an app-mode browser window
+# (rfcs/0014-generative-build-console.md's amendment) -- no
+# `default-features = false` needed here anymore, there's nothing left
+# to opt out of.
+nirdosha-hi = { path = "../nirdosha-hi" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

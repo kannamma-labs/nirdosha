@@ -1191,3 +1191,46 @@ needs no new design:
   plain-language, unverified-until-measured line in the same panel
   (`hi_enhance_phase_ux.md`'s Option A chip language), not something
   Option 3's interaction model can ever make visually self-evident.
+
+## Amendment 2026-09-20: default rendering surface changes from embedded webview to app-mode browser window
+
+**"Rendering surface — resolved, not open" above is superseded, along
+with the "Opening the system's default browser at a local URL" entry
+under Rejected alternatives.** `wry`/`tao` — and, transitively on
+Linux, the entire GTK3/WebKitGTK/soup3/javascriptcore/dbus/x11 native
+stack they pulled into every build of this toolchain, whether or not a
+given subcommand ever touched a window — are removed from the
+workspace entirely, not made non-default. `hi_window.rs` is deleted.
+
+**What replaces it was already built, just not the default.**
+`main.rs::cmd_window` now unconditionally starts `hi_server.rs`
+(`tiny_http`, an OS-assigned loopback-only port, `Origin`-allowlisted —
+already hardened for exactly this use, not newly added for this
+amendment) and opens its URL via `launch_app_window` in whichever
+Chromium-family browser (`google-chrome`, `chromium`, `microsoft-edge`,
+`brave-browser`, ...) it finds on `PATH`, using that browser's own
+`--app=<url>` mode: no address bar, no tabs, no bookmarks bar, no menu.
+`hi_api.rs`'s route table is unchanged; only the transport underneath
+it lost a competitor.
+
+**Why the original rejection doesn't hold against what's actually
+shipped.** The "Rejected alternatives" entry's objection to opening a
+browser was specific: "the user sees a browser tab with a URL bar, not
+`hi`" — true of a plain `xdg-open`/`start` browser launch, not true of
+`--app=` mode, which has none of a browser tab's chrome. The
+objection's premise doesn't survive contact with the mode actually
+implemented.
+
+**The honest trade-off this reintroduces, not hidden.** The original
+design's real, structural win — "no network port at all," closing
+CSRF/DNS-rebinding/port-squatting as a category rather than mitigating
+each — no longer holds. `hi_server.rs` binds a real socket now, always,
+not only in a headless fallback nobody hit by default. What's left in
+its place is mitigation, not categorical closure: loopback-only
+binding, an `Origin` allowlist (`has_browser_origin`), and `hi_api.rs`'s
+POST-only mutation rule (a mutating GET is CSRF-triggerable by a bare
+`<img src>` from any page; POST requires an `Origin` header modern
+browsers actually send on cross-origin requests). Real hardening, but a
+different security posture than "there is no network origin to attack,"
+and this amendment states that plainly rather than let the earlier
+section's stronger claim stand uncorrected.

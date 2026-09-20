@@ -1,16 +1,15 @@
-//! Headless local HTTP fallback for Hi build mode
-//! (rfcs/0014-generative-build-console.md). The RFC's own resolved
-//! default transport is `hi_window.rs`'s `wry` custom-protocol
-//! handler — "no network port at all" — because it closes CSRF/DNS-
-//! rebinding/port-squatting risk classes a real socket can't avoid.
-//! This module *is* that real socket: the RFC's own documented
-//! fallback for headless/scripting/CI use (`nirdosha hi serve`),
-//! never the default a user hits by opening build mode normally. Both
-//! transports share one route table (`hi_api::handle`) and differ
-//! only in how they translate their native request/response types at
-//! the edge, plus the hardening this module's own real network
-//! exposure requires and `hi_window.rs`'s doesn't (see
-//! `has_browser_origin` below).
+//! Local HTTP transport for Hi build mode
+//! (rfcs/0014-generative-build-console.md, 2026-09-20 amendment). The
+//! RFC's original default transport was `hi_window.rs`'s `wry`
+//! custom-protocol handler — "no network port at all" — retired along
+//! with the embedded `wry`/`tao` webview it required. This module *is*
+//! now the only transport, serving both the CLI's `--app=`-mode
+//! browser window (`main.rs::cmd_window`) and headless/scripting/CI use
+//! (`nirdosha hi serve`) through the same route table
+//! (`hi_api::handle`) — real network exposure the retired transport
+//! never had, hence the hardening below (`has_browser_origin`): loopback-
+//! only binding, `Origin` allowlisting, and `hi_api.rs`'s own POST-only
+//! mutation rule.
 //!
 //! `tiny_http` is already a workspace dependency
 //! (`crates/compiler/Cargo.toml`, used elsewhere for `compiled-serve`-

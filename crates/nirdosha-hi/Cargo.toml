@@ -48,31 +48,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 serde_jcs = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 base64 = "0.22"
-# `hi_window.rs`'s native build-mode window; `hi_api.rs`'s custom-
-# protocol handler needs `linux-body` for the same reason the native
-# compiler crate's own copy of this dependency did (WebKitGTK silently
-# drops a POST body without it). Optional, gated by the `native-window`
-# feature below (default-on, so the real `nirdosha-hi` binary's UX is
-# unchanged) -- these two alone pull in the entire GTK3/WebKitGTK/soup3/
-# javascriptcore/dbus/x11 native stack, which every other subcommand
-# (`mcp`/`graph`/`plugin`/`ingest`/`sync`/`link`/`impact`/`serve`) never
-# touches at all, and which `crates/bench` (this crate's own dependent,
-# `hi_llm` only) pays for with zero benefit. Building with
-# `--no-default-features` (as `crates/bench` now does) skips this whole
-# stack — the actual fix for the disk/link blowup a full workspace
-# build hit, not just clearing `target/` after the fact.
-wry = { version = "0.57.0", features = ["linux-body"], optional = true }
-tao = { version = "0.37.0", optional = true }
 tiny_http = "0.12"
-
-[features]
-default = ["native-window"]
-# `hi_window.rs`'s native build-mode window (`wry`+`tao`). Off means
-# bare `nirdosha-hi` (no subcommand) falls back to `hi_server.rs`'s
-# headless `serve` -- the same fallback `hi_window.rs`'s own module doc
-# already names as "the RFC's own documented fallback for headless
-# use," not a new behavior invented for this feature gate.
-native-window = ["dep:wry", "dep:tao"]
 
 # The agentic console is part of the dialect's own toolchain (the
 # verifier doesn't lint itself, same precedent as `crates/nirdosha-rt`):

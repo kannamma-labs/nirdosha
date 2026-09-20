@@ -153,9 +153,13 @@ fn format_impact_report(target: &str, report: &nirdosha_hi::hi_graph::ImpactRepo
 
 /// Bare `nirdosha-hi`: auto-scaffolds/syncs `.nir/hi.db` (best-effort --
 /// a sync problem degrades to a logged warning, never blocks the window
-/// from opening), then opens the native build-mode window and blocks
-/// until it's closed. `NIRDOSHA_HI_DISABLE=1` skips the scaffold/sync
-/// step entirely.
+/// from opening), then starts the headless `hi_server.rs` and opens its
+/// URL in a Chromium-family browser's `--app=` mode window (no address
+/// bar, tabs, or menu) if one is found on `PATH`, printing the URL to
+/// open by hand otherwise. Blocks (via `park()`) until Ctrl+C -- the
+/// window is meant to run alongside this process, not in place of it
+/// (see `launch_app_window`'s own doc comment). `NIRDOSHA_HI_DISABLE=1`
+/// skips the scaffold/sync step entirely.
 fn cmd_window(cwd: &Path) -> ExitCode {
     if !nirdosha_hi::graph_transport::is_typed(cwd) && !nirdosha_hi::hi_graph::is_disabled(&|k| std::env::var(k).ok()) {
         match nirdosha_hi::hi_graph::open(cwd) {
@@ -173,54 +177,34 @@ fn cmd_window(cwd: &Path) -> ExitCode {
             Err(e) => eprintln!("hi: couldn't open .nir/hi.db, continuing without it ({}=1 to silence this): {e}", nirdosha_hi::hi_graph::HI_DISABLE_VAR),
         }
     }
-    #[cfg(feature = "native-window")]
-    {
-        match nirdosha_hi::hi_window::open(cwd) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(msg) => {
-                eprintln!("{msg}");
-                ExitCode::FAILURE
+    match nirdosha_hi::hi_server::serve(cwd) {
+        Ok(handle) => {
+            let url = format!("http://127.0.0.1:{}/", handle.port);
+            if launch_app_window(&url) {
+                println!("hi running at {url} (opened in a browser app window -- Ctrl+C here to stop)");
+            } else {
+                println!(
+                    "hi API listening on {url} -- no Chromium-family browser found on PATH to open it as an app window; open that URL yourself. (Ctrl+C to stop)"
+                );
+            }
+            loop {
+                std::thread::park();
             }
         }
-    }
-    #[cfg(not(feature = "native-window"))]
-    {
-        // The same headless fallback `hi_window.rs`'s own module doc
-        // already names as the RFC's documented alternative when a
-        // native window isn't available -- this build just makes that
-        // the *only* option, by never having compiled `wry`/`tao` in at
-        // all (`--no-default-features`, e.g. `crates/bench`'s own
-        // dependency line).
-        eprintln!("hi: built without native-window support (--features native-window to enable it) -- falling back to headless `hi_server.rs`");
-        match nirdosha_hi::hi_server::serve(cwd) {
-            Ok(handle) => {
-                let url = format!("http://127.0.0.1:{}/", handle.port);
-                if launch_app_window(&url) {
-                    println!("hi running at {url} (opened in a browser app window -- Ctrl+C here to stop)");
-                } else {
-                    println!(
-                        "hi API listening on {url} -- no Chromium-family browser found on PATH to open it as an app window; open that URL yourself. (Ctrl+C to stop)"
-                    );
-                }
-                loop {
-                    std::thread::park();
-                }
-            }
-            Err(msg) => {
-                eprintln!("{msg}");
-                ExitCode::FAILURE
-            }
+        Err(msg) => {
+            eprintln!("{msg}");
+            ExitCode::FAILURE
         }
     }
 }
 
 /// Opens `url` in a Chromium-family browser's `--app=` mode -- a plain
-/// window with no address bar, tabs, bookmarks bar, or menu, the
-/// closest a spawned browser process gets to `hi_window.rs`'s real
-/// embedded-webview look. Deliberately not `wry`/`tao`: this adds zero
-/// new build-time dependencies (no GTK/WebKitGTK the way the
-/// `native-window` feature does on Linux) by execing whatever browser
-/// the user already has installed, rather than embedding one.
+/// window with no address bar, tabs, bookmarks bar, or menu: this app's
+/// one rendering surface (RFC 0014's original embedded-`wry`/`tao`
+/// webview was retired in favor of this -- see that RFC's 2026-09-20
+/// amendment). Deliberately not an embedded webview: this adds zero
+/// new build-time dependencies (no GTK/WebKitGTK) by execing whatever
+/// browser the user already has installed, rather than embedding one.
 /// Firefox's own site-specific-browser support has been inconsistent
 /// across versions and is deliberately not in this list -- a Chromium-
 /// family browser (which all support `--app=`) is a safe, common

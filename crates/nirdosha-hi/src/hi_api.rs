@@ -1,13 +1,10 @@
 //! Transport-agnostic route table over `.nir/hi.db`
-//! (rfcs/0014-generative-build-console.md) — shared by two transports
-//! that each translate their own request/response types at the edges
-//! and call [`handle`] for everything else:
-//!
-//! - `hi_window.rs`: `wry`'s custom-protocol handler, the RFC's own
-//!   resolved default for build mode ("no network port at all").
-//! - `hi_server.rs`: a real `tiny_http` socket, the RFC's own
-//!   documented fallback for headless/scripting/CI use, never the
-//!   default.
+//! (rfcs/0014-generative-build-console.md, 2026-09-20 amendment) —
+//! called by `hi_server.rs`, a real `tiny_http` socket, `127.0.0.1`-only
+//! with an `Origin` allowlist, serving both the CLI's `--app=`-mode
+//! browser window and headless/scripting/CI use. The RFC's original
+//! embedded-`wry`/`tao` webview transport (`hi_window.rs`, "no network
+//! port at all") was retired in favor of this single transport.
 //!
 //! Read-only, foundation-slice scope only (no write endpoints, no live
 //! updates, no filtering beyond a hard cap) — see that RFC's own Open
@@ -105,12 +102,13 @@ impl ApiResponse {
 /// every one of these mutates `.nir/hi.db` (or, for `/api/generate`/
 /// `/api/publish`, the filesystem under `.nir/generated/` too) and so
 /// is POST-only, never GET: a mutating GET would be triggerable by a
-/// plain `<img src>`/link from any page in `hi_server.rs`'s headless
-/// fallback mode, without ever carrying the `Origin` header that
-/// fallback's own `has_browser_origin` check relies on to reject
-/// browser-originated requests. POST closes that gap (modern browsers
-/// do send `Origin` on a cross-origin POST) on top of `hi_window.rs`'s
-/// transport already having no network origin to attack at all.
+/// plain `<img src>`/link from any page anywhere, without ever carrying
+/// the `Origin` header `hi_server.rs`'s own `has_browser_origin` check
+/// relies on to reject browser-originated cross-origin requests. POST
+/// closes that gap (modern browsers do send `Origin` on a cross-origin
+/// POST) -- the two checks together are this transport's real CSRF
+/// defense now that there's no embedded-webview transport left with no
+/// network origin to attack at all.
 const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/packs/install", "/api/generate", "/api/publish", "/api/preview/start", "/api/preview/stop"];
 
 /// Routes one request against a fresh connection opened on `root`.

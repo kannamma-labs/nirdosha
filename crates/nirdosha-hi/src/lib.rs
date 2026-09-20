@@ -5,8 +5,6 @@ pub mod hi_plugin;
 pub mod hi_preview;
 pub mod hi_revision;
 pub mod hi_server;
-#[cfg(feature = "native-window")]
-pub mod hi_window;
 pub mod hint_cache;
 pub mod mcp_tools;
 pub mod v2_capabilities;
