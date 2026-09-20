@@ -108,6 +108,7 @@ impl PolicyRegistration {
 			escalation: lowered.escalation,
 			caps: lowered.caps,
 			masks: lowered.masks,
+			affected_row_cap: lowered.affected_row_cap,
 			id: self.id.to_string(),
 		})
 	}

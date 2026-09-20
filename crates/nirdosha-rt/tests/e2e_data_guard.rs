@@ -15,7 +15,10 @@ fn build_context() -> nirdosha_guard_core::EvaluationContext {
         tenant: Tenant("tenant-alpha".into()),
         entity: "trade_records".into(),
         dataset: "memory".into(),
-        action: Action::Read,
+        // Create, not Read: this context feeds guarded_apply below, a
+        // write path (Plan Phase 8 requires the context's action to map
+        // to a real WriteAction — Read isn't one).
+        action: Action::Create,
         destination: Destination::Browser,
         environment: Environment {
             env: "production".into(),
@@ -40,10 +43,10 @@ fn build_context() -> nirdosha_guard_core::EvaluationContext {
 
 fn sample_policy() -> PolicyCandidate {
     PolicyCandidate {
-        id: "policy-read-trades".into(),
+        id: "policy-create-trades".into(),
         effect: PolicyEffect::Allow,
         subjects: vec!["compliance_officer".into()],
-        action: Action::Read,
+        action: Action::Create,
         resource: "trade_records".into(),
         purpose: Some("compliance_audit".into()),
         conditions: vec![],
@@ -52,6 +55,7 @@ fn sample_policy() -> PolicyCandidate {
         escalation: None,
         caps: vec![],
         masks: vec![],
+        affected_row_cap: None,
     }
 }
 

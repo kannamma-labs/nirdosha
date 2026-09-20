@@ -23,6 +23,10 @@ pub struct PolicyCandidate {
     pub caps: Vec<Cap>,
     /// Field masks this policy grants — same reasoning as `caps`.
     pub masks: Vec<FieldMask>,
+    /// `cap(affected_rows = N)` — the write-side counterpart to `caps`
+    /// (see `Cap`'s own doc comment on why it's a separate field, not a
+    /// `Cap` variant).
+    pub affected_row_cap: Option<u64>,
     pub id: String,
 }
 
@@ -36,6 +40,7 @@ pub struct EvaluationResult {
     pub residual_filter: Option<FilterExpr>,
     pub caps: Vec<Cap>,
     pub masks: Vec<FieldMask>,
+    pub affected_row_cap: Option<u64>,
 }
 
 pub fn evaluate(context: &EvaluationContext, policies: &[PolicyCandidate]) -> EvaluationResult {
@@ -44,12 +49,13 @@ pub fn evaluate(context: &EvaluationContext, policies: &[PolicyCandidate]) -> Ev
     let mut residual_filter = None;
     let mut caps = Vec::new();
     let mut masks = Vec::new();
+    let mut affected_row_cap = None;
     let mut allow = false;
     let mut escalation = None;
 
     while let Some(policy) = matching.next() {
         if matches!(policy.effect, PolicyEffect::Deny) {
-            return EvaluationResult { decision: Decision::Deny { reason: format!("policy denied: {}", policy.id) }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new() };
+            return EvaluationResult { decision: Decision::Deny { reason: format!("policy denied: {}", policy.id) }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new(), affected_row_cap: None };
         }
         allow = true;
         obligations.extend(policy.obligations.clone());
@@ -57,15 +63,16 @@ pub fn evaluate(context: &EvaluationContext, policies: &[PolicyCandidate]) -> Ev
         escalation = escalation.or_else(|| policy.escalation.clone());
         caps.extend(policy.caps.clone());
         masks.extend(policy.masks.clone());
+        affected_row_cap = affected_row_cap.or(policy.affected_row_cap);
     }
 
     if let Some(target) = escalation {
-        return EvaluationResult { decision: Decision::Escalate { to: target }, obligations, residual_filter, caps, masks };
+        return EvaluationResult { decision: Decision::Escalate { to: target }, obligations, residual_filter, caps, masks, affected_row_cap };
     }
     if allow {
-        EvaluationResult { decision: Decision::Allow, obligations, residual_filter, caps, masks }
+        EvaluationResult { decision: Decision::Allow, obligations, residual_filter, caps, masks, affected_row_cap }
     } else {
-        EvaluationResult { decision: Decision::Deny { reason: "deny by default".into() }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new() }
+        EvaluationResult { decision: Decision::Deny { reason: "deny by default".into() }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new(), affected_row_cap: None }
     }
 }
 
@@ -87,7 +94,7 @@ mod tests {
     }
 
     fn candidate(effect: PolicyEffect) -> PolicyCandidate {
-        PolicyCandidate { effect, subjects: vec!["analyst".into()], action: Action::Read, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], id: "orders-read".into() }
+        PolicyCandidate { effect, subjects: vec!["analyst".into()], action: Action::Read, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, id: "orders-read".into() }
     }
 
     #[test]

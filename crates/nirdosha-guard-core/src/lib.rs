@@ -207,6 +207,22 @@ impl Action {
             _ => None,
         }
     }
+
+    /// Maps to the closed `WriteAction` set `WritePlan`/`guarded_apply`
+    /// operate on. `None` for every non-mutating `Action` — `guarded_apply`
+    /// uses this to refuse a call whose context action isn't actually a
+    /// write, rather than silently treating (say) a `Read` as an implicit
+    /// `Update`.
+    pub fn as_write_action(&self) -> Option<WriteAction> {
+        match self {
+            Action::Create => Some(WriteAction::Create),
+            Action::Update => Some(WriteAction::Update),
+            Action::Delete => Some(WriteAction::Delete),
+            Action::Migrate => Some(WriteAction::Migrate),
+            Action::Export => Some(WriteAction::Export),
+            _ => None,
+        }
+    }
 }
 
 /// Shape of the incoming query, used for policy context and aggregate safety.

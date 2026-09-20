@@ -30,7 +30,7 @@ fn context_for(tenant: &str, resource: &str) -> nirdosha_guard_core::EvaluationC
         tenant: Tenant(tenant.into()),
         entity: resource.into(),
         dataset: "postgres".into(),
-        action: Action::Update,
+        action: Action::Create,
         destination: Destination::Browser,
         environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None },
         time_bucket: "2026-09-20".into(),
@@ -41,11 +41,15 @@ fn context_for(tenant: &str, resource: &str) -> nirdosha_guard_core::EvaluationC
 }
 
 fn tenant_scoped_policy(resource: &str, tenant: &str) -> PolicyCandidate {
+    write_policy(Action::Create, resource, tenant)
+}
+
+fn write_policy(action: Action, resource: &str, tenant: &str) -> PolicyCandidate {
     PolicyCandidate {
-        id: format!("allow-{resource}"),
+        id: format!("allow-{resource}-{action:?}"),
         effect: PolicyEffect::Allow,
         subjects: vec!["analyst".into()],
-        action: Action::Update,
+        action,
         resource: resource.into(),
         purpose: Some("aml_investigation".into()),
         conditions: vec![],
@@ -54,6 +58,7 @@ fn tenant_scoped_policy(resource: &str, tenant: &str) -> PolicyCandidate {
         escalation: None,
         caps: vec![],
         masks: vec![],
+        affected_row_cap: None,
     }
 }
 
@@ -82,12 +87,29 @@ fn probe_client(admin_url: &str) -> postgres::Client {
     config.connect(postgres::NoTls).expect("connect as guard_probe")
 }
 
+/// Deletes any pre-existing fixture rows for the given resource keys,
+/// bypassing RLS as the table-owning admin connection. Run at the start
+/// of every test using fixed resource keys against the real, persistent
+/// dev database — needed since `Plan Phase 8`'s `Create` now rejects a
+/// resource that already exists (a leftover row from a previous run of
+/// this same test, or from before this phase's stricter semantics
+/// existed, would otherwise fail every subsequent run rather than being
+/// silently overwritten the way the old keyed-upsert-only `commit()` did).
+fn clean_fixture_rows(admin_url: &str, resources: &[&str]) {
+    let config = postgres::Config::from_str(admin_url).expect("parse admin url");
+    let mut admin = config.connect(postgres::NoTls).expect("connect as admin for cleanup");
+    admin
+        .execute("DELETE FROM guard_entities WHERE resource = ANY($1)", &[&resources])
+        .expect("clean up fixture rows");
+}
+
 #[test]
 #[ignore]
 fn guarded_apply_commits_to_real_postgres_and_rls_enforces_tenant_isolation() {
     let url = test_url();
     let driver = PostgresStoreDriver::connect(&url).expect("connect + provision schema");
     ensure_probe_role(&url);
+    clean_fixture_rows(&url, &["rls_probe_row"]);
 
     let temp_dir = std::env::temp_dir().join(format!("nirdosha-pg-driver-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -152,7 +174,7 @@ fn prepare_rejects_a_write_plan_with_no_tenant_scope() {
         id: "allow-no-scope".into(),
         effect: PolicyEffect::Allow,
         subjects: vec!["analyst".into()],
-        action: Action::Update,
+        action: Action::Create,
         resource: "no_scope_row".into(),
         purpose: Some("aml_investigation".into()),
         conditions: vec![],
@@ -161,6 +183,7 @@ fn prepare_rejects_a_write_plan_with_no_tenant_scope() {
         escalation: None,
         caps: vec![],
         masks: vec![],
+        affected_row_cap: None,
     };
     let mut client = GuardClient::new(vec![policy], "rls-test-notenant", temp_dir.join("audit.jsonl"));
     let req = EvalRequest { context: context_for("tenant-alpha", "no_scope_row") };
@@ -184,6 +207,7 @@ fn read_policy(resource: &str, tenant: &str, caps: Vec<Cap>) -> PolicyCandidate 
         escalation: None,
         caps,
         masks: vec![],
+        affected_row_cap: None,
     }
 }
 
@@ -200,6 +224,7 @@ fn read_context(entity: &str, tenant: &str, action: Action) -> nirdosha_guard_co
 fn guarded_read_executes_a_real_capped_filtered_select() {
     let url = test_url();
     let driver = PostgresStoreDriver::connect(&url).expect("connect + provision schema");
+    clean_fixture_rows(&url, &["read_probe_1", "read_probe_2", "read_probe_3", "read_probe_other"]);
 
     let temp_dir = std::env::temp_dir().join(format!("nirdosha-pg-driver-read-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -248,6 +273,59 @@ fn guarded_read_executes_a_real_capped_filtered_select() {
         .expect("uncapped read must be allowed");
     assert_eq!(outcome_uncapped.rows.len(), 3);
     assert!(outcome_uncapped.rows.iter().all(|row| row.0[0] == b'g'));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+/// Real Postgres proof for `Plan Phase 8`'s write-action semantics: the
+/// existence/`row_scope` check now happens inside `commit()`'s own
+/// transaction via a real `SELECT ... FOR UPDATE`, not as a separate,
+/// racy step — this exercises that against the actual database, not just
+/// `MemStoreDriver`'s mutex-based equivalent.
+#[test]
+#[ignore]
+fn create_update_delete_lifecycle_is_enforced_by_real_row_locking() {
+    let url = test_url();
+    let driver = PostgresStoreDriver::connect(&url).expect("connect + provision schema");
+    clean_fixture_rows(&url, &["lifecycle_row"]);
+
+    let temp_dir = std::env::temp_dir().join(format!("nirdosha-pg-driver-lifecycle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let create_ctx = context_for("tenant-epsilon", "lifecycle_row");
+    let update_ctx = nirdosha_guard_core::EvaluationContext { action: Action::Update, ..context_for("tenant-epsilon", "lifecycle_row") };
+    let update_wrong_tenant_ctx = nirdosha_guard_core::EvaluationContext { action: Action::Update, ..context_for("tenant-zeta", "lifecycle_row") };
+    let delete_ctx = nirdosha_guard_core::EvaluationContext { action: Action::Delete, ..context_for("tenant-epsilon", "lifecycle_row") };
+
+    // Create: succeeds once, rejected the second time.
+    let mut creator = GuardClient::new(vec![tenant_scoped_policy("lifecycle_row", "tenant-epsilon")], "lc-create", temp_dir.join("create.jsonl"));
+    let outcome = creator
+        .guarded_apply(&EvalRequest { context: create_ctx.clone() }, &driver, EntityBytes(b"v1".to_vec()), "trace-lc-1", 1_700_001_000)
+        .expect("first create must commit");
+    assert!(matches!(outcome, Outcome::Committed { .. }));
+    let second_create = creator.guarded_apply(&EvalRequest { context: create_ctx }, &driver, EntityBytes(b"v1b".to_vec()), "trace-lc-2", 1_700_001_100);
+    assert!(second_create.is_err(), "a second real Create on the same resource must be rejected, not silently overwrite");
+    assert_eq!(driver.get("lifecycle_row").expect("read back").expect("row exists"), b"v1".to_vec());
+
+    // Update from the wrong tenant's row_scope: rejected, row unchanged.
+    let mut wrong_tenant_updater = GuardClient::new(vec![write_policy(Action::Update, "lifecycle_row", "tenant-zeta")], "lc-wrong", temp_dir.join("wrong.jsonl"));
+    let wrong_update = wrong_tenant_updater.guarded_apply(&EvalRequest { context: update_wrong_tenant_ctx }, &driver, EntityBytes(b"hijacked".to_vec()), "trace-lc-3", 1_700_001_200);
+    assert!(wrong_update.is_err(), "row_scope must reject an update whose tenant does not match the real stored row");
+    assert_eq!(driver.get("lifecycle_row").expect("read back").expect("row exists"), b"v1".to_vec());
+
+    // Update from the right tenant: succeeds.
+    let mut updater = GuardClient::new(vec![write_policy(Action::Update, "lifecycle_row", "tenant-epsilon")], "lc-update", temp_dir.join("update.jsonl"));
+    updater
+        .guarded_apply(&EvalRequest { context: update_ctx }, &driver, EntityBytes(b"v2".to_vec()), "trace-lc-4", 1_700_001_300)
+        .expect("update with matching row_scope must commit");
+    assert_eq!(driver.get("lifecycle_row").expect("read back").expect("row exists"), b"v2".to_vec());
+
+    // Delete: removes the real row.
+    let mut deleter = GuardClient::new(vec![write_policy(Action::Delete, "lifecycle_row", "tenant-epsilon")], "lc-delete", temp_dir.join("delete.jsonl"));
+    deleter
+        .guarded_apply(&EvalRequest { context: delete_ctx }, &driver, EntityBytes(vec![]), "trace-lc-5", 1_700_001_400)
+        .expect("delete must commit");
+    assert_eq!(driver.get("lifecycle_row").expect("read back"), None, "the real row must be gone after delete");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

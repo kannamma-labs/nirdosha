@@ -39,6 +39,7 @@ use nirdosha_guard_core::drivers::rdbms::{RdbmsEmitter, SqlDialect};
 use nirdosha_guard_core::{
     AggregateSemantics, CapabilityManifest, FilterNodeKind, LineageFacts, Tenant, Value,
 };
+use nirdosha_guard_core::WriteAction;
 use nirdosha_guard_mic::{EntityBytes, PlanError, PlanIr, Prepared, ReadPlanIr, Receipt, StoreDriver};
 use sha2::{Digest, Sha256};
 
@@ -219,7 +220,7 @@ impl StoreDriver for PostgresStoreDriver {
             .lock()
             .map_err(|_| PlanError::Store("pending-tenant lock poisoned".into()))?;
         pending.insert(ir.resource.clone(), tenant);
-        Ok(Prepared { resource: ir.resource.clone(), policy_version: ir.policy_version.clone() })
+        Ok(Prepared { resource: ir.resource.clone(), policy_version: ir.policy_version.clone(), action: ir.action.clone(), row_scope: ir.row_scope.clone() })
     }
 
     fn commit(&self, prepared: Prepared, entity: EntityBytes) -> Result<Receipt, PlanError> {
@@ -239,20 +240,59 @@ impl StoreDriver for PostgresStoreDriver {
         // parameterized equivalent, scoped to this transaction only.
         txn.execute("SELECT set_config('app.tenant', $1, true)", &[&tenant])
             .map_err(|e| PlanError::Store(e.to_string()))?;
-        let row = txn
-            .query_one(
-                "INSERT INTO guard_entities (resource, tenant, policy_version, payload) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (resource) DO UPDATE SET \
-                     payload = EXCLUDED.payload, \
-                     policy_version = EXCLUDED.policy_version, \
-                     tenant = EXCLUDED.tenant, \
-                     committed_at = now() \
-                 RETURNING xmin::text",
-                &[&prepared.resource, &tenant, &prepared.policy_version, &entity.0],
-            )
+
+        // The atomicity contract (Plan Phase 8): `FOR UPDATE` takes a real
+        // row lock spanning this check AND the write below, inside one
+        // transaction — a concurrent commit on the same resource blocks
+        // here rather than racing past a "resource doesn't exist yet"
+        // read from a moment ago. RLS still applies to this SELECT (the
+        // session's `app.tenant` was just set), so a row outside this
+        // tenant is invisible to the check, not merely excluded from it.
+        let existing = txn
+            .query_opt("SELECT tenant FROM guard_entities WHERE resource = $1 FOR UPDATE", &[&prepared.resource])
             .map_err(|e| PlanError::Store(e.to_string()))?;
-        let xmin: String = row.get(0);
+        match prepared.action {
+            WriteAction::Create => {
+                if existing.is_some() {
+                    return Err(PlanError::Rejected(format!("create: resource {:?} already exists", prepared.resource)));
+                }
+            }
+            WriteAction::Update | WriteAction::Delete => {
+                let Some(row) = existing.as_ref() else {
+                    return Err(PlanError::Rejected(format!("{:?}: resource {:?} does not exist", prepared.action, prepared.resource)));
+                };
+                if let Some(row_scope) = &prepared.row_scope {
+                    if let Some(required_tenant) = extract_tenant(row_scope) {
+                        let existing_tenant: String = row.get(0);
+                        if existing_tenant != required_tenant {
+                            return Err(PlanError::Rejected("row_scope: existing row's tenant does not match".into()));
+                        }
+                    }
+                }
+            }
+            WriteAction::Migrate | WriteAction::Export => {}
+        }
+
+        let xmin: String = if matches!(prepared.action, WriteAction::Delete) {
+            txn.execute("DELETE FROM guard_entities WHERE resource = $1", &[&prepared.resource])
+                .map_err(|e| PlanError::Store(e.to_string()))?;
+            "deleted".into()
+        } else {
+            let row = txn
+                .query_one(
+                    "INSERT INTO guard_entities (resource, tenant, policy_version, payload) \
+                     VALUES ($1, $2, $3, $4) \
+                     ON CONFLICT (resource) DO UPDATE SET \
+                         payload = EXCLUDED.payload, \
+                         policy_version = EXCLUDED.policy_version, \
+                         tenant = EXCLUDED.tenant, \
+                         committed_at = now() \
+                     RETURNING xmin::text",
+                    &[&prepared.resource, &tenant, &prepared.policy_version, &entity.0],
+                )
+                .map_err(|e| PlanError::Store(e.to_string()))?;
+            row.get(0)
+        };
         txn.commit().map_err(|e| PlanError::Store(e.to_string()))?;
 
         let mut hasher = Sha256::new();

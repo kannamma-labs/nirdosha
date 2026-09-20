@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use nirdosha_audit::envelope::{AuditEnvelope, AuditRecordKind, ModuleAuditChain};
 use nirdosha_guard_core::decision_cache::DecisionCache;
 use nirdosha_guard_core::evaluator::{self, EvaluationResult, PolicyCandidate};
-use nirdosha_guard_core::{Cap, CapabilityManifest, Decision, DecisionCacheKey, EvaluationContext, FieldMask, FilterExpr, FilterNodeKind, LineageFacts, Value};
+use nirdosha_guard_core::{Cap, CapabilityManifest, Decision, DecisionCacheKey, EvaluationContext, FieldMask, FilterExpr, FilterNodeKind, LineageFacts, Value, WriteAction};
 use nirdosha_lineage::collector::{KernelCollector, ObservationContext, PlanFacts};
 use nirdosha_lineage::{Authority, DriverRef, EdgeType, FlowCompleteness, TransformId};
 
@@ -20,7 +20,30 @@ use nirdosha_lineage::{Authority, DriverRef, EdgeType, FlowCompleteness, Transfo
 pub struct EvalRequest { pub context: EvaluationContext }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanIr { pub resource: String, pub dataset: String, pub filter: Option<FilterExpr>, pub policy_version: String }
+pub struct PlanIr {
+	pub resource: String,
+	pub dataset: String,
+	/// The tenant/scope this write's *new* value must carry (bound into
+	/// the row on write — e.g. the RLS session var an INSERT/UPDATE runs
+	/// under).
+	pub filter: Option<FilterExpr>,
+	/// A precondition on the *pre-existing* row (`Update`/`Delete` only):
+	/// the current row must match this before the write is allowed to
+	/// proceed. Distinct from `filter` — a policy could in principle scope
+	/// what a write is allowed to *become* differently from what it
+	/// requires the row to already *be* — but in the corpus and both
+	/// existing drivers, both come from the same matching policy's
+	/// `filter tenant_scope()`, so this is currently always `== filter`.
+	/// A real schema-level precondition (`requires field(status) ==
+	/// "pending"`) is out of scope here: `EntityBytes` is opaque, so
+	/// checking arbitrary entity-internal fields needs a typed schema
+	/// this layer doesn't have (same limitation `ReadOutcome::masks`
+	/// documents on the read side).
+	pub row_scope: Option<FilterExpr>,
+	pub action: WriteAction,
+	pub affected_row_cap: Option<u64>,
+	pub policy_version: String,
+}
 
 /// The read-side counterpart to `PlanIr`. Separate from it (rather than
 /// widening `PlanIr` itself) because reads carry `caps`/`masks` that a
@@ -37,7 +60,21 @@ pub struct ReadPlanIr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prepared { pub resource: String, pub policy_version: String }
+pub struct Prepared {
+	pub resource: String,
+	pub policy_version: String,
+	pub action: WriteAction,
+	/// Threaded from `PlanIr::row_scope` to `commit()` — the
+	/// existence/row_scope check happens *inside* `commit()`, not here in
+	/// `prepare()`, so it's checked atomically with the write itself
+	/// (same lock/transaction). Splitting "check" (prepare) from "act"
+	/// (commit) across two separate trait calls with no shared lock
+	/// between them would be a TOCTOU race: another commit could land in
+	/// the gap. `prepare()` stays validation-only (filter translatable,
+	/// tenant extractable) — see each driver's `prepare()` for what it
+	/// still does.
+	pub row_scope: Option<FilterExpr>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityBytes(pub Vec<u8>);
@@ -107,6 +144,11 @@ pub struct GuardClient {
 	cache: DecisionCache,
 	pub audit: ModuleAuditChain,
 	pub idempotency: IdempotencyStore,
+	/// `trace_id`s that have passed `dry_run()` — `WriteAction::Migrate`'s
+	/// mandatory-dry-run-before-apply gate (RFC 0023 §2). Single-use:
+	/// `guarded_apply` removes the entry on the matching apply, the same
+	/// "consume once" shape `idempotency` has for trace replay.
+	dry_runs: HashSet<String>,
 }
 
 impl std::fmt::Debug for GuardClient {
@@ -120,25 +162,64 @@ impl GuardClient {
 			cache: DecisionCache::new(std::time::Duration::from_secs(30)),
 			audit: ModuleAuditChain::new(module, audit_path.as_ref()),
 			idempotency: IdempotencyStore::new(),
+			dry_runs: HashSet::new(),
+		}
+	}
+
+	/// Records a dry run for `trace_id` — `guarded_apply` requires exactly
+	/// this before it will accept a `Migrate` action under the same
+	/// `trace_id`. Evaluates the request for real (a dry run that skips
+	/// authorization would prove nothing) but never touches a driver.
+	pub fn dry_run(&mut self, request: &EvalRequest, trace_id: impl Into<String>, now_ms: u64) -> Result<(), Rejected> {
+		let trace_id = trace_id.into();
+		let evaluation = self.evaluate(request);
+		let envelope = AuditEnvelope { trace_id: trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: request.context.subject.id.clone(), action: format!("{:?}", request.context.action), resource: request.context.entity.clone(), policy_versions: vec![request.context.policy_version.clone()], decision: format!("{:?}", evaluation.decision), obligations: evaluation.obligations.iter().map(|item| format!("{item:?}")).collect(), kind: AuditRecordKind::Decision, content: serde_json::json!({ "phase": "dry_run" }) };
+		self.audit.append(&envelope, now_ms);
+		match evaluation.decision {
+			Decision::Deny { reason } => Err(Rejected::Denied { reason }),
+			Decision::Escalate { to } => Err(Rejected::Escalated { target: format!("{to:?}") }),
+			Decision::Pending { .. } => Err(Rejected::Failed { reason: "dry run cannot be pending".into() }),
+			Decision::Allow => { self.dry_runs.insert(trace_id); Ok(()) }
 		}
 	}
 
 	pub fn evaluate(&mut self, request: &EvalRequest) -> EvaluationResult {
 		let key = cache_key(&request.context);
 		if let Some(cached) = self.cache.get(&key) {
-			return EvaluationResult { decision: cached.decision, obligations: cached.obligations, residual_filter: cached.residual_filter, caps: cached.caps, masks: cached.masks };
+			return EvaluationResult { decision: cached.decision, obligations: cached.obligations, residual_filter: cached.residual_filter, caps: cached.caps, masks: cached.masks, affected_row_cap: cached.affected_row_cap };
 		}
 		let result = evaluator::evaluate(&request.context, &self.policies);
 		if matches!(result.decision, Decision::Allow) {
-			let _ = self.cache.insert(key, result.decision.clone(), result.obligations.clone(), result.residual_filter.clone(), result.caps.clone(), result.masks.clone(), request.context.subject.clearance.clone());
+			let _ = self.cache.insert(key, result.decision.clone(), result.obligations.clone(), result.residual_filter.clone(), result.caps.clone(), result.masks.clone(), result.affected_row_cap, request.context.subject.clearance.clone());
 		}
 		result
 	}
 
 	pub fn guarded_apply<D: StoreDriver>(&mut self, request: &EvalRequest, driver: &D, payload: EntityBytes, trace_id: impl Into<String>, now_ms: u64) -> Result<Outcome, Rejected> {
 		let trace_id = trace_id.into();
+		// Idempotency first, before any other gate: a replayed trace_id
+		// means "this exact call already happened," which should
+		// short-circuit ahead of business-logic checks like the migrate
+		// dry-run gate below — otherwise a legitimate replay of an
+		// already-applied migrate would see its (already-consumed) dry
+		// run missing and get a confusing "no dry run" rejection instead
+		// of the correct "this already happened" signal.
 		if !self.idempotency.insert_if_new(&trace_id) {
 			return Ok(Outcome::Duplicate { trace_id });
+		}
+		let Some(write_action) = request.context.action.as_write_action() else {
+			return Err(Rejected::Failed { reason: format!("{:?} is not a write action — guarded_apply only accepts Create/Update/Delete/Migrate", request.context.action) });
+		};
+		if write_action == WriteAction::Export {
+			// Export has no new value to write — it's egress over
+			// *existing* data, not a mutation. Route through
+			// `guarded_read`, which forces full audit for it (RFC 0023
+			// §2: egress is never sampled) rather than reusing this
+			// upsert-shaped path for a fundamentally different action.
+			return Err(Rejected::Failed { reason: "export is not a write — call guarded_read with Action::Export instead".into() });
+		}
+		if write_action == WriteAction::Migrate && !self.dry_runs.remove(&trace_id) {
+			return Err(Rejected::Failed { reason: "migrate requires a prior dry_run() under the same trace_id (RFC 0023 §2: dry-run mandatory before apply)".into() });
 		}
 		let evaluation = self.evaluate(request);
 		let envelope = AuditEnvelope { trace_id: trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: request.context.subject.id.clone(), action: format!("{:?}", request.context.action), resource: request.context.entity.clone(), policy_versions: vec![request.context.policy_version.clone()], decision: format!("{:?}", evaluation.decision), obligations: evaluation.obligations.iter().map(|item| format!("{item:?}")).collect(), kind: AuditRecordKind::Decision, content: serde_json::json!({ "phase": "before_commit" }) };
@@ -147,7 +228,15 @@ impl GuardClient {
 			Decision::Escalate { to } => { self.audit.append(&envelope, now_ms); Err(Rejected::Escalated { target: format!("{to:?}") }) }
 			Decision::Pending { expires_at, .. } => { self.audit.append(&envelope, now_ms); Ok(Outcome::Pending { expires_at }) }
 			Decision::Allow => {
-				let plan = PlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), filter: evaluation.residual_filter, policy_version: request.context.policy_version.clone() };
+				let plan = PlanIr {
+					resource: request.context.entity.clone(),
+					dataset: request.context.dataset.clone(),
+					row_scope: evaluation.residual_filter.clone(),
+					filter: evaluation.residual_filter,
+					action: write_action,
+					affected_row_cap: evaluation.affected_row_cap,
+					policy_version: request.context.policy_version.clone(),
+				};
 				let prepared = driver.prepare(&plan).map_err(|error| Rejected::Failed { reason: format!("{error:?}") })?;
 				self.audit.append(&envelope, now_ms);
 				let receipt = driver.commit(prepared, payload).map_err(|error| Rejected::Failed { reason: format!("{error:?}") })?;
@@ -285,19 +374,49 @@ impl MemStoreDriver {
 impl StoreDriver for MemStoreDriver {
 	fn manifest(&self) -> &CapabilityManifest { &self.manifest }
 	fn prepare(&self, ir: &PlanIr) -> Result<Prepared, PlanError> {
-		// Same posture as the Postgres driver: a write with no tenant
-		// scope anywhere in its filter is refused, not written un-scoped.
+		// Validation only — see `Prepared::row_scope`'s doc comment on why
+		// the actual existence/row_scope check happens inside `commit()`,
+		// not here.
 		if let Some(filter) = &ir.filter {
 			if let Some(tenant) = nirdosha_guard_core::extract_tenant(filter) {
 				let mut pending = self.pending_tenants.lock().map_err(|_| PlanError::Store("pending-tenant lock poisoned".into()))?;
 				pending.insert(ir.resource.clone(), tenant);
 			}
 		}
-		Ok(Prepared { resource: ir.resource.clone(), policy_version: ir.policy_version.clone() })
+		Ok(Prepared { resource: ir.resource.clone(), policy_version: ir.policy_version.clone(), action: ir.action.clone(), row_scope: ir.row_scope.clone() })
 	}
 	fn commit(&self, prepared: Prepared, entity: EntityBytes) -> Result<Receipt, PlanError> {
 		let tenant = self.pending_tenants.lock().map_err(|_| PlanError::Store("pending-tenant lock poisoned".into()))?.remove(&prepared.resource);
-		self.rows.lock().map_err(|_| PlanError::Store("memory store poisoned".into()))?.insert(prepared.resource, MemRow { tenant, payload: entity.0 });
+		// One lock held across the existence/row_scope check AND the
+		// write itself — the atomicity contract (Plan Phase 8): no other
+		// commit can land in a gap between "checked" and "wrote" the way
+		// it could if this were split across `prepare()`/`commit()`.
+		let mut rows = self.rows.lock().map_err(|_| PlanError::Store("memory store poisoned".into()))?;
+		match prepared.action {
+			WriteAction::Create => {
+				if rows.contains_key(&prepared.resource) {
+					return Err(PlanError::Rejected(format!("create: resource {:?} already exists", prepared.resource)));
+				}
+			}
+			WriteAction::Update | WriteAction::Delete => {
+				let Some(existing) = rows.get(&prepared.resource) else {
+					return Err(PlanError::Rejected(format!("{:?}: resource {:?} does not exist", prepared.action, prepared.resource)));
+				};
+				if let Some(row_scope) = &prepared.row_scope {
+					if let Some(required_tenant) = nirdosha_guard_core::extract_tenant(row_scope) {
+						if existing.tenant.as_deref() != Some(required_tenant.as_str()) {
+							return Err(PlanError::Rejected("row_scope: existing row's tenant does not match".into()));
+						}
+					}
+				}
+			}
+			WriteAction::Migrate | WriteAction::Export => {}
+		}
+		if matches!(prepared.action, WriteAction::Delete) {
+			rows.remove(&prepared.resource);
+		} else {
+			rows.insert(prepared.resource.clone(), MemRow { tenant, payload: entity.0 });
+		}
 		let id = self.next_commit.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 		Ok(Receipt { store_commit_id: format!("mem-{id}"), digest: [id as u8; 32] })
 	}
@@ -403,8 +522,8 @@ mod tests {
 	use nirdosha_guard_core::evaluator::PolicyEffect;
 	use nirdosha_guard_core::{Action, Classification, Destination, Environment, MaskTransform, PaginationMode, Purpose, QueryShape, Subject, Tenant};
 
-	fn request() -> EvalRequest { EvalRequest { context: EvaluationContext { subject: Subject { id: "u".into(), roles: vec!["analyst".into()], claims: vec![], clearance: Classification::Internal }, tenant: Tenant("t".into()), entity: "orders".into(), dataset: "memory".into(), action: Action::Update, destination: Destination::Browser, environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None }, time_bucket: "now".into(), query_shape: QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: PaginationMode::LimitOnly { limit: 1 } }, purpose: Purpose("support".into()), policy_version: "v1".into() } } }
-	fn policy() -> PolicyCandidate { PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Update, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], id: "update-orders".into() } }
+	fn request() -> EvalRequest { EvalRequest { context: EvaluationContext { subject: Subject { id: "u".into(), roles: vec!["analyst".into()], claims: vec![], clearance: Classification::Internal }, tenant: Tenant("t".into()), entity: "orders".into(), dataset: "memory".into(), action: Action::Create, destination: Destination::Browser, environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None }, time_bucket: "now".into(), query_shape: QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: PaginationMode::LimitOnly { limit: 1 } }, purpose: Purpose("support".into()), policy_version: "v1".into() } } }
+	fn policy() -> PolicyCandidate { PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, id: "create-orders".into() } }
 
 	#[test]
 	fn guarded_apply_commits_only_after_audit_decision() {
@@ -428,14 +547,14 @@ mod tests {
 		EvalRequest { context: EvaluationContext { subject: Subject { id: "u".into(), roles: vec!["analyst".into()], claims: vec![], clearance: Classification::Internal }, tenant: Tenant(tenant.into()), entity: entity.into(), dataset: "memory".into(), action, destination: Destination::Browser, environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None }, time_bucket: "now".into(), query_shape: QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: PaginationMode::LimitOnly { limit: 10 } }, purpose: Purpose("support".into()), policy_version: "v1".into() } }
 	}
 	fn read_request(entity: &str, tenant: &str) -> EvalRequest { request_for(Action::Read, entity, tenant) }
-	fn write_request(entity: &str, tenant: &str) -> EvalRequest { request_for(Action::Update, entity, tenant) }
+	fn write_request(entity: &str, tenant: &str) -> EvalRequest { request_for(Action::Create, entity, tenant) }
 
 	fn tenant_scoped_write_policy(resource: &str, tenant: &str) -> PolicyCandidate {
-		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Update, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps: vec![], masks: vec![], id: format!("write-{resource}") }
+		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, id: format!("write-{resource}") }
 	}
 
 	fn read_policy(resource: &str, tenant: &str, caps: Vec<Cap>, masks: Vec<FieldMask>) -> PolicyCandidate {
-		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Read, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps, masks, id: format!("read-{resource}") }
+		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Read, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps, masks, affected_row_cap: None, id: format!("read-{resource}") }
 	}
 
 	fn scratch_dir(name: &str) -> std::path::PathBuf {
@@ -512,6 +631,123 @@ mod tests {
 		let outcome = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t2", 2_000).unwrap();
 		assert_eq!(outcome.rows.len(), 2, "RowCap(2) must cap the returned rows even though 3 exist");
 		assert_eq!(outcome.masks, vec![mask], "masks are handed to the caller, not silently applied to opaque bytes — see ReadOutcome's doc comment");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	fn action_policy(action: Action, resource: &str, tenant: &str) -> PolicyCandidate {
+		PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action, resource: resource.into(), purpose: Some("support".into()), conditions: vec![], filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }), obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, id: format!("{resource}-policy") }
+	}
+
+	#[test]
+	fn create_rejects_a_resource_that_already_exists() {
+		let root = scratch_dir("create-twice");
+		let driver = MemStoreDriver::new();
+		let mut client = GuardClient::new(vec![action_policy(Action::Create, "orders", "tenant-a")], "c", root.join("c.jsonl"));
+		client.guarded_apply(&write_request("orders", "tenant-a"), &driver, EntityBytes(b"v1".to_vec()), "t1", 1_000).unwrap();
+		let second = client.guarded_apply(&write_request("orders", "tenant-a"), &driver, EntityBytes(b"v2".to_vec()), "t2", 2_000);
+		assert!(matches!(second, Err(Rejected::Failed { .. })), "a second create on the same resource must be rejected, not silently overwrite");
+		assert_eq!(driver.get("orders"), Some(b"v1".to_vec()), "the rejected create must not have touched the stored value");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn update_rejects_a_resource_that_does_not_exist() {
+		let root = scratch_dir("update-missing");
+		let driver = MemStoreDriver::new();
+		let mut client = GuardClient::new(vec![action_policy(Action::Update, "orders", "tenant-a")], "u", root.join("u.jsonl"));
+		let result = client.guarded_apply(&request_for(Action::Update, "orders", "tenant-a"), &driver, EntityBytes(b"v1".to_vec()), "t1", 1_000);
+		assert!(matches!(result, Err(Rejected::Failed { .. })), "update on a resource that was never created must be rejected");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn update_rejects_when_row_scope_tenant_does_not_match_the_existing_row() {
+		let root = scratch_dir("update-wrong-tenant");
+		let driver = MemStoreDriver::new();
+		let mut creator = GuardClient::new(vec![action_policy(Action::Create, "orders", "tenant-a")], "c", root.join("c.jsonl"));
+		creator.guarded_apply(&write_request("orders", "tenant-a"), &driver, EntityBytes(b"v1".to_vec()), "t1", 1_000).unwrap();
+
+		// An Update policy scoped to a DIFFERENT tenant must not be able
+		// to touch tenant-a's existing row, even though it names the same
+		// resource key.
+		let mut updater = GuardClient::new(vec![action_policy(Action::Update, "orders", "tenant-b")], "u", root.join("u.jsonl"));
+		let result = updater.guarded_apply(&request_for(Action::Update, "orders", "tenant-b"), &driver, EntityBytes(b"v2".to_vec()), "t2", 2_000);
+		assert!(matches!(result, Err(Rejected::Failed { .. })), "row_scope must reject an update whose tenant doesn't match the existing row");
+		assert_eq!(driver.get("orders"), Some(b"v1".to_vec()));
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn update_succeeds_when_row_scope_tenant_matches() {
+		let root = scratch_dir("update-ok");
+		let driver = MemStoreDriver::new();
+		let mut creator = GuardClient::new(vec![action_policy(Action::Create, "orders", "tenant-a")], "c", root.join("c.jsonl"));
+		creator.guarded_apply(&write_request("orders", "tenant-a"), &driver, EntityBytes(b"v1".to_vec()), "t1", 1_000).unwrap();
+
+		let mut updater = GuardClient::new(vec![action_policy(Action::Update, "orders", "tenant-a")], "u", root.join("u.jsonl"));
+		updater.guarded_apply(&request_for(Action::Update, "orders", "tenant-a"), &driver, EntityBytes(b"v2".to_vec()), "t2", 2_000).unwrap();
+		assert_eq!(driver.get("orders"), Some(b"v2".to_vec()));
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn delete_removes_the_row() {
+		let root = scratch_dir("delete-ok");
+		let driver = MemStoreDriver::new();
+		let mut creator = GuardClient::new(vec![action_policy(Action::Create, "orders", "tenant-a")], "c", root.join("c.jsonl"));
+		creator.guarded_apply(&write_request("orders", "tenant-a"), &driver, EntityBytes(b"v1".to_vec()), "t1", 1_000).unwrap();
+		assert!(driver.get("orders").is_some());
+
+		let mut deleter = GuardClient::new(vec![action_policy(Action::Delete, "orders", "tenant-a")], "d", root.join("d.jsonl"));
+		deleter.guarded_apply(&request_for(Action::Delete, "orders", "tenant-a"), &driver, EntityBytes(vec![]), "t2", 2_000).unwrap();
+		assert_eq!(driver.get("orders"), None, "delete must actually remove the row");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn delete_rejects_a_resource_that_does_not_exist() {
+		let root = scratch_dir("delete-missing");
+		let driver = MemStoreDriver::new();
+		let mut client = GuardClient::new(vec![action_policy(Action::Delete, "orders", "tenant-a")], "d", root.join("d.jsonl"));
+		let result = client.guarded_apply(&request_for(Action::Delete, "orders", "tenant-a"), &driver, EntityBytes(vec![]), "t1", 1_000);
+		assert!(matches!(result, Err(Rejected::Failed { .. })));
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn migrate_requires_a_prior_dry_run_under_the_same_trace_id() {
+		let root = scratch_dir("migrate-no-dry-run");
+		let driver = MemStoreDriver::new();
+		let mut client = GuardClient::new(vec![action_policy(Action::Migrate, "config", "tenant-a")], "m", root.join("m.jsonl"));
+		let result = client.guarded_apply(&request_for(Action::Migrate, "config", "tenant-a"), &driver, EntityBytes(b"v1".to_vec()), "t1", 1_000);
+		assert!(matches!(result, Err(Rejected::Failed { .. })), "migrate without a prior dry_run under this trace_id must be rejected");
+	}
+
+	#[test]
+	fn migrate_succeeds_after_a_matching_dry_run() {
+		let root = scratch_dir("migrate-ok");
+		let driver = MemStoreDriver::new();
+		let mut client = GuardClient::new(vec![action_policy(Action::Migrate, "config", "tenant-a")], "m", root.join("m.jsonl"));
+		client.dry_run(&request_for(Action::Migrate, "config", "tenant-a"), "t1", 500).expect("dry run must be allowed");
+		let outcome = client.guarded_apply(&request_for(Action::Migrate, "config", "tenant-a"), &driver, EntityBytes(b"v1".to_vec()), "t1", 1_000).unwrap();
+		assert!(matches!(outcome, Outcome::Committed { .. }));
+
+		// The dry run is single-use: the SAME trace_id can't apply twice
+		// off one dry run (the second apply hits the idempotency
+		// short-circuit first, which is also correct, but the dry-run set
+		// itself must be empty by now too).
+		let second = client.guarded_apply(&request_for(Action::Migrate, "other_config", "tenant-a"), &driver, EntityBytes(b"v2".to_vec()), "t1", 2_000);
+		assert!(matches!(second, Ok(Outcome::Duplicate { .. })), "same trace_id replays as Duplicate before the action gate is re-checked");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn export_is_rejected_from_guarded_apply() {
+		let root = scratch_dir("export-rejected");
+		let driver = MemStoreDriver::new();
+		let mut client = GuardClient::new(vec![action_policy(Action::Export, "report", "tenant-a")], "e", root.join("e.jsonl"));
+		let result = client.guarded_apply(&request_for(Action::Export, "report", "tenant-a"), &driver, EntityBytes(vec![]), "t1", 1_000);
+		assert!(matches!(result, Err(Rejected::Failed { .. })), "export has no new value to write — guarded_apply must refuse it, not silently no-op");
 		let _ = std::fs::remove_dir_all(root);
 	}
 }

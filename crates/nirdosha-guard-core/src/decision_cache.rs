@@ -23,6 +23,7 @@ pub struct CachedDecision {
     pub residual_filter: Option<FilterExpr>,
     pub caps: Vec<Cap>,
     pub masks: Vec<FieldMask>,
+    pub affected_row_cap: Option<u64>,
     inserted_at: Instant,
 }
 
@@ -61,6 +62,7 @@ impl DecisionCache {
         residual_filter: Option<FilterExpr>,
         caps: Vec<Cap>,
         masks: Vec<FieldMask>,
+        affected_row_cap: Option<u64>,
         classification: crate::Classification,
     ) -> bool {
         if matches!(key.action, Action::Create | Action::Update | Action::Delete | Action::Migrate | Action::Export | Action::Delegate)
@@ -68,7 +70,7 @@ impl DecisionCache {
         {
             return false;
         }
-        self.map.insert(key, CachedDecision { decision, obligations, residual_filter, caps, masks, inserted_at: Instant::now() });
+        self.map.insert(key, CachedDecision { decision, obligations, residual_filter, caps, masks, affected_row_cap, inserted_at: Instant::now() });
         true
     }
 
@@ -132,8 +134,8 @@ mod tests {
     #[test]
     fn unsafe_decisions_are_not_cached() {
         let mut cache = DecisionCache::new(Duration::from_secs(60));
-        assert!(!cache.insert(key(Action::Update), Decision::Allow, vec![], None, vec![], vec![], crate::Classification::Internal));
-        assert!(!cache.insert(key(Action::Read), Decision::Allow, vec![], None, vec![], vec![], crate::Classification::Restricted));
+        assert!(!cache.insert(key(Action::Update), Decision::Allow, vec![], None, vec![], vec![], None, crate::Classification::Internal));
+        assert!(!cache.insert(key(Action::Read), Decision::Allow, vec![], None, vec![], vec![], None, crate::Classification::Restricted));
     }
 
     #[test]
@@ -142,7 +144,7 @@ mod tests {
         let filter = FilterExpr::TenantEq { value: Value::Str("t1".into()) };
         let caps = vec![crate::Cap::RowCap(50)];
         let masks = vec![crate::FieldMask { field: vec!["salary".into()], transform: crate::MaskTransform::Full }];
-        assert!(cache.insert(key(Action::Read), Decision::Allow, vec![], Some(filter.clone()), caps.clone(), masks.clone(), crate::Classification::Internal));
+        assert!(cache.insert(key(Action::Read), Decision::Allow, vec![], Some(filter.clone()), caps.clone(), masks.clone(), None, crate::Classification::Internal));
         let hit = cache.get(&key(Action::Read)).expect("cache hit");
         assert_eq!(hit.residual_filter, Some(filter));
         assert_eq!(hit.caps, caps);
