@@ -156,6 +156,45 @@ impl PolicyRegistration {
 	}
 }
 
+impl PolicyRecord {
+	/// The inverse direction of [`PolicyRegistration::to_candidate`]: a
+	/// fully Gate-2-lowered `PolicyRecord` (e.g. from a `RegistryDump` a
+	/// caller loaded from disk, not a live `linkme` slice) into the
+	/// `PolicyCandidate` shape `evaluator::evaluate` matches against.
+	/// Needed by `nirdosha-guard-mcp` (Plan Phase 14) to evaluate real
+	/// registry-sourced policies against MCP tool calls — previously
+	/// nothing outside a live macro-linked process could construct a
+	/// `PolicyCandidate` from a plain registry dump at all.
+	///
+	/// Returns `None` for the same reason `PolicyRegistration::to_candidate`
+	/// does: an `action` string outside the closed `Action` wire
+	/// vocabulary surfaces here, not as a silent always-deny.
+	pub fn to_candidate(&self) -> Option<nirdosha_guard_core::evaluator::PolicyCandidate> {
+		use nirdosha_guard_core::evaluator::{PolicyCandidate, PolicyEffect};
+		let action = nirdosha_guard_core::Action::parse_wire(&self.action)?;
+		let effect = match self.effect {
+			Effect::Allow => PolicyEffect::Allow,
+			Effect::Deny => PolicyEffect::Deny,
+		};
+		Some(PolicyCandidate {
+			effect,
+			subjects: self.subjects.clone(),
+			action,
+			resource: self.resource.clone(),
+			purpose: self.purpose.clone(),
+			conditions: self.conditions.clone(),
+			filter: self.filter.clone(),
+			obligations: self.obligations.clone(),
+			escalation: self.escalation.clone(),
+			caps: self.caps.clone(),
+			masks: self.masks.clone(),
+			affected_row_cap: self.affected_row_cap,
+			predicate_use: self.predicate_use.clone(),
+			id: self.id.clone(),
+		})
+	}
+}
+
 /// All registered policies, fully expanded into [`PolicyRecord`]s — the
 /// "owned `PolicyRecord` model" this crate's registration type has, since
 /// its introduction, said Gate 2 would produce.
@@ -314,5 +353,69 @@ mod tests {
 		let value: serde_json::Value = serde_json::from_str(&dump_json().unwrap()).unwrap();
 		assert_eq!(value["policies"], serde_json::json!([]));
 		assert!(coverage_matrix().contains(&"driver_manifests"));
+	}
+
+	#[test]
+	fn policy_record_to_candidate_round_trips_a_real_record() {
+		let record = PolicyRecord {
+			id: "allow-read-orders".into(),
+			effect: Effect::Allow,
+			subjects: vec!["Analyst".into()],
+			action: "read".into(),
+			resource: "orders".into(),
+			purpose: Some("support".into()),
+			caps: vec![],
+			affected_row_cap: None,
+			obligations: vec![],
+			escalation: None,
+			field_policy: vec![],
+			conditions: vec![],
+			filter: None,
+			filter_ref: None,
+			masks: vec![],
+			reason: None,
+			destination: None,
+			destination_denied_above: None,
+			grants: vec![],
+			predicate_use: vec![],
+			count_allowed: false,
+			policy_src: "test".into(),
+			line: 1,
+		};
+		let candidate = record.to_candidate().expect("a real \"read\" action must parse");
+		assert_eq!(candidate.id, "allow-read-orders");
+		assert_eq!(candidate.subjects, vec!["Analyst".to_string()]);
+		assert_eq!(candidate.action, nirdosha_guard_core::Action::Read);
+		assert_eq!(candidate.resource, "orders");
+	}
+
+	#[test]
+	fn policy_record_to_candidate_rejects_an_unparseable_action() {
+		let record = PolicyRecord {
+			id: "bad".into(),
+			effect: Effect::Allow,
+			subjects: vec![],
+			action: "not_a_real_action".into(),
+			resource: "orders".into(),
+			purpose: None,
+			caps: vec![],
+			affected_row_cap: None,
+			obligations: vec![],
+			escalation: None,
+			field_policy: vec![],
+			conditions: vec![],
+			filter: None,
+			filter_ref: None,
+			masks: vec![],
+			reason: None,
+			destination: None,
+			destination_denied_above: None,
+			grants: vec![],
+			predicate_use: vec![],
+			count_allowed: false,
+			policy_src: "test".into(),
+			line: 1,
+		};
+		assert!(record.to_candidate().is_none(), "an unparseable action must surface as None, not a silent default");
 	}
 }

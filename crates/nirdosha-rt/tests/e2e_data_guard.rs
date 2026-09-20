@@ -235,7 +235,12 @@ fn full_rfc0023_data_guard_pipeline_workflow() {
     // The MCP server only records the session hash when destination==LlmContext;
     // build a dedicated context for the agent call so submit_write can verify the
     // evaluate-then-act invariant.
-    let mut mcp = GuardMcpServer::new();
+    // A real registered policy the MCP server actually evaluates against
+    // (Plan Phase 14: evaluate() now consults real policies via the same
+    // evaluator every other guard client uses, instead of a hardcoded
+    // deny) — reusing sample_policy() since it already grants
+    // compliance_officer Create on trade_records, matching agent_ctx below.
+    let mut mcp = GuardMcpServer::new().with_policies(vec![sample_policy()]);
     mcp.agent_writes_enabled = true;
 
     let token = GuardMcpServer::mint_token(
@@ -244,6 +249,7 @@ fn full_rfc0023_data_guard_pipeline_workflow() {
         ctx.purpose.clone(),
         Destination::LlmContext,
         ctx.policy_version.clone(),
+        1_000,
     );
     // Build an agent-specific context: destination must be LlmContext so that
     // evaluate() passes the destination guard and records the plan hash.
@@ -251,24 +257,32 @@ fn full_rfc0023_data_guard_pipeline_workflow() {
         destination: Destination::LlmContext,
         ..ctx.clone()
     };
-    let (_mcp_dec, _mcp_plan) = mcp.evaluate(&token, &agent_ctx);
-    let plan_hash = "plan-hash-trade_records".to_string();
+    let (mcp_dec, mcp_plan) = mcp.evaluate(&token, &agent_ctx, 2_000).expect("token must not be expired/rate-limited");
+    assert_eq!(mcp_dec, nirdosha_guard_core::Decision::Allow, "a real registered policy must let evaluate() genuinely allow, not just avoid erroring");
+    // The real plan hash the server computed for the plan it just
+    // evaluated — a caller cannot guess or reconstruct this without
+    // having called evaluate() first (Plan Phase 14's fix: this used to
+    // be a predictable `format!("plan-hash-{entity}")` string).
+    let plan_hash = nirdosha_guard_mcp::access_plan_hash(&mcp_plan);
 
-    let write_dec = mcp.submit_write(
-        &token,
-        plan_hash,
-        WritePlan {
-            decision: nirdosha_guard_core::Decision::Allow,
-            action: WriteAction::Update,
-            row_scope: None,
-            preconditions: vec![],
-            postconditions: vec![],
-            field_policy: vec![],
-            affected_row_cap: 1,
-            obligations: vec![],
-            policy_version: ctx.policy_version.clone(),
-        },
-    );
+    let write_dec = mcp
+        .submit_write(
+            &token,
+            plan_hash,
+            WritePlan {
+                decision: nirdosha_guard_core::Decision::Allow,
+                action: WriteAction::Update,
+                row_scope: None,
+                preconditions: vec![],
+                postconditions: vec![],
+                field_policy: vec![],
+                affected_row_cap: 1,
+                obligations: vec![],
+                policy_version: ctx.policy_version.clone(),
+            },
+            3_000,
+        )
+        .expect("token must not be expired/rate-limited");
     assert_eq!(write_dec, nirdosha_guard_core::Decision::Allow);
 }
 
