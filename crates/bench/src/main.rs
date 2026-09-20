@@ -6,6 +6,19 @@
 //! bench-local notion of "correct" that could drift from what the
 //! compiler itself says.
 //!
+//! **Currently non-functional, disclosed rather than silently left
+//! broken**: `crates/compiler` (the `nirdosha certify` binary this
+//! module shells out to, `locate_nirdosha_binary` below) was deleted
+//! 2026-09-20. This crate still compiles -- the `Command::new` call is
+//! a runtime lookup, not a build-time dependency -- but running it will
+//! fail to find a `nirdosha` binary on `PATH`/`target/{debug,release}`.
+//! Repointing this at `cargo-nirdosha`'s equivalent verdict output (its
+//! JSON shape hasn't been confirmed to match `nirdosha certify`'s) is
+//! real, separate follow-up work, not done as part of that deletion --
+//! this crate's own historical `RESULTS.md` stays as a valid record of
+//! runs made before the deletion, not a claim that re-running it works
+//! today.
+//!
 //! **Honest v1 scope, per the master plan's own comparison matrix**
 //! (`Benchmark harness v1 (public, reproducible): Nirdosha vs
 //! TypeScript vs Rust vs plain-LLM vs LLM+XGrammar vs LLM+Imandra ...
@@ -123,10 +136,12 @@ struct RunSummary {
 /// `NIRDOSHA_BIN` first (an explicit override), then `target/{debug,
 /// release}/nirdosha` relative to the workspace root (`crates/bench`
 /// is always two directories under it), then bare `nirdosha` on
-/// `PATH` as a last resort. The same override-then-search order
-/// `clients/python/nirdosha-verify`'s own `_binary_path` uses, for the
-/// identical reason: this harness is not the compiler, and must never
-/// silently re-derive its own notion of "does this pass."
+/// `PATH` as a last resort. Deliberately never re-derives its own
+/// notion of "does this pass" -- this harness is not the compiler.
+/// (The now-deleted `clients/python/nirdosha-verify`'s `_binary_path`
+/// used this identical override-then-search order, for the same
+/// reason.) No binary this resolves to still exists as of 2026-09-20 --
+/// see this file's own top-of-file doc comment.
 fn locate_nirdosha_binary() -> String {
     if let Ok(p) = std::env::var("NIRDOSHA_BIN") {
         return p;

@@ -7,39 +7,44 @@ on:
     branches: [main]
 
 jobs:
+  # crates/compiler (and its dedicated build/build-macos/build-windows jobs,
+  # which existed solely to build/test that crate) was deleted 2026-09-20 --
+  # deprecated in favor of the v2 Rust dialect, see docs/ROADMAP.md's
+  # 2026-09-17 note and docs/V2_MIGRATION_ROADMAP.md. This job replaces them
+  # with real coverage of the rest of the workspace, which previously had
+  # none here (only v2-guarantees.yml's narrow, crate-specific checks).
+  #
+  # No system dependencies installed here on purpose, not by oversight:
+  # the GTK3/WebKitGTK install this job used to need was for `wry`/`tao`
+  # (nirdosha-hi's now-deleted native-window feature, removed the same
+  # session); no remaining root-workspace crate needed a system `libz3`
+  # install even for the old compiler-testing job's Linux leg once that
+  # crate is gone -- confirmed by this exact `cargo build --workspace`
+  # succeeding locally with no such install, and by v2-guarantees.yml's
+  # own jobs (nirdosha-driver, nirdosha-contract-core, etc.) never
+  # installing one either. Add one back if a real CI failure says otherwise
+  # -- don't guess ahead of evidence.
+  #
+  # No Redis service container either: the old job's own comment named
+  # its one real consumer, crates/compiler/tests/codegen.rs's
+  # `mq_publish_and_consume_round_trip_a_real_message`, deleted alongside
+  # that crate. The one other real-Redis test in this workspace,
+  # `crates/nirdosha-rt/tests/fleet_rate_limit.rs`, is `#[ignore]`d and
+  # feature-gated (`fleet-rate-limit`, non-default) by its own design;
+  # `examples/nirdosha-v2-corpus/tests/outputs.rs`'s notification test
+  # stands up its own fake RESP-speaking TCP listener rather than needing
+  # a real Redis at all. Nothing in a default `cargo test --workspace`
+  # run needs one.
+  #
+  # `--exclude rtm`: examples/rtm is a real workspace member with an empty
+  # `src/` (a work-in-progress example, pre-existing, unrelated to this
+  # change) -- its `[[bin]]` target has no source file yet, so it fails
+  # target resolution before any code is even compiled.
   build:
     runs-on: ubuntu-latest
-    # `mq_publish_and_consume_round_trip_a_real_message` (`tests/codegen.rs`)
-    # is deliberately real, not mocked -- it needs an actual Redis at
-    # 127.0.0.1:6379 (`Ty::Mq`'s doc comment: "not a mock" is the whole
-    # point of that test). Found missing by a real CI failure ("Connection
-    # refused (os error 111)"), not anticipated in advance -- a plain
-    # `ubuntu-latest` runner has no Redis running by default. Service
-    # containers only work on Linux-hosted runners (this job), not
-    # macOS/Windows (see those jobs' own Redis setup below/omission).
-    services:
-      redis:
-        image: redis
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      # `libgtk-3-dev`/`libwebkit2gtk-4.1-dev` are new as of the `hi`
-      # build-mode window (`tao`+`wry`, rfcs/0014): `wry`'s Linux backend
-      # embeds WebKitGTK, which needs its own dev headers (and pulls in
-      # glib/gdk/cairo/pango/atk/soup3/javascriptcoregtk transitively via
-      # apt's own dependency resolution -- no need to list each of those
-      # separately). Found missing by a real CI failure ("Package
-      # glib-2.0 was not found in the pkg-config search path"), not
-      # anticipated in advance -- `ubuntu-latest` has none of this
-      # preinstalled.
-      - name: Install system dependencies (clang, z3, gtk/webkit2gtk for the hi build-mode window)
-        run: sudo apt-get update && sudo apt-get install -y clang libz3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+      - uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
         with:
@@ -48,125 +53,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Build
-        working-directory: crates/compiler
-        run: cargo build --release
-      # The interpreter (and every plugin crate that only existed to
-      # demonstrate interpreted plugin dispatch -- plugin-support,
-      # plugin-example-{rot13,mysql,activemq,cassandra,neo4j,hbase},
-      # plugin-examples) was removed; this job's own test suite is now
-      # the real, only test coverage on Linux -- previously it ran no
-      # test suite at all here (only `cargo build`, above), relying on
-      # macOS/Windows below for that.
-      - name: Test
-        working-directory: crates/compiler
-        run: cargo test --release
-      # Self-test of .github/actions/verify against this job's own
-      # freshly-built binary -- a real GitHub Actions run, not just the
-      # local shell-only proof in
-      # .github/actions/verify/tests/run_test.sh. Uses
-      # examples/features/01_scalar_types_and_literals.nir, a real,
-      # already-shipped example with no `validate` blocks (PROVED,
-      # vacuously and honestly so -- see verify_verdict.rs's own
-      # `no_validate_blocks_at_all_is_proved_exit_0`), so this step adds
-      # no new fixture to maintain.
-      - name: Self-test the nirdosha/verify composite action
-        uses: ./.github/actions/verify
-        with:
-          nirdosha-path: ${{ github.workspace }}/target/release/nirdosha
-          files: examples/features/01_scalar_types_and_literals.nir
-      # Every `nirdosha build`/`emit-ui` command in README.md, run for
-      # real -- found by hand on 2026-09-11 that the very first thing a
-      # new user is told to paste (the Codespaces quickstart) had been
-      # silently broken since the interpreter was removed (a
-      # `cargo run -- serve <file> --port 8080` invocation of a
-      # subcommand that no longer exists). Docs are the spec of this
-      # project's own guarantees, not separate hygiene -- a stale
-      # command here is exactly as real a regression as a failing test.
-      - name: Verify every README command block actually runs
-        run: sh scripts/verify_readme_commands.sh
-
-  # macOS didn't get a CI job of its own until now — it was only ever
-  # actually built when a `v*` tag triggered release.yml, so a regular
-  # push/PR to `main` could break macOS and nothing here would notice
-  # until release time. This job mirrors release.yml's macOS leg exactly:
-  # same runner (macos-14, the aarch64-apple-darwin leg there), same
-  # `brew install z3` + non-`dist` (system Z3, not vendored) build --
-  # `z3-src` 416.0.2 fails to compile against the AppleClang on GitHub's
-  # macos-13/macos-14 runners (see release.yml's header comment), so this
-  # job deliberately does NOT pass `--features dist` here either. No
-  # `Z3_SYS_Z3_HEADER`/similar env var is set because release.yml doesn't
-  # set one either -- the `z3` crate finds Homebrew's system Z3 (headers +
-  # lib) on its own once it's installed.
-  build-macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install system Z3 (see workflow header)
-        run: brew install z3
-      # macOS runners have no service-container support (that's a
-      # Linux-runner-only GitHub Actions feature — see the `build` job's
-      # own `services:` block above) -- `mq_publish_and_consume_round_trip_
-      # a_real_message` needs a real local Redis just as much here, so
-      # it's installed and started directly instead.
-      - name: Install and start Redis (Homebrew — no service-container support on macOS runners)
-        run: |
-          brew install redis
-          brew services start redis
-          for i in $(seq 1 10); do redis-cli ping && break; sleep 1; done
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: macos-cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Build (macOS — system Z3, see workflow header)
-        working-directory: crates/compiler
-        run: cargo build --release
-      - name: Run the test suite
-        working-directory: crates/compiler
-        run: cargo test --release
-
-  # Windows didn't get a CI job of its own until now — the release
-  # workflow's `x86_64-pc-windows-msvc` leg was the only thing that ever
-  # actually compiled this crate for Windows, and it was failing outright
-  # (`std::os::unix::net::{UnixListener, UnixStream}` used unconditionally
-  # in the (now-removed) interpreter's sandbox-channel transport —
-  # Unix-only in std, so it doesn't even exist on the `windows` target;
-  # the `tcp`/`tcp_listener` runtime's own `RawFd`→`RawSocket` port was
-  # already correct). See docs/ROADMAP.md A7. `sandbox`/`sandbox_channels`/
-  # `channels` (the interpreter-only loopback-socket transport that fix
-  # added) are gone along with the interpreter itself; `tcp` remains --
-  # it's the one that exercises the surviving, compiled-path
-  # `runtime_kernels.rs` RawSocket code. `--features dist` vendors Z3 from
-  # source (same as release.yml) so this job needs no system `libz3`
-  # install on Windows.
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: windows-cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Build (Z3 vendored, no system libz3 dependency)
-        working-directory: crates/compiler
-        run: cargo build --release --features dist
-      - name: Run the tcp integration tests
-        working-directory: crates/compiler
-        run: cargo test --release --features dist --test tcp
-      - name: Run the compiled (native-codegen) tcp/tcp_listener tests
-        # These are the ones that actually exercise runtime_kernels.rs's
-        # RawSocket path -- they compile real .nir source to a native
-        # binary via `clang` (preinstalled on windows-latest) and run it.
-        # Filtered out of the rest of `codegen.rs`'s ~80 tests to keep
-        # this job fast; nothing else in that file touches the
-        # platform-conditional socket code.
-        working-directory: crates/compiler
-        run: cargo test --release --features dist --test codegen -- compiled_connect compiled_listen compiled_recv connecting_to_a_closed_port_traps_at_runtime tcp_client_example
+      - name: Build the workspace
+        run: cargo build --workspace --exclude rtm
+      - name: Test the workspace
+        run: cargo test --workspace --exclude rtm
