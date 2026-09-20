@@ -1,5 +1,13 @@
 # Side-by-side: the same prompt injection, two agents
 
+> **Legacy content, not yet migrated (2026-09-20).** `agent_b/*.nir`
+> targets the deleted interpreted-`.nir` compiler (`crates/compiler`,
+> removed in favor of the v2 Rust dialect) — that side of the
+> comparison doesn't build or run today. The narrative and results
+> below are a real, historical record of a real run — kept rather than
+> deleted because no v2-dialect equivalent exists yet; porting it is
+> separate, not-yet-scheduled follow-up work.
+
 A short, reproducible demonstration of the claim in this repo's own
 README — *"a systems language designed so your AI agent can't write the
 bugs AI agents always write"* — applied to a security bug specifically,

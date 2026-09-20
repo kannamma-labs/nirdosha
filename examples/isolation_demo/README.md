@@ -1,5 +1,13 @@
 # The isolation checker, on the exact race killer_demo already proved
 
+> **Legacy content, not yet migrated (2026-09-20).** `run.sh` builds
+> `race_probe_transact_checked.nir` via `nirdosha build`, the deleted
+> interpreted-`.nir` compiler (`crates/compiler`, removed in favor of
+> the v2 Rust dialect). This directory doesn't build or run today. The
+> narrative and results below are a real, historical record of a real
+> run — kept rather than deleted because no v2-dialect equivalent
+> exists yet; porting it is separate, not-yet-scheduled follow-up work.
+
 `examples/killer_demo/RESULTS.md` proved something Nirdosha doesn't
 prevent today: a naive, unsynchronized `db` transfer, raced through
 Nirdosha's own `spawn`/`thread`, corrupts a ledger exactly like the

@@ -1,13 +1,18 @@
-# Fintech canon v1
+# Fintech canon v1 (v2 dialect)
 
 `nirdosha-master-plan.md` Part 3 Dec 2026's "Fintech canon v1 — 12–15
 `validate` templates (payments, ledger, masking)" (parity target:
-C Proof). Thirteen small, real, individually `nirdosha certify`-proved
-`.nir` files, each demonstrating one canonical financial-code
-correctness pattern — not illustrative snippets, every one of them
-compiles, and twelve of the thirteen carry a real Z3-proved `validate`
-contract. See [`RESULTS.md`](./RESULTS.md) for the actual captured
-`nirdosha certify` output for every file.
+C Proof). Thirteen small, real Rust files (the v2 dialect's
+`nirdosha:validate` doc-comment form, not a bespoke `.nir` grammar),
+each demonstrating one canonical financial-code correctness pattern —
+not illustrative snippets, every one of them compiles under plain
+`cargo`, and twelve of the thirteen carry a real Z3-proved `validate`
+contract checked by `cargo nirdosha verify`.
+
+Migrated verbatim from the original interpreted-dialect
+`examples/fintech-canon/` (now removed along with the deprecated
+`crates/compiler` it targeted, 2026-09-20) — same guarantees, same
+file numbering, same table below, ported syntax only.
 
 ## Payments (6)
 
@@ -40,21 +45,25 @@ contract. See [`RESULTS.md`](./RESULTS.md) for the actual captured
 ## Why 12 `validate` files and one different one
 
 Twelve of these are Hoare-style `pre`/`post` contracts, proved by Z3 —
-the exact same `nirdosha certify` pipeline every other file in this
-repo uses. Masking is a genuinely different guarantee (access control
-over *data returned*, not an input/output relationship Z3 reasons
-about), enforced by a different, already-real mechanism:
-`requires(role: ...)` field annotations compiled directly into
-`codegen.rs`'s return-value lowering — see
-`examples/features/50_field_masking_and_check_role.nir` for the full,
-unabridged demonstration this file's own template is trimmed from.
-Both are real, both are compiled, neither is decorative.
+the exact same `cargo nirdosha verify` pipeline every other file in
+this corpus uses. Masking is a genuinely different guarantee (access
+control over *data returned*, not an input/output relationship Z3
+reasons about), enforced by a different, already-real mechanism:
+`requires(role: ...)` field annotations. See
+[`../50_field_masking_and_check_role.nir`](../50_field_masking_and_check_role.nir)
+for the full, unabridged demonstration this file's own template is
+trimmed from. Both are real, both are compiled, neither is decorative.
 
 ## Reproduce it
 
-```sh
-nirdosha certify examples/fintech-canon/01_nonnegative_balance_after_debit.nir
-# ... same for 02 through 12
+`cargo nirdosha verify` checks a whole package at once (no
+single-file argument, unlike the old interpreter's `nirdosha certify
+<file>`) — it verifies every `validate` contract in this corpus,
+these 12 included, in one pass:
 
-nirdosha build examples/fintech-canon/13_masked_account_pii.nir -o /tmp/canon13 && /tmp/canon13
+```sh
+cd examples/nirdosha-v2-corpus
+cargo nirdosha verify
+
+cargo run --bin v2_fintech_13_masked_account_pii
 ```

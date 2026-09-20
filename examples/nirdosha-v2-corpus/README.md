@@ -77,14 +77,19 @@ archaeology of the deleted interpreter would have bought nothing.
 
 ## Beyond the 63: other example directories
 
-The "63" above is `examples/features` + `examples/syntax`. Three more
-directories carry `.nir` showcases outside that set:
+The "63" above was `examples/features` + `examples/syntax` — both fully
+superseded and **deleted outright** 2026-09-20 alongside `crates/compiler`
+(every file had a same-named v2 counterpart already in this corpus, and
+the dozen `examples/features` files that weren't ported were a
+documented, deliberate skip, not an oversight — see the skip register
+above). `examples/fintech-canon` was deleted the same way, its 13 files
+already translated verbatim into `src/fintech_canon/`. Two directories
+remain, not yet translated, and don't build under plain `cargo` today:
 
 | directory | files | status |
 |---|---|---|
-| `examples/fintech-canon` | 13 | **translated** (`src/fintech_canon/`) — 12 mechanical `validate` (Hoare pre/post) templates plus `13_masked_account_pii` (field-level `requires(role)` masking composed with function-level `requires`, same pattern as `50_field_masking_and_check_role.nir`) |
-| `examples/killer_demo` | 7 | not yet translated — race-condition marketing demos (`race_probe*.nir`) |
-| `examples/isolation_demo` | 1 | not yet translated — `race_probe_transact_checked.nir` |
+| `examples/killer_demo` | 7 | not yet translated — race-condition marketing demos (`race_probe*.nir`); flagged legacy in its own README |
+| `examples/isolation_demo` | 1 | not yet translated — `race_probe_transact_checked.nir`; flagged legacy in its own README |
 
 `docs/redteam/2026-09-11-external-submission/adversarial/*.nir` (4
 files) are deliberately excluded from this corpus: they are adversarial
