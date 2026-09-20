@@ -62,7 +62,7 @@ Last updated: 2026-09-18 — reverted legacy `.nir` compiler changes; guard surf
 
 ## 6. Capability model & ladder (§7)
 
-- `[ ]` Versioned capability manifests emitted by driver crates.
+- `[PARTIAL]` Versioned capability manifests emitted by driver crates — `MemStoreDriver` and the new `PostgresStoreDriver` (`crates/nirdosha-guard-store-postgres`) both emit a real `CapabilityManifest` with `schema_version`; nothing yet cross-checks a manifest's claims against reality (that's the attestation-framework line below, still open).
 - `[ ]` Capability ladder: L4 pushdown → L3 pruning → L2 scan-time → L1 post-read → L0 deny.
 - `[ ]` Attestation framework: canary rows, differential tests, query-plan inspection.
 - `[ ]` Dynamic downgrade semantics on detected lie.
@@ -83,13 +83,13 @@ Last updated: 2026-09-18 — reverted legacy `.nir` compiler changes; guard surf
 
 - `[ ]` Inline topology: evaluate → compile → native pushdown → L2/L1 residual → masks at projection.
 - `[ ]` Delegated topology contract (§9.4): least-privilege exact scope, TTL + revocation, no listing, full audit, reaper.
-- `[ ]` Postgres RLS via session variables (preferred; no generated DDL).
+- `[DONE]` Postgres RLS via session variables (preferred; no generated DDL) — `crates/nirdosha-guard-store-postgres`, verified against a real Postgres container with a non-superuser probe role (`docs/adr/0013-postgres-store-driver-pooling-and-rls.md`).
 - `[ ]` DDL AST for stores that require generated row-filter/column-mask DDL.
 - `[ ]` S3 STS `AssumeRole` with session-policy scope (not signed URLs).
 
 ## 9. Drivers (RDBMS, Arrow/Parquet, Files, Hive/Spark, TSDB, Lakehouse)
 
-- `[ ]` RDBMS driver: typed AST → parameterized WHERE; write row_scope in UPDATE/DELETE WHERE.
+- `[PARTIAL]` RDBMS driver: typed AST → parameterized WHERE (`RdbmsEmitter` now covers `Eq/In/Compare/And/Or/Not/TimeRange/Pattern/TenantEq`, `crates/nirdosha-guard-core/src/drivers/rdbms.rs`) and a real Postgres `StoreDriver` exists (`crates/nirdosha-guard-store-postgres`); still missing: row_scope-bounded UPDATE/DELETE against arbitrary existing rows (today's driver is a keyed upsert by `resource`, not a WHERE-scoped bulk mutation) and read-path execution.
 - `[ ]` Arrow/Parquet driver: `FilterExpr` → `PruningPredicate` + `RowFilter`; masks on batches.
 - `[ ]` File driver: path predicates + scoped STS.
 - `[ ]` Hive/Spark driver: delegated DDL generation.

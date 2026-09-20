@@ -101,6 +101,17 @@ fn e2e_data_guard_and_metadata_plane_workflow() {
                 capabilities: vec![],
                 lineage_support: "datasets".into(),
             },
+            // Real Postgres StoreDriver (crates/nirdosha-guard-store-postgres):
+            // pooled + TLS, RLS via session variables, honest FilterNodeKind
+            // manifest. Registered here so V8's "≥2 drivers per port" check
+            // reflects the platform's actual driver roster.
+            nirdosha_guard_verify::DriverView {
+                port: "store".into(),
+                vendor: "postgres".into(),
+                version: "1.0".into(),
+                capabilities: vec![],
+                lineage_support: "datasets".into(),
+            },
         ],
     };
     let findings = nirdosha_guard_verify::verify(&reg_view);

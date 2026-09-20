@@ -40,6 +40,10 @@ members = [
     "crates/nirdosha-guard-registry",
     "crates/nirdosha-guard-mic",
     "crates/nirdosha-guard-verify",
+    # Real Postgres StoreDriver (write path): pooled + TLS-by-default
+    # connection, RLS via session variables, honest FilterNodeKind
+    # manifest — RFC 0026 checklist's "production store drivers" line.
+    "crates/nirdosha-guard-store-postgres",
     # RFC 0026 §14: LineageSink federation drivers (JSONL file + HTTP batch),
     # satisfying the two-driver rule for the sink port.
     "crates/nirdosha-lineage-sink-jsonl",
@@ -124,6 +128,10 @@ members = [
     "examples/rt-payroll-lying",
     "examples/rt-payroll-pure-chain",
     "examples/nirdosha-v2-corpus",
+    # v2 dialect: real-time transaction monitoring vertical slice
+    # (ingestion -> RFC 0023 data guard -> policy engine -> alerts -> UI),
+    # one .nir file that is a plain Rust program under both compilers.
+    "examples/rtm",
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

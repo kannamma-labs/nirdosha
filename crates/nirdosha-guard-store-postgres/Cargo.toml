@@ -1,0 +1,17 @@
+[package]
+name = "nirdosha-guard-store-postgres"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "Real, pooled, TLS-capable Postgres StoreDriver for the RFC 0023/0025 guard write path (RFC 0026 checklist: production store drivers)"
+license = "MIT"
+publish = false
+
+[dependencies]
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+nirdosha-guard-mic = { path = "../nirdosha-guard-mic" }
+postgres = "0.19"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+r2d2 = "0.8"
+sha2 = "0.10"

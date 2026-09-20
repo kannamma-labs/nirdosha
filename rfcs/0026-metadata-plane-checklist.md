@@ -93,7 +93,8 @@ Last updated: 2026-09-19.
 
 ## Verified deferrals
 
-- `[OPEN]` Live vendor capability attestation and production store drivers.
+- `[DONE]` Postgres `StoreDriver` (`crates/nirdosha-guard-store-postgres`) — pooled + TLS, RLS via session variables, honest `FilterNodeKind` manifest. See `docs/adr/0013-postgres-store-driver-pooling-and-rls.md`. Write path only.
+- `[OPEN]` Live vendor capability attestation (`DriverAttestation::{CanaryRows,DifferentialTests,QueryPlanInspection}` stays unimplemented — nothing yet verifies a manifest's claims are true) and read-path (`AccessPlan`) execution against a production store (no trait/contract exists for it yet — needs its own RFC amendment).
 - `[OPEN]` Cedar frontend integration and Gate-3 rustc metadata collection.
 - `[OPEN]` Async/networked policy store and MIC uplift.
 - `[OPEN]` Guarded `link_external_lineage` admission for external claims.

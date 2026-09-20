@@ -1,6 +1,6 @@
 //! RDBMS SQL Emitter, Postgres RLS session binder, and DDL AST generator for RFC 0023 §9.3 & §9.5.
 
-use crate::{FilterExpr, Tenant, Value};
+use crate::{CompareOp, FilterExpr, PatternMatcher, Tenant, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,9 +99,89 @@ impl RdbmsEmitter {
                 let inner_sql = Self::emit_where(inner, dialect, params);
                 format!("NOT ({inner_sql})")
             }
-            _ => "1=1".into(),
+            FilterExpr::Compare { field, op, value } => {
+                params.push(value.clone());
+                let idx = params.len();
+                let placeholder = Self::placeholder(dialect, idx);
+                let op_sql = match op {
+                    CompareOp::Lt => "<",
+                    CompareOp::Le => "<=",
+                    CompareOp::Gt => ">",
+                    CompareOp::Ge => ">=",
+                };
+                format!("\"{}\" {op_sql} {placeholder}", field.join("."))
+            }
+            FilterExpr::TimeRange { field, from, to } => {
+                params.push(Value::Str(from.clone()));
+                let from_placeholder = Self::placeholder(dialect, params.len());
+                params.push(Value::Str(to.clone()));
+                let to_placeholder = Self::placeholder(dialect, params.len());
+                let column = format!("\"{}\"", field.join("."));
+                format!("({column} >= {from_placeholder} AND {column} <= {to_placeholder})")
+            }
+            FilterExpr::Pattern { field, matcher } => {
+                let (like_value, needs_like) = match matcher {
+                    PatternMatcher::Exact(value) => (value.clone(), false),
+                    PatternMatcher::Prefix(value) => (format!("{}%", escape_like_literal(value)), true),
+                    PatternMatcher::Glob(value) => (glob_to_like(value), true),
+                };
+                params.push(Value::Str(like_value));
+                let placeholder = Self::placeholder(dialect, params.len());
+                let column = format!("\"{}\"", field.join("."));
+                if needs_like {
+                    format!("{column} LIKE {placeholder} ESCAPE '\\'")
+                } else {
+                    format!("{column} = {placeholder}")
+                }
+            }
+            // Relations are erased at plan-compile time (RFC 0023 §4) — one must
+            // never reach a driver. Failing loudly here catches a bug upstream
+            // instead of silently under-filtering with an unfiltered scan.
+            FilterExpr::RelationIn { .. } => {
+                unreachable!("RelationIn must be erased before reaching a driver, RFC 0023 §4")
+            }
         }
     }
+
+    fn placeholder(dialect: SqlDialect, idx: usize) -> String {
+        match dialect {
+            SqlDialect::Postgres => format!("${idx}"),
+            SqlDialect::Sqlite | SqlDialect::GenericSql => "?".into(),
+        }
+    }
+}
+
+/// Escapes literal `%`, `_`, and `\` in a value that will be embedded in a
+/// `LIKE ... ESCAPE '\'` clause, so a stored literal never acts as a wildcard.
+fn escape_like_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Translates a `*`/`?` glob pattern into a `LIKE`-safe string, escaping any
+/// literal `%`/`_`/`\` in the source first so they can't be mistaken for the
+/// wildcards they're being translated into.
+fn glob_to_like(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    for ch in pattern.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            '*' => out.push('%'),
+            '?' => out.push('_'),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// DDL AST with strict identifier quoting for delegated engines (§9.3).
@@ -185,6 +265,95 @@ mod tests {
         assert_eq!(plan.where_clause, "\"status\" = $1");
         assert_eq!(plan.parameters, vec![Value::Str("active".into())]);
         assert_eq!(plan.rls_session_settings[0].1, "t1");
+    }
+
+    #[test]
+    fn emits_compare_operator() {
+        let expr = FilterExpr::Compare {
+            field: vec!["amount".into()],
+            op: CompareOp::Ge,
+            value: Value::Int(10_000),
+        };
+        let plan = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
+        assert_eq!(plan.where_clause, "\"amount\" >= $1");
+        assert_eq!(plan.parameters, vec![Value::Int(10_000)]);
+    }
+
+    #[test]
+    fn emits_time_range_with_both_bounds_parameterized() {
+        let expr = FilterExpr::TimeRange {
+            field: vec!["occurred_at".into()],
+            from: "2026-01-01T00:00:00Z".into(),
+            to: "2026-02-01T00:00:00Z".into(),
+        };
+        let plan = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
+        assert_eq!(plan.where_clause, "(\"occurred_at\" >= $1 AND \"occurred_at\" <= $2)");
+        assert_eq!(
+            plan.parameters,
+            vec![
+                Value::Str("2026-01-01T00:00:00Z".into()),
+                Value::Str("2026-02-01T00:00:00Z".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn emits_exact_pattern_as_equality() {
+        let expr = FilterExpr::Pattern {
+            field: vec!["narrative".into()],
+            matcher: PatternMatcher::Exact("wire transfer".into()),
+        };
+        let plan = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
+        assert_eq!(plan.where_clause, "\"narrative\" = $1");
+        assert_eq!(plan.parameters, vec![Value::Str("wire transfer".into())]);
+    }
+
+    #[test]
+    fn emits_prefix_pattern_as_escaped_like() {
+        let expr = FilterExpr::Pattern {
+            field: vec!["narrative".into()],
+            matcher: PatternMatcher::Prefix("50% off_deal".into()),
+        };
+        let plan = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
+        assert_eq!(plan.where_clause, "\"narrative\" LIKE $1 ESCAPE '\\'");
+        // The literal `%` and `_` in the source value must not act as wildcards.
+        assert_eq!(plan.parameters, vec![Value::Str("50\\% off\\_deal%".into())]);
+    }
+
+    #[test]
+    fn emits_glob_pattern_translated_to_like() {
+        let expr = FilterExpr::Pattern {
+            field: vec!["narrative".into()],
+            matcher: PatternMatcher::Glob("cash*deposit?".into()),
+        };
+        let plan = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
+        assert_eq!(plan.where_clause, "\"narrative\" LIKE $1 ESCAPE '\\'");
+        assert_eq!(plan.parameters, vec![Value::Str("cash%deposit_".into())]);
+    }
+
+    #[test]
+    fn glob_pattern_escapes_literal_wildcard_lookalikes() {
+        let expr = FilterExpr::Pattern {
+            field: vec!["narrative".into()],
+            matcher: PatternMatcher::Glob("100%_match".into()),
+        };
+        let plan = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
+        assert_eq!(plan.parameters, vec![Value::Str("100\\%\\_match".into())]);
+    }
+
+    #[test]
+    #[should_panic(expected = "RelationIn must be erased")]
+    fn relation_in_reaching_a_driver_panics_instead_of_under_filtering() {
+        let expr = FilterExpr::RelationIn {
+            field: vec!["counterparty_id".into()],
+            relation: crate::RelationExpr {
+                name: "related_parties".into(),
+                source: "core_kyc".into(),
+                max_cardinality: 100,
+                ttl_seconds: 300,
+            },
+        };
+        let _ = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
     }
 
     #[test]
