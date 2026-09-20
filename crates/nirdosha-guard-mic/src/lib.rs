@@ -2,6 +2,7 @@
 
 pub mod attestation;
 pub mod exec;
+pub mod relation;
 pub mod shed;
 
 use std::collections::hash_map::DefaultHasher;
@@ -371,6 +372,31 @@ impl GuardClient {
 			Decision::Escalate { to } => { self.audit.append(&envelope, now_ms); Err(Rejected::Escalated { target: format!("{to:?}") }) }
 			Decision::Pending { .. } => { self.audit.append(&envelope, now_ms); Err(Rejected::Failed { reason: "read cannot be pending — escalation/approval applies to writes, not reads".into() }) }
 			Decision::Allow => {
+				// Relation lowering (Plan Phase 11, RFC 0023 §4): erase any
+				// `RelationIn` node before it ever reaches a driver, via a
+				// real resolver backed by this same `driver` — neither
+				// StoreDriver implementor can evaluate a RelationIn on its
+				// own (RdbmsEmitter panics on it, MemStoreDriver's
+				// match_filter excludes every row on it), so an unresolved
+				// one reaching `ReadPlanIr` would be a silent-deny bug, not
+				// a real capability gap.
+				let resolved_filter = match &evaluation.residual_filter {
+					Some(filter) => {
+						let resolver = relation::InProcessRelationResolver::new(driver, request.context.tenant.0.clone());
+						match relation::resolve_filter_relations(filter, &resolver, &request.context.subject) {
+							Ok(relation::ResolvedFilter::Filter(resolved)) => Some(resolved),
+							Ok(relation::ResolvedFilter::Escalate) => {
+								self.audit.append(&envelope, now_ms);
+								return Err(Rejected::Escalated { target: "relation-tier3-materialization".into() });
+							}
+							Err(error) => {
+								self.audit.append(&envelope, now_ms);
+								return Err(Rejected::Failed { reason: format!("relation resolution failed: {error:?}") });
+							}
+						}
+					}
+					None => None,
+				};
 				// I15: a masked field may not drive a non-projection
 				// clause (filter/join/grouping/having/ordering/window)
 				// unless explicitly granted via `predicate_use`. Checked
@@ -378,7 +404,7 @@ impl GuardClient {
 				// the filter — a masked field silently leaking through a
 				// WHERE clause is exactly the class of bug a guard exists
 				// to catch before it reaches a query planner.
-				if let Some(filter) = &evaluation.residual_filter {
+				if let Some(filter) = &resolved_filter {
 					let masked_fields: std::collections::HashSet<&nirdosha_guard_core::FieldPath> =
 						evaluation.masks.iter().map(|mask| &mask.field).collect();
 					let granted: std::collections::HashSet<&str> =
@@ -400,7 +426,7 @@ impl GuardClient {
 				// Compare/TimeRange lie `attestation::attest_canary_rows`
 				// caught) must fail closed here instead of silently returning
 				// whatever unfiltered/mis-filtered rows it happens to produce.
-				if let Some(filter) = &evaluation.residual_filter {
+				if let Some(filter) = &resolved_filter {
 					let effective_manifest = self.effective_manifest(driver);
 					let supported: std::collections::HashSet<&nirdosha_guard_core::FilterNodeKind> = effective_manifest.supported_filter_nodes.iter().collect();
 					for kind in nirdosha_guard_core::required_filter_node_kinds(filter) {
@@ -410,7 +436,7 @@ impl GuardClient {
 						}
 					}
 				}
-				let plan = ReadPlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), filter: evaluation.residual_filter, caps: evaluation.caps, pagination: request.context.query_shape.pagination.clone(), policy_version: request.context.policy_version.clone() };
+				let plan = ReadPlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), filter: resolved_filter, caps: evaluation.caps, pagination: request.context.query_shape.pagination.clone(), policy_version: request.context.policy_version.clone() };
 				let query_result = driver.query(&plan).map_err(|error| Rejected::Failed { reason: format!("{error:?}") })?;
 				let rows = query_result.rows;
 				let mut read_envelope = envelope.clone();
@@ -783,7 +809,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 mod tests {
 	use super::*;
 	use nirdosha_guard_core::evaluator::PolicyEffect;
-	use nirdosha_guard_core::{Action, Classification, Destination, Environment, MaskTransform, PaginationMode, Purpose, QueryShape, Subject, Tenant};
+	use nirdosha_guard_core::{Action, Classification, Destination, Environment, MaskTransform, PaginationMode, Purpose, QueryShape, RelationExpr, Subject, Tenant};
 
 	fn request() -> EvalRequest { EvalRequest { context: EvaluationContext { subject: Subject { id: "u".into(), roles: vec!["analyst".into()], claims: vec![], clearance: Classification::Internal }, tenant: Tenant("t".into()), entity: "orders".into(), dataset: "memory".into(), action: Action::Create, destination: Destination::Browser, environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None }, time_bucket: "now".into(), query_shape: QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: PaginationMode::LimitOnly { limit: 1 } }, purpose: Purpose("support".into()), policy_version: "v1".into() } } }
 	fn policy() -> PolicyCandidate { PolicyCandidate { effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Create, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: "create-orders".into() } }
@@ -939,6 +965,51 @@ mod tests {
 		reader.attest_driver(&driver);
 		let after_attestation = reader.guarded_read(&read_request("orders", "tenant-a"), &driver, "t3", 3_000);
 		assert!(matches!(after_attestation, Err(Rejected::Failed { .. })), "once attested lying about Compare, guarded_read must fail closed instead of trusting the driver's claim: {after_attestation:?}");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn guarded_read_resolves_relation_in_through_the_real_in_process_resolver_and_returns_matching_rows() {
+		// Plan Phase 11: a policy filter naming a real RelationIn must
+		// resolve through GuardClient::guarded_read's real wiring (not
+		// just relation::resolve_filter_relations in isolation) and only
+		// return rows the resolved relation actually includes.
+		let root = scratch_dir("read-relation");
+		let driver = MemStoreDriver::new();
+
+		let mut writer = GuardClient::new(
+			vec![tenant_scoped_write_policy("acct-1", "tenant-a"), tenant_scoped_write_policy("acct-2", "tenant-a"), tenant_scoped_write_policy("acct-9", "tenant-a")],
+			"w", root.join("w.jsonl"),
+		);
+		for resource in ["acct-1", "acct-2", "acct-9"] {
+			writer.guarded_apply(&write_request(resource, "tenant-a"), &driver, EntityBytes(resource.as_bytes().to_vec()), format!("t-{resource}"), 1_000).unwrap();
+		}
+
+		// Relation-backing rows: cust-1 owns acct-1 and acct-2, not acct-9.
+		let mut relation_writer = GuardClient::new(
+			vec![tenant_scoped_write_policy("relation:accounts_of:cust-1:acct-1", "tenant-a"), tenant_scoped_write_policy("relation:accounts_of:cust-1:acct-2", "tenant-a")],
+			"rel-w", root.join("rel-w.jsonl"),
+		);
+		relation_writer.guarded_apply(&write_request("relation:accounts_of:cust-1:acct-1", "tenant-a"), &driver, EntityBytes(b"acct-1".to_vec()), "t-rel-1", 1_000).unwrap();
+		relation_writer.guarded_apply(&write_request("relation:accounts_of:cust-1:acct-2", "tenant-a"), &driver, EntityBytes(b"acct-2".to_vec()), "t-rel-2", 1_000).unwrap();
+
+		let relation = RelationExpr { name: "accounts_of".into(), source: "accounts_of".into(), max_cardinality: 10, ttl_seconds: 60 };
+		let policy = PolicyCandidate {
+			effect: PolicyEffect::Allow, subjects: vec!["analyst".into()], action: Action::Read, resource: "acct-1".into(),
+			purpose: Some("support".into()), conditions: vec![],
+			filter: Some(FilterExpr::And(vec![
+				FilterExpr::TenantEq { value: Value::Str("tenant-a".into()) },
+				FilterExpr::RelationIn { field: vec!["resource".into()], relation },
+			])),
+			obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: "read-accounts-of-cust-1".into(),
+		};
+		let mut reader = GuardClient::new(vec![policy], "r", root.join("r.jsonl"));
+		let mut req = read_request("acct-1", "tenant-a");
+		req.context.subject.id = "cust-1".into();
+		let outcome = reader.guarded_read(&req, &driver, "t2", 2_000).expect("relation-scoped read must succeed");
+		let mut rows: Vec<String> = outcome.rows.into_iter().filter_map(|r| String::from_utf8(r.0).ok()).collect();
+		rows.sort();
+		assert_eq!(rows, vec!["acct-1".to_string(), "acct-2".to_string()], "must return exactly the accounts related to cust-1, not acct-9");
 		let _ = std::fs::remove_dir_all(root);
 	}
 

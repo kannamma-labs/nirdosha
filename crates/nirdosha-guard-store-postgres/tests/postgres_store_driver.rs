@@ -424,3 +424,65 @@ fn attest_query_plan_confirms_the_real_planner_applied_the_filter() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+#[ignore]
+fn guarded_read_resolves_relation_in_against_real_postgres() {
+    // Plan Phase 11: InProcessRelationResolver is generic over StoreDriver
+    // - this proves the same bounded, Pattern-pushed-down resolution
+    // guarded_read_resolves_relation_in_through_the_real_in_process_resolver_and_returns_matching_rows
+    // (nirdosha-guard-mic) proves against MemStoreDriver also works end to
+    // end against a real Postgres table, with real RLS in effect.
+    let url = test_url();
+    let driver = PostgresStoreDriver::connect(&url).expect("connect + provision schema");
+    let resources = ["acct-iota-1", "acct-iota-2", "acct-iota-9", "relation:accounts_of:cust-iota:acct-iota-1", "relation:accounts_of:cust-iota:acct-iota-2"];
+    clean_fixture_rows(&url, &resources);
+
+    let temp_dir = std::env::temp_dir().join(format!("nirdosha-pg-driver-relation-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let mut writer = GuardClient::new(
+        resources.iter().map(|r| tenant_scoped_policy(r, "tenant-iota")).collect(),
+        "relation-seed", temp_dir.join("seed.jsonl"),
+    );
+    for account in ["acct-iota-1", "acct-iota-2", "acct-iota-9"] {
+        let req = EvalRequest { context: context_for("tenant-iota", account) };
+        writer.guarded_apply(&req, &driver, EntityBytes(account.as_bytes().to_vec()), format!("trace-seed-{account}"), 1_700_004_000).unwrap();
+    }
+    // cust-iota owns acct-iota-1 and acct-iota-2, not acct-iota-9.
+    for (i, account) in ["acct-iota-1", "acct-iota-2"].iter().enumerate() {
+        let resource = format!("relation:accounts_of:cust-iota:{account}");
+        let req = EvalRequest { context: context_for("tenant-iota", &resource) };
+        writer.guarded_apply(&req, &driver, EntityBytes(account.as_bytes().to_vec()), format!("trace-seed-rel-{i}"), 1_700_004_001).unwrap();
+    }
+
+    let relation = nirdosha_guard_core::RelationExpr { name: "accounts_of".into(), source: "accounts_of".into(), max_cardinality: 10, ttl_seconds: 60 };
+    let policy = PolicyCandidate {
+        id: "read-accounts-of-cust-iota".into(),
+        effect: PolicyEffect::Allow,
+        subjects: vec!["analyst".into()],
+        action: Action::Read,
+        resource: "acct-iota-1".into(),
+        purpose: Some("aml_investigation".into()),
+        conditions: vec![],
+        filter: Some(FilterExpr::And(vec![
+            FilterExpr::TenantEq { value: Value::Str("tenant-iota".into()) },
+            FilterExpr::RelationIn { field: vec!["resource".into()], relation },
+        ])),
+        obligations: vec![],
+        escalation: None,
+        caps: vec![],
+        masks: vec![],
+        affected_row_cap: None,
+        predicate_use: vec![],
+    };
+    let mut reader = GuardClient::new(vec![policy], "relation-read", temp_dir.join("read.jsonl"));
+    let mut req = EvalRequest { context: read_context("acct-iota-1", "tenant-iota", Action::Read) };
+    req.context.subject.id = "cust-iota".into();
+    let outcome = reader.guarded_read(&req, &driver, "trace-relation-read", 1_700_004_100).expect("relation-scoped read must succeed against real Postgres");
+    let mut rows: Vec<String> = outcome.rows.into_iter().filter_map(|r| String::from_utf8(r.0).ok()).collect();
+    rows.sort();
+    assert_eq!(rows, vec!["acct-iota-1".to_string(), "acct-iota-2".to_string()], "must return exactly the real rows related to cust-iota, not acct-iota-9");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
