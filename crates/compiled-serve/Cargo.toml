@@ -39,3 +39,29 @@ base64 = "0.22"
 # `runtime-kernels` (this same workspace) already pins for
 # `nir_dpop_verify`'s own `jkt` thumbprint -- no new provenance story.
 sha2 = "0.10"
+# WebAuthn support (crate::webauthn_crypto): a real, direct path
+# dependency on a root-workspace crate from this separate
+# (../runtime-kernels) workspace -- confirmed working via a real
+# `cargo check`/`cargo nirdosha build` round-trip (2026-09-20), contrary
+# to this crate's own earlier assumption (mirrored from
+# nirdosha-guard-store-postgres's ADR-0013) that this workspace boundary
+# blocks path dependencies outright. That ADR's finding was about the
+# *opposite* direction -- a root-workspace crate depending on something
+# in *this* workspace (`runtime-kernels`) -- which really does hit
+# Cargo's "multiple workspace roots" error; a leaf workspace member
+# reaching *up* into an unambiguous root-workspace crate, as this
+# dependency does, does not hit the same failure. Needed for
+# `#[nirdosha_rt::contract(effects(pure))]` on the crypto adapter's
+# verification methods -- the same rustc+macro+driver enforcement every
+# other guarantee in this dialect goes through, not a plain,
+# uninstrumented Rust trait.
+nirdosha-rt = { path = "../nirdosha-rt" }
+# Raw P-256 ECDSA signature verification over WebAuthn's own
+# authenticatorData||SHA256(clientDataJSON) byte layout -- not a JWT, so
+# `identity.rs`'s existing jsonwebtoken-based verification path doesn't
+# apply. Reuses this workspace's own already-vendored default crypto
+# backend (transitively present via runtime-kernels -> jsonwebtoken's
+# `ring` default) as a *direct* dependency now that this module calls
+# into it itself, rather than introducing a third backend alongside
+# ADR-0012's ring/aws-lc-rs pair.
+ring = "0.17"

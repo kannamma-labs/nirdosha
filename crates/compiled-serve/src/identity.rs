@@ -86,6 +86,39 @@ unsafe fn read_str_out(out: &NirStrOut) -> String {
     String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(out.ptr, out.len as usize) }).into_owned()
 }
 
+/// A vendor-neutral port for bearer-token verification: the *whole*
+/// authentication surface should be swappable, not just the newer
+/// passkey path (`crate::webauthn_crypto::PasskeyCryptoAdapter`) built
+/// alongside an otherwise-hardcoded OIDC implementation. `Send + Sync`:
+/// shared across connection-handling threads behind an `Arc`, the same
+/// way `ServeConfig`'s other adapter fields are.
+///
+/// Deliberately **not** `#[nirdosha_rt::contract(effects(pure))]`,
+/// unlike `PasskeyCryptoAdapter`'s methods: [`RuntimeKernelsOidcVerifier`]'s
+/// real implementation genuinely reads the wall clock (the `exp` check
+/// `validate_token_against` already documents doing on purpose, at this
+/// Rust boundary rather than inside the kernel) — claiming purity here
+/// would be exactly the kind of lie `examples/rt-payroll-lying`
+/// demonstrates getting caught, not a contract to add just to match a
+/// pattern.
+pub trait BearerTokenVerifier: Send + Sync {
+    fn verify(&self, token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String>;
+}
+
+/// The default, real adapter: today's only implementation, wrapping the
+/// existing `nir_oidc_validate_token`-backed verification unchanged.
+/// Named for what it actually calls into, not "the" verifier — a future
+/// adapter (a different JWT library, a different IdP's own quirks) is a
+/// new `impl BearerTokenVerifier`, never a change to
+/// [`validate_token`]'s own multi-provider dispatch below.
+pub struct RuntimeKernelsOidcVerifier;
+
+impl BearerTokenVerifier for RuntimeKernelsOidcVerifier {
+    fn verify(&self, token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String> {
+        validate_token_against(token, auth)
+    }
+}
+
 /// `ServeConfig::auth`'s real dispatcher (ROADMAP.md A6, "Multi-IdP
 /// registry") — the public entry point every caller (`lib.rs::
 /// resolve_identity`) uses. One provider (the common case): verified
@@ -97,8 +130,12 @@ unsafe fn read_str_out(out: &NirStrOut) -> String {
 /// match is a real, honest `Err` (never a silent fallback to some other
 /// provider or to demo mode). `providers` is never empty in practice
 /// (`ServeConfig::auth`'s own invariant), but an empty slice still fails
-/// cleanly here rather than panicking.
-pub fn validate_token(token: &str, providers: &[AuthConfig]) -> Result<VerifiedClaims, String> {
+/// cleanly here rather than panicking. `verifier` is
+/// `ServeConfig::bearer_verifier`'s trait object — this function no
+/// longer calls `validate_token_against` directly, so a caller with a
+/// different `BearerTokenVerifier` gets its own logic exercised here
+/// too, not just at a call site that forgot to route through it.
+pub fn validate_token(token: &str, providers: &[AuthConfig], verifier: &dyn BearerTokenVerifier) -> Result<VerifiedClaims, String> {
     let auth = match providers {
         [] => return Err("invalid token: no identity provider is configured".to_string()),
         [only] => only,
@@ -110,7 +147,7 @@ pub fn validate_token(token: &str, providers: &[AuthConfig]) -> Result<VerifiedC
                 .ok_or_else(|| format!("invalid token: issuer {issuer:?} does not match any configured identity provider"))?
         }
     };
-    validate_token_against(token, auth)
+    verifier.verify(token, auth)
 }
 
 /// `token`'s own `iss` claim, read directly out of its base64url-decoded

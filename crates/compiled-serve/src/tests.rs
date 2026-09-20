@@ -723,3 +723,144 @@ fn auth_providers_from_env_degrades_to_demo_mode_on_a_malformed_providers_file()
     unsafe { std::env::remove_var("NIRDOSHA_IDENTITY_PROVIDERS") };
     let _ = std::fs::remove_file(&providers_path);
 }
+
+/// A full, real WebAuthn register→login round trip over real HTTP
+/// against a real running server — proving `Es256CborAdapter`,
+/// `InMemoryPasskeyCredentialStore`, and `ChallengeStore` actually
+/// compose correctly through `dispatch`'s real `/api/webauthn/*`
+/// handlers, not just that each piece passes its own unit tests in
+/// isolation. `Host: example.test` matches
+/// `webauthn_test_support::TEST_RP_ID` exactly -- `webauthn_rp_id`/
+/// `webauthn_expected_origin` derive both the relying-party ID and the
+/// origin from this same header, so the fixture's own baked-in
+/// `rpIdHash` (built against `TEST_RP_ID`) has to match what the real
+/// server computes from this request's `Host` for the ceremony to
+/// verify at all -- exactly the coupling a real browser's `Host`/
+/// `location.origin` would also enforce.
+#[test]
+fn a_real_webauthn_register_then_login_round_trip_ends_in_a_token_a_real_route_accepts() {
+    use crate::webauthn_test_support::{attestation_object, authenticator_data, client_data_json, generate_test_key, TEST_RP_ID};
+    use base64::Engine as _;
+
+    let (addr, _r) = start_test_server(ServeConfig::default());
+    let host_header = format!("Host: {TEST_RP_ID}");
+    let origin = format!("http://{TEST_RP_ID}");
+
+    // ---- register/start ----
+    let start_body = r#"{"subject":"alice"}"#;
+    let start_req = format!("POST /api/webauthn/register/start HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{start_body}", start_body.len());
+    let start_resp = raw_request(addr, &start_req);
+    assert_eq!(status_of(&start_resp), 200, "body: {}", body_of(&start_resp));
+    let start_json: serde_json::Value = serde_json::from_str(&body_of(&start_resp)).expect("register/start body should be real JSON");
+    let reg_challenge = start_json["challenge"].as_str().expect("register/start should return a challenge").to_string();
+
+    // ---- a real key, a real attestation object, a real signature-free "none" registration ----
+    let key = generate_test_key();
+    let auth_data = authenticator_data(0, Some((b"alice-cred-1", &key.x, &key.y)));
+    let att_obj = attestation_object(&auth_data);
+    let reg_client_data = client_data_json("webauthn.create", &reg_challenge, &origin);
+
+    let finish_body = serde_json::json!({
+        "subject": "alice",
+        "attestation_object": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&att_obj),
+        "client_data_json": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&reg_client_data),
+    })
+    .to_string();
+    let finish_req = format!("POST /api/webauthn/register/finish HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{finish_body}", finish_body.len());
+    let finish_resp = raw_request(addr, &finish_req);
+    assert_eq!(status_of(&finish_resp), 200, "body: {}", body_of(&finish_resp));
+    assert!(body_of(&finish_resp).contains("\"registered\":true"), "body: {}", body_of(&finish_resp));
+
+    // ---- login/start ----
+    let login_start_body = r#"{"subject":"alice"}"#;
+    let login_start_req = format!("POST /api/webauthn/login/start HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{login_start_body}", login_start_body.len());
+    let login_start_resp = raw_request(addr, &login_start_req);
+    assert_eq!(status_of(&login_start_resp), 200, "body: {}", body_of(&login_start_resp));
+    let login_start_json: serde_json::Value = serde_json::from_str(&body_of(&login_start_resp)).expect("login/start body should be real JSON");
+    let login_challenge = login_start_json["challenge"].as_str().expect("login/start should return a challenge").to_string();
+    assert_eq!(
+        login_start_json["allow_credentials"][0]["id"].as_str().unwrap(),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"alice-cred-1"),
+        "login/start should name the exact credential registered above"
+    );
+
+    // ---- a real assertion, signed by the same real key ----
+    let login_auth_data = authenticator_data(1, None);
+    let login_client_data = client_data_json("webauthn.get", &login_challenge, &origin);
+    let client_data_hash = ring::digest::digest(&ring::digest::SHA256, &login_client_data);
+    let mut signed_bytes = login_auth_data.clone();
+    signed_bytes.extend_from_slice(client_data_hash.as_ref());
+    let rng = ring::rand::SystemRandom::new();
+    let signature = key.key_pair.sign(&rng, &signed_bytes).expect("real ECDSA signing should succeed");
+
+    let login_finish_body = serde_json::json!({
+        "subject": "alice",
+        "authenticator_data": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&login_auth_data),
+        "client_data_json": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&login_client_data),
+        "signature": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_ref()),
+    })
+    .to_string();
+    let login_finish_req = format!("POST /api/webauthn/login/finish HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{login_finish_body}", login_finish_body.len());
+    let login_finish_resp = raw_request(addr, &login_finish_req);
+    assert_eq!(status_of(&login_finish_resp), 200, "body: {}", body_of(&login_finish_resp));
+    let login_finish_json: serde_json::Value = serde_json::from_str(&body_of(&login_finish_resp)).expect("login/finish body should be real JSON");
+    let token = login_finish_json["token"].as_str().expect("a successful passkey login should mint a real token").to_string();
+
+    // ---- the minted token is a genuinely valid bearer token, not a shortcut ----
+    let whoami_req = format!("GET /api/_whoami HTTP/1.1\r\n{host_header}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    let whoami_resp = raw_request(addr, &whoami_req);
+    assert_eq!(status_of(&whoami_resp), 200, "body: {}", body_of(&whoami_resp));
+    assert!(body_of(&whoami_resp).contains("\"subject\":\"alice\""), "body: {}", body_of(&whoami_resp));
+}
+
+/// A second login attempt replaying the *exact same* assertion (same
+/// challenge, same signature) must fail -- the challenge was already
+/// redeemed by the first attempt, so this is a real, if crude, replay
+/// probe: it proves `webauthn_login_finish_response` can't be re-run
+/// with identical bytes to mint a second token for free.
+#[test]
+fn replaying_an_already_used_login_assertion_fails() {
+    use crate::webauthn_test_support::{authenticator_data, client_data_json, generate_test_key, TEST_RP_ID};
+    use base64::Engine as _;
+
+    let (addr, _r) = start_test_server(ServeConfig::default());
+    let host_header = format!("Host: {TEST_RP_ID}");
+    let origin = format!("http://{TEST_RP_ID}");
+    let key = generate_test_key();
+
+    // Register once, out-of-band-style, reusing the same real ceremony shape.
+    let start_req = format!("POST /api/webauthn/register/start HTTP/1.1\r\n{host_header}\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{{\"subject\":\"bob\"}}");
+    let start_resp = raw_request(addr, &start_req);
+    let reg_challenge = serde_json::from_str::<serde_json::Value>(&body_of(&start_resp)).unwrap()["challenge"].as_str().unwrap().to_string();
+    let auth_data = crate::webauthn_test_support::authenticator_data(0, Some((b"bob-cred", &key.x, &key.y)));
+    let att_obj = crate::webauthn_test_support::attestation_object(&auth_data);
+    let reg_client_data = client_data_json("webauthn.create", &reg_challenge, &origin);
+    let finish_body = serde_json::json!({"subject": "bob", "attestation_object": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&att_obj), "client_data_json": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&reg_client_data)}).to_string();
+    let finish_req = format!("POST /api/webauthn/register/finish HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{finish_body}", finish_body.len());
+    assert_eq!(status_of(&raw_request(addr, &finish_req)), 200);
+
+    // login/start once, build one real assertion.
+    let login_start_req = format!("POST /api/webauthn/login/start HTTP/1.1\r\n{host_header}\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{{\"subject\":\"bob\"}}");
+    let login_challenge = serde_json::from_str::<serde_json::Value>(&body_of(&raw_request(addr, &login_start_req))).unwrap()["challenge"].as_str().unwrap().to_string();
+    let login_auth_data = authenticator_data(1, None);
+    let login_client_data = client_data_json("webauthn.get", &login_challenge, &origin);
+    let client_data_hash = ring::digest::digest(&ring::digest::SHA256, &login_client_data);
+    let mut signed_bytes = login_auth_data.clone();
+    signed_bytes.extend_from_slice(client_data_hash.as_ref());
+    let rng = ring::rand::SystemRandom::new();
+    let signature = key.key_pair.sign(&rng, &signed_bytes).unwrap();
+    let login_finish_body = serde_json::json!({
+        "subject": "bob",
+        "authenticator_data": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&login_auth_data),
+        "client_data_json": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&login_client_data),
+        "signature": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_ref()),
+    })
+    .to_string();
+    let login_finish_req = format!("POST /api/webauthn/login/finish HTTP/1.1\r\n{host_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{login_finish_body}", login_finish_body.len());
+
+    let first = raw_request(addr, &login_finish_req);
+    assert_eq!(status_of(&first), 200, "the first login attempt should succeed: {}", body_of(&first));
+
+    let second = raw_request(addr, &login_finish_req);
+    assert_ne!(status_of(&second), 200, "replaying the exact same assertion must not mint a second token: {}", body_of(&second));
+}

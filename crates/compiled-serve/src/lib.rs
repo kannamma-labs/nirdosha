@@ -51,9 +51,18 @@ mod dpop_replay;
 mod http;
 mod identity;
 mod ratelimit;
+mod webauthn_cbor;
+mod webauthn_challenge;
+mod webauthn_crypto;
+mod webauthn_store;
+#[cfg(test)]
+mod webauthn_test_support;
 
 pub use http::MAX_BODY_BYTES;
-pub use identity::{AuthConfig, VerifiedClaims};
+pub use identity::{AuthConfig, BearerTokenVerifier, RuntimeKernelsOidcVerifier, VerifiedClaims};
+pub use webauthn_challenge::{ChallengeContext, ChallengeStore};
+pub use webauthn_crypto::{AttestationResult, Es256CborAdapter, PasskeyCryptoAdapter};
+pub use webauthn_store::{CredentialStoreError, InMemoryPasskeyCredentialStore, PasskeyCredential, PasskeyCredentialStore};
 
 /// One exposed route's real dispatch target — a plain function pointer,
 /// never a name string (`rfcs/0010-landing-and-serve-exposure.md`'s own
@@ -195,6 +204,29 @@ pub struct ServeConfig {
     /// deleted along with the interpreter and isn't being rebuilt here;
     /// a real, disclosed narrowing of A6's original spec).
     pub auth: Vec<AuthConfig>,
+    /// The bearer-token verification vendor -- defaults to
+    /// [`identity::RuntimeKernelsOidcVerifier`] (today's only real
+    /// adapter), swappable without touching `resolve_identity` or
+    /// anything else that calls [`identity::validate_token`]. `Arc`, not
+    /// `Box`: `ServeConfig` is `Clone` (shared into every connection
+    /// thread), and a trait object needs a cheap-to-clone handle, not a
+    /// deep copy of whatever's behind it.
+    pub bearer_verifier: Arc<dyn identity::BearerTokenVerifier>,
+    /// The WebAuthn crypto/protocol vendor -- defaults to
+    /// [`webauthn_crypto::Es256CborAdapter`] (CBOR/COSE parsing + P-256
+    /// ECDSA via `ring`), swappable the same way `bearer_verifier` is: a
+    /// different backend is a new `impl PasskeyCryptoAdapter`, never a
+    /// change to the `/api/webauthn/*` handlers.
+    pub passkey_crypto: Arc<dyn webauthn_crypto::PasskeyCryptoAdapter>,
+    /// Where registered passkeys are persisted -- defaults to
+    /// [`webauthn_store::InMemoryPasskeyCredentialStore`], honestly
+    /// non-durable (see that type's own doc comment). A durable backend
+    /// is a separate adapter, not built here.
+    pub passkey_store: Arc<dyn webauthn_store::PasskeyCredentialStore>,
+    /// Short-lived WebAuthn registration/login challenges -- internal
+    /// bookkeeping, not a vendor-swappable concern the way the two
+    /// fields above are, so a concrete type rather than a trait object.
+    pub webauthn_challenges: webauthn_challenge::ChallengeStore,
     /// `true` exactly when `auth` is a single [`AuthConfig::demo()`]
     /// entry — gates whether `/api/_demo_login` exists at all (real
     /// production identity has no self-service login; a caller gets a
@@ -245,6 +277,10 @@ impl Default for ServeConfig {
             trusted_proxies: trusted_proxies_from_env(),
             metrics_token: None,
             auth,
+            bearer_verifier: Arc::new(identity::RuntimeKernelsOidcVerifier),
+            passkey_crypto: Arc::new(webauthn_crypto::Es256CborAdapter::new()),
+            passkey_store: Arc::new(webauthn_store::InMemoryPasskeyCredentialStore::new()),
+            webauthn_challenges: webauthn_challenge::ChallengeStore::new(),
             demo_mode,
             ui_html: Vec::new(),
             require_sender_constrained_tokens: false,
@@ -627,6 +663,18 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
     if req.path == "/api/_demo_login" {
         return with_cors(demo_login_response(req, config), req, config);
     }
+    if req.path == "/api/webauthn/register/start" {
+        return with_cors(webauthn_register_start_response(req, config), req, config);
+    }
+    if req.path == "/api/webauthn/register/finish" {
+        return with_cors(webauthn_register_finish_response(req, config), req, config);
+    }
+    if req.path == "/api/webauthn/login/start" {
+        return with_cors(webauthn_login_start_response(req, config), req, config);
+    }
+    if req.path == "/api/webauthn/login/finish" {
+        return with_cors(webauthn_login_finish_response(req, config), req, config);
+    }
     if req.path == "/api/_whoami" {
         return with_cors(whoami_response(req, config, dpop_replay), req, config);
     }
@@ -673,7 +721,7 @@ fn resolve_identity(req: &http::Request, config: &ServeConfig, dpop_replay: &dpo
     let Some(token) = auth_header.strip_prefix("Bearer ").or_else(|| auth_header.strip_prefix("bearer ")) else {
         return Err(http::Response::error(401, "Authorization header must be `Bearer <token>`"));
     };
-    let claims = match identity::validate_token(token, &config.auth[..]) {
+    let claims = match identity::validate_token(token, &config.auth[..], config.bearer_verifier.as_ref()) {
         Ok(claims) => claims,
         Err(e) => return Err(http::Response::error(401, &format!("invalid token: {e}"))),
     };
@@ -761,6 +809,229 @@ fn demo_login_response(req: &http::Request, config: &ServeConfig) -> http::Respo
     match identity::mock_issue_token(&subject, demo_auth, &roles, &claims) {
         Ok(token) => http::Response::ok_text(200, &serde_json::json!({"token": token}).to_string()),
         Err(e) => http::Response::error(500, &format!("failed to mint demo token: {e}")),
+    }
+}
+
+/// WebAuthn challenges expire after this long -- generous enough for a
+/// real user to complete a passkey ceremony (a platform authenticator
+/// prompt, a security-key tap) without racing a clock, tight enough that
+/// a minted-but-abandoned challenge doesn't stay redeemable for long.
+const WEBAUTHN_CHALLENGE_WINDOW: Duration = Duration::from_secs(120);
+
+/// The four `/api/webauthn/*` endpoints below are demo-mode only, the
+/// same gate `/api/_demo_login` uses and for the identical underlying
+/// reason: a successful ceremony ends in a real bearer token minted via
+/// `identity::mock_issue_token`, which needs a private signing key this
+/// process holds itself -- true only of `AuthConfig::demo()`'s own
+/// ephemeral key, never of a production `AuthConfig` (which carries only
+/// a verification JWKS, by design -- this server verifies production
+/// tokens, it never issues them). A real production passkey deployment
+/// needs the server to reach some real token-issuance capability after a
+/// successful ceremony; that integration is real, separate follow-up
+/// work, not built here -- stated plainly rather than silently assumed
+/// to already work outside demo mode.
+fn webauthn_gate(config: &ServeConfig) -> Option<http::Response> {
+    if !config.demo_mode {
+        return Some(http::Response::error(404, "not found"));
+    }
+    None
+}
+
+/// The origin a WebAuthn ceremony's `clientDataJSON.origin` must match --
+/// derived from the request's own `Host` header, the same "this process
+/// only ever speaks plain http://, TLS termination is a deployer's
+/// reverse proxy" posture `check_dpop_binding`'s own `expected_url`
+/// already documents.
+fn webauthn_expected_origin(req: &http::Request) -> String {
+    format!("http://{}", req.header("host").unwrap_or(""))
+}
+
+/// `rp.id` (WebAuthn's Relying Party ID) must be a bare domain, never a
+/// full origin URL with scheme/port -- the `Host` header's own hostname
+/// part, port stripped.
+fn webauthn_rp_id(req: &http::Request) -> String {
+    req.header("host").unwrap_or("").split(':').next().unwrap_or("").to_string()
+}
+
+fn webauthn_register_start_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    if let Some(resp) = webauthn_gate(config) {
+        return resp;
+    }
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let Some(subject) = body.get("subject").and_then(serde_json::Value::as_str) else {
+        return http::Response::error(400, "\"subject\" is required");
+    };
+    let challenge = match config.webauthn_challenges.mint(subject, WEBAUTHN_CHALLENGE_WINDOW) {
+        Ok(c) => c,
+        Err(e) => return http::Response::error(500, &format!("failed to mint a webauthn challenge: {e}")),
+    };
+    http::Response::ok_text(
+        200,
+        &serde_json::json!({
+            "challenge": challenge,
+            "rp": { "id": webauthn_rp_id(req), "name": webauthn_rp_id(req) },
+            "user": { "id": subject, "name": subject, "displayName": subject },
+            "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+        })
+        .to_string(),
+    )
+}
+
+fn webauthn_register_finish_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    if let Some(resp) = webauthn_gate(config) {
+        return resp;
+    }
+    use base64::Engine as _;
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let (Some(subject), Some(attestation_b64), Some(client_data_b64)) = (
+        body.get("subject").and_then(serde_json::Value::as_str),
+        body.get("attestation_object").and_then(serde_json::Value::as_str),
+        body.get("client_data_json").and_then(serde_json::Value::as_str),
+    ) else {
+        return http::Response::error(400, "\"subject\", \"attestation_object\", and \"client_data_json\" are required");
+    };
+    let Ok(attestation_object) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(attestation_b64) else {
+        return http::Response::error(400, "attestation_object is not valid base64url");
+    };
+    let Ok(client_data_json) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(client_data_b64) else {
+        return http::Response::error(400, "client_data_json is not valid base64url");
+    };
+    // The challenge store's own key is the *challenge value* `mint`
+    // returned (a random string), never the subject -- read it back out
+    // of `clientDataJSON` (where the client is required to echo it) to
+    // redeem the right entry. Checking the redeemed context's own
+    // `subject` against the request's claimed `subject` afterward is
+    // what actually stops a captured/forged `clientDataJSON` from one
+    // subject's ceremony being replayed against a different subject's
+    // `/finish` call -- redemption alone (key presence + freshness)
+    // isn't enough on its own.
+    let expected_challenge = match serde_json::from_slice::<serde_json::Value>(&client_data_json).ok().and_then(|v| v.get("challenge").and_then(|c| c.as_str()).map(str::to_string)) {
+        Some(c) => c,
+        None => return http::Response::error(400, "client_data_json has no \"challenge\" field"),
+    };
+    let Ok(Some(challenge_ctx)) = config.webauthn_challenges.redeem(&expected_challenge, WEBAUTHN_CHALLENGE_WINDOW) else {
+        return http::Response::error(400, "no outstanding (or already-expired/redeemed) registration challenge");
+    };
+    if challenge_ctx.subject != subject {
+        return http::Response::error(400, "this challenge was minted for a different subject");
+    }
+
+    let origin = webauthn_expected_origin(req);
+    match config.passkey_crypto.parse_and_verify_attestation(&attestation_object, &client_data_json, &expected_challenge, &origin, &webauthn_rp_id(req)) {
+        Ok(result) => {
+            let credential = webauthn_store::PasskeyCredential { credential_id: result.credential_id, public_key_x: result.public_key_x, public_key_y: result.public_key_y, sign_count: result.sign_count };
+            match config.passkey_store.save(subject, credential) {
+                Ok(()) => http::Response::ok_text(200, &serde_json::json!({"registered": true}).to_string()),
+                Err(e) => http::Response::error(500, &format!("registration succeeded but could not be stored: {e}")),
+            }
+        }
+        Err(e) => http::Response::error(400, &format!("registration ceremony failed: {e}")),
+    }
+}
+
+fn webauthn_login_start_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    if let Some(resp) = webauthn_gate(config) {
+        return resp;
+    }
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let Some(subject) = body.get("subject").and_then(serde_json::Value::as_str) else {
+        return http::Response::error(400, "\"subject\" is required");
+    };
+    let credential = match config.passkey_store.load(subject) {
+        Ok(c) => c,
+        Err(_) => return http::Response::error(404, "no passkey registered for this subject"),
+    };
+    let challenge = match config.webauthn_challenges.mint(subject, WEBAUTHN_CHALLENGE_WINDOW) {
+        Ok(c) => c,
+        Err(e) => return http::Response::error(500, &format!("failed to mint a webauthn challenge: {e}")),
+    };
+    use base64::Engine as _;
+    http::Response::ok_text(
+        200,
+        &serde_json::json!({
+            "challenge": challenge,
+            "rp_id": webauthn_rp_id(req),
+            "allow_credentials": [{ "type": "public-key", "id": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential.credential_id) }],
+        })
+        .to_string(),
+    )
+}
+
+fn webauthn_login_finish_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    if let Some(resp) = webauthn_gate(config) {
+        return resp;
+    }
+    use base64::Engine as _;
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let (Some(subject), Some(auth_data_b64), Some(client_data_b64), Some(signature_b64)) = (
+        body.get("subject").and_then(serde_json::Value::as_str),
+        body.get("authenticator_data").and_then(serde_json::Value::as_str),
+        body.get("client_data_json").and_then(serde_json::Value::as_str),
+        body.get("signature").and_then(serde_json::Value::as_str),
+    ) else {
+        return http::Response::error(400, "\"subject\", \"authenticator_data\", \"client_data_json\", and \"signature\" are required");
+    };
+    let (Ok(authenticator_data), Ok(client_data_json), Ok(signature)) = (
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(auth_data_b64),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(client_data_b64),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature_b64),
+    ) else {
+        return http::Response::error(400, "authenticator_data, client_data_json, and signature must all be valid base64url");
+    };
+    // Same "redeem by the challenge value read out of clientDataJSON,
+    // then check the redeemed context's own subject" shape as
+    // registration/finish above -- see that handler's comment for why
+    // keying by subject would be wrong here.
+    let expected_challenge = match serde_json::from_slice::<serde_json::Value>(&client_data_json).ok().and_then(|v| v.get("challenge").and_then(|c| c.as_str()).map(str::to_string)) {
+        Some(c) => c,
+        None => return http::Response::error(400, "client_data_json has no \"challenge\" field"),
+    };
+    let Ok(Some(challenge_ctx)) = config.webauthn_challenges.redeem(&expected_challenge, WEBAUTHN_CHALLENGE_WINDOW) else {
+        return http::Response::error(400, "no outstanding (or already-expired/redeemed) login challenge");
+    };
+    if challenge_ctx.subject != subject {
+        return http::Response::error(400, "this challenge was minted for a different subject");
+    }
+    let credential = match config.passkey_store.load(subject) {
+        Ok(c) => c,
+        Err(_) => return http::Response::error(404, "no passkey registered for this subject"),
+    };
+    let origin = webauthn_expected_origin(req);
+    let new_sign_count = match config.passkey_crypto.verify_assertion(&authenticator_data, &client_data_json, &signature, &expected_challenge, &origin, &webauthn_rp_id(req), &credential.public_key_x, &credential.public_key_y) {
+        Ok(count) => count,
+        Err(e) => return http::Response::error(401, &format!("login ceremony failed: {e}")),
+    };
+    // WebAuthn's own cloned-authenticator defense: a sign count that
+    // hasn't strictly advanced (a fresh authenticator legitimately
+    // reports 0 every time and is exempted, matching the spec's own
+    // guidance for authenticators that don't implement a counter at
+    // all) means either a replayed assertion or two physical
+    // authenticators sharing one credential -- refused, not silently
+    // accepted because the signature itself still checked out.
+    if new_sign_count != 0 && new_sign_count <= credential.sign_count {
+        return http::Response::error(401, "sign counter did not advance -- possible cloned authenticator or replayed assertion");
+    }
+    if let Err(e) = config.passkey_store.advance_sign_count(subject, new_sign_count) {
+        return http::Response::error(500, &format!("login succeeded but the sign counter could not be updated: {e}"));
+    }
+    let Some(demo_auth) = config.auth.first() else {
+        return http::Response::error(500, "demo mode is enabled but no identity provider is configured");
+    };
+    match identity::mock_issue_token(subject, demo_auth, &[], &[]) {
+        Ok(token) => http::Response::ok_text(200, &serde_json::json!({"token": token}).to_string()),
+        Err(e) => http::Response::error(500, &format!("login succeeded but a token could not be minted: {e}")),
     }
 }
 
