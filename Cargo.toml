@@ -76,11 +76,16 @@ members = [
     # symbol, not the deleted interpreter's `PluginBuiltin` trait) — see
     # each crate's own README for the plugin-author and app-author
     # sides. Their automated "compiles and the real binary runs
-    # correctly" proof lived in the now-deleted `crates/compiler/tests/
-    # native_plugin_examples.rs` -- a real, disclosed test-coverage loss
-    # from that deletion (2026-09-20), not rebuilt in this pass; these
-    # crates still compile standalone, they just have no integration
-    # harness proving the plugin ABI end to end anymore.
+    # correctly" proof (`crates/compiler/tests/native_plugin_examples.rs`)
+    # went away with `crates/compiler` itself (2026-09-20) -- these
+    # crates still compile standalone, but linking their staticlib output
+    # into a real native binary has no consumer left in this repo (v2 has
+    # no AOT codegen to link into). Not deleted: this is real,
+    # still-wanted functionality (v2 needs its own answer for
+    # third-party/native plugin support) with no v2-native port built yet
+    # -- tracked as an open item in `docs/V1_CAPABILITY_PORT_MAP.md`
+    # rather than lost. Kept as members so they keep compiling and
+    # bit-rotting less while that port is pending.
     "crates/plugin-example-native-shout",
     "crates/plugin-example-native-kv",
     # rfcs/0011-uniform-service-provider-model.md Phase 8: the RFC's own
@@ -89,34 +94,42 @@ members = [
     # with real compiled/linked/executed code, not just typechecked
     # `NativePluginBuiltin` metadata. See its own README; its
     # `crates/compiler/tests/native_plugin_examples.rs` proof is gone
-    # along with that crate (see comment above).
+    # along with that crate -- same "not deleted, pending a v2 port"
+    # status as the two crates above, same tracking doc.
     "crates/plugin-example-native-authed-http",
     # rfcs/0009-ui-catalog-extensibility.md Phase B's real reference UI
     # component -- a genuinely separate crate (not inline Rust in a
     # test file) contributing a `layout { ... }` widget kind. See its
     # own README; its `crates/compiler/tests/ui_plugin_examples.rs`
-    # "reads real, separately-compiled bytes" proof is gone along with
-    # that crate (see comment above).
+    # proof is gone along with that crate, and its own consumer-side
+    # example (`nirdosha::ui_plugin::NativeUiComponent`) named a type
+    # that lived in `crates/compiler` and is gone too -- same "not
+    # deleted, pending a v2 port" status, same tracking doc.
     "crates/ui-plugin-example-sparkline",
     # `crates/bench` (2026-09) -- nirdosha-master-plan.md Part 3 Sprint 2's
     # "Benchmark harness v1", rebuilt from nothing (the original,
     # interpreter-era `crates/bench` was removed for the same reason the
-    # six `plugin-example-*` crates below it were: it scored an
-    # LLM-generated program's *interpreted* result value, a mechanism
-    # that no longer exists). The rebuild is compiled-path-native --
-    # `nirdosha certify`'s own JSON verdict decides pass/fail, never a
-    # second, bench-local notion of "correct" -- so it carries no trace
-    # of that dependency.
+    # six interpreter-era `plugin-example-*` crates further below were:
+    # it scored an LLM-generated program's *interpreted* result value, a
+    # mechanism that no longer exists). Repointed to v2 2026-09-20:
+    # `nirdosha_hi::v2_verify::verify_v2_source`'s own in-process verdict
+    # decides pass/fail (`cargo build` + `cargo-nirdosha`'s contract
+    # scanner), the same check `nirdosha_hi::hi_llm`'s own self-repair
+    # loop already gates every attempt on -- never a second, bench-local
+    # notion of "correct" that could drift from what the compiler itself
+    # says. v2 has no SMT/Z3 proof-discharge pipeline yet (unlike the
+    # deleted `crates/compiler`'s `nirdosha certify`) -- tracked as an
+    # open item in `docs/V1_CAPABILITY_PORT_MAP.md`, not silently
+    # dropped.
     "crates/bench",
     # The original six interpreter-era `plugin-example-*` crates,
     # `plugin-support`, and `plugin-examples` stay removed: each depended
     # entirely on the interpreter (interpreted plugin dispatch via
     # `PluginBuiltin`/`PluginFn`) -- a mechanism that no longer exists
-    # now that the interpreter is gone. See git history if any of this
-    # (a real MySQL/Cassandra/ActiveMQ/Neo4j/HBase plugin, ported onto
-    # the compiled-path ABI above instead of the deleted trait) is worth
-    # rebuilding — rfcs/0008 Phase 4 names this as the real remaining
-    # proof, not yet done.
+    # now that the interpreter is gone. A real MySQL/Cassandra/ActiveMQ/
+    # Neo4j/HBase plugin, ported onto the compiled-path ABI above instead
+    # of the deleted trait, is the real remaining proof rfcs/0008 Phase 4
+    # names -- tracked in `docs/V1_CAPABILITY_PORT_MAP.md`, not done.
 
     # ── The Nirdosha Rust dialect (Stage 1) ──────────────────────────────
     # To the external world, Nirdosha-dialect code is just another Rust

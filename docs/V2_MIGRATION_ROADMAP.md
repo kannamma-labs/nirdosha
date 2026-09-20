@@ -164,7 +164,12 @@ golden tests green; 68 contracts, 0 violations.
 Remaining (its own register, not the product's critical path):
 G6 artifact-bytes + cfg binding; #13 signed trust chain; G3's
 shared-ABI tests; Stage 2.5 Z3-over-MIR for free-tier `proofs`;
-Phase-1 scanner teeth completion.
+Phase-1 scanner teeth completion. `docs/V1_CAPABILITY_PORT_MAP.md`
+tracks this same "still needed, not yet built in v2" register
+per-capability, for the specific case of something `crates/compiler`
+(now deleted) used to do — the Z3-over-MIR item above and this repo's
+still-kept-but-currently-unlinkable native-plugin reference crates are
+both rows there.
 
 ## 6. Decisions recorded (all dated 2026-09-16, user-driven)
 

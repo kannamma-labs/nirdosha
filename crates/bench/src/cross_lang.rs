@@ -12,6 +12,19 @@
 //! disclosed rather than silently downgraded to look equivalent to the
 //! other two.
 //!
+//! **Drifted from `main.rs::TASKS` since the 2026-09-20 v2 repoint,
+//! disclosed rather than silently left stale**: that file's own
+//! `injection` category was retired and replaced with
+//! `unauthorized_access` (v2 has no by-construction injection-immunity
+//! guarantee to test at all -- see its own doc comment). This module's
+//! `injection` task below is unaffected by that -- it was always a
+//! TypeScript/Rust-only, heuristic, no-Nirdosha-column comparison, not
+//! generated or scored against anything in `main.rs` -- but the run's
+//! own combined output no longer has a Nirdosha `injection` row to sit
+//! next to it; read this task's results as a standalone TS-vs-Rust
+//! comparison, not a three-way one, until/unless a v2-appropriate
+//! heuristic for `unauthorized_access` is added here too.
+//!
 //! **What this module deliberately does not attempt**: LLM+XGrammar
 //! (needs raw logit access for grammar-constrained decoding -- not
 //! available through Ollama's OpenAI-compatible chat-completions

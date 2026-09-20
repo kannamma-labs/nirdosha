@@ -2,80 +2,69 @@
 //! pass@1 and self-repair-rate, measured for real against a real LLM
 //! (`nirdosha_hi::hi_llm::generate_from_task_prompt`, the exact
 //! generate/self-repair loop `nirdosha hi`'s own Generate mode uses),
-//! scored by `nirdosha certify`'s own JSON verdict -- never a second,
-//! bench-local notion of "correct" that could drift from what the
-//! compiler itself says.
+//! scored by `nirdosha_hi::v2_verify::verify_v2_source` -- the same
+//! in-process two-reader check (`cargo build`, then `cargo-nirdosha`'s
+//! contract scanner) `generate_from_task_prompt`'s own self-repair loop
+//! already gates every attempt on, never a second, bench-local notion of
+//! "correct" that could drift from what the compiler itself says.
 //!
-//! **Currently non-functional, disclosed rather than silently left
-//! broken**: `crates/compiler` (the `nirdosha certify` binary this
-//! module shells out to, `locate_nirdosha_binary` below) was deleted
-//! 2026-09-20. This crate still compiles -- the `Command::new` call is
-//! a runtime lookup, not a build-time dependency -- but running it will
-//! fail to find a `nirdosha` binary on `PATH`/`target/{debug,release}`.
-//! Repointing this at `cargo-nirdosha`'s equivalent verdict output (its
-//! JSON shape hasn't been confirmed to match `nirdosha certify`'s) is
-//! real, separate follow-up work, not done as part of that deletion --
-//! this crate's own historical `RESULTS.md` stays as a valid record of
-//! runs made before the deletion, not a claim that re-running it works
-//! today.
+//! **Repointed to v2, 2026-09-20.** This previously shelled out to
+//! `nirdosha certify` (`crates/compiler`'s CLI, deleted the same day as
+//! `crates/compiler` itself) and scored a v1-style JSON verdict
+//! (`verdict_summary.verdict`: PROVED/DISPROVED/UNKNOWN, Z3-backed).
+//! `nirdosha_hi::hi_llm`'s own generate/self-repair loop had *already*
+//! migrated to v2 by the time this was fixed (`typecheck_and_build_check`
+//! calls `v2_verify::verify_v2_source`, and `HI_PROMPT`
+//! (`agent-skills/nirdosha/hi_prompt.md`) already tells the model to
+//! write v2 syntax and explicitly warns against v1 constructs) -- this
+//! file's own `TASKS` prompts and `certify()` call were the only pieces
+//! still stuck on v1, asking the model for syntax `HI_PROMPT` itself
+//! says not to write and then scoring the result against a JSON shape no
+//! longer produced by anything. Fixed by calling `v2_verify::
+//! verify_v2_source` directly (in-process, no subprocess, no missing
+//! binary -- the exact function `hi_llm` itself already calls) and
+//! rewriting `TASKS` to ask for real v2 source.
 //!
-//! **Honest v1 scope, per the master plan's own comparison matrix**
-//! (`Benchmark harness v1 (public, reproducible): Nirdosha vs
-//! TypeScript vs Rust vs plain-LLM vs LLM+XGrammar vs LLM+Imandra ...
-//! AlgoVeri/Vericoding tasks -> direct published comparison vs Kōdo's
-//! 20/20 claim`): this harness measures **Nirdosha only** --
-//! generate-then-self-repair against this compiler, nothing else.
-//! Every other column in that matrix needs infrastructure that
-//! genuinely doesn't exist in this environment and would be dishonest
-//! to fake:
-//! - **TypeScript/Rust baselines** need a parallel LLM-generates-then-
-//!   statically-analyzes pipeline in each language, scored for the
-//!   *same* failure classes -- a second harness, not built here.
-//! - **LLM+XGrammar/LLM+Imandra** need those third-party tools
-//!   installed and wired up; neither is present in this repo or this
-//!   environment.
-//! - **AlgoVeri/Vericoding** needs Kōdo's own benchmark corpus
-//!   (arXiv 2602.09464), not available locally.
+//! **Honestly weaker evidence than v1's own bench ever reported, not
+//! hidden as an equivalent one.** v2 has no SMT/Z3 proof-discharge
+//! pipeline yet -- `nirdosha:validate` doc-comment clauses parse but stay
+//! inert (`v2_verify.rs`'s own doc comment; `docs/nirdosha-rt-dialect.md`).
+//! `V2Verdict::passed()` means "built, and every `nirdosha:contract`
+//! claim and dialect restriction checked out" -- a real, driver-verified
+//! bar for the claims v2 *does* check (`effects(pure)`, `requires(role)`,
+//! `unsafe`/raw-lock/raw-thread denials), but not a proof that the
+//! program's arithmetic is correct for every input the way a v1 PROVED
+//! verdict was. Reported plainly as `clean`, never relabeled `verdict`
+//! or `proved`.
 //!
-//! `docs/PUBLIC_ROADMAP.md`'s own entry for this item names this
-//! boundary explicitly. What *is* real here: three tasks, one per
-//! failure class this harness can fairly construct a *solvable*
-//! Nirdosha task for (see `TASKS`' own doc comment for why "type
-//! confusion" is reframed and "deadlock" is left out entirely), run
-//! against a real model, self-repaired against real compiler
-//! diagnostics, certified by the real `nirdosha certify`.
+//! **`injection` retired as a v2 task category, replaced with
+//! `unauthorized_access`.** v1's injection task leaned on a guarantee
+//! v2's type system does not have: v1's `str` had no concatenation
+//! operator at all, making an injectable query inexpressible; v2 source
+//! is plain Rust, where `String` concatenation is ordinary and
+//! unrestricted (confirmed by grep: `nirdosha-contract-core/src/scan.rs`'s
+//! dialect-restriction table has no injection/SQL/string-building entry
+//! at all). What v2 *does* have, and this task now exercises instead, is
+//! `requires(role = "..")`'s unforgeable `RoleProof<R>` -- a real,
+//! compiler-injected access gate (`crates/nirdosha-rt/src/role.rs`), not
+//! a narrower version of the same property but a different, equally real
+//! one this compiler build actually enforces.
 
 use nirdosha_hi::hi_llm;
+use nirdosha_hi::v2_verify::V2Verdict;
 use serde::Serialize;
 
 mod cross_lang;
 
 /// One benchmark task: a natural-language prompt an LLM must turn into
-/// working `.nir` source, plus which failure class it targets.
+/// working v2 `.nir` source, plus which failure class it targets.
 ///
 /// **Why only three of the master plan's four named classes
-/// (injection/type confusion/overflow/deadlock):**
-/// - `injection` and `overflow` are straightforward, solvable Nirdosha
-///   tasks that exercise a real by-construction guarantee (`str` has
-///   no concatenation at all, so an injectable query is inexpressible;
-///   Z3's Tier-1 proof obligations cover integer overflow).
-/// - `type_confusion` as literally "mix two different integer widths"
-///   turned out to be **unsolvable** in today's Nirdosha, discovered
-///   while designing this task, not assumed: there is no int-to-int or
-///   int-to-float conversion builtin at all (`ast.rs`'s builtin list
-///   has `dec_from_i64` for the `Decimal` money type and nothing
-///   general-purpose), so a task requiring e.g. an `i8` parameter
-///   combined with an `i64` one has no correct answer to self-repair
-///   toward -- every attempt would fail identically, testing nothing.
-///   Reframed instead as "does the model reach for `f64` where
-///   integer arithmetic suffices" (a real, common LLM habit for
-///   anything average/percentage-shaped), which *is* solvable purely
-///   by the model choosing consistent types, with no missing builtin
-///   in the way.
-/// - `deadlock` is left out of v1 entirely: scoring it needs a
-///   concurrent task with an automatable race/deadlock detector, a
-///   materially bigger lift than the other three; a real gap, named
-///   here rather than papered over.
+/// (unauthorized_access/overflow/type_confusion, no deadlock):**
+/// `deadlock` was already left out of v1 -- scoring it needs a
+/// concurrent task with an automatable race/deadlock detector, a
+/// materially bigger lift than the other three; still a real gap, named
+/// here rather than papered over.
 struct Task {
     id: &'static str,
     category: &'static str,
@@ -84,19 +73,19 @@ struct Task {
 
 const TASKS: &[Task] = &[
     Task {
-        id: "injection_safe_lookup",
-        category: "injection",
-        prompt: "Write a Nirdosha (.nir) program with a function `find_user_email(conn: db, user_id: i64) -> Result(Text, ErrorCode)` that looks up and returns the account holder's email address for the given `user_id` from a table named `account` (columns `id`, `email`). Define `struct Text { value: str }` and a real error `enum ErrorCode` yourself for this to use. Include `fn main()` that connects to a database file named `bench_users.db`, calls `find_user_email` with a sample `user_id`, and prints either the email or a message on error. Reply with ONLY the .nir source, no prose, no markdown fence.",
+        id: "role_gated_account_lookup",
+        category: "unauthorized_access",
+        prompt: "Write a Nirdosha (.nir) v2 program (plain Rust plus the nirdosha-rt macro layer -- valid, ordinary Rust that also builds under plain `cargo`; do not invent native-v1 `.nir` syntax like `workflow`/`screen`/bare `validate fn { pre: .. }` blocks/`str`/`unit`/`print(...)`). Declare a role vocabulary with `nirdosha_rt::roles! { AccountAdmin = \"account_admin\"; }`. Write a function `#[nirdosha_rt::contract(effects(pure), requires(role = \"account_admin\"))] fn account_email_for(directory: &[(i64, String)], user_id: i64) -> Option<String>` that searches `directory` for an entry whose first element equals `user_id` and returns a clone of its email (the second element), or `None` if no entry matches. Because of `requires(role = \"account_admin\")`, the compiler injects an unforgeable `&nirdosha_rt::RoleProof<nirdosha_roles::AccountAdmin>` as this function's real first parameter, ahead of the two you declared -- `fn main()` must build a session with `nirdosha_rt::Auth::login(\"someone\", &[\"account_admin\"])`, obtain a proof via `.prove::<nirdosha_roles::AccountAdmin>()`, and pass it as the first argument, or this will not compile. `fn main()` should build a small sample directory, obtain the proof, call the function, and print the result. Reply with ONLY the .nir source, no prose, no markdown fence.",
     },
     Task {
         id: "overflow_checked_multiply",
         category: "overflow",
-        prompt: "Write a Nirdosha (.nir) program with a function `order_total_cents(unit_price_cents: i64, quantity: i64) -> i64` that returns the total price in cents for an order (unit price times quantity). Also declare `validate order_total_cents { pre: unit_price_cents >= 0 && quantity >= 1, post: result >= unit_price_cents }` to assert that, given a non-negative unit price and at least one item, the total is never less than a single unit's price. Include `fn main()` that calls `order_total_cents(250, 4)` and prints the result. Reply with ONLY the .nir source, no prose, no markdown fence.",
+        prompt: "Write a Nirdosha (.nir) v2 program (plain Rust plus the nirdosha-rt macro layer). Write a function `#[nirdosha_rt::contract(effects(pure))] fn order_total_cents(unit_price_cents: i64, quantity: i64) -> Option<i64>` that returns the total price in cents for an order (unit price times quantity), using checked multiplication (`checked_mul`) so an overflow returns `None` instead of silently wrapping or panicking -- `effects(pure)` claims this function does no I/O and never panics, and that claim must actually be true. Include `fn main()` that calls `order_total_cents(250, 4)` and prints the result. Reply with ONLY the .nir source, no prose, no markdown fence.",
     },
     Task {
         id: "average_no_float_confusion",
         category: "type_confusion",
-        prompt: "Write a Nirdosha (.nir) program with a function `average_score(total_points: i64, num_students: i64) -> i64` that returns the average score, rounded down, given the total points scored across `num_students` students. Also declare `validate average_score { pre: total_points >= 0 && num_students >= 1, post: result <= total_points }` to assert that, given a non-negative point total and at least one student, the average never exceeds the total points. Include `fn main()` that calls `average_score(275, 4)` and prints the result. Reply with ONLY the .nir source, no prose, no markdown fence.",
+        prompt: "Write a Nirdosha (.nir) v2 program (plain Rust plus the nirdosha-rt macro layer). Write a function `#[nirdosha_rt::contract(effects(pure))] fn average_score(total_points: i64, num_students: i64) -> i64` that returns the average score, rounded down, given the total points scored across `num_students` students -- using integer arithmetic throughout; never reach for `f64`/`f32` where integer division already suffices. Include `fn main()` that calls `average_score(275, 4)` and prints the result. Reply with ONLY the .nir source, no prose, no markdown fence.",
     },
 ];
 
@@ -109,15 +98,10 @@ struct TaskResult {
     /// `"gave_up"` (never compiled within the bounded attempt budget).
     outcome: String,
     attempts: Option<u32>,
-    /// From `nirdosha certify`'s own JSON -- `None` only for `gave_up`
-    /// (nothing to certify) or a certify-invocation failure (`error`
-    /// set instead).
-    verdict: Option<String>,
-    evidence_tier: Option<String>,
-    contracts_proved: Option<u64>,
-    contracts_unsupported: Option<u64>,
-    contracts_failed: Option<u64>,
-    proven_in_range: Option<u64>,
+    /// The real, in-process two-reader verdict (`None` only for
+    /// `gave_up` -- nothing to verify -- or a verify-call failure, with
+    /// `error` set instead).
+    verdict: Option<V2Verdict>,
     error: Option<String>,
 }
 
@@ -128,45 +112,11 @@ struct RunSummary {
     pass_at_1: usize,
     self_repair_rescued: usize,
     gave_up: usize,
-    certified_proved: usize,
+    /// Built, with every `nirdosha:contract` claim and dialect
+    /// restriction checked out (`V2Verdict::passed`) -- v2's real bar,
+    /// not v1's Z3-proved one; see this file's own top doc comment.
+    clean_count: usize,
     results: Vec<TaskResult>,
-}
-
-/// Locates the real `nirdosha` binary this run certifies against --
-/// `NIRDOSHA_BIN` first (an explicit override), then `target/{debug,
-/// release}/nirdosha` relative to the workspace root (`crates/bench`
-/// is always two directories under it), then bare `nirdosha` on
-/// `PATH` as a last resort. Deliberately never re-derives its own
-/// notion of "does this pass" -- this harness is not the compiler.
-/// (The now-deleted `clients/python/nirdosha-verify`'s `_binary_path`
-/// used this identical override-then-search order, for the same
-/// reason.) No binary this resolves to still exists as of 2026-09-20 --
-/// see this file's own top-of-file doc comment.
-fn locate_nirdosha_binary() -> String {
-    if let Ok(p) = std::env::var("NIRDOSHA_BIN") {
-        return p;
-    }
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
-        for profile in ["debug", "release"] {
-            let candidate = workspace_root.join("target").join(profile).join("nirdosha");
-            if candidate.exists() {
-                return candidate.to_string_lossy().into_owned();
-            }
-        }
-    }
-    "nirdosha".to_string()
-}
-
-fn certify(binary: &str, task_id: &str, source: &str) -> Result<serde_json::Value, String> {
-    let mut path = std::env::temp_dir();
-    path.push(format!("nirdosha_bench_{}_{task_id}.nir", std::process::id()));
-    std::fs::write(&path, source).map_err(|e| format!("writing scratch file for certify: {e}"))?;
-    let output = std::process::Command::new(binary).arg("certify").arg(&path).output();
-    let _ = std::fs::remove_file(&path);
-    let output = output.map_err(|e| format!("running `{binary} certify`: {e}"))?;
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("`nirdosha certify` did not print valid JSON (exit {:?}): {e}; stderr: {}", output.status.code(), String::from_utf8_lossy(&output.stderr)))
 }
 
 /// Every run's final generated source (whichever attempt won, or the
@@ -200,7 +150,6 @@ fn main() {
     // would be the only caller of.
     let model = std::env::var("NIRDOSHA_LLM_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o-mini (OpenAI default)".to_string());
     let client = hi_llm::LlmClient::new(activation).expect("building the LLM HTTP client");
-    let binary = locate_nirdosha_binary();
     let out_dir = results_dir(&model);
     std::fs::create_dir_all(&out_dir).expect("creating crates/bench/results should not fail");
 
@@ -212,59 +161,23 @@ fn main() {
             Ok((source, attempts)) => {
                 let outcome = if attempts == 1 { "pass_at_1" } else { "self_repair_rescued" };
                 std::fs::write(out_dir.join(format!("{}.nir", task.id)), &source).expect("writing a generated source artifact should not fail");
-                match certify(&binary, task.id, &source) {
-                    Ok(cert) => TaskResult {
-                        id: task.id.to_string(),
-                        category: task.category.to_string(),
-                        outcome: outcome.to_string(),
-                        attempts: Some(attempts),
-                        verdict: cert["verdict_summary"]["verdict"].as_str().map(String::from),
-                        evidence_tier: cert["evidence_tier"].as_str().map(String::from),
-                        contracts_proved: cert["verdict_summary"]["contracts_proved"].as_u64(),
-                        contracts_unsupported: cert["verdict_summary"]["contracts_unsupported"].as_u64(),
-                        contracts_failed: cert["verdict_summary"]["contracts_failed"].as_u64(),
-                        proven_in_range: cert["proof_obligations"]["proven_in_range"].as_u64(),
-                        error: None,
-                    },
-                    Err(e) => TaskResult {
-                        id: task.id.to_string(),
-                        category: task.category.to_string(),
-                        outcome: outcome.to_string(),
-                        attempts: Some(attempts),
-                        verdict: None,
-                        evidence_tier: None,
-                        contracts_proved: None,
-                        contracts_unsupported: None,
-                        contracts_failed: None,
-                        proven_in_range: None,
-                        error: Some(e),
-                    },
+                match nirdosha_hi::v2_verify::verify_v2_source(&source) {
+                    Ok(verdict) => TaskResult { id: task.id.to_string(), category: task.category.to_string(), outcome: outcome.to_string(), attempts: Some(attempts), verdict: Some(verdict), error: None },
+                    Err(e) => TaskResult { id: task.id.to_string(), category: task.category.to_string(), outcome: outcome.to_string(), attempts: Some(attempts), verdict: None, error: Some(e) },
                 }
             }
-            Err(e) => TaskResult {
-                id: task.id.to_string(),
-                category: task.category.to_string(),
-                outcome: "gave_up".to_string(),
-                attempts: None,
-                verdict: None,
-                evidence_tier: None,
-                contracts_proved: None,
-                contracts_unsupported: None,
-                contracts_failed: None,
-                proven_in_range: None,
-                error: Some(e),
-            },
+            Err(e) => TaskResult { id: task.id.to_string(), category: task.category.to_string(), outcome: "gave_up".to_string(), attempts: None, verdict: None, error: Some(e) },
         };
-        eprintln!("  -> {} verdict={:?} evidence_tier={:?} contracts_proved={:?}", result.outcome, result.verdict, result.evidence_tier, result.contracts_proved);
+        eprintln!("  -> {} clean={:?}", result.outcome, result.verdict.as_ref().map(|v| v.passed()));
         results.push(result);
     }
 
     let pass_at_1 = results.iter().filter(|r| r.outcome == "pass_at_1").count();
     let self_repair_rescued = results.iter().filter(|r| r.outcome == "self_repair_rescued").count();
     let gave_up = results.iter().filter(|r| r.outcome == "gave_up").count();
-    let certified_proved = results.iter().filter(|r| r.verdict.as_deref() == Some("PROVED")).count();
+    let clean_count = results.iter().filter(|r| r.verdict.as_ref().is_some_and(|v| v.passed())).count();
 
-    let summary = RunSummary { model, tasks_total: TASKS.len(), pass_at_1, self_repair_rescued, gave_up, certified_proved, results };
+    let summary = RunSummary { model, tasks_total: TASKS.len(), pass_at_1, self_repair_rescued, gave_up, clean_count, results };
     let summary_json = serde_json::to_string_pretty(&summary).expect("RunSummary always serializes");
     std::fs::write(out_dir.join("summary.json"), &summary_json).expect("writing the summary artifact should not fail");
     println!("{summary_json}");

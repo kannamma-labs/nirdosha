@@ -1,5 +1,23 @@
 # Benchmark harness v1 — results
 
+**Historical record, 2026-09-11, kept as-is — not reproducible by
+today's harness.** This file documents real runs against `crates/bench`
+as it existed before the 2026-09-20 v2 repoint: the old `TASKS`
+(`injection_safe_lookup`/`overflow_checked_multiply`/
+`average_no_float_confusion`, native-`.nir`-v1 syntax) scored by
+`nirdosha certify`'s Z3-backed PROVED/DISPROVED/UNKNOWN verdict. Both no
+longer exist — `crates/compiler` (the `nirdosha certify` binary this
+ran against) was deleted 2026-09-20, and `main.rs`'s `TASKS` were
+rewritten for v2 dialect source, scored instead by
+`nirdosha_hi::v2_verify::verify_v2_source`'s `builds`/`violations`
+verdict (no Z3 proof-discharge exists for v2 yet — see `main.rs`'s own
+top doc comment and `docs/V1_CAPABILITY_PORT_MAP.md`'s "SMT/Z3
+proof-discharge" row, the durable tracking entry for closing this gap
+for real). Running `cargo run -p nirdosha-bench` today exercises
+a different task set against a different compiler and will not
+reproduce the numbers below; this file stays as a real record of what
+the v1 harness once measured, not a claim about the current one.
+
 `nirdosha-master-plan.md` Part 3 Sprint 2's "Benchmark harness v1." Two
 real runs, not simulated numbers, against two independent providers:
 three tasks each, generated for real, self-repaired for real against
