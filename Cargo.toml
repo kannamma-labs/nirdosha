@@ -56,6 +56,11 @@ members = [
     # satisfying the two-driver rule for the sink port.
     "crates/nirdosha-lineage-sink-jsonl",
     "crates/nirdosha-lineage-sink-http",
+    # RFC 0025 §8 domain drivers (Plan Phase 13): the missing StoreDriver-
+    # adjacent ports the RTM ecosystem RFC declares but nothing in the
+    # workspace implemented -- each follows the same one-honest-driver
+    # pattern as nirdosha-guard-store-postgres above.
+    "crates/nirdosha-screening-list-fixture",
     # Pure, dependency-light transaction-isolation-anomaly detection
     # (the Direct Serialization Graph algorithm), shared verbatim by
     # `crates/runtime-kernels` (the live FFI-hooked path, via its own

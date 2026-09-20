@@ -1,0 +1,9 @@
+{
+  "list_id": "test_sanctions_list",
+  "version": "2026-09-21.0",
+  "entries": [
+    { "name": "TEST ENTITY ALPHA", "aliases": ["ALPHA TEST ENTITY", "T. ENTITY ALPHA"], "program": "TEST-PROGRAM-1" },
+    { "name": "TEST PERSON BETA", "aliases": ["BETA, TEST PERSON"], "program": "TEST-PROGRAM-1" },
+    { "name": "GAMMA HOLDINGS TEST LTD", "aliases": [], "program": "TEST-PROGRAM-2" }
+  ]
+}

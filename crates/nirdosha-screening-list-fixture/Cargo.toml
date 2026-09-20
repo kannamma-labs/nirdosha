@@ -1,0 +1,15 @@
+[package]
+name = "nirdosha-screening-list-fixture"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "ListProvider + Matcher for RFC 0025 SS8.4 screening, backed by a signed fixture list (no live vendor feed available in this workspace)"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
