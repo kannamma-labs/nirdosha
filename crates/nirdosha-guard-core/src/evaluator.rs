@@ -4,7 +4,7 @@
 //! deterministic deny-overrides kernel that registry and Cedar adapters can
 //! feed without making the IR depend on either frontend.
 
-use crate::{Action, Condition, Decision, EscalateTarget, EvaluationContext, FilterExpr, Obligation};
+use crate::{Action, Cap, Condition, Decision, EscalateTarget, EvaluationContext, FieldMask, FilterExpr, Obligation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyCandidate {
@@ -17,6 +17,12 @@ pub struct PolicyCandidate {
     pub filter: Option<FilterExpr>,
     pub obligations: Vec<Obligation>,
     pub escalation: Option<EscalateTarget>,
+    /// Cost/correctness caps this policy grants (`RowCap`, `MaxScanRows`,
+    /// ...) — an execution engine (read-path plan building) needs these;
+    /// the deny-overrides-allow decision itself does not.
+    pub caps: Vec<Cap>,
+    /// Field masks this policy grants — same reasoning as `caps`.
+    pub masks: Vec<FieldMask>,
     pub id: String,
 }
 
@@ -28,32 +34,38 @@ pub struct EvaluationResult {
     pub decision: Decision,
     pub obligations: Vec<Obligation>,
     pub residual_filter: Option<FilterExpr>,
+    pub caps: Vec<Cap>,
+    pub masks: Vec<FieldMask>,
 }
 
 pub fn evaluate(context: &EvaluationContext, policies: &[PolicyCandidate]) -> EvaluationResult {
     let mut matching = policies.iter().filter(|policy| matches_context(context, policy));
     let mut obligations = Vec::new();
     let mut residual_filter = None;
+    let mut caps = Vec::new();
+    let mut masks = Vec::new();
     let mut allow = false;
     let mut escalation = None;
 
     while let Some(policy) = matching.next() {
         if matches!(policy.effect, PolicyEffect::Deny) {
-            return EvaluationResult { decision: Decision::Deny { reason: format!("policy denied: {}", policy.id) }, obligations: Vec::new(), residual_filter: None };
+            return EvaluationResult { decision: Decision::Deny { reason: format!("policy denied: {}", policy.id) }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new() };
         }
         allow = true;
         obligations.extend(policy.obligations.clone());
         residual_filter = residual_filter.or_else(|| policy.filter.clone());
         escalation = escalation.or_else(|| policy.escalation.clone());
+        caps.extend(policy.caps.clone());
+        masks.extend(policy.masks.clone());
     }
 
     if let Some(target) = escalation {
-        return EvaluationResult { decision: Decision::Escalate { to: target }, obligations, residual_filter };
+        return EvaluationResult { decision: Decision::Escalate { to: target }, obligations, residual_filter, caps, masks };
     }
     if allow {
-        EvaluationResult { decision: Decision::Allow, obligations, residual_filter }
+        EvaluationResult { decision: Decision::Allow, obligations, residual_filter, caps, masks }
     } else {
-        EvaluationResult { decision: Decision::Deny { reason: "deny by default".into() }, obligations: Vec::new(), residual_filter: None }
+        EvaluationResult { decision: Decision::Deny { reason: "deny by default".into() }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new() }
     }
 }
 
@@ -75,7 +87,7 @@ mod tests {
     }
 
     fn candidate(effect: PolicyEffect) -> PolicyCandidate {
-        PolicyCandidate { effect, subjects: vec!["analyst".into()], action: Action::Read, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, id: "orders-read".into() }
+        PolicyCandidate { effect, subjects: vec!["analyst".into()], action: Action::Read, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], id: "orders-read".into() }
     }
 
     #[test]

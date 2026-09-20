@@ -21,9 +21,15 @@
 //! dataset field. This driver persists exactly that shape honestly (one
 //! row per `resource`, an opaque payload blob) rather than inventing
 //! structure the trait doesn't actually carry; it does not attempt
-//! per-field writes or read-path (`AccessPlan`) execution, which has no
-//! trait/contract of its own yet (a separate, undesigned gap — not solved
-//! here).
+//! per-field writes, and `commit()` remains a keyed upsert rather than a
+//! `row_scope`-bounded `UPDATE`/`DELETE` (Plan Phase 8's job).
+//!
+//! **Read path (Plan Phase 7).** `query()` compiles a `ReadPlanIr`'s
+//! `FilterExpr` with the same `RdbmsEmitter` `prepare()`/`commit()` already
+//! used, against a real `SELECT ... WHERE ... LIMIT <cap>` — the first
+//! implementation of `StoreDriver::query` anywhere in the workspace. Same
+//! refusal posture as the write side: no filter (hence no tenant scope) —
+//! reject, don't scan unscoped.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -31,9 +37,9 @@ use std::sync::Mutex;
 
 use nirdosha_guard_core::drivers::rdbms::{RdbmsEmitter, SqlDialect};
 use nirdosha_guard_core::{
-    AggregateSemantics, CapabilityManifest, FilterExpr, FilterNodeKind, LineageFacts, Tenant, Value,
+    AggregateSemantics, CapabilityManifest, FilterNodeKind, LineageFacts, Tenant, Value,
 };
-use nirdosha_guard_mic::{EntityBytes, PlanError, PlanIr, Prepared, Receipt, StoreDriver};
+use nirdosha_guard_mic::{EntityBytes, PlanError, PlanIr, Prepared, ReadPlanIr, Receipt, StoreDriver};
 use sha2::{Digest, Sha256};
 
 const TABLE_DDL: &str = r#"
@@ -123,14 +129,7 @@ fn build_postgres_manager(conn_str: &str) -> Result<PostgresManager, String> {
     Ok(PostgresManager { config, tls })
 }
 
-fn extract_tenant(filter: &FilterExpr) -> Option<String> {
-    match filter {
-        FilterExpr::TenantEq { value: Value::Str(tenant) } => Some(tenant.clone()),
-        FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().find_map(extract_tenant),
-        FilterExpr::Not(inner) => extract_tenant(inner),
-        _ => None,
-    }
-}
+use nirdosha_guard_core::extract_tenant;
 
 /// Real, pooled, TLS-capable Postgres implementation of `StoreDriver`.
 pub struct PostgresStoreDriver {
@@ -265,15 +264,83 @@ impl StoreDriver for PostgresStoreDriver {
         Ok(Receipt { store_commit_id: format!("pg-{xmin}"), digest })
     }
 
+    fn query(&self, plan: &ReadPlanIr) -> Result<Vec<EntityBytes>, PlanError> {
+        // Same posture as the write side's "missing tenant scope" refusal
+        // (`prepare`, above) and `MemStoreDriver::query`'s identical
+        // check: a read plan reaching this driver with no filter at all
+        // is refused, not silently turned into an unscoped `SELECT *`.
+        let filter = plan
+            .filter
+            .as_ref()
+            .ok_or_else(|| PlanError::Rejected("read plan has no filter — refusing an unscoped scan".into()))?;
+        let tenant = nirdosha_guard_core::extract_tenant(filter)
+            .ok_or_else(|| PlanError::Rejected("missing tenant scope".into()))?;
+        let sql_plan = RdbmsEmitter::compile_plan(filter, SqlDialect::Postgres, &Tenant(tenant.clone()));
+
+        let row_cap = plan.caps.iter().find_map(|cap| match cap {
+            nirdosha_guard_core::Cap::RowCap(n) => Some(*n),
+            _ => None,
+        });
+        // `MaxScanRows` bounds what the engine reads before filtering;
+        // without pushdown-vs-post-filter cost accounting (Plan Phase 9),
+        // this driver treats it the same as `RowCap` — both cap what
+        // comes back, which is honest for a fully-pushed-down `WHERE`
+        // (everything scanned matches the filter already) and merely
+        // conservative otherwise, never permissive.
+        let effective_cap = row_cap
+            .into_iter()
+            .chain(plan.caps.iter().find_map(|cap| match cap {
+                nirdosha_guard_core::Cap::MaxScanRows(n) => Some(*n),
+                _ => None,
+            }))
+            .min();
+
+        let query = match effective_cap {
+            Some(limit) => format!("SELECT payload FROM guard_entities WHERE {} LIMIT {limit}", sql_plan.where_clause),
+            None => format!("SELECT payload FROM guard_entities WHERE {}", sql_plan.where_clause),
+        };
+
+        let mut conn = self.pool.get().map_err(|e| PlanError::Store(e.to_string()))?;
+        let mut txn = conn.transaction().map_err(|e| PlanError::Store(e.to_string()))?;
+        // Scoped to this transaction only, same as `commit()` — RLS sees
+        // the real tenant for the duration of this one query.
+        txn.execute("SELECT set_config('app.tenant', $1, true)", &[&tenant])
+            .map_err(|e| PlanError::Store(e.to_string()))?;
+        let boxed_params: Vec<Box<dyn postgres::types::ToSql + Sync + Send>> =
+            sql_plan.parameters.iter().map(value_to_sql).collect();
+        let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            boxed_params.iter().map(|b| b.as_ref() as &(dyn postgres::types::ToSql + Sync)).collect();
+        let rows = txn
+            .query(query.as_str(), &param_refs)
+            .map_err(|e| PlanError::Store(e.to_string()))?;
+        txn.commit().map_err(|e| PlanError::Store(e.to_string()))?;
+        Ok(rows.into_iter().map(|row| EntityBytes(row.get::<_, Vec<u8>>(0))).collect())
+    }
+
     fn lineage(&self) -> LineageFacts {
         LineageFacts { sources: vec![], sink_keys: vec!["resource".into()] }
+    }
+}
+
+/// `FilterExpr::Value` -> a bound SQL parameter. `Dec` binds as its own
+/// canonical string form (its doc comment: "precise type enforced by
+/// schema") — this driver has no schema-typed column info to convert it
+/// to a real `NUMERIC` bind, so it stays text rather than guessing a
+/// precision.
+fn value_to_sql(value: &Value) -> Box<dyn postgres::types::ToSql + Sync + Send> {
+    match value {
+        Value::Int(v) => Box::new(*v),
+        Value::Bool(v) => Box::new(*v),
+        Value::Str(v) => Box::new(v.clone()),
+        Value::Dec(v) => Box::new(v.clone()),
+        Value::Null => Box::new(Option::<String>::None),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirdosha_guard_core::CompareOp;
+    use nirdosha_guard_core::{CompareOp, FilterExpr};
 
     #[test]
     fn extract_tenant_finds_top_level_tenant_eq() {

@@ -79,7 +79,16 @@ impl RdbmsEmitter {
                     SqlDialect::Postgres => format!("${idx}"),
                     SqlDialect::Sqlite | SqlDialect::GenericSql => "?".into(),
                 };
-                format!("\"tenant_id\" = {placeholder}")
+                // Column is `tenant`, not `tenant_id` — matching
+                // `guard_entities(resource, tenant, policy_version,
+                // payload)`, the actual schema
+                // `nirdosha-guard-store-postgres` creates. This was wrong
+                // from `"tenant_id"` until a real `SELECT` actually ran
+                // it (Plan Phase 7's `PostgresStoreDriver::query`) —
+                // `prepare()` only ever validated this method's output
+                // was well-formed, never executed it, and no unit test
+                // here exercised the `TenantEq` branch at all.
+                format!("\"tenant\" = {placeholder}")
             }
             FilterExpr::And(children) => {
                 let parts: Vec<String> = children
@@ -250,6 +259,19 @@ fn sanitize_ident(ident: &str) -> String {
 mod tests {
     use super::*;
     use crate::Value;
+
+    #[test]
+    fn emits_tenant_eq_against_the_real_column_name() {
+        // Regression test: this emitted "tenant_id" (no such column)
+        // instead of "tenant" (the real one in
+        // nirdosha-guard-store-postgres's `guard_entities` table) until a
+        // real SELECT actually ran it — nothing here exercised this
+        // branch before.
+        let expr = FilterExpr::TenantEq { value: Value::Str("tenant-alpha".into()) };
+        let plan = RdbmsEmitter::compile_plan(&expr, SqlDialect::Postgres, &Tenant("t1".into()));
+        assert_eq!(plan.where_clause, "\"tenant\" = $1");
+        assert_eq!(plan.parameters, vec![Value::Str("tenant-alpha".into())]);
+    }
 
     #[test]
     fn emits_postgres_bound_parameters() {

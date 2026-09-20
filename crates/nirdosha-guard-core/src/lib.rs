@@ -30,6 +30,23 @@ pub mod guard_down;
 pub mod relation_lower;
 pub mod snapshot;
 
+/// Extracts the tenant a `FilterExpr` scopes to, if any — the shared
+/// implementation both `nirdosha-guard-store-postgres` and
+/// `MemStoreDriver` need to enforce tenant isolation on `prepare`/`query`
+/// (a write with no `TenantEq` anywhere in its filter is rejected by both
+/// rather than written un-scoped). Lived as a private duplicate inside the
+/// Postgres driver crate alone until `MemStoreDriver` needed the identical
+/// logic for its own read-path query filtering (Plan Phase 7) — moved
+/// here so there's one implementation, not two that can drift.
+pub fn extract_tenant(filter: &FilterExpr) -> Option<String> {
+    match filter {
+        FilterExpr::TenantEq { value: Value::Str(tenant) } => Some(tenant.clone()),
+        FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().find_map(extract_tenant),
+        FilterExpr::Not(inner) => extract_tenant(inner),
+        _ => None,
+    }
+}
+
 /// A path to a field inside a record, e.g. `customer.address.zip`.
 pub type FieldPath = Vec<String>;
 

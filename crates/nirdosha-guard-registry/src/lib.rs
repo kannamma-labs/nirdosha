@@ -106,6 +106,8 @@ impl PolicyRegistration {
 			filter: lowered.filter,
 			obligations: lowered.obligations,
 			escalation: lowered.escalation,
+			caps: lowered.caps,
+			masks: lowered.masks,
 			id: self.id.to_string(),
 		})
 	}

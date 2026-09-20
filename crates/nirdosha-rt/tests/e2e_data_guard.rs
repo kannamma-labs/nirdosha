@@ -50,6 +50,8 @@ fn sample_policy() -> PolicyCandidate {
         filter: None,
         obligations: vec![],
         escalation: None,
+        caps: vec![],
+        masks: vec![],
     }
 }
 

@@ -3,12 +3,26 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::{Action, Decision, DecisionCacheKey, FilterExpr, FilterFragment, Value};
+use crate::{Action, Cap, Decision, DecisionCacheKey, FieldMask, FilterExpr, FilterFragment, Value};
 
 #[derive(Debug, Clone)]
 pub struct CachedDecision {
     pub decision: Decision,
     pub obligations: Vec<crate::Obligation>,
+    /// `residual_filter`/`caps`/`masks` were dropped on every cache hit
+    /// until now (`get` only ever returned `(decision, obligations)`,
+    /// forcing every caller to substitute `residual_filter: None` and no
+    /// caps/masks) — silently unsound for a cacheable action whose plan
+    /// actually depends on any of the three: a tenant-scoped write would
+    /// be a strange case to cache (writes already aren't cacheable, see
+    /// `insert`'s doc comment) but a *cacheable read* needing its
+    /// `RowCap`/masks enforced on the second, cache-hit request would
+    /// silently lose them. Found wiring Plan Phase 7 (the read path
+    /// actually consumes caps/masks for the first time), fixed here
+    /// rather than reproduced.
+    pub residual_filter: Option<FilterExpr>,
+    pub caps: Vec<Cap>,
+    pub masks: Vec<FieldMask>,
     inserted_at: Instant,
 }
 
@@ -21,13 +35,13 @@ pub struct DecisionCache {
 impl DecisionCache {
     pub fn new(ttl: Duration) -> Self { Self { map: HashMap::new(), ttl } }
 
-    pub fn get(&mut self, key: &DecisionCacheKey) -> Option<(Decision, Vec<crate::Obligation>)> {
+    pub fn get(&mut self, key: &DecisionCacheKey) -> Option<CachedDecision> {
         let cached = self.map.get(key)?;
         if cached.inserted_at.elapsed() > self.ttl {
             self.map.remove(key);
             return None;
         }
-        Some((cached.decision.clone(), cached.obligations.clone()))
+        Some(cached.clone())
     }
 
     /// Only cache decisions whose request shape is safe to reuse. Writes,
@@ -38,13 +52,23 @@ impl DecisionCache {
     /// read-only by the RFCs that define them (I9 aggregate leak control,
     /// RFC 0026 §9's lineage views, and `policy_simulation!`'s own "results
     /// are read-only").
-    pub fn insert(&mut self, key: DecisionCacheKey, decision: Decision, obligations: Vec<crate::Obligation>, classification: crate::Classification) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert(
+        &mut self,
+        key: DecisionCacheKey,
+        decision: Decision,
+        obligations: Vec<crate::Obligation>,
+        residual_filter: Option<FilterExpr>,
+        caps: Vec<Cap>,
+        masks: Vec<FieldMask>,
+        classification: crate::Classification,
+    ) -> bool {
         if matches!(key.action, Action::Create | Action::Update | Action::Delete | Action::Migrate | Action::Export | Action::Delegate)
             || classification >= crate::Classification::Restricted
         {
             return false;
         }
-        self.map.insert(key, CachedDecision { decision, obligations, inserted_at: Instant::now() });
+        self.map.insert(key, CachedDecision { decision, obligations, residual_filter, caps, masks, inserted_at: Instant::now() });
         true
     }
 
@@ -108,8 +132,21 @@ mod tests {
     #[test]
     fn unsafe_decisions_are_not_cached() {
         let mut cache = DecisionCache::new(Duration::from_secs(60));
-        assert!(!cache.insert(key(Action::Update), Decision::Allow, vec![], crate::Classification::Internal));
-        assert!(!cache.insert(key(Action::Read), Decision::Allow, vec![], crate::Classification::Restricted));
+        assert!(!cache.insert(key(Action::Update), Decision::Allow, vec![], None, vec![], vec![], crate::Classification::Internal));
+        assert!(!cache.insert(key(Action::Read), Decision::Allow, vec![], None, vec![], vec![], crate::Classification::Restricted));
+    }
+
+    #[test]
+    fn cache_hit_preserves_filter_caps_and_masks() {
+        let mut cache = DecisionCache::new(Duration::from_secs(60));
+        let filter = FilterExpr::TenantEq { value: Value::Str("t1".into()) };
+        let caps = vec![crate::Cap::RowCap(50)];
+        let masks = vec![crate::FieldMask { field: vec!["salary".into()], transform: crate::MaskTransform::Full }];
+        assert!(cache.insert(key(Action::Read), Decision::Allow, vec![], Some(filter.clone()), caps.clone(), masks.clone(), crate::Classification::Internal));
+        let hit = cache.get(&key(Action::Read)).expect("cache hit");
+        assert_eq!(hit.residual_filter, Some(filter));
+        assert_eq!(hit.caps, caps);
+        assert_eq!(hit.masks, masks);
     }
 
     #[test]

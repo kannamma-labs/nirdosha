@@ -12,7 +12,7 @@
 
 use nirdosha_guard_core::evaluator::{PolicyCandidate, PolicyEffect};
 use nirdosha_guard_core::{
-    Action, Classification, Destination, Environment, FilterExpr, PaginationMode, Purpose, QueryShape,
+    Action, Cap, Classification, Destination, Environment, FilterExpr, PaginationMode, Purpose, QueryShape,
     Subject, Tenant, Value,
 };
 use nirdosha_guard_mic::{EntityBytes, EvalRequest, GuardClient, Outcome};
@@ -52,6 +52,8 @@ fn tenant_scoped_policy(resource: &str, tenant: &str) -> PolicyCandidate {
         filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }),
         obligations: vec![],
         escalation: None,
+        caps: vec![],
+        masks: vec![],
     }
 }
 
@@ -157,11 +159,95 @@ fn prepare_rejects_a_write_plan_with_no_tenant_scope() {
         filter: None,
         obligations: vec![],
         escalation: None,
+        caps: vec![],
+        masks: vec![],
     };
     let mut client = GuardClient::new(vec![policy], "rls-test-notenant", temp_dir.join("audit.jsonl"));
     let req = EvalRequest { context: context_for("tenant-alpha", "no_scope_row") };
     let result = client.guarded_apply(&req, &driver, EntityBytes(b"payload".to_vec()), "trace-rls-2", 1_700_000_001);
     assert!(result.is_err(), "a write plan with no tenant scope must be rejected, not committed");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+fn read_policy(resource: &str, tenant: &str, caps: Vec<Cap>) -> PolicyCandidate {
+    PolicyCandidate {
+        id: format!("read-{resource}"),
+        effect: PolicyEffect::Allow,
+        subjects: vec!["analyst".into()],
+        action: Action::Read,
+        resource: resource.into(),
+        purpose: Some("aml_investigation".into()),
+        conditions: vec![],
+        filter: Some(FilterExpr::TenantEq { value: Value::Str(tenant.into()) }),
+        obligations: vec![],
+        escalation: None,
+        caps,
+        masks: vec![],
+    }
+}
+
+fn read_context(entity: &str, tenant: &str, action: Action) -> nirdosha_guard_core::EvaluationContext {
+    nirdosha_guard_core::EvaluationContext { action, ..context_for(tenant, entity) }
+}
+
+/// Real Postgres proof for `Plan Phase 7`'s read path: `guarded_read`
+/// against `PostgresStoreDriver::query` — filtered by real RLS-backed
+/// tenant scope, capped by a real SQL `LIMIT`, on rows a real `INSERT`
+/// (via `guarded_apply`) put there.
+#[test]
+#[ignore]
+fn guarded_read_executes_a_real_capped_filtered_select() {
+    let url = test_url();
+    let driver = PostgresStoreDriver::connect(&url).expect("connect + provision schema");
+
+    let temp_dir = std::env::temp_dir().join(format!("nirdosha-pg-driver-read-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    // Three rows for tenant-gamma, one for a different tenant — proves
+    // both the cap (3 exist, RowCap(2) must return exactly 2) and RLS
+    // tenant isolation (the other tenant's row must never appear) in one
+    // real round trip.
+    let mut writer = GuardClient::new(
+        vec![
+            tenant_scoped_policy("read_probe_1", "tenant-gamma"),
+            tenant_scoped_policy("read_probe_2", "tenant-gamma"),
+            tenant_scoped_policy("read_probe_3", "tenant-gamma"),
+            tenant_scoped_policy("read_probe_other", "tenant-delta"),
+        ],
+        "read-write-setup",
+        temp_dir.join("w.jsonl"),
+    );
+    for (i, resource) in ["read_probe_1", "read_probe_2", "read_probe_3"].iter().enumerate() {
+        let req = EvalRequest { context: context_for("tenant-gamma", resource) };
+        writer
+            .guarded_apply(&req, &driver, EntityBytes(vec![b'g', i as u8]), format!("trace-w-{resource}"), 1_700_000_100 + i as u64)
+            .expect("seed row must commit");
+    }
+    let other_req = EvalRequest { context: context_for("tenant-delta", "read_probe_other") };
+    writer
+        .guarded_apply(&other_req, &driver, EntityBytes(b"delta-row".to_vec()), "trace-w-other", 1_700_000_200)
+        .expect("other-tenant seed row must commit");
+
+    // The read is authorized against "read_probe_1" as the entity kind
+    // (mirroring the in-memory driver's tests) — RowCap(2) plus the real
+    // WHERE clause is what actually determines which/how-many rows come
+    // back, not the entity name matched during authorization.
+    let mut reader = GuardClient::new(vec![read_policy("read_probe_1", "tenant-gamma", vec![Cap::RowCap(2)])], "read-test", temp_dir.join("r.jsonl"));
+    let read_req = EvalRequest { context: read_context("read_probe_1", "tenant-gamma", Action::Read) };
+    let outcome = reader.guarded_read(&read_req, &driver, "trace-r-1", 1_700_000_300).expect("read must be allowed");
+    assert_eq!(outcome.rows.len(), 2, "RowCap(2) must cap a real SQL LIMIT even though 3 tenant-gamma rows exist");
+    for row in &outcome.rows {
+        assert_eq!(row.0[0], b'g', "no tenant-delta row may appear in a tenant-gamma-scoped read");
+    }
+
+    // Uncapped: all three tenant-gamma rows, and only those three.
+    let mut reader_uncapped = GuardClient::new(vec![read_policy("read_probe_1", "tenant-gamma", vec![])], "read-test-2", temp_dir.join("r2.jsonl"));
+    let outcome_uncapped = reader_uncapped
+        .guarded_read(&read_req, &driver, "trace-r-2", 1_700_000_400)
+        .expect("uncapped read must be allowed");
+    assert_eq!(outcome_uncapped.rows.len(), 3);
+    assert!(outcome_uncapped.rows.iter().all(|row| row.0[0] == b'g'));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
