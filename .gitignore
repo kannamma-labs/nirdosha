@@ -13,6 +13,13 @@
 
 # Generated bundles (kept locally only)
 /all_examples.md
+
+# `nirdosha_guard_registry::write_dump_from_env`'s default output path —
+# written by any dialect crate's `nirdosha_guard_dump` test (see that
+# function's doc comment) when NIRDOSHA_GUARD_DUMP_PATH isn't set, e.g.
+# running `cargo test nirdosha_guard_dump` directly rather than through
+# `cargo nirdosha verify --guard` (which always sets it to a target/ path).
+nirdosha-registry.json
 /nir_files.zip
 
 # Runtime database artifacts

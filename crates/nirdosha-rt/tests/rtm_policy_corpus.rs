@@ -1112,6 +1112,17 @@ fn corpus_policies_lower_to_real_structured_records() {
     assert_eq!(sla[0].masks[0].field, vec!["subject_id".to_string()]);
 }
 
+/// The convention `cargo nirdosha verify --guard` (Plan Phase 6) looks
+/// for: a `#[test]`, any name, any file, that calls
+/// `write_dump_from_env()`. `cargo test` finds it by content
+/// (`cargo test nirdosha_guard_dump`), not a fixed path — see that
+/// function's doc comment in `nirdosha-guard-registry` for why this has
+/// to run inside a test/run process rather than be read from source.
+#[test]
+fn nirdosha_guard_dump() {
+    nirdosha_guard_registry::write_dump_from_env().expect("registry dump must write");
+}
+
 /// End-to-end: registry dump -> `RegistryView` -> `verify()`, on the real
 /// corpus. This is the actual `cargo nirdosha verify --guard` pipeline
 /// (minus Phase 6's build-time wiring), run against real content for the

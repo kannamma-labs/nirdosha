@@ -154,19 +154,43 @@ fn main() -> ExitCode {
     }
 }
 
+/// `cargo nirdosha verify --guard [--registry-json <path>]`.
+///
+/// With `--registry-json`: the original, manual mode — read a
+/// pre-produced dump straight off disk (CI pipelines that build the dump
+/// their own way, or offline inspection of one already written).
+///
+/// Without it: the dump has to come from *running* the target package —
+/// `POLICIES`/`DATASETS`/etc. are `linkme::distributed_slice`s that only
+/// populate once the crate declaring them is linked into a live process,
+/// so no static analysis of source alone can produce this. Runs `cargo
+/// test nirdosha_guard_dump` inside the package at the current directory
+/// (via `locate()`, the same "run from inside the package" convention
+/// every other subcommand here uses) — the one-line convention documented
+/// on `nirdosha_guard_registry::write_dump_from_env` — and reads the JSON
+/// it writes. A package with no such test gets a clear error naming the
+/// convention, not a confusing "file not found".
 fn verify_guard_cli(args: &[String]) -> ExitCode {
-    let path = flag_value(args, "--registry-json").unwrap_or_else(|| "nirdosha-registry.json".into());
-    let json = match std::fs::read_to_string(&path) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("nirdosha: cannot read guard registry {path}: {error}");
-            return ExitCode::FAILURE;
-        }
+    let json = match flag_value(args, "--registry-json") {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("nirdosha: cannot read guard registry {path}: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => match produce_guard_dump() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("nirdosha: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
     };
     let registry = match nirdosha_guard_verify::RegistryView::from_json(&json) {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("nirdosha: invalid guard registry {path}: {error}");
+            eprintln!("nirdosha: invalid guard registry: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -174,7 +198,45 @@ fn verify_guard_cli(args: &[String]) -> ExitCode {
     for finding in &findings {
         eprintln!("{} {:?}: {}", finding.pass, finding.severity, finding.message);
     }
+    if findings.is_empty() {
+        eprintln!("nirdosha: guard verify — {} polic{} checked, no findings", registry.policies.len(), if registry.policies.len() == 1 { "y" } else { "ies" });
+    }
     if findings.iter().any(|finding| finding.severity == nirdosha_guard_verify::Severity::Error) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// Runs the target package's `nirdosha_guard_dump` test (see
+/// `verify_guard_cli`'s doc comment) and returns the JSON it wrote.
+fn produce_guard_dump() -> Result<String, String> {
+    let loc = locate()?;
+    let dump_dir = loc.target_dir.join("nirdosha");
+    std::fs::create_dir_all(&dump_dir).map_err(|e| format!("cannot create {}: {e}", dump_dir.display()))?;
+    let dump_path = dump_dir.join("guard-registry.json");
+    // A stale file from a previous run must not be mistaken for a fresh
+    // one if the test below fails to run at all for some reason other
+    // than a clean process exit (e.g. the binary is killed).
+    let _ = std::fs::remove_file(&dump_path);
+
+    let manifest = loc.manifest_dir.join("Cargo.toml");
+    let status = Command::new("cargo")
+        .args(["test", "--manifest-path"])
+        .arg(&manifest)
+        .args(["nirdosha_guard_dump", "--", "--exact"])
+        .env(nirdosha_guard_registry::GUARD_DUMP_PATH_ENV, &dump_path)
+        .status()
+        .map_err(|e| format!("cannot run `cargo test`: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "`cargo test nirdosha_guard_dump` failed in {} — does this package have a\n  #[test] fn nirdosha_guard_dump() {{ nirdosha_guard_registry::write_dump_from_env().unwrap(); }}\nsomewhere in its tests/? (see nirdosha_guard_registry::write_dump_from_env's doc comment)",
+            loc.manifest_dir.display()
+        ));
+    }
+    if !dump_path.exists() {
+        return Err(format!(
+            "cargo test nirdosha_guard_dump ran but {} was never written — is nirdosha_guard_dump actually calling write_dump_from_env()?",
+            dump_path.display()
+        ));
+    }
+    std::fs::read_to_string(&dump_path).map_err(|e| format!("cannot read {}: {e}", dump_path.display()))
 }
 
 /// Explicit consumer gate, deliberately independent of Cargo metadata.
@@ -354,6 +416,8 @@ fn usage() {
          - `cargo nirdosha build --fast`  Stage 1 only (source scan): sub-second, no nightly/rustc-dev needed\n\
          - `cargo nirdosha verify --workspace`  strict gate over every in-dialect crate + certificate\n\
          - `cargo nirdosha verify --provenance`  also binds Cargo.lock + toolchain into the certificate\n\
+         - `cargo nirdosha verify --guard`  runs the package's `nirdosha_guard_dump` test, verifies the result\n\
+         - `cargo nirdosha verify --guard --registry-json <path>`  verify a pre-produced dump instead\n\
          - `cargo nirdosha bench`          nfr(latency_ms) CI gate: your test suite is the workload\n\
          - `cargo nirdosha check-certificate <path> --root <package> --require <guarantee>`\n\
          - `cargo nirdosha keygen [-o key.pk8]`   generate an Ed25519 keypair for `verify --sign`\n\

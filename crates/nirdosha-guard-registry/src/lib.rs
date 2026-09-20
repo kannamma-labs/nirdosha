@@ -258,6 +258,37 @@ pub fn dump() -> RegistryDump {
 
 pub fn dump_json() -> Result<String, serde_json::Error> { serde_json::to_string(&dump()) }
 
+/// The env var `cargo nirdosha verify --guard` sets before running a
+/// dialect crate's dump test, and the default path used when it's unset
+/// (matching the CLI's own `--registry-json` default,
+/// `nirdosha-registry.json`).
+pub const GUARD_DUMP_PATH_ENV: &str = "NIRDOSHA_GUARD_DUMP_PATH";
+const DEFAULT_GUARD_DUMP_PATH: &str = "nirdosha-registry.json";
+
+/// The one-line convention a dialect crate needs so `cargo nirdosha
+/// verify --guard` can produce its own input without a manual step: a
+/// `#[test]` (any name, any file — `cargo test` finds it by content, not
+/// by a fixed path) that calls this function. `POLICIES`/`DATASETS`/etc.
+/// only populate once the crate that declared them has actually been
+/// *linked* into a running binary — a plain `cargo build` doesn't run
+/// anything, so the dump has to happen from inside a `cargo test`/`cargo
+/// run` process, not be synthesized by the CLI tool from source alone.
+///
+/// ```ignore
+/// #[test]
+/// fn nirdosha_guard_dump() {
+///     nirdosha_guard_registry::write_dump_from_env().unwrap();
+/// }
+/// ```
+pub fn write_dump_from_env() -> std::io::Result<std::path::PathBuf> {
+	let path = std::env::var(GUARD_DUMP_PATH_ENV)
+		.map(std::path::PathBuf::from)
+		.unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_GUARD_DUMP_PATH));
+	let json = dump_json().map_err(std::io::Error::other)?;
+	std::fs::write(&path, json)?;
+	Ok(path)
+}
+
 pub fn coverage_matrix() -> Vec<&'static str> {
 	vec!["policies", "datasets", "roles", "ports", "models", "workflows", "approval_chains", "invariants", "purposes", "driver_manifests"]
 }
