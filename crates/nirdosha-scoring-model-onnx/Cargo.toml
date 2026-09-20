@@ -1,0 +1,14 @@
+[package]
+name = "nirdosha-scoring-model-onnx"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "ModelRuntime/Model driver for RFC 0025 SS8.3 scoring, wrapping the ort ONNX Runtime crate against a signed artifact"
+license = "MIT"
+publish = false
+
+[dependencies]
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["download-binaries", "tls-rustls"] }
+sha2 = "0.10"
+
+[dev-dependencies]

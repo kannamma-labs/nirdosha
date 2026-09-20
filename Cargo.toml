@@ -61,6 +61,7 @@ members = [
     # workspace implemented -- each follows the same one-honest-driver
     # pattern as nirdosha-guard-store-postgres above.
     "crates/nirdosha-screening-list-fixture",
+    "crates/nirdosha-scoring-model-onnx",
     # Pure, dependency-light transaction-isolation-anomaly detection
     # (the Direct Serialization Graph algorithm), shared verbatim by
     # `crates/runtime-kernels` (the live FFI-hooked path, via its own
