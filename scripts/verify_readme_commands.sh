@@ -48,10 +48,6 @@ work_dir="$(mktemp -d)"
 # by its documented, hardcoded `-o` name, so a local run of this script
 # never leaves stray build artifacts or a still-listening server behind.
 cleanup() {
-    pkill -x hello 2>/dev/null || true
-    pkill -x employee 2>/dev/null || true
-    pkill -x serve_demo 2>/dev/null || true
-    rm -f "$repo_root/hello" "$repo_root/employee" "$repo_root/ui.html" "$repo_root/crates/compiler/hello" "$repo_root/crates/compiler/serve_demo"
     rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -108,16 +104,25 @@ while IFS= read -r line; do
             echo "----- block $block_num -----"
             cat "$block_file"
             echo "-----"
-            # `timeout` because one block (the compiled-`serve` example)
-            # ends in `&& ./serve_demo`, which starts a real HTTP server
-            # that never exits on its own -- still running after the
-            # timeout is exactly what a server command *should* do
-            # (exit 124), not a failure; anything else nonzero is real.
+            # `timeout`: a block that starts a real server with no exit
+            # of its own is expected to still be running when this fires
+            # (exit 124), not a failure -- no block currently does this,
+            # but the mechanism costs nothing to keep for the next one
+            # that might. `# nirdosha:expect-exit N`: a block whose whole
+            # point is a real refusal (rt-payroll-lying's `cargo nirdosha
+            # build` -- "REFUSED" is the demonstration, not an accident)
+            # declares its own expected nonzero code as a trailing
+            # comment line, read here rather than hand-waved past --
+            # this script still fails loudly if that exact command ever
+            # starts exiting 0 (the refusal silently stopped happening)
+            # or a *different* nonzero code (the refusal reason changed
+            # shape), not just anything-but-zero.
+            expect_exit="$(grep -o 'nirdosha:expect-exit [0-9]*' "$block_file" | tail -1 | awk '{print $2}')"
             set +e
             (cd "$repo_root" && timeout 8 sh "$block_file")
             status=$?
             set -e
-            if [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; then
+            if [ "$status" -eq 0 ] || [ "$status" -eq 124 ] || { [ -n "$expect_exit" ] && [ "$status" -eq "$expect_exit" ]; }; then
                 echo "PASS  block $block_num"
             else
                 echo "FAIL  block $block_num (exit $status)"

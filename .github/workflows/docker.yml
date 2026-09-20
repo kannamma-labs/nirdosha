@@ -68,10 +68,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           # `crates/presence-gateway/Dockerfile` needs the repo root as
-          # its build context: it also `COPY`s `crates/compiler/`'s
-          # manifest for its `[dev-dependencies]` path resolution (that
-          # Dockerfile's own doc comment), not just
-          # `crates/presence-gateway/` itself.
+          # its build context: its own `COPY` lines are written relative
+          # to it (`crates/presence-gateway/Cargo.toml`, `.../src`), not
+          # relative to `crates/presence-gateway/` itself. (Used to also
+          # need `crates/compiler/`'s manifest for a dev-dependency's
+          # path resolution -- that dependency, and the crate it pointed
+          # at, are both gone as of 2026-09-20.)
           context: .
           file: crates/presence-gateway/Dockerfile
           platforms: linux/amd64,linux/arm64

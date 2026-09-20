@@ -1,7 +1,9 @@
 # Local Postgres for the opt-in, real-server test convention
 # (`NIRDOSHA_TEST_POSTGRES_URL`-gated, `#[ignore]`-by-default tests — see
-# `crates/compiler/tests/postgres.rs`) and for manually exercising the
-# Nirdosha Ops Console demo against a real Postgres server.
+# `crates/nirdosha-guard-store-postgres/tests/postgres_store_driver.rs`;
+# originated in the now-deleted `crates/compiler/tests/postgres.rs`) and
+# for manually exercising the Nirdosha Ops Console demo against a real
+# Postgres server.
 #
 # Not used by CI (`.github/workflows/build.yml` has no Postgres service
 # container, deliberately — see docs/ROADMAP.md). Start it yourself:

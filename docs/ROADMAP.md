@@ -932,6 +932,18 @@ of Track B has landed.*
 > was built and verified at the time; it does not describe a currently
 > live, published artifact.
 
+> **Follow-up (2026-09-20): actually deleted, not just deprecated in
+> place.** `crates/compiler` (and `crates/grammar_export`/
+> `crates/grammar_check`, both purpose-built to validate its grammar)
+> are gone from this repo, along with the CI jobs, benchmark harness,
+> and Python client that targeted it. See the git history around this
+> date for the full removal; `README.md` is rewritten around the v2
+> Rust dialect as of the same date. Everything below Track A still
+> describes the deleted crate and stays exactly as it was — an accurate
+> historical record of work done on code that no longer exists here,
+> per this doc's own README.md-adjacent convention of not rewriting
+> history to match a later deletion.
+
 - `[DONE]` **A1. `transact` durability under real failure conditions** —
   actually kill the process mid-transaction under load and confirm
   crash-replay behaves, not just trust the existing test suite.

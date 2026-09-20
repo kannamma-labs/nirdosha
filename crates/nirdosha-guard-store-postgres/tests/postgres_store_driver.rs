@@ -1,8 +1,9 @@
 //! Opt-in, real-Postgres proof for `PostgresStoreDriver`, matching the
 //! repo's existing `NIRDOSHA_TEST_POSTGRES_URL`-gated, `#[ignore]`-by-default
-//! convention (`crates/compiler/tests/postgres.rs`,
-//! `crates/runtime-kernels/src/kernel/db.rs`'s own tests): never run by
-//! CI, fails loudly rather than skipping when no real server is reachable.
+//! convention (originated in the now-deleted `crates/compiler/tests/postgres.rs`;
+//! `crates/runtime-kernels/src/kernel/db.rs`'s own tests follow it too):
+//! never run by CI, fails loudly rather than skipping when no real
+//! server is reachable.
 //!
 //! Run against `docker-compose.dev.yml`:
 //!   docker compose -f docker-compose.dev.yml up -d
