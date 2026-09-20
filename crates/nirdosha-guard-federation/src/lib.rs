@@ -6,7 +6,7 @@
 //! they leave the guard boundary (I16).
 
 use nirdosha_guard_core::{
-    AccessPlan, BindingId, BudgetToken, DatasetRegistryEntry, FieldMask, FilterExpr,
+    AccessPlan, BindingId, BudgetToken, DatasetRegistryEntry, FieldMask, FieldPath, FilterExpr,
     FederatedPlan, MergeMode, MergeSpec, QueryShape,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,6 +100,24 @@ impl BudgetCoordinator {
     }
 }
 
+/// Cross-store aggregate safety posture for a federated merge (RFC 0023
+/// §1C.1's "disjoint / dedup-key / deny"): a caller must explicitly assert
+/// one of the two safe merge modes — there is no third, implicit "just
+/// union it" option, so an unsafe merge (neither provably disjoint nor
+/// deduplicated) simply cannot be expressed here, rather than being caught
+/// (or missed) by a runtime check a caller could forget to add.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeSafety {
+    /// The bindings are asserted disjoint (e.g. sharded by tenant) — no
+    /// row can appear in more than one binding's result, so a plain union
+    /// is safe without deduplication. Trusts the caller's assertion; this
+    /// layer has no independent way to verify disjointness.
+    Disjoint,
+    /// The bindings may overlap; deduplicate on these field paths, keeping
+    /// the first record seen for each distinct key.
+    DedupKeys(Vec<FieldPath>),
+}
+
 /// Merge-layer re-filtering and re-masking engine (I16).
 pub struct MergeLayerReFilter;
 
@@ -127,6 +145,46 @@ impl MergeLayerReFilter {
             })
             .collect()
     }
+
+    /// Unions every binding's record set per `safety`, then re-filters/
+    /// re-masks the merged result. `MergeSafety::DedupKeys` computes the
+    /// dedup key on the *raw* values, before masking — deduplicating
+    /// after masking would let two genuinely different rows collapse into
+    /// one just because their masked identity field both read
+    /// `"[MASKED]"`.
+    pub fn merge_refilter_and_remask(
+        per_binding: Vec<Vec<Vec<(String, String)>>>,
+        safety: &MergeSafety,
+        filter: &Option<FilterExpr>,
+        masks: &[FieldMask],
+    ) -> Vec<Vec<(String, String)>> {
+        let unioned: Vec<Vec<(String, String)>> = per_binding.into_iter().flatten().collect();
+        let deduped = match safety {
+            MergeSafety::Disjoint => unioned,
+            MergeSafety::DedupKeys(keys) => dedup_by_keys(unioned, keys),
+        };
+        Self::refilter_and_remask(deduped, filter, masks)
+    }
+}
+
+fn dedup_by_keys(records: Vec<Vec<(String, String)>>, keys: &[FieldPath]) -> Vec<Vec<(String, String)>> {
+    if keys.is_empty() {
+        return records;
+    }
+    let mut seen = std::collections::HashSet::new();
+    records
+        .into_iter()
+        .filter(|record| {
+            let key: Vec<Option<String>> = keys
+                .iter()
+                .map(|path| {
+                    let joined = path.join(".");
+                    record.iter().find(|(k, _)| *k == joined).map(|(_, v)| v.clone())
+                })
+                .collect();
+            seen.insert(key)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -189,5 +247,38 @@ mod tests {
         }];
         let res = MergeLayerReFilter::refilter_and_remask(records, &None, &masks);
         assert_eq!(res[0][0].1, "[MASKED]");
+    }
+
+    fn record(id: &str) -> Vec<(String, String)> {
+        vec![("id".to_string(), id.to_string())]
+    }
+
+    #[test]
+    fn merge_disjoint_unions_without_deduplicating() {
+        let per_binding = vec![vec![record("a")], vec![record("a")]]; // same id in both — Disjoint trusts the caller
+        let merged = MergeLayerReFilter::merge_refilter_and_remask(per_binding, &MergeSafety::Disjoint, &None, &[]);
+        assert_eq!(merged.len(), 2, "Disjoint must not deduplicate — that's the caller's own assertion to get right");
+    }
+
+    #[test]
+    fn merge_dedup_keys_removes_repeated_rows_across_bindings() {
+        let per_binding = vec![vec![record("a"), record("b")], vec![record("a"), record("c")]];
+        let merged = MergeLayerReFilter::merge_refilter_and_remask(per_binding, &MergeSafety::DedupKeys(vec![vec!["id".into()]]), &None, &[]);
+        let mut ids: Vec<String> = merged.into_iter().map(|r| r[0].1.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string(), "c".to_string()], "the duplicate 'a' from the second binding must be removed, everything else kept");
+    }
+
+    #[test]
+    fn merge_dedup_keys_computes_the_key_before_masking_not_after() {
+        // Two distinct ids that would both mask to "[MASKED]" must not be
+        // collapsed into one just because they're indistinguishable after
+        // masking — the dedup key here is `id` itself (masked), so
+        // deduplicating post-mask would wrongly drop one of two real rows.
+        let per_binding = vec![vec![record("a")], vec![record("b")]];
+        let masks = vec![FieldMask { field: vec!["id".into()], transform: nirdosha_guard_core::MaskTransform::Full }];
+        let merged = MergeLayerReFilter::merge_refilter_and_remask(per_binding, &MergeSafety::DedupKeys(vec![vec!["id".into()]]), &None, &masks);
+        assert_eq!(merged.len(), 2, "two real, distinct rows must survive even though masking makes their dedup key look identical");
+        assert!(merged.iter().all(|r| r[0].1 == "[MASKED]"));
     }
 }

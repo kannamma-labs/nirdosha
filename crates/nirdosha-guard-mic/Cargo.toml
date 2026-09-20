@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+nirdosha-guard-federation = { path = "../nirdosha-guard-federation" }
 nirdosha-guard-registry = { path = "../nirdosha-guard-registry" }
 nirdosha-audit = { path = "../nirdosha-audit" }
 nirdosha-lineage = { path = "../nirdosha-lineage" }

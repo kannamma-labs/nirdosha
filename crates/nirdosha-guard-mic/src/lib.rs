@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use nirdosha_audit::envelope::{AuditEnvelope, AuditRecordKind, ModuleAuditChain};
 use nirdosha_guard_core::decision_cache::DecisionCache;
 use nirdosha_guard_core::evaluator::{self, EvaluationResult, PolicyCandidate};
-use nirdosha_guard_core::{Cap, CapabilityManifest, Decision, DecisionCacheKey, EvaluationContext, FieldMask, FilterExpr, FilterNodeKind, LineageFacts, PaginationMode, Value, WriteAction};
+use nirdosha_guard_core::{BindingId, Cap, CapabilityManifest, Decision, DecisionCacheKey, EvaluationContext, FieldMask, FilterExpr, FilterNodeKind, LineageFacts, PaginationMode, Value, WriteAction};
 use nirdosha_lineage::collector::{KernelCollector, ObservationContext, PlanFacts};
 use nirdosha_lineage::{Authority, DriverRef, EdgeType, FlowCompleteness, TransformId};
 
@@ -139,6 +139,27 @@ pub struct ReadOutcome {
 	/// only; offset rejected") — each driver defines its own token shape
 	/// and nothing outside that driver is meant to parse it.
 	pub next_cursor: Option<String>,
+}
+
+/// One physical binding a federated read executes against — Plan Phase 12
+/// (RFC 0023 §1C.1). `&dyn StoreDriver` rather than a generic type
+/// parameter: real federation spans heterogeneous stores (Postgres +
+/// in-memory today; Kafka/ONNX/etc. once Phase 13 ships), so bindings in
+/// one federated read are not all the same concrete driver type.
+pub struct FederatedBinding<'d> {
+	pub id: BindingId,
+	pub driver: &'d dyn StoreDriver,
+}
+
+/// A successful `guarded_federated_read`: the merged, deduplicated,
+/// re-masked records (already redacted — unlike `ReadOutcome::rows`, these
+/// are typed key/value pairs, not opaque bytes, because the merge/dedup/
+/// re-mask layer needs field-level structure to do its job; `decode`'s
+/// caller-supplied translation from `EntityBytes` is what makes that
+/// possible without this crate assuming a schema of its own).
+pub struct FederatedReadOutcome {
+	pub records: Vec<Vec<(String, String)>>,
+	pub masks: Vec<FieldMask>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,11 +368,45 @@ impl GuardClient {
 	/// it lying about. A driver that has never been attested is trusted
 	/// as claimed — attestation is opt-in instrumentation (RFC 0023 §7),
 	/// not a precondition for every read.
-	fn effective_manifest<D: StoreDriver>(&self, driver: &D) -> nirdosha_guard_core::CapabilityManifest {
+	fn effective_manifest<D: StoreDriver + ?Sized>(&self, driver: &D) -> nirdosha_guard_core::CapabilityManifest {
 		match self.attestations.get(&driver.manifest().driver_name) {
 			Some(findings) => attestation::downgrade_manifest(driver.manifest(), findings),
 			None => driver.manifest().clone(),
 		}
+	}
+
+	/// I15 check shared by `guarded_read` and `guarded_federated_read`: a
+	/// masked field may not drive a non-projection clause unless granted
+	/// via `predicate_use`. See `guarded_read`'s call site for the full
+	/// rationale.
+	fn check_i15_masked_filter_fields(&self, filter: &FilterExpr, masks: &[FieldMask], predicate_use: &[String]) -> Result<(), String> {
+		let masked_fields: std::collections::HashSet<&nirdosha_guard_core::FieldPath> = masks.iter().map(|mask| &mask.field).collect();
+		let granted: std::collections::HashSet<&str> = predicate_use.iter().map(String::as_str).collect();
+		for field in nirdosha_guard_core::filter_fields(filter) {
+			let is_masked = masked_fields.contains(field);
+			let is_granted = field.len() == 1 && granted.contains(field[0].as_str());
+			if is_masked && !is_granted {
+				return Err(format!("I15: field {field:?} is masked and not granted via predicate_use — cannot drive a filter clause"));
+			}
+		}
+		Ok(())
+	}
+
+	/// I12 dynamic-downgrade check shared by `guarded_read` and
+	/// `guarded_federated_read`: refuse a filter that needs a
+	/// `FilterNodeKind` the driver's attested (not raw-claimed) manifest
+	/// doesn't actually support. See `guarded_read`'s call site for the
+	/// full rationale. `?Sized` so this also accepts a `&dyn StoreDriver`
+	/// federated binding, not only a concrete driver type.
+	fn check_i12_capability_supported<D: StoreDriver + ?Sized>(&self, driver: &D, filter: &FilterExpr) -> Result<(), String> {
+		let effective_manifest = self.effective_manifest(driver);
+		let supported: std::collections::HashSet<&nirdosha_guard_core::FilterNodeKind> = effective_manifest.supported_filter_nodes.iter().collect();
+		for kind in nirdosha_guard_core::required_filter_node_kinds(filter) {
+			if !supported.contains(&kind) {
+				return Err(format!("{:?}", PlanError::CapabilityUnsupported { required: format!("{kind:?}"), attested: format!("{:?}", effective_manifest.supported_filter_nodes) }));
+			}
+		}
+		Ok(())
 	}
 
 	pub fn guarded_read<D: StoreDriver>(&mut self, request: &EvalRequest, driver: &D, trace_id: impl Into<String>, now_ms: u64) -> Result<ReadOutcome, Rejected> {
@@ -403,19 +458,12 @@ impl GuardClient {
 				// here, at plan-build time, before the driver ever sees
 				// the filter — a masked field silently leaking through a
 				// WHERE clause is exactly the class of bug a guard exists
-				// to catch before it reaches a query planner.
+				// to catch before it reaches a query planner. Shared with
+				// `guarded_federated_read` via `check_i15_masked_filter_fields`.
 				if let Some(filter) = &resolved_filter {
-					let masked_fields: std::collections::HashSet<&nirdosha_guard_core::FieldPath> =
-						evaluation.masks.iter().map(|mask| &mask.field).collect();
-					let granted: std::collections::HashSet<&str> =
-						evaluation.predicate_use.iter().map(String::as_str).collect();
-					for field in nirdosha_guard_core::filter_fields(filter) {
-						let is_masked = masked_fields.contains(field);
-						let is_granted = field.len() == 1 && granted.contains(field[0].as_str());
-						if is_masked && !is_granted {
-							self.audit.append(&envelope, now_ms);
-							return Err(Rejected::Failed { reason: format!("I15: field {field:?} is masked and not granted via predicate_use — cannot drive a filter clause") });
-						}
+					if let Err(reason) = self.check_i15_masked_filter_fields(filter, &evaluation.masks, &evaluation.predicate_use) {
+						self.audit.append(&envelope, now_ms);
+						return Err(Rejected::Failed { reason });
 					}
 				}
 				// I12 dynamic downgrade: don't trust a driver's raw claim if
@@ -426,14 +474,12 @@ impl GuardClient {
 				// Compare/TimeRange lie `attestation::attest_canary_rows`
 				// caught) must fail closed here instead of silently returning
 				// whatever unfiltered/mis-filtered rows it happens to produce.
+				// Shared with `guarded_federated_read` via
+				// `check_i12_capability_supported`.
 				if let Some(filter) = &resolved_filter {
-					let effective_manifest = self.effective_manifest(driver);
-					let supported: std::collections::HashSet<&nirdosha_guard_core::FilterNodeKind> = effective_manifest.supported_filter_nodes.iter().collect();
-					for kind in nirdosha_guard_core::required_filter_node_kinds(filter) {
-						if !supported.contains(&kind) {
-							self.audit.append(&envelope, now_ms);
-							return Err(Rejected::Failed { reason: format!("{:?}", PlanError::CapabilityUnsupported { required: format!("{kind:?}"), attested: format!("{:?}", effective_manifest.supported_filter_nodes) }) });
-						}
+					if let Err(reason) = self.check_i12_capability_supported(driver, filter) {
+						self.audit.append(&envelope, now_ms);
+						return Err(Rejected::Failed { reason });
 					}
 				}
 				let plan = ReadPlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), filter: resolved_filter, caps: evaluation.caps, pagination: request.context.query_shape.pagination.clone(), policy_version: request.context.policy_version.clone() };
@@ -472,6 +518,100 @@ impl GuardClient {
 					self.audit.append(&lineage, now_ms);
 				}
 				Ok(ReadOutcome { rows, masks: evaluation.masks, next_cursor: query_result.next_cursor })
+			}
+		}
+	}
+
+	/// Plan Phase 12 (RFC 0023 §1C.1): a single logical decision, evaluated
+	/// once, pushed as a `ReadPlanIr` to every real `bindings` driver in
+	/// turn, then unioned/deduplicated/re-masked by
+	/// `nirdosha_guard_federation::MergeLayerReFilter` — the same I15/I12
+	/// checks and audit/lineage shape `guarded_read` uses for a single
+	/// binding, just fanned out. `safety` (`MergeSafety::Disjoint` or
+	/// `::DedupKeys`) must be asserted explicitly; there is no implicit
+	/// "just union it" path (see `MergeSafety`'s own doc comment). `decode`
+	/// turns each binding's opaque `EntityBytes` rows into the typed
+	/// key/value records the merge layer needs — this crate has no schema
+	/// of its own to do that translation, same reason `ReadOutcome::rows`
+	/// stays opaque on the single-binding path.
+	pub fn guarded_federated_read(
+		&mut self,
+		request: &EvalRequest,
+		bindings: &[FederatedBinding],
+		safety: nirdosha_guard_federation::MergeSafety,
+		decode: impl Fn(&EntityBytes) -> Vec<(String, String)>,
+		trace_id: impl Into<String>,
+		now_ms: u64,
+	) -> Result<FederatedReadOutcome, Rejected> {
+		let trace_id = trace_id.into();
+		if bindings.is_empty() {
+			return Err(Rejected::Failed { reason: "guarded_federated_read requires at least one binding".into() });
+		}
+		if matches!(request.context.query_shape.pagination, PaginationMode::Rejected) {
+			return Err(Rejected::Failed { reason: "offset pagination is rejected — use an opaque cursor (I10/§8.4)".into() });
+		}
+		let evaluation = self.evaluate(request);
+		let binding_ids: Vec<String> = bindings.iter().map(|binding| binding.id.clone()).collect();
+		let envelope = AuditEnvelope { trace_id: trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: request.context.subject.id.clone(), action: format!("{:?}", request.context.action), resource: request.context.entity.clone(), policy_versions: vec![request.context.policy_version.clone()], decision: format!("{:?}", evaluation.decision), obligations: evaluation.obligations.iter().map(|item| format!("{item:?}")).collect(), kind: AuditRecordKind::Decision, content: serde_json::json!({ "phase": "before_federated_read", "bindings": binding_ids }) };
+		match evaluation.decision {
+			Decision::Deny { reason } => { self.audit.append(&envelope, now_ms); Err(Rejected::Denied { reason }) }
+			Decision::Escalate { to } => { self.audit.append(&envelope, now_ms); Err(Rejected::Escalated { target: format!("{to:?}") }) }
+			Decision::Pending { .. } => { self.audit.append(&envelope, now_ms); Err(Rejected::Failed { reason: "read cannot be pending — escalation/approval applies to writes, not reads".into() }) }
+			Decision::Allow => {
+				if let Some(filter) = &evaluation.residual_filter {
+					if let Err(reason) = self.check_i15_masked_filter_fields(filter, &evaluation.masks, &evaluation.predicate_use) {
+						self.audit.append(&envelope, now_ms);
+						return Err(Rejected::Failed { reason });
+					}
+				}
+				let mut per_binding_records = Vec::with_capacity(bindings.len());
+				for binding in bindings {
+					if let Some(filter) = &evaluation.residual_filter {
+						if let Err(reason) = self.check_i12_capability_supported(binding.driver, filter) {
+							self.audit.append(&envelope, now_ms);
+							return Err(Rejected::Failed { reason: format!("binding {}: {reason}", binding.id) });
+						}
+					}
+					let plan = ReadPlanIr { resource: request.context.entity.clone(), dataset: request.context.dataset.clone(), filter: evaluation.residual_filter.clone(), caps: evaluation.caps.clone(), pagination: request.context.query_shape.pagination.clone(), policy_version: request.context.policy_version.clone() };
+					let result = binding.driver.query(&plan).map_err(|error| Rejected::Failed { reason: format!("binding {}: {error:?}", binding.id) })?;
+					per_binding_records.push(result.rows.iter().map(|row| decode(row)).collect::<Vec<_>>());
+				}
+				let merged = nirdosha_guard_federation::MergeLayerReFilter::merge_refilter_and_remask(per_binding_records, &safety, &evaluation.residual_filter, &evaluation.masks);
+				let mut read_envelope = envelope.clone();
+				self.audit.append(&envelope, now_ms);
+				read_envelope.kind = AuditRecordKind::Mutation;
+				read_envelope.content = serde_json::json!({ "records_returned": merged.len(), "bindings": binding_ids });
+				self.audit.append(&read_envelope, now_ms);
+				for binding in bindings {
+					let collector = KernelCollector { config: nirdosha_lineage::collector::CollectorConfig { enabled: true } };
+					if let Some(observation) = collector.observe(
+						PlanFacts {
+							edge_type: EdgeType::Read,
+							transformation: TransformId::Policy(request.context.policy_version.clone()),
+							driver: DriverRef { port: "store".into(), vendor: binding.driver.manifest().driver_name.clone(), version: "0.1.0".into() },
+							authority: Authority::KernelExecution,
+							completeness: FlowCompleteness::Full,
+							sampled: false,
+							degraded: false,
+							sink: nirdosha_guard_core::LineageEntity { entity: request.context.entity.clone(), keys: Vec::new() },
+						},
+						Some(&binding.driver.lineage()),
+						ObservationContext {
+							module: self.audit.module.clone(),
+							trace_id: trace_id.clone(),
+							subject_id: request.context.subject.id.clone(),
+							tenant_id: request.context.tenant.0.clone(),
+							policy_version: request.context.policy_version.clone(),
+							purpose: request.context.purpose.clone(),
+							destination: request.context.destination.clone(),
+							receipt_digest: [0u8; 32],
+						},
+					) {
+						let lineage = AuditEnvelope { trace_id: observation.trace_id.clone(), ts: nirdosha_lineage::time::format_rfc3339_ms(now_ms), module: self.audit.module.clone(), subject: observation.subject_id.clone(), action: format!("{:?}", request.context.action), resource: observation.sink.node.catalog_id.clone(), policy_versions: vec![observation.policy_version.clone()], decision: "allow".into(), obligations: vec![], kind: AuditRecordKind::Lineage, content: observation.to_audit_content() };
+						self.audit.append(&lineage, now_ms);
+					}
+				}
+				Ok(FederatedReadOutcome { records: merged, masks: evaluation.masks })
 			}
 		}
 	}
@@ -1010,6 +1150,73 @@ mod tests {
 		let mut rows: Vec<String> = outcome.rows.into_iter().filter_map(|r| String::from_utf8(r.0).ok()).collect();
 		rows.sort();
 		assert_eq!(rows, vec!["acct-1".to_string(), "acct-2".to_string()], "must return exactly the accounts related to cust-1, not acct-9");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	fn decode_kv_row(row: &EntityBytes) -> Vec<(String, String)> {
+		String::from_utf8(row.0.clone()).unwrap().split(';').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+	}
+
+	#[test]
+	fn guarded_federated_read_unions_dedups_and_remasks_across_two_real_bindings() {
+		let root = scratch_dir("federated-read");
+		let driver_a = MemStoreDriver::new();
+		let driver_b = MemStoreDriver::new();
+
+		let mut writer_a = GuardClient::new(vec![tenant_scoped_write_policy("cust-1", "tenant-a"), tenant_scoped_write_policy("cust-2", "tenant-a")], "wa", root.join("wa.jsonl"));
+		writer_a.guarded_apply(&write_request("cust-1", "tenant-a"), &driver_a, EntityBytes(b"id=cust-1;salary=100000".to_vec()), "t-a-1", 1_000).unwrap();
+		writer_a.guarded_apply(&write_request("cust-2", "tenant-a"), &driver_a, EntityBytes(b"id=cust-2;salary=90000".to_vec()), "t-a-2", 1_000).unwrap();
+
+		// cust-1 exists in BOTH bindings — a real cross-store overlap the
+		// merge layer must dedup down to one record, not two.
+		let mut writer_b = GuardClient::new(vec![tenant_scoped_write_policy("cust-1", "tenant-a"), tenant_scoped_write_policy("cust-3", "tenant-a")], "wb", root.join("wb.jsonl"));
+		writer_b.guarded_apply(&write_request("cust-1", "tenant-a"), &driver_b, EntityBytes(b"id=cust-1;salary=999999".to_vec()), "t-b-1", 1_000).unwrap();
+		writer_b.guarded_apply(&write_request("cust-3", "tenant-a"), &driver_b, EntityBytes(b"id=cust-3;salary=80000".to_vec()), "t-b-2", 1_000).unwrap();
+
+		let mask = FieldMask { field: vec!["salary".into()], transform: MaskTransform::Full };
+		let policy = read_policy("customer", "tenant-a", vec![], vec![mask.clone()]);
+		let mut reader = GuardClient::new(vec![policy], "fr", root.join("fr.jsonl"));
+
+		let bindings = [
+			FederatedBinding { id: "binding-a".into(), driver: &driver_a },
+			FederatedBinding { id: "binding-b".into(), driver: &driver_b },
+		];
+		let req = read_request("customer", "tenant-a");
+		let outcome = reader
+			.guarded_federated_read(&req, &bindings, nirdosha_guard_federation::MergeSafety::DedupKeys(vec![vec!["id".into()]]), decode_kv_row, "trace-fed", 2_000)
+			.expect("federated read must succeed");
+
+		let mut ids: Vec<String> = outcome.records.iter().map(|r| r.iter().find(|(k, _)| k == "id").unwrap().1.clone()).collect();
+		ids.sort();
+		assert_eq!(ids, vec!["cust-1".to_string(), "cust-2".to_string(), "cust-3".to_string()], "the duplicate cust-1 across both bindings must be deduplicated to one");
+		assert!(outcome.records.iter().all(|r| r.iter().find(|(k, _)| k == "salary").unwrap().1 == "[MASKED]"), "salary must be remasked in the merged result");
+		assert_eq!(outcome.masks, vec![mask]);
+
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn guarded_federated_read_disjoint_mode_does_not_deduplicate() {
+		let root = scratch_dir("federated-read-disjoint");
+		let driver_a = MemStoreDriver::new();
+		let driver_b = MemStoreDriver::new();
+
+		let mut writer_a = GuardClient::new(vec![tenant_scoped_write_policy("cust-1", "tenant-a")], "wa2", root.join("wa.jsonl"));
+		writer_a.guarded_apply(&write_request("cust-1", "tenant-a"), &driver_a, EntityBytes(b"id=cust-1".to_vec()), "t-a", 1_000).unwrap();
+		let mut writer_b = GuardClient::new(vec![tenant_scoped_write_policy("cust-1", "tenant-a")], "wb2", root.join("wb.jsonl"));
+		writer_b.guarded_apply(&write_request("cust-1", "tenant-a"), &driver_b, EntityBytes(b"id=cust-1".to_vec()), "t-b", 1_000).unwrap();
+
+		let policy = read_policy("customer", "tenant-a", vec![], vec![]);
+		let mut reader = GuardClient::new(vec![policy], "fr2", root.join("fr.jsonl"));
+		let bindings = [
+			FederatedBinding { id: "binding-a".into(), driver: &driver_a },
+			FederatedBinding { id: "binding-b".into(), driver: &driver_b },
+		];
+		let req = read_request("customer", "tenant-a");
+		let outcome = reader
+			.guarded_federated_read(&req, &bindings, nirdosha_guard_federation::MergeSafety::Disjoint, decode_kv_row, "trace-fed-2", 2_000)
+			.expect("federated read must succeed");
+		assert_eq!(outcome.records.len(), 2, "Disjoint must union without deduplicating, even though both bindings returned the same id");
 		let _ = std::fs::remove_dir_all(root);
 	}
 
