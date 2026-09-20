@@ -84,6 +84,7 @@ fn e2e_data_guard_and_metadata_plane_workflow() {
             resource: "trade_records".into(),
             purpose: Some("compliance_audit".into()),
             effect: "allow".into(),
+            ..Default::default()
         }],
         ports: vec![nirdosha_guard_verify::PortView { name: "store".into() }],
         drivers: vec![

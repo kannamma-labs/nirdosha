@@ -229,7 +229,13 @@ pub static DRIVER_MANIFESTS: [DriverManifestRecord] = [..];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegistryDump {
-	pub policies: Vec<PolicyRegistration>,
+	/// Fully lowered ("Gate 2" expanded) records, not the raw
+	/// `PolicyRegistration` — a consumer of the dump (`cargo nirdosha
+	/// verify --guard` foremost) needs the real clause data (subjects,
+	/// caps, field_policy, conditions, ...) to check anything meaningful;
+	/// the opaque `clauses_json` blob on `PolicyRegistration` was never
+	/// meant to be that consumer's input.
+	pub policies: Vec<PolicyRecord>,
 	pub datasets: Vec<DatasetRecord>,
 	pub roles: Vec<RoleRecord>,
 	pub ports: Vec<PortRecord>,
@@ -243,7 +249,7 @@ pub struct RegistryDump {
 
 pub fn dump() -> RegistryDump {
 	RegistryDump {
-		policies: POLICIES.to_vec(), datasets: DATASETS.to_vec(), roles: ROLES.to_vec(),
+		policies: records(), datasets: DATASETS.to_vec(), roles: ROLES.to_vec(),
 		ports: PORTS.to_vec(), models: MODELS.to_vec(), workflows: WORKFLOWS.to_vec(),
 		approval_chains: APPROVAL_CHAINS.to_vec(), invariants: INVARIANTS.to_vec(),
 		purposes: PURPOSES.to_vec(), driver_manifests: DRIVER_MANIFESTS.to_vec(),

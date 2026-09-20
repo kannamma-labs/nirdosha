@@ -32,8 +32,14 @@ impl DecisionCache {
 
     /// Only cache decisions whose request shape is safe to reuse. Writes,
     /// exports, and restricted reads remain uncached by contract.
+    /// `Delegate` joins that list — minting a delegation token is a
+    /// stateful, non-idempotent action (RFC 0023 §9.4/I11), not a read;
+    /// `Aggregate`/`LineageQuery`/`Simulate` stay cacheable — all three are
+    /// read-only by the RFCs that define them (I9 aggregate leak control,
+    /// RFC 0026 §9's lineage views, and `policy_simulation!`'s own "results
+    /// are read-only").
     pub fn insert(&mut self, key: DecisionCacheKey, decision: Decision, obligations: Vec<crate::Obligation>, classification: crate::Classification) -> bool {
-        if matches!(key.action, Action::Create | Action::Update | Action::Delete | Action::Migrate | Action::Export)
+        if matches!(key.action, Action::Create | Action::Update | Action::Delete | Action::Migrate | Action::Export | Action::Delegate)
             || classification >= crate::Classification::Restricted
         {
             return false;

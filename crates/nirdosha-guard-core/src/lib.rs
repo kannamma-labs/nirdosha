@@ -138,6 +138,21 @@ pub struct EvaluationContext {
 }
 
 /// Actions the guard decides on.
+///
+/// `Aggregate`/`LineageQuery`/`Simulate`/`Delegate` added alongside the
+/// original seven: found by running RTM's real corpus
+/// (`examples/rtm/roles-N-guard_policy.md`) through `Action::parse_wire` —
+/// `bi-aggregate`/`lead-dashboard`/`hold-stats`/`lead-sla-aggregate` use
+/// `action == "aggregate"`, `lineage-explore`/`lineage-audit` use
+/// `"lineage_query"` (matching `lineage_query!`'s own vocabulary),
+/// `policy-simulate` uses `"simulate"` (matching `policy_simulation!`),
+/// and `admin-mint-delegation` uses `"delegate"`. Every one of those real
+/// policies silently vanished from `PolicyRegistration::to_candidate()`
+/// (which `filter_map`s out an unparseable action) before this — not a
+/// compile error, not a runtime panic, just a policy that looked live in
+/// every listing and never matched a request. `nirdosha-guard-verify`'s V3
+/// pass now catches exactly this class of gap for whatever this enum
+/// still doesn't cover.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     Read,
@@ -147,6 +162,10 @@ pub enum Action {
     Migrate,
     Export,
     Enumerate,
+    Aggregate,
+    LineageQuery,
+    Simulate,
+    Delegate,
 }
 
 impl Action {
@@ -164,6 +183,10 @@ impl Action {
             "migrate" => Some(Action::Migrate),
             "export" => Some(Action::Export),
             "enumerate" => Some(Action::Enumerate),
+            "aggregate" => Some(Action::Aggregate),
+            "lineage_query" => Some(Action::LineageQuery),
+            "simulate" => Some(Action::Simulate),
+            "delegate" => Some(Action::Delegate),
             _ => None,
         }
     }

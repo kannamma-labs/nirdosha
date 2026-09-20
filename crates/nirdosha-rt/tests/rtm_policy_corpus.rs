@@ -1111,3 +1111,39 @@ fn corpus_policies_lower_to_real_structured_records() {
     assert_eq!(sla[0].masks.len(), 1);
     assert_eq!(sla[0].masks[0].field, vec!["subject_id".to_string()]);
 }
+
+/// End-to-end: registry dump -> `RegistryView` -> `verify()`, on the real
+/// corpus. This is the actual `cargo nirdosha verify --guard` pipeline
+/// (minus Phase 6's build-time wiring), run against real content for the
+/// first time since any of it existed.
+#[test]
+fn corpus_registry_dump_round_trips_through_verify() {
+    let json = nirdosha_guard_registry::dump_json().expect("registry must serialize");
+    let registry =
+        nirdosha_guard_verify::RegistryView::from_json(&json).expect("dump must deserialize into RegistryView");
+    assert_eq!(registry.policies.len(), nirdosha_guard_registry::POLICIES.len());
+
+    let findings = nirdosha_guard_verify::verify(&registry);
+    let by_pass = |pass: &str| findings.iter().filter(|f| f.pass == pass).count();
+    println!("V1={} V2={} V3={} V4={} V5={} V6={} V7={} V8={}",
+        by_pass("V1"), by_pass("V2"), by_pass("V3"), by_pass("V4"),
+        by_pass("V5"), by_pass("V6"), by_pass("V7"), by_pass("V8"));
+    for finding in &findings {
+        println!("  {} {:?}: {} ({:?})", finding.pass, finding.severity, finding.message, finding.item);
+    }
+
+    // V1/V2/V3 must be clean: every registration has an id/action/resource,
+    // effect is allow/deny, and action is one of the seven canonical wire
+    // strings (Phase 1's for/in-list parsing plus Phase 3's lowering
+    // produced well-formed records for all 114).
+    assert_eq!(by_pass("V1"), 0, "V1 findings: {findings:?}");
+    assert_eq!(by_pass("V2"), 0, "V2 findings: {findings:?}");
+    assert_eq!(by_pass("V3"), 0, "V3 findings: {findings:?}");
+    // V4: none of the corpus's real filters/conditions negate a relation.
+    assert_eq!(by_pass("V4"), 0, "V4 findings: {findings:?}");
+    // V5/V8 need driver manifests, which this corpus (pure policy/catalog
+    // declarations, no #[dataset]-attached store drivers) never registers
+    // — nothing to find either way.
+    assert_eq!(by_pass("V5"), 0);
+    assert_eq!(by_pass("V8"), 0);
+}
