@@ -23,7 +23,15 @@ pub struct PolicyRecord {
 	pub line: u32,
 }
 
+/// Serialized lowercase (`"allow"`/`"deny"`) to match the wire vocabulary
+/// `guard_policy!` source uses and `nirdosha-guard-verify::PolicyView`
+/// expects — the previous default (PascalCase `"Allow"`/`"Deny"`) meant
+/// `nirdosha-guard-verify`'s V2 pass (`effect != "allow" && effect != "deny"`)
+/// would reject every real registration once fed through `dump_json()`,
+/// a mismatch nothing caught because nothing called `dump_json()` end to
+/// end until this phase wired it up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Effect { Allow, Deny }
 
 /// Const-friendly registration emitted by proc macros. Gate 2 expands this
@@ -32,12 +40,59 @@ pub enum Effect { Allow, Deny }
 pub struct PolicyRegistration {
 	pub id: &'static str,
 	pub effect: Effect,
+	/// Role names from `for <Role>, <Role>...`. Empty means "any subject"
+	/// (matches `PolicyCandidate::subjects.is_empty()` semantics in
+	/// `nirdosha_guard_core::evaluator::matches_context`).
+	pub subjects: &'static [&'static str],
 	pub action: &'static str,
 	pub resource: &'static str,
 	pub purpose: Option<&'static str>,
 	pub clauses_json: Option<&'static str>,
 	pub source: &'static str,
 	pub line: u32,
+}
+
+impl PolicyRegistration {
+	/// Expands this const registration into the runtime `PolicyCandidate`
+	/// the evaluator actually matches against. Only identity/routing fields
+	/// (subjects/action/resource/purpose/effect) are populated here —
+	/// clause-derived fields (`filter`/`caps`/`obligations`/`escalation`)
+	/// come from real clause lowering, not yet wired into this
+	/// registration shape.
+	///
+	/// Returns `None` if `action` isn't one of the closed `Action` wire
+	/// strings (`read`/`create`/`update`/`delete`/`migrate`/`export`/
+	/// `enumerate`) — a policy source typo surfaces here, not as a silent
+	/// always-deny.
+	pub fn to_candidate(&self) -> Option<nirdosha_guard_core::evaluator::PolicyCandidate> {
+		use nirdosha_guard_core::evaluator::{PolicyCandidate, PolicyEffect};
+		let action = nirdosha_guard_core::Action::parse_wire(self.action)?;
+		let effect = match self.effect {
+			Effect::Allow => PolicyEffect::Allow,
+			Effect::Deny => PolicyEffect::Deny,
+		};
+		Some(PolicyCandidate {
+			effect,
+			subjects: self.subjects.iter().map(|s| s.to_string()).collect(),
+			action,
+			resource: self.resource.to_string(),
+			purpose: self.purpose.map(|p| p.to_string()),
+			conditions: Vec::new(),
+			filter: None,
+			obligations: Vec::new(),
+			escalation: None,
+			id: self.id.to_string(),
+		})
+	}
+}
+
+/// All registered policies, expanded into evaluator-ready candidates.
+/// Registrations whose `action` doesn't parse are skipped (silently
+/// dropped, not silently mis-evaluated) — callers that need to catch that
+/// case should compare `POLICIES.len()` against this Vec's length, which is
+/// exactly what `nirdosha-guard-verify`'s V1 pass is for.
+pub fn candidates() -> Vec<nirdosha_guard_core::evaluator::PolicyCandidate> {
+	POLICIES.iter().filter_map(PolicyRegistration::to_candidate).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

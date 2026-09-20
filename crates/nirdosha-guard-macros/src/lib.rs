@@ -14,10 +14,36 @@ use syn::{
 struct PolicyInput {
     effect: Ident,
     id: LitStr,
-    action: LitStr,
-    resource: LitStr,
+    subjects: Vec<Ident>,
+    actions: Vec<LitStr>,
+    resources: Vec<LitStr>,
     purpose: Option<LitStr>,
     clauses: String,
+}
+
+/// Parses either `== "value"` (single) or `in ["a", "b", ...]` (list) after
+/// a clause keyword (`action`/`resource`) has already been consumed.
+/// `in` is a Rust keyword, not an `Ident` — it must be peeked/parsed as
+/// `Token![in]`, the same fix `for` needed below.
+fn parse_clause_values(input: ParseStream<'_>) -> Result<Vec<LitStr>> {
+    if input.peek(Token![==]) {
+        let _: Token![==] = input.parse()?;
+        Ok(vec![input.parse()?])
+    } else if input.peek(Token![in]) {
+        let _: Token![in] = input.parse()?;
+        let content;
+        syn::bracketed!(content in input);
+        let mut values = Vec::new();
+        while !content.is_empty() {
+            values.push(content.parse::<LitStr>()?);
+            if content.peek(Token![,]) {
+                let _: Token![,] = content.parse()?;
+            }
+        }
+        Ok(values)
+    } else {
+        Err(input.error("expected `==` or `in [...]`"))
+    }
 }
 
 impl Parse for PolicyInput {
@@ -28,17 +54,14 @@ impl Parse for PolicyInput {
         }
         let id: LitStr = input.parse()?;
 
-        // Optional `for Role, Role...`
-        if input.peek(Ident) && input.fork().parse::<Ident>()?.to_string() == "for" {
-            let _: Ident = input.parse()?;
-            while !input.peek(Ident)
-                || input
-                    .fork()
-                    .parse::<Ident>()
-                    .map(|value| value.to_string() != "when")
-                    .unwrap_or(false)
-            {
-                let _: Ident = input.parse()?;
+        // Optional `for Role, Role...`. `for` is a Rust keyword, not an
+        // `Ident` — peeking `Ident` here never matched it, so this branch
+        // was previously dead for every real `for <Role>` policy.
+        let mut subjects = Vec::new();
+        if input.peek(Token![for]) {
+            let _: Token![for] = input.parse()?;
+            loop {
+                subjects.push(input.parse::<Ident>()?);
                 if input.peek(Token![,]) {
                     let _: Token![,] = input.parse()?;
                 } else {
@@ -55,18 +78,16 @@ impl Parse for PolicyInput {
         if action_name != "action" {
             return Err(syn::Error::new(action_name.span(), "expected `action`"));
         }
-        let _: Token![==] = input.parse()?;
-        let action: LitStr = input.parse()?;
+        let actions = parse_clause_values(input)?;
 
-        let mut resource = LitStr::new("*", proc_macro2::Span::call_site());
+        let mut resources = vec![LitStr::new("*", proc_macro2::Span::call_site())];
         let mut purpose = None;
 
         if input.peek(Token![&&]) {
             let _: Token![&&] = input.parse()?;
             let resource_name: Ident = input.parse()?;
             if resource_name == "resource" {
-                let _: Token![==] = input.parse()?;
-                resource = input.parse()?;
+                resources = parse_clause_values(input)?;
             }
         }
 
@@ -79,8 +100,31 @@ impl Parse for PolicyInput {
                 if kw == "purpose" && input.peek(syn::token::Paren) {
                     let content;
                     syn::parenthesized!(content in input);
-                    if let Ok(p) = content.parse::<LitStr>() {
-                        purpose = Some(p);
+                    // `content` holds either a string literal (the original
+                    // `policy!` convention) or a bare identifier — RTM's
+                    // `purpose(FraudMonitoring)` style, an enum-variant-like
+                    // reference rather than a wire string. `content.peek`
+                    // (not `.parse`) is required here: a *failed* typed
+                    // `.parse::<LitStr>()` still records its span in syn's
+                    // shared "furthest unexpected token" tracker even when
+                    // the `Result::Err` itself is caught and discarded —
+                    // and the top-level `syn::parse_str`/`parse2` entry
+                    // point surfaces that recorded span as a hard error
+                    // regardless of whether `PolicyInput::parse` overall
+                    // returns `Ok`. Confirmed by direct reproduction: the
+                    // exact same "successfully reached end of parse loop,
+                    // returned Ok" path still surfaced as a top-level
+                    // "unexpected token" error until the attempt was
+                    // changed from parse-and-catch to peek-then-parse.
+                    if content.peek(LitStr) {
+                        purpose = Some(content.parse::<LitStr>()?);
+                    } else {
+                        // Bare identifier form: capture as the wire string
+                        // (`FraudMonitoring` -> `"FraudMonitoring"`) rather
+                        // than silently dropping it — RTM's whole `purpose!`
+                        // enum's variant names are exactly these identifiers.
+                        let ident: Ident = content.parse()?;
+                        purpose = Some(LitStr::new(&ident.to_string(), ident.span()));
                     }
                 } else {
                     clauses_tokens.push(kw.to_string());
@@ -94,8 +138,9 @@ impl Parse for PolicyInput {
         Ok(Self {
             effect,
             id,
-            action,
-            resource,
+            subjects,
+            actions,
+            resources,
             purpose,
             clauses: clauses_tokens.join(" "),
         })
@@ -108,24 +153,16 @@ fn policy_impl(input: TokenStream) -> TokenStream {
         Err(error) => return error.into_compile_error().into(),
     };
     let id = parsed.id.value();
-    let static_name = format_ident!(
-        "__NIRDOSHA_POLICY_{}",
-        id.chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    );
+    let sanitized_id: String = id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+        .collect();
     let effect = if parsed.effect == "allow" {
         quote!(::nirdosha_guard_registry::Effect::Allow)
     } else {
         quote!(::nirdosha_guard_registry::Effect::Deny)
     };
     let id_lit = parsed.id;
-    let action = parsed.action;
-    let resource = parsed.resource;
     let purpose_expr = match parsed.purpose {
         Some(p) => quote!(Some(#p)),
         None => quote!(None),
@@ -136,23 +173,43 @@ fn policy_impl(input: TokenStream) -> TokenStream {
         let clauses = parsed.clauses;
         quote!(Some(#clauses))
     };
+    // `parsed.subjects` are `Ident`s; render each as its own string literal.
+    let subject_lits: Vec<LitStr> = parsed
+        .subjects
+        .iter()
+        .map(|ident| LitStr::new(&ident.to_string(), ident.span()))
+        .collect();
+    let subjects_expr = quote!(&[#(#subject_lits),*]);
 
-    quote! {
-        #[used]
-        #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::POLICIES)]
-        #[linkme(crate = ::nirdosha_guard_registry::linkme)]
-        static #static_name: ::nirdosha_guard_registry::PolicyRegistration = ::nirdosha_guard_registry::PolicyRegistration {
-            id: #id_lit,
-            effect: #effect,
-            action: #action,
-            resource: #resource,
-            purpose: #purpose_expr,
-            clauses_json: #clauses_expr,
-            source: module_path!(),
-            line: line!(),
-        };
+    // A policy with `action in [...]` and/or `resource in [...]` is a
+    // shorthand for one registration per (action, resource) pair — the
+    // downstream IR (`PolicyRecord`/`PolicyCandidate`) is single-action,
+    // single-resource by design, so the fan-out happens here, once, at
+    // macro-expansion time.
+    let mut output = proc_macro2::TokenStream::new();
+    for (a_idx, action) in parsed.actions.iter().enumerate() {
+        for (r_idx, resource) in parsed.resources.iter().enumerate() {
+            let static_name =
+                format_ident!("__NIRDOSHA_POLICY_{}_{}_{}", sanitized_id, a_idx, r_idx);
+            output.extend(quote! {
+                #[used]
+                #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::POLICIES)]
+                #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+                static #static_name: ::nirdosha_guard_registry::PolicyRegistration = ::nirdosha_guard_registry::PolicyRegistration {
+                    id: #id_lit,
+                    effect: #effect,
+                    subjects: #subjects_expr,
+                    action: #action,
+                    resource: #resource,
+                    purpose: #purpose_expr,
+                    clauses_json: #clauses_expr,
+                    source: module_path!(),
+                    line: line!(),
+                };
+            });
+        }
     }
-    .into()
+    output.into()
 }
 
 /// `policy! { allow "name" when ... }` — canonical policy surface.
@@ -250,11 +307,47 @@ pub fn purpose(args: TokenStream, input: TokenStream) -> TokenStream {
     attribute_impl("purpose", args, input)
 }
 
+/// Collision-free static name for a `CATALOG`-registered item.
+///
+/// Every macro below previously used a single hardcoded static name
+/// (`__NIRDOSHA_APPROVAL_CHAIN_REG` etc.), so a *second* invocation in the
+/// same module was a hard `E0428` "defined multiple times" error — unlike
+/// `guard_policy!`, none of them derived a name from their own content.
+/// Confirmed by compiling `examples/rtm/roles-N-guard_policy.md` verbatim:
+/// it calls `approval_chain!` seven times in one file (`00_core.nir`) and
+/// `workflow!` five times in another (`10_domains.nir`); every invocation
+/// past the first failed to compile. Hashing the invocation's own token
+/// text gives a name that's unique per distinct declaration and stable
+/// across rebuilds (no dependence on line/column, which are unstable
+/// across nightly toolchains for function-like macros).
+fn catalog_static_name(kind: &str, content: &str) -> Ident {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    format_ident!("__NIRDOSHA_{}_{:016X}", kind.to_ascii_uppercase(), hasher.finish())
+}
+
+/// Best-effort human-readable catalog name: the identifier immediately
+/// following `marker` in the token stream (e.g. `chain sar_release` ->
+/// `"sar_release"`), falling back to `kind` when the grammar has no
+/// reliable leading name token to key off (`break_glass!`, `enumerate!`,
+/// the two `audit_*!` macros — none of RTM's real usages give one).
+fn extract_named_after(input_str: &str, marker: &str, kind: &'static str) -> String {
+    let tokens: Vec<&str> = input_str.split_whitespace().collect();
+    tokens
+        .iter()
+        .position(|t| *t == marker)
+        .and_then(|i| tokens.get(i + 1))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| kind.to_string())
+}
+
 /// `guard_roles! { RoleA, RoleB, ... }`.
 #[proc_macro]
 pub fn guard_roles(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
-    let static_name = format_ident!("__NIRDOSHA_ROLES_REGISTRATION");
+    let static_name = catalog_static_name("ROLES", &input_str);
     quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
@@ -268,18 +361,19 @@ pub fn guard_roles(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// `approval_chain! { name { ... } }`.
+/// `approval_chain! { chain name { ... } }`.
 #[proc_macro]
 pub fn approval_chain(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
-    let static_name = format_ident!("__NIRDOSHA_APPROVAL_CHAIN_REG");
+    let static_name = catalog_static_name("APPROVAL_CHAIN", &input_str);
+    let name = extract_named_after(&input_str, "chain", "approval_chain");
     quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
         #[linkme(crate = ::nirdosha_guard_registry::linkme)]
         static #static_name: ::nirdosha_guard_registry::CatalogRegistration = ::nirdosha_guard_registry::CatalogRegistration {
             kind: "approval_chain",
-            name: "approval_chain",
+            name: #name,
             source: #input_str,
         };
     }
@@ -290,25 +384,26 @@ pub fn approval_chain(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn workflow(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
-    let static_name = format_ident!("__NIRDOSHA_WORKFLOW_REG");
+    let static_name = catalog_static_name("WORKFLOW", &input_str);
+    let name = extract_named_after(&input_str, "machine", "workflow");
     quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
         #[linkme(crate = ::nirdosha_guard_registry::linkme)]
         static #static_name: ::nirdosha_guard_registry::CatalogRegistration = ::nirdosha_guard_registry::CatalogRegistration {
             kind: "workflow",
-            name: "workflow",
+            name: #name,
             source: #input_str,
         };
     }
     .into()
 }
 
-/// `break_glass! { grant name { ... } }`.
+/// `break_glass! { scope(...) ttl(...) dual_approve ... }`.
 #[proc_macro]
 pub fn break_glass(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
-    let static_name = format_ident!("__NIRDOSHA_BREAK_GLASS_REG");
+    let static_name = catalog_static_name("BREAK_GLASS", &input_str);
     quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
@@ -326,7 +421,7 @@ pub fn break_glass(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn audit_sampling(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
-    let static_name = format_ident!("__NIRDOSHA_AUDIT_SAMPLING_REG");
+    let static_name = catalog_static_name("AUDIT_SAMPLING", &input_str);
     quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
@@ -344,7 +439,7 @@ pub fn audit_sampling(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn audit_rules(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
-    let static_name = format_ident!("__NIRDOSHA_AUDIT_RULES_REG");
+    let static_name = catalog_static_name("AUDIT_RULES", &input_str);
     quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
@@ -362,7 +457,7 @@ pub fn audit_rules(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn enumerate(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
-    let static_name = format_ident!("__NIRDOSHA_ENUMERATE_REG");
+    let static_name = catalog_static_name("ENUMERATE", &input_str);
     quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
@@ -375,4 +470,3 @@ pub fn enumerate(input: TokenStream) -> TokenStream {
     }
     .into()
 }
-

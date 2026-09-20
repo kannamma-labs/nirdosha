@@ -140,6 +140,26 @@ pub enum Action {
     Enumerate,
 }
 
+impl Action {
+    /// Parses the lowercase wire string a `guard_policy!` source literal
+    /// carries (`action == "read"`, `action in ["create", "update"]`, ...)
+    /// into the closed `Action` enum. Returns `None` for anything outside
+    /// the closed set — the caller decides whether that's a hard error or
+    /// a skip; this type has no opinion.
+    pub fn parse_wire(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Action::Read),
+            "create" => Some(Action::Create),
+            "update" => Some(Action::Update),
+            "delete" => Some(Action::Delete),
+            "migrate" => Some(Action::Migrate),
+            "export" => Some(Action::Export),
+            "enumerate" => Some(Action::Enumerate),
+            _ => None,
+        }
+    }
+}
+
 /// Shape of the incoming query, used for policy context and aggregate safety.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueryShape {

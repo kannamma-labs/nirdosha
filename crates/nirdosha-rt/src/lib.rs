@@ -92,16 +92,78 @@ pub use theme::{load as load_theme, themed_page_shell, themed_page_shell_ex, The
 ///     impl nirdosha_rt::Role for SecurityOps { const NAME: &'static str = "security_ops"; }
 /// }
 /// ```
+/// Item muncher backing [`roles!`]. Recurses one item at a time because the
+/// body is heterogeneous — plain `Name = "wire_name";`, bare `role Name;`
+/// (wire name defaults to `stringify!(Name)`), and `principal Name =
+/// "wire_name";` all appear in the same invocation (see RTM's
+/// `examples/rtm/roles-N-guard_policy.md` `00_core.nir` for the case that
+/// motivated the last two forms) — a single flat repetition pattern can't
+/// express "each item is one of three shapes," so each shape gets its own
+/// arm, tried in order, with the most specific (literal leading keyword)
+/// arms before the generic fallback.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __nirdosha_roles_item {
+    (role $Name:ident ; $($rest:tt)*) => {
+        pub struct $Name;
+        impl ::nirdosha_rt::Role for $Name {
+            const NAME: &'static str = stringify!($Name);
+        }
+        $crate::__nirdosha_roles_item!($($rest)*);
+    };
+    (principal $Name:ident = $name:literal ; $($rest:tt)*) => {
+        pub struct $Name;
+        impl ::nirdosha_rt::Role for $Name {
+            const NAME: &'static str = $name;
+        }
+        $crate::__nirdosha_roles_item!($($rest)*);
+    };
+    ($Name:ident = $name:literal ; $($rest:tt)*) => {
+        pub struct $Name;
+        impl ::nirdosha_rt::Role for $Name {
+            const NAME: &'static str = $name;
+        }
+        $crate::__nirdosha_roles_item!($($rest)*);
+    };
+    () => {};
+}
+
+/// ```
+/// nirdosha_rt::roles! {
+///     HrStaff = "hr_staff";
+///     Manager = "manager";
+///     SecurityOps = "security_ops";
+/// }
+/// ```
+///
+/// also accepts, in the same invocation, bare human roles (wire name
+/// defaults to the type name) and explicitly-named service principals —
+/// both used throughout RTM-style policy catalogs:
+///
+/// ```
+/// nirdosha_rt::roles! {
+///     role Analyst;
+///     principal SvcIngest = "spiffe://acme/ns/rtm/sa/ingest";
+/// }
+/// ```
+///
+/// expands to
+///
+/// ```ignore
+/// pub mod nirdosha_roles {
+///     pub struct HrStaff;
+///     impl nirdosha_rt::Role for HrStaff { const NAME: &'static str = "hr_staff"; }
+///     pub struct Manager;
+///     impl nirdosha_rt::Role for Manager { const NAME: &'static str = "manager"; }
+///     pub struct SecurityOps;
+///     impl nirdosha_rt::Role for SecurityOps { const NAME: &'static str = "security_ops"; }
+/// }
+/// ```
 #[macro_export]
 macro_rules! roles {
-    ( $( $Name:ident = $name:literal ; )+ ) => {
+    ( $($body:tt)* ) => {
         pub mod nirdosha_roles {
-            $(
-                pub struct $Name;
-                impl ::nirdosha_rt::Role for $Name {
-                    const NAME: &'static str = $name;
-                }
-            )+
+            $crate::__nirdosha_roles_item!($($body)*);
         }
     };
 }
