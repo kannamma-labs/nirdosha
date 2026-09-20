@@ -32,5 +32,36 @@ services:
       timeout: 3s
       retries: 10
 
+  # Kafka-API-compatible broker for the opt-in, real-server test convention
+  # backing `nirdosha-ingestion-topic-kafka` (Plan Phase 13, 3/4 —
+  # `TopicDriver`/`StreamSource`/`StreamSink`, RFC 0025 §8.1). Redpanda,
+  # not `confluentinc/cp-kafka`: single self-contained binary (no separate
+  # ZooKeeper/KRaft controller container needed), lighter for a dev/test
+  # sandbox, and speaks the real Kafka wire protocol `rskafka` (the client
+  # this driver uses) talks to — the driver has no Redpanda-specific code
+  # path, so a real Kafka broker is a drop-in swap, matching the "vendor
+  # swap" pattern this repo's other drivers already follow.
+  #   docker compose -f docker-compose.dev.yml up -d
+  #   export NIRDOSHA_TEST_KAFKA_BROKERS=localhost:9092
+  #   cargo test -p nirdosha-ingestion-topic-kafka -- --ignored
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7@sha256:82a69763bef8d8b55ea5a520fa1b38f993908ef68946819ca1aed43541824c48
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+    ports:
+      - "${NIRDOSHA_DEV_KAFKA_PORT:-9092}:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   nirdosha_pg_dev:
