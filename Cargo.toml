@@ -63,6 +63,7 @@ members = [
     "crates/nirdosha-screening-list-fixture",
     "crates/nirdosha-scoring-model-onnx",
     "crates/nirdosha-ingestion-topic-kafka",
+    "crates/nirdosha-egress-report-goaml",
     # Pure, dependency-light transaction-isolation-anomaly detection
     # (the Direct Serialization Graph algorithm), shared verbatim by
     # `crates/runtime-kernels` (the live FFI-hooked path, via its own

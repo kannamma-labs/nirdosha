@@ -1147,6 +1147,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libxml"
+version = "0.3.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0aba96591171f24c6909906eb05895902a49bbe2a6ff15bf8ff48d95774d67b"
+dependencies = [
+ "bindgen",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "linkme"
 version = "0.3.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1327,6 +1339,13 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nirdosha-egress-report-goaml"
+version = "0.1.0"
+dependencies = [
+ "libxml",
 ]
 
 [[package]]

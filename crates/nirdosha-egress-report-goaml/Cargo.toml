@@ -1,0 +1,13 @@
+[package]
+name = "nirdosha-egress-report-goaml"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "goAML XML report envelope builder, real XSD schema validation (libxml2), and an injectable submission transport for RFC 0025's egress port"
+license = "MIT"
+publish = false
+
+[dependencies]
+libxml = "0.3"
+
+[dev-dependencies]
