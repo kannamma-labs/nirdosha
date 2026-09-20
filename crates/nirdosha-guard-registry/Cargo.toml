@@ -9,3 +9,9 @@ linkme = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+# Clause lowering (PolicyRegistration -> PolicyRecord) re-tokenizes the
+# macro's captured clause text and parses it with the same tooling the
+# macro itself uses — same versions as nirdosha-guard-macros for one
+# consistent grammar story across the parse-time/registry-time split.
+proc-macro2 = "1"
+syn = { version = "2", features = ["full"] }

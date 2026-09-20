@@ -1037,3 +1037,77 @@ fn corpus_compiles_and_registers_policies() {
     println!("registered policy records: {count}");
     assert!(count >= 66, "expected at least 66 registrations (one per guard_policy! block, more after action/resource-in-list fan-out), got {count}");
 }
+
+/// Phase 3 acceptance bar: `records()` on the real corpus produces
+/// non-trivial, correctly-lowered `PolicyRecord`s — not just "the macro
+/// didn't error." Each assertion below is a real clause from the doc,
+/// checked against the specific structured value it should lower to.
+#[test]
+fn corpus_policies_lower_to_real_structured_records() {
+    let records = nirdosha_guard_registry::records();
+    assert_eq!(records.len(), nirdosha_guard_registry::POLICIES.len());
+
+    let find = |id: &str| -> Vec<&nirdosha_guard_registry::PolicyRecord> {
+        records.iter().filter(|r| r.id == id).collect()
+    };
+
+    // "ingest-create-txn": purpose + field_policy + affected_rows cap +
+    // full audit obligation, all from one guard_policy! block.
+    let ingest = find("ingest-create-txn");
+    assert_eq!(ingest.len(), 1);
+    let ingest = ingest[0];
+    assert_eq!(ingest.subjects, vec!["SvcIngest".to_string()]);
+    assert_eq!(ingest.affected_row_cap, Some(1));
+    assert!(ingest
+        .field_policy
+        .contains(&nirdosha_guard_core::FieldPolicy::Required(vec!["tenant_id".into()])));
+    assert!(ingest
+        .field_policy
+        .contains(&nirdosha_guard_core::FieldPolicy::Allowed(vec!["device_id".into()])));
+    assert!(ingest.obligations.contains(&nirdosha_guard_core::Obligation::Audit {
+        level: nirdosha_guard_core::AuditLevel::Full
+    }));
+
+    // "sar-export": quorum escalation + egress destination + notify.
+    let sar_export = find("sar-export");
+    assert_eq!(sar_export.len(), 1);
+    let sar_export = sar_export[0];
+    assert_eq!(
+        sar_export.escalation,
+        Some(nirdosha_guard_core::EscalateTarget::Approval { chain: "sar_release".into() })
+    );
+    assert_eq!(sar_export.destination, Some(nirdosha_guard_core::Destination::ExportFile));
+    assert!(sar_export
+        .obligations
+        .contains(&nirdosha_guard_core::Obligation::Notify { channel: "regulatory-log".into() }));
+
+    // "case-transition": requires field(status).transition_allowed() (not
+    // structurally lowerable — must survive as a named condition, not be
+    // silently dropped) plus a real invariant() conjunct.
+    let case_transition = find("case-transition");
+    assert_eq!(case_transition.len(), 1);
+    assert!(!case_transition[0].conditions.is_empty());
+
+    // "screening-write-hit": forbidden field_policy fields.
+    let hit = find("screening-write-hit");
+    assert_eq!(hit.len(), 1);
+    assert!(hit[0]
+        .field_policy
+        .contains(&nirdosha_guard_core::FieldPolicy::Forbidden(vec!["disposition".into()])));
+
+    // "auditor-no-write": one deny per fanned-out action, each with the
+    // same reason code.
+    let auditor_no_write = find("auditor-no-write");
+    assert_eq!(auditor_no_write.len(), 4);
+    for record in &auditor_no_write {
+        assert_eq!(record.effect, nirdosha_guard_registry::Effect::Deny);
+        assert_eq!(record.reason.as_deref(), Some("audit.read_only_principal"));
+    }
+
+    // "lead-sla-aggregate": cohort_floor cap + tokenized mask.
+    let sla = find("lead-sla-aggregate");
+    assert_eq!(sla.len(), 1);
+    assert!(sla[0].caps.contains(&nirdosha_guard_core::Cap::CohortFloor(5)));
+    assert_eq!(sla[0].masks.len(), 1);
+    assert_eq!(sla[0].masks[0].field, vec!["subject_id".to_string()]);
+}

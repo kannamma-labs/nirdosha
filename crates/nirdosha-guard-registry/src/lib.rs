@@ -1,6 +1,12 @@
 //! RFC 0025 catalog registry foundation.
 
-use nirdosha_guard_core::{Cap, Condition, EscalateTarget, FieldPolicy, FilterExpr, Obligation};
+mod clauses;
+pub use clauses::{lower as lower_clauses, LoweredClauses};
+
+use nirdosha_guard_core::{
+	Cap, Classification, Condition, Destination, EscalateTarget, FieldMask, FieldPolicy,
+	FilterExpr, Obligation,
+};
 use serde::{Deserialize, Serialize};
 
 pub use linkme;
@@ -14,11 +20,29 @@ pub struct PolicyRecord {
 	pub resource: String,
 	pub purpose: Option<String>,
 	pub caps: Vec<Cap>,
+	/// `cap(affected_rows = N)` — `WritePlan::affected_row_cap`'s source,
+	/// a different concept from `caps` (rows a mutation may touch, not
+	/// rows a read may scan).
+	pub affected_row_cap: Option<u64>,
 	pub obligations: Vec<Obligation>,
 	pub escalation: Option<EscalateTarget>,
 	pub field_policy: Vec<FieldPolicy>,
 	pub conditions: Vec<Condition>,
 	pub filter: Option<FilterExpr>,
+	/// A `filter <scope-fn>(...)` clause this lowering pass can name but
+	/// not resolve to a concrete `FilterExpr` without a live
+	/// `EvaluationContext` (`tenant_scope()`, `subject_scope()`,
+	/// `delegation_scope()`, `time_range(...)`). See `clauses.rs`.
+	pub filter_ref: Option<String>,
+	pub masks: Vec<FieldMask>,
+	/// `reason(sod.xxx)` — the deny-justification code on `deny` policies.
+	pub reason: Option<String>,
+	pub destination: Option<Destination>,
+	pub destination_denied_above: Option<Classification>,
+	/// `grant predicate_use(...)` / `grant count_allowed`, kept as their
+	/// original clause text (see `clauses.rs`'s doc comment on why these
+	/// two, specifically, aren't lowered further here).
+	pub grants: Vec<String>,
 	pub policy_src: String,
 	pub line: u32,
 }
@@ -71,19 +95,60 @@ impl PolicyRegistration {
 			Effect::Allow => PolicyEffect::Allow,
 			Effect::Deny => PolicyEffect::Deny,
 		};
+		let lowered = clauses::lower(self.clauses_json);
 		Some(PolicyCandidate {
 			effect,
 			subjects: self.subjects.iter().map(|s| s.to_string()).collect(),
 			action,
 			resource: self.resource.to_string(),
 			purpose: self.purpose.map(|p| p.to_string()),
-			conditions: Vec::new(),
-			filter: None,
-			obligations: Vec::new(),
-			escalation: None,
+			conditions: lowered.conditions,
+			filter: lowered.filter,
+			obligations: lowered.obligations,
+			escalation: lowered.escalation,
 			id: self.id.to_string(),
 		})
 	}
+
+	/// Full "Gate 2" expansion: every clause this registration's macro
+	/// invocation carried, lowered into `PolicyRecord`'s structured form.
+	/// Unlike [`to_candidate`], which only carries what the evaluator
+	/// needs (decision-time concerns), this also carries execution-time
+	/// concerns (`caps`, `masks`, `field_policy`, `destination`, ...) —
+	/// the `AccessPlan`/`WritePlan` building work later phases do.
+	pub fn to_record(&self) -> PolicyRecord {
+		let lowered = clauses::lower(self.clauses_json);
+		PolicyRecord {
+			id: self.id.to_string(),
+			effect: self.effect,
+			subjects: self.subjects.iter().map(|s| s.to_string()).collect(),
+			action: self.action.to_string(),
+			resource: self.resource.to_string(),
+			purpose: self.purpose.map(|p| p.to_string()),
+			caps: lowered.caps,
+			affected_row_cap: lowered.affected_row_cap,
+			obligations: lowered.obligations,
+			escalation: lowered.escalation,
+			field_policy: lowered.field_policy,
+			conditions: lowered.conditions,
+			filter: lowered.filter,
+			filter_ref: lowered.filter_ref,
+			masks: lowered.masks,
+			reason: lowered.reason,
+			destination: lowered.destination,
+			destination_denied_above: lowered.destination_denied_above,
+			grants: lowered.grants,
+			policy_src: self.source.to_string(),
+			line: self.line,
+		}
+	}
+}
+
+/// All registered policies, fully expanded into [`PolicyRecord`]s — the
+/// "owned `PolicyRecord` model" this crate's registration type has, since
+/// its introduction, said Gate 2 would produce.
+pub fn records() -> Vec<PolicyRecord> {
+	POLICIES.iter().map(PolicyRegistration::to_record).collect()
 }
 
 /// All registered policies, expanded into evaluator-ready candidates.

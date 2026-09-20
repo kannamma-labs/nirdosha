@@ -78,6 +78,13 @@ pub struct Subject {
 pub struct Tenant(pub String);
 
 /// Where the result will be sent. A first-class policy dimension.
+///
+/// `FeaturePipeline`/`Warehouse` added alongside the original five: real
+/// `destination(...)` clauses in `examples/rtm/roles-N-guard_policy.md`
+/// (`destination(feature_pipeline)` on the feature-engine read,
+/// `destination(warehouse)` on the BI aggregate) referenced destinations
+/// this closed set didn't cover — found while lowering that corpus's
+/// clauses into this IR, not invented speculatively.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Destination {
     Browser,
@@ -85,6 +92,8 @@ pub enum Destination {
     LlmContext,
     ExportFile,
     Webhook,
+    FeaturePipeline,
+    Warehouse,
 }
 
 /// Runtime environment attributes.
@@ -304,6 +313,15 @@ pub enum MaskTransform {
 }
 
 /// Cost and correctness caps.
+///
+/// `MaxDepth`/`MaxNodes` added alongside the original six: RTM's
+/// `lineage-explore`/`lineage-audit` policies cap graph-traversal depth and
+/// node count (`cap(max_depth = 5, max_nodes = 1_000, ...)`) — a real cap
+/// kind this enum didn't have room for, found while lowering that policy's
+/// clauses, not invented speculatively. `affected_rows` (write scope) is
+/// deliberately NOT here — it's `WritePlan::affected_row_cap`, a different
+/// concept (bounding rows touched by a mutation, not rows scanned by a
+/// read).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cap {
     RowCap(u64),
@@ -312,6 +330,8 @@ pub enum Cap {
     MaxExecutionTimeMs(u64),
     MaxResultBytes(u64),
     CohortFloor(u64),
+    MaxDepth(u64),
+    MaxNodes(u64),
 }
 
 /// Blocking or non-blocking obligation attached to a decision.

@@ -1254,8 +1254,10 @@ version = "0.1.0"
 dependencies = [
  "linkme",
  "nirdosha-guard-core",
+ "proc-macro2",
  "serde",
  "serde_json",
+ "syn 2.0.119",
 ]
 
 [[package]]
