@@ -18,6 +18,15 @@
 //!     }
 //! }
 //! ```
+//!
+//! `guarded: true` on a `Metric`/`Chart` entry calls its `fn` as
+//! `#fn(auth)` instead of `#fn()` -- for a widget whose data comes from
+//! a `nirdosha_guard_screens::GuardedTable` (real per-request policy
+//! evaluation), the fn needs the viewer's `&Auth` to evaluate against,
+//! the same way any other guarded route in this crate does. The guard
+//! check itself lives in the widget fn's own body (typically a
+//! `guarded_snapshot`/`guarded_aggregate` call reduced to one number);
+//! this macro only decides whether `auth` is in scope to pass down.
 
 use crate::util::expect_keyword;
 use proc_macro::TokenStream;
@@ -34,12 +43,14 @@ enum Widget {
         target: Option<Lit>,
         alert_below: bool,
         requires_role: Option<LitStr>,
+        guarded: bool,
     },
     Chart {
         label: LitStr,
         chart_fn: Ident,
         mark: Ident,
         requires_role: Option<LitStr>,
+        guarded: bool,
     },
 }
 
@@ -58,7 +69,7 @@ impl Parse for Widget {
         braced!(content in input);
         match kind.to_string().as_str() {
             "Metric" => {
-                let (mut label, mut stat_fn, mut target, mut alert_below, mut requires_role) = (None, None, None, false, None);
+                let (mut label, mut stat_fn, mut target, mut alert_below, mut requires_role, mut guarded) = (None, None, None, false, None, false);
                 while !content.is_empty() {
                     let key = Ident::parse_any(&content)?;
                     content.parse::<Token![:]>()?;
@@ -68,10 +79,11 @@ impl Parse for Widget {
                         "target" => target = Some(content.parse::<Lit>()?),
                         "alert_below" => alert_below = content.parse::<LitBool>()?.value,
                         "requires_role" => requires_role = Some(content.parse::<LitStr>()?),
+                        "guarded" => guarded = content.parse::<LitBool>()?.value,
                         other => {
                             return Err(syn::Error::new(
                                 key.span(),
-                                format!("unknown Metric key `{other}` — valid keys: label, fn, target, alert_below, requires_role"),
+                                format!("unknown Metric key `{other}` — valid keys: label, fn, target, alert_below, requires_role, guarded"),
                             ))
                         }
                     }
@@ -85,10 +97,11 @@ impl Parse for Widget {
                     target,
                     alert_below,
                     requires_role,
+                    guarded,
                 })
             }
             "Chart" => {
-                let (mut label, mut chart_fn, mut mark, mut requires_role) = (None, None, None, None);
+                let (mut label, mut chart_fn, mut mark, mut requires_role, mut guarded) = (None, None, None, None, false);
                 while !content.is_empty() {
                     let key = Ident::parse_any(&content)?;
                     content.parse::<Token![:]>()?;
@@ -97,10 +110,11 @@ impl Parse for Widget {
                         "fn" => chart_fn = Some(content.parse::<Ident>()?),
                         "mark" => mark = Some(content.parse::<Ident>()?),
                         "requires_role" => requires_role = Some(content.parse::<LitStr>()?),
+                        "guarded" => guarded = content.parse::<LitBool>()?.value,
                         other => {
                             return Err(syn::Error::new(
                                 key.span(),
-                                format!("unknown Chart key `{other}` — valid keys: label, fn, mark, requires_role"),
+                                format!("unknown Chart key `{other}` — valid keys: label, fn, mark, requires_role, guarded"),
                             ))
                         }
                     }
@@ -120,6 +134,7 @@ impl Parse for Widget {
                     chart_fn: chart_fn.ok_or_else(|| syn::Error::new(kind.span(), "Chart needs `fn`"))?,
                     mark,
                     requires_role,
+                    guarded,
                 })
             }
             other => Err(syn::Error::new(
@@ -211,27 +226,36 @@ fn expand_parsed(input: DashboardInput) -> TokenStream2 {
 
     let widget_pushes = input.widgets.iter().map(|w| {
         let push = match w {
-            Widget::Metric { label, stat_fn, target, alert_below, .. } => {
+            Widget::Metric { label, stat_fn, target, alert_below, guarded, .. } => {
                 let target_tok = match target {
                     Some(lit) => quote! { Some(#lit as f64) },
                     None => quote! { None },
                 };
+                // `guarded: true` calls `#stat_fn(auth)` instead of
+                // `#stat_fn()` -- the fn is responsible for calling a
+                // `GuardedTable::guarded_snapshot`/`guarded_aggregate`
+                // itself and reducing to one value, exactly like every
+                // other guard-enforced route in this crate: the guard
+                // check lives in the widget fn's own body, `dashboard!`
+                // only decides whether `auth` is in scope to pass it.
+                let call = if *guarded { quote! { #stat_fn(auth) } } else { quote! { #stat_fn() } };
                 quote! {
                     widgets.push(::nirdosha_rt::dashboard::metric_widget(
                         #label,
-                        ::nirdosha_rt::dashboard::IntoMetricValue::into_metric_value(#stat_fn()),
+                        ::nirdosha_rt::dashboard::IntoMetricValue::into_metric_value(#call),
                         #target_tok,
                         #alert_below,
                     ));
                 }
             }
-            Widget::Chart { label, chart_fn, mark, .. } => {
+            Widget::Chart { label, chart_fn, mark, guarded, .. } => {
                 let mark_str = mark.to_string();
+                let call = if *guarded { quote! { #chart_fn(auth) } } else { quote! { #chart_fn() } };
                 quote! {
                     widgets.push(::nirdosha_rt::dashboard::chart_widget(
                         #label,
                         #mark_str,
-                        ::nirdosha_rt::dashboard::IntoChartData::into_chart_data(#chart_fn()),
+                        ::nirdosha_rt::dashboard::IntoChartData::into_chart_data(#call),
                     ));
                 }
             }
@@ -247,7 +271,12 @@ fn expand_parsed(input: DashboardInput) -> TokenStream2 {
     });
 
     quote! {
-        fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+        // `pub`, matching `login!`/`app_shell!`/`crud_screens!`'s generated
+        // mount fns -- a private mount fn only ever worked because every
+        // existing caller invoked the macro and called the result in the
+        // same file; a real multi-module app (screens split one-per-file)
+        // needs to call it from outside that module.
+        pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
             fn __nirdosha_dashboard_widgets(auth: &::nirdosha_rt::Auth) -> Vec<::serde_json::Value> {
                 let mut widgets: Vec<::serde_json::Value> = Vec::new();
                 #(#widget_pushes)*

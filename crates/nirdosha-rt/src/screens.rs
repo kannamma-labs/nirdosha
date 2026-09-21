@@ -132,6 +132,33 @@ pub fn list_html(
     themed_page_shell(title, "", &format!("{search_box}{new_link}{table}{export_link}"))
 }
 
+/// A table with no per-row link and no create/search/export chrome —
+/// for a cross-resource, guarded-read-only view (e.g. `m21_restricted
+/// .nir`'s 21.1 Auditor Read-Only Portal) where there is no matching
+/// per-id detail route to link to (unlike `list_html`, which always
+/// assumes one via its own `row["id"]`-keyed "view" link) and no write
+/// action of any kind to offer. Still routes every value through
+/// `value_display`/`html_escape` like every other render helper here.
+pub fn read_only_list_html(title: &str, fields: &[FieldSpec], rows: &[serde_json::Value]) -> String {
+    if rows.is_empty() {
+        return themed_page_shell(title, "", &format!("<p class=\"empty\">No {} visible under this read.</p>", html_escape(title)));
+    }
+    let mut table = String::from("<table><thead><tr>");
+    for f in fields {
+        table.push_str(&format!("<th>{}</th>", html_escape(f.name)));
+    }
+    table.push_str("</tr></thead><tbody>");
+    for row in rows {
+        table.push_str("<tr>");
+        for f in fields {
+            table.push_str(&format!("<td>{}</td>", html_escape(&value_display(&row[f.name]))));
+        }
+        table.push_str("</tr>");
+    }
+    table.push_str("</tbody></table>");
+    themed_page_shell(title, "", &table)
+}
+
 /// Escapes one CSV field per RFC 4180: wrap in quotes (doubling any
 /// embedded quote) whenever the value contains a comma, quote, or
 /// newline — left bare otherwise, matching how every spreadsheet
@@ -146,7 +173,13 @@ pub fn csv_escape(value: &str) -> String {
 
 /// `GET <path>/{id}` — every field as a read row, plus Edit/Delete
 /// links when the caller may perform them.
-pub fn detail_html(title: &str, base_path: &str, id: i64, fields: &[FieldSpec], row: &serde_json::Value, can_edit: bool, can_delete: bool) -> String {
+/// `id` is `impl Display`, not a fixed `i64` -- every existing `i64`
+/// call site still works unchanged (Display is satisfied for free), and
+/// `crud_screens!`'s `guard:` clause (RTM live-demo plan, Phase B) needs
+/// this for real string row identities (`TxnId`, not a synthetic
+/// integer) without inventing a parallel render helper just to change
+/// one parameter's type.
+pub fn detail_html(title: &str, base_path: &str, id: impl std::fmt::Display, fields: &[FieldSpec], row: &serde_json::Value, can_edit: bool, can_delete: bool) -> String {
     let mut rows = String::new();
     for f in fields {
         rows.push_str(&format!("<p><label>{}</label> {}</p>", html_escape(f.name), html_escape(&value_display(&row[f.name]))));

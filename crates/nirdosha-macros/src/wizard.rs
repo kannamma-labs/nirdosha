@@ -51,8 +51,12 @@ impl Parse for Access {
                 return Err(syn::Error::new(role_kw.span(), "expected `role`"));
             }
             let role: LitStr = input.parse()?;
-            if let Err(msg) = nirdosha_contract_core::role::validate_role_name(&role.value()) {
-                return Err(syn::Error::new(role.span(), msg));
+            // Validated the same way the ident gets built later
+            // (`role_ident` at codegen time) -- accepts snake_case wire
+            // names and bare PascalCase role type names (RTM's
+            // `roles! { role Analyst; }` convention) alike.
+            if let Err(e) = nirdosha_contract_core::role::role_ident(&role.value(), role.span()) {
+                return Err(e);
             }
             return Ok(Access::Role(role));
         }
@@ -348,7 +352,12 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
     });
 
     quote! {
-        fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+        // `pub`, matching `login!`/`app_shell!`/`crud_screens!`'s generated
+        // mount fns -- a private mount fn only ever worked because every
+        // existing caller invoked the macro and called the result in the
+        // same file; a real multi-module app (screens split one-per-file)
+        // needs to call it from outside that module.
+        pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
             #finalize_fn
             #( #step_items )*
             router

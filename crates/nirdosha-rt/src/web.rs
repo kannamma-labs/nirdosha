@@ -750,6 +750,43 @@ macro_rules! gated_claim_method {
     };
 }
 
+/// An ungated route (no `RoleProof<R>` required to view it at all)
+/// whose handler still gets the resolved `Auth` — for content that is
+/// *visible* to everyone but *varies* per viewer (e.g. `dashboard!`'s
+/// per-widget `requires_role`, which hides a widget from a viewer
+/// lacking the role rather than gating the whole page, or
+/// `crud_screens!`'s `guard:` clause, which defers the real
+/// role/action/resource/purpose decision to a `GuardedTable`
+/// evaluation instead of a single named-role check). Resolves the same
+/// way a gated route does: session cookie first, then the app's own
+/// `authenticate`.
+macro_rules! with_auth_method {
+    ($name:ident, $method:literal) => {
+        pub fn $name(
+            mut self,
+            path: &'static str,
+            summary: &'static str,
+            handler: impl Fn(&Request, &PathParams, &Auth) -> Response + Send + Sync + 'static,
+        ) -> Self {
+            let authenticate = self.authenticate.clone();
+            let sessions = self.sessions.clone();
+            let wrapped = move |req: &Request, params: &PathParams| -> Response {
+                let auth = session_auth(&sessions, req).unwrap_or_else(|| authenticate(req));
+                handler(req, params, &auth)
+            };
+            self.routes.push(Route {
+                method: $method,
+                template: PathTemplate::parse(path),
+                summary,
+                required_role: None,
+                required_claim: None,
+                handler: Arc::new(wrapped),
+            });
+            self
+        }
+    };
+}
+
 /// One TLS-or-plain async request/response cycle -- the async
 /// transport's own version of `tls::handle_sync_connection`'s sync
 /// one, generic over the actual stream type (`tokio::net::TcpStream`
@@ -973,35 +1010,19 @@ impl Router {
     gated_claim_method!(put_gated_claim, "PUT");
     gated_claim_method!(delete_gated_claim, "DELETE");
 
-    /// An ungated route (no `RoleProof<R>` required to view it at all)
-    /// whose handler still gets the resolved `Auth` — for content that
-    /// is *visible* to everyone but *varies* per viewer (e.g.
-    /// `dashboard!`'s per-widget `requires_role`, which hides a widget
-    /// from a viewer lacking the role rather than gating the whole
-    /// page). Resolves the same way a gated route does: session cookie
-    /// first, then the app's own `authenticate`.
-    pub fn get_with_auth(
-        mut self,
-        path: &'static str,
-        summary: &'static str,
-        handler: impl Fn(&Request, &PathParams, &Auth) -> Response + Send + Sync + 'static,
-    ) -> Self {
-        let authenticate = self.authenticate.clone();
-        let sessions = self.sessions.clone();
-        let wrapped = move |req: &Request, params: &PathParams| -> Response {
-            let auth = session_auth(&sessions, req).unwrap_or_else(|| authenticate(req));
-            handler(req, params, &auth)
-        };
-        self.routes.push(Route {
-            method: "GET",
-            template: PathTemplate::parse(path),
-            summary,
-            required_role: None,
-            required_claim: None,
-            handler: Arc::new(wrapped),
-        });
-        self
-    }
+    with_auth_method!(get_with_auth, "GET");
+    // `post_with_auth`/`put_with_auth`/`delete_with_auth`: the write-side
+    // counterparts `get_with_auth` never needed until `crud_screens!`'s
+    // `guard:` clause (RTM live-demo plan, Phase B) started routing
+    // create/update/delete through a real per-request `GuardedTable`
+    // evaluation rather than a `RoleProof<R>` presence check --
+    // `GuardedTable::guarded_update`/`guarded_delete` need the resolved
+    // `&Auth` itself (role list, subject id), not just a proof that one
+    // named role matches. Same resolution order as every gated method:
+    // session cookie first, then the app's own `authenticate`.
+    with_auth_method!(post_with_auth, "POST");
+    with_auth_method!(put_with_auth, "PUT");
+    with_auth_method!(delete_with_auth, "DELETE");
 
     /// Route one already-parsed request. `GET /openapi.json` is
     /// answered here directly, before the route table — it always

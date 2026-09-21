@@ -19,9 +19,16 @@
 use crate::web::{html_escape, page_shell};
 
 /// One card, as the macro's generated code already knows it: its id,
-/// display title, and current column.
+/// display title, and current column. `id` is `String`, not `i64` --
+/// widened for `kanban_board!`'s `guard:` mode, whose rows are keyed by
+/// `GuardedEntity::row_id()`'s real string identity (an `AlertId`/
+/// `CaseId` newtype, not the `store:`/`SharedTable` path's synthetic
+/// integer id). `data-id="{}"` (below) and `board_js`'s JS-side
+/// `card.dataset.id` both already treat this as opaque text, so the
+/// widening is source-compatible for every existing `i64`-id caller
+/// via `.to_string()`.
 pub struct Card {
-    pub id: i64,
+    pub id: String,
     pub title: String,
     pub column: String,
 }

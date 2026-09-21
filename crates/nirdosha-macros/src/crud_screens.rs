@@ -33,7 +33,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
-use syn::{bracketed, Ident, LitStr, Token, Type};
+use syn::{braced, bracketed, Ident, LitStr, Token, Type};
 
 enum Access {
     Public,
@@ -52,8 +52,12 @@ impl Parse for Access {
                 return Err(syn::Error::new(role_kw.span(), "expected `role`"));
             }
             let role: LitStr = input.parse()?;
-            if let Err(msg) = nirdosha_contract_core::role::validate_role_name(&role.value()) {
-                return Err(syn::Error::new(role.span(), msg));
+            // Validated the same way the ident gets built later
+            // (`role_ident` at codegen time) -- accepts snake_case wire
+            // names and bare PascalCase role type names (RTM's
+            // `roles! { role Analyst; }` convention) alike.
+            if let Err(e) = nirdosha_contract_core::role::role_ident(&role.value(), role.span()) {
+                return Err(e);
             }
             return Ok(Access::Role(role));
         }
@@ -66,6 +70,125 @@ struct FieldDef {
     ty: Type,
 }
 
+/// Optional `guard: { table: <ident>, purpose: "..." }` clause -- see
+/// `crates/nirdosha-guard-screens`'s own doc comment for what `table`
+/// must return (`&'static GuardedTable<D, Entity>`, any `D: StoreDriver`
+/// -- the macro never names `D` itself, it's inferred at the app's own
+/// call site) and why a policy id is never named here: which corpus
+/// policy applies is resolved by `GuardedTable`'s own evaluator call
+/// (role + action + resource + purpose), the same way any other
+/// `guard_policy!` consumer works.
+///
+/// Phase B scope (RTM live-demo plan): wires list/export/JSON-list
+/// (Phase A), detail-by-id, edit-form, and update -- all keyed by
+/// `GuardedEntity::row_id()`'s real `String` identity (`params.get("id")`
+/// used directly, no `i64` parse) rather than the `store:`/`SharedTable`
+/// path's synthetic integer id. **`create`/`delete` are deliberately not
+/// wired for `guard:` in this phase**: every real corpus create policy
+/// surveyed so far is service-principal-driven (e.g. `ingest-create-txn`
+/// `for SvcIngest`), not a human `<form>` submission, and no corpus
+/// module surveyed so far has a per-row human `delete` policy at all
+/// (`retention-purge` is a catalog-level Admin action, not a per-row
+/// CRUD delete) -- building a generic guarded create/delete path before
+/// a real module needs one would be speculative machinery this phase
+/// doesn't add. When a module *does* need guarded create/delete, that's
+/// the point to design it against that module's own real shape, not
+/// before. `can_create`/`can_delete` are forced `false` for a guarded
+/// screen regardless of `input.create`/`input.delete`'s declared
+/// access -- see `expand_parsed`'s own comment at the guard branch.
+///
+/// `update_fields: [name: Type, ...]` is a second, narrower field list,
+/// independent of the top-level `fields:` (which stays whatever a
+/// list/detail screen wants to *display*). It exists because a real
+/// corpus update policy's `field_policy` almost always allows a much
+/// smaller set than a screen displays (`analyst-flag-transaction`
+/// allows only `analyst_flag`/`analyst_flag_reason` out of a dozen-plus
+/// displayed `transaction` columns) -- G1's field-policy check runs
+/// against exactly the fields *submitted*, so reusing the display
+/// `fields:` list as the update's changed-field set would make every
+/// such update fail closed on every field it merely displays. Omitting
+/// `update_fields` entirely (M6's current shape: no human role may
+/// write a transaction at all) means no edit-form/update route is
+/// registered for this screen -- see `expand_parsed`'s guard branch on
+/// `edit_form_route`/`update_html_route`/`update_api_route`.
+///
+/// **There is deliberately no separate `read_only: true` flag.** Delete
+/// is *already* never registered for a guarded screen (see above); a
+/// screen that also omits both `create_fields:` and `update_fields:` is
+/// therefore *already* read-only by construction -- no create, update,
+/// or delete route exists at all, not merely hidden behind a UI flag.
+/// Adding a flag for something already true by omission would be the
+/// exact "speculative machinery before a real module needs it" this
+/// file's own module doc comment already argues against for
+/// `create`/`delete`. A `guard: { table, purpose }` block with no
+/// `create_fields:`/`update_fields:` at all is the read-only-by-
+/// construction primitive a screen like 21.1 (Auditor Read-Only
+/// Portal) needs -- see `m21_restricted.nir::mount_auditor_portal`,
+/// which reuses this exact property by hand-writing its routes
+/// (`guarded_snapshot` only, no write handler registered) rather than
+/// through this macro, since it also needs the watermark banner
+/// (`nirdosha_rt::watermark`) `list_html`'s own output has no hook for.
+struct GuardConfig {
+    table: Ident,
+    purpose: LitStr,
+    update_fields: Option<Vec<FieldDef>>,
+    /// Like `update_fields`, but for a guarded `create` -- registers
+    /// `/{path}/new` and the create submit routes through
+    /// `GuardedTable::guarded_insert` instead of leaving them unwired.
+    /// Added once a real corpus policy needed it (`60_case_management.nir`'s
+    /// `analyst-create-case`, a genuine human `<form>` submission) --
+    /// unlike `create`/`delete`'s blanket "no real corpus policy needs
+    /// this yet" omission this file's own module doc comment describes,
+    /// `create_fields` is opt-in per screen, not a default every guarded
+    /// screen gets.
+    create_fields: Option<Vec<FieldDef>>,
+}
+
+impl Parse for GuardConfig {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        expect_keyword(input, "table")?;
+        input.parse::<Token![:]>()?;
+        let table: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+        expect_keyword(input, "purpose")?;
+        input.parse::<Token![:]>()?;
+        let purpose: LitStr = input.parse()?;
+        let _ = input.parse::<Token![,]>();
+
+        let mut update_fields = None;
+        let mut create_fields = None;
+        while input.peek(Ident) {
+            let fork = input.fork();
+            let ahead: Ident = fork.parse()?;
+            let target = if ahead == "update_fields" {
+                &mut update_fields
+            } else if ahead == "create_fields" {
+                &mut create_fields
+            } else {
+                break;
+            };
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let content;
+            bracketed!(content in input);
+            let mut fields = Vec::new();
+            while !content.is_empty() {
+                let name: Ident = content.parse()?;
+                content.parse::<Token![:]>()?;
+                let ty: Type = content.parse()?;
+                fields.push(FieldDef { name, ty });
+                if content.peek(Token![,]) {
+                    content.parse::<Token![,]>()?;
+                }
+            }
+            *target = Some(fields);
+            let _ = input.parse::<Token![,]>();
+        }
+
+        Ok(GuardConfig { table, purpose, update_fields, create_fields })
+    }
+}
+
 struct CrudScreensInput {
     mount: Ident,
     entity: Type,
@@ -76,6 +199,7 @@ struct CrudScreensInput {
     read: Access,
     update: Access,
     delete: Access,
+    guard: Option<GuardConfig>,
 }
 
 impl Parse for CrudScreensInput {
@@ -139,6 +263,23 @@ impl Parse for CrudScreensInput {
         let delete: Access = input.parse()?;
         let _ = input.parse::<Token![,]>();
 
+        // Additive-only: every existing `crud_screens!` invocation ends
+        // right here (no trailing content), so this only ever fires for
+        // an invocation that opted in.
+        let mut guard = None;
+        if input.peek(Ident) {
+            let fork = input.fork();
+            let ahead: Ident = fork.parse()?;
+            if ahead == "guard" {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                let content;
+                braced!(content in input);
+                guard = Some(content.parse::<GuardConfig>()?);
+                let _ = input.parse::<Token![,]>();
+            }
+        }
+
         Ok(CrudScreensInput {
             mount,
             entity,
@@ -149,6 +290,7 @@ impl Parse for CrudScreensInput {
             read,
             update,
             delete,
+            guard,
         })
     }
 }
@@ -232,9 +374,39 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     let field_types: Vec<&Type> = input.fields.iter().map(|f| &f.ty).collect();
     let input_types: Vec<&'static str> = input.fields.iter().map(|f| input_type_for(&f.ty)).collect();
 
-    let can_create = matches!(input.create, Access::Public);
+    // A guarded screen's editable set -- see `GuardConfig::update_fields`'s
+    // own doc comment for why this is independent of the display
+    // `fields:` list above. `None` (no `update_fields:` in the `guard:`
+    // block) means this screen offers no edit UI at all.
+    let update_fields: Option<&[FieldDef]> = input.guard.as_ref().and_then(|g| g.update_fields.as_deref());
+    let update_field_idents: Vec<&Ident> = update_fields.map(|fs| fs.iter().map(|f| &f.name).collect()).unwrap_or_default();
+    let update_field_names: Vec<String> = update_fields.map(|fs| fs.iter().map(|f| f.name.to_string()).collect()).unwrap_or_default();
+    let update_field_types: Vec<&Type> = update_fields.map(|fs| fs.iter().map(|f| &f.ty).collect()).unwrap_or_default();
+    let update_input_types: Vec<&'static str> = update_fields.map(|fs| fs.iter().map(|f| input_type_for(&f.ty)).collect()).unwrap_or_default();
+
+    // Same shape as `update_fields` above, for a guarded `create` --
+    // `None` (no `create_fields:` in the `guard:` block) means this
+    // screen offers no create UI at all, same posture `update_fields`
+    // already has for edit.
+    let create_fields: Option<&[FieldDef]> = input.guard.as_ref().and_then(|g| g.create_fields.as_deref());
+    let create_field_idents: Vec<&Ident> = create_fields.map(|fs| fs.iter().map(|f| &f.name).collect()).unwrap_or_default();
+    let create_field_names: Vec<String> = create_fields.map(|fs| fs.iter().map(|f| f.name.to_string()).collect()).unwrap_or_default();
+    let create_field_types: Vec<&Type> = create_fields.map(|fs| fs.iter().map(|f| &f.ty).collect()).unwrap_or_default();
+    let create_input_types: Vec<&'static str> = create_fields.map(|fs| fs.iter().map(|f| input_type_for(&f.ty)).collect()).unwrap_or_default();
+
+    // A guarded screen's `can_create`/`can_delete` reflect whether
+    // `guard.create_fields`/an eventual `delete_fields` equivalent is
+    // present, not `input.create`/`input.delete`'s declared access (see
+    // `GuardConfig`'s own doc comment -- `create`/`update`/`delete` stay
+    // `public` on every guarded RTM invocation today, since no RTM role
+    // name can satisfy `crud_screens!`'s own `requires role "..."`
+    // grammar; `guard:` is the real authorization for these screens).
+    // `delete` has no guarded path yet (no per-row corpus delete policy
+    // exists anywhere to build one against) so it stays unconditionally
+    // unwired for a guarded screen, same as before this change.
+    let can_create = if input.guard.is_some() { create_fields.is_some() } else { matches!(input.create, Access::Public) };
     let can_update = matches!(input.update, Access::Public);
-    let can_delete = matches!(input.delete, Access::Public);
+    let can_delete = input.guard.is_none() && matches!(input.delete, Access::Public);
 
     let fields_fn = quote! {
         fn __fields() -> Vec<::nirdosha_rt::screens::FieldSpec> {
@@ -327,154 +499,494 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     let edit_title = format!("Edit {title}");
 
     // ---- read: list + detail, HTML + JSON ----
-    let list_html_route = route("get", &input.read, &path, "List", |_| {
+    // When `guard:` is set, list/export go through
+    // `nirdosha_guard_screens::GuardedTable::guarded_snapshot` instead of
+    // `__matching_rows`/`#store()` -- real per-request policy evaluation
+    // (role/action/resource/purpose), tenant scoping, and field masking,
+    // not just the `Access::Role` presence check `route()` builds
+    // everywhere else in this file. See `GuardConfig`'s own doc comment
+    // for exactly what stays unwired in this phase.
+    let list_html_route = if let Some(guard) = &input.guard {
+        let table = &guard.table;
+        let purpose = &guard.purpose;
         quote! {
-            let matched = __matching_rows(req);
-            let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-            let q = req.query().get("q").cloned();
-            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref()))
-        }
-    });
-    let export_route = route("get", &input.read, &export_path, "Export CSV", |_| {
-        quote! {
-            let matched = __matching_rows(req);
-            let mut csv = String::new();
-            csv.push_str(&[ #(#field_names),* ].join(","));
-            csv.push('\n');
-            for e in &matched {
-                let cells: Vec<String> = vec![ #( ::nirdosha_rt::screens::csv_escape(&e.#field_idents.to_string()) ),* ];
-                csv.push_str(&cells.join(","));
-                csv.push('\n');
-            }
-            ::nirdosha_rt::Response::csv(200, csv)
-        }
-    });
-    let list_api_route = route("get", &input.read, &api_path, "List (JSON)", |_| {
-        quote! {
-            let matched = __matching_rows(req);
-            let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-            ::nirdosha_rt::Response::json(200, &::serde_json::json!(rows))
-        }
-    });
-    let detail_html_route = route("get", &input.read, &id_path, "Detail", |_| {
-        quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            match #store().get(&id) {
-                Some(entity) => {
-                    let row = ::serde_json::to_value(&entity).unwrap();
-                    ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::detail_html(#title, #path, id, &__fields(), &row, #can_update, #can_delete))
+            .get_with_auth(#path, "List", |req, _params, auth| {
+                match #table().guarded_snapshot(auth, #purpose) {
+                    Ok(matched) => {
+                        let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+                        let q = req.query().get("q").cloned();
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref()))
+                    }
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
                 }
-                None => ::nirdosha_rt::Response::not_found(),
-            }
+            })
         }
-    });
-    let detail_api_route = route("get", &input.read, &api_id_path, "Detail (JSON)", |_| {
+    } else {
+        route("get", &input.read, &path, "List", |_| {
+            quote! {
+                let matched = __matching_rows(req);
+                let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+                let q = req.query().get("q").cloned();
+                ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref()))
+            }
+        })
+    };
+    let export_route = if let Some(guard) = &input.guard {
+        let table = &guard.table;
+        let purpose = &guard.purpose;
         quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            match #store().get(&id) {
-                Some(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
-                None => ::nirdosha_rt::Response::not_found(),
-            }
+            .get_with_auth(#export_path, "Export CSV", |_req, _params, auth| {
+                match #table().guarded_snapshot(auth, #purpose) {
+                    Ok(matched) => {
+                        let mut csv = String::new();
+                        csv.push_str(&[ #(#field_names),* ].join(","));
+                        csv.push('\n');
+                        for e in &matched {
+                            let row = ::serde_json::to_value(e).unwrap();
+                            let cells: Vec<String> = vec![ #( ::nirdosha_rt::screens::csv_escape(&::nirdosha_rt::screens::value_display(row.get(#field_names).unwrap_or(&::serde_json::Value::Null))) ),* ];
+                            csv.push_str(&cells.join(","));
+                            csv.push('\n');
+                        }
+                        ::nirdosha_rt::Response::csv(200, csv)
+                    }
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
         }
-    });
+    } else {
+        route("get", &input.read, &export_path, "Export CSV", |_| {
+            quote! {
+                let matched = __matching_rows(req);
+                let mut csv = String::new();
+                csv.push_str(&[ #(#field_names),* ].join(","));
+                csv.push('\n');
+                for e in &matched {
+                    let cells: Vec<String> = vec![ #( ::nirdosha_rt::screens::csv_escape(&e.#field_idents.to_string()) ),* ];
+                    csv.push_str(&cells.join(","));
+                    csv.push('\n');
+                }
+                ::nirdosha_rt::Response::csv(200, csv)
+            }
+        })
+    };
+    let list_api_route = if let Some(guard) = &input.guard {
+        let table = &guard.table;
+        let purpose = &guard.purpose;
+        quote! {
+            .get_with_auth(#api_path, "List (JSON)", |_req, _params, auth| {
+                match #table().guarded_snapshot(auth, #purpose) {
+                    Ok(matched) => {
+                        let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+                        ::nirdosha_rt::Response::json(200, &::serde_json::json!(rows))
+                    }
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        }
+    } else {
+        route("get", &input.read, &api_path, "List (JSON)", |_| {
+            quote! {
+                let matched = __matching_rows(req);
+                let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+                ::nirdosha_rt::Response::json(200, &::serde_json::json!(rows))
+            }
+        })
+    };
+    let detail_html_route = if let Some(guard) = &input.guard {
+        let table = &guard.table;
+        let purpose = &guard.purpose;
+        quote! {
+            .get_with_auth(#id_path, "Detail", |_req, params, auth| {
+                let Some(id) = params.get("id") else { return ::nirdosha_rt::Response::bad_request("id required") };
+                match #table().guarded_get(auth, #purpose, id) {
+                    Ok(Some(entity)) => {
+                        let row = ::serde_json::to_value(&entity).unwrap();
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::detail_html(#title, #path, id, &__fields(), &row, #can_update, #can_delete))
+                    }
+                    Ok(None) => ::nirdosha_rt::Response::not_found(),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        }
+    } else {
+        route("get", &input.read, &id_path, "Detail", |_| {
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                match #store().get(&id) {
+                    Some(entity) => {
+                        let row = ::serde_json::to_value(&entity).unwrap();
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::detail_html(#title, #path, id, &__fields(), &row, #can_update, #can_delete))
+                    }
+                    None => ::nirdosha_rt::Response::not_found(),
+                }
+            }
+        })
+    };
+    let detail_api_route = if let Some(guard) = &input.guard {
+        let table = &guard.table;
+        let purpose = &guard.purpose;
+        quote! {
+            .get_with_auth(#api_id_path, "Detail (JSON)", |_req, params, auth| {
+                let Some(id) = params.get("id") else { return ::nirdosha_rt::Response::bad_request("id required") };
+                match #table().guarded_get(auth, #purpose, id) {
+                    Ok(Some(entity)) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
+                    Ok(None) => ::nirdosha_rt::Response::not_found(),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        }
+    } else {
+        route("get", &input.read, &api_id_path, "Detail (JSON)", |_| {
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                match #store().get(&id) {
+                    Some(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
+                    None => ::nirdosha_rt::Response::not_found(),
+                }
+            }
+        })
+    };
 
     // ---- create: new-form (GET), submit (POST html + POST json) ----
-    let new_form_route = route("get", &input.create, &new_path, "New form", |_| {
-        quote! {
-            let values: ::std::collections::HashMap<String, String> = ::std::collections::HashMap::new();
-            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#new_title, #path, &__fields(), &values, &[]))
+    // Guarded mode only registers these when `guard.create_fields` is
+    // set (see `GuardConfig::create_fields`'s own doc comment) --
+    // otherwise unregistered entirely, same as before this addition.
+    let new_form_route = if input.guard.is_some() {
+        if create_fields.is_none() {
+            quote! {}
+        } else {
+            route("get", &Access::Public, &new_path, "New form", |_| {
+                quote! {
+                    let values: ::std::collections::HashMap<String, String> = ::std::collections::HashMap::new();
+                    ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#new_title, #path, &__guarded_create_fields(), &values, &[]))
+                }
+            })
         }
-    });
-    let create_html_route = route("post", &input.create, &path, "Create", |proof| {
-        let arg = proof_arg(&proof);
-        quote! {
-            let values = req.form_or_json();
-            match __create(#arg &values) {
-                Ok(entity) => ::nirdosha_rt::Response::redirect(format!("{}/{}", #path, entity.id)),
-                Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::form_html(#new_title, #path, &__fields(), &values, &errors)),
+    } else {
+        route("get", &input.create, &new_path, "New form", |_| {
+            quote! {
+                let values: ::std::collections::HashMap<String, String> = ::std::collections::HashMap::new();
+                ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#new_title, #path, &__fields(), &values, &[]))
+            }
+        })
+    };
+    let create_html_route = if let Some(guard) = &input.guard {
+        if create_fields.is_none() {
+            quote! {}
+        } else {
+            let table = &guard.table;
+            let purpose = &guard.purpose;
+            quote! {
+                .post_with_auth(#path, "Create", |req, _params, auth| {
+                    let values = req.form_or_json();
+                    let entity = match __guarded_parse_create_fields(&values) {
+                        Ok(e) => e,
+                        Err(errors) => return ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::form_html(#new_title, #path, &__guarded_create_fields(), &values, &errors)),
+                    };
+                    let row_id = ::nirdosha_guard_screens::GuardedEntity::row_id(&entity);
+                    let submitted = __guarded_submitted_create_fields(&values);
+                    match #table().guarded_insert_checked(auth, #purpose, &submitted, entity) {
+                        Ok(_entity) => ::nirdosha_rt::Response::redirect(format!("{}/{}", #path, row_id)),
+                        Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                    }
+                })
             }
         }
-    });
-    let create_api_route = route("post", &input.create, &api_path, "Create (JSON)", |proof| {
-        let arg = proof_arg(&proof);
-        quote! {
-            let values = req.form_or_json();
-            match __create(#arg &values) {
-                Ok(entity) => ::nirdosha_rt::Response::json(201, &::serde_json::to_value(&entity).unwrap()),
-                Err(errors) => ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors })),
+    } else {
+        route("post", &input.create, &path, "Create", |proof| {
+            let arg = proof_arg(&proof);
+            quote! {
+                let values = req.form_or_json();
+                match __create(#arg &values) {
+                    Ok(entity) => ::nirdosha_rt::Response::redirect(format!("{}/{}", #path, entity.id)),
+                    Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::form_html(#new_title, #path, &__fields(), &values, &errors)),
+                }
+            }
+        })
+    };
+    let create_api_route = if let Some(guard) = &input.guard {
+        if create_fields.is_none() {
+            quote! {}
+        } else {
+            let table = &guard.table;
+            let purpose = &guard.purpose;
+            quote! {
+                .post_with_auth(#api_path, "Create (JSON)", |req, _params, auth| {
+                    let values = req.form_or_json();
+                    let entity = match __guarded_parse_create_fields(&values) {
+                        Ok(e) => e,
+                        Err(errors) => return ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors })),
+                    };
+                    let submitted = __guarded_submitted_create_fields(&values);
+                    match #table().guarded_insert_checked(auth, #purpose, &submitted, entity) {
+                        Ok(entity) => ::nirdosha_rt::Response::json(201, &::serde_json::to_value(&entity).unwrap()),
+                        Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                    }
+                })
             }
         }
-    });
+    } else {
+        route("post", &input.create, &api_path, "Create (JSON)", |proof| {
+            let arg = proof_arg(&proof);
+            quote! {
+                let values = req.form_or_json();
+                match __create(#arg &values) {
+                    Ok(entity) => ::nirdosha_rt::Response::json(201, &::serde_json::to_value(&entity).unwrap()),
+                    Err(errors) => ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors })),
+                }
+            }
+        })
+    };
 
     // ---- update: edit-form (GET), submit (POST html, PUT json) ----
-    let edit_form_route = route("get", &input.update, &edit_path, "Edit form", |_| {
+    // Guarded mode parses submitted values into a macro-local
+    // `__GuardedFields` struct (just the `fields:` subset, never the
+    // full `#entity`) before calling `GuardedTable::guarded_update` --
+    // unlike `__parse`, which needs `#entity: Default` to fill in every
+    // field a `fields:` entry doesn't cover, a guarded update only ever
+    // *merges* the submitted subset onto the row `GuardedTable` fetches
+    // internally, so it never needs to construct a whole `#entity` value
+    // at all.
+    let guarded_fields_helpers = if update_fields.is_some() {
         quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            match #store().get(&id) {
-                Some(entity) => {
-                    let row = ::serde_json::to_value(&entity).unwrap();
-                    let values = ::nirdosha_rt::screens::row_to_form_values(&__fields(), &row);
-                    ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#edit_title, &format!("{}/{}/edit", #path, id), &__fields(), &values, &[]))
+            fn __guarded_update_fields() -> Vec<::nirdosha_rt::screens::FieldSpec> {
+                vec![ #( ::nirdosha_rt::screens::FieldSpec { name: #update_field_names, input_type: #update_input_types } ),* ]
+            }
+            struct __GuardedFields { #( #update_field_idents: #update_field_types, )* }
+            fn __guarded_parse_fields(values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<__GuardedFields, Vec<String>> {
+                let mut errors: Vec<String> = Vec::new();
+                #(
+                    let #update_field_idents = match <#update_field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#update_field_names).map(|s| s.as_str())) {
+                        Ok(v) => v,
+                        Err(e) => { errors.push(format!("{}: {}", #update_field_names, e)); Default::default() }
+                    };
+                )*
+                if !errors.is_empty() { return Err(errors); }
+                Ok(__GuardedFields { #( #update_field_idents ),* })
+            }
+            // `update_fields:` itself *is* "what this screen may edit" --
+            // G1's `field_policy` check runs against exactly this set,
+            // not the merged row's full field set (see
+            // `GuardedTable::guarded_update`'s own doc comment for why: a
+            // real update policy's `forbidden(...)` list names fields
+            // that are always present on the merged row whether or not
+            // this write touched them).
+            fn __guarded_changed_fields() -> ::std::collections::HashSet<String> {
+                [ #(#update_field_names),* ].into_iter().map(|s: &str| s.to_string()).collect()
+            }
+        }
+    } else {
+        quote! {}
+    };
+    // Same shape for a guarded `create` -- unlike the update path, this
+    // one constructs a whole `#entity` (via `Default`, same as `__parse`
+    // does for the ungated path) rather than merging onto a fetched row,
+    // since there is no existing row yet.
+    let guarded_create_helpers = if create_fields.is_some() {
+        quote! {
+            fn __guarded_create_fields() -> Vec<::nirdosha_rt::screens::FieldSpec> {
+                vec![ #( ::nirdosha_rt::screens::FieldSpec { name: #create_field_names, input_type: #create_input_types } ),* ]
+            }
+            fn __guarded_parse_create_fields(values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, Vec<String>> {
+                let mut errors: Vec<String> = Vec::new();
+                #(
+                    let #create_field_idents = match <#create_field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#create_field_names).map(|s| s.as_str())) {
+                        Ok(v) => v,
+                        Err(e) => { errors.push(format!("{}: {}", #create_field_names, e)); Default::default() }
+                    };
+                )*
+                if !errors.is_empty() { return Err(errors); }
+                Ok(#entity { id: 0, #( #create_field_idents ),*, ..Default::default() })
+            }
+            // G1's `required(...)` check needs "was this field actually
+            // submitted," which a fully-`Default`-filled `#entity` can't
+            // represent (every field always has *some* value) --
+            // computed from the raw form/JSON keys instead, restricted
+            // to this screen's own declared `create_fields:` set so an
+            // unrelated extra key in `values` can't masquerade as a
+            // real field. A key present but empty (`rationale=`) counts
+            // as NOT submitted -- an HTML `<form>` has no way to omit a
+            // named input entirely, so "present but blank" is the only
+            // signal a browser submission can give for "I didn't fill
+            // this in."
+            fn __guarded_submitted_create_fields(values: &::std::collections::HashMap<String, String>) -> ::std::collections::HashSet<String> {
+                let exempt: &[&str] = <#entity as ::nirdosha_guard_screens::GuardedEntity>::create_field_policy_exempt();
+                [ #(#create_field_names),* ]
+                    .into_iter()
+                    .filter(|name: &&str| values.get(*name).is_some_and(|v| !v.is_empty()))
+                    .filter(|name: &&str| !exempt.contains(name))
+                    .map(|s: &str| s.to_string())
+                    .collect()
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let edit_form_route = if let Some(guard) = &input.guard {
+        if update_fields.is_none() {
+            quote! {}
+        } else {
+            let table = &guard.table;
+            let purpose = &guard.purpose;
+            quote! {
+                .get_with_auth(#edit_path, "Edit form", |_req, params, auth| {
+                    let Some(id) = params.get("id") else { return ::nirdosha_rt::Response::bad_request("id required") };
+                    match #table().guarded_get(auth, #purpose, id) {
+                        Ok(Some(entity)) => {
+                            let row = ::serde_json::to_value(&entity).unwrap();
+                            let values = ::nirdosha_rt::screens::row_to_form_values(&__guarded_update_fields(), &row);
+                            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#edit_title, &format!("{}/{}/edit", #path, id), &__guarded_update_fields(), &values, &[]))
+                        }
+                        Ok(None) => ::nirdosha_rt::Response::not_found(),
+                        Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                    }
+                })
+            }
+        }
+    } else {
+        route("get", &input.update, &edit_path, "Edit form", |_| {
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                match #store().get(&id) {
+                    Some(entity) => {
+                        let row = ::serde_json::to_value(&entity).unwrap();
+                        let values = ::nirdosha_rt::screens::row_to_form_values(&__fields(), &row);
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#edit_title, &format!("{}/{}/edit", #path, id), &__fields(), &values, &[]))
+                    }
+                    None => ::nirdosha_rt::Response::not_found(),
                 }
-                None => ::nirdosha_rt::Response::not_found(),
+            }
+        })
+    };
+    let update_html_route = if let Some(guard) = &input.guard {
+        if update_fields.is_none() {
+            quote! {}
+        } else {
+            let table = &guard.table;
+            let purpose = &guard.purpose;
+            quote! {
+                .post_with_auth(#edit_path, "Update", |req, params, auth| {
+                    let Some(id) = params.get("id").map(|s| s.to_string()) else { return ::nirdosha_rt::Response::bad_request("id required") };
+                    let values = req.form_or_json();
+                    let parsed = match __guarded_parse_fields(&values) {
+                        Ok(p) => p,
+                        Err(errors) => return ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::form_html(#edit_title, &format!("{}/{}/edit", #path, id), &__guarded_update_fields(), &values, &errors)),
+                    };
+                    let changed = __guarded_changed_fields();
+                    match #table().guarded_update(auth, #purpose, &id, &changed, move |entity| { #( entity.#update_field_idents = parsed.#update_field_idents; )* }) {
+                        Ok(_entity) => ::nirdosha_rt::Response::redirect(format!("{}/{}", #path, id)),
+                        Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                    }
+                })
             }
         }
-    });
-    let update_html_route = route("post", &input.update, &edit_path, "Update", |proof| {
-        let arg = proof_arg(&proof);
-        quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            let values = req.form_or_json();
-            match __update(#arg id, &values) {
-                Ok(entity) => ::nirdosha_rt::Response::redirect(format!("{}/{}", #path, entity.id)),
-                Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::form_html(#edit_title, &format!("{}/{}/edit", #path, id), &__fields(), &values, &errors)),
+    } else {
+        route("post", &input.update, &edit_path, "Update", |proof| {
+            let arg = proof_arg(&proof);
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                let values = req.form_or_json();
+                match __update(#arg id, &values) {
+                    Ok(entity) => ::nirdosha_rt::Response::redirect(format!("{}/{}", #path, entity.id)),
+                    Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::form_html(#edit_title, &format!("{}/{}/edit", #path, id), &__fields(), &values, &errors)),
+                }
+            }
+        })
+    };
+    let update_api_route = if let Some(guard) = &input.guard {
+        if update_fields.is_none() {
+            quote! {}
+        } else {
+            let table = &guard.table;
+            let purpose = &guard.purpose;
+            quote! {
+                .put_with_auth(#api_id_path, "Update (JSON)", |req, params, auth| {
+                    let Some(id) = params.get("id").map(|s| s.to_string()) else { return ::nirdosha_rt::Response::bad_request("id required") };
+                    let values = req.form_or_json();
+                    let parsed = match __guarded_parse_fields(&values) {
+                        Ok(p) => p,
+                        Err(errors) => return ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors })),
+                    };
+                    let changed = __guarded_changed_fields();
+                    match #table().guarded_update(auth, #purpose, &id, &changed, move |entity| { #( entity.#update_field_idents = parsed.#update_field_idents; )* }) {
+                        Ok(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
+                        Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                    }
+                })
             }
         }
-    });
-    let update_api_route = route("put", &input.update, &api_id_path, "Update (JSON)", |proof| {
-        let arg = proof_arg(&proof);
-        quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            let values = req.form_or_json();
-            match __update(#arg id, &values) {
-                Ok(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
-                Err(errors) => ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors })),
+    } else {
+        route("put", &input.update, &api_id_path, "Update (JSON)", |proof| {
+            let arg = proof_arg(&proof);
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                let values = req.form_or_json();
+                match __update(#arg id, &values) {
+                    Ok(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
+                    Err(errors) => ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors })),
+                }
             }
-        }
-    });
+        })
+    };
 
     // ---- delete: typed-confirmation (GET), submit (POST html, DELETE json) ----
-    let delete_confirm_route = route("get", &input.delete, &delete_path, "Delete confirmation", |_| {
-        quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::delete_confirm_html(#title, &format!("{}/{}/delete", #path, id), "DELETE", &format!("#{id}")))
-        }
-    });
-    let delete_html_route = route("post", &input.delete, &delete_path, "Delete", |proof| {
-        let arg = proof_arg(&proof);
-        quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            let values = req.form_or_json();
-            if values.get("confirm").map(|s| s.as_str()) != Some("DELETE") {
-                return ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::delete_confirm_html(#title, &format!("{}/{}/delete", #path, id), "DELETE", &format!("#{id}")));
+    // Never registered for a guarded screen -- see `GuardConfig`'s own
+    // doc comment.
+    let delete_confirm_route = if input.guard.is_some() {
+        quote! {}
+    } else {
+        route("get", &input.delete, &delete_path, "Delete confirmation", |_| {
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::delete_confirm_html(#title, &format!("{}/{}/delete", #path, id), "DELETE", &format!("#{id}")))
             }
-            __delete(#arg id);
-            ::nirdosha_rt::Response::redirect(#path)
-        }
-    });
-    let delete_api_route = route("delete", &input.delete, &api_id_path, "Delete (JSON)", |proof| {
-        let arg = proof_arg(&proof);
-        quote! {
-            let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
-            if __delete(#arg id) { ::nirdosha_rt::Response::no_content() } else { ::nirdosha_rt::Response::not_found() }
-        }
-    });
+        })
+    };
+    let delete_html_route = if input.guard.is_some() {
+        quote! {}
+    } else {
+        route("post", &input.delete, &delete_path, "Delete", |proof| {
+            let arg = proof_arg(&proof);
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                let values = req.form_or_json();
+                if values.get("confirm").map(|s| s.as_str()) != Some("DELETE") {
+                    return ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::delete_confirm_html(#title, &format!("{}/{}/delete", #path, id), "DELETE", &format!("#{id}")));
+                }
+                __delete(#arg id);
+                ::nirdosha_rt::Response::redirect(#path)
+            }
+        })
+    };
+    let delete_api_route = if input.guard.is_some() {
+        quote! {}
+    } else {
+        route("delete", &input.delete, &api_id_path, "Delete (JSON)", |proof| {
+            let arg = proof_arg(&proof);
+            quote! {
+                let id: i64 = match params.get("id").and_then(|s| s.parse().ok()) { Some(v) => v, None => return ::nirdosha_rt::Response::bad_request("id must be an integer") };
+                if __delete(#arg id) { ::nirdosha_rt::Response::no_content() } else { ::nirdosha_rt::Response::not_found() }
+            }
+        })
+    };
 
     quote! {
-        fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+        // `pub`, matching `login!`/`app_shell!`'s generated mount fns
+        // (all six screen-archetype macros now agree on this — see
+        // `dashboard!`/`kanban_board!`/`wizard!`/`settings_screen!`/
+        // `communication_feed!`'s own identical fix). A private mount fn
+        // only ever worked because every existing caller invoked the
+        // macro and called the result in the same file; a real
+        // multi-module app (screens split one-per-file, e.g. RTM's
+        // `screens/m06_transactions.nir` mounted from a separate
+        // `src/bin/serve.nir`) needs to call it from outside
+        // that module.
+        pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
             #fields_fn
             #parse_fn
             #core_fns
+            #guarded_fields_helpers
+            #guarded_create_helpers
 
             // Literal-suffix routes (`/new`, `/{id}/edit`, `/{id}/delete`)
             // must be registered before `/{id}` itself: `Router::dispatch`
