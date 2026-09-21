@@ -108,6 +108,12 @@ struct KanbanInput {
     columns: Vec<LitStr>,
     move_path: LitStr,
     guard: Option<GuardConfig>,
+    /// Optional `machine: "Name"` (T-14) — the `workflow!`-registered
+    /// state machine (e.g. `"CaseStatus"`) whose real transition graph
+    /// gates drags: a card's current column derives its allowed drop
+    /// columns from `nirdosha_guard_registry::workflow_allowed_transitions`,
+    /// never a second, driftable `transitions:` literal at the call site.
+    machine: Option<LitStr>,
 }
 
 impl Parse for KanbanInput {
@@ -174,9 +180,16 @@ impl Parse for KanbanInput {
         // Additive-only: every existing `kanban_board!` invocation ends
         // right here (no trailing content), so this only ever fires for
         // an invocation that opted in -- same convention as
-        // `crud_screens!`'s identical `guard:` parse.
+        // `crud_screens!`'s identical `guard:` parse. `guard:` and
+        // `machine:` are independent opt-ins and may appear in either
+        // order, so this loops over trailing keyed clauses instead of
+        // checking one fixed keyword once.
         let mut guard = None;
-        if input.peek(Ident) {
+        let mut machine = None;
+        loop {
+            if !input.peek(Ident) {
+                break;
+            }
             let fork = input.fork();
             let ahead: Ident = fork.parse()?;
             if ahead == "guard" {
@@ -186,10 +199,17 @@ impl Parse for KanbanInput {
                 syn::braced!(content in input);
                 guard = Some(content.parse::<GuardConfig>()?);
                 let _ = input.parse::<Token![,]>();
+            } else if ahead == "machine" {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                machine = Some(input.parse::<LitStr>()?);
+                let _ = input.parse::<Token![,]>();
+            } else {
+                break;
             }
         }
 
-        Ok(KanbanInput { mount, entity, store, path, access, title_field, column_field, columns, move_path, guard })
+        Ok(KanbanInput { mount, entity, store, path, access, title_field, column_field, columns, move_path, guard, machine })
     }
 }
 
@@ -214,6 +234,20 @@ fn expand_parsed(input: KanbanInput) -> TokenStream2 {
     let asset_path_str = format!("{}/board.js", path_str.trim_end_matches('/'));
     let asset_path = quote! { #asset_path_str };
 
+    // Computed once per request, from the real `workflow!`-registered
+    // machine -- never a second literal transition list at the call
+    // site. `None` (no `machine:` clause) renders exactly as every
+    // pre-T-14 board did: no `data-allowed-to`, no graying.
+    let allowed_binding = match &input.machine {
+        Some(name) => quote! {
+            let __nirdosha_allowed: Option<::std::collections::HashMap<String, Vec<String>>> =
+                Some(::nirdosha_guard_registry::workflow_allowed_transitions(#name));
+        },
+        None => quote! {
+            let __nirdosha_allowed: Option<::std::collections::HashMap<String, Vec<String>>> = None;
+        },
+    };
+
     // `guard:` swaps the card source for a real, per-request guard-policy
     // read (`GuardedTable::guarded_snapshot`) instead of the ungated
     // `#store().snapshot()` -- same posture as `crud_screens!`'s own
@@ -237,7 +271,8 @@ fn expand_parsed(input: KanbanInput) -> TokenStream2 {
                             })
                             .collect();
                         let columns: &[&str] = &[ #(#columns),* ];
-                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::board::board_html(#title, columns, &cards, #asset_path))
+                        #allowed_binding
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::board::board_html(#title, columns, &cards, #asset_path, __nirdosha_allowed.as_ref()))
                     }
                     Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
                 }
@@ -255,7 +290,8 @@ fn expand_parsed(input: KanbanInput) -> TokenStream2 {
                 })
                 .collect();
             let columns: &[&str] = &[ #(#columns),* ];
-            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::board::board_html(#title, columns, &cards, #asset_path))
+            #allowed_binding
+            ::nirdosha_rt::Response::html(200, ::nirdosha_rt::board::board_html(#title, columns, &cards, #asset_path, __nirdosha_allowed.as_ref()))
         };
         match &input.access {
             Access::Public => quote! { .get(#path, #title, |_req, _params| { #view_body }) },

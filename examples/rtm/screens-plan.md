@@ -33,7 +33,7 @@
 | A1 | Stale-blocker purge + 17-screen re-stage | A | M | 17 | ☑ done | A2 (landed same commit) |
 | A2 | `read user_role` policy (18.1) | A | S | 1 | ☑ done | — |
 | B1 | T-03 disposition vocabulary (S) | B | S | 2+2 | ☑ done | — |
-| B2 | T-14 kanban drag transitions (S) | B | S | 1 | ☐ pending | B1 (machine) |
+| B2 | T-14 kanban drag transitions (S) | B | S | 1 | ☑ done | B1 (machine) |
 | B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☐ pending | — |
 | B4 | T-10 role-ident canonicalization (S) | B | S | all | ☐ pending | — |
 | B5 | T-12 predicate binding / I15 (S) | B | S | gate | ☐ pending | — |
@@ -142,18 +142,31 @@ added alongside the existing `rationale_present`).
 **Done-when.** A write with an unknown code or empty rationale is denied by
 the guard (integration test proves the deny, not just the render).
 
-## B2 ☐ T-14 kanban drag transitions (S)
+## B2 ☑ T-14 kanban drag transitions (S) — done
 **Goal.** `kanban_board!` grays out drags the `workflow!` machine forbids,
 instead of rejecting post-hoc.
-**Steps.**
-1. `kanban_board!` currently takes presentational columns only
-   (`crates/nirdosha-macros/src/kanban_board.rs`). Accept an explicit
-   `transitions:` list (or read the registered machine catalog) and emit
-   per-column `data-allowed-to` attributes + CSS graying.
-2. Emit-side check: a drag target with no allowed transition renders
-   grayed, never clickable (mirrors T-02's absence-over-failure posture).
-**Done-when.** Illegal drag renders grayed pre-drop; legal drag emits the
-guarded transition call. One integration test in the rtm suite.
+**What shipped.** Read the registered machine catalog for real, rather than
+a second `transitions:` literal: discovered `WORKFLOWS`/`WorkflowRecord` were
+declared but never populated (`workflow!` only ever wrote its free-text
+source into `CATALOG`) — closed that gap the same way Plan Phase 15 closed
+the identical one for `approval_chain!`/`APPROVAL_CHAINS`. `workflow!` now
+also parses its `machine { a -> b -> [c,d]; ... }` body into real edges and
+emits a const `WorkflowRegistration` into `WORKFLOWS`
+(`nirdosha-guard-macros`/`nirdosha-guard-registry`). `kanban_board!` gained
+an optional `machine: "Name"` clause
+(`crates/nirdosha-macros/src/kanban_board.rs`) that calls the new
+`nirdosha_guard_registry::workflow_allowed_transitions(name)` at request
+time and passes the per-card allowed-columns map into `board_html`
+(`crates/nirdosha-rt/src/board.rs`), which renders `data-allowed-to` on each
+card; `board_js` grays disallowed columns pre-drop (`kanban-column
+--disallowed`, `pointer-events:none`) and refuses the drop, never a
+post-hoc-only reject. 4.1's mount (`examples/rtm/src/screens/m04_cases.nir`)
+now passes `machine: "CaseStatus"`.
+**Done-when.** Illegal drag renders grayed pre-drop; legal drag's column
+stays live. Proven by
+`case_board_drags_gray_out_transitions_the_real_casestatus_machine_forbids`
+(`examples/rtm/tests/m03_m04_m05_screens.rs`). 4.1 flipped `blocked_by = []`,
+`stage = "built"`.
 
 ## B3 ☐ T-02 forbidden=absent drop pass (S)
 **Goal.** `field_policy { forbidden(x) }` renders the field **absent** — no
@@ -448,4 +461,6 @@ parallelizes off the core path.
 | — | Blocker D closed: `verify_screen_inventory.rs` (V1/V2/V3/V5/V6/V10); 3 policies added; 1 menu waiver; 1 screen role fix | verify_screen_inventory |
 | — | screens-plan.md revision: fixed A1 emittable count (41 not 23), A2 role mismatch, B10 approval_inbox grouping, C4 unlock count, added performance notes | verify_screen_inventory, verify_tickets_and_blockers, verify_tickets |
 | — | A1+A2 landed: 34 stale blockers removed, 17 screens → emittable (41 built+emittable), pins emptied; `user-role-read` policy added to src/90_ops_admin.nir + roles doc; two-agent split codified in agent-a-engine.md / agent-b-dataplanes.md | all 12 suites green |
+| 2026-09-22 | B1 (T-03) landed: disposition vocabularies + rationale/code invariants (00_core.nir + bridge.nir both halves); 3.3/4.10/11.2 → built | all rtm suites green |
+| 2026-09-22 | B2 (T-14) landed: `workflow!` now populates the real `WORKFLOWS` registry slice (was declared, never emitted into); `kanban_board!` gained `machine:` to read it and gray illegal drags pre-drop; 4.1 → built, blocked_by emptied | all rtm suites green |
 | 2026-09-22 | B1 (T-03) landed: closed vocabularies (`DISPOSITION_CODES`/`CASE_DISPOSITION_CODES`/`HOLD_REASON_CODES`, 10_domains.nir) + 3 new invariants (`disposition_code_valid`/`case_disposition_valid`/`hold_reason_valid`, 00_core.nir + bridge.nir check_invariant arms), wired into `analyst-disposition-alert`/`case-transition`/`ingest-create-hold`; 3.3→built, 4.10→built, 11.2→built, 4.1 drops T-03 (T-14 only remains); executed single-agent (agent-a-engine.md's bridge.nir restriction lifted — no concurrent Agent B this run) | all rtm suites green (verify_tickets corpus-facts recomputed: 48 refs/40 lines/8 stage-gating+4 note-only) |

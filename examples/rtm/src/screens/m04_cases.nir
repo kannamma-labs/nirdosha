@@ -93,6 +93,7 @@ nirdosha_rt::kanban_board! {
         table: case_table,
         purpose: "AmlInvestigation",
     },
+    machine: "CaseStatus",
 }
 
 /// 4.11 Four-Eyes Review — `case-close-confirm` (`ComplianceLead`,

@@ -46,11 +46,14 @@ meta.roles_note (T-10).
 | L | cross-cutting runtime + archetype work gating ten or more screens |
 
 **Corpus facts this legend is pinned to** (asserted by tests/verify_tickets.rs):
-48 `ticket:T-…` references on 40 `blocked_by` lines across the 152-screen
-register (8 lines block on two tickets at once); 12 of the 14 ticket slots
-carry references — 8 stage-gating tickets
-(T-01, T-04, T-06, T-07, T-08, T-09, T-11, T-14) and 4 note/menu-level
+47 `ticket:T-…` references on 39 `blocked_by` lines across the 152-screen
+register (8 lines block on two tickets at once); 11 of the 14 ticket slots
+carry references — 7 stage-gating tickets
+(T-01, T-04, T-06, T-07, T-08, T-09, T-11) and 4 note/menu-level
 only (T-02, T-03, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
+T-14 closed its only gate (4.1) and is no longer referenced anywhere in the
+corpus (it stays `active`, not `reserved` — a closed-out ticket keeps its
+slot's identity, it just currently gates/notes nothing).
 The register's own header line ("blocked_by: ticket:T-xx | dataset:<id> | …")
 is format documentation, not a reference.
 
@@ -371,8 +374,8 @@ fills this section in the same step.
 - status: active
 - size: S
 - meaning: board drag-and-drop transitions validated against the workflow! state machine (graying disallowed moves)
-- blocked-screens: 4.1
-- note-mentions: 4.1
+- blocked-screens: none
+- note-mentions: none
 
 **Scope.** The interaction layer on 4.1 Case Queue / Board: drag-and-drop
 column moves check the workflow! table's allowed transitions and gray out
@@ -380,8 +383,13 @@ illegal drags rather than rejecting them post-hoc — "board+list shippable;
 drag graying T-14 from workflow! table". Builds on T-03's disposition machine
 for which transitions exist.
 
-**Gates.** 4.1 Case Queue / Board (stage=interim: board+list are shippable
-today; only the drag feature waits on this ticket).
+**Gates.** None — closed. 4.1 Case Queue / Board is `stage = "built"`:
+`kanban_board!`'s `machine: "CaseStatus"` clause reads the real
+`workflow!`-registered transition graph (via the new
+`nirdosha_guard_registry::WORKFLOWS` slice / `workflow_allowed_transitions`)
+and grays every column a card's current status cannot legally reach.
 
 **Done when.** A drag to a column the CaseStatus machine forbids renders
 grayed/disallowed before drop, and allowed drags emit the guarded transition.
+✓ Proven by `case_board_drags_gray_out_transitions_the_real_casestatus_machine_forbids`
+(examples/rtm/tests/m03_m04_m05_screens.rs).

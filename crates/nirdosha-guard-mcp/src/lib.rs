@@ -692,7 +692,7 @@ mod tests {
 			roles: vec![],
 			ports: vec![],
 			models: vec![],
-			workflows: vec![nirdosha_guard_registry::WorkflowRecord { name: "CaseStatus".into(), states: vec!["open".into(), "closed".into()] }],
+			workflows: vec![nirdosha_guard_registry::WorkflowRecord { name: "CaseStatus".into(), states: vec!["open".into(), "closed".into()], edges: vec![("open".into(), "closed".into())] }],
 			approval_chains: vec![],
 			invariants: vec![],
 			purposes: vec![],

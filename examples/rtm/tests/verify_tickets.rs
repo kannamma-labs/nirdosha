@@ -259,8 +259,9 @@ fn every_ticket_reference_resolves_to_a_defined_active_ticket() {
         assert_ne!(t.status, "reserved", "reserved slot `{id}` is referenced by the corpus");
         checked += 1;
     }
-    // The 12 referenced slots: T-01..T-04, T-06..T-12, T-14 (T-05/T-13 reserved).
-    assert_eq!(checked, 12, "expected exactly 12 distinct referenced ticket ids");
+    // The 11 referenced slots: T-01..T-04, T-06..T-12 (T-05/T-13 reserved;
+    // T-14 closed its only gate and is no longer referenced anywhere).
+    assert_eq!(checked, 11, "expected exactly 11 distinct referenced ticket ids");
 
     // Every structured blocker in a parsed `blocked_by` array is well-formed
     // (`ticket:T-xx`). The register header's format example (`ticket:T-xx`)
@@ -442,16 +443,18 @@ fn legend_corpus_facts_match_live_counts() {
     // format example is documentation and excluded by the two-digit filter).
     let occurrences = count_structured_refs(&screens_src);
     let lines = count_structured_ref_lines(&screens_src);
-    assert_eq!(occurrences, 48, "screens.toml now carries {occurrences} ticket refs (legend says 48)");
-    assert_eq!(lines, 40, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 40)");
+    assert_eq!(occurrences, 47, "screens.toml now carries {occurrences} ticket refs (legend says 47)");
+    assert_eq!(lines, 39, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 39)");
 
-    // 8 stage-gating tickets, 4 note-only, 2 reserved — and the legend's
+    // 7 stage-gating tickets, 4 note-only, 2 reserved — and the legend's
     // corpus-facts paragraph still names exactly those sets. (T-03 closed
     // out its stage-gating blockers on 3.3/4.1/4.10/11.2 — its remaining
-    // trace is 7.1's historical note-mention, so it moved to note-only.)
+    // trace is 7.1's historical note-mention, so it moved to note-only.
+    // T-14 closed 4.1's drag-graying blocker — its only gate — and dropped
+    // out of both sets entirely.)
     let blocked = blocked_by_tickets(&screens);
     let stage_gating: Vec<&String> = blocked.keys().collect();
-    assert_eq!(stage_gating.len(), 8, "stage-gating tickets drifted: {stage_gating:?}");
+    assert_eq!(stage_gating.len(), 7, "stage-gating tickets drifted: {stage_gating:?}");
 
     let active = tickets.iter().filter(|t| t.status == "active").count();
     let reserved = tickets.iter().filter(|t| t.status == "reserved").count();
@@ -461,7 +464,7 @@ fn legend_corpus_facts_match_live_counts() {
         .chain(scan_ticket_ids(&screens_src))
         .chain(scan_ticket_ids(&read("menus.toml")))
         .collect();
-    assert_eq!(referenced.len(), 12, "referenced ticket ids drifted: {referenced:?}");
+    assert_eq!(referenced.len(), 11, "referenced ticket ids drifted: {referenced:?}");
     let note_only: Vec<String> = referenced.iter().filter(|t| !blocked.contains_key(*t)).cloned().collect();
     assert_eq!(note_only, vec!["T-02", "T-03", "T-10", "T-12"], "note-only tickets drifted");
 
@@ -473,7 +476,7 @@ fn legend_corpus_facts_match_live_counts() {
         .split("---")
         .next()
         .unwrap();
-    for token in ["48", "40", "152", "12 of the 14", "8 stage-gating", "T-02, T-03, T-10, T-12", "T-05 and T-13"] {
+    for token in ["47", "39", "152", "11 of the 14", "7 stage-gating", "T-02, T-03, T-10, T-12", "T-05 and T-13"] {
         assert!(facts.contains(token), "tickets.md corpus-facts paragraph no longer states `{token}`");
     }
     for tid in stage_gating {

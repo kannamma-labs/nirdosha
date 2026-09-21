@@ -403,7 +403,58 @@ impl McpServerRegistration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowRecord { pub name: String, pub states: Vec<String> }
+pub struct WorkflowRecord { pub name: String, pub states: Vec<String>, pub edges: Vec<(String, String)> }
+
+/// Const-constructible counterpart to [`WorkflowRecord`] — what
+/// `workflow!` now actually emits into `WORKFLOWS` (T-14: kanban drag
+/// transitions need a *real* registered machine to check drags against,
+/// not the free-text `CatalogRegistration.source` dump the doc comment
+/// at the top of `nirdosha-guard-macros` claimed `WORKFLOWS` already got
+/// from every `workflow!` call — it didn't; this closes that gap the
+/// same way Plan Phase 15 closed the identical one for
+/// `ApprovalChainRegistration`/`APPROVAL_CHAINS`). `edges` is the
+/// machine's parsed `from -> to` transition graph (a bracketed
+/// `a -> [b, c]` fans out to two edges, `(a,b)` and `(a,c)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRegistration {
+	pub name: &'static str,
+	pub edges: &'static [(&'static str, &'static str)],
+}
+
+impl WorkflowRegistration {
+	pub fn to_record(&self) -> WorkflowRecord {
+		let mut states = Vec::new();
+		for (from, to) in self.edges {
+			if !states.contains(&from.to_string()) {
+				states.push(from.to_string());
+			}
+			if !states.contains(&to.to_string()) {
+				states.push(to.to_string());
+			}
+		}
+		WorkflowRecord {
+			name: self.name.to_string(),
+			states,
+			edges: self.edges.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect(),
+		}
+	}
+}
+
+/// The allowed next states from every state of the named machine (e.g.
+/// `"CaseStatus"`), derived from its real `workflow!`-registered
+/// transition graph — the source `kanban_board!`'s `machine:` clause
+/// (T-14) reads to gray out a drag target with no allowed transition,
+/// instead of duplicating the machine's edges as a second, driftable
+/// `transitions:` literal at the call site.
+pub fn workflow_allowed_transitions(name: &str) -> std::collections::HashMap<String, Vec<String>> {
+	let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+	for w in WORKFLOWS.iter().filter(|w| w.name == name) {
+		for (from, to) in w.edges {
+			map.entry((*from).to_string()).or_default().push((*to).to_string());
+		}
+	}
+	map
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalChainRecord { pub name: String, pub quorum: u8, pub approvers: Vec<String> }
@@ -485,7 +536,7 @@ pub static PORTS: [PortRegistration] = [..];
 #[linkme::distributed_slice]
 pub static MODELS: [ModelRegistration] = [..];
 #[linkme::distributed_slice]
-pub static WORKFLOWS: [WorkflowRecord] = [..];
+pub static WORKFLOWS: [WorkflowRegistration] = [..];
 #[linkme::distributed_slice]
 pub static APPROVAL_CHAINS: [ApprovalChainRegistration] = [..];
 #[linkme::distributed_slice]
@@ -529,7 +580,7 @@ pub fn dump() -> RegistryDump {
 		policies: records(), datasets: DATASETS.to_vec(), roles: ROLES.to_vec(),
 		ports: PORTS.iter().map(PortRegistration::to_record).collect(),
 		models: MODELS.iter().map(ModelRegistration::to_record).collect(),
-		workflows: WORKFLOWS.to_vec(),
+		workflows: WORKFLOWS.iter().map(WorkflowRegistration::to_record).collect(),
 		approval_chains: APPROVAL_CHAINS.iter().map(ApprovalChainRegistration::to_record).collect(), invariants: INVARIANTS.to_vec(),
 		purposes: PURPOSES.iter().map(PurposeRegistration::to_record).collect(),
 		driver_manifests: DRIVER_MANIFESTS.to_vec(),

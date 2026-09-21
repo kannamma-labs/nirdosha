@@ -313,9 +313,9 @@ archetype = "kanban_board!"
 combo = ["crud_screens!"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W", "McpCopilot:R"]
 datasets = ["PG.case"]
-blocked_by = ["ticket:T-14"]
-stage = "interim"
-notes = "board+list shippable; drag graying T-14 from workflow! table"
+blocked_by = []
+stage = "built"
+notes = "drag graying via kanban_board!'s machine: clause, reading the real CaseStatus workflow! transition graph"
 
 [[screen]]
 id = "4.2"

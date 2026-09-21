@@ -452,13 +452,101 @@ pub fn approval_chain(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// `workflow! { machine Name { ... } }`.
+/// Parses a `workflow!` machine body's `from -> to -> [to, to, ...];`
+/// statements into a flat edge list. Grammar: each `;`-terminated
+/// statement is a chain of `->`-separated segments; every segment but
+/// possibly the last is a bare state ident, and any segment may instead
+/// be a bracketed list of idents (fanning the previous segment's states
+/// out to each list member) — `a -> b -> [c, d]` yields edges
+/// `(a,b), (b,c), (b,d)`. Consecutive list segments chain generally: the
+/// next segment's edges originate from *every* ident the prior segment
+/// produced, not just the first.
+fn parse_workflow_edges(body_str: &str) -> Vec<(String, String)> {
+    let mut edges = Vec::new();
+    for stmt in split_top_level(body_str, ';') {
+        if stmt.is_empty() {
+            continue;
+        }
+        let segments = split_arrow_top_level(&stmt);
+        if segments.len() < 2 {
+            continue;
+        }
+        let mut prev: Vec<String> = parse_state_segment(&segments[0]);
+        for seg in &segments[1..] {
+            let current = parse_state_segment(seg);
+            for from in &prev {
+                for to in &current {
+                    edges.push((from.clone(), to.clone()));
+                }
+            }
+            prev = current;
+        }
+    }
+    edges
+}
+
+/// A single `->`-chain segment: either a bare ident (`open`) or a
+/// bracketed list (`[confirmed_fraud, false_positive, escalate]`).
+fn parse_state_segment(seg: &str) -> Vec<String> {
+    if let Some(inner) = seg.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        split_top_level(inner, ',').into_iter().filter(|s| !s.is_empty()).collect()
+    } else if seg.is_empty() {
+        Vec::new()
+    } else {
+        vec![seg.to_string()]
+    }
+}
+
+/// Splits on top-level `->` occurrences (depth 0 across `()[]{}`) — like
+/// `split_top_level`, but for the two-character `->` delimiter that
+/// delimiter's single-`char` signature can't take.
+fn split_arrow_top_level(s: &str) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(c);
+                i += 1;
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                current.push(c);
+                i += 1;
+            }
+            '-' if depth == 0 && chars.get(i + 1) == Some(&'>') => {
+                items.push(std::mem::take(&mut current));
+                i += 2;
+            }
+            _ => {
+                current.push(c);
+                i += 1;
+            }
+        }
+    }
+    if !current.is_empty() {
+        items.push(current);
+    }
+    items
+}
+
+/// `workflow! { machine Name { ... } }`. Emits the existing free-text
+/// `CatalogRegistration` (unchanged, still feeds `cargo nirdosha verify`'s
+/// dump) plus — new for T-14 — a real `WorkflowRegistration` with the
+/// machine's parsed transition graph into `WORKFLOWS`, the same
+/// "register both, dual-slice" fix Plan Phase 15 already established for
+/// `approval_chain!`/`APPROVAL_CHAINS`.
 #[proc_macro]
 pub fn workflow(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
     let static_name = catalog_static_name("WORKFLOW", &input_str);
     let name = extract_named_after(&input_str, "machine", "workflow");
-    quote! {
+    let catalog_registration = quote! {
         #[used]
         #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
         #[linkme(crate = ::nirdosha_guard_registry::linkme)]
@@ -467,6 +555,41 @@ pub fn workflow(input: TokenStream) -> TokenStream {
             name: #name,
             source: #input_str,
         };
+    };
+
+    let tokens: TokenStream2 = input.into();
+    let blocks = top_level_named_blocks(tokens, "machine");
+    let edges: Vec<(String, String)> = blocks
+        .first()
+        .map(|(_, body)| parse_workflow_edges(&compact(&body.to_string())))
+        .unwrap_or_default();
+
+    // No parseable edges: register the raw catalog entry only, same
+    // honest-gap posture `approval_chain!` takes for a chain with no
+    // parseable `quorum(...)` — never a silent empty-but-present record.
+    let record_registration = if edges.is_empty() {
+        quote! {}
+    } else {
+        let record_static_name = catalog_static_name("WORKFLOW_RECORD", &input_str);
+        let edge_tokens = edges.iter().map(|(from, to)| {
+            let from_lit = LitStr::new(from, proc_macro2::Span::call_site());
+            let to_lit = LitStr::new(to, proc_macro2::Span::call_site());
+            quote! { (#from_lit, #to_lit) }
+        });
+        quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::WORKFLOWS)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #record_static_name: ::nirdosha_guard_registry::WorkflowRegistration = ::nirdosha_guard_registry::WorkflowRegistration {
+                name: #name,
+                edges: &[ #(#edge_tokens),* ],
+            };
+        }
+    };
+
+    quote! {
+        #catalog_registration
+        #record_registration
     }
     .into()
 }

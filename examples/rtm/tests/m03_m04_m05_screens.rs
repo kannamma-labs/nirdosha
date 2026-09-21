@@ -208,6 +208,48 @@ fn case_board_route_is_not_swallowed_by_the_id_wildcard() {
     assert_eq!(resp.status, 200, "the board route must render, not be mistaken for /cases/{{id}} with id=\"board\": {resp:?}");
 }
 
+#[test]
+fn case_board_drags_gray_out_transitions_the_real_casestatus_machine_forbids() {
+    // T-14: `kanban_board!`'s `machine: "CaseStatus"` clause (m04_cases.nir)
+    // must render each card's *real* allowed next columns from the
+    // `workflow! { machine CaseStatus { .. } }` declared in 10_domains.nir
+    // -- `open -> investigating -> [confirmed_fraud, false_positive, escalate]`
+    // -- not a second, driftable transitions list.
+    let router = router();
+    seed_case("case-300", "open");
+    seed_case("case-301", "confirmed_fraud");
+    let cookie = login_as(&router, "analyst", "analyst-demo");
+
+    let resp = get_as(&router, "/cases/board", &cookie);
+    assert_eq!(resp.status, 200, "{resp:?}");
+
+    // An `open` card may legally move only to `investigating` -- every
+    // other column (confirmed_fraud, false_positive, sar_filed, closed)
+    // is absent from its `data-allowed-to`, which is what drives
+    // `board_js`'s pre-drop graying.
+    let open_card_marker = format!("data-id=\"{}\"", "case-300");
+    let open_card_start = resp.body.find(&open_card_marker).expect("case-300 card must render");
+    let open_card_tag_end = resp.body[..open_card_start].rfind('<').unwrap();
+    let open_card_tag = &resp.body[open_card_tag_end..open_card_start + open_card_marker.len() + 40];
+    assert!(open_card_tag.contains("data-allowed-to=\"investigating\""), "open's only legal move is investigating: {open_card_tag}");
+    assert!(!open_card_tag.contains("confirmed_fraud"), "open must not list confirmed_fraud as an allowed target: {open_card_tag}");
+
+    // `confirmed_fraud` may legally move only to `sar_filed` per the
+    // declared machine.
+    let cf_card_marker = format!("data-id=\"{}\"", "case-301");
+    let cf_card_start = resp.body.find(&cf_card_marker).expect("case-301 card must render");
+    let cf_card_tag_end = resp.body[..cf_card_start].rfind('<').unwrap();
+    let cf_card_tag = &resp.body[cf_card_tag_end..cf_card_start + cf_card_marker.len() + 40];
+    assert!(cf_card_tag.contains("data-allowed-to=\"sar_filed\""), "confirmed_fraud's only legal move is sar_filed: {cf_card_tag}");
+
+    // The board's own JS grays a column pre-drop and refuses the drop --
+    // never a post-hoc reject only.
+    let js = get_as(&router, "/cases/board/board.js", &cookie);
+    assert_eq!(js.status, 200, "{js:?}");
+    assert!(js.body.contains("kanban-column--disallowed"), "board_js must gray disallowed columns: {}", js.body);
+    assert!(js.body.contains("dataset.allowedTo"), "board_js must read the card's real allowed-to set: {}", js.body);
+}
+
 // ---- M5 Customers ----
 
 #[test]
