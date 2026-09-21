@@ -76,9 +76,9 @@ fn auditor_gets_the_wider_unpinned_lineage_view() {
 fn ops_analyst_decides_a_low_value_hold_through_a_plain_guarded_update() {
     let router = router();
     payment_table().raw_driver_seed(DEMO_TENANT, &PaymentRow {
-        id: 0, payment_id: "pay-lowval".into(), tenant_id: DEMO_TENANT.into(), rail_ref: "rtp-1".into(),
-        originator: "s1".into(), beneficiary: "s2".into(), amount: "500.00".into(), currency: "USD".into(),
-        status: "held".into(), hold_reason: "velocity".into(), hold_expires_at: 0, decision_by: String::new(), decision_rationale: String::new(),
+        id: 0, payment_id: "pay-lowval".into(), tenant_id: DEMO_TENANT.into(), rail_ref: Some("rtp-1".into()),
+        originator: Some("s1".into()), beneficiary: Some("s2".into()), amount: Some("500.00".into()), currency: "USD".into(),
+        status: "held".into(), hold_reason: Some("velocity".into()), hold_expires_at: 0, decision_by: None, decision_rationale: None,
     });
     let ops_cookie = login_as(&router, "opsanalyst", "opsanalyst-demo");
     let resp = post_form_as(&router, "/holds/pay-lowval/decide", &ops_cookie, "status=released&decision_rationale=cleared+after+review");
@@ -91,9 +91,9 @@ fn ops_analyst_decides_a_low_value_hold_through_a_plain_guarded_update() {
 fn high_value_hold_release_escalates_through_override_release_quorum() {
     let router = router();
     payment_table().raw_driver_seed(DEMO_TENANT, &PaymentRow {
-        id: 0, payment_id: "pay-highval".into(), tenant_id: DEMO_TENANT.into(), rail_ref: "rtp-2".into(),
-        originator: "s3".into(), beneficiary: "s4".into(), amount: "250000.00".into(), currency: "USD".into(),
-        status: "held".into(), hold_reason: "sanctions_screen".into(), hold_expires_at: 0, decision_by: String::new(), decision_rationale: String::new(),
+        id: 0, payment_id: "pay-highval".into(), tenant_id: DEMO_TENANT.into(), rail_ref: Some("rtp-2".into()),
+        originator: Some("s3".into()), beneficiary: Some("s4".into()), amount: Some("250000.00".into()), currency: "USD".into(),
+        status: "held".into(), hold_reason: Some("sanctions_screen".into()), hold_expires_at: 0, decision_by: None, decision_rationale: None,
     });
     let ops_cookie = login_as(&router, "opsanalyst", "opsanalyst-demo");
     let propose = post_form_as(&router, "/holds/pay-highval/decide", &ops_cookie, "status=released&decision_rationale=confirmed+legitimate");
@@ -112,9 +112,9 @@ fn high_value_hold_release_escalates_through_override_release_quorum() {
 fn auto_release_on_timeout_is_a_real_denial_not_a_silent_release() {
     let router = router();
     payment_table().raw_driver_seed(DEMO_TENANT, &PaymentRow {
-        id: 0, payment_id: "pay-expired".into(), tenant_id: DEMO_TENANT.into(), rail_ref: "rtp-3".into(),
-        originator: "s5".into(), beneficiary: "s6".into(), amount: "50.00".into(), currency: "USD".into(),
-        status: "released".into(), hold_reason: "velocity".into(), hold_expires_at: 1, decision_by: String::new(), decision_rationale: String::new(),
+        id: 0, payment_id: "pay-expired".into(), tenant_id: DEMO_TENANT.into(), rail_ref: Some("rtp-3".into()),
+        originator: Some("s5".into()), beneficiary: Some("s6".into()), amount: Some("50.00".into()), currency: "USD".into(),
+        status: "released".into(), hold_reason: Some("velocity".into()), hold_expires_at: 1, decision_by: None, decision_rationale: None,
     });
     // `auto-release-on-timeout` denies `SvcIngest` attempting the
     // release write once `expired(hold_expires_at)` — no HTTP route

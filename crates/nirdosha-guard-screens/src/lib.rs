@@ -1144,7 +1144,13 @@ mod tests {
         widget_id: String,
         tenant_id: String,
         name: String,
-        secret_note: String,
+        // `Option`, not `String` -- T-02's `Drop` transform truly removes
+        // a `field_policy { forbidden(secret_note) }` key rather than
+        // masking it, so a read under such a policy must decode to
+        // `None`, not error out on a missing required field (mirrors
+        // `bridge.nir`'s `AlertRow::sar_linked`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret_note: Option<String>,
     }
 
     impl GuardedEntity for Widget {
@@ -1205,14 +1211,14 @@ mod tests {
         // freshly-seeded row round-trips.
         let foreign_plan = PlanIr { resource: scope::storage_key(Widget::RESOURCE, "w-foreign"), dataset: "guarded".into(), filter: Some(FilterExpr::TenantEq { value: Value::Str("tenant-b".into()) }), row_scope: None, action: WriteAction::Create, affected_row_cap: None, policy_version: "rtm-demo".into() };
         let foreign_prepared = driver.prepare(&foreign_plan).expect("prepare foreign row");
-        driver.commit(foreign_prepared, EntityBytes(serde_json::to_vec(&Widget { widget_id: "w-foreign".into(), tenant_id: "tenant-b".into(), name: "not-mine".into(), secret_note: "x".into() }).unwrap())).expect("commit foreign row");
+        driver.commit(foreign_prepared, EntityBytes(serde_json::to_vec(&Widget { widget_id: "w-foreign".into(), tenant_id: "tenant-b".into(), name: "not-mine".into(), secret_note: Some("x".into()) }).unwrap())).expect("commit foreign row");
 
         let read_candidate = candidate("widget-read", PolicyEffect::Allow, &["Analyst"], Action::Read, Some("Ops"), None, vec![]);
         let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
         let records = vec![record("widget-read", "read", vec![], Some("tenant_scope()"))];
         let table = GuardedTable::<_, Widget>::new(driver, vec![read_candidate, write_candidate], records, "test", root.join("audit.jsonl"), vec!["Analyst".into(), "Ingest".into()], "tenant-a", vec![]);
 
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "in-tenant".into(), secret_note: "x".into() }).expect("seed in tenant-a");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "in-tenant".into(), secret_note: Some("x".into()) }).expect("seed in tenant-a");
 
         let rows = table.guarded_snapshot(&Auth::login("an", &["Analyst"]), "Ops").expect("analyst read must succeed");
         assert_eq!(rows.len(), 1, "the tenant-b row must not leak through: {rows:?}");
@@ -1228,7 +1234,7 @@ mod tests {
         let records = vec![record("widget-write", "create", vec![nirdosha_guard_core::FieldPolicy::Forbidden(vec!["secret_note".into()])], None)];
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate], records, "test", root.join("audit.jsonl"), vec!["Ingest".into()], "tenant-a", vec![]);
 
-        let result = table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "should be forbidden".into() });
+        let result = table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("should be forbidden".into()) });
         assert!(matches!(result, Err(GuardScreenError::FieldPolicyViolation(_))), "{result:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1242,9 +1248,9 @@ mod tests {
         let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
         let table = GuardedTable::<_, Widget>::new(driver, vec![read_candidate, write_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Analyst".into(), "Ingest".into()], "tenant-a", vec![]);
 
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "real-secret".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("real-secret".into()) }).expect("seed");
         let rows = table.guarded_snapshot(&Auth::login("an", &["Analyst"]), "Ops").expect("read");
-        assert_eq!(rows[0].secret_note, "[REDACTED]");
+        assert_eq!(rows[0].secret_note, Some("[REDACTED]".to_string()));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1258,8 +1264,13 @@ mod tests {
     /// `cs-payment-status`'s real shape) returned every field in the
     /// clear. See `field_policy::read_masks_from_field_policy`'s own doc
     /// comment for the fix.
+    ///
+    /// T-02 update: `read_masks_from_field_policy` now synthesizes
+    /// `MaskTransform::Drop` for `forbidden(...)`, not `Full` -- the
+    /// field must come back `None` (absent), not a `"[REDACTED]"`
+    /// placeholder string (tipping-off: existence itself must be hidden).
     #[test]
-    fn g1_read_side_forbidden_field_policy_is_now_masked_like_a_real_mask_clause() {
+    fn g1_read_side_forbidden_field_policy_is_now_dropped_not_placeholder_masked() {
         let root = scratch_dir("g1-read-field-policy");
         let driver = MemStoreDriver::new();
         let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
@@ -1270,11 +1281,11 @@ mod tests {
         let read_candidate = candidate("widget-read", PolicyEffect::Allow, &["CsAgent"], Action::Read, Some("Ops"), None, vec![]);
         let records = vec![record("widget-read", "read", vec![nirdosha_guard_core::FieldPolicy::Allowed(vec!["name".into()]), nirdosha_guard_core::FieldPolicy::Forbidden(vec!["secret_note".into()])], None)];
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, read_candidate], records, "test", root.join("audit.jsonl"), vec!["Ingest".into(), "CsAgent".into()], "tenant-a", vec![]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "visible".into(), secret_note: "must-not-leak".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "visible".into(), secret_note: Some("must-not-leak".into()) }).expect("seed");
 
         let rows = table.guarded_snapshot(&Auth::login("cs", &["CsAgent"]), "Ops").expect("read must succeed (the grant itself is real)");
         assert_eq!(rows[0].name, "visible", "an allowed field must still come through untouched");
-        assert_eq!(rows[0].secret_note, "[REDACTED]", "a field_policy-forbidden field on a READ policy must now be masked, not returned in the clear: {:?}", rows[0]);
+        assert_eq!(rows[0].secret_note, None, "T-02: a field_policy-forbidden field on a READ policy must be absent (Drop), not a masked placeholder or the real value: {:?}", rows[0]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1302,7 +1313,7 @@ mod tests {
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, wide, narrow], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Analyst".into()], "tenant-a", vec![]);
         for i in 0..3 {
             table
-                .guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: format!("w-{i}"), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "x".into() })
+                .guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: format!("w-{i}"), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("x".into()) })
                 .expect("seed");
         }
 
@@ -1318,14 +1329,14 @@ mod tests {
         let update_candidate = candidate("widget-update", PolicyEffect::Allow, &["Analyst"], Action::Update, Some("Ops"), None, vec![]);
         let records = vec![record("widget-update", "update", vec![nirdosha_guard_core::FieldPolicy::Allowed(vec!["name".into()])], None)];
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, update_candidate], records, "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Analyst".into()], "tenant-a", vec![]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: "keep-me".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("keep-me".into()) }).expect("seed");
 
         let changed: HashSet<String> = ["name".into()].into();
         let updated = table
             .guarded_update(&Auth::login("an", &["Analyst"]), "Ops", "w-1", &changed, |w| w.name = "new".into())
             .expect("allowed field update must succeed");
         assert_eq!(updated.name, "new");
-        assert_eq!(updated.secret_note, "keep-me", "an untouched field must survive the merge");
+        assert_eq!(updated.secret_note, Some("keep-me".to_string()), "an untouched field must survive the merge");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1337,10 +1348,10 @@ mod tests {
         let update_candidate = candidate("widget-update", PolicyEffect::Allow, &["Analyst"], Action::Update, Some("Ops"), None, vec![]);
         let records = vec![record("widget-update", "update", vec![nirdosha_guard_core::FieldPolicy::Forbidden(vec!["secret_note".into()])], None)];
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, update_candidate], records, "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Analyst".into()], "tenant-a", vec![]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: "original".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("original".into()) }).expect("seed");
 
         let changed: HashSet<String> = ["secret_note".into()].into();
-        let result = table.guarded_update(&Auth::login("an", &["Analyst"]), "Ops", "w-1", &changed, |w| w.secret_note = "tampered".into());
+        let result = table.guarded_update(&Auth::login("an", &["Analyst"]), "Ops", "w-1", &changed, |w| w.secret_note = Some("tampered".into()));
         assert!(matches!(result, Err(GuardScreenError::FieldPolicyViolation(_))), "{result:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1400,7 +1411,7 @@ mod tests {
         let read_candidate = candidate("widget-read", PolicyEffect::Allow, &["Admin"], Action::Read, Some("Ops"), None, vec![]);
         let delete_candidate = candidate("widget-delete", PolicyEffect::Allow, &["Admin"], Action::Delete, Some("Ops"), None, vec![]);
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, read_candidate, delete_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Admin".into()], "tenant-a", vec![]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "s".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("s".into()) }).expect("seed");
         assert_eq!(table.guarded_snapshot(&Auth::login("admin", &["Admin"]), "Ops").expect("read before delete").len(), 1);
 
         table.guarded_delete(&Auth::login("admin", &["Admin"]), "Ops", "w-1").expect("delete must succeed");
@@ -1430,7 +1441,7 @@ mod tests {
         let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
         let aggregate_candidate = candidate("widget-aggregate", PolicyEffect::Allow, &["ComplianceLead"], Action::Aggregate, Some("Operations"), None, vec![]);
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, aggregate_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "ComplianceLead".into()], "tenant-a", vec![]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "s".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("s".into()) }).expect("seed");
 
         let lead = Auth::login("lead", &["ComplianceLead"]);
         let read_result = table.guarded_snapshot(&lead, "Operations");
@@ -1460,7 +1471,7 @@ mod tests {
         let mut close_candidate = candidate("widget-close-confirm", PolicyEffect::Allow, &["ComplianceLead"], Action::Update, Some("Ops"), None, vec![]);
         close_candidate.escalation = Some(EscalateTarget::Approval { chain: "case_review".into() });
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, close_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "ComplianceLead".into()], "tenant-a", vec![case_review_chain()]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: "s".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
 
         let lead_a = Auth::login("lead-a", &["ComplianceLead"]);
         let changed: HashSet<String> = ["name".into()].into();
@@ -1494,7 +1505,7 @@ mod tests {
         migrate_candidate.escalation = Some(EscalateTarget::Approval { chain: "policy_release".into() });
         let chain = ApprovalChainDefinition { name: "policy_release".into(), quorum: 2, approver_roles: vec!["PolicyEngineer".into(), "ComplianceLead".into()] };
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, migrate_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Admin".into(), "PolicyEngineer".into(), "ComplianceLead".into()], "tenant-a", vec![chain]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: "s".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
 
         let admin = Auth::login("admin-1", &["Admin"]);
         let changed: HashSet<String> = ["name".into()].into();
@@ -1533,7 +1544,7 @@ mod tests {
         let mut close_candidate = candidate("widget-close-confirm", PolicyEffect::Allow, &["ComplianceLead"], Action::Update, Some("Ops"), None, vec![]);
         close_candidate.escalation = Some(EscalateTarget::Approval { chain: "case_review".into() });
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, read_candidate, close_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "ComplianceLead".into()], "tenant-a", vec![case_review_chain()]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: "s".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
 
         let lead_a = Auth::login("lead-a", &["ComplianceLead"]);
         let lead_b = Auth::login("lead-b", &["ComplianceLead"]);
@@ -1568,7 +1579,7 @@ mod tests {
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate], vec![write_record], "test", root.join("audit.jsonl"), vec!["Ingest".into()], "tenant-a", vec![])
             .with_notify_hook(move |channel, body_ref| seen_for_hook.lock().unwrap().push((channel.to_string(), body_ref.to_string())));
 
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "s".into() }).expect("insert");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("s".into()) }).expect("insert");
 
         let fired = seen.lock().unwrap();
         assert_eq!(*fired, vec![("test-inbox".to_string(), "widget:w-1".to_string())], "a real Obligation::Notify from a matching PolicyRecord must reach the registered hook exactly once, with the real resource:row_id body_ref: {fired:?}");
@@ -1585,7 +1596,7 @@ mod tests {
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into()], "tenant-a", vec![])
             .with_notify_hook(move |channel, body_ref| seen_for_hook.lock().unwrap().push((channel.to_string(), body_ref.to_string())));
 
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "s".into() }).expect("insert");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("s".into()) }).expect("insert");
 
         assert!(seen.lock().unwrap().is_empty(), "no PolicyRecord carried a Notify obligation, so the hook must not fire");
         let _ = std::fs::remove_dir_all(&root);
@@ -1599,7 +1610,7 @@ mod tests {
         // never consults `evaluate()`, matching `notification`'s real
         // corpus shape (no `guard_policy!` names that resource).
         let table = GuardedTable::<_, Widget>::new(driver, vec![], vec![], "test", root.join("audit.jsonl"), vec![], "tenant-a", vec![]);
-        table.system_write("tenant-a", &Widget { widget_id: "sys-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "s".into() });
+        table.system_write("tenant-a", &Widget { widget_id: "sys-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("s".into()) });
         let rows = table.system_scan().expect("system_scan needs no auth/policy to succeed");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].widget_id, "sys-1");
@@ -1615,7 +1626,7 @@ mod tests {
         export_candidate.escalation = Some(EscalateTarget::Approval { chain: "egress_release".into() });
         let egress_chain = ApprovalChainDefinition { name: "egress_release".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()] };
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, export_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Analyst".into(), "ComplianceLead".into()], "tenant-a", vec![egress_chain]);
-        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: "s".into() }).expect("seed");
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("s".into()) }).expect("seed");
 
         // Analyst proposes but holds no `egress_release`-eligible role --
         // real maker≠checker, same shape `refdata-migrate` exercises.
@@ -1661,8 +1672,8 @@ mod tests {
         let table = GuardedTable::<_, Widget>::new(driver, vec![read_candidate, write_candidate], vec![read_record], "test", root.join("audit.jsonl"), vec!["Analyst".into(), "Ingest".into()], "tenant-a", vec![]);
 
         let svc = Auth::login("svc", &["Ingest"]);
-        table.guarded_insert(&svc, "Ops", Widget { widget_id: "w-yes".into(), tenant_id: "tenant-a".into(), name: "eligible".into(), secret_note: "x".into() }).expect("seed eligible row");
-        table.guarded_insert(&svc, "Ops", Widget { widget_id: "w-no".into(), tenant_id: "tenant-a".into(), name: "not-yet".into(), secret_note: "x".into() }).expect("seed ineligible row");
+        table.guarded_insert(&svc, "Ops", Widget { widget_id: "w-yes".into(), tenant_id: "tenant-a".into(), name: "eligible".into(), secret_note: Some("x".into()) }).expect("seed eligible row");
+        table.guarded_insert(&svc, "Ops", Widget { widget_id: "w-no".into(), tenant_id: "tenant-a".into(), name: "not-yet".into(), secret_note: Some("x".into()) }).expect("seed ineligible row");
 
         let rows = table.guarded_snapshot(&Auth::login("an", &["Analyst"]), "Ops").expect("read must succeed");
         assert_eq!(rows.len(), 1, "only the row satisfying the condition should be returned: {rows:?}");

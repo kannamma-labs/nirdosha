@@ -414,17 +414,36 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         }
     };
 
-    let parse_fn = quote! {
-        fn __parse(values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, Vec<String>> {
-            let mut errors: Vec<String> = Vec::new();
-            #(
-                let #field_idents = match <#field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#field_names).map(|s| s.as_str())) {
-                    Ok(v) => v,
-                    Err(e) => { errors.push(format!("{}: {}", #field_names, e)); Default::default() }
-                };
-            )*
-            if !errors.is_empty() { return Err(errors); }
-            Ok(#entity { id: 0, #( #field_idents ),*, ..Default::default() })
+    // T-02 fix: this ungated `__parse` (and `core_fns` below) is dead
+    // code on a guarded screen -- every guarded route calls its own
+    // `__guarded_*` helpers or `GuardedTable::guarded_snapshot` instead
+    // (see `new_form_route`'s own doc comment: "otherwise unregistered
+    // entirely" -- true of every `#(field_idents)` reference here, not
+    // just create). Before this fix it was still unconditionally
+    // generated and type-checked, which required every top-level
+    // `fields:` entry's declared type to implement `Default` +
+    // (`__matching_rows`'s `.to_string()`) `Display`/`ToString` even
+    // when nothing guarded ever calls it -- `Option<T>` (a real
+    // field_policy-forbidden field's own real type, see
+    // `masking::apply_one`) implements neither, so a guarded screen with
+    // even one such field could never compile. Gating both on
+    // `input.guard.is_none()` matches what every guarded screen's own
+    // routes already do at runtime.
+    let parse_fn = if input.guard.is_some() {
+        quote! {}
+    } else {
+        quote! {
+            fn __parse(values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, Vec<String>> {
+                let mut errors: Vec<String> = Vec::new();
+                #(
+                    let #field_idents = match <#field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#field_names).map(|s| s.as_str())) {
+                        Ok(v) => v,
+                        Err(e) => { errors.push(format!("{}: {}", #field_names, e)); Default::default() }
+                    };
+                )*
+                if !errors.is_empty() { return Err(errors); }
+                Ok(#entity { id: 0, #( #field_idents ),*, ..Default::default() })
+            }
         }
     };
 
@@ -444,7 +463,13 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     // The #[contract(..)] macro (if the operation is role-gated) injects
     // its own proof parameter at position 0 automatically -- these core
     // fn signatures below never declare one themselves.
-    let core_fns = quote! {
+    //
+    // Dead code on a guarded screen, same as `parse_fn` above (its own
+    // doc comment has the full reasoning) -- gated identically.
+    let core_fns = if input.guard.is_some() {
+        quote! {}
+    } else {
+        quote! {
         #create_attr
         fn __create(values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, Vec<String>> {
             let mut entity = __parse(values)?;
@@ -492,6 +517,7 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
                 .collect();
             rows.sort_by_key(|e| e.id);
             rows
+        }
         }
     };
 

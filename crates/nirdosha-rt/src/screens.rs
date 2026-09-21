@@ -53,6 +53,26 @@ impl ParseField for bool {
     }
 }
 
+/// T-02: `crud_screens!` always type-checks its generated (possibly
+/// dead-code, guard-only screens never call it) ungated `__parse`/
+/// `__update` against the top-level `fields:` list's own declared
+/// types, regardless of whether a `guard:` block's real routes ever run
+/// that path -- so a field the entity struct now types `Option<T>` (a
+/// field_policy-forbidden field a real `guard_policy!` can drop
+/// entirely, see `masking::apply_one`) needs its own `fields:` entry
+/// declared `Option<T>` too, not the bare `T`. Missing/empty input
+/// parses to `None`, matching an HTML `<form>`'s "an absent field looks
+/// like an empty one" convention every other `ParseField` impl here
+/// already follows.
+impl<T: ParseField> ParseField for Option<T> {
+    fn parse_field(raw: Option<&str>) -> Result<Self, String> {
+        match raw {
+            None | Some("") => Ok(None),
+            some => T::parse_field(some).map(Some),
+        }
+    }
+}
+
 /// One column/field, as the macro knows it: its name and an HTML
 /// `<input type>` hint derived from its Rust type.
 #[derive(Clone, Copy)]

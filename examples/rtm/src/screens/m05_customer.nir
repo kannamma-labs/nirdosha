@@ -42,14 +42,19 @@ nirdosha_rt::crud_screens! {
     fields: [
         customer_id: String,
         tenant_id: String,
-        name: String,
-        national_id: String,
-        dob: String,
+        // T-02: `CustomerRow`'s own field_policy-forbidden fields are
+        // `Option<String>` now (`bridge.nir`'s doc comment) -- this
+        // macro's ungated `__parse`/`__update` path always type-checks
+        // against these declared types (dead code on this guard-only
+        // screen, but still compiled), so they must match exactly.
+        name: Option<String>,
+        national_id: Option<String>,
+        dob: Option<String>,
         occupation: String,
         kyc_status: String,
-        risk_rating: String,
-        pep_flag: String,
-        sanctions_status: String,
+        risk_rating: Option<String>,
+        pep_flag: Option<String>,
+        sanctions_status: Option<String>,
         restriction_status: String,
     ],
     create: public,

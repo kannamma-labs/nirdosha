@@ -98,11 +98,34 @@ the tipping-off rule already enforced in the policy corpus (`forbidden(sar_linke
 in src/50_alerts.nir, 95_qa.nir, 96_restricted_views.nir) and the V7 menu rule
 ("absence, never disabled-state").
 
-**Gates.** No screen is stage-blocked on it. Feature gate on 3.2 Alert Detail:
-"sar_linked must be absent (T-02 drop-mask)".
+**Gates (closed).** No screen is stage-blocked on it. Feature gate on 3.2
+Alert Detail: "sar_linked must be absent (T-02 drop-mask)" — closed:
+`AlertRow.sar_linked` is `Option<String>`, absent (no JSON key at all) for
+every role `analyst-read-alert`/`analyst-disposition-alert` mask it from.
 
 **Done when.** Every emitted screen omits forbidden fields entirely — no
-masked placeholder, no empty cell — verified by an emit-level check.
+masked placeholder, no empty cell — verified by an emit-level check. ✓
+`nirdosha_guard_screens::field_policy::read_masks_from_field_policy` now
+synthesizes `MaskTransform::Drop` (not `Full`) for `field_policy {
+forbidden(...) }`, and `masking::apply_one` removes the JSON key entirely
+for `Drop` instead of writing a `"[REDACTED]"`/`"[DROPPED]"` placeholder.
+Applied to every real forbidden field currently reachable through a read
+policy: `AlertRow.sar_linked`, `CaseRow.sar_id`, `CustomerRow.{name,
+national_id, dob, risk_rating, pep_flag, sanctions_status}`,
+`PaymentRow.{rail_ref, originator, beneficiary, amount, hold_reason,
+decision_by, decision_rationale}` — all converted from a masked-shaped
+`String` to `Option<String>` with `#[serde(skip_serializing_if =
+"Option::is_none")]` so a dropped key decodes to `None` and stays absent on
+the way back out. `crud_screens!`'s own ungated `__parse`/`core_fns` helpers
+(previously unconditionally generated and type-checked even on guard-only
+screens, requiring `Default`/`Display` on every declared field type) are now
+gated off `input.guard.is_none()` — true dead code elimination, not just
+unused, since nothing in a guarded screen ever called them. Regression:
+`g1_read_side_forbidden_field_policy_is_now_dropped_not_placeholder_masked`
+(`nirdosha-guard-screens`), `cs_agent_sees_only_the_real_allowed_payment_
+fields_forbidden_fields_are_genuinely_absent` /
+`rm_user_sees_only_restriction_status_every_other_customer_field_is_
+genuinely_absent` (`examples/rtm/tests/m19_m20_m21_m22_screens.rs`).
 
 ---
 

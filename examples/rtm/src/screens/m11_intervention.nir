@@ -76,20 +76,20 @@ pub fn mount_hold_decision(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
             let Ok(Some(current)) = payment_table().guarded_get(auth, "FraudMonitoring", &id) else {
                 return nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" }));
             };
-            let amount: f64 = current.amount.parse().unwrap_or(0.0);
+            let amount: f64 = current.amount.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
 
             if amount > 100_000.0 {
                 let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                 let status2 = status.clone();
                 let by2 = decision_by.clone();
                 let rat2 = decision_rationale.clone();
-                match payment_table().guarded_propose_escalated_update(auth, "Operations", &id, &changed, move |row| { row.status = status2; row.decision_by = by2; row.decision_rationale = rat2; }, now_ms) {
+                match payment_table().guarded_propose_escalated_update(auth, "Operations", &id, &changed, move |row| { row.status = status2; row.decision_by = Some(by2); row.decision_rationale = Some(rat2); }, now_ms) {
                     Ok(EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
                     Ok(EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum, "reason": "amount exceeds $100k -- override_release quorum(1, ComplianceLead) required" })),
                     Err(e) => nirdosha_guard_screens::guard_error_response(e),
                 }
             } else {
-                match payment_table().guarded_update(auth, "FraudMonitoring", &id, &changed, move |row| { row.status = status; row.decision_by = decision_by; row.decision_rationale = decision_rationale; }) {
+                match payment_table().guarded_update(auth, "FraudMonitoring", &id, &changed, move |row| { row.status = status; row.decision_by = Some(decision_by); row.decision_rationale = Some(decision_rationale); }) {
                     Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
                     Err(e) => nirdosha_guard_screens::guard_error_response(e),
                 }
@@ -105,7 +105,7 @@ pub fn mount_hold_decision(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
             let decision_by = auth.user().to_string();
             let changed: HashSet<String> = ["status".into(), "decision_by".into(), "decision_rationale".into()].into();
             let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-            match payment_table().guarded_confirm_escalated_update(auth, "Operations", &id, &chain, &escalation_id, &changed, move |row| { row.status = status; row.decision_by = decision_by; row.decision_rationale = decision_rationale; }, now_ms) {
+            match payment_table().guarded_confirm_escalated_update(auth, "Operations", &id, &chain, &escalation_id, &changed, move |row| { row.status = status; row.decision_by = Some(decision_by); row.decision_rationale = Some(decision_rationale); }, now_ms) {
                 Ok(EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
                 Ok(EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
                 Err(e) => nirdosha_guard_screens::guard_error_response(e),

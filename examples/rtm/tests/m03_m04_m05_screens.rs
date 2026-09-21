@@ -53,7 +53,7 @@ fn seed_alert(alert_id: &str, status: &str) -> AlertRow {
     // scope). Seeding for this test goes straight at the driver, the
     // same "arrange state outside the boundary under test" posture
     // `seed_case`/`seed_customer` already use.
-    let row = AlertRow { id: 0, alert_id: alert_id.into(), tenant_id: "acme-demo".into(), txn_id: "txn-1".into(), score: 0.9, model_version: "v1".into(), policy_version: "v1".into(), status: status.into(), assignee: String::new(), disposition_code: String::new(), rationale: String::new(), case_id: String::new(), sar_linked: String::new(), severity: "High".into(), tags: String::new() };
+    let row = AlertRow { id: 0, alert_id: alert_id.into(), tenant_id: "acme-demo".into(), txn_id: "txn-1".into(), score: 0.9, model_version: "v1".into(), policy_version: "v1".into(), status: status.into(), assignee: String::new(), disposition_code: String::new(), rationale: String::new(), case_id: String::new(), sar_linked: None, severity: "High".into(), tags: String::new() };
     alert_table().raw_driver_seed("acme-demo", &row);
     row
 }
@@ -65,7 +65,7 @@ fn seed_case(case_id: &str, status: &str) -> CaseRow {
     // pre-seeded at e.g. `confirmed_fraud` has no guarded path to get
     // there, so this seeds directly against the driver, same posture as
     // `seed_customer` below.
-    let row = CaseRow { id: 0, case_id: case_id.into(), tenant_id: "acme-demo".into(), status: status.into(), assigned_to: String::new(), alert_ids: String::new(), subject_ref: "cust-1".into(), sar_id: String::new(), disposition: String::new(), rationale: "seed".into(), review_verdict: String::new(), review_note: String::new() };
+    let row = CaseRow { id: 0, case_id: case_id.into(), tenant_id: "acme-demo".into(), status: status.into(), assigned_to: String::new(), alert_ids: String::new(), subject_ref: "cust-1".into(), sar_id: None, disposition: String::new(), rationale: "seed".into(), review_verdict: String::new(), review_note: String::new() };
     case_table().raw_driver_seed("acme-demo", &row);
     row
 }
@@ -77,7 +77,7 @@ fn seed_customer(customer_id: &str) -> CustomerRow {
     // the same "test fixture, not a policy proof" posture
     // `crates/nirdosha-guard-mic`'s own driver tests use for arranging
     // state outside the guard boundary being tested.
-    let row = CustomerRow { id: 0, customer_id: customer_id.into(), tenant_id: "acme-demo".into(), name: "Jane Doe".into(), national_id: "N123".into(), dob: "1990-01-01".into(), occupation: "Engineer".into(), kyc_status: "Verified".into(), risk_rating: "Low".into(), pep_flag: String::new(), sanctions_status: "Clear".into(), restriction_status: "None".into(), legal_hold: false };
+    let row = CustomerRow { id: 0, customer_id: customer_id.into(), tenant_id: "acme-demo".into(), name: Some("Jane Doe".into()), national_id: Some("N123".into()), dob: Some("1990-01-01".into()), occupation: "Engineer".into(), kyc_status: "Verified".into(), risk_rating: Some("Low".into()), pep_flag: None, sanctions_status: Some("Clear".into()), restriction_status: "None".into(), legal_hold: false };
     customer_table().raw_driver_seed("acme-demo", &row);
     row
 }

@@ -75,7 +75,7 @@ fn qa_reviewer_cannot_disposition_an_alert_real_sod_deny() {
     // `qa-no-disposition`: `deny for QaReviewer when action == "update"
     // && resource == "alert"`.
     let router = router();
-    rtm::bridge::alert_table().raw_driver_seed("acme-demo", &rtm::bridge::AlertRow { id: 0, alert_id: "alert-qa-1".into(), tenant_id: "acme-demo".into(), txn_id: "txn-1".into(), score: 0.9, model_version: "v1".into(), policy_version: "v1".into(), status: "new".into(), assignee: String::new(), disposition_code: String::new(), rationale: String::new(), case_id: String::new(), sar_linked: String::new(), severity: String::new(), tags: String::new() });
+    rtm::bridge::alert_table().raw_driver_seed("acme-demo", &rtm::bridge::AlertRow { id: 0, alert_id: "alert-qa-1".into(), tenant_id: "acme-demo".into(), txn_id: "txn-1".into(), score: 0.9, model_version: "v1".into(), policy_version: "v1".into(), status: "new".into(), assignee: String::new(), disposition_code: String::new(), rationale: String::new(), case_id: String::new(), sar_linked: None, severity: String::new(), tags: String::new() });
     let cookie = login_as(&router, "qareviewer", "qareviewer-demo");
     let resp = post_form_as(&router, "/alerts/alert-qa-1/edit", &cookie, "status=in_progress&rationale=r");
     assert_eq!(resp.status, 403, "the real qa-review SoD deny must block QaReviewer from dispositioning an alert: {resp:?}");
@@ -132,7 +132,7 @@ fn a_role_with_no_channel_mapping_sees_no_notifications() {
 
 #[test]
 fn governed_case_export_is_pending_after_one_proposer_and_commits_after_a_second_distinct_lead() {
-    case_table().raw_driver_seed("acme-demo", &CaseRow { id: 3, case_id: "case-export-1".into(), tenant_id: "acme-demo".into(), status: "open".into(), assigned_to: String::new(), alert_ids: String::new(), subject_ref: "cust-1".into(), sar_id: String::new(), disposition: String::new(), rationale: "r".into(), review_verdict: String::new(), review_note: String::new() });
+    case_table().raw_driver_seed("acme-demo", &CaseRow { id: 3, case_id: "case-export-1".into(), tenant_id: "acme-demo".into(), status: "open".into(), assigned_to: String::new(), alert_ids: String::new(), subject_ref: "cust-1".into(), sar_id: None, disposition: String::new(), rationale: "r".into(), review_verdict: String::new(), review_note: String::new() });
     let router = router();
     let analyst_cookie = login_as(&router, "analyst", "analyst-demo");
     let propose = post_form_as(&router, "/exports/case/propose", &analyst_cookie, "");
@@ -187,7 +187,7 @@ fn admin_mints_a_delegation_token_within_the_real_ttl_cap() {
 
 #[test]
 fn dsar_export_is_a_real_maker_neq_checker_escalated_scan_over_customer() {
-    customer_table().raw_driver_seed("acme-demo", &CustomerRow { id: 4, customer_id: "cust-dsar-1".into(), tenant_id: "acme-demo".into(), name: "Jane Doe".into(), national_id: "N1".into(), dob: String::new(), occupation: String::new(), kyc_status: "Verified".into(), risk_rating: "Low".into(), pep_flag: String::new(), sanctions_status: "Clear".into(), restriction_status: String::new(), legal_hold: false });
+    customer_table().raw_driver_seed("acme-demo", &CustomerRow { id: 4, customer_id: "cust-dsar-1".into(), tenant_id: "acme-demo".into(), name: Some("Jane Doe".into()), national_id: Some("N1".into()), dob: None, occupation: String::new(), kyc_status: "Verified".into(), risk_rating: Some("Low".into()), pep_flag: None, sanctions_status: Some("Clear".into()), restriction_status: String::new(), legal_hold: false });
     let router = router();
     let admin_cookie = login_as(&router, "admin", "admin-demo");
     let propose = post_form_as(&router, "/admin/dsar/propose", &admin_cookie, "");

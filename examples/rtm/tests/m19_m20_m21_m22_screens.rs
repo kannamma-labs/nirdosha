@@ -143,7 +143,7 @@ fn cs_agent_sees_only_the_real_allowed_payment_fields_forbidden_fields_are_genui
     assert_eq!(row["status"], "held", "an allowed field must come through in the clear");
     assert_eq!(row["currency"], "USD", "an allowed field must come through in the clear");
     for forbidden_field in ["amount", "rail_ref", "originator", "beneficiary", "hold_reason", "decision_by", "decision_rationale"] {
-        assert_eq!(row[forbidden_field], "[REDACTED]", "cs-payment-status's real field_policy forbidden({forbidden_field}) must mask it, not return the real value: {row:?}");
+        assert!(row.get(forbidden_field).is_none(), "T-02: cs-payment-status's real field_policy forbidden({forbidden_field}) must render it absent, not a \"[REDACTED]\" placeholder or the real value: {row:?}");
     }
     // The real values must never appear anywhere in the raw response body
     // (not just under the expected key) -- proves this is genuine
@@ -153,8 +153,8 @@ fn cs_agent_sees_only_the_real_allowed_payment_fields_forbidden_fields_are_genui
 }
 
 #[test]
-fn rm_user_sees_only_restriction_status_every_other_customer_field_is_masked() {
-    customer_table().raw_driver_seed("acme-demo", &CustomerRow { id: 5, customer_id: "cust-rm-1".into(), tenant_id: "acme-demo".into(), name: "Real Name".into(), national_id: "REAL-NATID".into(), dob: "1980-01-01".into(), occupation: "x".into(), kyc_status: "Verified".into(), risk_rating: "High".into(), pep_flag: "true".into(), sanctions_status: "Clear".into(), restriction_status: "Watch".into(), legal_hold: false });
+fn rm_user_sees_only_restriction_status_every_other_customer_field_is_genuinely_absent() {
+    customer_table().raw_driver_seed("acme-demo", &CustomerRow { id: 5, customer_id: "cust-rm-1".into(), tenant_id: "acme-demo".into(), name: Some("Real Name".into()), national_id: Some("REAL-NATID".into()), dob: Some("1980-01-01".into()), occupation: "x".into(), kyc_status: "Verified".into(), risk_rating: Some("High".into()), pep_flag: Some("true".into()), sanctions_status: Some("Clear".into()), restriction_status: "Watch".into(), legal_hold: false });
     let router = router();
     let rm_cookie = login_as(&router, "rmuser", "rmuser-demo");
     let resp = get_as(&router, "/rm/customers/cust-rm-1", &rm_cookie, );
@@ -162,7 +162,7 @@ fn rm_user_sees_only_restriction_status_every_other_customer_field_is_masked() {
     let row = body_json(&resp);
     assert_eq!(row["restriction_status"], "Watch", "the one allowed field must come through in the clear");
     for forbidden_field in ["national_id", "name", "dob", "risk_rating", "pep_flag", "sanctions_status"] {
-        assert_eq!(row[forbidden_field], "[REDACTED]", "rm-restriction-view's real field_policy forbidden({forbidden_field}) must mask it: {row:?}");
+        assert!(row.get(forbidden_field).is_none(), "T-02: rm-restriction-view's real field_policy forbidden({forbidden_field}) must render it absent, not a \"[REDACTED]\" placeholder or the real value: {row:?}");
     }
     assert!(!resp.body.contains("REAL-NATID"), "the real national_id must never appear in the response body: {}", resp.body);
 }

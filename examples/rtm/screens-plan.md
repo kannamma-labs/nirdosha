@@ -34,7 +34,7 @@
 | A2 | `read user_role` policy (18.1) | A | S | 1 | ☑ done | — |
 | B1 | T-03 disposition vocabulary (S) | B | S | 2+2 | ☑ done | — |
 | B2 | T-14 kanban drag transitions (S) | B | S | 1 | ☑ done | B1 (machine) |
-| B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☐ pending | — |
+| B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☑ done | — |
 | B4 | T-10 role-ident canonicalization (S) | B | S | all | ☐ pending | — |
 | B5 | T-12 predicate binding / I15 (S) | B | S | gate | ☐ pending | — |
 | B6 | T-09 live streaming plane (M) | B | M | 4 | ☐ pending | — |
@@ -168,23 +168,55 @@ stays live. Proven by
 (`examples/rtm/tests/m03_m04_m05_screens.rs`). 4.1 flipped `blocked_by = []`,
 `stage = "built"`.
 
-## B3 ☐ T-02 forbidden=absent drop pass (S)
+## B3 ☑ T-02 forbidden=absent drop pass (S) — done
 **Goal.** `field_policy { forbidden(x) }` renders the field **absent** — no
 input, no placeholder, no `"[DROPPED]"` cell. Closes the tipping-off hole
 where masking leaks a field's *existence*.
-**Steps.**
-1. In `crud_screens!`'s list/detail/form emission
-   (`crates/nirdosha-macros/src/crud_screens.rs`), drop forbidden fields
-   from the rendered column/field sets instead of masking values.
-2. Add an emit-level assertion inside the macro: a forbidden field name
-   appearing in generated HTML strings is a compile error. **Caution:**
-   whitelist structural tokens (CSS class prefixes, dataset attribute
-   names) so legitimate macro plumbing is not caught; only literal field
-   identifiers in labels/placeholders/values should fail.
+
+**What actually shipped (differs from the plan below — disclosed, not
+silently substituted, per R3).** `forbidden(...)` is a *runtime* policy
+fact resolved per (role, purpose) at evaluation time — `crud_screens!`
+never sees it at compile time, so a macro-level "drop the field from the
+column set" or "compile error on a literal field name in generated HTML"
+(this section's original steps 1–2) has nothing to check against; the
+macro emits identical code regardless of which policy ends up matching a
+given request. The real fix lives one layer down, where forbidden-ness
+*is* known (`nirdosha_guard_screens::field_policy::read_masks_from_field_
+policy`, evaluated per request): it now synthesizes `MaskTransform::Drop`
+instead of `Full` for `field_policy { forbidden(...) }`, and
+`masking::apply_one` removes the JSON key outright for `Drop` rather than
+writing a placeholder string. Every render path (`list_html`/
+`detail_html`/`form_html`/JSON API) already renders off the row's own
+JSON keys, so a genuinely-absent key is genuinely absent everywhere for
+free — no per-screen HTML-string scanning needed. The entity struct field
+a dropped key decodes into must be `Option<T>` (not a masked-shaped bare
+`String`) so decode doesn't hard-fail on the missing key; converted every
+field currently reachable through a real read policy's `forbidden(...)`:
+`AlertRow.sar_linked`, `CaseRow.sar_id`, `CustomerRow.{name, national_id,
+dob, risk_rating, pep_flag, sanctions_status}`, `PaymentRow.{rail_ref,
+originator, beneficiary, amount, hold_reason, decision_by,
+decision_rationale}`. Surfaced one real, separate bug along the way:
+`crud_screens!`'s ungated `__parse`/`core_fns` helpers were
+unconditionally generated and type-checked (`Default`+`Display` bounds on
+every declared field) even on guard-only screens that never call them —
+now gated off `input.guard.is_none()`, true dead-code elimination.
+
+**Steps (original plan, superseded by the above).**
+1. ~~In `crud_screens!`'s list/detail/form emission drop forbidden fields
+   from the rendered column/field sets instead of masking values.~~
+2. ~~Add an emit-level assertion inside the macro: a forbidden field name
+   appearing in generated HTML strings is a compile error.~~
 3. Regression: `sar_linked` absent (not masked) on 3.2 for non-MLRO roles —
-   extend an existing m03 test rather than adding a new file.
-**Done-when.** Emit-level check passes for every `crud_screens!` call site;
-m03 test asserts absence.
+   done, extended `examples/rtm/tests/m19_m20_m21_m22_screens.rs` (the CS/RM
+   masked-view tests, which already exercised the same real bug for
+   `PaymentRow`/`CustomerRow`) and `nirdosha-guard-screens`'s own
+   `g1_read_side_forbidden_field_policy_is_now_dropped_not_placeholder_
+   masked` unit test, rather than m03 (m03's `AlertRow` fields subject to
+   `forbidden(sar_linked)` were never in that screen's declared HTML
+   `fields:` list to begin with — the live leak was the JSON API path).
+**Done-when.** Every real forbidden-on-read field renders absent
+(`row.get(name).is_none()`), proven by the tests above; `cargo test -p rtm`
+and `cargo test -p nirdosha-guard-screens` both green.
 
 ## B4 ☐ T-10 role-ident canonicalization (S)
 **Goal.** menus.toml's PascalCase logical roles (`ComplianceLead`, `Mlro`)
@@ -464,3 +496,4 @@ parallelizes off the core path.
 | 2026-09-22 | B1 (T-03) landed: disposition vocabularies + rationale/code invariants (00_core.nir + bridge.nir both halves); 3.3/4.10/11.2 → built | all rtm suites green |
 | 2026-09-22 | B2 (T-14) landed: `workflow!` now populates the real `WORKFLOWS` registry slice (was declared, never emitted into); `kanban_board!` gained `machine:` to read it and gray illegal drags pre-drop; 4.1 → built, blocked_by emptied | all rtm suites green |
 | 2026-09-22 | B1 (T-03) landed: closed vocabularies (`DISPOSITION_CODES`/`CASE_DISPOSITION_CODES`/`HOLD_REASON_CODES`, 10_domains.nir) + 3 new invariants (`disposition_code_valid`/`case_disposition_valid`/`hold_reason_valid`, 00_core.nir + bridge.nir check_invariant arms), wired into `analyst-disposition-alert`/`case-transition`/`ingest-create-hold`; 3.3→built, 4.10→built, 11.2→built, 4.1 drops T-03 (T-14 only remains); executed single-agent (agent-a-engine.md's bridge.nir restriction lifted — no concurrent Agent B this run) | all rtm suites green (verify_tickets corpus-facts recomputed: 48 refs/40 lines/8 stage-gating+4 note-only) |
+| 2026-09-22 | B3 (T-02) landed: `read_masks_from_field_policy` synthesizes `MaskTransform::Drop` (true key removal) instead of `Full` for `field_policy { forbidden(...) }`; `masking::apply_one` removes the key outright for `Drop`; converted every field currently reachable through a real read policy's `forbidden(...)` to `Option<T>` (`AlertRow.sar_linked`, `CaseRow.sar_id`, `CustomerRow.{name,national_id,dob,risk_rating,pep_flag,sanctions_status}`, `PaymentRow.{rail_ref,originator,beneficiary,amount,hold_reason,decision_by,decision_rationale}`); `crud_screens!`'s ungated `__parse`/`core_fns` (dead code on any guard-only screen, previously always type-checked) now gated off `input.guard.is_none()`. Plan's original macro-level approach (steps 1-2) superseded — disclosed in B3's own section — since `forbidden(...)` is runtime policy, invisible to the macro at compile time | `cargo test -p rtm` (63 tests) + `cargo test -p nirdosha-rt -p nirdosha-macros -p nirdosha-guard-screens` (36+68+other suites) all green; full-workspace build has one pre-existing, unrelated failure in `nirdosha-guard-mcp` (`RegistryDump` missing fields) not touched by this change |

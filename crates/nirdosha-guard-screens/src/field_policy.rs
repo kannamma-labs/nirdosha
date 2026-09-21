@@ -191,13 +191,21 @@ pub fn check_custom_conditions<E: crate::entity::GuardedEntity>(record: &PolicyR
 /// list the write-side check already excludes, so a row's own synthetic
 /// `id`/row-identity fields are never masked out from under a screen that
 /// needs them to render.
+///
+/// T-02: synthesizes `MaskTransform::Drop`, not `Full` -- a
+/// `field_policy { forbidden(x) }` grant is the tipping-off case
+/// ("this reader must not even see that `x` exists"), which `Drop`'s
+/// true key-removal (`masking::apply_one`) satisfies; an explicit
+/// `mask(x, transform: full)` grant elsewhere in the corpus is a
+/// different, legitimate case (show a `[REDACTED]` placeholder) and is
+/// untouched by this synthesis path.
 pub fn read_masks_from_field_policy(record: &PolicyRecord, exempt: &[&str]) -> Vec<nirdosha_guard_core::FieldMask> {
     record
         .field_policy
         .iter()
         .filter_map(|fp| match fp {
             FieldPolicy::Forbidden(path) => match path.as_slice() {
-                [name] if !exempt.contains(&name.as_str()) => Some(nirdosha_guard_core::FieldMask { field: vec![name.clone()], transform: nirdosha_guard_core::MaskTransform::Full }),
+                [name] if !exempt.contains(&name.as_str()) => Some(nirdosha_guard_core::FieldMask { field: vec![name.clone()], transform: nirdosha_guard_core::MaskTransform::Drop }),
                 _ => None,
             },
             _ => None,

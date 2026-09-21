@@ -213,17 +213,18 @@ pub struct AlertRow {
     /// on the corpus's own `#[dataset] struct Alert`, `10_domains.nir`)
     /// so the G1 check has something real to enforce, the same
     /// `account_id`/`analyst_flag` precedent `TransactionRow` set.
-    /// **`String`, not `bool`** -- batch 4's fix to
+    /// **`Option<String>`, not `bool` or bare `String`** -- T-02's fix to
     /// `nirdosha_guard_screens::field_policy::read_masks_from_field_policy`
-    /// (see that fn's own doc comment) means this field_policy-forbidden
-    /// field IS now masked on read, and `masking::apply_masks` always
-    /// produces a JSON string; found live by this exact field breaking
-    /// `analyst-read-alert`'s own pre-existing test with a real
-    /// deserialize error the moment read-side field_policy enforcement
-    /// went live (`invalid type: string "[REDACTED]", expected a
-    /// boolean`) -- same "flat screen projection, not a literal bool"
-    /// fix `PaymentRow.amount` already needed for the identical reason.
-    pub sar_linked: String,
+    /// synthesizes `MaskTransform::Drop` (true key removal) for this
+    /// field_policy-forbidden field, not `Full`/`"[REDACTED]"` (batch
+    /// 4's earlier fix, since superseded): the tipping-off rule this
+    /// field exists to enforce means a forbidden reader must not see
+    /// that `sar_linked` even EXISTS, not just see it masked. `Option`
+    /// so a dropped key decodes to `None` instead of a hard deserialize
+    /// error, and `skip_serializing_if` so it round-trips back out of
+    /// the typed entity still absent, not reintroduced as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sar_linked: Option<String>,
     /// `lead-bulk-alert`'s `field_policy { allowed(assignee, severity,
     /// tags) }` -- `severity`/`tags` don't exist on the corpus's own
     /// `Alert` dataset either (another real, disclosed drift, same shape
@@ -320,7 +321,12 @@ pub struct CaseRow {
     /// of never re-declaring the corpus's own dataset types verbatim.
     pub alert_ids: String,
     pub subject_ref: String,
-    pub sar_id: String,
+    // T-02: `case-read`'s real `field_policy { forbidden(sar_id) }`
+    // (`60_case_management.nir`) -- tipping-off, same posture as
+    // `AlertRow.sar_linked` -- means this field must be genuinely absent
+    // for `Analyst`'s own read, not a `"[REDACTED]"` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sar_id: Option<String>,
     pub disposition: String,
     pub rationale: String,
     /// `case-close-confirm`'s own `field_policy { allowed(review_verdict,
@@ -426,21 +432,29 @@ pub struct CustomerRow {
     pub id: i64,
     pub customer_id: String,
     pub tenant_id: String,
-    pub name: String,
-    pub national_id: String,
-    pub dob: String,
+    // T-02: `rm-restriction-view`'s real `field_policy {
+    // allowed(restriction_status) forbidden(national_id, name, dob,
+    // ..., pep_flag, sanctions_status, ...) }` (`96_restricted_views.nir`)
+    // means these fields must come back genuinely ABSENT for `RmUser`,
+    // not a `"[REDACTED]"` placeholder -- `read_masks_from_field_policy`
+    // now synthesizes `MaskTransform::Drop` (true key removal) for a
+    // `forbidden(...)` name, so every field it can name here is
+    // `Option<T>` with `skip_serializing_if`, not a bare masked-shaped
+    // `String`/`bool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub national_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dob: Option<String>,
     pub occupation: String,
     pub kyc_status: String,
-    pub risk_rating: String,
-    // `String`, not `bool` -- `rm-restriction-view`'s real `field_policy
-    // { forbidden(..., pep_flag, ...) }` (`96_restricted_views.nir`)
-    // means this field is masked on `RmUser`'s own read since batch 4's
-    // read-side field_policy fix; same "masking always produces a JSON
-    // string" constraint `AlertRow.sar_linked`'s own doc comment
-    // explains, found the identical way (a live deserialize failure the
-    // moment the fix went in, not anticipated in advance).
-    pub pep_flag: String,
-    pub sanctions_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_rating: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pep_flag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanctions_status: Option<String>,
     /// The ONE field `rm-restriction-view` actually grants `RmUser` --
     /// every other field above is real (matches `10_domains.nir`'s
     /// `#[dataset] struct Customer`) but only reachable by `Auditor`'s
@@ -1173,24 +1187,34 @@ pub struct PaymentRow {
     pub id: i64,
     pub payment_id: String,
     pub tenant_id: String,
-    pub rail_ref: String,
-    pub originator: String,
-    pub beneficiary: String,
-    // `String`, not `f64` -- `cs-payment-status` forbids this field, and
-    // `nirdosha_guard_screens::masking::apply_masks` always produces a
-    // JSON string (every `MaskTransform` arm stays string-shaped so a
-    // masked field still deserializes into whatever type the struct
-    // declares) -- an `f64` field masked to `"[REDACTED]"` would fail to
-    // deserialize back into this row at all. Same "flat screen
-    // projection, not the corpus struct's own type verbatim" convention
-    // `CaseRow.alert_ids`/`TransactionRow.occurred_at` already establish.
-    pub amount: String,
+    // T-02: `cs-payment-status` (`96_restricted_views.nir`) and
+    // `ops-decide-hold` (`85_intervention.nir`) both `forbidden(...)`
+    // every field below except `status`/`currency`/`hold_expires_at`.
+    // `read_masks_from_field_policy` now synthesizes `MaskTransform::Drop`
+    // (true key removal, not a `"[REDACTED]"` placeholder) for those --
+    // `Option<T>`, not a bare masked-shaped `String`/`f64`, so a dropped
+    // key decodes to `None` instead of a hard deserialize error, and
+    // `skip_serializing_if` so it stays absent on the way back out.
+    // `amount` was already flattened to `String` (not `f64`) for the
+    // identical "masking always produces a JSON string" reason, before
+    // this fix could remove the key outright.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rail_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beneficiary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
     pub currency: String,
     pub status: String,
-    pub hold_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_reason: Option<String>,
     pub hold_expires_at: i64,
-    pub decision_by: String,
-    pub decision_rationale: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_rationale: Option<String>,
 }
 
 impl GuardedEntity for PaymentRow {
@@ -1206,13 +1230,14 @@ impl GuardedEntity for PaymentRow {
             // `ops-decide-hold`'s own `requires invariant(rationale_present)`
             // -- this dataset's rationale field is `decision_rationale`,
             // not the generic `rationale` `AlertRow`/`CaseRow` use.
-            "rationale_present" => Some(!self.decision_rationale.is_empty()),
+            "rationale_present" => Some(!self.decision_rationale.as_deref().unwrap_or("").is_empty()),
             // `00_core.nir`'s real `hold_reason_valid` [NEW: T-03] --
             // `ingest-create-hold` requires `hold_reason` non-empty, so
             // (unlike the disposition checks) empty is never valid here.
-            "hold_reason_valid" => Some(
-                !self.hold_reason.is_empty() && crate::domains::HOLD_REASON_CODES.contains(&self.hold_reason.as_str()),
-            ),
+            "hold_reason_valid" => {
+                let hold_reason = self.hold_reason.as_deref().unwrap_or("");
+                Some(!hold_reason.is_empty() && crate::domains::HOLD_REASON_CODES.contains(&hold_reason))
+            }
             _ => None,
         }
     }
@@ -1255,9 +1280,9 @@ pub fn payment_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha
         // act on, standing in for what `ingest-create-hold` (M11,
         // unbuilt) would have produced.
         table.raw_driver_seed(DEMO_TENANT, &PaymentRow {
-            id: 1, payment_id: "pay-001".into(), tenant_id: DEMO_TENANT.into(), rail_ref: "rtp-778812".into(),
-            originator: "subj-77".into(), beneficiary: "subj-12".into(), amount: "4500.00".into(), currency: "USD".into(),
-            status: "held".into(), hold_reason: "velocity".into(), hold_expires_at: 1_800_000_000, decision_by: String::new(), decision_rationale: String::new(),
+            id: 1, payment_id: "pay-001".into(), tenant_id: DEMO_TENANT.into(), rail_ref: Some("rtp-778812".into()),
+            originator: Some("subj-77".into()), beneficiary: Some("subj-12".into()), amount: Some("4500.00".into()), currency: "USD".into(),
+            status: "held".into(), hold_reason: Some("velocity".into()), hold_expires_at: 1_800_000_000, decision_by: None, decision_rationale: None,
         });
         table
     })
