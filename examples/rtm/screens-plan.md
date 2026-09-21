@@ -35,7 +35,7 @@
 | B1 | T-03 disposition vocabulary (S) | B | S | 2+2 | ☑ done | — |
 | B2 | T-14 kanban drag transitions (S) | B | S | 1 | ☑ done | B1 (machine) |
 | B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☑ done | — |
-| B4 | T-10 role-ident canonicalization (S) | B | S | all | ☐ pending | — |
+| B4 | T-10 role-ident canonicalization (S) | B | S | all | ☑ done | — |
 | B5 | T-12 predicate binding / I15 (S) | B | S | gate | ☐ pending | — |
 | B6 | T-09 live streaming plane (M) | B | M | 4 | ☐ pending | — |
 | B7 | T-01 governed egress (M) | B | M | 5 | ☐ pending | — |
@@ -218,7 +218,7 @@ now gated off `input.guard.is_none()`, true dead-code elimination.
 (`row.get(name).is_none()`), proven by the tests above; `cargo test -p rtm`
 and `cargo test -p nirdosha-guard-screens` both green.
 
-## B4 ☐ T-10 role-ident canonicalization (S)
+## B4 ☑ T-10 role-ident canonicalization (S) — done
 **Goal.** menus.toml's PascalCase logical roles (`ComplianceLead`, `Mlro`)
 map to the PascalCase runtime `RoleProof<R>` types the guard registry
 already registers; also unblocks `crud_screens!`'s `requires role "..."`
@@ -234,6 +234,24 @@ workaround is `public` verbs + `guard:` blocks).
 **Done-when.** A menus.toml role edit referencing an unmappable role fails
 at emit time with a named error; RTM screen files can switch from the
 `public`-verb workaround to real `requires role` declarations.
+
+**Landed.** The central mapping fn already existed —
+`nirdosha_contract_core::role::role_ident` (`crud_screens!`'s `requires
+role "..."` grammar was already using it; it accepts both snake_case wire
+names and bare PascalCase `roles! { role X; }` type names). What was
+missing was `app_shell_from_toml!` reusing it: every role its nav guards
+and `[landing]` rules consume now gets `role_ident`'s shape check at
+macro-expansion time, plus a dead type alias `type
+__AssertRoleDeclared_<Role> = crate::nirdosha_roles::<Role>;` that forces
+the consuming crate's own `rustc` to resolve the path — an undeclared role
+is now a named "cannot find type" compile error instead of silently-dead
+nav. `crates/nirdosha-macros/src/app_shell_from_toml.rs` gained two unit
+tests proving the assertion is emitted for both a stale/typo'd role and a
+genuinely declared one; `examples/rtm`'s own `cargo build -p rtm` is the
+live proof for all 11 of RTM's declared roles. Did not do a corpus-wide
+sweep of screens off the `public`-verb workaround onto `requires role`
+declarations — out of this ticket's real scope once the mapping fn turned
+out to already exist; that's cosmetic cleanup, not a blocker closing.
 
 ## B5 ☐ T-12 search/filter predicate binding — I15 (S)
 **Goal.** `q`/filter inputs compile into guarded WHERE clauses restricted by
@@ -497,3 +515,4 @@ parallelizes off the core path.
 | 2026-09-22 | B2 (T-14) landed: `workflow!` now populates the real `WORKFLOWS` registry slice (was declared, never emitted into); `kanban_board!` gained `machine:` to read it and gray illegal drags pre-drop; 4.1 → built, blocked_by emptied | all rtm suites green |
 | 2026-09-22 | B1 (T-03) landed: closed vocabularies (`DISPOSITION_CODES`/`CASE_DISPOSITION_CODES`/`HOLD_REASON_CODES`, 10_domains.nir) + 3 new invariants (`disposition_code_valid`/`case_disposition_valid`/`hold_reason_valid`, 00_core.nir + bridge.nir check_invariant arms), wired into `analyst-disposition-alert`/`case-transition`/`ingest-create-hold`; 3.3→built, 4.10→built, 11.2→built, 4.1 drops T-03 (T-14 only remains); executed single-agent (agent-a-engine.md's bridge.nir restriction lifted — no concurrent Agent B this run) | all rtm suites green (verify_tickets corpus-facts recomputed: 48 refs/40 lines/8 stage-gating+4 note-only) |
 | 2026-09-22 | B3 (T-02) landed: `read_masks_from_field_policy` synthesizes `MaskTransform::Drop` (true key removal) instead of `Full` for `field_policy { forbidden(...) }`; `masking::apply_one` removes the key outright for `Drop`; converted every field currently reachable through a real read policy's `forbidden(...)` to `Option<T>` (`AlertRow.sar_linked`, `CaseRow.sar_id`, `CustomerRow.{name,national_id,dob,risk_rating,pep_flag,sanctions_status}`, `PaymentRow.{rail_ref,originator,beneficiary,amount,hold_reason,decision_by,decision_rationale}`); `crud_screens!`'s ungated `__parse`/`core_fns` (dead code on any guard-only screen, previously always type-checked) now gated off `input.guard.is_none()`. Plan's original macro-level approach (steps 1-2) superseded — disclosed in B3's own section — since `forbidden(...)` is runtime policy, invisible to the macro at compile time | `cargo test -p rtm` (63 tests) + `cargo test -p nirdosha-rt -p nirdosha-macros -p nirdosha-guard-screens` (36+68+other suites) all green; full-workspace build has one pre-existing, unrelated failure in `nirdosha-guard-mcp` (`RegistryDump` missing fields) not touched by this change |
+| 2026-09-22 | B4 (T-10) landed: the central role-name mapping fn already existed (`nirdosha_contract_core::role::role_ident`, already used by `crud_screens!`); `app_shell_from_toml!` now reuses it for every nav-guard/`[landing]` role, plus emits a dead `type __AssertRoleDeclared_<Role> = crate::nirdosha_roles::<Role>;` alias per role so an undeclared role fails the *consuming* crate's build with a named "cannot find type" error instead of silently-dead nav; 2 new unit tests in `app_shell_from_toml.rs` prove the assertion fires for both a stale/typo'd role and a genuinely declared one; disk was found at 100%/60MB free mid-run (`target/` at 84GB) and `cargo clean` reclaimed 93GB before this unit ran | all rtm suites green; `cargo test -p nirdosha-macros app_shell_from_toml` green (2 new tests) |

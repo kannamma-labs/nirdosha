@@ -312,22 +312,33 @@ updates (poll → push), and countdown columns derive from live payment state.
 ## T-10 — Role ident canonicalization
 - status: active
 - size: S
-- meaning: maps PascalCase logical roles (menus.toml) to runtime snake_case role idents so route guards resolve
+- meaning: maps PascalCase logical roles (menus.toml) to runtime `nirdosha_roles::<Role>` types; an undeclared role fails the build
 - blocked-screens: none
 - note-mentions: none
 
 **Scope.** menus.toml writes logical roles PascalCase ("ComplianceLead",
-"Mlro"); the runtime guard registry registers snake_case idents. T-10 is the
-canonicalization: app_shell! emission maps logical role names to runtime role
-idents (menus.toml meta.roles_note: "T-10 fixes snake_case blocker"), which
-also completes the V5 probe input — every route.guard {action, resource} must
-resolve to an existing guard_policy! record ("public must reference guard:").
+"Mlro"). `nirdosha_contract_core::role::role_ident` (already the mapping
+`crud_screens!`'s `requires role "..."` grammar uses) is the one central
+mapping fn; `app_shell_from_toml!` now reuses it for every role its nav
+guards and `[landing]` rules consume. Each role gets (1) a shape check via
+`role_ident` at macro-expansion time and (2) a dead type-alias, `type
+__AssertRoleDeclared_<Role> = crate::nirdosha_roles::<Role>;`, forcing the
+*consuming* crate's own `rustc` to resolve that path — an undeclared role
+fails with a named "cannot find type `<Role>` in module `nirdosha_roles`"
+error, not silently-unreachable nav. This also completes the V5 probe
+input — every route.guard {action, resource} must resolve to an existing
+guard_policy! record ("public must reference guard:").
 
 **Gates.** No individual screen. Register-wide: the whole menu/nav emission
 and the V5 guard-reference check. Cited only in menus.toml comments.
 
 **Done when.** A menus.toml role/route edit that references a nonexistent
-guard record or unmappable role fails at emit time with a named error.
+guard record or unmappable role fails at emit time with a named error. ✓ —
+`crates/nirdosha-macros/src/app_shell_from_toml.rs`'s
+`every_consumed_role_gets_a_type_existence_assertion` /
+`declared_role_gets_the_same_assertion_and_expands_cleanly` tests prove the
+assertion is wired; `examples/rtm`'s own build is the live proof for all 11
+of RTM's declared roles.
 
 ---
 
