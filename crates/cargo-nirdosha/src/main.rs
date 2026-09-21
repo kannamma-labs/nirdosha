@@ -171,6 +171,9 @@ fn main() -> ExitCode {
 /// it writes. A package with no such test gets a clear error naming the
 /// convention, not a confusing "file not found".
 fn verify_guard_cli(args: &[String]) -> ExitCode {
+    if args.iter().any(|a| a == "--workspace" || a == "--all") {
+        return verify_guard_workspace_cli();
+    }
     let json = match flag_value(args, "--registry-json") {
         Some(path) => match std::fs::read_to_string(&path) {
             Ok(value) => value,
@@ -202,6 +205,133 @@ fn verify_guard_cli(args: &[String]) -> ExitCode {
         eprintln!("nirdosha: guard verify — {} polic{} checked, no findings", registry.policies.len(), if registry.policies.len() == 1 { "y" } else { "ies" });
     }
     if findings.iter().any(|finding| finding.severity == nirdosha_guard_verify::Severity::Error) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// `cargo nirdosha verify --guard --workspace`: Gate-3 (Plan Phase 17)
+/// cross-crate registry totality. Per-crate `linkme` slices only see what
+/// got linked into one compiled binary (`verify_guard_cli`'s own
+/// `--registry-json`/`produce_guard_dump` path) — this instead builds the
+/// whole workspace through `nirdosha-driver` (`RUSTC_WORKSPACE_WRAPPER`,
+/// the same "Stage 2" mechanism `cargo nirdosha build --deep` already
+/// uses), with `NIRDOSHA_GATE3_DIR` set so every crate that compiles
+/// writes its own real registry fragment (`nirdosha-driver::gate3`,
+/// HIR-level, not linker-level), then merges every fragment and reports
+/// any policy whose `resource` no `#[dataset]` anywhere in the workspace
+/// declares — a gap a single crate's own `linkme` view structurally
+/// cannot see, since it never links the crate that would have caught it.
+///
+/// This checks cross-crate totality specifically, not the full V1–V8
+/// pass suite across every package (a distinct, larger undertaking of
+/// merging N per-package guard dumps that this mode does not attempt) —
+/// stated so the scope isn't misread as broader than it is.
+fn verify_guard_workspace_cli() -> ExitCode {
+    let Some(driver) = driver_path() else {
+        eprintln!(
+            "nirdosha: Gate-3 needs the Stage-2 driver next to cargo-nirdosha \
+             — run `cargo build -p nirdosha-driver` first (nightly + rustc-dev)"
+        );
+        return ExitCode::FAILURE;
+    };
+    let target_dir = match workspace_target_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("nirdosha: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let gate3_dir = target_dir.join("nirdosha").join("gate3");
+    // Stale fragments from a crate that no longer exists (or no longer
+    // declares any policy/dataset) must not linger and be mistaken for
+    // current state.
+    let _ = std::fs::remove_dir_all(&gate3_dir);
+    if let Err(error) = std::fs::create_dir_all(&gate3_dir) {
+        eprintln!("nirdosha: cannot create {}: {error}", gate3_dir.display());
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!("nirdosha: Gate-3 — building the whole workspace through {} to collect per-crate registry fragments", driver.display());
+    let status = Command::new("cargo")
+        .args(["build", "--workspace"])
+        .env("NIRDOSHA_DRIVER", "1")
+        .env("RUSTC_WORKSPACE_WRAPPER", &driver)
+        .env("NIRDOSHA_GATE3_DIR", &gate3_dir)
+        .status();
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("nirdosha: `cargo build --workspace` failed ({status}) — Gate-3 cannot trust a partial fragment set");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("nirdosha: cannot run cargo build --workspace: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    match gate3_check(&gate3_dir) {
+        Ok(findings) => {
+            for finding in &findings {
+                eprintln!("Gate3 Error: {finding}");
+            }
+            if findings.is_empty() {
+                eprintln!("nirdosha: Gate-3 — no cross-crate registry gaps found");
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("nirdosha: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The JSON shape `nirdosha-driver::gate3::Gate3Fragment` writes — kept as
+/// an independent reader of that same contract rather than a shared type
+/// (see `nirdosha-driver/src/gate3.rs`'s own comment on why: sharing Rust
+/// code between a rustc-driver binary and a plain CLI binary would need
+/// `nirdosha-driver` to also ship as a library crate for no other reason).
+#[derive(serde::Deserialize)]
+struct Gate3Fragment {
+    crate_name: String,
+    #[serde(default)]
+    policy_resources: Vec<String>,
+    #[serde(default)]
+    dataset_entities: Vec<String>,
+}
+
+fn gate3_check(dir: &Path) -> Result<Vec<String>, String> {
+    let mut all_resources: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut all_entities: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut resource_owner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut fragments_read = 0usize;
+
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let content = std::fs::read_to_string(entry.path()).map_err(|e| format!("cannot read {}: {e}", entry.path().display()))?;
+        let fragment: Gate3Fragment = serde_json::from_str(&content).map_err(|e| format!("malformed Gate-3 fragment {}: {e}", entry.path().display()))?;
+        fragments_read += 1;
+        for resource in &fragment.policy_resources {
+            resource_owner.entry(resource.clone()).or_insert_with(|| fragment.crate_name.clone());
+        }
+        all_resources.extend(fragment.policy_resources);
+        all_entities.extend(fragment.dataset_entities);
+    }
+    eprintln!("nirdosha: Gate-3 — merged {fragments_read} crate fragment(s): {} real policies, {} real datasets", all_resources.len(), all_entities.len());
+
+    Ok(all_resources
+        .into_iter()
+        .filter(|resource| !all_entities.contains(resource))
+        .map(|resource| {
+            let owner = resource_owner.get(&resource).map(String::as_str).unwrap_or("?");
+            format!("policy in crate {owner:?} references resource {resource:?}, which no #[dataset] anywhere in the workspace declares")
+        })
+        .collect())
 }
 
 /// Runs the target package's `nirdosha_guard_dump` test (see

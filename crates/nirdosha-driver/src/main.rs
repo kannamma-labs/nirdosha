@@ -49,6 +49,7 @@ extern crate rustc_span;
 use std::collections::{HashMap, HashSet};
 
 mod dataflow;
+mod gate3;
 mod numeric;
 mod pack_check;
 mod proof_certificate;
@@ -142,6 +143,19 @@ impl Callbacks for NirdoshaCallbacks {
 // ---------------------------------------------------------------------------
 
 fn analyze(tcx: TyCtxt<'_>, certificate: &mut Option<proof_certificate::Pending>) -> Compilation {
+    // Gate-3 (Plan Phase 17): opt-in per-crate registry fragment, written
+    // only when `cargo nirdosha verify --guard --workspace` set
+    // NIRDOSHA_GATE3_DIR on this build — every other invocation of this
+    // driver is unaffected, same posture as the contract-claims pass
+    // below (pass-through unless there's something to say).
+    if let Ok(dir) = std::env::var("NIRDOSHA_GATE3_DIR") {
+        let fragment = gate3::collect(tcx);
+        if let Err(error) = gate3::write_fragment(std::path::Path::new(&dir), &fragment) {
+            tcx.dcx().err(format!("nirdosha: cannot write Gate-3 fragment: {error}"));
+            tcx.dcx().abort_if_errors();
+        }
+    }
+
     let mut claims: Vec<(LocalDefId, cc::model::Contract)> = Vec::new();
     let mut malformed: Vec<(LocalDefId, String)> = Vec::new();
 

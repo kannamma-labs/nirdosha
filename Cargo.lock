@@ -1785,6 +1785,7 @@ dependencies = [
  "nirdosha-contract-core",
  "nirdosha-smt-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "syn 2.0.119",
 ]
