@@ -89,6 +89,41 @@ pub fn value_display(v: &serde_json::Value) -> String {
     }
 }
 
+/// Current wall-clock time as Unix epoch seconds -- the same `SystemTime`
+/// read `web.rs`'s own token-expiry check already uses, made reusable so
+/// `crud_screens!`'s `countdown_field:` doesn't need its own copy.
+pub fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// T-09 (11.1): a real, live "time remaining" string computed fresh at
+/// render time from an epoch-seconds field (e.g. `PaymentRow::
+/// hold_expires_at`) and the current wall clock -- never a client-side
+/// timer. Negative remainders read as elapsed-since-expiry, matching
+/// I3's stance that an expired hold is a real, visible state, not a
+/// value that silently goes stale-looking.
+pub fn format_countdown(expires_at_secs: i64, now_secs: i64) -> String {
+    let delta = expires_at_secs - now_secs;
+    if delta < 0 {
+        format!("EXPIRED {}", format_duration(-delta))
+    } else {
+        format!("{} remaining", format_duration(delta))
+    }
+}
+
+fn format_duration(total_secs: i64) -> String {
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    if h > 0 {
+        format!("{h}h {m}m")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// Converts a serialized entity back into the same key→string shape
 /// `Request::form_or_json` produces — used to pre-fill an edit form
 /// with the entity's current values.
@@ -106,7 +141,12 @@ pub fn list_html(
     rows: &[serde_json::Value],
     can_create: bool,
     search: Option<&str>,
+    refresh_seconds: Option<u64>,
 ) -> String {
+    let refresh_meta = match refresh_seconds {
+        Some(secs) => format!("<meta http-equiv=\"refresh\" content=\"{secs}\">"),
+        None => String::new(),
+    };
     let search_box = format!(
         "<form method=\"get\" action=\"{base_path}\" style=\"margin-bottom:1rem\">\
          <input type=\"text\" class=\"nir-input\" name=\"q\" value=\"{}\" placeholder=\"Search {}...\">\
@@ -130,7 +170,7 @@ pub fn list_html(
         } else {
             format!("No {} yet.{cta}", html_escape(title))
         };
-        return themed_page_shell(title, "", &format!("{search_box}<p class=\"empty\">{empty_msg}</p>"));
+        return themed_page_shell(title, &refresh_meta, &format!("{search_box}<p class=\"empty\">{empty_msg}</p>"));
     }
     let mut table = String::from("<table><thead><tr>");
     for f in fields {
@@ -149,7 +189,7 @@ pub fn list_html(
     table.push_str("</tbody></table>");
     let new_link = if can_create { format!("<p><a href=\"{base_path}/new\" class=\"nir-btn\">+ New</a></p>") } else { String::new() };
     let export_link = format!("<p><a href=\"{base_path}/export.csv\" class=\"nir-btn nir-btn-secondary\">Export CSV</a></p>");
-    themed_page_shell(title, "", &format!("{search_box}{new_link}{table}{export_link}"))
+    themed_page_shell(title, &refresh_meta, &format!("{search_box}{new_link}{table}{export_link}"))
 }
 
 /// A table with no per-row link and no create/search/export chrome —
@@ -310,7 +350,7 @@ mod tests {
 
     #[test]
     fn list_html_shows_empty_state_with_create_link() {
-        let html = list_html("Products", "/products", &[], &[], true, None);
+        let html = list_html("Products", "/products", &[], &[], true, None, None);
         assert!(html.contains("No Products yet"));
         assert!(html.contains("/products/new"));
     }
@@ -319,7 +359,7 @@ mod tests {
     fn list_html_renders_rows_and_view_links() {
         let fields = [FieldSpec { name: "name", input_type: "text" }];
         let rows = vec![serde_json::json!({"id": 1, "name": "Widget"})];
-        let html = list_html("Products", "/products", &fields, &rows, false, None);
+        let html = list_html("Products", "/products", &fields, &rows, false, None, None);
         assert!(html.contains("Widget"));
         assert!(html.contains("/products/1"));
         assert!(!html.contains("/products/new"));
@@ -327,9 +367,32 @@ mod tests {
 
     #[test]
     fn list_html_shows_no_matching_results_for_an_empty_search() {
-        let html = list_html("Products", "/products", &[], &[], true, Some("xyz"));
+        let html = list_html("Products", "/products", &[], &[], true, Some("xyz"), None);
         assert!(html.contains("No matching results"));
         assert!(html.contains("value=\"xyz\""));
+    }
+
+    #[test]
+    fn list_html_includes_a_real_refresh_meta_tag_when_set() {
+        let fields = [FieldSpec { name: "name", input_type: "text" }];
+        let rows = vec![serde_json::json!({"id": 1, "name": "Widget"})];
+        let html = list_html("Products", "/products", &fields, &rows, false, None, Some(15));
+        assert!(html.contains("http-equiv=\"refresh\" content=\"15\""));
+    }
+
+    #[test]
+    fn list_html_omits_the_refresh_meta_tag_when_unset() {
+        let fields = [FieldSpec { name: "name", input_type: "text" }];
+        let rows = vec![serde_json::json!({"id": 1, "name": "Widget"})];
+        let html = list_html("Products", "/products", &fields, &rows, false, None, None);
+        assert!(!html.contains("http-equiv=\"refresh\""));
+    }
+
+    #[test]
+    fn format_countdown_reads_remaining_or_expired() {
+        assert_eq!(format_countdown(130, 100), "30s remaining");
+        assert_eq!(format_countdown(100, 100), "0s remaining");
+        assert_eq!(format_countdown(40, 100), "EXPIRED 1m 0s");
     }
 
     #[test]

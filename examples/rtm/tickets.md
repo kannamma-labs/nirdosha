@@ -46,7 +46,7 @@ meta.roles_note (T-10).
 | L | cross-cutting runtime + archetype work gating ten or more screens |
 
 **Corpus facts this legend is pinned to** (asserted by tests/verify_tickets.rs):
-47 `ticket:T-…` references on 39 `blocked_by` lines across the 152-screen
+44 `ticket:T-…` references on 36 `blocked_by` lines across the 152-screen
 register (8 lines block on two tickets at once); 11 of the 14 ticket slots
 carry references — 7 stage-gating tickets
 (T-01, T-04, T-06, T-07, T-08, T-09, T-11) and 4 note/menu-level
@@ -289,23 +289,48 @@ attachment pipeline, and 12.10's filing export can read a completed bundle.
 ## T-09 — Live streaming plane for screens
 - status: active
 - size: M
-- meaning: K.* topic consumption feeding screen-pushable live state (tickers, countdowns, job progress, health)
-- blocked-screens: 2.5, 10.5, 11.1, 19.1
-- note-mentions: none
+- meaning: the refresh_seconds poll mechanism is real everywhere it's declared; true topic-push stays a later ticket
+- blocked-screens: 19.1
+- note-mentions: 2.5, 10.5, 11.1, 19.1
 
-**Scope.** The realtime data path behind the `refresh_seconds` combo and the
-future `realtime` archetype: K.guard.decisions and related topics consumed
-into screen-pushable state — monitoring wall ticker (2.5: "auto-refresh table
-now; true ticker = realtime archetype later"), interception queue time-
-remaining countdowns (11.1), rescreen job progress (10.5), and module self-
-reporting health ("modules self-report via notify(topic)", 19.1). Menus.toml:
-the intervention nav item is "blocked on dataset:PG.payment + T-09".
+**Scope.** `refresh_seconds` existed only on `dashboard!`/`communication_feed!`
+before this ticket — `crud_screens!` had the combo declared in `screens.toml`
+(2.5, 10.5, 11.1) but silently ignored it (D1's disclosed governance hole).
+`crud_screens!` now supports `refresh_seconds` (a real `<meta
+http-equiv="refresh">` poll, same mechanism `dashboard.rs` already used),
+plus two new opt-in clauses, `sort_by:` (ascending) and `countdown_field:`
+(renders an epoch-seconds field as a live "Xm Ys remaining"/"EXPIRED"
+string computed fresh every request — no client-side timer). 2.5's Real-Time
+Monitoring Wall and 11.1's Interception Queue are both built on top: real
+`ops-read-holds`-guarded reads over `PG.payment`, sorted soonest-expiring-
+first, auto-refreshing. **What this ticket does NOT build**: real `K.*`
+topic consumption or push-based delivery — that's still poll (a real page
+reload), not push. 11.1's countdown/sort were never actually a Kafka
+concern; deriving from `PG.payment`'s own `hold_expires_at` at request time
+was always sufficient and is what's built. 2.5's OTHER named dataset,
+`K.guard.decisions` (a live decision ticker), has no real topic consumer or
+queryable projection anywhere in this corpus — `GuardClient`'s own JSONL
+audit log is file-backed and unqueried by any screen (same gap `m03_alerts
+.nir`'s 3.10 doc comment already discloses) — so 2.5 stays `stage =
+"interim"`, not `built`. 19.1's own T-09 gap, "modules self-report via
+notify(topic)", is untouched — `dashboard!`'s `refresh_seconds` already
+existed pre-ticket, so nothing this ticket built closes 19.1's real gap; it
+stays the sole `blocked-screens` entry. 10.5 dropped its `ticket:T-09` half
+(the poll mechanism it needs is now real) but stays `blocked` on
+`dataset:PG.rescreen_job` (C9, not yet landed).
 
-**Gates.** 2.5 Real-Time Monitoring Wall (interim auto-refresh), 10.5
-Rescreening Monitor, 11.1 Interception Queue, 19.1 System Health Dashboard.
+**Gates.** 19.1 System Health Dashboard remains stage-blocked. 2.5 (interim,
+real poll now — see its own notes), 10.5 (still blocked, dataset-only now),
+11.1 (built) all dropped `ticket:T-09` from their `blocked_by`.
 
 **Done when.** A screen marked refresh_seconds receives real topic-driven
-updates (poll → push), and countdown columns derive from live payment state.
+updates (poll → push), and countdown columns derive from live payment
+state. Countdown half: ✓ (11.1/2.5, both real, proven by
+`tests/m07_m11_m12_m17_screens.rs`'s
+`hold_queue_renders_a_real_auto_refreshing_sorted_countdown_html_screen`
+and `monitoring_wall_auto_refreshes_and_shows_a_live_sorted_countdown`).
+Topic-push half: not done — poll is real, push is a later ticket (no
+`K.*` topic consumer exists in this corpus yet).
 
 ---
 

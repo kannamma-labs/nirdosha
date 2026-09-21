@@ -30,6 +30,7 @@ fn main() {
     let router = rtm::m01_auth::mount_avatar_picker(router);
     let router = rtm::m02_dashboards::mount_l1_dashboard(router);
     let router = rtm::m02_dashboards::mount_team_dashboard(router);
+    let router = rtm::m02_dashboards::mount_monitoring_wall(router);
     // `mount_*_board`'s own literal `/alerts/board`, `/cases/board`
     // registered BEFORE the sibling `crud_screens!` mount: `Router::
     // dispatch` matches in registration order, and `crud_screens!`'s own

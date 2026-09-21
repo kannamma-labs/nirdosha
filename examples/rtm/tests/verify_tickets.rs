@@ -443,8 +443,8 @@ fn legend_corpus_facts_match_live_counts() {
     // format example is documentation and excluded by the two-digit filter).
     let occurrences = count_structured_refs(&screens_src);
     let lines = count_structured_ref_lines(&screens_src);
-    assert_eq!(occurrences, 47, "screens.toml now carries {occurrences} ticket refs (legend says 47)");
-    assert_eq!(lines, 39, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 39)");
+    assert_eq!(occurrences, 44, "screens.toml now carries {occurrences} ticket refs (legend says 44)");
+    assert_eq!(lines, 36, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 36)");
 
     // 7 stage-gating tickets, 4 note-only, 2 reserved — and the legend's
     // corpus-facts paragraph still names exactly those sets. (T-03 closed
@@ -476,7 +476,7 @@ fn legend_corpus_facts_match_live_counts() {
         .split("---")
         .next()
         .unwrap();
-    for token in ["47", "39", "152", "11 of the 14", "7 stage-gating", "T-02, T-03, T-10, T-12", "T-05 and T-13"] {
+    for token in ["44", "36", "152", "11 of the 14", "7 stage-gating", "T-02, T-03, T-10, T-12", "T-05 and T-13"] {
         assert!(facts.contains(token), "tickets.md corpus-facts paragraph no longer states `{token}`");
     }
     for tid in stage_gating {

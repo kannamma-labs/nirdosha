@@ -21,6 +21,7 @@ fn router() -> Router {
     let router = rtm::m11_intervention::mount_hold_decision(router);
     let router = rtm::m11_intervention::mount_hold_queue(router);
     let router = rtm::m11_intervention::mount_hold_detail(router);
+    let router = rtm::m02_dashboards::mount_monitoring_wall(router);
     let router = rtm::m12_sar::mount_sar_mlro_decision(router);
     let router = rtm::m12_sar::mount_sar_export(router);
     let router = rtm::m12_sar::mount_sar_screens(router);
@@ -126,6 +127,84 @@ fn auto_release_on_timeout_is_a_real_denial_not_a_silent_release() {
     let changed: std::collections::HashSet<String> = ["status".into()].into();
     let result = payment_table().guarded_update(&svc, "FraudMonitoring", "pay-expired", &changed, |row| row.status = "released".into());
     assert!(result.is_err(), "auto-release-on-timeout must really deny SvcIngest, not silently succeed: {result:?}");
+}
+
+/// T-09 (11.1 Interception Queue): `/holds` is now a real HTML screen
+/// (previously JSON-only at that exact path, so no screen rendered at
+/// all), auto-refreshing, sorted soonest-expiring-first, with a live
+/// countdown -- `/api/holds` keeps the original JSON shape.
+#[test]
+fn hold_queue_renders_a_real_auto_refreshing_sorted_countdown_html_screen() {
+    let router = router();
+    let now = nirdosha_rt::screens::now_epoch_secs();
+    payment_table().raw_driver_seed(DEMO_TENANT, &PaymentRow {
+        id: 0, payment_id: "pay-queue-soon".into(), tenant_id: DEMO_TENANT.into(), rail_ref: None,
+        originator: None, beneficiary: None, amount: None, currency: "USD".into(),
+        status: "held".into(), hold_reason: Some("velocity".into()), hold_expires_at: now + 30, decision_by: None, decision_rationale: None,
+    });
+    payment_table().raw_driver_seed(DEMO_TENANT, &PaymentRow {
+        id: 0, payment_id: "pay-queue-later".into(), tenant_id: DEMO_TENANT.into(), rail_ref: None,
+        originator: None, beneficiary: None, amount: None, currency: "USD".into(),
+        status: "held".into(), hold_reason: Some("sanctions_screen".into()), hold_expires_at: now + 7200, decision_by: None, decision_rationale: None,
+    });
+    let ops_cookie = login_as(&router, "opsanalyst", "opsanalyst-demo");
+
+    let html = get_as(&router, "/holds", &ops_cookie);
+    assert_eq!(html.status, 200, "{html:?}");
+    assert!(html.body.contains("http-equiv=\"refresh\""), "the queue must really auto-refresh: {}", html.body);
+    assert!(html.body.contains("remaining"), "hold_expires_at must render as a live countdown: {}", html.body);
+    let soon_pos = html.body.find("pay-queue-soon").expect("soon row must render");
+    let later_pos = html.body.find("pay-queue-later").expect("later row must render");
+    assert!(soon_pos < later_pos, "the queue must be sorted soonest-expiring first: {}", html.body);
+
+    let json = get_as(&router, "/api/holds", &ops_cookie);
+    assert_eq!(json.status, 200, "{json:?}");
+    let body = body_json(&json);
+    let holds = body["holds"].as_array().unwrap();
+    let soon_idx = holds.iter().position(|r| r["payment_id"] == "pay-queue-soon").expect("soon row must be present");
+    let later_idx = holds.iter().position(|r| r["payment_id"] == "pay-queue-later").expect("later row must be present");
+    assert!(soon_idx < later_idx, "the JSON API stays sorted the same way: {holds:?}");
+}
+
+/// T-09 (2.5 Real-Time Monitoring Wall): `refresh_seconds` is now a real
+/// `<meta http-equiv="refresh">` poll on `crud_screens!` (it previously
+/// only existed on `dashboard!`/`communication_feed!`); `sort_by` orders
+/// the guarded scan soonest-expiring-first; `countdown_field` renders a
+/// live "Xm Ys remaining"/"EXPIRED" string computed fresh at request
+/// time from the real `hold_expires_at` epoch, not a client-side timer.
+#[test]
+fn monitoring_wall_auto_refreshes_and_shows_a_live_sorted_countdown() {
+    let router = router();
+    let now = nirdosha_rt::screens::now_epoch_secs();
+    payment_table().raw_driver_seed(DEMO_TENANT, &PaymentRow {
+        id: 0, payment_id: "pay-wall-soon".into(), tenant_id: DEMO_TENANT.into(), rail_ref: None,
+        originator: None, beneficiary: None, amount: None, currency: "USD".into(),
+        status: "held".into(), hold_reason: Some("velocity".into()), hold_expires_at: now + 60, decision_by: None, decision_rationale: None,
+    });
+    payment_table().raw_driver_seed(DEMO_TENANT, &PaymentRow {
+        id: 0, payment_id: "pay-wall-later".into(), tenant_id: DEMO_TENANT.into(), rail_ref: None,
+        originator: None, beneficiary: None, amount: None, currency: "USD".into(),
+        status: "held".into(), hold_reason: Some("sanctions_screen".into()), hold_expires_at: now + 3600, decision_by: None, decision_rationale: None,
+    });
+    let ops_cookie = login_as(&router, "opsanalyst", "opsanalyst-demo");
+
+    let resp = get_as(&router, "/wall", &ops_cookie);
+    assert_eq!(resp.status, 200, "ops-read-holds must let OpsAnalyst see the wall: {resp:?}");
+    assert!(resp.body.contains("http-equiv=\"refresh\" content=\"15\""), "the wall must really auto-refresh, not just declare the combo: {}", resp.body);
+    assert!(resp.body.contains("remaining"), "hold_expires_at must render as a live countdown, not a raw epoch: {}", resp.body);
+    assert!(!resp.body.contains(&(now + 60).to_string()) && !resp.body.contains(&(now + 3600).to_string()), "the raw epoch must not leak through once countdown_field replaces it: {}", resp.body);
+
+    // Soonest-expiring first.
+    let soon_pos = resp.body.find("pay-wall-soon").expect("soon row must render");
+    let later_pos = resp.body.find("pay-wall-later").expect("later row must render");
+    assert!(soon_pos < later_pos, "sort_by must order soonest-expiring first: {}", resp.body);
+
+    // ComplianceLead is also in this screen's `roles`, but the corpus
+    // has no plain `read payment` grant for it (only `hold-stats`'s
+    // `aggregate`) — a real, disclosed denial, not routed around.
+    let lead_cookie = login_as(&router, "compliancelead", "compliancelead-demo");
+    let denied = get_as(&router, "/wall", &lead_cookie);
+    assert_eq!(denied.status, 403, "ComplianceLead has no plain read grant on payment: {denied:?}");
 }
 
 // ---- M12 SAR / Regulatory Reporting ----

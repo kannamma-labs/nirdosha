@@ -153,9 +153,9 @@ archetype = "crud_screens!"
 combo = ["refresh_seconds"]
 roles = ["OpsAnalyst:R", "ComplianceLead:R"]
 datasets = ["K.guard.decisions", "PG.payment"]
-blocked_by = ["ticket:T-09"]
+blocked_by = []
 stage = "interim"
-notes = "auto-refresh table now; true ticker = realtime archetype later"
+notes = "T-09 closed: real refresh_seconds poll, live countdown, sorted; PG.payment half real, K.guard.decisions ticker still not built (no queryable decision stream exists yet)"
 
 [[screen]]
 id = "2.6"
@@ -1010,8 +1010,9 @@ archetype = "crud_screens!"
 combo = ["refresh_seconds"]
 roles = ["Admin:R"]
 datasets = ["PG.rescreen_job"]
-blocked_by = ["dataset:PG.rescreen_job", "ticket:T-09"]
+blocked_by = ["dataset:PG.rescreen_job"]
 stage = "blocked"
+notes = "T-09 half closed (refresh_seconds is real on crud_screens! now); still blocked on PG.rescreen_job (C9)"
 
 [[screen]]
 id = "10.6"
@@ -1033,9 +1034,9 @@ archetype = "crud_screens!"
 combo = ["refresh_seconds"]
 roles = ["OpsAnalyst:R", "ComplianceLead:R"]
 datasets = ["PG.payment"]
-blocked_by = ["ticket:T-09"]
-stage = "blocked"
-notes = "countdown col = realtime archetype later; sorted by time-remaining"
+blocked_by = []
+stage = "built"
+notes = "T-09 closed: real refresh_seconds poll, live countdown, sorted by time-remaining"
 
 [[screen]]
 id = "11.2"
@@ -1621,7 +1622,7 @@ roles = ["Admin:R"]
 datasets = ["PG.svc_health", "PG.incident"]
 blocked_by = ["dataset:PG.svc_health", "ticket:T-09"]
 stage = "blocked"
-notes = "modules self-report via notify(topic)"
+notes = "modules self-report via notify(topic) -- not built this pass; dashboard!'s refresh_seconds already existed pre-T-09, so this screen's actual T-09 gap (a real notify(topic) health self-report feed) is untouched"
 
 [[screen]]
 id = "19.2"

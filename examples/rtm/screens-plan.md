@@ -37,7 +37,7 @@
 | B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☑ done | — |
 | B4 | T-10 role-ident canonicalization (S) | B | S | all | ☑ done | — |
 | B5 | T-12 predicate binding / I15 (S) | B | S | gate | ☑ done | — |
-| B6 | T-09 live streaming plane (M) | B | M | 4 | ☐ pending | — |
+| B6 | T-09 live streaming plane (M) | B | M | 4 | ☑ done (poll half; 19.1 still blocked) | — |
 | B7 | T-01 governed egress (M) | B | M | 5 | ☐ pending | — |
 | B8 | T-11 audit-chain projection (M) | B | M | 4 | ☐ pending | — |
 | B9 | T-07+T-08 SAR wizard + datasets (M+M) | B | M | 5 | ☐ pending | — |
@@ -298,7 +298,7 @@ already accepts. 6.1 gained its missing `file =` register line and
 flipped `emittable` → `built` (the file already existed and was tested;
 only the search-decorative disclosure was holding its stage back).
 
-## B6 ☐ T-09 live streaming plane (M)
+## B6 ☑ T-09 live streaming plane (M) — done (poll half only)
 **Unlocks.** Builds 11.1 Interception Queue; upgrades 2.5 wall, 10.5
 rescreen progress, 19.1 health.
 **Steps.**
@@ -314,6 +314,43 @@ the guard's audit rate. Cap update frequency to ≤5 Hz per widget, coalesce
 concurrent topic messages, and provide a client-side kill switch that
 falls back to the existing `refresh_seconds` poll path if the WebSocket/
 SSE path stalls.
+
+**Landed (honest partial close — disclosed, per R3).** `refresh_seconds`
+existed only on `dashboard!`/`communication_feed!` before this ticket —
+`crud_screens!` had the combo declared in `screens.toml` (2.5/10.5/11.1)
+but silently ignored it (D1's governance hole). `crud_screens!` gained
+real `refresh_seconds` (a real `<meta http-equiv="refresh">` poll) plus
+two new opt-in clauses: `sort_by:` (ascending) and `countdown_field:`
+(renders an epoch-seconds field as a live "Xm Ys remaining"/"EXPIRED"
+string computed fresh every request — no client-side timer, matching
+`screens.rs`'s "no client-side JS" posture; new
+`nirdosha_rt::screens::{now_epoch_secs, format_countdown}` helpers).
+11.1 Interception Queue: discovered its read/decide/confirm backend
+(`m11_intervention.nir`) was ALREADY real and tested — the only gap was
+that `/holds` returned JSON only, no HTML screen existed at all. Now
+`/holds` is a real, sorted, auto-refreshing, live-countdown HTML screen
+(hand-written, reusing the same `screens.rs` helpers `crud_screens!`'s
+new clauses use so the two don't drift); `/api/holds` keeps the JSON
+shape. Fixed `menus.toml`'s stale `route = "/intervention"` (nothing was
+ever mounted there) to the real `/holds`. → `stage = "built"`,
+`blocked_by` emptied. 2.5 Real-Time Monitoring Wall: new `crud_screens!`
+over `payment_table()` (`ops-read-holds`, `OpsAnalyst`) at `/wall`, same
+refresh/sort/countdown treatment. **Not built — disclosed, not routed
+around**: 2.5's other named dataset, `K.guard.decisions` (a live
+decision ticker) — no real topic consumer or queryable projection exists
+anywhere in this corpus (`GuardClient`'s own JSONL audit log is
+file-backed and unqueried by any screen, same gap 3.10's doc comment
+already names) — so 2.5 stays `stage = "interim"`, notes updated
+honestly. 19.1's real gap — modules self-reporting health via
+`notify(topic)` — is untouched (`dashboard!`'s `refresh_seconds` already
+existed pre-ticket, so nothing built here closes it); it's now T-09's
+sole remaining `blocked-screens` entry. 10.5 dropped the `ticket:T-09`
+half of its blocker (poll mechanism now real) but stays blocked on
+`dataset:PG.rescreen_job` (C9). **True topic-push (WebSocket/SSE) was
+never built** — this ticket's own Performance-note framing (poll→push)
+already scoped that as a *later* step; poll is what's real now.
+`tests/verify_tickets.rs` corpus-facts recomputed (44 refs/36 lines,
+unchanged 7 stage-gating/4 note-only/2 reserved).
 
 ## B7 ☐ T-01 governed egress/export path (M)
 **Unlocks.** 12.10, 15.5, 18.9, 20.3 built; 7.5 gate.
@@ -544,3 +581,4 @@ parallelizes off the core path.
 | 2026-09-22 | B3 (T-02) landed: `read_masks_from_field_policy` synthesizes `MaskTransform::Drop` (true key removal) instead of `Full` for `field_policy { forbidden(...) }`; `masking::apply_one` removes the key outright for `Drop`; converted every field currently reachable through a real read policy's `forbidden(...)` to `Option<T>` (`AlertRow.sar_linked`, `CaseRow.sar_id`, `CustomerRow.{name,national_id,dob,risk_rating,pep_flag,sanctions_status}`, `PaymentRow.{rail_ref,originator,beneficiary,amount,hold_reason,decision_by,decision_rationale}`); `crud_screens!`'s ungated `__parse`/`core_fns` (dead code on any guard-only screen, previously always type-checked) now gated off `input.guard.is_none()`. Plan's original macro-level approach (steps 1-2) superseded — disclosed in B3's own section — since `forbidden(...)` is runtime policy, invisible to the macro at compile time | `cargo test -p rtm` (63 tests) + `cargo test -p nirdosha-rt -p nirdosha-macros -p nirdosha-guard-screens` (36+68+other suites) all green; full-workspace build has one pre-existing, unrelated failure in `nirdosha-guard-mcp` (`RegistryDump` missing fields) not touched by this change |
 | 2026-09-22 | B4 (T-10) landed: the central role-name mapping fn already existed (`nirdosha_contract_core::role::role_ident`, already used by `crud_screens!`); `app_shell_from_toml!` now reuses it for every nav-guard/`[landing]` role, plus emits a dead `type __AssertRoleDeclared_<Role> = crate::nirdosha_roles::<Role>;` alias per role so an undeclared role fails the *consuming* crate's build with a named "cannot find type" error instead of silently-dead nav; 2 new unit tests in `app_shell_from_toml.rs` prove the assertion fires for both a stale/typo'd role and a genuinely declared one; disk was found at 100%/60MB free mid-run (`target/` at 84GB) and `cargo clean` reclaimed 93GB before this unit ran | all rtm suites green; `cargo test -p nirdosha-macros app_shell_from_toml` green (2 new tests) |
 | 2026-09-22 | B5 (T-12) landed: new `GuardedTable::guarded_search` (nirdosha-guard-screens/src/lib.rs) — `q` ORs a case-insensitive substring match only across a screen's fields the winning policy's `grant predicate_use(...)` actually names, in-process after decode (driver-level payload-field pushdown is a separate, pre-existing, disclosed gap); zero eligible fields on a non-empty `q` is a named deny; `crud_screens!`'s guarded list/JSON-list routes now call it (previously `q` was captured and displayed but never actually filtered anything on the `guard:` path at all — worse than decorative). `analyst-read-alert` (50_alerts.nir + roles-N-guard_policy.md mirror) gained a real `grant predicate_use(status, assignee, model_version, policy_version, txn_id)` since it had none; 6.1 gained its missing `file =` line and flipped emittable→built | 4 new integration tests (m03_m04_m05_screens.rs, m06_transactions_screen.rs) proving both the granted-rows and named-deny halves through real HTTP routes; all rtm suites green |
+| 2026-09-22 | B6 (T-09) landed, poll half only (disclosed): `crud_screens!` gained real `refresh_seconds` (`<meta http-equiv="refresh">`, previously silently ignored — D1's hole) plus `sort_by:`/`countdown_field:` (new `nirdosha_rt::screens::{now_epoch_secs, format_countdown}` helpers, no client-side JS). 11.1 Interception Queue: found its guard-enforced backend already real/tested, only the HTML screen was missing (`/holds` was JSON-only) — built it (sorted, auto-refreshing, live countdown), added `/api/holds` for JSON, fixed menus.toml's dead `route = "/intervention"` → `/holds` → stage built, blocked_by emptied. 2.5 Real-Time Monitoring Wall: new `crud_screens!` over `payment_table()` at `/wall`, same treatment, stays `interim` — its `K.guard.decisions` half has no real topic consumer/projection anywhere in this corpus, disclosed not faked. 19.1's real T-09 gap (notify(topic) health self-report) untouched, remains T-09's sole blocked-screens entry. 10.5 dropped the ticket half, stays blocked on dataset:PG.rescreen_job (C9). True WebSocket/SSE push not built — always scoped as a later step per this ticket's own "poll→push" framing | 3 new integration tests (m07_m11_m12_m17_screens.rs) proving real auto-refresh/sort/countdown on both screens; verify_tickets corpus-facts recomputed (44 refs/36 lines); all rtm suites green |

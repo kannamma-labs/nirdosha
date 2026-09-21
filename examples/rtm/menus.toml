@@ -392,12 +392,12 @@ id = "nav.intervention"
 label_key = "nav.intervention"
 group = "work"
 screen_id = "11.1"
-route = "/intervention"
+route = "/holds"
 guard = { action = "read", resource = "payment" }
 badge = { source = "PG.payment", filter = "status=held", cap = 99 }
 roles = ["OpsAnalyst", "ComplianceLead"]
 order = 55
-stage_min = "blocked"                    # blocked on dataset:PG.payment + T-09
+stage_min = "blocked"                    # T-09 closed; 11.1 is now stage=built
 
 [[menu]]
 id = "nav.hold_outcomes"

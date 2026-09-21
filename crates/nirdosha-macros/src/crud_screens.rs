@@ -33,7 +33,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, bracketed, Ident, LitStr, Token, Type};
+use syn::{braced, bracketed, Ident, LitInt, LitStr, Token, Type};
 
 enum Access {
     Public,
@@ -200,6 +200,24 @@ struct CrudScreensInput {
     update: Access,
     delete: Access,
     guard: Option<GuardConfig>,
+    /// T-09: `<meta http-equiv="refresh">` on the List screen, the same
+    /// real poll mechanism `dashboard!`/`communication_feed!` already
+    /// use (`render_dashboard_html`'s own doc comment) -- `crud_screens!`
+    /// was the one archetype `combo = ["refresh_seconds"]` named in
+    /// screens.toml without ever actually wiring it (D1's disclosed
+    /// governance hole).
+    refresh_seconds: Option<LitInt>,
+    /// T-09 (11.1): ascending sort on the guarded list by a declared
+    /// `i64` field before rendering -- "sorted by time-remaining" for a
+    /// hold-expiry queue is "sorted by the field holding that
+    /// timestamp," not a bespoke realtime-archetype concept.
+    sort_by: Option<Ident>,
+    /// T-09 (11.1): renders a declared epoch-seconds field as a live
+    /// "expires in Xm Ys" / "EXPIRED Xm ago" string, computed fresh on
+    /// every real request -- genuinely live (not a client-side fake
+    /// timer), matching `screens.rs`'s own "no client-side JS" posture
+    /// for this archetype.
+    countdown_field: Option<Ident>,
 }
 
 impl Parse for CrudScreensInput {
@@ -264,19 +282,42 @@ impl Parse for CrudScreensInput {
         let _ = input.parse::<Token![,]>();
 
         // Additive-only: every existing `crud_screens!` invocation ends
-        // right here (no trailing content), so this only ever fires for
-        // an invocation that opted in.
+        // right here (no trailing content), so this loop only ever
+        // fires for an invocation that opted into one or more of these
+        // trailing clauses -- any order, each optional, each at most
+        // once (a repeat is an ordinary "expected `guard`, `sort_by`,
+        // ..." parse error, not silently overwritten).
         let mut guard = None;
-        if input.peek(Ident) {
+        let mut refresh_seconds = None;
+        let mut sort_by = None;
+        let mut countdown_field = None;
+        while input.peek(Ident) {
             let fork = input.fork();
             let ahead: Ident = fork.parse()?;
-            if ahead == "guard" {
+            if ahead == "guard" && guard.is_none() {
                 input.parse::<Ident>()?;
                 input.parse::<Token![:]>()?;
                 let content;
                 braced!(content in input);
                 guard = Some(content.parse::<GuardConfig>()?);
                 let _ = input.parse::<Token![,]>();
+            } else if ahead == "refresh_seconds" && refresh_seconds.is_none() {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                refresh_seconds = Some(input.parse::<LitInt>()?);
+                let _ = input.parse::<Token![,]>();
+            } else if ahead == "sort_by" && sort_by.is_none() {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                sort_by = Some(input.parse::<Ident>()?);
+                let _ = input.parse::<Token![,]>();
+            } else if ahead == "countdown_field" && countdown_field.is_none() {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                countdown_field = Some(input.parse::<Ident>()?);
+                let _ = input.parse::<Token![,]>();
+            } else {
+                break;
             }
         }
 
@@ -291,6 +332,9 @@ impl Parse for CrudScreensInput {
             update,
             delete,
             guard,
+            refresh_seconds,
+            sort_by,
+            countdown_field,
         })
     }
 }
@@ -373,6 +417,37 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     let field_names: Vec<String> = input.fields.iter().map(|f| f.name.to_string()).collect();
     let field_types: Vec<&Type> = input.fields.iter().map(|f| &f.ty).collect();
     let input_types: Vec<&'static str> = input.fields.iter().map(|f| input_type_for(&f.ty)).collect();
+
+    // T-09: `<meta http-equiv="refresh">` token, threaded into both
+    // `list_html` call sites below -- `None` when unset, exactly
+    // `dashboard.rs`'s own `refresh_seconds` handling.
+    let refresh_seconds_tok = match &input.refresh_seconds {
+        Some(n) => quote! { Some(#n) },
+        None => quote! { None },
+    };
+    // T-09 (11.1): sort the guarded scan ascending by a declared field
+    // before rendering/exporting -- applied identically everywhere a
+    // guarded `matched: Vec<#entity>` is produced, so List/JSON/CSV
+    // never disagree on order.
+    let sort_by_stmt = input.sort_by.as_ref().map(|f| quote! { matched.sort_by_key(|e| e.#f); });
+    // T-09 (11.1): render this field's raw epoch-seconds value as a
+    // live "expires in Xm Ys" / "EXPIRED Xm ago" string -- HTML display
+    // only (the JSON/CSV paths keep the raw epoch for machine
+    // consumers). Computed fresh on every real request, so it's
+    // genuinely live across `refresh_seconds`' real page reloads, not a
+    // client-side fake timer (`screens.rs`'s own "no client-side JS"
+    // posture for this archetype).
+    let countdown_stmt = input.countdown_field.as_ref().map(|f| {
+        let f_str = f.to_string();
+        quote! {
+            let __now = ::nirdosha_rt::screens::now_epoch_secs();
+            for row in rows.iter_mut() {
+                if let Some(v) = row.get(#f_str).and_then(|v| v.as_i64()) {
+                    row[#f_str] = ::serde_json::Value::String(::nirdosha_rt::screens::format_countdown(v, __now));
+                }
+            }
+        }
+    });
 
     // A guarded screen's editable set -- see `GuardConfig::update_fields`'s
     // own doc comment for why this is independent of the display
@@ -532,6 +607,8 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
     // not just the `Access::Role` presence check `route()` builds
     // everywhere else in this file. See `GuardConfig`'s own doc comment
     // for exactly what stays unwired in this phase.
+    let matched_mut = if input.sort_by.is_some() { quote! { mut } } else { quote! {} };
+    let rows_mut = if input.countdown_field.is_some() { quote! { mut } } else { quote! {} };
     let list_html_route = if let Some(guard) = &input.guard {
         let table = &guard.table;
         let purpose = &guard.purpose;
@@ -539,9 +616,11 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
             .get_with_auth(#path, "List", |req, _params, auth| {
                 let q = req.query().get("q").cloned();
                 match #table().guarded_search(auth, #purpose, q.as_deref(), &[ #(#field_names),* ]) {
-                    Ok(matched) => {
-                        let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref()))
+                    Ok(#matched_mut matched) => {
+                        #sort_by_stmt
+                        let #rows_mut rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
+                        #countdown_stmt
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref(), #refresh_seconds_tok))
                     }
                     Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
                 }
@@ -553,7 +632,7 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
                 let matched = __matching_rows(req);
                 let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
                 let q = req.query().get("q").cloned();
-                ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref()))
+                ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref(), #refresh_seconds_tok))
             }
         })
     };
@@ -563,7 +642,8 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         quote! {
             .get_with_auth(#export_path, "Export CSV", |_req, _params, auth| {
                 match #table().guarded_snapshot(auth, #purpose) {
-                    Ok(matched) => {
+                    Ok(#matched_mut matched) => {
+                        #sort_by_stmt
                         let mut csv = String::new();
                         csv.push_str(&[ #(#field_names),* ].join(","));
                         csv.push('\n');
@@ -602,7 +682,8 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
             .get_with_auth(#api_path, "List (JSON)", |req, _params, auth| {
                 let q = req.query().get("q").cloned();
                 match #table().guarded_search(auth, #purpose, q.as_deref(), &[ #(#field_names),* ]) {
-                    Ok(matched) => {
+                    Ok(#matched_mut matched) => {
+                        #sort_by_stmt
                         let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
                         ::nirdosha_rt::Response::json(200, &::serde_json::json!(rows))
                     }

@@ -33,14 +33,65 @@ use nirdosha_guard_screens::EscalatedWrite;
 use std::collections::HashSet;
 
 /// 11.1 desk queue -- `ops-read-holds` (`OpsAnalyst`, `filter
-/// tenant_scope()`, `cap(row_cap = 100)`).
+/// tenant_scope()`, `cap(row_cap = 100)`). `/holds` is the real screen
+/// [T-09]: a server-rendered, real `<meta http-equiv="refresh">`-polled
+/// table sorted soonest-expiring-first, with a live "Xm Ys remaining"
+/// countdown computed fresh from `hold_expires_at` on every request --
+/// hand-written (not `crud_screens!`, matching this whole module's own
+/// documented reason) but reusing the SAME `nirdosha_rt::screens`
+/// helpers `crud_screens!`'s own `refresh_seconds`/`countdown_field`
+/// clauses now use, so the two don't drift on what "live" means.
+/// `/api/holds` keeps the original JSON shape for machine consumers.
 pub fn mount_hold_queue(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
-    router.get_with_auth("/holds", "Payment hold queue", |_req, _params, auth| {
-        match payment_table().guarded_snapshot(auth, "FraudMonitoring") {
-            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!({ "holds": rows })),
-            Err(e) => nirdosha_guard_screens::guard_error_response(e),
-        }
-    })
+    router
+        .get_with_auth("/holds", "Payment hold queue", |_req, _params, auth| {
+            match payment_table().guarded_snapshot(auth, "FraudMonitoring") {
+                Ok(mut rows) => {
+                    rows.sort_by_key(|r| r.hold_expires_at);
+                    let now = nirdosha_rt::screens::now_epoch_secs();
+                    let body = render_hold_queue_html(&rows, now);
+                    nirdosha_rt::Response::html(200, body)
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/api/holds", "Payment hold queue (JSON)", |_req, _params, auth| {
+            match payment_table().guarded_snapshot(auth, "FraudMonitoring") {
+                Ok(mut rows) => {
+                    rows.sort_by_key(|r| r.hold_expires_at);
+                    nirdosha_rt::Response::json(200, &serde_json::json!({ "holds": rows }))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+fn render_hold_queue_html(rows: &[crate::bridge::PaymentRow], now: i64) -> String {
+    let title = "Payment hold queue";
+    if rows.is_empty() {
+        return nirdosha_rt::themed_page_shell(title, "<meta http-equiv=\"refresh\" content=\"10\">", "<p class=\"empty\">No holds pending.</p>");
+    }
+    let mut table = String::from(
+        "<table><thead><tr><th>payment_id</th><th>status</th><th>hold_reason</th><th>currency</th><th>time remaining</th><th>decision</th></tr></thead><tbody>",
+    );
+    for r in rows {
+        let remaining = nirdosha_rt::screens::format_countdown(r.hold_expires_at, now);
+        let decision = match (&r.decision_by, &r.decision_rationale) {
+            (Some(by), Some(reason)) if !by.is_empty() => format!("{by}: {reason}"),
+            _ => String::new(),
+        };
+        table.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            nirdosha_rt::html_escape(&r.payment_id),
+            nirdosha_rt::html_escape(&r.status),
+            nirdosha_rt::html_escape(r.hold_reason.as_deref().unwrap_or("")),
+            nirdosha_rt::html_escape(&r.currency),
+            nirdosha_rt::html_escape(&remaining),
+            nirdosha_rt::html_escape(&decision),
+        ));
+    }
+    table.push_str("</tbody></table>");
+    nirdosha_rt::themed_page_shell(title, "<meta http-equiv=\"refresh\" content=\"10\">", &table)
 }
 
 /// 11.2 detail -- same policy, `guarded_get`.
