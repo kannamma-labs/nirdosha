@@ -48,6 +48,12 @@ members = [
     "crates/nirdosha-guard-registry",
     "crates/nirdosha-guard-mic",
     "crates/nirdosha-guard-verify",
+    # RTM live-demo plan, Phase 0: bridges GuardClient/StoreDriver into
+    # nirdosha-rt's screen-archetype macros (crud_screens! and friends) --
+    # see the crate's own doc comment for exactly which evaluator gaps
+    # (field_policy, requires conditions, scope-function filters, and the
+    # one-row-per-resource storage schema) it closes and how.
+    "crates/nirdosha-guard-screens",
     # Real Postgres StoreDriver (write path): pooled + TLS-by-default
     # connection, RLS via session variables, honest FilterNodeKind
     # manifest — RFC 0026 checklist's "production store drivers" line.
