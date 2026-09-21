@@ -39,6 +39,7 @@
 //! over-approximate (see `nirdosha-contract-core/src/scan.rs`).
 
 mod app_shell;
+mod app_shell_from_toml;
 mod categorical;
 mod communication_feed;
 mod crud_screens;
@@ -110,6 +111,13 @@ pub fn kanban_board(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn communication_feed(input: TokenStream) -> TokenStream {
     communication_feed::expand(input)
+}
+
+/// See `app_shell_from_toml::expand`'s module doc — generate the
+/// app shell and landing rules directly from `menus.toml`.
+#[proc_macro]
+pub fn app_shell_from_toml(input: TokenStream) -> TokenStream {
+    app_shell_from_toml::expand(input)
 }
 
 /// See `landing::expand`'s module doc — issue #70's substitute for

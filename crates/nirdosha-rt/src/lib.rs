@@ -24,7 +24,7 @@
 //! ```
 
 pub use nirdosha_macros::{
-    app_shell, categorical_actions, communication_feed, contract, crud_screens, dashboard,
+    app_shell, app_shell_from_toml, categorical_actions, communication_feed, contract, crud_screens, dashboard,
     kanban_board, landing, login, settings_screen, wizard, workflow,
 };
 
@@ -56,6 +56,7 @@ pub mod feed;
 pub mod screens;
 pub mod showcase_screens;
 pub mod theme;
+pub mod watermark;
 pub mod web;
 pub mod wizard;
 

@@ -14,6 +14,7 @@ nirdosha-contract-core = { path = "../nirdosha-contract-core" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
+toml = "0.8"
 # The dialect's own toolchain: explicitly exempt from itself (the
 # verifier does not lint its own implementation — see
 # docs/nirdosha-rt-dialect.md §5).
