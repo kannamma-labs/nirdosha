@@ -1,0 +1,21 @@
+// ============================================================================
+// 99_break_glass.nir — scoped, time-boxed, dual-approved, reconciled. Never global.
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+nirdosha_rt::break_glass! {                                 // → SAR emergency egress
+    scope(resource("sar_bundle"), action("export"))
+    ttl(1h)
+    dual_approve above(severity(2))
+    obligate audit(full)
+    // auto-creates post-hoc review task; V10 holds finding open until reconciliation
+}
+nirdosha_rt::break_glass! {                                 // → payment release above authority
+    scope(resource("payment"), action("update"))
+    ttl(30m)
+    dual_approve above(severity(2))
+    obligate audit(full)
+}
+// NOTE: guard-down emergency access is OUT-OF-BAND by design (RFC 0023 §14):
+// no break-glass macro path exists when the guard is down; dual-control paper
+// procedure + mandatory reconciliation on recovery. Not expressible here — correct.

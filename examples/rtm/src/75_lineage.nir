@@ -1,0 +1,112 @@
+// ============================================================================
+// 75_lineage.nir — [RFC 0026 §9–10]. Phases 1–4 of RFC 0026.
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+nirdosha_rt::lineage_query! {                               // [RFC 0026 §9.2 verbatim]
+    view downstream_of(start: NodeId, depth: u32) -> DownstreamRow {
+        node: NodeId,
+        edge_type: EdgeType [filter],
+        policy_version: PolicyVersion [filter],
+        authority: Authority [filter],
+    };
+    view upstream_of(start: NodeId, depth: u32) -> UpstreamRow {
+        node: NodeId,
+        edge_type: EdgeType [filter],
+        purpose: Purpose [filter],
+        destination: Destination [filter],
+    };
+    view provenance_of(trace_id: TraceId) -> ProvenanceRow {
+        step: u32, src: NodeId, edge_type: EdgeType, dst: NodeId,
+        policy_version: PolicyVersion, receipt_digest: [u8; 32],
+    };
+}
+
+nirdosha_rt::guard_policy! {                                // [RFC 0026 §9.1 verbatim → M7]
+    allow "lineage-explore" for Analyst
+    when action == "lineage_query" && resource == "downstream_of"
+    filter tenant_scope()
+    cap(max_depth = 5, max_nodes = 1_000, max_execution = 5s)
+    destination(llm_context) denied_above(CONFIDENTIAL)
+    obligate audit(full)                                    // lineage reads are never sampled
+}
+nirdosha_rt::guard_policy! {                                // [NEW → 20.1 auditor scope]
+    allow "lineage-audit" for Auditor
+    when action == "lineage_query" && resource in ["downstream_of", "upstream_of", "provenance_of"]
+    purpose(Audit)
+    cap(max_depth = 8, max_nodes = 10_000, max_execution = 30s)
+    obligate audit(full)
+}
+
+// → M7 network graph link queries (7.1/7.2/7.3) + graph export (7.5) [NEW]
+//   `menus.toml` declares `action = "link_query", resource = "network_of"`
+//   and `action = "export", resource = "link_edge"`; these are the policy
+//   records the V5 route-guard invariant resolves to.
+nirdosha_rt::guard_policy! {
+    allow "network-link-query" for Analyst, ComplianceLead
+    when action == "link_query" && resource == "network_of"
+    purpose(AmlInvestigation)
+    cap(max_depth = 5, max_nodes = 1_000, max_execution = 5s)
+    destination(llm_context) denied_above(CONFIDENTIAL)
+    obligate audit(full)
+}
+nirdosha_rt::guard_policy! {
+    allow "network-export" for Analyst
+    when action == "export" && resource == "link_edge"
+    purpose(AmlInvestigation)
+    destination(export-file)
+    escalate to approval(chain egress_release)
+    cap(row_cap = 50_000, max_result_bytes = 100MB)
+    obligate audit(full)
+}
+
+// → 8.6/8.7 threshold simulation — dry-run at scale [RFC 0026 §10.3; Phase 4]
+nirdosha_rt::policy_simulation! {
+    simulation sim_threshold_tune {
+        window = 7d;
+        candidate_policy = "2025.12.1-candidate";
+        baseline_policy = current;
+        measure { alert_volume, denied_flows, escalation_load, case_load };
+        obligate audit(full);
+    }
+}
+nirdosha_rt::guard_policy! {
+    allow "policy-simulate" for PolicyEngineer
+    when action == "simulate" && resource == "policy_simulation"
+    purpose(ModelGovernance)
+    obligate audit(full)                                    // read-only results; V10-subject
+}
+
+// → 8.6 simulation read-only view for ComplianceLead (menu V5 coverage) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "lead-view-simulation" for ComplianceLead
+    when action == "simulate" && resource == "policy_simulation"
+    purpose(ModelGovernance)
+    obligate audit(full)
+}
+
+// → 8.3 threshold edits = migrate (dry-run mandatory at runtime, §2) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "threshold-migrate" for PolicyEngineer
+    when action == "migrate" && resource in ["window", "policy", "matcher", "model"]
+    purpose(ModelGovernance)
+    escalate to approval(chain policy_release)
+    obligate audit(full)
+}
+
+// → 8.3/8.10 policy/window migrate for ComplianceLead (menu V5 coverage) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "lead-migrate-policy" for ComplianceLead
+    when action == "migrate" && resource in ["policy", "window"]
+    purpose(ModelGovernance)
+    escalate to approval(chain policy_release)
+    obligate audit(full)
+}
+
+// → V10 findings read (dormant/undeclared/issued-unconsumed/pending) [NEW → new screens]
+nirdosha_rt::guard_policy! {
+    allow "v10-findings-read" for PolicyEngineer
+    when action == "read" && resource == "lineage_findings"
+    purpose(ModelGovernance)
+    obligate audit(full)
+}

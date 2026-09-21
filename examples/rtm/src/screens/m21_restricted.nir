@@ -1,0 +1,191 @@
+//! M21 Restricted / Downstream Views (`screen.md` module 21, 4 screens).
+//! Policies: `96_restricted_views.nir` (`cs-payment-status`,
+//! `rm-restriction-view`, `regulator-scoped-read`, `regulator-no-export`),
+//! `65_sar.nir` (`cs-no-sar`, `rm-no-sar`). RTM live-demo plan Phase B
+//! batch 4.
+//!
+//! Real, guard-enforced: 21.3 CS payment-status lookup
+//! (`cs-payment-status`'s real `for CsAgent`, `field_policy {
+//! allowed(status, hold_expires_at, currency) forbidden(amount, rail_ref,
+//! originator, beneficiary, hold_reason, decision_by,
+//! decision_rationale) }` over `bridge.nir`'s new, minimal `PaymentRow`
+//! -- see that row's own doc comment for why it exists here rather than
+//! waiting on M11) and 21.4 RM restriction-band view
+//! (`rm-restriction-view`'s real `for RmUser`, `field_policy {
+//! allowed(restriction_status) }`, reusing M5's own `CustomerRow`). Both
+//! routes are tested (this batch's own test suite) asserting the
+//! forbidden fields are genuinely ABSENT from the JSON response body
+//! (masked at the source -- `evaluate()`'s real `masks` applied by
+//! `decode_rows`/`masking::apply_masks` before this row is even
+//! deserialized -- not merely "the request succeeded"), matching this
+//! rollout's very first field-masking proof (`m06_transactions.nir`'s
+//! `card_token`) but for two more real corpus masks.
+//!
+//! Real, guard-enforced (N16 batch): 21.1 Auditor Read-Only Portal
+//! (`mount_auditor_portal`, below) -- reuses `auditor-read`'s real
+//! grant (`96_restricted_views.nir`, `for Auditor`, `purpose(Audit)`,
+//! `resource in ["alert", "case", "transaction", "customer", ...]`)
+//! that `m20_audit.nir::mount_audit_trail` already proves live, over
+//! the SAME `GuardedTable`s that module already imports -- the only
+//! things 21.1 adds are (a) an HTML render instead of raw JSON and (b)
+//! the always-on watermark banner (`nirdosha_rt::watermark`) screen.md
+//! actually asks 21.1 for that M20's plain audit-search screens don't
+//! need. Read-only by construction: these routes only ever call
+//! `guarded_snapshot`, and no create/update/delete handler is
+//! registered for any of them -- the same property `crud_screens!`'s
+//! `guard:` clause gets for free by omitting `create_fields:`/
+//! `update_fields:` (see that macro's own updated `GuardConfig` doc
+//! comment), just hand-written here since the watermark wrap needs a
+//! hook `list_html`'s own output has none of.
+//!
+//! **Disclosed, not built this pass**: 21.2 Regulator scoped access
+//! (`regulator-scoped-read`'s real `filter delegation_scope()`) --
+//! `nirdosha-guard-screens::scope::resolve_filter_ref` fails closed on
+//! `delegation_scope()` today (confirmed: no live delegation-credential
+//! verification exists anywhere in this workspace to resolve it against,
+//! the same real gap `bridge.nir`'s `DelegationTokenRow` doc comment
+//! already discloses for the *minting* side in M18 -- this is that same
+//! disclosed boundary's *consuming* side). A route calling
+//! `case_table().guarded_snapshot(auth, "RegulatoryInspection")` for
+//! `RegulatorViewer` could be added today, but it would only ever
+//! return `Denied`/`Store` (the filter never resolves) -- building it
+//! now would just be a route whose one and only observable behavior is
+//! "always fails," which isn't worth the surface area until the real
+//! delegation-credential consumer exists; the deny is already provable
+//! directly against the policy (see this batch's own test). `regulator-
+//! no-export` is real and denies by construction (no export route
+//! exists for `RegulatorViewer` to even attempt), so there's nothing
+//! distinct to build for it either.
+
+use crate::bridge::alert_table;
+use crate::bridge::case_table;
+use crate::bridge::customer_table;
+use crate::bridge::payment_table;
+use crate::bridge::transaction_table;
+use nirdosha_rt::screens::FieldSpec;
+use nirdosha_rt::watermark::{watermark_banner, with_watermark};
+
+fn now_ms_string() -> String {
+    let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis();
+    format!("{now_ms}ms since epoch")
+}
+
+/// Wraps an already-rendered guarded-read HTML page with 21.1's
+/// always-on "AUDIT READ-ONLY" banner naming the viewing `Auditor` and
+/// the moment they viewed it -- screen.md's own watermark requirement,
+/// applied uniformly to every resource this portal serves.
+fn watermarked(auth: &nirdosha_rt::Auth, html: String) -> String {
+    let banner = watermark_banner(auth.user(), "AUDIT READ-ONLY", &now_ms_string());
+    with_watermark(html, &banner)
+}
+
+/// 21.3 -- masked payment-status lookup, keyed by the one seeded payment
+/// (`bridge.nir`'s `pay-001`) -- a real per-id `guarded_get`, not a list,
+/// matching `cs-payment-status`'s own `cap(row_cap = 1)`.
+pub fn mount_cs_payment_status(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cs/payments/{id}", "CS payment status", |_req, params, auth| {
+        let Some(id) = params.get("id") else { return nirdosha_rt::Response::bad_request("id required") };
+        match payment_table().guarded_get(auth, "CustomerService", id) {
+            Ok(Some(row)) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+            Ok(None) => nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 21.4 -- masked customer restriction-band view, same shape.
+pub fn mount_rm_restriction_view(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/rm/customers/{id}", "RM restriction view", |_req, params, auth| {
+        let Some(id) = params.get("id") else { return nirdosha_rt::Response::bad_request("id required") };
+        match customer_table().guarded_get(auth, "CustomerService", id) {
+            Ok(Some(row)) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+            Ok(None) => nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 21.1 -- Auditor Read-Only Portal: one watermarked HTML read per
+/// resource `auditor-read` already grants (same tables/purpose
+/// `m20_audit.nir::mount_audit_trail` uses), plus an index page. No
+/// create/update/delete handler is registered anywhere in this fn --
+/// read-only by construction, not by hidden UI, matching `crud_screens
+/// !`'s own guarded-omission property (see `GuardConfig`'s doc comment
+/// in `nirdosha-macros`).
+pub fn mount_auditor_portal(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/auditor", "Auditor Read-Only Portal", |_req, _params, auth| {
+            let body = "<ul>\
+                <li><a href=\"/auditor/transactions\">Transactions</a></li>\
+                <li><a href=\"/auditor/alerts\">Alerts</a></li>\
+                <li><a href=\"/auditor/cases\">Cases</a></li>\
+                <li><a href=\"/auditor/customers\">Customers</a></li>\
+                </ul>"
+                .to_string();
+            nirdosha_rt::Response::html(200, watermarked(auth, nirdosha_rt::web::page_shell("Auditor Read-Only Portal", "", &body)))
+        })
+        .get_with_auth("/auditor/transactions", "Auditor: transactions", |_req, _params, auth| {
+            match transaction_table().guarded_snapshot(auth, "Audit") {
+                Ok(rows) => {
+                    let fields = [
+                        FieldSpec { name: "txn_id", input_type: "text" },
+                        FieldSpec { name: "amount", input_type: "number" },
+                        FieldSpec { name: "currency", input_type: "text" },
+                        FieldSpec { name: "status", input_type: "text" },
+                        FieldSpec { name: "occurred_at", input_type: "number" },
+                    ];
+                    let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                    let html = nirdosha_rt::screens::read_only_list_html("Auditor: transactions", &fields, &values);
+                    nirdosha_rt::Response::html(200, watermarked(auth, html))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/auditor/alerts", "Auditor: alerts", |_req, _params, auth| {
+            match alert_table().guarded_snapshot(auth, "Audit") {
+                Ok(rows) => {
+                    let fields = [
+                        FieldSpec { name: "alert_id", input_type: "text" },
+                        FieldSpec { name: "score", input_type: "number" },
+                        FieldSpec { name: "status", input_type: "text" },
+                        FieldSpec { name: "case_id", input_type: "text" },
+                    ];
+                    let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                    let html = nirdosha_rt::screens::read_only_list_html("Auditor: alerts", &fields, &values);
+                    nirdosha_rt::Response::html(200, watermarked(auth, html))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/auditor/cases", "Auditor: cases", |_req, _params, auth| {
+            match case_table().guarded_snapshot(auth, "Audit") {
+                Ok(rows) => {
+                    let fields = [
+                        FieldSpec { name: "case_id", input_type: "text" },
+                        FieldSpec { name: "status", input_type: "text" },
+                        FieldSpec { name: "assigned_to", input_type: "text" },
+                        FieldSpec { name: "disposition", input_type: "text" },
+                    ];
+                    let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                    let html = nirdosha_rt::screens::read_only_list_html("Auditor: cases", &fields, &values);
+                    nirdosha_rt::Response::html(200, watermarked(auth, html))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/auditor/customers", "Auditor: customers", |_req, _params, auth| {
+            match customer_table().guarded_snapshot(auth, "Audit") {
+                Ok(rows) => {
+                    let fields = [
+                        FieldSpec { name: "customer_id", input_type: "text" },
+                        FieldSpec { name: "kyc_status", input_type: "text" },
+                        FieldSpec { name: "risk_rating", input_type: "text" },
+                    ];
+                    let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                    let html = nirdosha_rt::screens::read_only_list_html("Auditor: customers", &fields, &values);
+                    nirdosha_rt::Response::html(200, watermarked(auth, html))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

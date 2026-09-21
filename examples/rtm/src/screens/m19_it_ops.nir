@@ -1,0 +1,100 @@
+//! M19 IT Operations & Data Monitoring (`screen.md` module 19, 8 screens).
+//! Policies: `20_ingestion.nir` (`ops-ingest-admin`), `90_ops_admin.nir`
+//! (`driver-migrate` -- already built in `m18_admin.nir`'s
+//! `mount_driver_migrate`, reused as-is, not duplicated here). RTM
+//! live-demo plan Phase B batch 4.
+//!
+//! Real, guard-enforced: 19.2/19.3 exception replay / reprocess
+//! (`ops-ingest-admin`'s real `action in ["update", "migrate"] &&
+//! resource == "ingest_admin"`, `escalate to approval(chain
+//! policy_release)` -- built under `migrate`, the same maker≠checker
+//! shape `driver-migrate`/`refdata-migrate` already prove: `Admin`
+//! proposes, `policy_release`'s `of = [PolicyEngineer, ComplianceLead]`
+//! names neither).
+//!
+//! **Real, disclosed gap found wiring this module**: no human role has
+//! ANY `read`/`aggregate` `guard_policy!` grant touching ingestion
+//! pipeline health anywhere in this corpus (`bi-aggregate` on
+//! `transaction` is `SvcBi`-only, a service principal, never a human
+//! login) -- a "pipeline health dashboard" built on `guarded_aggregate`
+//! would just always deny every real human role. 19.1/19.4-19.8 (queue
+//! depth, lag charts, DLQ, schema drift, capacity) are the same shape:
+//! no `#[dataset]`/`guard_policy!` backs live pipeline metrics anywhere
+//! in this corpus. What IS real and shown here instead: the corpus's own
+//! compiled-in catalog facts (`nirdosha_guard_registry::dump()`'s own
+//! counts -- policies/chains/ports registered, the same numbers
+//! `rtm::boot_banner()` already prints at boot) -- static, not
+//! per-tenant data, so gating it by `Admin`'s role directly
+//! (`Auth::has_role`) rather than a `guard_policy!` this crate could
+//! evaluate is the honest posture, same as `m10_screening.nir`'s
+//! `matcher!` catalog view and `m16_notifications.nir`'s channel map.
+
+use crate::bridge::ingest_admin_table;
+use nirdosha_guard_core::{Action, WriteAction};
+use std::collections::HashSet;
+
+/// 19.1-ish catalog-facts panel -- real compiled-in registry counts,
+/// role-gated (not policy-gated, see this module's own doc comment), not
+/// live pipeline telemetry this corpus has no dataset for.
+fn registered_policy_count(auth: &nirdosha_rt::Auth) -> i64 {
+    if !auth.has_role("Admin") {
+        return 0;
+    }
+    nirdosha_guard_registry::POLICIES.len() as i64
+}
+
+fn registered_stream_ports(auth: &nirdosha_rt::Auth) -> String {
+    if !auth.has_role("Admin") {
+        return "[]".to_string();
+    }
+    let dump = nirdosha_guard_registry::dump();
+    serde_json::to_string(&vec![
+        serde_json::json!({ "label": "stream_port! ports", "value": dump.ports.len() }),
+        serde_json::json!({ "label": "approval_chain! chains", "value": dump.approval_chains.len() }),
+        serde_json::json!({ "label": "window! features", "value": dump.windows.len() }),
+    ])
+    .unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_it_ops_dashboard,
+    path: "/ops/pipeline-health",
+    title: "IT Operations — Pipeline Health",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Registered guard_policy! records", fn: registered_policy_count, guarded: true },
+        Chart  { label: "Catalog registrations", fn: registered_stream_ports, mark: bar, guarded: true },
+    }
+}
+
+/// 19.2/19.3 -- `ops-ingest-admin` moving a pre-seeded `IngestAdminRow`
+/// (`bridge.nir`'s `replay-001`, status `requested`) to `reprocessed`,
+/// under the same real `policy_release` maker≠checker quorum
+/// `m13_risk_config.nir`'s `refdata-migrate` and `m18_admin.nir`'s
+/// `driver-migrate` already prove -- reused verbatim, no new engine work.
+pub fn mount_ingest_admin(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .post_with_auth("/ops/ingest-admin/{id}/propose-replay", "Propose exception replay", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let changed: HashSet<String> = ["status".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match ingest_admin_table().guarded_propose_escalated_action(auth, "PlatformOperations", Action::Migrate, "migrate", WriteAction::Migrate, &id, &changed, |row| row.status = "reprocessed".into(), now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/ops/ingest-admin/{id}/confirm-replay", "Confirm exception replay", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let changed: HashSet<String> = ["status".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match ingest_admin_table().guarded_confirm_escalated_action(auth, "PlatformOperations", Action::Migrate, "migrate", WriteAction::Migrate, &id, &chain, &escalation_id, &changed, |row| row.status = "reprocessed".into(), now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

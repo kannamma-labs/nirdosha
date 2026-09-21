@@ -1,0 +1,12 @@
+//! `rtm` binary — thin entry point. The actual policy/catalog corpus lives
+//! in `src/lib.nir` (see that file's doc comment for why a `[lib]` target
+//! is needed at all here). `main()` stays intentionally small: it boots the
+//! binary and proves the whole corpus actually linked and registered. The
+//! real guarded-read/write proof lives in `tests/guarded_ingest.rs`, and
+//! serving the ~150 screens over HTTP (RFC-0022 archetype macros —
+//! `login!`, `app_shell!`, `crud_screens!`, etc., all proven elsewhere in
+//! this workspace) is deliberately out of scope for this pass.
+
+fn main() {
+    rtm::boot_banner();
+}

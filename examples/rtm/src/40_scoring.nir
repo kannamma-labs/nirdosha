@@ -1,0 +1,86 @@
+// ============================================================================
+// 40_scoring.nir — [RFC §8.3/§8.4 verbatim] + hit disposition + list mgmt.
+// Verbatim from examples/rtm/roles-N-guard_policy.md — `model_artifact!`/
+// `matcher!` are real now (see crates/nirdosha-guard-macros), so this file
+// no longer has any skipped/blocked content.
+// ============================================================================
+
+nirdosha_rt::model_artifact! {                              // [RFC §8.3 verbatim]
+    model rt_fraud_v1 {
+        format = onnx;
+        inputs = [velocity_1h, distinct_payees_7d, amount_dev_30d, impossible_travel];
+        outputs = [score: f64, explanation: vec[string]];
+        threshold_alert = 0.85;
+    }
+}
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.3 verbatim — V7 SoD]
+    deny "scoring-no-side-effects" for SvcScoring
+    when action in ["create", "update"] && resource in ["alert", "case", "transaction", "payment"]
+    reason(sod.pipeline_stage_isolation)
+}
+
+// → 9.1 model swap = guarded admin mutation, never a config edit [RFC §8.3]
+nirdosha_rt::guard_policy! {
+    allow "scoring-model-swap" for PolicyEngineer
+    when action == "update" && resource == "model"
+    purpose(ModelGovernance)
+    escalate to approval(chain model_release)               // maker≠checker; shadow flag carried
+    obligate audit(full)
+}
+
+// ---- Screening [RFC §8.4 verbatim matcher + policy] ----
+nirdosha_rt::matcher! {
+    matcher sanctions {
+        algorithm = fuzzy_jaro_winkler;
+        threshold = 0.92;
+        lists = [ofac_sdn, un_consolidated, eu_fsf];
+    }
+}
+nirdosha_rt::matcher! {                                     // [NEW → 10.4 internal/PEP lists]
+    matcher internal_watchlist {
+        algorithm = fuzzy_jaro_winkler;
+        threshold = 0.95;
+        lists = [internal_watch, pep_global];
+    }
+}
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.4 verbatim]
+    allow "screening-check" for SvcScreening
+    when action == "read" && resource == "sanctions_lists"
+    purpose(FraudMonitoring)
+    cap(max_scan_rows = 50)
+    obligate audit(full)                                    // every check auditable
+}
+
+// svc:screening writes hits — sole writer [NEW]
+nirdosha_rt::guard_policy! {
+    allow "screening-write-hit" for SvcScreening
+    when action == "create" && resource == "screening_hit"
+    purpose(FraudMonitoring)
+    field_policy { required(tenant_id, subject_ref, list_id, match_score)
+                   forbidden(disposition, rationale) }      // analyst-only fields
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// → 10.2 Hit disposition (Analyst) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "analyst-disposition-hit" for Analyst
+    when action == "update" && resource == "screening_hit"
+    purpose(AmlInvestigation)
+    field_policy { allowed(disposition, rationale)
+                   forbidden(subject_ref, list_id, match_score) }
+    requires invariant(rationale_present)
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// → 10.3/10.4 list upload & config = migrate (maker-checker) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "screening-list-migrate" for Admin
+    when action == "migrate" && resource in ["sanctions_lists", "matcher"]
+    purpose(ModelGovernance)
+    escalate to approval(chain policy_release)              // V5 re-attestation on swap
+    obligate audit(full)
+}

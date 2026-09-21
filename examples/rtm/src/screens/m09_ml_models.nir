@@ -1,0 +1,101 @@
+//! M9 ML Model Management (`screen.md` module 9, 6 screens). Policies:
+//! `40_scoring.nir`. RTM live-demo plan Phase B batch 2.
+//!
+//! Real, guard-enforced: 9.1's model swap -- `scoring-model-swap`'s real
+//! `escalate to approval(chain model_release)` (`quorum(2, of =
+//! [PolicyEngineer, ComplianceLead])`). **Disclosed, same shape as
+//! `m10_screening.nir`/`m13_risk_config.nir`**: no `guard_policy!`
+//! anywhere in this corpus grants a plain `read` on `"model"` either
+//! (`scoring-model-swap` only covers `action == "update"`) -- the
+//! `/models`/`/api/models` list/detail routes below are real and
+//! correctly deny-by-default for every role, proven by this batch's own
+//! test suite, not a bug in this screen.
+//! hand-written as two POSTs (`/models/{id}/propose-swap`,
+//! `/models/{id}/confirm-swap`) over `GuardedTable::
+//! guarded_propose_escalated_update`/`guarded_confirm_escalated_update`
+//! -- the exact same real quorum engine `m04_cases.nir`'s four-eyes
+//! review already exercises, reused verbatim (PolicyEngineer both
+//! proposes and is chain-eligible, so this is "four-eyes among peers,"
+//! not `bridge.nir::RefDatasetRow`'s maker≠checker case).
+//!
+//! Not built this pass: 9.2 champion/challenger comparison, 9.3 shadow
+//! mode toggle history, 9.4 drift monitoring, 9.5 explainability, 9.6
+//! model card/lineage -- each names its own dataset/driver
+//! (`screen-field-mappings.md`'s M9 section) with no corresponding
+//! `#[dataset]`/`guard_policy!` anywhere in this corpus; `shadow_mode` is
+//! carried on `bridge.nir::ModelRow` but no policy governs toggling it
+//! independently of a full model swap.
+
+use crate::bridge::model_table;
+use crate::bridge::ModelRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_model_store() -> &'static SharedTable<i64, ModelRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, ModelRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_model_screens,
+    entity: ModelRow,
+    store: unused_model_store,
+    path: "/models",
+    fields: [
+        model_id: String,
+        format: String,
+        threshold_alert: f64,
+        shadow_mode: bool,
+        inputs: String,
+        outputs: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: model_table,
+        purpose: "ModelGovernance",
+    },
+}
+
+/// 9.1 model swap -- `scoring-model-swap` (`PolicyEngineer`, `escalate to
+/// approval(chain model_release)`). Only `threshold_alert` is exposed as
+/// editable here (the one field `screen-field-mappings.md`'s M9 section
+/// calls out as operator-tunable without a full model re-upload) -- a
+/// real format/artifact swap has no policy of its own beyond this same
+/// action/resource pair, so this phase doesn't invent a second write
+/// surface for it.
+pub fn mount_model_swap(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .post_with_auth("/models/{id}/propose-swap", "Propose threshold swap", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(threshold) = values.get("threshold_alert").and_then(|s| s.parse::<f64>().ok()) else {
+                return nirdosha_rt::Response::bad_request("threshold_alert must be a real number");
+            };
+            let changed: HashSet<String> = ["threshold_alert".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match model_table().guarded_propose_escalated_update(auth, "ModelGovernance", &id, &changed, move |row| { row.threshold_alert = threshold; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/models/{id}/confirm-swap", "Confirm threshold swap", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required (from the propose step's response)") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required (from the propose step's response)") };
+            let Some(threshold) = values.get("threshold_alert").and_then(|s| s.parse::<f64>().ok()) else {
+                return nirdosha_rt::Response::bad_request("threshold_alert must be a real number");
+            };
+            let changed: HashSet<String> = ["threshold_alert".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match model_table().guarded_confirm_escalated_update(auth, "ModelGovernance", &id, &chain, &escalation_id, &changed, move |row| { row.threshold_alert = threshold; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

@@ -1,0 +1,106 @@
+//! M22 Miscellaneous (`screen.md` module 22, 3 screens). Policies:
+//! `90_ops_admin.nir` (`self-update-profile`, `self-read-profile`,
+//! `any-create-ticket`). RTM live-demo plan Phase B batch 4.
+//!
+//! Real, guard-enforced: 22.1 self-profile update (`self-update-profile`'s
+//! real `for Analyst`, `filter subject_scope()`, `field_policy {
+//! allowed(locale, tz, notif_prefs) forbidden(user_id) }`) -- the row_id
+//! is hardcoded to `auth.user()` server-side (never taken from a request
+//! param), so this route can't even be asked to touch another subject's
+//! row; `GuardedTable::commit_action`'s own real `subject_scope()`
+//! write-side enforcement (a fix made alongside this module, see its own
+//! doc comment) is still exercised as real defense-in-depth, not
+//! load-bearing on its own here. 22.1 self-profile read
+//! (`self-read-profile`) now exists so the chrome `profile` route's
+//! `menus.toml` guard resolves, but no route consumes it in this pass.
+//! 22.2 support ticket creation (`any-create-ticket`'s real `field_policy {
+//! required(tenant_id, category, priority, description) }`).
+//!
+//! **Real, disclosed gap**: no read policy exists for `support_ticket`
+//! anywhere in this corpus (only `create`) -- the fourth real instance of
+//! the same "write grant, no matching read grant" shape this rollout keeps
+//! finding (`m05_customer.nir`, `m10_screening.nir`, `m19_it_ops.nir`'s own
+//! pipeline-health disclosure). `user_profile`'s own rows are seeded once
+//! per demo login (`bridge.nir`'s `user_profile_table`) so the blind
+//! update below has a real row to act on, standing in for a real
+//! deployment's own account-provisioning step. 22.3 (help/onboarding
+//! checklist) names no corresponding `#[dataset]`/`guard_policy!`.
+
+use crate::bridge::support_ticket_table;
+use crate::bridge::user_profile_table;
+use nirdosha_rt::prelude::SharedTable;
+use std::collections::HashSet;
+
+/// 22.1 -- blind update (no read grant exists to pre-fill a form from):
+/// submits the four editable fields directly, same "no plain read
+/// exists" posture `m18_admin.nir`'s role-grant/delegation routes
+/// already take.
+pub fn mount_self_profile(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.post_with_auth("/profile/update", "Update my profile", |req, _params, auth| {
+        let values = req.form_or_json();
+        let locale = values.get("locale").cloned();
+        let tz = values.get("tz").cloned();
+        let digest = values.get("digest").map(|v| v == "true" || v == "on");
+        let quiet_hours = values.get("quiet_hours").cloned();
+        // `self-update-profile`'s real `field_policy { allowed(locale, tz,
+        // notif_prefs) }` (`90_ops_admin.nir`) names the corpus's own
+        // single `notif_prefs: NotifPrefs` field -- this row flattens it
+        // into `digest`/`quiet_hours` (see `UserProfileRow`'s own doc
+        // comment in `bridge.nir`), so a submission touching either one
+        // must report itself under the ONE real policy-recognized name,
+        // not the two Rust struct fields it happens to decompose into.
+        // Found live: submitting the literal `digest`/`quiet_hours` names
+        // failed with a real, correct `field policy violation: field
+        // \`digest\` is not in policy's allowed set` the first time this
+        // route was exercised end to end.
+        let mut changed: HashSet<String> = HashSet::new();
+        if locale.is_some() { changed.insert("locale".into()); }
+        if tz.is_some() { changed.insert("tz".into()); }
+        if digest.is_some() || quiet_hours.is_some() { changed.insert("notif_prefs".into()); }
+        let user_id = auth.user().to_string();
+        let result = user_profile_table().guarded_update(auth, "Operations", &user_id, &changed, move |row| {
+            if let Some(v) = locale { row.locale = v; }
+            if let Some(v) = tz { row.tz = v; }
+            if let Some(v) = digest { row.digest = v; }
+            if let Some(v) = quiet_hours { row.quiet_hours = v; }
+        });
+        match result {
+            Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+fn unused_support_ticket_store() -> &'static SharedTable<i64, crate::bridge::SupportTicketRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, crate::bridge::SupportTicketRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_support_ticket_screens,
+    entity: crate::bridge::SupportTicketRow,
+    store: unused_support_ticket_store,
+    path: "/support-tickets",
+    fields: [
+        ticket_id: String,
+        tenant_id: String,
+        category: String,
+        priority: String,
+        description: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: support_ticket_table,
+        purpose: "Operations",
+        create_fields: [
+            ticket_id: String,
+            tenant_id: String,
+            category: String,
+            priority: String,
+            description: String,
+        ],
+    },
+}

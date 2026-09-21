@@ -1,0 +1,129 @@
+//! M8 Detection Scenario & Rule Management (`screen.md` module 8, 12
+//! screens). Policies: `75_lineage.nir`, `40_scoring.nir`. RTM live-demo
+//! plan Phase B batch 2.
+//!
+//! Real, guard-enforced: 8.3 threshold edit -- `threshold-migrate`'s real
+//! `escalate to approval(chain policy_release)`, hand-written as two
+//! POSTs over `guarded_propose_escalated_action`/
+//! `guarded_confirm_escalated_action` (`Action::Migrate`, same
+//! generalization `m13_risk_config.nir` introduces). Unlike
+//! `RefDatasetRow`'s maker≠checker shape, `PolicyEngineer` (the proposer
+//! here) IS `policy_release`'s own chain-eligible role -- "four-eyes
+//! among peers," the same shape M4/M9 already exercise. **Disclosed,
+//! same shape as M9/M10/M13**: no `guard_policy!` anywhere in this
+//! corpus grants a plain `read` on `"window"` either (`threshold-migrate`
+//! only covers `action == "migrate"`) -- 8.1/8.2's list/detail routes
+//! below are real and correctly deny-by-default for every role, proven
+//! by this batch's own test suite.
+//!
+//! **Disclosed, not fabricated**: `policy_simulation! { simulation
+//! sim_threshold_tune { ... } }` (`75_lineage.nir:42-50`) and
+//! `v10-findings-read`'s `"lineage_findings"` resource are both
+//! catalog-only or entirely driverless in this workspace -- no
+//! simulation engine and no V10 findings store exist anywhere to back a
+//! real "run this simulation" or "list open findings" action. 8.6/8.7
+//! (simulation results) and the V10 findings screens render their real,
+//! declared config honestly (below) rather than inventing result data no
+//! engine produced.
+//!
+//! Not built this pass: 8.4/8.5 rule builder canvas + typology library,
+//! 8.8-8.12 (versioning, backtest, approval history beyond the one real
+//! chain above, deployment status, audit) -- each names its own
+//! dataset/driver `screen-field-mappings.md` invents with no
+//! corresponding `#[dataset]`/`guard_policy!` in this corpus.
+
+use crate::bridge::window_config_table;
+use crate::bridge::WindowConfigRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_window_config_store() -> &'static SharedTable<i64, WindowConfigRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, WindowConfigRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_window_config_screens,
+    entity: WindowConfigRow,
+    store: unused_window_config_store,
+    path: "/rules/windows",
+    fields: [
+        window_id: String,
+        velocity_1h_threshold: f64,
+        impossible_travel_kmh: f64,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: window_config_table,
+        purpose: "ModelGovernance",
+    },
+}
+
+/// 8.3 threshold edit -- `threshold-migrate` (`PolicyEngineer`, `action
+/// == "migrate" && resource in ["window", "policy", "matcher", "model"]`,
+/// `escalate to approval(chain policy_release)`). Only the `"window"`
+/// case (`WindowConfigRow`) is wired -- see this module's own doc
+/// comment.
+pub fn mount_window_migrate(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .post_with_auth("/rules/windows/{id}/propose-migrate", "Propose threshold change", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(threshold) = values.get("velocity_1h_threshold").and_then(|s| s.parse::<f64>().ok()) else {
+                return nirdosha_rt::Response::bad_request("velocity_1h_threshold must be a real number");
+            };
+            let changed: HashSet<String> = ["velocity_1h_threshold".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match window_config_table().guarded_propose_escalated_action(auth, "ModelGovernance", nirdosha_guard_core::Action::Migrate, "migrate", nirdosha_guard_core::WriteAction::Migrate, &id, &changed, move |row| { row.velocity_1h_threshold = threshold; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/rules/windows/{id}/confirm-migrate", "Confirm threshold change", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required (from the propose step's response)") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required (from the propose step's response)") };
+            let Some(threshold) = values.get("velocity_1h_threshold").and_then(|s| s.parse::<f64>().ok()) else {
+                return nirdosha_rt::Response::bad_request("velocity_1h_threshold must be a real number");
+            };
+            let changed: HashSet<String> = ["velocity_1h_threshold".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match window_config_table().guarded_confirm_escalated_action(auth, "ModelGovernance", nirdosha_guard_core::Action::Migrate, "migrate", nirdosha_guard_core::WriteAction::Migrate, &id, &chain, &escalation_id, &changed, move |row| { row.velocity_1h_threshold = threshold; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+/// 8.6/8.7 simulation config + 8.x V10 findings -- both catalog-only or
+/// driverless (see this module's own doc comment). Role-gated
+/// (`PolicyEngineer`), not policy-gated for the findings half: `40_scoring.nir`
+/// has no read policy on `"policy_simulation"` (only `action ==
+/// "simulate"`, which this phase has no simulation engine to actually
+/// invoke); `v10-findings-read` IS a real read policy on
+/// `"lineage_findings"`, honestly reported as having no backing data
+/// source in this phase rather than a fabricated findings list.
+pub fn mount_simulation_config(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::PolicyEngineer>("/rules/simulations", "Simulation config", |_req, _params, _proof| {
+        nirdosha_rt::Response::json(200, &serde_json::json!({
+            "policy_simulation": {
+                "name": "sim_threshold_tune",
+                "window": "7d",
+                "candidate_policy": "2025.12.1-candidate",
+                "baseline_policy": "current",
+                "measures": ["alert_volume", "denied_flows", "escalation_load", "case_load"],
+                "note": "catalog-only (75_lineage.nir:42-50) -- no simulation engine exists anywhere in this workspace to produce real results.",
+            },
+            "v10_findings": {
+                "note": "v10-findings-read is a real guard_policy! on resource \"lineage_findings\" (PolicyEngineer, purpose ModelGovernance) -- honestly reported empty: no findings store/driver exists in this phase.",
+                "findings": [],
+            },
+        }))
+    })
+}

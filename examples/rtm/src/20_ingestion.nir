@@ -1,0 +1,76 @@
+// ============================================================================
+// 20_ingestion.nir — [RFC §8.1 verbatim policies] + analyst reads.
+// Verbatim from examples/rtm/roles-N-guard_policy.md — pure guard_policy!
+// declarations; no Rust type cross-references needed.
+// ============================================================================
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.1 verbatim, +account_id]
+    allow "ingest-create-txn" for SvcIngest
+    when action == "create" && resource == "transaction"
+    purpose(FraudMonitoring)
+    // `account_id` added to `allowed(...)` here: it's a real,
+    // non-optional `Transaction` field (`10_domains.nir`'s own comment
+    // marks it `INTERNAL [NEW field]`, added after this policy's RFC
+    // §8.1 verbatim text was written) that had no field_policy entry at
+    // all — a real drift between the dataset and the policy that guarded
+    // by field-policy enforcement (RTM live-demo plan, Phase 0/G1) now
+    // actually rejects every real ingest write until fixed here, rather
+    // than the gap staying invisible the way it was while field_policy
+    // was inert at runtime.
+    field_policy { required(tenant_id, subject_id, amount, currency, status, occurred_at)
+                   allowed(channel, merchant_id, card_token, device_id, geo, account_id) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.1 verbatim — V7 SoD record]
+    deny "ingest-no-readback" for SvcIngest
+    when action == "read" && resource == "transaction"
+    reason(sod.ingestion_is_write_only)
+}
+
+// → 6.1 Transaction search (Analyst) — listing; caps + predicate_use per I15
+nirdosha_rt::guard_policy! {
+    allow "analyst-search-transaction" for Analyst
+    when action == "read" && resource == "transaction"
+    purpose(AmlInvestigation)
+    filter tenant_scope()
+    cap(row_cap = 500, max_scan_rows = 100_000, max_execution = 10s)
+    grant predicate_use(amount, currency, channel, merchant_id, device_id, geo)
+    grant count_allowed                                     // → totals on 6.1
+    obligate audit(sampled)                                 // CONFIDENTIAL ⇒ rate 1.0 via table
+}
+
+// → 6.2 Transaction detail — same surface, no listing shortcuts; masked fields
+// (card_token) absent per classification unless subject has explicit grant (none here).
+nirdosha_rt::guard_policy! {
+    allow "analyst-open-transaction" for Analyst
+    when action == "read" && resource == "transaction"
+    purpose(AmlInvestigation)
+    filter tenant_scope()
+    cap(row_cap = 1)
+    obligate audit(full)
+}
+
+// → 6.6 manual alert from txn (L2) — evidence-carrying write; svc:alerts remains
+// the only *service* writer; this is the human path.
+nirdosha_rt::guard_policy! {
+    allow "analyst-flag-transaction" for Analyst
+    when action == "update" && resource == "transaction"
+    purpose(AmlInvestigation)
+    requires invariant(amount_positive) && invariant(currency_iso)
+    field_policy { allowed(analyst_flag, analyst_flag_reason)
+                   forbidden(tenant_id, subject_id, amount, currency, status,
+                             occurred_at, card_token) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// → 19.3 exception replay / 19.2 reprocess — IT admin ops as guarded mutations (§6.6)
+nirdosha_rt::guard_policy! {
+    allow "ops-ingest-admin" for Admin
+    when action in ["update", "migrate"] && resource == "ingest_admin"
+    purpose(PlatformOperations)
+    escalate to approval(chain policy_release)
+    obligate audit(full)
+}

@@ -1,0 +1,100 @@
+//! M13 Risk Configuration (`screen.md` module 13, 5 screens). Policies:
+//! `90_ops_admin.nir`. RTM live-demo plan Phase B batch 2.
+//!
+//! Real, guard-enforced: 13.2/13.5 refdata edits --
+//! `refdata-migrate`'s real `escalate to approval(chain policy_release)`,
+//! hand-written as two POSTs over the newly-generalized
+//! `GuardedTable::guarded_propose_escalated_action`/
+//! `guarded_confirm_escalated_action` (`Action::Migrate`, not `Update` --
+//! `refdata-migrate`'s own real `action == "migrate"`, the reason those
+//! two methods exist as a generalization of M4/M9's `_update` pair, not
+//! a third, drifting copy of the same quorum machinery).
+//!
+//! **Real maker≠checker finding**, caught live wiring this module: the
+//! corpus grants `refdata-migrate` to `Admin`, but `policy_release`'s own
+//! `quorum(2, of = [PolicyEngineer, ComplianceLead])` never names
+//! `Admin` at all -- the proposer can never fill one of the two required
+//! slots themselves. `guarded_propose_escalated_action` handles this for
+//! real (opens the escalation with zero approvals when the proposer
+//! holds no chain-eligible role, rather than erroring); see that
+//! method's own doc comment and `nirdosha-guard-screens`'s
+//! `maker_neq_checker_...` regression test for the fix this finding
+//! produced.
+//!
+//! **Also disclosed, same shape as M8/M9/M10**: no `guard_policy!`
+//! grants a plain `read` on `"refdata"` either -- 13.1's list/detail
+//! routes below are real and correctly deny-by-default for every role.
+//!
+//! Not built this pass: 13.3 velocity/threshold limits, 13.4 geo risk
+//! matrix -- `screen-field-mappings.md`'s M13 section names these as
+//! distinct config surfaces, but the corpus's own `refdata-migrate`
+//! covers exactly `["refdata", "country_risk", "global_params"]` as one
+//! action; `country_risk`'s own enumerate! (`10_domains.nir:253`) is
+//! rendered nowhere else in this corpus as a distinct editable dataset,
+//! so a separate 13.3/13.4 screen would be inventing a data shape this
+//! corpus doesn't declare.
+
+use crate::bridge::refdata_table;
+use crate::bridge::RefDatasetRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_refdata_store() -> &'static SharedTable<i64, RefDatasetRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, RefDatasetRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_refdata_screens,
+    entity: RefDatasetRow,
+    store: unused_refdata_store,
+    path: "/risk-config/refdata",
+    fields: [
+        code: String,
+        label: String,
+        class: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: refdata_table,
+        purpose: "PlatformOperations",
+    },
+}
+
+/// 13.2/13.5 refdata edit -- `refdata-migrate` (`Admin`, `action ==
+/// "migrate"`, `escalate to approval(chain policy_release)`). See this
+/// module's own doc comment for the real maker≠checker shape: `Admin`
+/// proposes, but only `PolicyEngineer`/`ComplianceLead` can ever supply
+/// the two required approvals.
+pub fn mount_refdata_migrate(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .post_with_auth("/risk-config/refdata/{id}/propose-migrate", "Propose refdata change", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let label = values.get("label").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["label".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match refdata_table().guarded_propose_escalated_action(auth, "PlatformOperations", nirdosha_guard_core::Action::Migrate, "migrate", nirdosha_guard_core::WriteAction::Migrate, &id, &changed, move |row| { row.label = label; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum, "note": "Admin proposed but holds no policy_release-eligible role: zero slots consumed, two distinct PolicyEngineer/ComplianceLead approvals still required" })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/risk-config/refdata/{id}/confirm-migrate", "Confirm refdata change", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required (from the propose step's response)") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required (from the propose step's response)") };
+            let label = values.get("label").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["label".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match refdata_table().guarded_confirm_escalated_action(auth, "PlatformOperations", nirdosha_guard_core::Action::Migrate, "migrate", nirdosha_guard_core::WriteAction::Migrate, &id, &chain, &escalation_id, &changed, move |row| { row.label = label; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

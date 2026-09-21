@@ -1,0 +1,123 @@
+//! M3 Alert Management / L1 Triage (`screen.md` module 3, 10 screens).
+//! Policies: `50_alerts.nir`. RTM live-demo plan Phase B.
+//!
+//! Real, guard-enforced: 3.1 queue + 3.2 detail (`crud_screens!`, list +
+//! detail-by-id, `analyst-search-transaction`'s M6 sibling shape —
+//! here `analyst-read-alert`), 3.3 disposition (the same screen's
+//! `update_fields`, `analyst-disposition-alert`'s real `field_policy` +
+//! `requires field(status).transition_allowed() && invariant
+//! (rationale_present)` — both checked for real, see `bridge.nir`'s
+//! `AlertRow`), a status-column board covering 3.1's kanban view
+//! (`kanban_board!`, same `guard:` bridge), and 3.5 bulk reassignment
+//! (`lead-bulk-alert`, hand-written: `crud_screens!`/`kanban_board!`
+//! have no "act on N selected rows" archetype, so this is a real
+//! `POST` handler looping `GuardedTable::guarded_update` per id, each
+//! iteration independently policy-checked — not a single bulk grant
+//! rubber-stamped once).
+//!
+//! Not built this pass (`screen-field-mappings.md`'s own validation-UX
+//! detail — checklists, attestation modals, min/max text lengths — is a
+//! frontend concern the `guard_policy!` corpus doesn't encode at all,
+//! and building it wouldn't prove anything about guard enforcement):
+//! 3.4 related/merge, 3.6 reassignment (single-row shortcut of 3.5, not
+//! separately wired), 3.7 RFI, 3.8 escalation form (3.8's real
+//! substance — creating a case draft — is M4's `analyst-create-case`,
+//! reachable from the case screens instead), 3.9 SLA monitor
+//! (`lead-sla-aggregate` — an `aggregate` action, same shape M2's
+//! dashboards use `guarded_aggregate` for; left to M2's own
+//! `ComplianceLead` dashboard rather than duplicated here), 3.10 audit
+//! history (no dedicated audit-trail read policy for alerts in this
+//! corpus — `GuardClient`'s own JSONL audit log is real but has no
+//! screen anywhere yet).
+
+use crate::bridge::alert_table;
+use crate::bridge::AlertRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_alert_store() -> &'static SharedTable<i64, AlertRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, AlertRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_alert_screens,
+    entity: AlertRow,
+    store: unused_alert_store,
+    path: "/alerts",
+    fields: [
+        alert_id: String,
+        tenant_id: String,
+        txn_id: String,
+        score: f64,
+        model_version: String,
+        policy_version: String,
+        status: String,
+        assignee: String,
+        disposition_code: String,
+        rationale: String,
+        case_id: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: alert_table,
+        purpose: "AmlInvestigation",
+        update_fields: [
+            status: String,
+            assignee: String,
+            disposition_code: String,
+            rationale: String,
+            case_id: String,
+        ],
+    },
+}
+
+nirdosha_rt::kanban_board! {
+    mount: mount_alert_board,
+    entity: AlertRow,
+    store: unused_alert_store,
+    path: "/alerts/board",
+    access: public,
+    title_field: alert_id,
+    column_field: status,
+    columns: ["new", "in_progress", "pending_info", "escalated", "closed_false_positive"],
+    move_path: "/alerts/{id}/board-move/{to}",
+    guard: {
+        table: alert_table,
+        purpose: "AmlInvestigation",
+    },
+}
+
+/// 3.5 Bulk Actions — `lead-bulk-alert` (`ComplianceLead`, `purpose
+/// (Operations)`, `field_policy { allowed(assignee, severity, tags)
+/// forbidden(everything_else) }`, `cap(affected_rows = 100)`). Hand-
+/// written: no archetype macro has a "many rows, one submitted form"
+/// shape. Each id gets its own independent `guarded_update` call — one
+/// bad row fails that row only, matching the corpus's own per-record
+/// audit posture (`obligate audit(full)` is per-write, not per-batch).
+pub fn mount_bulk_alert_reassign(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router.post_with_auth("/alerts/bulk-reassign", "Bulk reassign", |req, _params, auth| {
+        let form = req.form_or_json();
+        let Some(ids_raw) = form.get("ids") else { return nirdosha_rt::Response::bad_request("ids required (comma-separated alert_id list)") };
+        let Some(new_assignee) = form.get("assignee") else { return nirdosha_rt::Response::bad_request("assignee required") };
+        let ids: Vec<&str> = ids_raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if ids.len() > 100 {
+            return nirdosha_rt::Response::bad_request("cap(affected_rows = 100): at most 100 ids per bulk call");
+        }
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        let changed: HashSet<String> = ["assignee".into()].into();
+        for id in ids {
+            let assignee = new_assignee.clone();
+            let outcome = alert_table().guarded_update(auth, "Operations", id, &changed, move |row| row.assignee = assignee);
+            let entry = match outcome {
+                Ok(_) => serde_json::json!({ "id": id, "ok": true }),
+                Err(e) => serde_json::json!({ "id": id, "ok": false, "error": format!("{e:?}") }),
+            };
+            results.push(entry);
+        }
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "results": results }))
+    })
+}

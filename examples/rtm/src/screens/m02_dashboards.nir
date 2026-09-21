@@ -1,0 +1,80 @@
+//! M2 Dashboards & Landing (`screen.md` module 2, 7 screens) + the
+//! app-wide shell/landing every other module depends on. RTM live-demo
+//! plan Phase B.
+//!
+//! The navigation shell and post-login landing rules are now generated
+//! from `menus.toml` via `app_shell_from_toml!`, so the nav/landing stay
+//! in sync with the 152-screen inventory as screens move through
+//! `built` / `emittable` / `interim` / `blocked` stages.
+//!
+//! Real, guard-enforced: 2.1 Global Navigation Shell, landing, 2.2 L1
+//! dashboard, 2.3 Team Dashboard — same grounded details as before.
+//!
+//! **Real, disclosed corpus gaps** remain listed for 2.4–2.7.
+
+use crate::bridge::alert_table;
+
+fn my_pending_alerts(auth: &nirdosha_rt::Auth) -> i64 {
+    match alert_table().guarded_snapshot(auth, "AmlInvestigation") {
+        Ok(rows) => rows.iter().filter(|r| r.status == "new" || r.status == "in_progress").count() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn my_alerts_by_status(auth: &nirdosha_rt::Auth) -> String {
+    let counts = match alert_table().guarded_snapshot(auth, "AmlInvestigation") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_status: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for row in &counts {
+        *by_status.entry(row.status.clone()).or_insert(0) += 1;
+    }
+    serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
+}
+
+fn team_alert_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    match alert_table().guarded_aggregate(auth, "Operations") {
+        Ok(rows) => rows.len() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn team_alerts_by_status(auth: &nirdosha_rt::Auth) -> String {
+    let rows = match alert_table().guarded_aggregate(auth, "Operations") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_status: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for row in &rows {
+        *by_status.entry(row.status.clone()).or_insert(0) += 1;
+    }
+    serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_l1_dashboard,
+    path: "/dashboard/my-day",
+    title: "My Day",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "My pending alerts", fn: my_pending_alerts, guarded: true },
+        Chart  { label: "My alerts by status", fn: my_alerts_by_status, mark: bar, guarded: true },
+    }
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_team_dashboard,
+    path: "/dashboard/team",
+    title: "Team Dashboard",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Team alert volume", fn: team_alert_volume, guarded: true },
+        Chart  { label: "Team alerts by status", fn: team_alerts_by_status, mark: bar, guarded: true },
+    }
+}
+
+nirdosha_rt::app_shell_from_toml!(
+    "menus.toml",
+    title: "RTM — Real-Time Transaction Monitoring (demo)",
+);

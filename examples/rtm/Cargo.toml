@@ -1,0 +1,71 @@
+[package]
+name = "rtm"
+version = "0.1.0"
+edition = "2024"
+description = "Nirdosha v2 dialect demo: real-time transaction monitoring — ingestion, RFC 0023 data guard, policy engine, alerts, and a served UI, in one vertical slice. Builds and runs under plain cargo; gains verification and a certificate under cargo nirdosha."
+publish = false
+
+[dependencies]
+nirdosha-rt = { path = "../../crates/nirdosha-rt" }
+# Guard proc-macro expansions emit `::nirdosha_guard_registry::...` paths;
+# name resolution for expanded code needs a direct dependency entry
+# (same posture as the v2 corpus, see its Cargo.toml for the why).
+nirdosha-guard-registry = { path = "../../crates/nirdosha-guard-registry" }
+# `nirdosha_guard_macros::workflow!`/`purpose_taxonomy!` are called
+# fully-qualified in 00_core.nir/10_domains.nir — `nirdosha_rt` re-exports
+# same-named, unrelated macros under `workflow`/`purpose`, so the real
+# RFC 0023 state-machine/taxonomy macros need a direct path to this crate.
+nirdosha-guard-macros = { path = "../../crates/nirdosha-guard-macros" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# RTM live-demo plan, Phase A: `bridge.nir`'s `transaction_table()` (a
+# real, running `GuardedTable`, not a test fixture) needs both at
+# ordinary build time now, not just under `tests/*.rs` -- promoted out
+# of dev-dependencies below for that reason.
+nirdosha-guard-mic = { path = "../../crates/nirdosha-guard-mic" }
+nirdosha-guard-core = { path = "../../crates/nirdosha-guard-core" }
+nirdosha-guard-screens = { path = "../../crates/nirdosha-guard-screens" }
+# M17 Knowledge's static content -- content-hash integrity, mirroring the
+# pinned-SHA-256 convention `nirdosha-scoring-model-onnx`/
+# `nirdosha-screening-list-fixture` already use elsewhere in this
+# workspace (both already depend on this exact version).
+sha2 = "0.10"
+# M7 Network/Link Analysis's real `lineage_query!`-shaped backing data --
+# the actual RFC 0026 `GraphStore` port + its real embedded driver, not a
+# fabricated graph. No live collector runs against this demo's traffic
+# yet (that's Phase C), so the store is seeded once with a real,
+# corpus-consistent pipeline trace at boot -- disclosed as such in
+# `m07_network.nir`'s own doc comment.
+nirdosha-lineage = { path = "../../crates/nirdosha-lineage" }
+nirdosha-lineage-store-embedded = { path = "../../crates/nirdosha-lineage-store-embedded" }
+
+[dev-dependencies]
+# Real `cargo nirdosha verify --guard` pipeline proof (tests/verify_corpus.rs)
+# against this crate's own registered corpus.
+nirdosha-guard-verify = { path = "../../crates/nirdosha-guard-verify" }
+# TOML parsing for the screen/menu inventory verification test.
+toml = "0.8"
+
+# In-dialect from day one: `cargo nirdosha verify --workspace` gates this
+# package like every other v2 crate.
+[package.metadata.nirdosha-rt]
+dialect = true
+
+[lib]
+# Holds the actual policy/catalog corpus so both the bin below and
+# `tests/*.rs` (which Cargo always links against a package's own `[lib]`)
+# see the same `linkme`-registered `nirdosha_guard_registry` records at
+# runtime — see src/lib.nir's doc comment for the full why.
+name = "rtm"
+path = "src/lib.nir"
+
+[[bin]]
+name = "rtm"
+path = "src/main.nir"
+
+[[bin]]
+# RTM live-demo plan, Phase A: the actual running HTTP server -- M1's
+# avatar picker + M6's guard-enforced transaction screens, mounted onto
+# one `Router`. `cargo run --bin rtm-serve`.
+name = "rtm-serve"
+path = "src/bin/serve.nir"

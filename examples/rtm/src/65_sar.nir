@@ -1,0 +1,69 @@
+// ============================================================================
+// 65_sar.nir — SAR lifecycle. Tipping-off posture: existence + subjects are
+// RESTRICTED-class; llm_context denied above CONFIDENTIAL everywhere here.
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+nirdosha_rt::guard_policy! {                                // → 12.2/12.3/12.4 draft [NEW]
+    allow "analyst-draft-sar" for Analyst
+    when action == "create" && resource == "sar_bundle"
+    purpose(AmlInvestigation)
+    requires invariant(sar_subject_in_case)
+    field_policy { required(case_id, subject) forbidden(status, goaml_ref, filed_at) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+    destination(llm_context) denied_above(CONFIDENTIAL)     // copilot: no SAR content
+}
+
+nirdosha_rt::guard_policy! {                                // → 12.2–12.5 edit [NEW]
+    allow "analyst-edit-sar" for Analyst
+    when action == "update" && resource == "sar_bundle"
+    requires field(status) == "draft"
+    field_policy { allowed(narrative, activity_codes, amount_total, txn_refs, next_review_at)
+                   forbidden(case_id, subject, status, goaml_ref) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {                                // → 12.6 MLRO decision [NEW]
+    allow "mlro-decide-sar" for Mlro
+    when action == "update" && resource == "sar_bundle"
+    purpose(AmlInvestigation)
+    requires field(status).transition_allowed()             // SarStatus machine
+    field_policy { allowed(status, mlro_rationale) forbidden(narrative, txn_refs) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.6 verbatim shape → 12.10]
+    allow "sar-export" for ComplianceLead
+    when action == "export" && resource == "sar_bundle"
+    requires field(status) == "confirmed_fraud"             // NOTE: RFC machine files from
+                                                            // confirmed_fraud; align via
+                                                            // sar_filed state in practice
+    escalate to approval(chain sar_release)                 // quorum(2); timeout(deny)
+    destination(export-file)
+    obligate audit(full)                                    // egress: NEVER sampled (§2)
+    obligate notify(channel("regulatory-log"))
+}
+
+// → 12.7 submission receipts written by filing driver [NEW]
+nirdosha_rt::guard_policy! {
+    allow "sar-submission-write" for SvcCase
+    when action == "create" && resource == "sar_submission"
+    purpose(AmlInvestigation)
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// Tipping-off explicit denies — denial records are themselves V-pass evidence [NEW]
+nirdosha_rt::guard_policy! {
+    deny "cs-no-sar" for CsAgent
+    when action in ["read", "aggregate"] && resource in ["sar_bundle", "case", "alert"]
+    reason(tipping_off.sar_existence_invisible)
+}
+nirdosha_rt::guard_policy! {
+    deny "rm-no-sar" for RmUser
+    when action in ["read", "aggregate"] && resource in ["sar_bundle", "case", "alert"]
+    reason(tipping_off.sar_existence_invisible)
+}

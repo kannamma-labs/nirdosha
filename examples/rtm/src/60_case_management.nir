@@ -1,0 +1,58 @@
+// ============================================================================
+// 60_case_management.nir — [RFC §8.6 verbatim core] + create/read/merge/RFI.
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+nirdosha_rt::guard_policy! {                                // [NEW — 3.8 escalation path]
+    allow "analyst-create-case" for Analyst
+    when action == "create" && resource == "case"
+    purpose(AmlInvestigation)
+    field_policy { required(tenant_id, subject_ref, alert_ids, rationale)
+                   forbidden(status, sar_id, disposition) } // svc:case seeds status
+    cap(affected_rows = 1)
+    obligate audit(full)
+    obligate notify(channel("case-inbox"))
+}
+
+nirdosha_rt::guard_policy! {                                // → 4.2/4.3 read [NEW]
+    allow "case-read" for Analyst
+    when action == "read" && resource == "case"
+    purpose(AmlInvestigation)
+    filter tenant_scope()
+    field_policy { forbidden(sar_id) }                      // tipping-off
+    cap(row_cap = 200, max_scan_rows = 50_000)
+    grant count_allowed
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.6 verbatim — 4.10/4.13]
+    allow "case-transition" for Analyst
+    when action == "update" && resource == "case"
+    requires field(status).transition_allowed()
+    field_policy { allowed(status, assigned_to, disposition, rationale, merged_into)
+                   forbidden(alert_ids) }                   // composition immutable
+    requires invariant(rationale_present)
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// → 4.11 four-eyes on suspicious closure [NEW — chain from 00_core]
+nirdosha_rt::guard_policy! {
+    allow "case-close-confirm" for ComplianceLead
+    when action == "update" && resource == "case"
+    requires field(status) in ["confirmed_fraud", "false_positive"]
+    escalate to approval(chain case_review)
+    field_policy { allowed(review_verdict, review_note) forbidden(everything_else) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// svc:case internal transitions (status seeding, sar_id attach) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "case-svc-write" for SvcCase
+    when action == "update" && resource == "case"
+    purpose(AmlInvestigation)
+    field_policy { allowed(status, sar_id) forbidden(alert_ids, rationale, assigned_to) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}

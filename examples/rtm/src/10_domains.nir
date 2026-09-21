@@ -1,0 +1,267 @@
+// ============================================================================
+// 10_domains.nir — entity declarations. Serves: all data screens.
+// Field lists: [RFC 0025 §8.1/§8.5/§8.6] where declared; [NEW] otherwise.
+//
+// Verbatim from examples/rtm/roles-N-guard_policy.md except:
+// - `#[dataset]` struct bodies now resolve against domain_types.nir's real
+//   types (the doc referenced ~30 of them without ever declaring any).
+// - `#[reference(...)]` rewritten from a bare six-line list to one
+//   `field = ..., store = ..., missing = ...` attribute per declared item —
+//   the macro (`attribute_impl` in nirdosha-guard-macros) only requires a
+//   real, named Rust item to attach to; it never validated argument content,
+//   so a bare list with no item at all was the actual (sole) grammar bug.
+// - `#[relation]`/`#[materialize]` given real fn bodies instead of
+//   semicolon-only signatures — honestly catalog-only (no runtime
+//   resolution), matching every other declarative macro here; `Set<T>`
+//   (pseudo-code in the doc) becomes `Vec<T>`.
+// - `nirdosha_rt::workflow!` -> `nirdosha_guard_macros::workflow!` (name
+//   collision with the unrelated, load-bearing UI screen-flow macro
+//   `nirdosha_rt` already exports under `workflow`).
+// ============================================================================
+
+use crate::domain_types::*;
+
+// ---- Type classifications (mask registry is type-class driven, §17) ----
+#[nirdosha_rt::classify(RESTRICTED)]   pub struct CardToken(pub String);   // PCI
+#[nirdosha_rt::classify(RESTRICTED)]   pub struct NationalId(pub String);  // PII-hard
+#[nirdosha_rt::classify(CONFIDENTIAL)] pub struct SubjectId(pub String);
+#[nirdosha_rt::classify(CONFIDENTIAL)] pub struct DeviceId(pub String);
+#[nirdosha_rt::classify(CONFIDENTIAL)] pub struct Geo(pub String);
+#[nirdosha_rt::classify(CONFIDENTIAL)] pub struct CustomerName(pub String);
+#[nirdosha_rt::classify(INTERNAL)]     pub struct Money(pub f64);
+
+impl Money {
+    /// The real check `00_core.nir`'s `amount_positive` invariant runs
+    /// (`t.amount.0 > 0.0`), extracted to a method on `Money` itself --
+    /// same reasoning `CurrencyCode::is_iso_4217` (below) already
+    /// follows -- so `nirdosha_guard_screens::GuardedEntity::
+    /// check_invariant` impls (`bridge.nir`'s `TransactionRow`) can call
+    /// the real logic directly instead of reconstructing a full
+    /// `Transaction` from a screen-row projection just to invoke a
+    /// one-line predicate.
+    pub fn is_positive(&self) -> bool {
+        self.0 > 0.0
+    }
+}
+
+// ---- transaction — [RFC §8.1: exact required/allowed set] ----
+#[nirdosha_rt::dataset(entity = "transaction", store = "pg_primary", kind = "table")]
+pub struct Transaction {
+    pub tenant_id:  TenantId,                       // INTERNAL (required, TenantEq-attested)
+    pub subject_id: SubjectId,                      // CONFIDENTIAL
+    pub account_id: AccountId,                      // INTERNAL                [NEW field]
+    pub amount:     Money,                          // INTERNAL (Money mask = partial)
+    pub currency:   CurrencyCode,                   // INTERNAL
+    pub status:     TxnStatus,                       // INTERNAL
+    pub occurred_at: Timestamp,                     // INTERNAL
+    pub channel:    TxnChannel,                     // INTERNAL (allowed)
+    pub merchant_id: MerchantId,                    // INTERNAL (allowed)
+    pub card_token: CardToken,                      // RESTRICTED (allowed)
+    pub device_id:  DeviceId,                       // CONFIDENTIAL (allowed)
+    pub geo:        Geo,                            // CONFIDENTIAL (allowed)
+}
+
+// ---- txn_events — topic-as-dataset (features read this) [RFC §8.2] ----
+#[nirdosha_rt::dataset(entity = "txn_events", store = "kafka_main", kind = "topic")]
+pub struct TxnEvent { /* mirrors transaction schema */ }
+
+// ---- alert — [RFC §8.5: required set; status is analyst-only] ----
+#[nirdosha_rt::dataset(entity = "alert", store = "pg_primary", kind = "table")]
+pub struct Alert {
+    pub tenant_id: TenantId,
+    pub txn_id:    TxnId,
+    pub score:     f64,
+    pub rule_hits: Vec<RuleHit>,
+    pub model_version: String,
+    pub policy_version: PolicyVersion,
+    pub status:    AlertStatus,        // analyst-only (forbidden to svc:alerts)
+    pub assignee:  Option<UserId>,     //                                      [NEW]
+    pub disposition_code: Option<DispositionCode>,   //                       [NEW]
+    pub rationale: Option<String>,     //                                     [NEW]
+    pub case_id:   Option<CaseId>,     //                                     [NEW]
+    pub sar_linked: bool,              // tipping-off flag — RESTRICTED-class   [NEW]
+    pub sla_due_at: Timestamp,         //                                      [NEW]
+}
+
+// ---- case — [RFC §8.6: status machine below; alert_ids immutable] ----
+#[nirdosha_rt::dataset(entity = "case", store = "pg_primary", kind = "table")]
+pub struct Case {
+    pub tenant_id: TenantId,
+    pub status: CaseStatus,
+    pub assigned_to: UserId,
+    pub alert_ids: Vec<AlertId>,       // composition — immutable post-create
+    pub subject_ref: CustomerRef,      //                                       [NEW]
+    pub sar_id: Option<SarId>,         // existence restricted (tipping-off)    [NEW]
+    pub disposition: Option<CaseDisposition>,   //                             [NEW]
+    pub rationale: Option<String>,     //                                       [NEW]
+}
+
+// ---- customer — [NEW: full declaration; M5] ----
+#[nirdosha_rt::dataset(entity = "customer", store = "pg_primary", kind = "table")]
+pub struct Customer {
+    pub tenant_id: TenantId,
+    pub name: CustomerName,                 // CONFIDENTIAL
+    pub national_id: NationalId,            // RESTRICTED
+    pub dob: Date,                          // CONFIDENTIAL
+    pub address: Address,                   // CONFIDENTIAL
+    pub phone: Phone,                       // CONFIDENTIAL
+    pub occupation: String,                 // INTERNAL
+    pub kyc_status: KycStatus,              // INTERNAL
+    pub risk_rating: RiskBand,              // CONFIDENTIAL
+    pub pep_flag: bool,                     // CONFIDENTIAL
+    pub sanctions_status: ScreeningStatus,  // CONFIDENTIAL
+    pub expected_profile: ActivityProfile,  // CONFIDENTIAL  → feeds 5.5
+    pub restriction_status: RestrictionBand,// INTERNAL — the ONLY field RM/CS may see → M21
+    pub legal_hold: bool,                   // INTERNAL     → DSAR gate
+}
+
+// ---- sar_bundle — [NEW: M12; existence itself is tipping-off-sensitive] ----
+#[nirdosha_rt::dataset(entity = "sar_bundle", store = "pg_primary", kind = "table")]
+pub struct SarBundle {
+    pub tenant_id: TenantId,
+    pub case_id: CaseId,                    // required — invariant-linked
+    pub subject: SubjectRef,
+    pub status: SarStatus,
+    pub narrative: String,                  // RESTRICTED-class content
+    pub activity_codes: Vec<ActivityCode>,
+    pub amount_total: Money,
+    pub txn_refs: Vec<TxnId>,
+    pub filed_at: Option<Timestamp>,
+    pub goaml_ref: Option<String>,
+    pub next_review_at: Option<Timestamp>,  // continuing-activity (→ 12.9)
+}
+
+// ---- screening_hit — [NEW: M10] ----
+#[nirdosha_rt::dataset(entity = "screening_hit", store = "pg_primary", kind = "table")]
+pub struct ScreeningHit {
+    pub tenant_id: TenantId,
+    pub subject_ref: SubjectRef,
+    pub list_id: ListId,                    // ofac_sdn | un_consolidated | eu_fsf | internal
+    pub match_score: f64,
+    pub disposition: Option<HitDisposition>, // true_match | false_match | needs_edd
+    pub rationale: Option<String>,
+}
+
+// ---- payment (Mode B holds) — [NEW: M11; Pending entities live here] ----
+#[nirdosha_rt::dataset(entity = "payment", store = "pg_primary", kind = "table")]
+pub struct Payment {
+    pub tenant_id: TenantId,
+    pub rail_ref: String,                   // external payment reference
+    pub originator: SubjectRef,
+    pub beneficiary: SubjectRef,
+    pub amount: Money,
+    pub currency: CurrencyCode,
+    pub status: PaymentStatus,              // workflow machine below
+    pub hold_reason: Option<HoldReason>,
+    pub hold_expires_at: Option<Timestamp>, // deny-by-timeout clock (§6.3)
+    pub decision_by: Option<UserId>,
+    pub decision_rationale: Option<String>,
+}
+
+// ---- qa_review — [NEW: M14] ----
+#[nirdosha_rt::dataset(entity = "qa_review", store = "pg_primary", kind = "table")]
+pub struct QaReview {
+    pub tenant_id: TenantId,
+    pub item_ref: ItemRef,                  // alert | case
+    pub rubric_scores: Vec<Score>,
+    pub result: QaResult,
+    pub error_severity: Option<Severity>,
+    pub retraining_flag: bool,
+    pub feedback: Option<String>,
+}
+
+// ---- notification — [NEW: M16; fed by notify(channel(...)) obligations] ----
+#[nirdosha_rt::dataset(entity = "notification", store = "pg_primary", kind = "table")]
+pub struct Notification { pub tenant_id: TenantId, pub channel: ChannelId,
+                          pub user_id: UserId, pub body_ref: String,
+                          pub read: bool, pub entity_ref: Option<String> }
+
+// ---- user_profile — [NEW: M22.1 self-service] ----
+#[nirdosha_rt::dataset(entity = "user_profile", store = "pg_primary", kind = "table")]
+pub struct UserProfile { pub user_id: UserId, pub locale: Locale, pub tz: Tz,
+                         pub notif_prefs: NotifPrefs }
+
+// ---- support_ticket — [NEW: M22.2] ----
+#[nirdosha_rt::dataset(entity = "support_ticket", store = "pg_primary", kind = "table")]
+pub struct SupportTicket { pub tenant_id: TenantId, pub category: TicketCategory,
+                           pub priority: Severity, pub description: String }
+
+// ---- Reference datasets — [RFC 0023 §1C.2 pattern] ----
+#[nirdosha_rt::dataset(entity = "refdata", store = "refdata", kind = "table")]
+pub struct RefDataset { pub code: String, pub label: String, pub class: Classification }
+
+#[nirdosha_rt::reference(field = "customer.kyc_status", store = "refdata", missing = "fail_closed")]
+fn ref_customer_kyc_status() {}
+#[nirdosha_rt::reference(field = "alert.disposition_code", store = "refdata", missing = "fail_closed")] // → 3.3, 18.5
+fn ref_alert_disposition_code() {}
+#[nirdosha_rt::reference(field = "customer.risk_rating", store = "refdata", missing = "fail_closed")]
+fn ref_customer_risk_rating() {}
+#[nirdosha_rt::reference(field = "transaction.currency", store = "refdata", missing = "fail_closed")] // ISO 4217
+fn ref_transaction_currency() {}
+#[nirdosha_rt::reference(field = "case.disposition", store = "refdata", missing = "fail_closed")]
+fn ref_case_disposition() {}
+#[nirdosha_rt::reference(field = "country_risk", store = "refdata", missing = "fail_closed")] // → M13.2
+fn ref_country_risk() {}
+
+// ---- Relations — [§4: positive-only; negation = compile error] ----
+// Catalog-only, like every other declarative macro here: these bodies don't
+// actually resolve anything at runtime (no KYC graph driver exists), same
+// posture as `#[dataset(store = "pg_primary")]` not itself instantiating a
+// `PostgresStoreDriver`.
+#[nirdosha_rt::relation(source = "core_kyc", cardinality = 200, ttl = "60s")]
+fn accounts_of(_customer: CustomerId) -> Vec<AccountId> { Vec::new() }           // → 5.2, 6.3
+
+#[nirdosha_rt::relation(source = "core_kyc", cardinality = 100, ttl = "300s")]
+fn related_parties(_customer: CustomerId) -> Vec<CustomerId> { Vec::new() }      // → 5.6
+
+#[nirdosha_rt::relation(source = "org_registry", cardinality = 1000, ttl = "300s")]
+#[nirdosha_rt::materialize(relation = "ubo_closure")]               // Tier 2 → 5.6
+fn ubo_closure(_customer: CustomerId) -> Vec<CustomerId> { Vec::new() }
+
+// NOTE (M7): customer-level "network" (shared devices/counterparty rings) is a
+// QUERY over transaction attributes (device_id, beneficiary), NOT a relation —
+// cardinality unbounded. Relation lowering is reserved for bounded KYC graphs.
+
+// ---- Stream ports — [RFC §8.1 + §6.5] ----
+nirdosha_rt::stream_port! {
+    port txn_in    { bind "card_network.rails";   semantics = at_least_once; }
+    port txn_out   { publish "txn.authorized";    format = "avro"; schema = "transaction"; }
+    port decisions { publish "guard.decisions";   format = "avro"; } // → M2.5 wall
+}
+
+// ---- Workflows — closed & deterministic; type-state (illegal transitions don't compile) ----
+nirdosha_guard_macros::workflow! {
+    machine CaseStatus {                                   // [RFC §8.6 verbatim]
+        open -> investigating -> [confirmed_fraud, false_positive, escalate];
+        confirmed_fraud -> sar_filed -> closed;
+        false_positive -> closed;
+    }
+}
+nirdosha_guard_macros::workflow! {                                   // [NEW → 3.3]
+    machine AlertStatus {
+        new -> in_progress -> [closed_false_positive, escalated, pending_info];
+        pending_info -> [in_progress, escalated];          // → 3.7 RFI
+        closed_false_positive -> in_progress;              // reopen = TL, audited
+    }
+}
+nirdosha_guard_macros::workflow! {                                   // [NEW → M11]
+    machine PaymentStatus {
+        received -> held -> [released, blocked];           // transitions via I3 revalidate
+        held -> held;                                      // no self-loop releases
+    }
+}
+nirdosha_guard_macros::workflow! {                                   // [NEW → M12]
+    machine SarStatus {
+        draft -> in_review -> [filed, rejected, do_not_file];
+        rejected -> draft;                                 // correction loop → 12.7
+        filed -> continuation_due -> [filed, ceased];      // → 12.9
+    }
+}
+nirdosha_guard_macros::workflow! {                                   // [NEW → M14]
+    machine QaReviewStatus { assigned -> scored -> [closed, returned]; }
+}
+
+// ---- Enumerations (get_options screens) — §8.4 / §1C.2: both hops guarded ----
+nirdosha_rt::enumerate! { options from alert.disposition_code filter active == true cap(row_cap = 50) } // → 3.3
+nirdosha_rt::enumerate! { options from transaction.channel      filter active == true cap(row_cap = 50) } // → 6.1
+nirdosha_rt::enumerate! { options from country_risk             filter active == true cap(row_cap = 250) } // → 13.2

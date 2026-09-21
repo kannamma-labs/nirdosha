@@ -1,0 +1,137 @@
+//! M4 Case Management / L2 Investigation (`screen.md` module 4, 14
+//! screens). Policies: `60_case_management.nir`. RTM live-demo plan
+//! Phase B.
+//!
+//! Real, guard-enforced: 4.1 queue + 4.2 overview (`crud_screens!`
+//! list/detail, `case-read`'s real `field_policy { forbidden(sar_id) }`
+//! -- tipping-off, same posture `50_alerts.nir` uses for alerts),
+//! creating a case (`analyst-create-case`'s real `field_policy {
+//! required(tenant_id, subject_ref, alert_ids, rationale) forbidden
+//! (status, sar_id, disposition) }`, wired via `crud_screens!`'s new
+//! `guard.create_fields`), 4.10 disposition/closure (`update_fields`,
+//! `case-transition`'s real `requires field(status).transition_allowed()
+//! && invariant(rationale_present)`), a status-column board (4.1's
+//! kanban view, `kanban_board!`'s own `guard:`), and 4.11 four-eyes
+//! review -- `case-close-confirm`'s real `escalate to approval(chain
+//! case_review)` (`quorum(2, of = [ComplianceLead])`), hand-written as
+//! two POSTs (`/cases/{id}/propose-close`, `/cases/{id}/confirm-close`)
+//! over `GuardedTable::guarded_propose_escalated_update`/
+//! `guarded_confirm_escalated_update` -- a real, tested quorum flow
+//! (`crates/nirdosha-guard-screens`'s own `escalated_update_*` tests),
+//! not a single-click "approve" button.
+//!
+//! Not built this pass (same reasoning as `m03_alerts.nir`'s doc
+//! comment: this is UX chrome the `guard_policy!` corpus doesn't encode,
+//! not a guard-enforcement question): 4.3 investigation workspace tabs,
+//! 4.4-4.9 (linked alerts / transactions / documents / notes / tasks /
+//! internal RFI -- each names its own dataset `screen-field-mappings.md`
+//! invents with no corresponding `#[dataset]`/`guard_policy!` anywhere
+//! in this corpus), 4.12 escalation to MLRO (no distinct policy from
+//! 4.11's own `case-close-confirm`), 4.13 merge/link cases (no corpus
+//! policy). 4.14 Initiate SAR is a plain link to `/sar/draft?case_id=`
+//! -- M12 itself is a later, bespoke batch.
+
+use crate::bridge::case_table;
+use crate::bridge::CaseRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_case_store() -> &'static SharedTable<i64, CaseRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, CaseRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_case_screens,
+    entity: CaseRow,
+    store: unused_case_store,
+    path: "/cases",
+    fields: [
+        case_id: String,
+        tenant_id: String,
+        status: String,
+        assigned_to: String,
+        alert_ids: String,
+        subject_ref: String,
+        sar_id: String,
+        disposition: String,
+        rationale: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: case_table,
+        purpose: "AmlInvestigation",
+        create_fields: [
+            case_id: String,
+            tenant_id: String,
+            subject_ref: String,
+            alert_ids: String,
+            rationale: String,
+        ],
+        update_fields: [
+            status: String,
+            assigned_to: String,
+            disposition: String,
+            rationale: String,
+        ],
+    },
+}
+
+nirdosha_rt::kanban_board! {
+    mount: mount_case_board,
+    entity: CaseRow,
+    store: unused_case_store,
+    path: "/cases/board",
+    access: public,
+    title_field: case_id,
+    column_field: status,
+    columns: ["open", "investigating", "confirmed_fraud", "false_positive", "sar_filed", "closed"],
+    move_path: "/cases/{id}/board-move/{to}",
+    guard: {
+        table: case_table,
+        purpose: "AmlInvestigation",
+    },
+}
+
+/// 4.11 Four-Eyes Review — `case-close-confirm` (`ComplianceLead`,
+/// `requires field(status) in ["confirmed_fraud", "false_positive"]`,
+/// `escalate to approval(chain case_review)`). Two real, distinct HTTP
+/// calls, each a real `ComplianceLead` identity, each independently
+/// policy- and role-eligibility-checked -- the self-review block is
+/// `ApprovalChainRuntime::approve`'s own duplicate-approver rejection
+/// (see `guarded_confirm_escalated_update`'s doc comment), not a
+/// same-request check this handler adds on top.
+pub fn mount_case_four_eyes(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .post_with_auth("/cases/{id}/propose-close", "Propose closure (4-eyes)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let verdict = values.get("review_verdict").cloned().unwrap_or_default();
+            let note = values.get("review_note").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["review_verdict".into(), "review_note".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match case_table().guarded_propose_escalated_update(auth, "Operations", &id, &changed, move |row| { row.review_verdict = verdict; row.review_note = note; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/cases/{id}/confirm-close", "Confirm closure (4-eyes)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required (from the propose step's response)") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required (from the propose step's response)") };
+            let verdict = values.get("review_verdict").cloned().unwrap_or_default();
+            let note = values.get("review_note").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["review_verdict".into(), "review_note".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match case_table().guarded_confirm_escalated_update(auth, "Operations", &id, &chain, &escalation_id, &changed, move |row| { row.review_verdict = verdict; row.review_note = note; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

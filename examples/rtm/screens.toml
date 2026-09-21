@@ -1,0 +1,1822 @@
+# ============================================================================
+# screens.toml — RTM screen register (definitive, 152 screens)
+# Consumed by tests/verify_screen_inventory.rs
+#
+# stage:    built     = rendered today (file must exist)
+#           emittable = all 3 ingredients present; screen not yet written
+#           interim   = partial version shippable now (crud/table), full fidelity blocked
+#           blocked   = nothing shippable until blocked_by closes
+#           delegated = owned by external system (IdP)
+#
+# roles:    "<Role>:R" | "<Role>:R/W" | "<Role>:W"
+# datasets: PG.* RDBMS | RD.* refdata | AC.* audit chain | GR.* graph projections
+#           K.* kafka topics | L.* sanctions list store | O.* object storage
+#           CATALOG.* compiled metadata | RUNTIME.* guard runtime | IDP.* identity
+#           GW.* gateways | STATIC.* signed build docs | EXT.* external integrations
+# blocked_by: ticket:T-xx | dataset:<id> | archetype:<name> | engine:<name>
+#             integration:<name> | external:<name> | phase:<x>
+# ============================================================================
+
+[metadata]
+source_inventory = "examples/rtm/screen.md"
+version = "1.0.0"
+total_screens = 152
+# NOTE: previous counts (150 headline, 147 reconciliation) were undercounts.
+
+# ---------------------------------------------------------------- M1 Auth (6)
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.users_file"]
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m01_auth.nir"
+notes = "demo avatar picker; production via NIRDOSHA_LOGIN_USERS"
+
+[[screen]]
+id = "1.2"
+name = "MFA Challenge"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.mfa"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+notes = "guard step_up(mfa) on sensitive writes is separate and stays in-app"
+
+[[screen]]
+id = "1.3"
+name = "Forgot/Reset Password"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.reset"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+
+[[screen]]
+id = "1.4"
+name = "First-Login Setup"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.onboarding"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+
+[[screen]]
+id = "1.5"
+name = "Session Timeout / Re-auth"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.session", "AC.delegation_registry"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+notes = "guard remainder = copilot TTL revoke; surfaces as banner, no screen"
+
+[[screen]]
+id = "1.6"
+name = "Access Denied / Locked"
+module = "M1"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["AC.deny_records", "PG.user_role", "PG.unlock_request"]
+blocked_by = ["dataset:PG.unlock_request"]
+stage = "blocked"
+notes = "GuardError named reasons surfaced natively on every deny"
+
+# -------------------------------------------------------- M2 Dashboards (7)
+[[screen]]
+id = "2.1"
+name = "Global Navigation Shell"
+module = "M2"
+archetype = "app_shell!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["PG.user_role", "PG.user_profile"]
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m02_shell.nir"
+notes = "nav role-filtered; env badge"
+
+[[screen]]
+id = "2.2"
+name = "L1 My Day Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["Analyst:R"]
+datasets = ["PG.alert", "PG.case_task"]
+blocked_by = ["dataset:PG.case_task"]
+stage = "emittable"
+notes = "core alert widgets shippable; tasks widget pending case_task"
+
+[[screen]]
+id = "2.3"
+name = "Team Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["ComplianceLead:R"]
+datasets = ["PG.alert", "PG.case"]
+blocked_by = []
+stage = "emittable"
+notes = "aggregates only; cohort_floor on people-level views"
+
+[[screen]]
+id = "2.4"
+name = "MLRO Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["Mlro:R", "ComplianceLead:R"]
+datasets = ["PG.sar_bundle", "PG.case", "PG.alert"]
+blocked_by = ["dataset:PG.sar_bundle"]
+stage = "blocked"
+notes = "sar widgets ⛔ for lead; deadline countdown"
+
+[[screen]]
+id = "2.5"
+name = "Real-Time Monitoring Wall"
+module = "M2"
+archetype = "crud_screens!"
+combo = ["refresh_seconds"]
+roles = ["OpsAnalyst:R", "ComplianceLead:R"]
+datasets = ["K.guard.decisions", "PG.payment"]
+blocked_by = ["ticket:T-09"]
+stage = "interim"
+notes = "auto-refresh table now; true ticker = realtime archetype later"
+
+[[screen]]
+id = "2.6"
+name = "Executive KPI Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["Mlro:R", "Admin:R"]
+datasets = ["PG.alert", "PG.case", "PG.model_run_stat"]
+blocked_by = ["dataset:PG.model_run_stat"]
+stage = "blocked"
+notes = "period-over-period; model health widget pending"
+
+[[screen]]
+id = "2.7"
+name = "Saved Views Manager"
+module = "M2"
+archetype = "crud_screens!"
+combo = ["app_shell!"]
+roles = ["AllRoles:R/W"]
+datasets = ["PG.saved_view"]
+blocked_by = ["dataset:PG.saved_view"]
+stage = "blocked"
+
+# ------------------------------------------------------------ M3 Alerts (10)
+[[screen]]
+id = "3.1"
+name = "Alert Work Queue"
+module = "M3"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R", "ComplianceLead:R", "QaReviewer:R", "McpCopilot:R"]
+datasets = ["PG.alert", "RD.disposition_code"]
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m03_alerts.nir"
+notes = "search q is decorative until T-12"
+
+[[screen]]
+id = "3.2"
+name = "Alert Detail"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["Analyst:R/W", "ComplianceLead:R/W", "QaReviewer:R", "McpCopilot:R/W"]
+datasets = ["PG.alert", "PG.transaction", "PG.customer", "AC.alert_chain"]
+blocked_by = ["archetype:workspace!", "ticket:T-06"]
+stage = "built"
+file = "examples/rtm/src/screens/m03_alerts.nir"
+notes = "sar_linked must be absent (T-02 drop-mask); copilot: score absent"
+
+[[screen]]
+id = "3.3"
+name = "Disposition Panel"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workflow_transitions"]
+roles = ["Analyst:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.alert", "RD.disposition_code"]
+blocked_by = ["ticket:T-03"]
+stage = "built"
+file = "examples/rtm/src/screens/m03_alerts.nir"
+notes = "AlertStatus machine; rationale invariant; evidence checkboxes"
+
+[[screen]]
+id = "3.4"
+name = "Related & Linked Alerts"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["Analyst:R", "McpCopilot:R"]
+datasets = ["PG.alert", "PG.case"]
+blocked_by = ["archetype:workspace!", "ticket:T-06"]
+stage = "interim"
+notes = "filtered-list interim shippable"
+
+[[screen]]
+id = "3.5"
+name = "Bulk Actions"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["multi_select_form"]
+roles = ["ComplianceLead:R/W", "Analyst:R/W"]
+datasets = ["PG.alert"]
+blocked_by = []
+stage = "emittable"
+notes = "lead cap 100; per-row audit receipts (I1) — no batch rationale shortcut"
+
+[[screen]]
+id = "3.6"
+name = "Reassignment / Pickup"
+module = "M3"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.alert", "PG.user_role"]
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m03_alerts.nir"
+
+[[screen]]
+id = "3.7"
+name = "Pending Info / RFI"
+module = "M3"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R/W"]
+datasets = ["PG.alert", "PG.case_task"]
+blocked_by = ["dataset:PG.case_task"]
+stage = "blocked"
+notes = "SLA clock pause on status"
+
+[[screen]]
+id = "3.8"
+name = "Escalation to Case"
+module = "M3"
+archetype = "wizard!"
+combo = []
+roles = ["Analyst:R/W", "McpCopilot:R/W"]
+datasets = ["PG.alert", "PG.case"]
+blocked_by = ["ticket:T-07"]
+stage = "interim"
+notes = "single-form escalation now; persistent wizard later"
+
+[[screen]]
+id = "3.9"
+name = "SLA & Aging Monitor"
+module = "M3"
+archetype = "dashboard!"
+combo = []
+roles = ["ComplianceLead:R", "Mlro:R"]
+datasets = ["PG.alert", "PG.sla_config"]
+blocked_by = ["dataset:PG.sla_config"]
+stage = "emittable"
+notes = "aging buckets shippable; auto-escalate toggle pending sla_config"
+
+[[screen]]
+id = "3.10"
+name = "Alert Audit History"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workspace!", "ac_timeline"]
+roles = ["AllRoles:R", "Auditor:R"]
+datasets = ["AC.alert_chain"]
+blocked_by = ["ticket:T-06", "ticket:T-11"]
+stage = "blocked"
+notes = "immutable before→after rows"
+
+# -------------------------------------------------------------- M4 Cases (14)
+[[screen]]
+id = "4.1"
+name = "Case Queue / Board"
+module = "M4"
+archetype = "kanban_board!"
+combo = ["crud_screens!"]
+roles = ["Analyst:R/W", "ComplianceLead:R/W", "McpCopilot:R"]
+datasets = ["PG.case"]
+blocked_by = ["ticket:T-03", "ticket:T-14"]
+stage = "interim"
+notes = "board+list shippable; drag graying T-14 from workflow! table"
+
+[[screen]]
+id = "4.2"
+name = "Case Overview"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R", "ComplianceLead:R", "QaReviewer:R", "McpCopilot:R"]
+datasets = ["PG.case", "PG.alert", "PG.sar_bundle"]
+blocked_by = ["dataset:PG.sar_bundle"]
+stage = "interim"
+notes = "works now minus sar_id field (⛔ tipping-off)"
+
+[[screen]]
+id = "4.3"
+name = "Investigation Workspace"
+module = "M4"
+archetype = "workspace!"
+combo = []
+roles = ["Analyst:R/W", "ComplianceLead:R/W", "McpCopilot:R/W"]
+datasets = ["PG.case", "PG.alert", "PG.transaction", "PG.customer", "PG.case_evidence", "AC.case_chain"]
+blocked_by = ["archetype:workspace!", "ticket:T-06", "dataset:PG.case_evidence"]
+stage = "blocked"
+notes = "interim = crud detail; evidence pinboard = guarded rows"
+
+[[screen]]
+id = "4.4"
+name = "Linked Alerts Tab"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["Analyst:R", "McpCopilot:R"]
+datasets = ["PG.alert", "PG.case"]
+blocked_by = ["ticket:T-06"]
+stage = "interim"
+
+[[screen]]
+id = "4.5"
+name = "Case Transactions Tab"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["Analyst:R/W", "McpCopilot:R"]
+datasets = ["PG.transaction", "PG.case_txn_scope"]
+blocked_by = ["ticket:T-06", "dataset:PG.case_txn_scope"]
+stage = "interim"
+notes = "annotate via analyst_flag now; scope table pending"
+
+[[screen]]
+id = "4.6"
+name = "Documents & Evidence"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R/W", "ComplianceLead:R"]
+datasets = ["O.evidence", "PG.evidence_doc"]
+blocked_by = ["dataset:PG.evidence_doc"]
+stage = "blocked"
+notes = "blobs in object store; metadata guarded"
+
+[[screen]]
+id = "4.7"
+name = "Notes & Activity Timeline"
+module = "M4"
+archetype = "communication_feed!"
+combo = []
+roles = ["Analyst:R/W", "ComplianceLead:R/W", "McpCopilot:R/W"]
+datasets = ["PG.case_note"]
+blocked_by = ["dataset:PG.case_note"]
+stage = "blocked"
+
+[[screen]]
+id = "4.8"
+name = "Tasks & Checklist"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.case_task"]
+blocked_by = ["dataset:PG.case_task"]
+stage = "blocked"
+
+[[screen]]
+id = "4.9"
+name = "Internal RFI"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R/W"]
+datasets = ["PG.case_task"]
+blocked_by = ["dataset:PG.case_task"]
+stage = "blocked"
+
+[[screen]]
+id = "4.10"
+name = "Disposition & Closure"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["workflow_transitions"]
+roles = ["Analyst:R/W"]
+datasets = ["PG.case", "RD.disposition_code"]
+blocked_by = ["ticket:T-03"]
+stage = "emittable"
+notes = "CaseStatus machine; alert_ids immutable"
+
+[[screen]]
+id = "4.11"
+name = "Four-Eyes Review"
+module = "M4"
+archetype = "approval_inbox!"
+combo = []
+roles = ["ComplianceLead:R/W"]
+datasets = ["PG.case", "RUNTIME.pending_approvals"]
+blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
+stage = "blocked"
+notes = "maker≠checker enforced; return needs reason"
+
+[[screen]]
+id = "4.12"
+name = "Escalation to MLRO"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["approval_mint"]
+roles = ["ComplianceLead:R/W"]
+datasets = ["PG.case"]
+blocked_by = ["ticket:T-04"]
+stage = "emittable"
+notes = "memo + recommendation; mints approval chain entry"
+
+[[screen]]
+id = "4.13"
+name = "Merge / Link Cases"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["confirm_modal"]
+roles = ["ComplianceLead:R/W"]
+datasets = ["PG.case"]
+blocked_by = []
+stage = "emittable"
+notes = "pre-merge check server-side; irreversible + re-auth"
+
+[[screen]]
+id = "4.14"
+name = "Initiate SAR"
+module = "M4"
+archetype = "wizard!"
+combo = ["wizard_persistent"]
+roles = ["Analyst:R/W"]
+datasets = ["PG.case", "PG.sar_draft"]
+blocked_by = ["ticket:T-07", "ticket:T-08"]
+stage = "blocked"
+notes = "creates SarDraft; case must be past investigating"
+
+# ----------------------------------------------------------- M5 Customer (10)
+[[screen]]
+id = "5.1"
+name = "Global Entity Search"
+module = "M5"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R", "ComplianceLead:R", "OpsAnalyst:R", "QaReviewer:R", "McpCopilot:R"]
+datasets = ["PG.customer", "PG.transaction", "PG.alert", "PG.case"]
+blocked_by = ["dataset:PG.customer"]
+stage = "interim"
+notes = "txn-only search shippable today; customer axis pending"
+
+[[screen]]
+id = "5.2"
+name = "Customer 360"
+module = "M5"
+archetype = "workspace!"
+combo = []
+roles = ["Analyst:R", "ComplianceLead:R", "McpCopilot:R"]
+datasets = ["PG.customer", "PG.account", "PG.transaction", "L.sanctions_lists", "AC.entity_chain"]
+blocked_by = ["archetype:workspace!", "ticket:T-06", "dataset:PG.customer"]
+stage = "blocked"
+notes = "masked fields ABSENT; national_id partial_last4; copilot restricted set"
+
+[[screen]]
+id = "5.3"
+name = "KYC Document Viewer"
+module = "M5"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R", "QaReviewer:R"]
+datasets = ["O.kyc_docs", "PG.kyc_doc"]
+blocked_by = ["dataset:PG.kyc_doc"]
+stage = "blocked"
+
+[[screen]]
+id = "5.4"
+name = "Risk Score Breakdown"
+module = "M5"
+archetype = "workspace!"
+combo = ["dashboard!"]
+roles = ["Analyst:R", "PolicyEngineer:R"]
+datasets = ["PG.risk_factor", "PG.risk_history", "PG.customer"]
+blocked_by = ["dataset:PG.risk_factor", "dataset:PG.customer"]
+stage = "blocked"
+
+[[screen]]
+id = "5.5"
+name = "Expected vs Actual Activity"
+module = "M5"
+archetype = "dashboard!"
+combo = []
+roles = ["Analyst:R"]
+datasets = ["PG.customer", "PG.transaction"]
+blocked_by = ["dataset:PG.customer"]
+stage = "blocked"
+
+[[screen]]
+id = "5.6"
+name = "Related Parties / UBO"
+module = "M5"
+archetype = "crud_screens!"
+combo = ["tree_view"]
+roles = ["Analyst:R/W"]
+datasets = ["PG.customer_rel", "CATALOG.relation_ubo_closure"]
+blocked_by = ["dataset:PG.customer_rel", "dataset:PG.customer", "archetype:tree_view"]
+stage = "interim"
+notes = "table now; ubo_closure Tier-2 materialized; tree = graph renderer later"
+
+[[screen]]
+id = "5.7"
+name = "Adverse Media Results"
+module = "M5"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R/W"]
+datasets = ["PG.adverse_media", "EXT.news_provider"]
+blocked_by = ["integration:news_provider", "dataset:PG.adverse_media"]
+stage = "blocked"
+
+[[screen]]
+id = "5.8"
+name = "Entity Alert/Case History"
+module = "M5"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["Analyst:R"]
+datasets = ["PG.alert", "PG.case", "PG.customer"]
+blocked_by = ["dataset:PG.customer"]
+stage = "interim"
+notes = "per-subject filter works via alert/case now"
+
+[[screen]]
+id = "5.9"
+name = "Internal Risk Notes/Flags"
+module = "M5"
+archetype = "communication_feed!"
+combo = []
+roles = ["Analyst:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.entity_flag"]
+blocked_by = ["dataset:PG.entity_flag"]
+stage = "blocked"
+
+[[screen]]
+id = "5.10"
+name = "Restriction/Exit Recommendation"
+module = "M5"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["Analyst:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.customer_restriction", "PG.customer"]
+blocked_by = ["dataset:PG.customer_restriction", "ticket:T-04", "dataset:PG.customer"]
+stage = "blocked"
+
+# ------------------------------------------------------- M6 Transactions (8)
+[[screen]]
+id = "6.1"
+name = "Transaction Search"
+module = "M6"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R", "OpsAnalyst:R", "McpCopilot:R"]
+datasets = ["PG.transaction", "RD.currency"]
+blocked_by = []
+stage = "emittable"
+notes = "works now; filters real after T-12 (predicate_use fields)"
+
+[[screen]]
+id = "6.2"
+name = "Transaction Detail"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["Analyst:R", "OpsAnalyst:R", "QaReviewer:R", "Auditor:R", "McpCopilot:R"]
+datasets = ["PG.transaction", "K.guard.decisions", "PG.screening_hit"]
+blocked_by = ["ticket:T-06"]
+stage = "interim"
+notes = "crud detail now; card_token masked; copilot ⛔ alert/case links"
+
+[[screen]]
+id = "6.3"
+name = "Ledger View"
+module = "M6"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R"]
+datasets = ["PG.transaction"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "6.4"
+name = "Funds Flow Visualization"
+module = "M6"
+archetype = "sankey!"
+combo = []
+roles = ["Analyst:R"]
+datasets = ["GR.flow_edge"]
+blocked_by = ["archetype:sankey!", "dataset:GR.flow_edge"]
+stage = "blocked"
+notes = "interim = 6.5 counterparty table; Watermark completeness honest"
+
+[[screen]]
+id = "6.5"
+name = "Counterparty Analysis"
+module = "M6"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R"]
+datasets = ["PG.transaction"]
+blocked_by = []
+stage = "emittable"
+notes = "agg with cohort_floor; new-payee flag"
+
+[[screen]]
+id = "6.6"
+name = "Pattern/Typology Match Viewer"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["Analyst:R"]
+datasets = ["PG.alert", "K.guard.decisions"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "6.7"
+name = "Structuring Visual"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["heatmap"]
+roles = ["Analyst:R"]
+datasets = ["GR.agg_bins"]
+blocked_by = ["dataset:GR.agg_bins"]
+stage = "interim"
+notes = "binned table interim (precomputed — sidesteps I9); bars later"
+
+[[screen]]
+id = "6.8"
+name = "Device & Session Intelligence"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["Analyst:R", "OpsAnalyst:R"]
+datasets = ["PG.device_session", "GR.link_edge"]
+blocked_by = ["dataset:PG.device_session"]
+stage = "blocked"
+notes = "impossible_travel feature exists; blacklist = guarded admin op"
+
+# ------------------------------------------------------------- M7 Network (5)
+[[screen]]
+id = "7.1"
+name = "Interactive Entity Graph"
+module = "M7"
+archetype = "graph_renderer"
+combo = []
+roles = ["Analyst:R", "ComplianceLead:R"]
+datasets = ["GR.link_edge"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "engine:LinkGraphRuntime"]
+stage = "interim"
+interim = "crud_screens! over link_edge table"
+notes = "caps from policy (depth/nodes/exec); corrected sample's T-03 ref"
+
+[[screen]]
+id = "7.2"
+name = "Path Finder"
+module = "M7"
+archetype = "graph_renderer"
+combo = ["form"]
+roles = ["Analyst:R"]
+datasets = ["GR.link_edge"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "engine:LinkGraphRuntime"]
+stage = "blocked"
+notes = "traversal full-audit, never sampled"
+
+[[screen]]
+id = "7.3"
+name = "Cluster Detection"
+module = "M7"
+archetype = "graph_renderer"
+combo = ["crud_screens!"]
+roles = ["Analyst:R"]
+datasets = ["GR.link_edge"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "engine:LinkGraphRuntime"]
+stage = "blocked"
+notes = "communities = capability-gated (V5); unavailable shown honestly"
+
+[[screen]]
+id = "7.4"
+name = "Shared Attributes"
+module = "M7"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R"]
+datasets = ["PG.transaction", "PG.device_session"]
+blocked_by = ["dataset:PG.device_session"]
+stage = "emittable"
+notes = "Stage-0: txn-only version (device/geo filters) needs only policy"
+
+[[screen]]
+id = "7.5"
+name = "Graph Snapshot Export"
+module = "M7"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["Analyst:R/W"]
+datasets = ["GR.link_edge", "PG.governed_export"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "ticket:T-01"]
+stage = "blocked"
+notes = "egress path; watermarked"
+
+# -------------------------------------------------------------- M8 Rules (12)
+[[screen]]
+id = "8.1"
+name = "Scenario Library"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["settings_screen!"]
+roles = ["PolicyEngineer:R", "Admin:R", "ComplianceLead:R", "Auditor:R"]
+datasets = ["CATALOG.catalog_projection", "PG.rule_stat"]
+blocked_by = ["dataset:CATALOG.catalog_projection", "dataset:PG.rule_stat"]
+stage = "interim"
+notes = "rules ARE .nir source; library = compiled-metadata read"
+
+[[screen]]
+id = "8.2"
+name = "Rule Builder / Editor"
+module = "M8"
+archetype = "rule_builder!"
+combo = []
+roles = ["PolicyEngineer:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = ["archetype:rule_builder!", "engine:graph_apply_flow"]
+stage = "blocked"
+notes = "interim = textarea proposal via graph_apply; rustc diagnostics = validation UX"
+
+[[screen]]
+id = "8.3"
+name = "Threshold & Parameter Editor"
+module = "M8"
+archetype = "settings_screen!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "ComplianceLead:R/W"]
+datasets = ["GR.project_graph", "RUNTIME.pending_approvals"]
+blocked_by = ["ticket:T-04", "engine:graph_apply_flow"]
+stage = "interim"
+notes = "action=migrate; dry-run mandatory; simulation attestation"
+
+[[screen]]
+id = "8.4"
+name = "Segmentation & Scope Config"
+module = "M8"
+archetype = "crud_screens!"
+combo = []
+roles = ["PolicyEngineer:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = ["engine:graph_apply_flow"]
+stage = "interim"
+
+[[screen]]
+id = "8.5"
+name = "Suppression/Dedup Logic"
+module = "M8"
+archetype = "settings_screen!"
+combo = []
+roles = ["PolicyEngineer:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = ["engine:graph_apply_flow"]
+stage = "interim"
+
+[[screen]]
+id = "8.6"
+name = "Simulation & Backtesting"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["PolicyEngineer:R/W", "ComplianceLead:R"]
+datasets = ["AC.replay", "PG.sim_result"]
+blocked_by = ["engine:policy_simulation", "phase:RFC0026-P4"]
+stage = "blocked"
+notes = "measures alert_volume/denied/escalation/case_load"
+
+[[screen]]
+id = "8.7"
+name = "Threshold Sensitivity What-if"
+module = "M8"
+archetype = "whatif!"
+combo = []
+roles = ["PolicyEngineer:R"]
+datasets = ["PG.sim_result"]
+blocked_by = ["archetype:whatif!", "engine:policy_simulation"]
+stage = "blocked"
+
+[[screen]]
+id = "8.8"
+name = "Approval Workflow"
+module = "M8"
+archetype = "approval_inbox!"
+combo = []
+roles = ["ComplianceLead:R/W", "Mlro:R/W"]
+datasets = ["RUNTIME.pending_approvals", "GR.project_graph"]
+blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
+stage = "blocked"
+notes = "diff vs current; cooling period on approve"
+
+[[screen]]
+id = "8.9"
+name = "Version History & Diff"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["diff_view"]
+roles = ["PolicyEngineer:R", "Auditor:R"]
+datasets = ["CATALOG.policy_versions", "AC.policy_chain"]
+blocked_by = ["dataset:CATALOG.catalog_projection"]
+stage = "blocked"
+
+[[screen]]
+id = "8.10"
+name = "Scheduling & Go-Live"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "ComplianceLead:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = ["ticket:T-04"]
+stage = "interim"
+notes = "rollback plan mandatory; pilot cohort option"
+
+[[screen]]
+id = "8.11"
+name = "Whitelist/Allowlist"
+module = "M8"
+archetype = "crud_screens!"
+combo = []
+roles = ["PolicyEngineer:R/W", "ComplianceLead:R/W", "Analyst:R"]
+datasets = ["PG.allowlist"]
+blocked_by = ["dataset:PG.allowlist"]
+stage = "blocked"
+notes = "expiry ≤12mo; maker≠checker"
+
+[[screen]]
+id = "8.12"
+name = "Scenario Performance"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["PolicyEngineer:R", "ComplianceLead:R"]
+datasets = ["PG.rule_stat"]
+blocked_by = ["dataset:PG.rule_stat"]
+stage = "blocked"
+notes = "FP%>90 auto-flagged red"
+
+# ------------------------------------------------------------------ M9 ML (6)
+[[screen]]
+id = "9.1"
+name = "Model Registry"
+module = "M9"
+archetype = "crud_screens!"
+combo = []
+roles = ["PolicyEngineer:R/W", "Auditor:R"]
+datasets = ["CATALOG.model_artifacts", "PG.model_run_stat"]
+blocked_by = ["dataset:CATALOG.catalog_projection"]
+stage = "blocked"
+notes = "swap = guarded admin mutation; SignedArtifact; shadow flag"
+
+[[screen]]
+id = "9.2"
+name = "Model Performance Monitor"
+module = "M9"
+archetype = "dashboard!"
+combo = []
+roles = ["PolicyEngineer:R", "ComplianceLead:R"]
+datasets = ["PG.model_run_stat"]
+blocked_by = ["dataset:PG.model_run_stat"]
+stage = "blocked"
+
+[[screen]]
+id = "9.3"
+name = "Drift Monitoring"
+module = "M9"
+archetype = "dashboard!"
+combo = ["heatmap"]
+roles = ["PolicyEngineer:R"]
+datasets = ["PG.feature_stat"]
+blocked_by = ["dataset:PG.feature_stat"]
+stage = "blocked"
+notes = "PSI > 0.2 flagged"
+
+[[screen]]
+id = "9.4"
+name = "Champion/Challenger"
+module = "M9"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["PolicyEngineer:R/W"]
+datasets = ["CATALOG.model_artifacts", "PG.model_run_stat"]
+blocked_by = ["dataset:PG.model_run_stat"]
+stage = "blocked"
+
+[[screen]]
+id = "9.5"
+name = "Model Validation & Governance"
+module = "M9"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "Mlro:R/W", "Auditor:R"]
+datasets = ["PG.model_validation"]
+blocked_by = ["dataset:PG.model_validation", "ticket:T-04"]
+stage = "blocked"
+notes = "validator ≠ owner enforced"
+
+[[screen]]
+id = "9.6"
+name = "Score Explainability Viewer"
+module = "M9"
+archetype = "workspace!"
+combo = []
+roles = ["Analyst:R", "McpCopilot:R"]
+datasets = ["PG.model_run_stat"]
+blocked_by = ["ticket:T-06", "dataset:PG.model_run_stat"]
+stage = "blocked"
+notes = "factor contributions; embeds in 3.2"
+
+# --------------------------------------------------------- M10 Screening (6)
+[[screen]]
+id = "10.1"
+name = "Screening Hit Queue"
+module = "M10"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R"]
+datasets = ["PG.screening_hit", "RD.list_labels"]
+blocked_by = ["dataset:PG.screening_hit"]
+stage = "blocked"
+
+[[screen]]
+id = "10.2"
+name = "Hit Review & Disposition"
+module = "M10"
+archetype = "crud_screens!"
+combo = ["form"]
+roles = ["Analyst:R/W"]
+datasets = ["PG.screening_hit", "L.sanctions_lists", "O.evidence"]
+blocked_by = ["dataset:PG.screening_hit"]
+stage = "blocked"
+notes = "side-by-side name compare; true match auto-escalates"
+
+[[screen]]
+id = "10.3"
+name = "Screening Configuration"
+module = "M10"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["CATALOG.matcher_records", "PG.list_versions"]
+blocked_by = ["dataset:PG.list_versions"]
+stage = "blocked"
+notes = "threshold edits via migrate; V5 re-attestation"
+
+[[screen]]
+id = "10.4"
+name = "Watchlist Management"
+module = "M10"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W", "Analyst:R"]
+datasets = ["L.sanctions_lists", "O.uploads", "PG.internal_list"]
+blocked_by = ["dataset:PG.internal_list"]
+stage = "blocked"
+notes = "signed snapshots via ListProvider drivers; >20% delta confirm"
+
+[[screen]]
+id = "10.5"
+name = "Rescreening Monitor"
+module = "M10"
+archetype = "crud_screens!"
+combo = ["refresh_seconds"]
+roles = ["Admin:R"]
+datasets = ["PG.rescreen_job"]
+blocked_by = ["dataset:PG.rescreen_job", "ticket:T-09"]
+stage = "blocked"
+
+[[screen]]
+id = "10.6"
+name = "Historical Rescreen Campaigns"
+module = "M10"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.rescreen_campaign"]
+blocked_by = ["dataset:PG.rescreen_campaign"]
+stage = "blocked"
+
+# ----------------------------------------------------- M11 Intervention (5)
+[[screen]]
+id = "11.1"
+name = "Interception Queue"
+module = "M11"
+archetype = "crud_screens!"
+combo = ["refresh_seconds"]
+roles = ["OpsAnalyst:R", "ComplianceLead:R"]
+datasets = ["PG.payment"]
+blocked_by = ["dataset:PG.payment", "ticket:T-09"]
+stage = "blocked"
+notes = "countdown col = realtime archetype later; sorted by time-remaining"
+
+[[screen]]
+id = "11.2"
+name = "Hold Decision"
+module = "M11"
+archetype = "crud_screens!"
+combo = ["workflow_transitions"]
+roles = ["OpsAnalyst:R/W"]
+datasets = ["PG.payment", "PG.screening_hit"]
+blocked_by = ["dataset:PG.payment", "ticket:T-03"]
+stage = "blocked"
+notes = "I3 revalidate at commit; above-authority auto-routes to 11.3"
+
+[[screen]]
+id = "11.3"
+name = "Override/Exception Approval"
+module = "M11"
+archetype = "approval_inbox!"
+combo = []
+roles = ["ComplianceLead:R/W"]
+datasets = ["PG.payment", "RUNTIME.pending_approvals"]
+blocked_by = ["archetype:approval_inbox!", "ticket:T-04", "dataset:PG.payment"]
+stage = "blocked"
+notes = "authority limit vs amount checked"
+
+[[screen]]
+id = "11.4"
+name = "Auto-Release/Timeout Config"
+module = "M11"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.timeout_config"]
+blocked_by = ["dataset:PG.timeout_config"]
+stage = "blocked"
+notes = "timeout resolves to DENY structurally — release-on-timeout not expressible"
+
+[[screen]]
+id = "11.5"
+name = "Hold Outcomes Log & Stats"
+module = "M11"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["ComplianceLead:R", "Mlro:R"]
+datasets = ["PG.payment"]
+blocked_by = ["dataset:PG.payment"]
+stage = "blocked"
+
+# ---------------------------------------------------------------- M12 SAR (11)
+[[screen]]
+id = "12.1"
+name = "SAR Workbench Queue"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R", "Mlro:R", "ComplianceLead:R"]
+datasets = ["PG.sar_bundle", "PG.sar_submission"]
+blocked_by = ["dataset:PG.sar_bundle"]
+stage = "blocked"
+notes = "CsAgent/RmUser/Copilot hard-deny (cs-no-sar / rm-no-sar / copilot-no-sar)"
+
+[[screen]]
+id = "12.2"
+name = "SAR Draft Wizard"
+module = "M12"
+archetype = "wizard!"
+combo = ["wizard_persistent"]
+roles = ["Analyst:R/W"]
+datasets = ["PG.sar_draft", "RD.jurisdiction", "RD.activity_code"]
+blocked_by = ["ticket:T-07", "ticket:T-08"]
+stage = "blocked"
+notes = "in-memory wizard FORBIDDEN for SAR — draft must be guarded entity"
+
+[[screen]]
+id = "12.3"
+name = "Narrative Editor"
+module = "M12"
+archetype = "wizard!"
+combo = ["wizard_persistent"]
+roles = ["Analyst:R/W", "Mlro:R"]
+datasets = ["PG.sar_draft"]
+blocked_by = ["ticket:T-07", "ticket:T-08"]
+stage = "blocked"
+notes = "who/what/when/where/why/how attestations; word count"
+
+[[screen]]
+id = "12.4"
+name = "Subjects & Activity Tabs"
+module = "M12"
+archetype = "wizard!"
+combo = ["wizard_persistent"]
+roles = ["Analyst:R/W"]
+datasets = ["PG.sar_draft", "PG.transaction"]
+blocked_by = ["ticket:T-07", "ticket:T-08"]
+stage = "blocked"
+notes = "case-scoped txn lookup only; totals consistency blocks advance"
+
+[[screen]]
+id = "12.5"
+name = "Supporting Attachments"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["Analyst:R/W"]
+datasets = ["O.evidence", "PG.sar_draft"]
+blocked_by = ["ticket:T-08", "dataset:PG.evidence_doc"]
+stage = "blocked"
+notes = "≥1 statement + redaction confirm to submit"
+
+[[screen]]
+id = "12.6"
+name = "MLRO Review & Decision"
+module = "M12"
+archetype = "approval_inbox!"
+combo = []
+roles = ["Mlro:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.sar_bundle", "RUNTIME.pending_approvals"]
+blocked_by = ["archetype:approval_inbox!", "ticket:T-04", "dataset:PG.sar_bundle"]
+stage = "blocked"
+notes = "sar_release quorum(2) timeout(deny); do-not-file needs legal-consult"
+
+[[screen]]
+id = "12.7"
+name = "Submission Tracking"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["Mlro:R", "ComplianceLead:R"]
+datasets = ["PG.sar_submission", "GW.goaml"]
+blocked_by = ["dataset:PG.sar_submission", "integration:goAML"]
+stage = "blocked"
+
+[[screen]]
+id = "12.8"
+name = "Reporting Calendar"
+module = "M12"
+archetype = "dashboard!"
+combo = ["crud_screens!"]
+roles = ["Mlro:R/W", "ComplianceLead:R"]
+datasets = ["PG.reporting_calendar"]
+blocked_by = ["dataset:PG.reporting_calendar"]
+stage = "blocked"
+
+[[screen]]
+id = "12.9"
+name = "Continuing Activity SAR"
+module = "M12"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["Mlro:R/W"]
+datasets = ["PG.sar_bundle", "PG.transaction"]
+blocked_by = ["dataset:PG.sar_bundle"]
+stage = "blocked"
+notes = "90-day review queue; txn delta since filing"
+
+[[screen]]
+id = "12.10"
+name = "Filing Export/Validation"
+module = "M12"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["Mlro:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.sar_bundle", "O.xml", "GW.goaml"]
+blocked_by = ["ticket:T-01", "integration:goAML", "dataset:PG.sar_bundle"]
+stage = "blocked"
+notes = "egress: full audit never sampled; 0 schema errors required"
+
+[[screen]]
+id = "12.11"
+name = "Tipping-Off Controls"
+module = "M12"
+archetype = "settings_screen!"
+combo = ["ac_timeline"]
+roles = ["Mlro:R/W", "Auditor:R"]
+datasets = ["PG.sar_visibility", "AC.access_log"]
+blocked_by = ["dataset:PG.sar_visibility", "ticket:T-11"]
+stage = "blocked"
+
+# --------------------------------------------------------- M13 Risk Config (5)
+[[screen]]
+id = "13.1"
+name = "Customer Risk Model Config"
+module = "M13"
+archetype = "settings_screen!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "ComplianceLead:R/W"]
+datasets = ["CATALOG.classify_records", "PG.risk_factor"]
+blocked_by = ["ticket:T-04", "dataset:PG.risk_factor"]
+stage = "blocked"
+notes = "weights sum=100; no auto-downgrade"
+
+[[screen]]
+id = "13.2"
+name = "Country Risk Editor"
+module = "M13"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W", "Analyst:R"]
+datasets = ["RD.country_risk"]
+blocked_by = ["dataset:RD.country_risk"]
+stage = "blocked"
+
+[[screen]]
+id = "13.3"
+name = "Product/Channel Risk Config"
+module = "M13"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["RD.product_risk"]
+blocked_by = ["dataset:RD.product_risk"]
+stage = "blocked"
+
+[[screen]]
+id = "13.4"
+name = "PEP Classification & Handling"
+module = "M13"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["RD.pep_category"]
+blocked_by = ["dataset:RD.pep_category"]
+stage = "blocked"
+
+[[screen]]
+id = "13.5"
+name = "Global Parameters"
+module = "M13"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.global_params"]
+blocked_by = ["dataset:PG.global_params"]
+stage = "blocked"
+
+# ------------------------------------------------------------------ M14 QA (5)
+[[screen]]
+id = "14.1"
+name = "QA Sampling Queue"
+module = "M14"
+archetype = "crud_screens!"
+combo = ["form"]
+roles = ["QaReviewer:R/W"]
+datasets = ["PG.qa_review", "PG.alert", "PG.case"]
+blocked_by = ["dataset:PG.qa_review"]
+stage = "blocked"
+notes = "own-work excluded structurally"
+
+[[screen]]
+id = "14.2"
+name = "QA Scorecard"
+module = "M14"
+archetype = "crud_screens!"
+combo = ["linked_detail"]
+roles = ["QaReviewer:R/W"]
+datasets = ["PG.qa_review", "PG.alert", "PG.case"]
+blocked_by = ["dataset:PG.qa_review"]
+stage = "blocked"
+
+[[screen]]
+id = "14.3"
+name = "Analyst Scorecards"
+module = "M14"
+archetype = "dashboard!"
+combo = []
+roles = ["Analyst:R", "ComplianceLead:R", "QaReviewer:R"]
+datasets = ["PG.qa_review"]
+blocked_by = ["dataset:PG.qa_review"]
+stage = "blocked"
+notes = "self view = own row only"
+
+[[screen]]
+id = "14.4"
+name = "Feedback & Coaching"
+module = "M14"
+archetype = "communication_feed!"
+combo = ["task_form"]
+roles = ["ComplianceLead:R/W", "Analyst:R/W"]
+datasets = ["PG.qa_review", "PG.case_task"]
+blocked_by = ["dataset:PG.qa_review", "dataset:PG.case_task"]
+stage = "blocked"
+notes = "close blocked until ack + action items done"
+
+[[screen]]
+id = "14.5"
+name = "Overturned Decisions Log"
+module = "M14"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["ComplianceLead:R", "Mlro:R"]
+datasets = ["PG.qa_review", "AC.alert_chain"]
+blocked_by = ["dataset:PG.qa_review", "ticket:T-11"]
+stage = "blocked"
+
+# ----------------------------------------------------------- M15 Reporting (5)
+[[screen]]
+id = "15.1"
+name = "Standard Report Library"
+module = "M15"
+archetype = "crud_screens!"
+combo = []
+roles = ["ComplianceLead:R/W", "Mlro:R", "Admin:R"]
+datasets = ["PG.report_def", "PG.report_run"]
+blocked_by = ["dataset:PG.report_def"]
+stage = "blocked"
+
+[[screen]]
+id = "15.2"
+name = "Ad-Hoc Report Builder"
+module = "M15"
+archetype = "report_builder!"
+combo = []
+roles = ["ComplianceLead:R/W", "Mlro:R"]
+datasets = ["PG.alert", "PG.case", "PG.transaction"]
+blocked_by = ["archetype:report_builder!"]
+stage = "blocked"
+notes = "interim = preset reports via 15.1; PII auto-masked in aggregates"
+
+[[screen]]
+id = "15.3"
+name = "Scheduled Reports & Distribution"
+module = "M15"
+archetype = "crud_screens!"
+combo = []
+roles = ["ComplianceLead:R/W"]
+datasets = ["PG.scheduled_report"]
+blocked_by = ["dataset:PG.scheduled_report"]
+stage = "blocked"
+notes = "zero new UI work — plain crud"
+
+[[screen]]
+id = "15.4"
+name = "Typology & Trend Analytics"
+module = "M15"
+archetype = "dashboard!"
+combo = ["heatmap"]
+roles = ["Mlro:R", "ComplianceLead:R"]
+datasets = ["PG.alert", "PG.case"]
+blocked_by = []
+stage = "emittable"
+notes = "drill-through to filtered list"
+
+[[screen]]
+id = "15.5"
+name = "Governed Export Center"
+module = "M15"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["Analyst:R/W", "ComplianceLead:R/W", "Auditor:R"]
+datasets = ["PG.governed_export", "O.exports"]
+blocked_by = ["ticket:T-01", "ticket:T-04", "dataset:PG.governed_export"]
+stage = "blocked"
+notes = "purpose mandatory; expiry on downloads"
+
+# ------------------------------------------------------ M16 Notifications (5)
+[[screen]]
+id = "16.1"
+name = "Notification Center"
+module = "M16"
+archetype = "communication_feed!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["PG.notification"]
+blocked_by = ["dataset:PG.notification"]
+stage = "blocked"
+
+[[screen]]
+id = "16.2"
+name = "Comments & @Mentions"
+module = "M16"
+archetype = "communication_feed!"
+combo = []
+roles = ["Analyst:R/W", "ComplianceLead:R/W", "McpCopilot:R"]
+datasets = ["PG.case_note"]
+blocked_by = ["dataset:PG.case_note"]
+stage = "blocked"
+notes = "mention picker excludes users lacking entity access"
+
+[[screen]]
+id = "16.3"
+name = "Shift Handover"
+module = "M16"
+archetype = "communication_feed!"
+combo = ["checklist_form"]
+roles = ["Analyst:R/W", "ComplianceLead:R/W", "OpsAnalyst:R/W"]
+datasets = ["PG.handover"]
+blocked_by = ["dataset:PG.handover"]
+stage = "blocked"
+
+[[screen]]
+id = "16.4"
+name = "My Tasks"
+module = "M16"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["PG.case_task", "PG.alert"]
+blocked_by = ["dataset:PG.case_task"]
+stage = "blocked"
+
+[[screen]]
+id = "16.5"
+name = "Notification Preferences"
+module = "M16"
+archetype = "settings_screen!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["PG.user_profile"]
+blocked_by = ["dataset:PG.user_profile"]
+stage = "blocked"
+
+# ----------------------------------------------------------- M17 Knowledge (4)
+[[screen]]
+id = "17.1"
+name = "Typology Library"
+module = "M17"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "emittable"
+notes = "static read; content pack from .nirpkg signed artifacts"
+
+[[screen]]
+id = "17.2"
+name = "SOP/Procedure Viewer"
+module = "M17"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "17.3"
+name = "Regulatory Reference"
+module = "M17"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "17.4"
+name = "In-Context Help"
+module = "M17"
+archetype = "dashboard!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "emittable"
+
+# -------------------------------------------------------------- M18 Admin (10)
+[[screen]]
+id = "18.1"
+name = "User Management"
+module = "M18"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.user_role", "IDP.users_file"]
+blocked_by = ["dataset:PG.user_role"]
+stage = "blocked"
+notes = "deactivate forces session kill + WIP reassign prompt"
+
+[[screen]]
+id = "18.2"
+name = "Role & Permission Matrix"
+module = "M18"
+archetype = "crud_screens!"
+combo = ["diff_view"]
+roles = ["Admin:R"]
+datasets = ["CATALOG.policy_records"]
+blocked_by = ["dataset:CATALOG.catalog_projection"]
+stage = "blocked"
+notes = "READ-ONLY — the guard_policy! set IS the matrix; edits via 8.2/8.3 flow"
+
+[[screen]]
+id = "18.3"
+name = "Queue Assignment Rules"
+module = "M18"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.assignment_rules"]
+blocked_by = ["dataset:PG.assignment_rules"]
+stage = "blocked"
+
+[[screen]]
+id = "18.4"
+name = "SLA & Workflow Config"
+module = "M18"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.sla_config"]
+blocked_by = ["dataset:PG.sla_config"]
+stage = "blocked"
+
+[[screen]]
+id = "18.5"
+name = "Reason Code Taxonomy"
+module = "M18"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W", "Analyst:R"]
+datasets = ["RD.disposition_code"]
+blocked_by = ["dataset:RD.disposition_code"]
+stage = "blocked"
+notes = "missing=FailClosed on reference"
+
+[[screen]]
+id = "18.6"
+name = "Notification Templates"
+module = "M18"
+archetype = "crud_screens!"
+combo = ["preview"]
+roles = ["Admin:R/W"]
+datasets = ["PG.notif_template", "PG.notification"]
+blocked_by = ["dataset:PG.notif_template"]
+stage = "blocked"
+
+[[screen]]
+id = "18.7"
+name = "Data Retention & Purge"
+module = "M18"
+archetype = "settings_screen!"
+combo = ["approval_inbox!"]
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.retention_config"]
+blocked_by = ["archetype:approval_inbox!", "ticket:T-04", "dataset:PG.retention_config"]
+stage = "blocked"
+notes = "legal-hold invariant; purge dual-control + type-PURGE confirm"
+
+[[screen]]
+id = "18.8"
+name = "Delegate/Proxy Access"
+module = "M18"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.delegation"]
+blocked_by = ["dataset:PG.delegation"]
+stage = "blocked"
+notes = "TTL ≤90d; I11 full audit"
+
+[[screen]]
+id = "18.9"
+name = "Privacy/DSAR Handling"
+module = "M18"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["Admin:R/W", "ComplianceLead:R/W"]
+datasets = ["PG.dsar_request", "PG.customer", "O.packs"]
+blocked_by = ["ticket:T-01", "dataset:PG.dsar_request", "dataset:PG.customer"]
+stage = "blocked"
+notes = "30d deadline; legal-hold conflict flag"
+
+[[screen]]
+id = "18.10"
+name = "License & Environment"
+module = "M18"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.license_info", "CATALOG.manifest"]
+blocked_by = ["dataset:PG.license_info"]
+stage = "blocked"
+
+# --------------------------------------------------------------- M19 IT Ops (8)
+[[screen]]
+id = "19.1"
+name = "System Health Dashboard"
+module = "M19"
+archetype = "dashboard!"
+combo = ["refresh_seconds"]
+roles = ["Admin:R"]
+datasets = ["PG.svc_health", "PG.incident"]
+blocked_by = ["dataset:PG.svc_health", "ticket:T-09"]
+stage = "blocked"
+notes = "modules self-report via notify(topic)"
+
+[[screen]]
+id = "19.2"
+name = "Data Pipeline Monitor"
+module = "M19"
+archetype = "dashboard!"
+combo = ["crud_screens!"]
+roles = ["Admin:R"]
+datasets = ["PG.pipeline_stat"]
+blocked_by = ["dataset:PG.pipeline_stat"]
+stage = "blocked"
+notes = "pause/restart/reprocess = guarded admin mutations"
+
+[[screen]]
+id = "19.3"
+name = "Exception Queue"
+module = "M19"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.ingest_exception"]
+blocked_by = ["dataset:PG.ingest_exception"]
+stage = "blocked"
+
+[[screen]]
+id = "19.4"
+name = "Data Reconciliation"
+module = "M19"
+archetype = "dashboard!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.recon_report"]
+blocked_by = ["dataset:PG.recon_report"]
+stage = "blocked"
+
+[[screen]]
+id = "19.5"
+name = "Integration/API Monitor"
+module = "M19"
+archetype = "dashboard!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.integration_stat"]
+blocked_by = ["dataset:PG.integration_stat"]
+stage = "blocked"
+
+[[screen]]
+id = "19.6"
+name = "Batch/EOD Job Monitor"
+module = "M19"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.batch_job"]
+blocked_by = ["dataset:PG.batch_job"]
+stage = "blocked"
+
+[[screen]]
+id = "19.7"
+name = "Capacity & Performance Trends"
+module = "M19"
+archetype = "dashboard!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.capacity_stat"]
+blocked_by = ["dataset:PG.capacity_stat"]
+stage = "blocked"
+
+[[screen]]
+id = "19.8"
+name = "Reference Data Sync"
+module = "M19"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.sync_stat", "RD.all"]
+blocked_by = ["dataset:PG.sync_stat"]
+stage = "blocked"
+notes = "FX staleness >24h alerts; fail-open/closed setting"
+
+# ---------------------------------------------------------------- M20 Audit (3)
+[[screen]]
+id = "20.1"
+name = "Audit Log Search"
+module = "M20"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["Auditor:R", "Admin:R", "Mlro:R"]
+datasets = ["AC.all_chains"]
+blocked_by = ["ticket:T-11", "ticket:T-06"]
+stage = "blocked"
+notes = "immutable; export via governed path"
+
+[[screen]]
+id = "20.2"
+name = "Config Change History"
+module = "M20"
+archetype = "crud_screens!"
+combo = ["diff_view"]
+roles = ["Auditor:R", "Mlro:R"]
+datasets = ["AC.policy_chain", "AC.config_chains"]
+blocked_by = ["ticket:T-11"]
+stage = "blocked"
+
+[[screen]]
+id = "20.3"
+name = "Regulatory Audit Pack Export"
+module = "M20"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["Mlro:R/W", "Auditor:R/W"]
+datasets = ["AC.all_chains", "O.packs"]
+blocked_by = ["ticket:T-01", "ticket:T-11"]
+stage = "blocked"
+notes = "encrypted + watermarked; share-link expiry"
+
+# ------------------------------------------------------ M21 Restricted (4)
+[[screen]]
+id = "21.1"
+name = "Auditor Read-Only Portal"
+module = "M21"
+archetype = "app_shell!"
+combo = ["all_read_screens_ro"]
+roles = ["Auditor:R"]
+datasets = ["PG.all", "AC.all_chains", "CATALOG.all"]
+blocked_by = ["dataset:PG.user_role"]
+stage = "interim"
+notes = "watermark overlay; auditor-no-write deny; content grows as screens land"
+
+[[screen]]
+id = "21.2"
+name = "Regulator Inspection View"
+module = "M21"
+archetype = "app_shell!"
+combo = ["crud_screens!_ro"]
+roles = ["RegulatorViewer:R"]
+datasets = ["PG.case", "PG.sar_bundle", "PG.transaction"]
+blocked_by = ["engine:delegation_mint", "dataset:PG.sar_bundle"]
+stage = "blocked"
+notes = "scoped delegation §9.4 only; export denied; session recorded"
+
+[[screen]]
+id = "21.3"
+name = "CS Transaction Status Lookup"
+module = "M21"
+archetype = "crud_screens!"
+combo = []
+roles = ["CsAgent:R"]
+datasets = ["PG.payment"]
+blocked_by = ["dataset:PG.payment"]
+stage = "blocked"
+notes = "4 fields only; sar/case/alert hard-deny; full audit per peek"
+
+[[screen]]
+id = "21.4"
+name = "RM/Business Customer Status View"
+module = "M21"
+archetype = "crud_screens!"
+combo = []
+roles = ["RmUser:R"]
+datasets = ["PG.customer"]
+blocked_by = ["dataset:PG.customer"]
+stage = "blocked"
+notes = "restriction_status single field only"
+
+# ---------------------------------------------------------------- M22 Misc (3)
+[[screen]]
+id = "22.1"
+name = "My Profile & Preferences"
+module = "M22"
+archetype = "settings_screen!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["PG.user_profile"]
+blocked_by = ["dataset:PG.user_profile"]
+stage = "blocked"
+notes = "password change ⛔ delegated:IdP"
+
+[[screen]]
+id = "22.2"
+name = "Help & Support"
+module = "M22"
+archetype = "crud_screens!"
+combo = ["static_kb"]
+roles = ["AllRoles:R/W"]
+datasets = ["PG.support_ticket", "STATIC.kb"]
+blocked_by = ["dataset:PG.support_ticket"]
+stage = "blocked"
+
+[[screen]]
+id = "22.3"
+name = "About / Release Notes"
+module = "M22"
+archetype = "static_embed"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["CATALOG.manifest"]
+blocked_by = []
+stage = "emittable"

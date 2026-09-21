@@ -1,0 +1,140 @@
+//! `rtm` library target — real-time transaction monitoring, Nirdosha v2
+//! dialect demo. Holds the actual policy/catalog corpus (one module per
+//! file from `examples/rtm/roles-N-guard_policy.md`'s own breakdown) so
+//! both `src/main.nir` (the `[[bin]]`) and `tests/guarded_ingest.rs`
+//! (integration tests, which Cargo always links against a package's own
+//! `[lib]` target) see the *same* registered `nirdosha_guard_registry`
+//! records at runtime.
+//!
+//! This split exists only because `linkme::distributed_slice` registration
+//! is a link-time effect: it only happens inside whichever binary/test
+//! process actually links the code declaring it (see
+//! `nirdosha_guard_registry::write_dump_from_env`'s own doc comment). A
+//! `[[bin]]`-only package has no `[lib]` for its `tests/*.rs` to link
+//! against, so putting the corpus directly under `main.nir` (this crate's
+//! very first shape) left every integration test seeing zero registered
+//! policies — not a bug in the corpus, a missing library target.
+//!
+// `#[classify]`'s and `lineage_query!`'s generated static/type names don't
+// screaming-case the source item's own identifier (a pre-existing, purely
+// cosmetic naming-convention gap in those macros — see
+// `crates/nirdosha-rt/tests/rtm_policy_corpus.rs` for the identical
+// suppression). Dead-code warnings are expected: this pass registers the
+// policy/catalog corpus for real but doesn't wire a runtime consumer for
+// every declared dataset/relation/reference/entity type — `tests/
+// guarded_ingest.rs` proves the guarded read/write path for the flows this
+// phase actually wires end to end.
+#![allow(non_upper_case_globals, non_camel_case_types, dead_code)]
+
+#[path = "domain_types.nir"]
+pub mod domain_types;
+#[path = "00_core.nir"]
+pub mod core;
+#[path = "10_domains.nir"]
+pub mod domains;
+#[path = "20_ingestion.nir"]
+pub mod ingestion;
+#[path = "30_features.nir"]
+pub mod features;
+#[path = "40_scoring.nir"]
+pub mod scoring;
+#[path = "50_alerts.nir"]
+pub mod alerts;
+#[path = "60_case_management.nir"]
+pub mod case_management;
+#[path = "65_sar.nir"]
+pub mod sar;
+#[path = "70_mcp.nir"]
+pub mod mcp;
+#[path = "75_lineage.nir"]
+pub mod lineage;
+#[path = "80_consumers.nir"]
+pub mod consumers;
+#[path = "85_intervention.nir"]
+pub mod intervention;
+#[path = "90_ops_admin.nir"]
+pub mod ops_admin;
+#[path = "95_qa.nir"]
+pub mod qa;
+#[path = "96_restricted_views.nir"]
+pub mod restricted_views;
+#[path = "99_break_glass.nir"]
+pub mod break_glass;
+
+// ---- RTM live-demo plan, Phase A: guard-enforced screens ----
+// `crate::nirdosha_roles::*` (what `crud_screens!`'s `requires role
+// "..."` and every `RoleProof<R>` gate actually name) has to resolve at
+// the crate root -- `core`'s own `nirdosha_rt::roles! { ... }`
+// invocation expands to `nirdosha_roles` *inside* `mod core` (macros
+// expand where they're written, not at the invoking crate's root), so
+// without this re-export `crate::nirdosha_roles::Analyst` wouldn't
+// exist even though `crate::core::nirdosha_roles::Analyst` does.
+pub use core::nirdosha_roles;
+
+#[path = "bridge.nir"]
+pub mod bridge;
+#[path = "screens/m01_auth.nir"]
+pub mod m01_auth;
+#[path = "screens/m02_dashboards.nir"]
+pub mod m02_dashboards;
+#[path = "screens/m03_alerts.nir"]
+pub mod m03_alerts;
+#[path = "screens/m04_cases.nir"]
+pub mod m04_cases;
+#[path = "screens/m05_customer.nir"]
+pub mod m05_customer;
+#[path = "screens/m06_transactions.nir"]
+pub mod m06_transactions;
+#[path = "screens/m07_network.nir"]
+pub mod m07_network;
+#[path = "screens/m08_rules.nir"]
+pub mod m08_rules;
+#[path = "screens/m09_ml_models.nir"]
+pub mod m09_ml_models;
+#[path = "screens/m10_screening.nir"]
+pub mod m10_screening;
+#[path = "screens/m11_intervention.nir"]
+pub mod m11_intervention;
+#[path = "screens/m12_sar.nir"]
+pub mod m12_sar;
+#[path = "screens/m13_risk_config.nir"]
+pub mod m13_risk_config;
+#[path = "screens/m14_qa.nir"]
+pub mod m14_qa;
+#[path = "screens/m15_reporting.nir"]
+pub mod m15_reporting;
+#[path = "screens/m16_notifications.nir"]
+pub mod m16_notifications;
+#[path = "screens/m17_knowledge.nir"]
+pub mod m17_knowledge;
+#[path = "screens/m18_admin.nir"]
+pub mod m18_admin;
+#[path = "screens/m19_it_ops.nir"]
+pub mod m19_it_ops;
+#[path = "screens/m20_audit.nir"]
+pub mod m20_audit;
+#[path = "screens/m21_restricted.nir"]
+pub mod m21_restricted;
+#[path = "screens/m22_misc.nir"]
+pub mod m22_misc;
+
+/// Prints what actually linked and registered — called from `main()` (and
+/// available to anything else, e.g. a future `cargo nirdosha` integration)
+/// so the corpus's presence is asserted from an explicit code path, not
+/// left to depend on whether the binary happens to reference this crate by
+/// name anywhere.
+pub fn boot_banner() {
+    let policy_count = nirdosha_guard_registry::POLICIES.len();
+    let dump = nirdosha_guard_registry::dump();
+    println!("rtm boot — real-time transaction monitoring (Nirdosha v2 dialect demo)");
+    println!("  guard_policy! registrations : {policy_count}");
+    println!("  approval_chain! chains      : {}", dump.approval_chains.len());
+    println!("  stream_port! ports          : {}", dump.ports.len());
+    println!("  window! features            : {}", dump.windows.len());
+    println!("  model_artifact! models      : {}", dump.models.len());
+    println!("  matcher! matchers           : {}", dump.matchers.len());
+    println!("  mcp_tools! servers          : {}", dump.mcp_servers.len());
+    println!("  purpose_taxonomy! codes     : {}", dump.purposes.len());
+
+    assert!(policy_count >= 76, "expected at least 76 guard_policy! registrations, got {policy_count}");
+}

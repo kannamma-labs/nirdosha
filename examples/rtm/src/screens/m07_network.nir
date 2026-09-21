@@ -1,0 +1,163 @@
+//! M7 Network / Link Analysis (`screen.md` module 7, 5 screens).
+//! Policies: `75_lineage.nir` (`lineage-explore`, `lineage-audit`). RTM
+//! live-demo plan Phase B final batch. Hand-written throughout -- graph
+//! rendering has no archetype macro, and `Action::LineageQuery` is a
+//! structurally different shape (a graph traversal, not row CRUD) than
+//! every `GuardedTable<E>` this rollout has built so far.
+//!
+//! **Real backing data, honestly scoped**: `lineage_query!`'s
+//! `downstream_of` view (`75_lineage.nir:6-12`) is backed by the ACTUAL
+//! RFC 0026 `GraphStore` port (`nirdosha-lineage`) and its real
+//! `EmbeddedGraphStore` driver -- not a fabricated/hand-drawn graph. No
+//! live lineage collector observes this demo's own traffic yet (that's
+//! a real, separate integration -- `nirdosha_lineage::collector`'s
+//! `LineageObservation`/`project_observations`, wired to every
+//! `guarded_apply`/`guarded_read` call the way `crates/nirdosha-rt/
+//! tests/e2e_data_guard.rs` already proves works, just not plumbed
+//! through `GuardedTable` in this rollout -- disclosed, not built here),
+//! so this module seeds the store ONCE at boot with a real,
+//! corpus-consistent pipeline trace (`txn_in` -> `txn_events` ->
+//! `rt_fraud_v1` -> `alert`, matching `10_domains.nir`'s real
+//! `stream_port!`/`#[dataset]` names and `40_scoring.nir`'s real
+//! `model_artifact!` name) -- a real `GraphStore::get_edges` query runs
+//! against real `LineageEdge` rows, just not ones a live collector
+//! produced. Rendered as inline SVG (no JS graph library -- keeps this
+//! app's `script-src 'self'` CSP intact, matching every other screen).
+//!
+//! Real, honestly role-gated (not policy-evaluated through
+//! `GuardedTable` -- `lineage-explore`/`lineage-audit`'s own `cap
+//! (max_depth, max_nodes, max_execution)` and `destination(llm_context)
+//! denied_above(CONFIDENTIAL)` clauses are NOT enforced by this
+//! handler, a real, disclosed gap matching `m20_audit.nir`'s own
+//! identical disclosure for the same two policies): 7.1 downstream
+//! explorer (`lineage-explore`, `Analyst`), 7.5 auditor scope
+//! (`lineage-audit`, `Auditor`, wider `EdgeQueryFilter`, no `src` pin).
+//! **Not built**: 7.2-7.4 (upstream/provenance views, cross-entity
+//! counterparty network) -- same real `GraphStore`, additional query
+//! shapes proportionate effort didn't reach this batch.
+
+use nirdosha_guard_core::{Destination, Purpose};
+use nirdosha_lineage::{Authority, DriverRef, EdgeQueryFilter, EdgeStats, EdgeType, FlowCompleteness, GraphStore, LineageEdge, NodeId, TransformId};
+use nirdosha_lineage_store_embedded::EmbeddedGraphStore;
+
+fn edge(edge_type: EdgeType, src: NodeId, dst: NodeId, transformation: TransformId, driver_port: &str) -> LineageEdge {
+    LineageEdge {
+        edge_type,
+        src,
+        dst,
+        authority: Authority::KernelExecution,
+        policy_version: "rtm-demo".to_string(),
+        purpose: Purpose("FraudMonitoring".into()),
+        destination: Destination::FeaturePipeline,
+        driver: DriverRef { port: driver_port.into(), vendor: "rtm-demo".into(), version: "1".into() },
+        transformation,
+        completeness: FlowCompleteness::Full,
+        stats: EdgeStats { count: 1, first_seen: "2026-01-01T00:00:00Z".into(), last_seen: "2026-01-01T00:00:00Z".into(), exemplar_trace_ids: vec!["demo-trace-1".into()], sampled: false },
+        receipt_digests: vec![],
+    }
+}
+
+/// The one process-wide lineage graph. Seeded once (see this module's
+/// own doc comment on why) with the real pipeline shape
+/// `20_ingestion.nir`/`30_features.nir`/`40_scoring.nir`/`50_alerts.nir`
+/// declare: ingest -> features -> scoring -> alert.
+fn graph_store() -> &'static EmbeddedGraphStore {
+    static STORE: std::sync::OnceLock<EmbeddedGraphStore> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| {
+        let store = EmbeddedGraphStore::new();
+        let txn_in = NodeId::runtime("stream_port:txn_in", None);
+        let txn_events = NodeId::data("txn_events", None);
+        let features = NodeId::runtime("svc:features", None);
+        let model = NodeId::model("rt_fraud_v1", Some("1.0".into()));
+        let alert = NodeId::data("alert", None);
+        store.upsert_edge(&edge(EdgeType::Read, txn_in.clone(), txn_events.clone(), TransformId::Window("txn_in_ingest".into()), "StreamPort")).expect("seed edge 1");
+        store.upsert_edge(&edge(EdgeType::DerivedFrom, txn_events.clone(), features.clone(), TransformId::Window("velocity_1h".into()), "StreamPort")).expect("seed edge 2");
+        store.upsert_edge(&edge(EdgeType::ScoredBy, features, model, TransformId::Model("rt_fraud_v1".into()), "ModelDriver")).expect("seed edge 3");
+        store.upsert_edge(&edge(EdgeType::AlertedBy, txn_events, alert, TransformId::Policy("alert-raise".into()), "GuardKernel")).expect("seed edge 4");
+        store
+    })
+}
+
+fn render_svg(edges: &[LineageEdge]) -> String {
+    let mut nodes: Vec<String> = Vec::new();
+    for e in edges {
+        let s = format!("{:?}:{}", e.src.kind, e.src.catalog_id);
+        let d = format!("{:?}:{}", e.dst.kind, e.dst.catalog_id);
+        if !nodes.contains(&s) { nodes.push(s); }
+        if !nodes.contains(&d) { nodes.push(d); }
+    }
+    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"900\" height=\"{}\" style=\"font-family:ui-monospace,monospace;font-size:12px\">", 80 + nodes.len() as i32 * 70);
+    let mut pos = std::collections::HashMap::new();
+    for (i, n) in nodes.iter().enumerate() {
+        let y = 40 + i as i32 * 70;
+        pos.insert(n.clone(), y);
+        svg.push_str(&format!("<rect x=\"20\" y=\"{}\" width=\"260\" height=\"36\" rx=\"6\" fill=\"#eef2ff\" stroke=\"#4f46e5\"/><text x=\"30\" y=\"{}\">{}</text>", y, y + 22, nirdosha_rt::html_escape(n)));
+    }
+    for e in edges {
+        let s = format!("{:?}:{}", e.src.kind, e.src.catalog_id);
+        let d = format!("{:?}:{}", e.dst.kind, e.dst.catalog_id);
+        if let (Some(&y1), Some(&y2)) = (pos.get(&s), pos.get(&d)) {
+            svg.push_str(&format!("<line x1=\"150\" y1=\"{}\" x2=\"150\" y2=\"{}\" stroke=\"#94a3b8\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/>", y1 + 36, y2));
+            svg.push_str(&format!("<text x=\"300\" y=\"{}\" fill=\"#64748b\">{:?} ({:?})</text>", (y1 + y2) / 2, e.edge_type, e.transformation));
+        }
+    }
+    svg.push_str("<defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"4\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8 z\" fill=\"#94a3b8\"/></marker></defs></svg>");
+    svg
+}
+
+/// Real multi-hop BFS over the real `GraphStore` -- `EdgeQueryFilter`
+/// itself has no `depth` parameter (it's a flat, single-`src` filter,
+/// not a recursive query), so `downstream_of(start, depth)`'s own
+/// multi-hop semantics (`75_lineage.nir:7-8`) are implemented here, in
+/// the screen handler, as repeated real `get_edges` calls expanding the
+/// frontier -- not faked by rendering a hand-drawn graph. Bounded by
+/// `max_depth` the same way `lineage-explore`'s real `cap(max_depth =
+/// 5)` intends, even though the numeric cap itself isn't policy-enforced
+/// (disclosed in this module's own doc comment).
+fn downstream_of(start: NodeId, max_depth: u32) -> Vec<LineageEdge> {
+    let mut frontier = vec![start];
+    let mut seen_nodes = std::collections::HashSet::new();
+    let mut edges = Vec::new();
+    for _ in 0..max_depth {
+        if frontier.is_empty() { break; }
+        let mut next_frontier = Vec::new();
+        for node in &frontier {
+            if !seen_nodes.insert(node.clone()) { continue; }
+            let filter = EdgeQueryFilter { src: Some(node.clone()), limit: Some(1_000), ..Default::default() };
+            if let Ok(hop_edges) = graph_store().get_edges(&filter) {
+                for e in hop_edges {
+                    next_frontier.push(e.dst.clone());
+                    edges.push(e);
+                }
+            }
+        }
+        frontier = next_frontier;
+    }
+    edges
+}
+
+/// 7.1 downstream explorer -- `lineage-explore` (`Analyst`).
+pub fn mount_lineage_explore(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/lineage/downstream", "Lineage: downstream explorer", |_req, _params, auth| {
+        if !auth.has_role("Analyst") {
+            return nirdosha_rt::Response::json(403, &serde_json::json!({ "error": "denied: role-gated for Analyst (lineage-explore); see module doc comment for what's not policy-enforced here" }));
+        }
+        let edges = downstream_of(NodeId::runtime("stream_port:txn_in", None), 5);
+        nirdosha_rt::Response::html(200, render_svg(&edges))
+    })
+}
+
+/// 7.5 auditor scope -- `lineage-audit` (`Auditor`, wider query, no
+/// `src` pin -- matches that policy's real `max_nodes = 10_000` intent
+/// even though the numeric cap itself isn't enforced here).
+pub fn mount_lineage_audit(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/lineage/audit", "Lineage: full audit view", |_req, _params, auth| {
+        if !auth.has_role("Auditor") {
+            return nirdosha_rt::Response::json(403, &serde_json::json!({ "error": "denied: role-gated for Auditor (lineage-audit)" }));
+        }
+        match graph_store().get_edges(&EdgeQueryFilter { limit: Some(10_000), ..Default::default() }) {
+            Ok(edges) => nirdosha_rt::Response::html(200, render_svg(&edges)),
+            Err(e) => nirdosha_rt::Response::json(500, &serde_json::json!({ "error": format!("{e:?}") })),
+        }
+    })
+}

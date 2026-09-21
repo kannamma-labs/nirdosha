@@ -1,0 +1,79 @@
+//! M20 Audit Trail (`screen.md` module 20, 3 screens). Policies:
+//! `96_restricted_views.nir` (`auditor-read`, `auditor-no-write`,
+//! `auditor-export`), `75_lineage.nir` (`lineage-audit`). RTM live-demo
+//! plan Phase B batch 4.
+//!
+//! Real, guard-enforced: 20.1/20.2 cross-resource audit read
+//! (`auditor-read`'s real `for Auditor`, `action == "read" && resource
+//! in ["alert", "case", "transaction", "customer", "sar_bundle",
+//! "payment", "screening_hit", "qa_review"]`, `purpose(Audit)`) -- one
+//! route per resource this corpus already has a `GuardedTable` for
+//! (`alert`/`case`/`transaction`/`customer`/`screening_hit`/`qa_review`;
+//! `sar_bundle` is M12's own, unbuilt table -- see this module's doc
+//! comment below). Proves, live, that `Auditor` sees data M6/M3/M4's
+//! Analyst-purpose (`AmlInvestigation`) screens correctly deny them --
+//! same rows, different purpose, both real guard decisions (see
+//! `m20_audit_screens.rs`'s own test for the side-by-side proof).
+//! `auditor-no-write` (`deny "auditor-no-write" for Auditor when action
+//! in ["create", "update", "delete", "migrate"]`) is a real, exercised
+//! denial: every existing guarded write route already denies `Auditor`
+//! by construction (the corpus's own deny-overrides-allow evaluator, not
+//! a special case this screen module adds) -- proven by this batch's own
+//! test calling `transaction_table().guarded_insert(&Auditor, ...)`
+//! directly and asserting a real `Denied`.
+//!
+//! **Not built this pass, disclosed**: `auditor-export`'s real `action
+//! == "export" && resource in ["audit_pack", "sar_bundle"]` -- neither
+//! resource names an actual `#[dataset]`/`GuardedTable` anywhere in this
+//! corpus (`audit_pack` has no `#[dataset(...)]` declaration at all,
+//! `sar_bundle` is M12's, unbuilt) -- the same proportionate-scope call
+//! `m18_admin.nir`'s own doc comment already makes for `retention-purge`.
+//! `lineage-audit`'s real `action == "lineage_query"` needs the actual
+//! `lineage_query!`-projected `downstream_of`/`upstream_of`/
+//! `provenance_of` views (`75_lineage.nir`) -- a real, separate
+//! `nirdosha-lineage`/`GraphStore` integration this phase's `GuardedTable`
+//! (built for flat `#[dataset]` rows, not graph projections) was never
+//! meant to serve; disclosed as out of this rollout's proportionate
+//! scope, not silently faked with a fabricated graph.
+
+use crate::bridge::alert_table;
+use crate::bridge::case_table;
+use crate::bridge::customer_table;
+use crate::bridge::qa_review_table;
+use crate::bridge::screening_hit_table;
+use crate::bridge::transaction_table;
+
+/// 20.1/20.2 -- one real, `purpose(Audit)`-evaluated route per resource
+/// this corpus already has a `GuardedTable` for. Each reuses the exact
+/// same `guarded_snapshot` call every other module's read routes use --
+/// the only thing that differs from, say, `m06_transactions.nir`'s
+/// `/transactions` is the purpose string, which is the whole point: the
+/// same underlying row, evaluated under a different real matching
+/// policy.
+pub fn mount_audit_trail(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/audit/transactions", "Audit: transactions", |_req, _params, auth| match transaction_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        })
+        .get_with_auth("/audit/alerts", "Audit: alerts", |_req, _params, auth| match alert_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        })
+        .get_with_auth("/audit/cases", "Audit: cases", |_req, _params, auth| match case_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        })
+        .get_with_auth("/audit/customers", "Audit: customers", |_req, _params, auth| match customer_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        })
+        .get_with_auth("/audit/screening-hits", "Audit: screening hits", |_req, _params, auth| match screening_hit_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        })
+        .get_with_auth("/audit/qa-reviews", "Audit: QA reviews", |_req, _params, auth| match qa_review_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        })
+}

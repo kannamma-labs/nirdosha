@@ -1,0 +1,87 @@
+//! M14 Quality Assurance & Oversight (`screen.md` module 14, 5 screens).
+//! Policies: `95_qa.nir`. RTM live-demo plan Phase B batch 3.
+//!
+//! Real, guard-enforced: 14.1/14.2 QA review create/update
+//! (`qa-write-review`'s real `field_policy { required(item_ref,
+//! rubric_scores, result) forbidden(item_ref_content) }` + `requires
+//! field(status).transition_allowed()` against the real `QaReviewStatus`
+//! machine, wired via `guard.create_fields`/`update_fields` the same way
+//! every prior batch has), 14.3 self scorecard (`self-read-qa`'s real
+//! `filter subject_scope()`, keyed on `bridge.nir`'s disclosed
+//! `subject_user_id` field), and the corpus's own bidirectional SoD
+//! denies (`qa-no-disposition`, `analyst-no-qa`) -- exercised by this
+//! batch's own test suite as real denials, not asserted as theory.
+//!
+//! Not built this pass: 14.4/14.5 (feedback loop to model retraining,
+//! QA trend analytics) -- no corresponding `#[dataset]`/`guard_policy!`
+//! beyond the `retraining_flag` field this row already carries.
+
+use crate::bridge::qa_review_table;
+use crate::bridge::QaReviewRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_qa_review_store() -> &'static SharedTable<i64, QaReviewRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, QaReviewRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_qa_review_screens,
+    entity: QaReviewRow,
+    store: unused_qa_review_store,
+    path: "/qa",
+    fields: [
+        review_id: String,
+        item_ref: String,
+        rubric_scores: String,
+        result: String,
+        error_severity: String,
+        retraining_flag: bool,
+        feedback: String,
+        status: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: qa_review_table,
+        purpose: "QaReview",
+        create_fields: [
+            review_id: String,
+            tenant_id: String,
+            subject_user_id: String,
+            item_ref: String,
+            rubric_scores: String,
+            result: String,
+        ],
+        update_fields: [
+            status: String,
+            error_severity: String,
+            retraining_flag: bool,
+            feedback: String,
+        ],
+    },
+}
+
+/// 14.3 Analyst's own scorecard -- `self-read-qa` (`Analyst`, `filter
+/// subject_scope()`, `cap(row_cap = 50)`). A distinct route from
+/// `/qa` (which `qa-write-review`'s own `for QaReviewer` denies to
+/// `Analyst` entirely) rather than a query param on the same one --
+/// `guarded_snapshot`'s own tenant/scope-clause resolution already
+/// depends on which *action*/*purpose* pair is being evaluated
+/// (`self-read-qa` has no `purpose(...)` clause at all, matching
+/// `EvaluationContext.purpose`'s own "any purpose" default via an empty
+/// string here), so a second explicit route keeps that real, not a
+/// filter param this crate's read path can't express anyway.
+pub fn mount_qa_self_scorecard(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    // `get_with_auth`, not `get_gated::<Analyst>` -- the real
+    // authorization is `self-read-qa`'s own guard evaluation (any other
+    // role's `guarded_snapshot` call here correctly denies), the same
+    // "let the bridge decide, don't pre-filter by role" posture every
+    // other guard-backed route in this phase uses.
+    router.get_with_auth("/qa/mine", "My QA scorecard", |_req, _params, auth| match qa_review_table().guarded_snapshot(auth, "") {
+        Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+        Err(e) => nirdosha_guard_screens::guard_error_response(e),
+    })
+}

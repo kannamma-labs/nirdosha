@@ -1,0 +1,81 @@
+//! M10 Watchlist & Screening Management (`screen.md` module 10, 6
+//! screens). Policies: `40_scoring.nir`. RTM live-demo plan Phase B
+//! batch 2.
+//!
+//! Real, guard-enforced: 10.2 hit disposition -- `analyst-disposition-hit`'s
+//! real `field_policy { allowed(disposition, rationale) forbidden
+//! (subject_ref, list_id, match_score) }` and `requires
+//! invariant(rationale_present)`, wired via `crud_screens!`'s proven
+//! `guard.update_fields` pattern.
+//!
+//! **Disclosed real gap, not a bug in this screen**: no `guard_policy!`
+//! anywhere in this corpus grants any human role a plain `read` on
+//! `screening_hit` (`screening-check` reads a different resource,
+//! `sanctions_lists`; `screening-write-hit` is `SvcScreening`-only
+//! create) -- see `bridge.nir::ScreeningHitRow`'s own doc comment. This
+//! screen's list/detail routes are real and correctly guard-enforced;
+//! they will correctly deny-by-default for every human role until a
+//! later phase adds a real read grant to the corpus itself (not this
+//! screen's call to make).
+//!
+//! Not built this pass: 10.1 watchlist browser, 10.3 list upload wizard,
+//! 10.4 matcher config, 10.5/10.6 PEP/internal-list management -- each
+//! names `screen-field-mappings.md` dataset shapes with no
+//! `#[dataset]`/typed-row backing; `matcher!`'s two real catalog records
+//! (`sanctions`, `internal_watchlist`, `40_scoring.nir:33-46`) are
+//! rendered read-only below, role-gated (not policy-gated: no
+//! `guard_policy!` covers `"matcher"` reads either, same disclosed
+//! posture `m08_rules.nir` uses for `window!`/`model_artifact!`).
+
+use crate::bridge::screening_hit_table;
+use crate::bridge::ScreeningHitRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_screening_hit_store() -> &'static SharedTable<i64, ScreeningHitRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, ScreeningHitRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_screening_hit_screens,
+    entity: ScreeningHitRow,
+    store: unused_screening_hit_store,
+    path: "/screening/hits",
+    fields: [
+        hit_id: String,
+        tenant_id: String,
+        subject_ref: String,
+        list_id: String,
+        match_score: f64,
+        disposition: String,
+        rationale: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: screening_hit_table,
+        purpose: "AmlInvestigation",
+        update_fields: [
+            disposition: String,
+            rationale: String,
+        ],
+    },
+}
+
+/// Read-only `matcher!` catalog view -- role-gated (`PolicyEngineer`,
+/// `Admin`) rather than policy-gated, disclosed in this module's own
+/// doc comment. Real values transcribed from `40_scoring.nir:33-46`, not
+/// generated.
+pub fn mount_matcher_catalog(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::PolicyEngineer>("/screening/matchers", "Matcher catalog", |_req, _params, _proof| {
+        nirdosha_rt::Response::json(200, &serde_json::json!({
+            "note": "role-gated (PolicyEngineer), not policy-gated: no guard_policy! covers a \"matcher\" read anywhere in this corpus.",
+            "matchers": [
+                { "name": "sanctions", "algorithm": "fuzzy_jaro_winkler", "threshold": 0.92, "lists": ["ofac_sdn", "un_consolidated", "eu_fsf"] },
+                { "name": "internal_watchlist", "algorithm": "fuzzy_jaro_winkler", "threshold": 0.95, "lists": ["internal_watch", "pep_global"] },
+            ],
+        }))
+    })
+}

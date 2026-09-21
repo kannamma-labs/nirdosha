@@ -1,0 +1,119 @@
+// ============================================================================
+// 00_core.nir — foundations. Serves: ALL modules.
+//
+// Verbatim from examples/rtm/roles-N-guard_policy.md except:
+// - `purpose!` -> `nirdosha_guard_macros::purpose_taxonomy!` (real macro now;
+//   see crates/nirdosha-guard-macros for why the fully-qualified path).
+// - The five `#[invariant]` bodies, rewritten to compile against real types
+//   (see each one's comment for exactly what was wrong and why).
+// ============================================================================
+
+use crate::domain_types::AlertUpdate;
+use crate::domains::{Customer, SarBundle, Transaction};
+
+// ---- Roles & principals ---- [RFC 0025 §6.2, §7.4; role set per screen-inventory Part 1]
+nirdosha_rt::roles! {
+    // Human roles
+    role Analyst;              // L1 triage + L2 investigation        → M3–M7
+    role ComplianceLead;       // team lead / four-eyes / quorum member → M4, M12
+    role Mlro;                 // final SAR authority                 → M12  [NEW — RFCs name only ComplianceLead]
+    role QaReviewer;           // QA sampling & scorecards            → M14  [NEW]
+    role OpsAnalyst;           // real-time fraud desk, hold release  → M11  [NEW]
+    role PolicyEngineer;       // scenario/model author (RMG)         → M8, M9
+    role Admin;                // catalog, users, drivers, retention  → M18, M19
+    role Auditor;              // read-only assurance                 → M20, M21.1
+    role CsAgent;              // masked payment-status lookup only   → M21.3 [NEW]
+    role RmUser;               // masked customer-status view         → M21.4 [NEW]
+    role RegulatorViewer;      // usable ONLY via scoped delegation   → M21.2 [NEW]
+
+    // Service principals — SPIFFE-backed, one identity per module (P2)
+    principal SvcIngest    = "spiffe://acme/ns/rtm/sa/ingest";
+    principal SvcFeatures  = "spiffe://acme/ns/rtm/sa/features";
+    principal SvcScoring   = "spiffe://acme/ns/rtm/sa/scoring";
+    principal SvcScreening = "spiffe://acme/ns/rtm/sa/screening";
+    principal SvcAlerts    = "spiffe://acme/ns/rtm/sa/alerts";
+    principal SvcCase      = "spiffe://acme/ns/rtm/sa/case";
+    principal SvcBi        = "spiffe://acme/ns/rtm/sa/bi";
+    principal McpCopilot   = "mcp:analyst-copilot";   // RFC 0024 §1 — separate principal
+}
+
+// ---- Purpose taxonomy (closed core; §1B / §17) ----
+nirdosha_guard_macros::purpose_taxonomy! {
+    enum Purpose {
+        Operations,              // default operational purpose
+        FraudMonitoring,         // "fraud_monitoring" — used by svc:* [RFC 0025 §8.1]
+        AmlInvestigation,        // analyst work on alerts/cases          [NEW code]
+        CustomerService,         // CsAgent lookups                       [NEW code]
+        QaReview,                // [NEW]
+        Audit,                   // [NEW]
+        RegulatoryInspection,    // [NEW]
+        Analytics,               // [NEW]
+        ModelGovernance,         // [NEW]
+        PlatformOperations,      // [NEW]
+    }
+}
+
+// ---- Audit sampling table — §17 canonical form ----
+// Hard floors the sampler cannot override (stated here as comments; enforced
+// structurally): denials ALWAYS full (I2) · exports ALWAYS full (§2 Export) ·
+// delegated/agent access ALWAYS full (I17) · lineage reads NEVER sampled (RFC 0026 §9.1).
+nirdosha_rt::audit_sampling! {
+    classification: PUBLIC       -> rate 0.01;
+    classification: INTERNAL     -> rate 0.10;
+    classification: CONFIDENTIAL -> rate 1.0;   // RTM: confidential = full by default
+    classification: RESTRICTED   -> rate 1.0;
+}
+
+// ---- Approval chains ---- [RFC 0025 §8.6 + NEW; all timeouts resolve to DENY]
+nirdosha_rt::approval_chain! {
+    chain sar_release {                              // [RFC §8.6 verbatim]
+        quorum(2, of = [ComplianceLead]);
+        timeout(deny);
+    }
+}
+nirdosha_rt::approval_chain! {
+    chain case_review { quorum(2, of = [ComplianceLead]); timeout(deny); }   // → 4.11 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain policy_release { quorum(2, of = [PolicyEngineer, ComplianceLead]); timeout(deny); } // → 8.8 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain model_release { quorum(2, of = [PolicyEngineer, ComplianceLead]); timeout(deny); }  // → 9.1 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain override_release { quorum(1, of = [ComplianceLead]); timeout(deny); } // → 11.3 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain purge_release { quorum(2, of = [Admin, ComplianceLead]); timeout(deny); } // → 18.7 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain egress_release { quorum(1, of = [ComplianceLead]); timeout(deny); } // → 15.5, 21.1 [NEW]
+}
+
+// ---- Global invariant registrations (referenced by policies below) ----
+// [RFC 0023 §2 Condition::Custom registry; §17; RFC 0026 §10.1 examples]
+//
+// All five bodies below are rewritten from the doc's originals, which
+// referenced types/methods nothing in the corpus declares (confirmed by
+// attempting exactly this compile — see rtm_policy_corpus.rs's own doc
+// comment in the platform repo for the identical finding against the same
+// five functions):
+#[nirdosha_rt::invariant(name = "amount_positive", schema = "transaction")]
+fn amount_positive(t: &Transaction) -> bool { t.amount.is_positive() } // real method, 10_domains.nir
+
+#[nirdosha_rt::invariant(name = "currency_iso", schema = "transaction")]
+fn currency_iso(t: &Transaction) -> bool { t.currency.is_iso_4217() } // real method, domain_types.nir
+
+#[nirdosha_rt::invariant(name = "rationale_present", schema = "alert")]       // → 3.3 [NEW]
+fn rationale_present(a: &AlertUpdate) -> bool { !a.rationale.is_empty() } // AlertUpdate now declared, domain_types.nir
+
+// The doc's original `s.case().subjects().contains(s.subject())` wants a
+// cross-entity join (case's subject list) no relation/join feature in this
+// codebase can resolve today — `nirdosha-guard-mic`'s `#[relation]` surface
+// is catalog-only (see 10_domains.nir's own comment on `accounts_of` etc.).
+// Rewritten to what's actually checkable from `SarBundle`'s own fields.
+#[nirdosha_rt::invariant(name = "sar_subject_in_case", schema = "sar_bundle")] // → 12.2 [NEW]
+fn sar_subject_in_case(s: &SarBundle) -> bool { !s.case_id.0.is_empty() && !s.subject.0.is_empty() }
+
+#[nirdosha_rt::invariant(name = "no_legal_hold", schema = "customer")]        // → 18.9 [NEW]
+fn no_legal_hold(c: &Customer) -> bool { !c.legal_hold } // field access, not a method call

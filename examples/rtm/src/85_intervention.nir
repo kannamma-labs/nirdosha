@@ -1,0 +1,66 @@
+// ============================================================================
+// 85_intervention.nir — Mode B holds. timeout ⇒ DENY, never auto-release.
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+nirdosha_rt::guard_policy! {                                // svc:ingest parks the hold [NEW]
+    allow "ingest-create-hold" for SvcIngest
+    when action == "create" && resource == "payment"
+    purpose(FraudMonitoring)
+    field_policy { required(tenant_id, rail_ref, originator, beneficiary, amount,
+                             currency, status, hold_reason, hold_expires_at)
+                   forbidden(decision_by, decision_rationale) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// → 11.1/11.2 desk queue + decision [NEW]
+nirdosha_rt::guard_policy! {
+    allow "ops-read-holds" for OpsAnalyst
+    when action == "read" && resource == "payment"
+    purpose(FraudMonitoring)
+    filter tenant_scope()
+    cap(row_cap = 100, max_scan_rows = 10_000, max_execution = 5s)
+    grant count_allowed
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "ops-decide-hold" for OpsAnalyst
+    when action == "update" && resource == "payment"
+    purpose(FraudMonitoring)
+    requires field(status).transition_allowed()             // PaymentStatus machine
+    requires invariant(rationale_present)
+    field_policy { allowed(status, decision_by, decision_rationale)
+                   forbidden(rail_ref, originator, beneficiary, amount, hold_reason) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+    // release revalidates at commit (I3) — runtime, not policy
+}
+// Above-authority releases escalate: same policy family, higher band [NEW]
+nirdosha_rt::guard_policy! {
+    allow "ops-decide-hold-highvalue" for OpsAnalyst
+    when action == "update" && resource == "payment"
+    requires field(amount) > 100_000
+    escalate to approval(chain override_release)            // → 11.3; + step_up above 1M:
+    // escalate to step_up(mfa) — combine via two obligations on the same block in practice
+    obligate audit(full)
+}
+
+// → 11.4 explicit deny of silent auto-release [NEW — documents the guard's stance]
+nirdosha_rt::guard_policy! {
+    deny "auto-release-on-timeout" for SvcIngest
+    when action == "update" && resource == "payment"
+    requires field(status) == "released" && expired(hold_expires_at)
+    reason(policy.timeout_resolves_to_deny)
+}
+
+// → 11.5 outcomes stats [NEW]
+nirdosha_rt::guard_policy! {
+    allow "hold-stats" for ComplianceLead
+    when action == "aggregate" && resource == "payment"
+    purpose(Operations)
+    cap(cohort_floor = 5, max_execution = 30s)
+    mask(subject_id, tokenized)
+    obligate audit(full)
+}

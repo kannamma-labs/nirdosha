@@ -1,0 +1,97 @@
+//! RTM live-demo plan: the actual running server. `cargo run --bin
+//! rtm-serve`, then open http://localhost:8080/.
+//!
+//! Deliberately not `main.nir`'s binary: that one exists solely to prove
+//! the policy/catalog corpus itself links and registers (see its own
+//! doc comment) and stays that way — this is the separate `[[bin]]`
+//! the live-demo plan named for actually serving screens.
+//!
+//! All 22 `screen.md` modules mounted here (Phase B complete): M1
+//! (avatar login), M2 (dashboards + app shell + landing), M3 (alerts:
+//! queue/detail/disposition, board, bulk reassign), M4 (cases:
+//! queue/detail/create/transition, board, four-eyes closure), M5
+//! (customers), M6 (transactions, Phase A), M7 (lineage explorer +
+//! auditor scope, real `GraphStore`), M8 (rules/windows + threshold
+//! migrate), M9 (ML models + swap), M10 (screening hit disposition +
+//! matcher catalog), M11 (payment hold queue/decision + high-value
+//! override + outcomes stats), M12 (SAR draft/edit/MLRO-decide/export),
+//! M13 (risk config refdata + migrate), M14 (QA reviews + self
+//! scorecard), M15 (reporting dashboard + governed export), M16
+//! (notifications), M17 (static knowledge base), M18 (admin: role
+//! grant, delegation mint, driver migrate, DSAR export), M19 (IT ops:
+//! pipeline-health catalog panel + ingest-admin replay), M20
+//! (cross-resource audit trail under `purpose(Audit)`), M21 (CS
+//! payment-status + RM restriction-band masked views), M22 (self
+//! profile + support tickets).
+
+fn main() {
+    let router = rtm::m02_dashboards::mount_app_shell(nirdosha_rt::Router::new(|_req| nirdosha_rt::Auth::login("anon", &[])));
+    let router = rtm::m01_auth::mount_login(router);
+    let router = rtm::m01_auth::mount_avatar_picker(router);
+    let router = rtm::m02_dashboards::mount_l1_dashboard(router);
+    let router = rtm::m02_dashboards::mount_team_dashboard(router);
+    // `mount_*_board`'s own literal `/alerts/board`, `/cases/board`
+    // registered BEFORE the sibling `crud_screens!` mount: `Router::
+    // dispatch` matches in registration order, and `crud_screens!`'s own
+    // `/{id}` wildcard would otherwise swallow the literal `board`
+    // segment as if it were a row id (found live, by this exact curl
+    // check — `guarded_get(..., "board")` correctly returned 404 for a
+    // nonexistent row, which is what made the ordering bug visible
+    // rather than silently serving the wrong screen). Same reasoning
+    // applies to every `{id}`-wildcard `crud_screens!` mount below: its
+    // sibling literal-path routes (propose/confirm, matcher catalog,
+    // simulations) are mounted first.
+    let router = rtm::m03_alerts::mount_alert_board(router);
+    let router = rtm::m03_alerts::mount_alert_screens(router);
+    let router = rtm::m03_alerts::mount_bulk_alert_reassign(router);
+    let router = rtm::m04_cases::mount_case_board(router);
+    let router = rtm::m04_cases::mount_case_screens(router);
+    let router = rtm::m04_cases::mount_case_four_eyes(router);
+    let router = rtm::m05_customer::mount_customer_screens(router);
+    let router = rtm::m06_transactions::mount_transaction_screens(router);
+    let router = rtm::m07_network::mount_lineage_explore(router);
+    let router = rtm::m07_network::mount_lineage_audit(router);
+    let router = rtm::m08_rules::mount_window_migrate(router);
+    let router = rtm::m08_rules::mount_simulation_config(router);
+    let router = rtm::m08_rules::mount_window_config_screens(router);
+    let router = rtm::m09_ml_models::mount_model_swap(router);
+    let router = rtm::m09_ml_models::mount_model_screens(router);
+    let router = rtm::m10_screening::mount_matcher_catalog(router);
+    let router = rtm::m10_screening::mount_screening_hit_screens(router);
+    let router = rtm::m11_intervention::mount_hold_stats(router);
+    let router = rtm::m11_intervention::mount_hold_decision(router);
+    let router = rtm::m11_intervention::mount_hold_queue(router);
+    let router = rtm::m11_intervention::mount_hold_detail(router);
+    // `mount_sar_mlro_decision`/`mount_sar_export`'s own literal
+    // `/sar/{id}/decide`, `/sar/export/propose`, `/sar/export/confirm`
+    // routes, mounted BEFORE `mount_sar_screens`'s `crud_screens!`
+    // `/{id}` wildcard — same ordering reasoning as every board mount
+    // above.
+    let router = rtm::m12_sar::mount_sar_mlro_decision(router);
+    let router = rtm::m12_sar::mount_sar_export(router);
+    let router = rtm::m12_sar::mount_sar_screens(router);
+    let router = rtm::m13_risk_config::mount_refdata_migrate(router);
+    let router = rtm::m13_risk_config::mount_refdata_screens(router);
+    let router = rtm::m14_qa::mount_qa_self_scorecard(router);
+    let router = rtm::m14_qa::mount_qa_review_screens(router);
+    let router = rtm::m15_reporting::mount_governed_export(router);
+    let router = rtm::m15_reporting::mount_mis_dashboard(router);
+    let router = rtm::m16_notifications::mount_notification_feed(router);
+    let router = rtm::m18_admin::mount_role_grant(router);
+    let router = rtm::m18_admin::mount_delegation_mint(router);
+    let router = rtm::m18_admin::mount_driver_migrate(router);
+    let router = rtm::m18_admin::mount_dsar_export(router);
+    let router = rtm::m19_it_ops::mount_it_ops_dashboard(router);
+    let router = rtm::m19_it_ops::mount_ingest_admin(router);
+    let router = rtm::m20_audit::mount_audit_trail(router);
+    let router = rtm::m21_restricted::mount_cs_payment_status(router);
+    let router = rtm::m21_restricted::mount_rm_restriction_view(router);
+    let router = rtm::m21_restricted::mount_auditor_portal(router);
+    let router = rtm::m22_misc::mount_self_profile(router);
+    let router = rtm::m22_misc::mount_support_ticket_screens(router);
+    let router = rtm::m17_knowledge::mount_knowledge(router);
+    println!("rtm-serve — RTM live demo (Phase B COMPLETE: all 22 modules mounted)");
+    println!("  guard_policy! registrations : {}", nirdosha_guard_registry::POLICIES.len());
+    println!("  listening on http://localhost:8080/");
+    router.serve(8080);
+}

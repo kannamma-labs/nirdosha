@@ -210,6 +210,7 @@ injected proof parameter does not resolve.
 | `examples/rt-payroll` | compliant program; all contract forms on display; passes the default (Stage 2) gate |
 | `examples/rt-payroll-lying` | zero-dependency lying program; plain cargo runs it, nirdosha refuses it |
 | `examples/rt-payroll-pure-chain` | the *indirect* lie: Stage 1 (`--fast`) passes it, the Stage 2 default refuses with the chain |
+| `examples/rtm` | full vertical slice in one `.nir` file: deterministic ingestion → RFC 0023 data guard (classify/mask/guard_policy) → `#[contract]` policy engine → alert store → served `crud_screens!`/`categorical_actions!`/`dashboard!` UI; passes the default (Stage 2) gate |
 
 ### Certificates: `nirdosha.certificate/v1`
 

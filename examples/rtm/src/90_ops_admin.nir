@@ -1,0 +1,208 @@
+// ============================================================================
+// 90_ops_admin.nir — everything-is-a-catalog-mutation (P6). No runtime YAML (N-A2).
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+// → M18.1/18.2 runtime user↔role grants (roles themselves are compiled; this is assignment)
+nirdosha_rt::guard_policy! {
+    allow "admin-grant-role" for Admin
+    when action in ["create", "update", "delete"] && resource == "user_role"
+    purpose(PlatformOperations)
+    escalate to approval(chain policy_release)              // maker≠checker
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// → M18.8 delegate/proxy = scoped delegation mint [RFC 0026 §7.5 semantics; NEW policy]
+nirdosha_rt::guard_policy! {
+    allow "admin-mint-delegation" for Admin
+    when action == "delegate" && resource == "delegation_token"
+    purpose(PlatformOperations)
+    cap(ttl_max = 90d)                                      // delegate cover ≤ 90d
+    obligate audit(full)                                    // I11: delegation fully audited
+}
+// Regulator inspection = same mint path with RegulatorViewer principal,
+// exact-scope + TTL + full audit per §9.4 (→ M21.2).
+
+// → M13.2/13.5 reference data & global params [NEW]
+nirdosha_rt::guard_policy! {
+    allow "refdata-migrate" for Admin
+    when action == "migrate" && resource in ["refdata", "country_risk", "global_params"]
+    purpose(PlatformOperations)
+    escalate to approval(chain policy_release)
+    obligate audit(full)
+}
+
+// → M18.7 retention purge — data_contract declares; purge executes dual-controlled
+// [RFC 0026 §10.1 — Phase 4 macro; retention floor enforced by contract]
+nirdosha_rt::data_contract! {
+    contract txn_v2 {
+        entity = "transaction";
+        owner = "payments-platform";
+        schema_version = "2.1";
+        quality { invariant(amount_positive), invariant(currency_iso) };
+        retention = 7y;
+        downstream_consumers = [
+            node(runtime, "svc:bi"),
+            node(runtime, "regulatory_archive"),
+            node(data, "rt_fraud_v1", "1.3.0"),
+        ];
+    }
+}
+nirdosha_rt::guard_policy! {
+    allow "retention-purge" for Admin
+    when action == "delete" && resource == "refdata_archive"
+    purpose(PlatformOperations)
+    requires invariant(no_legal_hold)
+    escalate to approval(chain purge_release)               // quorum(2); type-"PURGE" confirm at runtime
+    cap(affected_rows = 1_000_000)
+    obligate audit(full)
+}
+
+// → M18.9 DSAR = export-with-hold-check [NEW]
+nirdosha_rt::guard_policy! {
+    allow "dsar-export" for Admin
+    when action == "export" && resource == "customer"
+    purpose(Operations)
+    requires invariant(no_legal_hold)
+    destination(export-file)
+    escalate to approval(chain egress_release)
+    obligate audit(full)
+}
+
+// → M19 driver install/upgrade/rollback = catalog mutation [RFC §7.5; §11 swap procedure]
+nirdosha_rt::guard_policy! {
+    allow "driver-migrate" for Admin
+    when action == "migrate" && resource == "driver"
+    purpose(PlatformOperations)
+    escalate to approval(chain policy_release)              // V5/V8 re-run gates the apply
+    obligate audit(full)
+}
+
+// → M22.1 self-profile [NEW]
+nirdosha_rt::guard_policy! {
+    allow "self-update-profile" for Analyst
+    when action == "update" && resource == "user_profile"
+    filter subject_scope()                                  // own row only
+    field_policy { allowed(locale, tz, notif_prefs) forbidden(user_id) }
+    cap(affected_rows = 1)
+    obligate audit(sampled)
+}
+
+// → M22.1 self-profile read [NEW]
+//   `menus.toml` chrome `profile` and route `/preferences/profile`
+//   declare `read`/`user_profile` with `filter = "subject_scope"`.
+nirdosha_rt::guard_policy! {
+    allow "self-read-profile" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "user_profile"
+    filter subject_scope()
+    cap(row_cap = 1)
+    obligate audit(sampled)
+}
+
+// → M22.2 support ticket [NEW]
+//   Opened to all human roles so the chrome `profile → Help & Support`
+//   route (`/help/support`, guard = create/support_ticket, AllHuman)
+//   resolves to a real policy record.
+nirdosha_rt::guard_policy! {
+    allow "any-create-ticket" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "create" && resource == "support_ticket"
+    purpose(Operations)
+    field_policy { required(tenant_id, category, priority, description) }
+    cap(affected_rows = 1)
+    obligate audit(sampled)
+}
+
+// → M16 notification feed [NEW]
+//   `menus.toml` declares `read`/`notification` for the bell chrome and
+//   `/notifications` route; this is the policy record V5 resolves to.
+nirdosha_rt::guard_policy! {
+    allow "notification-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "notification"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+// → M17 static knowledge [NEW]
+//   `menus.toml` declares `read`/`static_docs` for 17.1-17.3 and the
+//   About route (`/about`, 22.3).
+nirdosha_rt::guard_policy! {
+    allow "static-docs-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "static_docs"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// → M2 saved views [NEW]
+//   `menus.toml` chrome `saved_views` + route `/preferences/saved-views`
+//   declare `read`/`saved_view`.
+nirdosha_rt::guard_policy! {
+    allow "saved-view-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "saved_view"
+    purpose(Operations)
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+
+// → M16 shift handover [NEW]
+//   `menus.toml` `/handover` declares `read`/`handover` for Analyst,
+//   ComplianceLead and OpsAnalyst.
+nirdosha_rt::guard_policy! {
+    allow "handover-read" for Analyst, ComplianceLead, OpsAnalyst
+    when action == "read" && resource == "handover"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// → M20 audit log [NEW]
+//   `menus.toml` 20.1/20.2/20.3 and sub-route `/alerts/{id}/audit`
+//   declare `read`/`audit_record` for Auditor, Admin and Mlro.
+nirdosha_rt::guard_policy! {
+    allow "audit-record-read" for Auditor, Admin, Mlro
+    when action == "read" && resource == "audit_record"
+    purpose(Audit)
+    filter tenant_scope()
+    cap(row_cap = 1_000, max_scan_rows = 500_000, max_execution = 60s)
+    obligate audit(full)
+}
+
+// → M6.7 Structuring Visual [NEW; screen `interim`, dataset GR.agg_bins pending]
+//   `menus.toml` `/transactions/structuring` declares `read`/`agg_bins` for
+//   Analyst. Precomputed aggregation bins, no row-level export — the
+//   policy is real now so V5 resolves; the dataset is the disclosed gap.
+nirdosha_rt::guard_policy! {
+    allow "agg-bins-read" for Analyst
+    when action == "read" && resource == "agg_bins"
+    purpose(AmlInvestigation)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+// → M8.1 Scenario Library [NEW; screen `interim`, dataset CATALOG.catalog_projection pending]
+//   `menus.toml` `/rules` declares `read`/`catalog_item` for the four
+//   roles the screen's own `roles` list names. Rules ARE .nir source;
+//   the library view is a compiled-metadata read only (no write path).
+nirdosha_rt::guard_policy! {
+    allow "catalog-item-read" for PolicyEngineer, ComplianceLead, Auditor, Admin
+    when action == "read" && resource == "catalog_item"
+    purpose(ModelGovernance)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+// → M5.6 Related Parties / UBO [NEW; screen `interim`, dataset PG.customer_rel pending]
+//   `menus.toml` sub-route `/customers/{id}/parties` declares
+//   `read`/`customer_rel` for Analyst. Relationship rows between demo
+//   customers only — same scope the customer read already carries.
+nirdosha_rt::guard_policy! {
+    allow "customer-rel-read" for Analyst
+    when action == "read" && resource == "customer_rel"
+    purpose(AmlInvestigation)
+    filter tenant_scope()
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}

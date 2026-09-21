@@ -1,0 +1,70 @@
+//! M6 Transactions (screen.md 6.1/6.2) — [RFC §8.1] search/detail, plus
+//! [§6.6] the analyst flag-transaction update. RTM live-demo plan's
+//! Phase A/B proof module.
+//!
+//! List/export/JSON-list/detail-by-id are real, guard-enforced reads
+//! through `nirdosha_guard_screens::GuardedTable` (`guard:` below) —
+//! per-request `analyst-search-transaction`/`analyst-open-transaction`
+//! evaluation against `rtm`'s own linked-in corpus, tenant-scoped,
+//! masked, capped. `update_fields` wires a real, narrower guarded update
+//! for `analyst-flag-transaction`'s own `field_policy { allowed
+//! (analyst_flag, analyst_flag_reason) forbidden(tenant_id, subject_id,
+//! amount, currency, status, occurred_at, card_token) }` — see
+//! `bridge.nir`'s `TransactionRow` doc comment for why those two fields
+//! exist there and not on the corpus's own `Transaction` struct.
+//!
+//! `create`/`delete` stay unwired for `guard:` — no human role has a
+//! `guard_policy!` allow to create or delete a transaction at all
+//! (`ingest-create-txn` is `SvcIngest`-only; there is no per-row delete
+//! policy anywhere in this corpus) — see `crud_screens.rs`'s
+//! `GuardConfig` doc comment. `store:` only exists because
+//! `crud_screens!` requires one unconditionally even though nothing
+//! guarded ever calls it. Every verb is `public`, not role-gated,
+//! because `crud_screens!`'s `requires role "..."` cannot name any real
+//! RTM role at all today — see `bridge.nir`'s module doc comment for why
+//! (a snake_case-vs-PascalCase mismatch between
+//! `nirdosha-contract-core`'s role-name grammar and every `00_core.nir`
+//! role).
+
+use crate::bridge::transaction_table;
+use crate::bridge::TransactionRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_transaction_store() -> &'static SharedTable<i64, TransactionRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, TransactionRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_transaction_screens,
+    entity: TransactionRow,
+    store: unused_transaction_store,
+    path: "/transactions",
+    fields: [
+        txn_id: String,
+        tenant_id: String,
+        subject_id: String,
+        account_id: String,
+        amount: f64,
+        currency: String,
+        status: String,
+        occurred_at: i64,
+        channel: String,
+        merchant_id: String,
+        card_token: String,
+        device_id: String,
+        geo: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: transaction_table,
+        purpose: "AmlInvestigation",
+        update_fields: [
+            analyst_flag: bool,
+            analyst_flag_reason: String,
+        ],
+    },
+}

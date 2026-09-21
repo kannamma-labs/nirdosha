@@ -1,0 +1,73 @@
+// ============================================================================
+// 96_restricted_views.nir — coarse, masked, destination-controlled views.
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+// → 21.3 CS status lookup: status band + scripted actions ONLY.
+// national_id, name, amounts — absent. sar/case/alert: denied in 65_sar.
+nirdosha_rt::guard_policy! {
+    allow "cs-payment-status" for CsAgent
+    when action == "read" && resource == "payment"
+    purpose(CustomerService)
+    filter tenant_scope()
+    cap(row_cap = 1)
+    field_policy { allowed(status, hold_expires_at, currency)          // coarse band only
+                   forbidden(amount, rail_ref, originator, beneficiary,
+                             hold_reason, decision_by, decision_rationale) }
+    obligate audit(full)                                    // every CS peek is auditable
+}
+
+// → 21.4 RM view: restriction band + required action only
+nirdosha_rt::guard_policy! {
+    allow "rm-restriction-view" for RmUser
+    when action == "read" && resource == "customer"
+    purpose(CustomerService)
+    filter tenant_scope()
+    cap(row_cap = 1)
+    field_policy { allowed(restriction_status)              // single field
+                   forbidden(national_id, name, dob, address, phone, risk_rating,
+                             pep_flag, sanctions_status, expected_profile) }
+    obligate audit(full)
+}
+
+// → 21.1 Auditor: broad READ, zero WRITE, egress gated
+nirdosha_rt::guard_policy! {
+    allow "auditor-read" for Auditor
+    when action == "read" && resource in ["alert", "case", "transaction",
+                                          "customer", "sar_bundle", "payment",
+                                          "screening_hit", "qa_review"]
+    purpose(Audit)
+    filter tenant_scope()
+    field_policy { forbidden(sar_linked) }                  // existence still controlled
+    cap(row_cap = 1_000, max_scan_rows = 500_000, max_execution = 60s)
+    obligate audit(full)                                    // read-only assurance, fully audited
+}
+nirdosha_rt::guard_policy! {
+    deny "auditor-no-write" for Auditor
+    when action in ["create", "update", "delete", "migrate"]
+    reason(audit.read_only_principal)
+}
+nirdosha_rt::guard_policy! {                                // auditor pack export → 20.3
+    allow "auditor-export" for Auditor
+    when action == "export" && resource in ["audit_pack", "sar_bundle"]
+    purpose(Audit)
+    destination(export-file)
+    escalate to approval(chain egress_release)
+    obligate audit(full)
+}
+
+// → 21.2 Regulator: reachable ONLY through scoped delegation mint (90_ops_admin);
+// base role has no grants — deny-by-default is the control. Explicit read window:
+nirdosha_rt::guard_policy! {
+    allow "regulator-scoped-read" for RegulatorViewer
+    when action == "read" && resource in ["case", "sar_bundle", "transaction"]
+    purpose(RegulatoryInspection)
+    filter delegation_scope()                               // exact-scope per §9.4.1
+    cap(row_cap = 100, max_scan_rows = 10_000)
+    obligate audit(full)                                    // §9.4.5: full, never sampled
+}
+nirdosha_rt::guard_policy! {
+    deny "regulator-no-export" for RegulatorViewer
+    when action == "export"
+    reason(regulatory.session_recording_only)
+}

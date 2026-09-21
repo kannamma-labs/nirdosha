@@ -1,0 +1,47 @@
+// ============================================================================
+// 95_qa.nir — QA role surface + SoD denies both directions.
+// `[NEW — no RFC machinery exists]`. Verbatim from
+// examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+nirdosha_rt::guard_policy! {                                // → 14.1/14.2 read closed items
+    allow "qa-read-closed" for QaReviewer
+    when action == "read" && resource in ["alert", "case"]
+    purpose(QaReview)
+    filter tenant_scope()
+    field_policy { forbidden(sar_linked) }
+    cap(row_cap = 100, max_scan_rows = 50_000)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {                                // → 14.2/14.4 scorecard + feedback
+    allow "qa-write-review" for QaReviewer
+    when action in ["create", "update"] && resource == "qa_review"
+    requires field(status).transition_allowed()             // QaReviewStatus machine
+    field_policy { required(item_ref, rubric_scores, result)
+                   forbidden(item_ref_content) }            // reads originals; never edits them
+    cap(affected_rows = 1)
+    obligate audit(full)
+    obligate notify(channel("qa-inbox"))
+}
+
+// SoD: QA never dispositions; analysts never score [NEW — conformance SoD probes]
+nirdosha_rt::guard_policy! {
+    deny "qa-no-disposition" for QaReviewer
+    when action == "update" && resource == "alert"
+    reason(sod.qa_separation)
+}
+nirdosha_rt::guard_policy! {
+    deny "analyst-no-qa" for Analyst
+    when action in ["create", "update"] && resource == "qa_review"
+    reason(sod.qa_separation)
+}
+
+// → 14.3 analyst sees own scorecard [NEW]
+nirdosha_rt::guard_policy! {
+    allow "self-read-qa" for Analyst
+    when action == "read" && resource == "qa_review"
+    filter subject_scope()
+    cap(row_cap = 50)
+    obligate audit(full)
+}

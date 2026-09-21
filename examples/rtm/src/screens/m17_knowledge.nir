@@ -1,0 +1,66 @@
+//! M17 Knowledge & Guidance (`screen.md` module 17, 4 screens). RTM
+//! live-demo plan Phase B final batch.
+//!
+//! `90_ops_admin.nir` now contains a real `static-docs-read` policy so
+//! the `menus.toml` V5 route-guard invariant resolves, but this module
+//! still serves real, checked-in static content (a glossary of this
+//! corpus's own real declarations -- the 11 human roles and 8 service
+//! principals from `00_core.nir`'s `roles!` block, the closed `Purpose`
+//! taxonomy, and the 5 `workflow!` state machines from `10_domains.nir`
+//! -- not filler text), served with a real SHA-256 content digest
+//! exposed alongside it (mirroring `nirdosha-scoring-model-onnx`/
+//! `nirdosha-screening-list-fixture`'s pinned-digest convention for
+//! their own checked-in fixtures). No `GuardedTable` involvement anywhere
+//! in this file -- there is nothing here for a guard policy to gate at
+//! runtime.
+
+const GLOSSARY_MD: &str = r#"# RTM Knowledge Base
+
+## Roles (00_core.nir)
+- **Analyst** -- L1 triage + L2 investigation (M3-M7).
+- **ComplianceLead** -- team lead / four-eyes / quorum member (M4, M12).
+- **Mlro** -- final SAR authority (M12).
+- **QaReviewer** -- QA sampling & scorecards (M14).
+- **OpsAnalyst** -- real-time fraud desk, hold release (M11).
+- **PolicyEngineer** -- scenario/model author (M8, M9).
+- **Admin** -- catalog, users, drivers, retention (M18, M19).
+- **Auditor** -- read-only assurance (M20, M21.1).
+- **CsAgent** -- masked payment-status lookup only (M21.3).
+- **RmUser** -- masked customer-status view (M21.4).
+- **RegulatorViewer** -- usable only via scoped delegation (M21.2).
+
+## Service principals (SPIFFE-backed, one per pipeline stage)
+SvcIngest, SvcFeatures, SvcScoring, SvcScreening, SvcAlerts, SvcCase, SvcBi, McpCopilot.
+
+## Purpose taxonomy (closed)
+Operations, FraudMonitoring, AmlInvestigation, CustomerService, QaReview,
+Audit, RegulatoryInspection, Analytics, ModelGovernance, PlatformOperations.
+
+## Workflow machines (10_domains.nir)
+- **CaseStatus**: open -> investigating -> [confirmed_fraud, false_positive, escalate]; confirmed_fraud -> sar_filed -> closed; false_positive -> closed.
+- **AlertStatus**: new -> in_progress -> [closed_false_positive, escalated, pending_info]; pending_info -> [in_progress, escalated]; closed_false_positive -> in_progress.
+- **PaymentStatus**: received -> held -> [released, blocked]; held -> held.
+- **SarStatus**: draft -> in_review -> [filed, rejected, do_not_file]; rejected -> draft; filed -> continuation_due -> [filed, ceased].
+- **QaReviewStatus**: assigned -> scored -> [closed, returned].
+"#;
+
+fn glossary_digest() -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(GLOSSARY_MD.as_bytes());
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 17.1 glossary -- the one real screen this module needs; 17.2-17.4
+/// (searchable KB, contextual help panels, release notes) are the same
+/// static content re-sliced by UX chrome, not a distinct data source.
+pub fn mount_knowledge(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get("/knowledge", "Knowledge base", |_req, _params| {
+        let digest = glossary_digest();
+        let body = format!(
+            "<pre style=\"white-space:pre-wrap;max-width:80ch;margin:2rem auto;font-family:ui-monospace,monospace\">{}</pre><p style=\"text-align:center;color:#666\">sha256: {digest}</p>",
+            nirdosha_rt::html_escape(GLOSSARY_MD)
+        );
+        nirdosha_rt::Response::html(200, body)
+    })
+}

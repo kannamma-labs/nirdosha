@@ -1,0 +1,134 @@
+//! M12 SAR / Regulatory Reporting (`screen.md` module 12, 11 screens).
+//! Policies: `65_sar.nir`. RTM live-demo plan Phase B final batch.
+//!
+//! Real, guard-enforced: 12.2-12.5 draft/edit (`analyst-draft-sar`'s real
+//! `requires invariant(sar_subject_in_case)` + `field_policy {
+//! required(case_id, subject) forbidden(status, goaml_ref, filed_at) }`,
+//! `analyst-edit-sar`'s `requires field(status) == "draft"` -- via
+//! `crud_screens!`'s `guard.create_fields`/`update_fields`, the same
+//! macro-level pattern every prior batch established, NOT `wizard!`:
+//! batch 2 already investigated giving `wizard!` `guard:` support and
+//! judged hand-written/`crud_screens!` routes more proportionate than
+//! extending a second macro for one module's multi-step form -- this
+//! batch follows that established precedent rather than relitigating it).
+//! 12.6 MLRO decision (`mlro-decide-sar`'s real `for Mlro`, `requires
+//! field(status).transition_allowed()` against the real `SarStatus`
+//! machine, `field_policy { allowed(status, mlro_rationale)
+//! forbidden(narrative, txn_refs) }`). 12.10 export (`sar-export`'s real
+//! `requires field(status) == "confirmed_fraud"` + `escalate to
+//! approval(chain sar_release)` quorum(2) -- this batch's own new
+//! `apply_condition_filter_in_process` engine fix (see
+//! `nirdosha-guard-screens/src/lib.rs`) makes the `requires field(...)`
+//! condition real on an export SCAN for the first time in this rollout:
+//! the export narrows to confirmed_fraud rows only, not zero-or-all).
+//! Tipping-off (`cs-no-sar`/`rm-no-sar`, `resource in [...]`, not a
+//! wildcard) proven denied by this batch's own test -- verified against
+//! the real evaluator post the prior batch's wildcard-matching fix, not
+//! assumed safe by association.
+//!
+//! 4.14's stub link (`m04_cases.nir`) already points at `/sar/draft`,
+//! which is now this module's own real create route -- no further
+//! wiring needed on the M4 side (`crud_screens!`'s generated detail page
+//! has no extension point for adding a cross-module link without macro
+//! changes disproportionate to this one navigational nicety).
+//!
+//! **Disclosed, not built this pass**: 12.1 (SAR queue dashboard -- no
+//! distinct policy beyond the create/read routes below), 12.7
+//! (submission receipts, `sar-submission-write`'s real `for SvcCase` --
+//! a service-principal write path, not a human screen), 12.8/12.9
+//! (goAML XSD preview, continuing-activity reminders -- Phase C's real
+//! `nirdosha-egress-report-goaml` driver, not this phase's `MemStoreDriver`
+//! scope), 12.11 (regulator inbox -- `regulator-scoped-read`'s own
+//! `delegation_scope()` gap, already disclosed since M21).
+
+use crate::bridge::sar_bundle_table;
+use crate::bridge::SarBundleRow;
+use nirdosha_guard_core::Action;
+use nirdosha_guard_screens::EscalatedWrite;
+use nirdosha_rt::prelude::SharedTable;
+use std::collections::HashSet;
+
+fn unused_sar_store() -> &'static SharedTable<i64, SarBundleRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, SarBundleRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_sar_screens,
+    entity: SarBundleRow,
+    store: unused_sar_store,
+    path: "/sar",
+    fields: [
+        sar_id: String,
+        case_id: String,
+        subject: String,
+        status: String,
+        narrative: String,
+        activity_codes: String,
+        amount_total: f64,
+        txn_refs: String,
+        goaml_ref: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: sar_bundle_table,
+        purpose: "AmlInvestigation",
+        create_fields: [
+            sar_id: String,
+            tenant_id: String,
+            case_id: String,
+            subject: String,
+        ],
+        update_fields: [
+            narrative: String,
+            activity_codes: String,
+            amount_total: f64,
+            txn_refs: String,
+            next_review_at: i64,
+        ],
+    },
+}
+
+/// 12.6 MLRO decision -- `mlro-decide-sar` (`Mlro`, real `SarStatus`
+/// transition check).
+pub fn mount_sar_mlro_decision(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.post_with_auth("/sar/{id}/decide", "MLRO SAR decision", |req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        let values = req.form_or_json();
+        let status = values.get("status").cloned().unwrap_or_default();
+        let mlro_rationale = values.get("mlro_rationale").cloned().unwrap_or_default();
+        let changed: HashSet<String> = ["status".into(), "mlro_rationale".into()].into();
+        match sar_bundle_table().guarded_update(auth, "AmlInvestigation", &id, &changed, move |row| { row.status = status; row.mlro_rationale = mlro_rationale; }) {
+            Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 12.10 export -- `sar-export` (`ComplianceLead`, real `confirmed_fraud`
+/// condition filter + `sar_release` quorum(2)).
+pub fn mount_sar_export(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .post_with_auth("/sar/export/propose", "Propose SAR export", |_req, _params, auth| {
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match sar_bundle_table().guarded_propose_escalated_export(auth, "AmlInvestigation", Action::Export, "export", now_ms) {
+                Ok(EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/sar/export/confirm", "Confirm SAR export", |req, _params, auth| {
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match sar_bundle_table().guarded_confirm_escalated_export(auth, "AmlInvestigation", Action::Export, "export", &chain, &escalation_id, now_ms) {
+                Ok(EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

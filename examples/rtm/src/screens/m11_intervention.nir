@@ -1,0 +1,130 @@
+//! M11 Real-Time Payment Intervention (`screen.md` module 11, 5 screens).
+//! Policies: `85_intervention.nir`. RTM live-demo plan Phase B final
+//! batch. Hand-written throughout (the plan's designated bespoke shape
+//! for this module) -- `crud_screens!`'s single plain `guard.update_fields`
+//! route can't express `ops-decide-hold-highvalue`'s conditional
+//! escalation (only above $100k), so the whole desk queue/decision
+//! surface is written directly against `Router` and `payment_table()`.
+//!
+//! **`PaymentRow` reconciliation** (see `bridge.nir`'s own note): M21
+//! already declared the full real `Payment` field set for
+//! `cs-payment-status`'s masked view; M11 reuses that SAME table rather
+//! than forking a second one, so a hold `ops-decide-hold` writes here is
+//! immediately visible (masked) through M21's CS screen too -- one real
+//! data plane, not two.
+//!
+//! Real, guard-enforced: 11.1/11.2 desk queue + decision
+//! (`ops-read-holds`, `ops-decide-hold`'s real `requires
+//! field(status).transition_allowed()` against the real `PaymentStatus`
+//! machine + `requires invariant(rationale_present)`), 11.3 high-value
+//! override (`ops-decide-hold-highvalue`'s real `requires field(amount)
+//! > 100_000`, `escalate to approval(chain override_release)` --
+//! branched in this handler: amounts at or below the threshold go
+//! through a plain `guarded_update` under `ops-decide-hold`, amounts
+//! above go through the real propose/confirm quorum engine, exactly
+//! matching the corpus's own two-policy-family design), 11.4 the
+//! explicit `auto-release-on-timeout` deny (proven by this batch's own
+//! test, same "denial records are real" posture `auditor-no-write` was
+//! proven with), 11.5 outcomes stats (`hold-stats`'s real `for
+//! ComplianceLead`, `cap(cohort_floor = 5)`, via `guarded_aggregate`).
+
+use crate::bridge::payment_table;
+use nirdosha_guard_screens::EscalatedWrite;
+use std::collections::HashSet;
+
+/// 11.1 desk queue -- `ops-read-holds` (`OpsAnalyst`, `filter
+/// tenant_scope()`, `cap(row_cap = 100)`).
+pub fn mount_hold_queue(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/holds", "Payment hold queue", |_req, _params, auth| {
+        match payment_table().guarded_snapshot(auth, "FraudMonitoring") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!({ "holds": rows })),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 11.2 detail -- same policy, `guarded_get`.
+pub fn mount_hold_detail(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/holds/{id}", "Payment hold detail", |_req, params, auth| {
+        let Some(id) = params.get("id") else { return nirdosha_rt::Response::bad_request("id required") };
+        match payment_table().guarded_get(auth, "FraudMonitoring", id) {
+            Ok(Some(row)) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+            Ok(None) => nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 11.2/11.3 decision -- reads the submitted `amount` threshold decision
+/// straight from the CURRENT row (not the submitted form -- `amount` is
+/// `ops-decide-hold`'s own `forbidden` field, never writable here) to
+/// pick which real corpus policy family this write must satisfy: at or
+/// under $100k, `ops-decide-hold`'s plain update; above it,
+/// `ops-decide-hold-highvalue`'s real `override_release` quorum. This is
+/// the one branch point `crud_screens!`'s generic `guard.update_fields`
+/// has no shape for.
+pub fn mount_hold_decision(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .post_with_auth("/holds/{id}/decide", "Decide hold (release/block)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let status = values.get("status").cloned().unwrap_or_default();
+            let decision_rationale = values.get("decision_rationale").cloned().unwrap_or_default();
+            let decision_by = auth.user().to_string();
+            let changed: HashSet<String> = ["status".into(), "decision_by".into(), "decision_rationale".into()].into();
+
+            let Ok(Some(current)) = payment_table().guarded_get(auth, "FraudMonitoring", &id) else {
+                return nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" }));
+            };
+            let amount: f64 = current.amount.parse().unwrap_or(0.0);
+
+            if amount > 100_000.0 {
+                let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                let status2 = status.clone();
+                let by2 = decision_by.clone();
+                let rat2 = decision_rationale.clone();
+                match payment_table().guarded_propose_escalated_update(auth, "Operations", &id, &changed, move |row| { row.status = status2; row.decision_by = by2; row.decision_rationale = rat2; }, now_ms) {
+                    Ok(EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                    Ok(EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum, "reason": "amount exceeds $100k -- override_release quorum(1, ComplianceLead) required" })),
+                    Err(e) => nirdosha_guard_screens::guard_error_response(e),
+                }
+            } else {
+                match payment_table().guarded_update(auth, "FraudMonitoring", &id, &changed, move |row| { row.status = status; row.decision_by = decision_by; row.decision_rationale = decision_rationale; }) {
+                    Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+                    Err(e) => nirdosha_guard_screens::guard_error_response(e),
+                }
+            }
+        })
+        .post_with_auth("/holds/{id}/confirm-decide", "Confirm high-value decision", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let status = values.get("status").cloned().unwrap_or_default();
+            let decision_rationale = values.get("decision_rationale").cloned().unwrap_or_default();
+            let decision_by = auth.user().to_string();
+            let changed: HashSet<String> = ["status".into(), "decision_by".into(), "decision_rationale".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match payment_table().guarded_confirm_escalated_update(auth, "Operations", &id, &chain, &escalation_id, &changed, move |row| { row.status = status; row.decision_by = decision_by; row.decision_rationale = decision_rationale; }, now_ms) {
+                Ok(EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+/// 11.5 outcomes stats -- `hold-stats` (`ComplianceLead`, `action ==
+/// "aggregate"`).
+pub fn mount_hold_stats(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/holds/stats", "Hold outcomes stats", |_req, _params, auth| {
+        match payment_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => {
+                let released = rows.iter().filter(|r| r.status == "released").count();
+                let blocked = rows.iter().filter(|r| r.status == "blocked").count();
+                let held = rows.iter().filter(|r| r.status == "held").count();
+                nirdosha_rt::Response::json(200, &serde_json::json!({ "total": rows.len(), "held": held, "released": released, "blocked": blocked }))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}

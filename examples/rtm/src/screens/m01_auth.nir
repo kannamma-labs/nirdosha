@@ -1,0 +1,81 @@
+//! M1 Auth (screen.md 1.1) — demo avatar login. RTM live-demo plan §2.
+//!
+//! `POST /login` is real, unmodified `nirdosha_rt::login!` in `mode:
+//! demo` (fixture-grade auth, disclosed as such by that macro's own doc
+//! comment — exactly the "click assumes that identity's claims are
+//! true" posture the demo asked for, nothing more faked than that).
+//! `GET "/"` is hand-written: `Router::dispatch_authenticated` only
+//! intercepts `login.path` itself ahead of the ordinary route table
+//! (confirmed against `crates/nirdosha-rt/src/web.rs`), so nothing about
+//! `login!` needed to change to let this module claim the root path as
+//! the picker instead.
+//!
+//! One tile per **human** role only — the 8 `Svc*`/`McpCopilot` service
+//! principals `00_core.nir` declares are backend identities a browser
+//! session never authenticates as.
+
+use crate::bridge::HUMAN_ROLES;
+// The real, per-role landing routing lives in `m02_dashboards.nir`
+// (`landing!`'s one fixed-name `landing_path` fn, generated there once
+// every role's own module exists to route to) -- imported rather than
+// this module declaring its own second `landing!` (each module's own
+// `landing!` invocation is independently valid Rust, but only one of
+// them should be the real routing table `login!` below actually uses).
+use crate::m02_dashboards::landing_path;
+
+/// `demo_users:` below and this function follow the same fixed formula
+/// (`<lowercase role>-demo`) rather than sharing one literal Rust value
+/// — `login!`'s `demo_users:` list is proc-macro input, evaluated at
+/// compile time from literal tokens, so it can't call an ordinary `fn`.
+/// Both sides list the same 11 roles in the same order for exactly this
+/// reason: drift between them is a `cargo test`-catchable login failure,
+/// not a silent mismatch (see `avatar_login_lets_every_human_role_in`
+/// below).
+fn demo_password_for(role: &str) -> String {
+    format!("{}-demo", role.to_lowercase())
+}
+
+nirdosha_rt::login! {
+    mount: mount_login,
+    path: "/login",
+    mode: demo,
+    demo_users: [
+        { username: "analyst", password: "analyst-demo", roles: ["Analyst"] },
+        { username: "compliancelead", password: "compliancelead-demo", roles: ["ComplianceLead"] },
+        { username: "mlro", password: "mlro-demo", roles: ["Mlro"] },
+        { username: "qareviewer", password: "qareviewer-demo", roles: ["QaReviewer"] },
+        { username: "opsanalyst", password: "opsanalyst-demo", roles: ["OpsAnalyst"] },
+        { username: "policyengineer", password: "policyengineer-demo", roles: ["PolicyEngineer"] },
+        { username: "admin", password: "admin-demo", roles: ["Admin"] },
+        { username: "auditor", password: "auditor-demo", roles: ["Auditor"] },
+        { username: "csagent", password: "csagent-demo", roles: ["CsAgent"] },
+        { username: "rmuser", password: "rmuser-demo", roles: ["RmUser"] },
+        { username: "regulatorviewer", password: "regulatorviewer-demo", roles: ["RegulatorViewer"] },
+    ],
+    landing: landing_path,
+}
+
+pub fn mount_avatar_picker(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get("/", "Choose a role", |_req, _params| {
+        let mut tiles = String::new();
+        for role in HUMAN_ROLES {
+            let username = role.to_lowercase();
+            let password = demo_password_for(role);
+            tiles.push_str(&format!(
+                "<form method=\"post\" action=\"/login\" style=\"display:inline-block;margin:8px\">\
+                    <input type=\"hidden\" name=\"username\" value=\"{username}\">\
+                    <input type=\"hidden\" name=\"password\" value=\"{password}\">\
+                    <button type=\"submit\" style=\"padding:16px 24px;font-size:16px\">{role}</button>\
+                </form>"
+            ));
+        }
+        nirdosha_rt::Response::html(
+            200,
+            format!(
+                "<html><body><h1>RTM demo &mdash; choose who you are</h1>\
+                 <p>Demo mode: clicking a role signs you in as that identity and its claims are assumed true. Nothing else is faked.</p>\
+                 {tiles}</body></html>"
+            ),
+        )
+    })
+}

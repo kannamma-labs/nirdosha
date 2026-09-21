@@ -1,0 +1,49 @@
+//! M16 Notifications & Collaboration (`screen.md` module 16, 5 screens).
+//! Policies: wherever `obligate notify(channel(...))` appears across the
+//! corpus (`50_alerts.nir`'s `analyst-inbox`, `60_case_management.nir`'s
+//! `case-inbox`, `95_qa.nir`'s `qa-inbox`, `65_sar.nir`'s
+//! `regulatory-log`), plus `90_ops_admin.nir`'s `notification-read` so
+//! the `menus.toml` V5 route-guard invariant resolves. RTM live-demo plan
+//! Phase B batch 3.
+//!
+//! **Real, disclosed corpus shape**: notifications are still a pure
+//! obligation SIDE EFFECT of an already-authorized action on a different
+//! resource; the feed is role-gated by a fixed channel map, not
+//! `guard_policy!`-gated at runtime. The `notification-read` policy was
+//! added only so the menu route declaration points at a real policy
+//! record.
+use crate::bridge::notification_table;
+
+/// Which human roles a given `obligate notify(channel(...))` channel is
+/// meant for -- transcribed from each policy's own real subject +
+/// obligation pairing (`alert-raise`'s `analyst-inbox` reaches the
+/// `Analyst` who works the queue it feeds; `case-inbox` reaches both the
+/// analyst who opened the case and the lead who may need to four-eyes it;
+/// `qa-inbox` reaches the `QaReviewer` who owns the review queue;
+/// `regulatory-log` is `sar-export`'s own obligation, reaching
+/// compliance leadership). Not itself a `guard_policy!` -- a UI routing
+/// table over data this table's own writes already exist independent of
+/// who's allowed to look at them here.
+fn roles_for_channel(channel: &str) -> &'static [&'static str] {
+    match channel {
+        "analyst-inbox" => &["Analyst"],
+        "case-inbox" => &["Analyst", "ComplianceLead"],
+        "qa-inbox" => &["QaReviewer"],
+        "regulatory-log" => &["ComplianceLead", "Mlro"],
+        _ => &[],
+    }
+}
+
+pub fn mount_notification_feed(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/notifications", "Notifications", |_req, _params, auth| {
+        let rows = match notification_table().system_scan() {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let visible: Vec<_> = rows
+            .into_iter()
+            .filter(|row| roles_for_channel(&row.channel).iter().any(|role| auth.has_role(role)))
+            .collect();
+        nirdosha_rt::Response::json(200, &serde_json::json!(visible))
+    })
+}

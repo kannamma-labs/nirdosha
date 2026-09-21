@@ -1,0 +1,377 @@
+# ============================================================================
+# tickets.md — the ticket legend for `ticket:T-xx` references
+#
+# Definition site for every ticket id cited by screens.toml (in `blocked_by`
+# arrays and `notes` lines) and menus.toml (in comments and route notes).
+# screens.toml and menus.toml stay untouched; this file is what makes their
+# references resolvable instead of dangling.
+# Consumed by: tests/verify_tickets.rs   (cargo test -p rtm)
+#
+# Machine contract (parsed and enforced by the test):
+#   - one `## T-xx — <title>` section per ticket, ids exactly T-01..T-14
+#   - `- status:`          active | reserved   (reserved = referenced nowhere)
+#   - `- size:`            S | M | L | unassigned
+#   - `- meaning:`         one line, single sentence
+#   - `- blocked-screens:` comma-separated screen ids from screens.toml whose
+#                          `blocked_by` carries `ticket:T-xx`; `none` if none
+#   - `- note-mentions:`   comma-separated screen ids whose `notes` cite the
+#                          bare ticket id; `none` if none
+#
+# The test enforces: every T-xx token appearing anywhere in screens.toml or
+# menus.toml resolves to a section here; each legend's blocked-screens set is
+# EXACTLY the screens.toml `blocked_by` reality (both directions); each
+# note-mentions set is EXACTLY the screens whose `notes` cite the ticket
+# (both directions); reserved slots carry zero references; the corpus facts
+# below match live counts.
+# ============================================================================
+
+## Reading the legend
+
+**How tickets gate screens.** `ticket:T-xx` in a screen's `blocked_by` means
+the screen ships nothing (or only its declared `interim` shape) until the
+ticket closes — same semantics as a `dataset:`/`archetype:` blocker, but for
+in-repo application work rather than data/engine/archetype availability. A
+bare `T-xx` in a `notes` line is softer: the screen already renders
+decoratively or interim, and the note says which capability becomes real when
+the ticket lands. menus.toml cites tickets the same way in comments (e.g.
+nav.exports' "request form works pre-T-01; downloads gate on it") and in
+meta.roles_note (T-10).
+
+**Size scale.**
+
+| Size | Rough scope |
+|---|---|
+| S | one emit-side pass, vocabulary, or mapping change; single-file work |
+| M | one guarded dataset plus one integration point (approval/quorum, stream, writer) |
+| L | cross-cutting runtime + archetype work gating ten or more screens |
+
+**Corpus facts this legend is pinned to** (asserted by tests/verify_tickets.rs):
+52 `ticket:T-…` references on 43 `blocked_by` lines across the 152-screen
+register (9 lines block on two tickets at once); 12 of the 14 ticket slots
+carry references — 9 stage-gating tickets
+(T-01, T-03, T-04, T-06, T-07, T-08, T-09, T-11, T-14) and 3 note/menu-level
+only (T-02, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
+The register's own header line ("blocked_by: ticket:T-xx | dataset:<id> | …")
+is format documentation, not a reference.
+
+---
+
+## T-01 — Governed egress/export path
+- status: active
+- size: M
+- meaning: every screen-initiated export leaves through one policy-declared egress path
+- blocked-screens: 7.5, 12.10, 15.5, 18.9, 20.3
+- note-mentions: none
+
+**Scope.** One guarded egress implementation behind the `governed_export`
+combo: a purpose-mandatory export request record (PG.governed_export), the
+O.* object-store writer with watermark + encryption, download/share-link
+expiry metadata, and the per-class approval hooks — including `sar_release`
+quorum(2) for SAR bundle egress (menus.toml route /sar/{id}/export: "egress
+via sar_release quorum; T-01 path mandatory").
+
+**Gates.** 7.5 Graph Snapshot Export, 12.10 Filing Export/Validation, 15.5
+Governed Export Center, 18.9 Privacy/DSAR Handling, 20.3 Regulatory Audit Pack
+Export — all stage=blocked on it. Menus.toml: nav.exports (15.5) runs interim —
+"request form works pre-T-01; downloads gate on it".
+
+**Done when.** A screen-declared export produces a purpose-tagged, approved
+(or quorum-released), watermarked artifact in O.* carrying expiry metadata,
+and any egress bypassing the path fails emit/verify.
+
+---
+
+## T-02 — Drop-mask render enforcement (forbidden = absent)
+- status: active
+- size: S
+- meaning: field_policy forbidden(x) renders the field absent, not masked or disabled
+- blocked-screens: none
+- note-mentions: 3.2
+
+**Scope.** The emit-side drop pass that honors `field_policy { forbidden(...) }`
+at render time: a forbidden field produces no input, no placeholder, no
+disabled control — absence, never masking. This is the screen-layer face of
+the tipping-off rule already enforced in the policy corpus (`forbidden(sar_linked)`
+in src/50_alerts.nir, 95_qa.nir, 96_restricted_views.nir) and the V7 menu rule
+("absence, never disabled-state").
+
+**Gates.** No screen is stage-blocked on it. Feature gate on 3.2 Alert Detail:
+"sar_linked must be absent (T-02 drop-mask)".
+
+**Done when.** Every emitted screen omits forbidden fields entirely — no
+masked placeholder, no empty cell — verified by an emit-level check.
+
+---
+
+## T-03 — Disposition vocabulary + rationale invariant
+- status: active
+- size: S
+- meaning: shared reason-code taxonomy and mandatory-rationale invariant across alert/case/payment dispositions
+- blocked-screens: 3.3, 4.1, 4.10, 11.2
+- note-mentions: 7.1
+
+**Scope.** Populate RD.disposition_code and bind the disposition machines to
+it: close-as-FP/false-hit/duplicate/known reason codes with mandatory free-text
+rationale and evidence checkboxes on alerts (3.3), case disposition & closure
+(4.10, "CaseStatus machine; alert_ids immutable"), and payment hold/release
+codes (11.2, "I3 revalidate at commit; above-authority auto-routes to 11.3").
+Board/board-column semantics for 4.1 also derive from the machine's allowed
+transitions.
+
+**Gates.** 3.3 Disposition Panel (built), 4.1 Case Queue / Board (interim),
+4.10 Disposition & Closure (emittable), 11.2 Hold Decision (blocked).
+7.1's note ("corrected sample's T-03 ref") is a historical correction note,
+not a gate — the graph sample once cited the wrong ticket.
+
+**Done when.** Every disposition write validates its reason code against
+RD.disposition_code and refuses to commit without the rationale invariant.
+
+---
+
+## T-04 — Approval chain runtime + approval_inbox! emission
+- status: active
+- size: L
+- meaning: maker≠checker approval inbox backed by RUNTIME.pending_approvals and approval_chain! quorum/timeout/cooling
+- blocked-screens: 4.11, 4.12, 5.10, 8.3, 8.8, 8.10, 9.5, 11.3, 12.6, 13.1, 15.5, 18.7
+- note-mentions: none
+
+**Scope.** The approval engine the whole compliance posture hangs off:
+`approval_chain!` chains (quorum, timeout(deny), cooling period on approve,
+return-with-reason) surfaced as the `approval_inbox!` archetype with
+RUNTIME.pending_approvals as the inbox dataset. Covers dual-control purge
+(18.7), validator≠owner (9.5), diff-vs-current + cooling period (8.8),
+authority-limit checks (11.3), and sar_release quorum(2) consumption (12.6).
+
+**Gates.** Twelve screens — 4.11 Four-Eyes Review, 4.12 Escalation to MLRO,
+5.10 Restriction/Exit Recommendation, 8.3 Threshold & Parameter Editor, 8.8
+Approval Workflow, 8.10 Scheduling & Go-Live, 9.5 Model Validation &
+Governance, 11.3 Override/Exception Approval, 12.6 MLRO Review & Decision,
+13.1 Customer Risk Model Config, 15.5 Governed Export Center, 18.7 Data
+Retention & Purge. Largest ticket in the register. Menus.toml: the approvals
+inbox nav item "appears the moment T-04 mounts anything" (stage_min=interim).
+
+**Done when.** pending_approvals round-trips: mint → inbox render →
+approve/return with the chain's quorum/timeout semantics enforced and
+maker≠checker + return-reason invariants machine-checked.
+
+---
+
+## T-05 — Reserved slot
+- status: reserved
+- size: unassigned
+- meaning: unallocated ticket id held so the T-01..T-14 range stays contiguous
+- blocked-screens: none
+- note-mentions: none
+
+**Scope.** None yet. No screens.toml blocked_by, note, or menus.toml line
+references T-05 (verified by tests/verify_tickets.rs). The slot is reserved
+up-front so a future ticket keeps its neighbors' ids stable instead of
+renumbering.
+
+**Promotion rule.** The commit that first references T-05 must, in the same
+step, fill in this section (status/size/meaning/gates) — docs and code change
+together.
+
+---
+
+## T-06 — Cross-entity linked-context assembly
+- status: active
+- size: L
+- meaning: one guarded cross-entity context read feeding workspaces and tabs (related alerts, txn scope, 360, explainability, audit timeline)
+- blocked-screens: 3.2, 3.4, 3.10, 4.3, 4.4, 4.5, 5.2, 6.2, 9.6, 20.1
+- note-mentions: none
+
+**Scope.** The linked-context layer every detail/workspace screen composes
+from instead of N ad-hoc joins: related alerts on the same
+customer/counterparty/period, transactions inside a case's scope
+(PG.case_txn_scope), Customer 360 roll-ups, score-explainability embeds, and
+per-entity audit timelines. Feeds the `workspace!` archetype, the
+`linked_detail`/tab combos, and cross-chain search (20.1 pairs it with T-11's
+unified chain store). menus.toml: nav.audit_log — "T-11 projection; timeline
+via T-06".
+
+**Gates.** Ten screens — 3.2 Alert Detail, 3.4 Related & Linked Alerts, 3.10
+Alert Audit History, 4.3 Investigation Workspace, 4.4 Linked Alerts Tab, 4.5
+Case Transactions Tab, 5.2 Customer 360, 6.2 Transaction Detail, 9.6 Score
+Explainability Viewer, 20.1 Audit Log Search. Most of these ship an
+`interim = crud/table` shape today; full fidelity waits on this ticket.
+
+**Done when.** A screen declares its context needs once (related/alerts,
+case/transactions, entity/360, ...) and the emitted screen gets one guarded,
+policy-capped context read — not per-screen bespoke joins.
+
+---
+
+## T-07 — Case→SAR conversion + persistent wizard framework
+- status: active
+- size: M
+- meaning: wizard state lives in a guarded entity (wizard_persistent), never in memory; case-to-SAR promotion built on it
+- blocked-screens: 3.8, 4.14, 12.2, 12.3, 12.4
+- note-mentions: none
+
+**Scope.** The `wizard_persistent` combo's backing: multi-step wizard state
+stored as a guarded entity row so a wizard survives restart, timeout, and
+handover — "in-memory wizard FORBIDDEN for SAR — draft must be guarded
+entity" (12.2's note). On top of it, the escalation/convert flow: escalate
+alert→case (3.8, menus.toml: "single-form now; persistent wizard after T-07"),
+initiate SAR from a case past investigating (4.14), SAR Draft Wizard (12.2),
+Narrative Editor with who/what/when/where/why/how attestations (12.3),
+Subjects & Activity Tabs with case-scoped lookup and totals-consistency
+advance-blocking (12.4).
+
+**Gates.** 3.8 Escalation to Case (interim single-form today), 4.14 Initiate
+SAR, 12.2 SAR Draft Wizard, 12.3 Narrative Editor, 12.4 Subjects & Activity
+Tabs.
+
+**Done when.** A crashed mid-wizard session resumes from the guarded draft
+row, and SAR wizards physically cannot run from memory.
+
+---
+
+## T-08 — SAR draft/bundle datasets + attachments
+- status: active
+- size: M
+- meaning: PG.sar_draft and PG.sar_bundle guarded tables with subject/activity registries and document attachments
+- blocked-screens: 4.14, 12.2, 12.3, 12.4, 12.5
+- note-mentions: none
+
+**Scope.** The SAR data plane the T-07 wizard writes into: PG.sar_draft
+(versioned narrative + attestations), PG.sar_bundle (subjects, activity codes
+RD.jurisdiction/RD.activity_code, assembled filing payload), and supporting
+document attachments via PG.evidence_doc/O.* storage with redaction-confirm
+and "≥1 statement to submit" (12.5).
+
+**Gates.** 4.14 Initiate SAR, 12.2 SAR Draft Wizard, 12.3 Narrative Editor,
+12.4 Subjects & Activity Tabs, 12.5 Supporting Attachments. Always cited
+alongside T-07 (T-07 = flow, T-08 = storage).
+
+**Done when.** sar_draft/sar_bundle rows exist as guarded tables with the
+attachment pipeline, and 12.10's filing export can read a completed bundle.
+
+---
+
+## T-09 — Live streaming plane for screens
+- status: active
+- size: M
+- meaning: K.* topic consumption feeding screen-pushable live state (tickers, countdowns, job progress, health)
+- blocked-screens: 2.5, 10.5, 11.1, 19.1
+- note-mentions: none
+
+**Scope.** The realtime data path behind the `refresh_seconds` combo and the
+future `realtime` archetype: K.guard.decisions and related topics consumed
+into screen-pushable state — monitoring wall ticker (2.5: "auto-refresh table
+now; true ticker = realtime archetype later"), interception queue time-
+remaining countdowns (11.1), rescreen job progress (10.5), and module self-
+reporting health ("modules self-report via notify(topic)", 19.1). Menus.toml:
+the intervention nav item is "blocked on dataset:PG.payment + T-09".
+
+**Gates.** 2.5 Real-Time Monitoring Wall (interim auto-refresh), 10.5
+Rescreening Monitor, 11.1 Interception Queue, 19.1 System Health Dashboard.
+
+**Done when.** A screen marked refresh_seconds receives real topic-driven
+updates (poll → push), and countdown columns derive from live payment state.
+
+---
+
+## T-10 — Role ident canonicalization
+- status: active
+- size: S
+- meaning: maps PascalCase logical roles (menus.toml) to runtime snake_case role idents so route guards resolve
+- blocked-screens: none
+- note-mentions: none
+
+**Scope.** menus.toml writes logical roles PascalCase ("ComplianceLead",
+"Mlro"); the runtime guard registry registers snake_case idents. T-10 is the
+canonicalization: app_shell! emission maps logical role names to runtime role
+idents (menus.toml meta.roles_note: "T-10 fixes snake_case blocker"), which
+also completes the V5 probe input — every route.guard {action, resource} must
+resolve to an existing guard_policy! record ("public must reference guard:").
+
+**Gates.** No individual screen. Register-wide: the whole menu/nav emission
+and the V5 guard-reference check. Cited only in menus.toml comments.
+
+**Done when.** A menus.toml role/route edit that references a nonexistent
+guard record or unmappable role fails at emit time with a named error.
+
+---
+
+## T-11 — Unified audit chain projection + tipping-off visibility
+- status: active
+- size: M
+- meaning: per-domain AC.* chains projected into one queryable store (AC.all_chains) plus PG.sar_visibility tipping-off controls
+- blocked-screens: 3.10, 12.11, 14.5, 20.1, 20.2, 20.3
+- note-mentions: none
+
+**Scope.** Consolidate the per-domain append-only chains (AC.alert_chain,
+AC.case_chain, AC.entity_chain, AC.access_log, ...) into the AC.all_chains
+projection that audit screens search, with the `timeline`/`ac_timeline`
+combos reading from it; plus PG.sar_visibility as the tipping-off visibility
+projection (12.11), overturned-decision records (14.5), and config-change
+history (20.2). Export of the projection still egresses via T-01 (20.3).
+
+**Gates.** 3.10 Alert Audit History, 12.11 Tipping-Off Controls, 14.5
+Overturned Decisions Log, 20.1 Audit Log Search, 20.2 Config Change History,
+20.3 Regulatory Audit Pack Export. Menus.toml: nav.audit_log — "T-11
+projection; timeline via T-06".
+
+**Done when.** One guarded projection answers cross-chain audit queries with
+immutability intact, and sar visibility rules hold at the projection layer.
+
+---
+
+## T-12 — Search/filter predicate binding (I15)
+- status: active
+- size: S
+- meaning: q/filter parameters bind to real WHERE clauses limited by predicate_use grants instead of rendering decoratively
+- blocked-screens: none
+- note-mentions: 3.1, 6.1
+
+**Scope.** The I15 face of search: `q` and filter fields on list screens
+compile into guarded predicates restricted to the role's `predicate_use(...)`
+grants (masked fields excluded from WHERE/JOIN/GROUP/ORDER per I15 —
+inventory-wiring.md "Masked-but-filterable" row). Until it lands, the fields
+render but do not query.
+
+**Gates.** No screen is stage-blocked. Feature gate on 3.1 Alert Work Queue
+("search q is decorative until T-12") and 6.1 Transaction Search ("works now;
+filters real after T-12 (predicate_use fields)").
+
+**Done when.** A filter on a non-predicate_use field is rejected with a named
+reason, and a granted filter returns policy-correct results.
+
+---
+
+## T-13 — Reserved slot
+- status: reserved
+- size: unassigned
+- meaning: unallocated ticket id held so the T-01..T-14 range stays contiguous
+- blocked-screens: none
+- note-mentions: none
+
+**Scope.** None yet. No screens.toml blocked_by, note, or menus.toml line
+references T-13 (verified by tests/verify_tickets.rs). Reserved for the same
+reason as T-05.
+
+**Promotion rule.** Identical to T-05: the commit that first references T-13
+fills this section in the same step.
+
+---
+
+## T-14 — Kanban drag transitions via workflow! table
+- status: active
+- size: S
+- meaning: board drag-and-drop transitions validated against the workflow! state machine (graying disallowed moves)
+- blocked-screens: 4.1
+- note-mentions: 4.1
+
+**Scope.** The interaction layer on 4.1 Case Queue / Board: drag-and-drop
+column moves check the workflow! table's allowed transitions and gray out
+illegal drags rather than rejecting them post-hoc — "board+list shippable;
+drag graying T-14 from workflow! table". Builds on T-03's disposition machine
+for which transitions exist.
+
+**Gates.** 4.1 Case Queue / Board (stage=interim: board+list are shippable
+today; only the drag feature waits on this ticket).
+
+**Done when.** A drag to a column the CaseStatus machine forbids renders
+grayed/disallowed before drop, and allowed drags emit the guarded transition.
