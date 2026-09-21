@@ -30,8 +30,8 @@
 
 | #  | Task | Group | Size | Screens | Status | Depends on |
 |----|------|-------|------|---------|--------|------------|
-| A1 | Stale-blocker purge + 17-screen re-stage | A | M | 17 | ☐ pending | A2 (same-commit co-requisite) |
-| A2 | `read user_role` policy (18.1) | A | S | 1 | ☐ pending | — |
+| A1 | Stale-blocker purge + 17-screen re-stage | A | M | 17 | ☑ done | A2 (landed same commit) |
+| A2 | `read user_role` policy (18.1) | A | S | 1 | ☑ done | — |
 | B1 | T-03 disposition vocabulary (S) | B | S | 2+2 | ☐ pending | — |
 | B2 | T-14 kanban drag transitions (S) | B | S | 1 | ☐ pending | B1 (machine) |
 | B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☐ pending | — |
@@ -58,11 +58,17 @@
 
 Statuses: ☐ pending · ◐ in-progress · ☑ done. Update in the same commit as the work (R2).
 
+**Two-agent execution.** Work is split per `agent-a-engine.md` (engine/
+macros: B1–B5, B6–B11, C4–C7) and `agent-b-dataplanes.md` (data planes:
+A1+A2 ✓, C1/C2/C8/C9/C10, then C3/C6). Register edits follow the
+shared-file protocol in those files: rebase → edit → `cargo test -p rtm`
+→ commit immediately.
+
 ---
 
 # GROUP A — spec-only, no archetype/engine work
 
-## A1 ☐ Stale-blocker purge — re-stage 17 screens
+## A1 ☑ Stale-blocker purge — re-stage 17 screens (done)
 **Goal.** Delete the 34 stale `dataset:PG.<x>` blocker entries in
 `screens.toml` whose datasets already exist as live `GuardedTable`s in
 `bridge.nir`, and re-stage the 17 screens whose every blocker is stale.
@@ -92,7 +98,7 @@ newly promoted); pinned sets empty; no verify test red.
 disclosed gap because the screen is `blocked`. Promotion makes it reachable
 ⇒ **A2 must land in this same commit**, or V5 goes red.
 
-## A2 ☐ `read user_role` policy — screen 18.1
+## A2 ☑ `read user_role` policy — screen 18.1 (done)
 **Goal.** Back `menus.toml` nav.users (`read user_role`, Admin) with a real
 `guard_policy!` so 18.1 User Management is V5-clean the moment it is
 stage-promoted.
@@ -437,3 +443,4 @@ parallelizes off the core path.
 | — | Blocker E closed: `app_shell_from_toml!` generates shell/landing from `menus.toml` | screen suite |
 | — | Blocker D closed: `verify_screen_inventory.rs` (V1/V2/V3/V5/V6/V10); 3 policies added; 1 menu waiver; 1 screen role fix | verify_screen_inventory |
 | — | screens-plan.md revision: fixed A1 emittable count (41 not 23), A2 role mismatch, B10 approval_inbox grouping, C4 unlock count, added performance notes | verify_screen_inventory, verify_tickets_and_blockers, verify_tickets |
+| — | A1+A2 landed: 34 stale blockers removed, 17 screens → emittable (41 built+emittable), pins emptied; `user-role-read` policy added to src/90_ops_admin.nir + roles doc; two-agent split codified in agent-a-engine.md / agent-b-dataplanes.md | all 12 suites green |

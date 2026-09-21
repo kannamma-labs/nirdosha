@@ -1043,6 +1043,17 @@ nirdosha_rt::guard_policy! {
     obligate audit(full)
 }
 
+// → M18.1 user-management read [NEW — screens-plan A2; mirrors src/90_ops_admin.nir]
+//   The read beside the grant write path; backs menus.toml nav.users'
+//   `read user_role` guard (18.1's screen roles are Admin only).
+nirdosha_rt::guard_policy! {
+    allow "user-role-read" for Admin
+    when action == "read" && resource == "user_role"
+    purpose(PlatformOperations)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
 // → M18.8 delegate/proxy = scoped delegation mint [RFC 0026 §7.5 semantics; NEW policy]
 nirdosha_rt::guard_policy! {
     allow "admin-mint-delegation" for Admin

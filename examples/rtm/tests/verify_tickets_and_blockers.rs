@@ -20,11 +20,12 @@
 //! both pinned and printed as a disclosure, same style as
 //! `verify_screen_inventory`.
 //!
-//! Pinned numbers as of this commit (recomputed from the live corpus, not
-//! transcribed from any doc): 34 stale pairs across 34 screens; 21 screens
-//! whose every blocker is a stale dataset; 17 of those stage=blocked — the
-//! pinned promotion-candidate list. The pinned lists below are the source of
-//! truth the test enforces; update them deliberately, never silently.
+//! Pinned numbers as of the stale-blocker purge (screens-plan A1+A2): all 34
+//! stale pairs were removed from screens.toml and the 17 stage=blocked
+//! candidates were promoted to stage=emittable in the same commit, so both
+//! pins below are empty. A stale pair appearing again means a new
+//! GuardedTable landed without its register cleanup — acknowledge it here by
+//! name with a comment saying why it stays, never silently.
 
 extern crate rtm;
 
@@ -221,65 +222,12 @@ fn promotion_candidates(screens: &[Screen], wired: &BTreeSet<String>) -> BTreeSe
 /// (not just a count) so a stale blocker removed from screens.toml without a
 /// same-commit shrink fails loudly, and a new stale blocker must be
 /// acknowledged here by name.
-const EXPECTED_STALE_PAIRS: &[(&str, &str)] = &[
-    ("10.1", "PG.screening_hit"),
-    ("10.2", "PG.screening_hit"),
-    ("11.1", "PG.payment"),
-    ("11.2", "PG.payment"),
-    ("11.3", "PG.payment"),
-    ("11.5", "PG.payment"),
-    ("12.1", "PG.sar_bundle"),
-    ("12.10", "PG.sar_bundle"),
-    ("12.6", "PG.sar_bundle"),
-    ("12.9", "PG.sar_bundle"),
-    ("14.1", "PG.qa_review"),
-    ("14.2", "PG.qa_review"),
-    ("14.3", "PG.qa_review"),
-    ("14.4", "PG.qa_review"),
-    ("14.5", "PG.qa_review"),
-    ("16.1", "PG.notification"),
-    ("16.5", "PG.user_profile"),
-    ("18.1", "PG.user_role"),
-    ("18.9", "PG.customer"),
-    ("2.4", "PG.sar_bundle"),
-    ("21.1", "PG.user_role"),
-    ("21.2", "PG.sar_bundle"),
-    ("21.3", "PG.payment"),
-    ("21.4", "PG.customer"),
-    ("22.1", "PG.user_profile"),
-    ("22.2", "PG.support_ticket"),
-    ("4.2", "PG.sar_bundle"),
-    ("5.1", "PG.customer"),
-    ("5.10", "PG.customer"),
-    ("5.2", "PG.customer"),
-    ("5.4", "PG.customer"),
-    ("5.5", "PG.customer"),
-    ("5.6", "PG.customer"),
-    ("5.8", "PG.customer"),
-];
+const EXPECTED_STALE_PAIRS: &[(&str, &str)] = &[]; // emptied: all 34 stale pairs removed from screens.toml in the same commit (screens-plan A1)
 
 /// The pinned promotion-candidate list — the actionable face of the audit.
 /// When someone fixes screens.toml, this list must shrink in the same
 /// commit, or the audit goes red.
-const EXPECTED_PROMOTION_CANDIDATES: &[&str] = &[
-    "10.1", // Screening Hit Queue — PG.screening_hit
-    "10.2", // Hit Review & Disposition — PG.screening_hit
-    "11.5", // Hold Outcomes Log & Stats — PG.payment
-    "12.1", // SAR Workbench Queue — PG.sar_bundle
-    "12.9", // Continuing Activity SAR — PG.sar_bundle
-    "14.1", // QA Sampling Queue — PG.qa_review
-    "14.2", // QA Scorecard — PG.qa_review
-    "14.3", // Analyst Scorecards — PG.qa_review
-    "16.1", // Notification Center — PG.notification
-    "16.5", // Notification Preferences — PG.user_profile
-    "18.1", // User Management — PG.user_role
-    "2.4",  // MLRO Dashboard — PG.sar_bundle
-    "21.3", // CS Transaction Status Lookup — PG.payment
-    "21.4", // RM/Business Customer Status View — PG.customer
-    "22.1", // My Profile & Preferences — PG.user_profile
-    "22.2", // Help & Support — PG.support_ticket
-    "5.5",  // Expected vs Actual Activity — PG.customer
-];
+const EXPECTED_PROMOTION_CANDIDATES: &[&str] = &[]; // emptied: the 17 candidates were promoted to stage=emittable in the same commit (screens-plan A1)
 
 fn assert_pinned_set<T: Ord + Clone + std::fmt::Debug>(
     actual: &BTreeSet<T>,

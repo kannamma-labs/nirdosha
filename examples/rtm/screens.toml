@@ -141,8 +141,8 @@ archetype = "dashboard!"
 combo = []
 roles = ["Mlro:R", "ComplianceLead:R"]
 datasets = ["PG.sar_bundle", "PG.case", "PG.alert"]
-blocked_by = ["dataset:PG.sar_bundle"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "sar widgets ⛔ for lead; deadline countdown"
 
 [[screen]]
@@ -325,7 +325,7 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R", "ComplianceLead:R", "QaReviewer:R", "McpCopilot:R"]
 datasets = ["PG.case", "PG.alert", "PG.sar_bundle"]
-blocked_by = ["dataset:PG.sar_bundle"]
+blocked_by = []
 stage = "interim"
 notes = "works now minus sar_id field (⛔ tipping-off)"
 
@@ -478,7 +478,7 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R", "ComplianceLead:R", "OpsAnalyst:R", "QaReviewer:R", "McpCopilot:R"]
 datasets = ["PG.customer", "PG.transaction", "PG.alert", "PG.case"]
-blocked_by = ["dataset:PG.customer"]
+blocked_by = []
 stage = "interim"
 notes = "txn-only search shippable today; customer axis pending"
 
@@ -490,7 +490,7 @@ archetype = "workspace!"
 combo = []
 roles = ["Analyst:R", "ComplianceLead:R", "McpCopilot:R"]
 datasets = ["PG.customer", "PG.account", "PG.transaction", "L.sanctions_lists", "AC.entity_chain"]
-blocked_by = ["archetype:workspace!", "ticket:T-06", "dataset:PG.customer"]
+blocked_by = ["archetype:workspace!", "ticket:T-06"]
 stage = "blocked"
 notes = "masked fields ABSENT; national_id partial_last4; copilot restricted set"
 
@@ -513,7 +513,7 @@ archetype = "workspace!"
 combo = ["dashboard!"]
 roles = ["Analyst:R", "PolicyEngineer:R"]
 datasets = ["PG.risk_factor", "PG.risk_history", "PG.customer"]
-blocked_by = ["dataset:PG.risk_factor", "dataset:PG.customer"]
+blocked_by = ["dataset:PG.risk_factor"]
 stage = "blocked"
 
 [[screen]]
@@ -524,8 +524,8 @@ archetype = "dashboard!"
 combo = []
 roles = ["Analyst:R"]
 datasets = ["PG.customer", "PG.transaction"]
-blocked_by = ["dataset:PG.customer"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 
 [[screen]]
 id = "5.6"
@@ -535,7 +535,7 @@ archetype = "crud_screens!"
 combo = ["tree_view"]
 roles = ["Analyst:R/W"]
 datasets = ["PG.customer_rel", "CATALOG.relation_ubo_closure"]
-blocked_by = ["dataset:PG.customer_rel", "dataset:PG.customer", "archetype:tree_view"]
+blocked_by = ["dataset:PG.customer_rel", "archetype:tree_view"]
 stage = "interim"
 notes = "table now; ubo_closure Tier-2 materialized; tree = graph renderer later"
 
@@ -558,7 +558,7 @@ archetype = "crud_screens!"
 combo = ["timeline"]
 roles = ["Analyst:R"]
 datasets = ["PG.alert", "PG.case", "PG.customer"]
-blocked_by = ["dataset:PG.customer"]
+blocked_by = []
 stage = "interim"
 notes = "per-subject filter works via alert/case now"
 
@@ -581,7 +581,7 @@ archetype = "crud_screens!"
 combo = ["approval_inbox!"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.customer_restriction", "PG.customer"]
-blocked_by = ["dataset:PG.customer_restriction", "ticket:T-04", "dataset:PG.customer"]
+blocked_by = ["dataset:PG.customer_restriction", "ticket:T-04"]
 stage = "blocked"
 
 # ------------------------------------------------------- M6 Transactions (8)
@@ -962,8 +962,8 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R"]
 datasets = ["PG.screening_hit", "RD.list_labels"]
-blocked_by = ["dataset:PG.screening_hit"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 
 [[screen]]
 id = "10.2"
@@ -973,8 +973,8 @@ archetype = "crud_screens!"
 combo = ["form"]
 roles = ["Analyst:R/W"]
 datasets = ["PG.screening_hit", "L.sanctions_lists", "O.evidence"]
-blocked_by = ["dataset:PG.screening_hit"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "side-by-side name compare; true match auto-escalates"
 
 [[screen]]
@@ -1032,7 +1032,7 @@ archetype = "crud_screens!"
 combo = ["refresh_seconds"]
 roles = ["OpsAnalyst:R", "ComplianceLead:R"]
 datasets = ["PG.payment"]
-blocked_by = ["dataset:PG.payment", "ticket:T-09"]
+blocked_by = ["ticket:T-09"]
 stage = "blocked"
 notes = "countdown col = realtime archetype later; sorted by time-remaining"
 
@@ -1044,7 +1044,7 @@ archetype = "crud_screens!"
 combo = ["workflow_transitions"]
 roles = ["OpsAnalyst:R/W"]
 datasets = ["PG.payment", "PG.screening_hit"]
-blocked_by = ["dataset:PG.payment", "ticket:T-03"]
+blocked_by = ["ticket:T-03"]
 stage = "blocked"
 notes = "I3 revalidate at commit; above-authority auto-routes to 11.3"
 
@@ -1056,7 +1056,7 @@ archetype = "approval_inbox!"
 combo = []
 roles = ["ComplianceLead:R/W"]
 datasets = ["PG.payment", "RUNTIME.pending_approvals"]
-blocked_by = ["archetype:approval_inbox!", "ticket:T-04", "dataset:PG.payment"]
+blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
 stage = "blocked"
 notes = "authority limit vs amount checked"
 
@@ -1080,8 +1080,8 @@ archetype = "crud_screens!"
 combo = ["dashboard!"]
 roles = ["ComplianceLead:R", "Mlro:R"]
 datasets = ["PG.payment"]
-blocked_by = ["dataset:PG.payment"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 
 # ---------------------------------------------------------------- M12 SAR (11)
 [[screen]]
@@ -1092,8 +1092,8 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R", "Mlro:R", "ComplianceLead:R"]
 datasets = ["PG.sar_bundle", "PG.sar_submission"]
-blocked_by = ["dataset:PG.sar_bundle"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "CsAgent/RmUser/Copilot hard-deny (cs-no-sar / rm-no-sar / copilot-no-sar)"
 
 [[screen]]
@@ -1152,7 +1152,7 @@ archetype = "approval_inbox!"
 combo = []
 roles = ["Mlro:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.sar_bundle", "RUNTIME.pending_approvals"]
-blocked_by = ["archetype:approval_inbox!", "ticket:T-04", "dataset:PG.sar_bundle"]
+blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
 stage = "blocked"
 notes = "sar_release quorum(2) timeout(deny); do-not-file needs legal-consult"
 
@@ -1186,8 +1186,8 @@ archetype = "crud_screens!"
 combo = ["dashboard!"]
 roles = ["Mlro:R/W"]
 datasets = ["PG.sar_bundle", "PG.transaction"]
-blocked_by = ["dataset:PG.sar_bundle"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "90-day review queue; txn delta since filing"
 
 [[screen]]
@@ -1198,7 +1198,7 @@ archetype = "crud_screens!"
 combo = ["governed_export"]
 roles = ["Mlro:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.sar_bundle", "O.xml", "GW.goaml"]
-blocked_by = ["ticket:T-01", "integration:goAML", "dataset:PG.sar_bundle"]
+blocked_by = ["ticket:T-01", "integration:goAML"]
 stage = "blocked"
 notes = "egress: full audit never sampled; 0 schema errors required"
 
@@ -1279,8 +1279,8 @@ archetype = "crud_screens!"
 combo = ["form"]
 roles = ["QaReviewer:R/W"]
 datasets = ["PG.qa_review", "PG.alert", "PG.case"]
-blocked_by = ["dataset:PG.qa_review"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "own-work excluded structurally"
 
 [[screen]]
@@ -1291,8 +1291,8 @@ archetype = "crud_screens!"
 combo = ["linked_detail"]
 roles = ["QaReviewer:R/W"]
 datasets = ["PG.qa_review", "PG.alert", "PG.case"]
-blocked_by = ["dataset:PG.qa_review"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 
 [[screen]]
 id = "14.3"
@@ -1302,8 +1302,8 @@ archetype = "dashboard!"
 combo = []
 roles = ["Analyst:R", "ComplianceLead:R", "QaReviewer:R"]
 datasets = ["PG.qa_review"]
-blocked_by = ["dataset:PG.qa_review"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "self view = own row only"
 
 [[screen]]
@@ -1314,7 +1314,7 @@ archetype = "communication_feed!"
 combo = ["task_form"]
 roles = ["ComplianceLead:R/W", "Analyst:R/W"]
 datasets = ["PG.qa_review", "PG.case_task"]
-blocked_by = ["dataset:PG.qa_review", "dataset:PG.case_task"]
+blocked_by = ["dataset:PG.case_task"]
 stage = "blocked"
 notes = "close blocked until ack + action items done"
 
@@ -1326,7 +1326,7 @@ archetype = "crud_screens!"
 combo = ["timeline"]
 roles = ["ComplianceLead:R", "Mlro:R"]
 datasets = ["PG.qa_review", "AC.alert_chain"]
-blocked_by = ["dataset:PG.qa_review", "ticket:T-11"]
+blocked_by = ["ticket:T-11"]
 stage = "blocked"
 
 # ----------------------------------------------------------- M15 Reporting (5)
@@ -1398,8 +1398,8 @@ archetype = "communication_feed!"
 combo = []
 roles = ["AllRoles:R/W"]
 datasets = ["PG.notification"]
-blocked_by = ["dataset:PG.notification"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 
 [[screen]]
 id = "16.2"
@@ -1443,8 +1443,8 @@ archetype = "settings_screen!"
 combo = []
 roles = ["AllRoles:R/W"]
 datasets = ["PG.user_profile"]
-blocked_by = ["dataset:PG.user_profile"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 
 # ----------------------------------------------------------- M17 Knowledge (4)
 [[screen]]
@@ -1501,8 +1501,8 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Admin:R/W"]
 datasets = ["PG.user_role", "IDP.users_file"]
-blocked_by = ["dataset:PG.user_role"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "deactivate forces session kill + WIP reassign prompt"
 
 [[screen]]
@@ -1594,7 +1594,7 @@ archetype = "crud_screens!"
 combo = ["governed_export"]
 roles = ["Admin:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.dsar_request", "PG.customer", "O.packs"]
-blocked_by = ["ticket:T-01", "dataset:PG.dsar_request", "dataset:PG.customer"]
+blocked_by = ["ticket:T-01", "dataset:PG.dsar_request"]
 stage = "blocked"
 notes = "30d deadline; legal-hold conflict flag"
 
@@ -1746,7 +1746,7 @@ archetype = "app_shell!"
 combo = ["all_read_screens_ro"]
 roles = ["Auditor:R"]
 datasets = ["PG.all", "AC.all_chains", "CATALOG.all"]
-blocked_by = ["dataset:PG.user_role"]
+blocked_by = []
 stage = "interim"
 notes = "watermark overlay; auditor-no-write deny; content grows as screens land"
 
@@ -1758,7 +1758,7 @@ archetype = "app_shell!"
 combo = ["crud_screens!_ro"]
 roles = ["RegulatorViewer:R"]
 datasets = ["PG.case", "PG.sar_bundle", "PG.transaction"]
-blocked_by = ["engine:delegation_mint", "dataset:PG.sar_bundle"]
+blocked_by = ["engine:delegation_mint"]
 stage = "blocked"
 notes = "scoped delegation §9.4 only; export denied; session recorded"
 
@@ -1770,8 +1770,8 @@ archetype = "crud_screens!"
 combo = []
 roles = ["CsAgent:R"]
 datasets = ["PG.payment"]
-blocked_by = ["dataset:PG.payment"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "4 fields only; sar/case/alert hard-deny; full audit per peek"
 
 [[screen]]
@@ -1782,8 +1782,8 @@ archetype = "crud_screens!"
 combo = []
 roles = ["RmUser:R"]
 datasets = ["PG.customer"]
-blocked_by = ["dataset:PG.customer"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "restriction_status single field only"
 
 # ---------------------------------------------------------------- M22 Misc (3)
@@ -1795,8 +1795,8 @@ archetype = "settings_screen!"
 combo = []
 roles = ["AllRoles:R/W"]
 datasets = ["PG.user_profile"]
-blocked_by = ["dataset:PG.user_profile"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 notes = "password change ⛔ delegated:IdP"
 
 [[screen]]
@@ -1807,8 +1807,8 @@ archetype = "crud_screens!"
 combo = ["static_kb"]
 roles = ["AllRoles:R/W"]
 datasets = ["PG.support_ticket", "STATIC.kb"]
-blocked_by = ["dataset:PG.support_ticket"]
-stage = "blocked"
+blocked_by = []
+stage = "emittable"
 
 [[screen]]
 id = "22.3"
