@@ -1485,3 +1485,81 @@ pub fn sar_bundle_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdo
         )
     })
 }
+
+// ============================================================================
+// T-01 governed egress — `PG.governed_export`. Real `GuardedTable`
+// backing every export event `nirdosha_rt::export::write_governed_export`
+// mints (watermark, content hash, row count, expiry). Same posture as
+// `NotificationRow` above: no `guard_policy!` names `"governed_export"`
+// as a resource anywhere in this corpus today (no screen reads export
+// HISTORY yet -- 15.5 Governed Export Center, the one screen that
+// would, stays blocked on `ticket:T-04`'s not-yet-built
+// `approval_inbox!`), so this is written only via `system_write`
+// (`record_export`, wired as the crate-generic `export` module's sink
+// below) and left for a future ticket to add a real `governed-export-
+// read` policy once 15.5 actually needs one. Disclosed, not faked.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct GovernedExportRow {
+    pub id: i64,
+    pub export_id: String,
+    pub tenant_id: String,
+    pub purpose: String,
+    pub content_hash: String,
+    pub row_count: i64,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+impl GuardedEntity for GovernedExportRow {
+    const RESOURCE: &'static str = "governed_export";
+    fn row_id(&self) -> String {
+        self.export_id.clone()
+    }
+}
+
+pub fn governed_export_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, GovernedExportRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, GovernedExportRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            vec![],
+            vec![],
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-governed-export-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_governed_export_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn record_export(record: &nirdosha_rt::export::GovernedExportRecord) {
+    governed_export_table().system_write(
+        DEMO_TENANT,
+        &GovernedExportRow {
+            id: next_governed_export_row_id(),
+            export_id: record.export_id.clone(),
+            tenant_id: DEMO_TENANT.into(),
+            purpose: record.purpose.clone(),
+            content_hash: record.content_hash.clone(),
+            row_count: record.row_count as i64,
+            created_at: record.created_at,
+            expires_at: record.expires_at,
+        },
+    );
+}
+
+/// Registers [`record_export`] as `nirdosha_rt::export`'s sink so every
+/// `crud_screens!`-generated guarded CSV export produces a real
+/// `PG.governed_export` row here, not just the generic in-memory `O.*`
+/// artifact that crate keeps on its own. Called once from
+/// `src/bin/serve.nir`'s `main()`, before any route is mounted.
+pub fn init_governed_export_sink() {
+    nirdosha_rt::export::set_export_sink(record_export);
+}

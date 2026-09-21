@@ -46,14 +46,16 @@ meta.roles_note (T-10).
 | L | cross-cutting runtime + archetype work gating ten or more screens |
 
 **Corpus facts this legend is pinned to** (asserted by tests/verify_tickets.rs):
-44 `ticket:T-…` references on 36 `blocked_by` lines across the 152-screen
-register (8 lines block on two tickets at once); 11 of the 14 ticket slots
-carry references — 7 stage-gating tickets
-(T-01, T-04, T-06, T-07, T-08, T-09, T-11) and 4 note/menu-level
-only (T-02, T-03, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
+39 `ticket:T-…` references on 33 `blocked_by` lines across the 152-screen
+register (6 lines block on two tickets at once); 11 of the 14 ticket slots
+carry references — 6 stage-gating tickets
+(T-04, T-06, T-07, T-08, T-09, T-11) and 5 note/menu-level
+only (T-01, T-02, T-03, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
 T-14 closed its only gate (4.1) and is no longer referenced anywhere in the
 corpus (it stays `active`, not `reserved` — a closed-out ticket keeps its
-slot's identity, it just currently gates/notes nothing).
+slot's identity, it just currently gates/notes nothing). T-01 (B7) closed
+all 5 of its stage-gating blockers the same way and moved to note-only
+(menus.toml's nav.exports/sar-export route comments still cite it).
 The register's own header line ("blocked_by: ticket:T-xx | dataset:<id> | …")
 is format documentation, not a reference.
 
@@ -62,21 +64,46 @@ is format documentation, not a reference.
 ## T-01 — Governed egress/export path
 - status: active
 - size: M
-- meaning: every screen-initiated export leaves through one policy-declared egress path
-- blocked-screens: 7.5, 12.10, 15.5, 18.9, 20.3
+- meaning: every guarded CSV export is purpose-mandatory, watermarked, content-hashed; per-class quorum (sar_release) stays dependent on T-04
+- blocked-screens: none
 - note-mentions: none
 
-**Scope.** One guarded egress implementation behind the `governed_export`
-combo: a purpose-mandatory export request record (PG.governed_export), the
-O.* object-store writer with watermark + encryption, download/share-link
-expiry metadata, and the per-class approval hooks — including `sar_release`
-quorum(2) for SAR bundle egress (menus.toml route /sar/{id}/export: "egress
-via sar_release quorum; T-01 path mandatory").
+**Landed this pass.** `nirdosha_rt::export::write_governed_export` — refuses
+an empty purpose or an over-`MAX_EXPORT_ROWS` row count before writing
+anything (cap as backpressure, not post-hoc truncation), assembles the
+artifact in fixed-size chunks, content-hashes it (sha256), writes it into a
+real in-memory `O.*` object store under a fresh `export_id`, and appends a
+watermark footer line (purpose, export_id, exported_at, expires_at, sha256)
+to the returned artifact. `crud_screens!`'s guarded CSV export route (the
+documented `guarded_snapshot`→`Response::csv` bypass) now calls this before
+returning any bytes — fixed for every `guard:`-gated screen, not just the
+five originally named. `bridge.nir`'s new `governed_export_table()` is a
+real `PG.governed_export` `GuardedTable`, populated via a sink
+(`nirdosha_rt::export::set_export_sink`, registered at boot in
+`src/bin/serve.nir`) so every minted export also produces a real row there.
 
-**Gates.** 7.5 Graph Snapshot Export, 12.10 Filing Export/Validation, 15.5
-Governed Export Center, 18.9 Privacy/DSAR Handling, 20.3 Regulatory Audit Pack
-Export — all stage=blocked on it. Menus.toml: nav.exports (15.5) runs interim —
-"request form works pre-T-01; downloads gate on it".
+**Disclosed gap, not faked (R3).** Per-class approval hooks — specifically
+`sar_release` quorum(2) for SAR bundle egress — are NOT wired into this
+path. They depend on the `approval_chain!`/`RUNTIME.pending_approvals`
+machinery T-04 (B10) builds, which doesn't exist yet. Note: a DIFFERENT,
+pre-existing mechanism already provides real quorum-gated export for
+alert/case/transaction resources —
+`GuardedTable::guarded_propose_escalated_export`/
+`guarded_confirm_escalated_export`, mounted at `/exports/{resource}/
+propose|confirm` in `m15_reporting.nir`'s `mount_governed_export` (JSON API,
+no HTML screen, predates this ticket) — but it does not watermark/hash/cap
+its artifact the way this pass's path does. The two mechanisms are
+currently separate; unifying them (or deciding one supersedes the other) is
+left for whoever builds B10's `approval_inbox!` and 15.5's screen for real.
+
+**Gates.** No screen is stage-blocked by `ticket:T-01` any more — 7.5, 15.5,
+18.9, 20.3 stay blocked on their OTHER real blockers (`archetype:
+graph_renderer`+`dataset:GR.link_edge`; `ticket:T-04`; `dataset:
+PG.dsar_request`; `ticket:T-11`, respectively); 12.10 stays blocked on
+`integration:goAML` (external gateway, out of this ticket's scope). Menus.
+toml's nav.exports note ("request form works pre-T-01; downloads gate on
+it") is now stale — the download path is real; 15.5's screen itself still
+doesn't exist pending T-04.
 
 **Done when.** A screen-declared export produces a purpose-tagged, approved
 (or quorum-released), watermarked artifact in O.* carrying expiry metadata,

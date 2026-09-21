@@ -640,20 +640,38 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         let table = &guard.table;
         let purpose = &guard.purpose;
         quote! {
+            // T-01: every guarded export mints a governed, watermarked,
+            // content-hashed artifact via `nirdosha_rt::export` instead
+            // of handing back `Response::csv` straight from
+            // `guarded_snapshot` (the documented bypass) -- the read
+            // itself is still policy-evaluated exactly as before; this
+            // wraps the resulting rows in the governed-egress path
+            // before any byte reaches the caller.
             .get_with_auth(#export_path, "Export CSV", |_req, _params, auth| {
                 match #table().guarded_snapshot(auth, #purpose) {
                     Ok(#matched_mut matched) => {
                         #sort_by_stmt
-                        let mut csv = String::new();
-                        csv.push_str(&[ #(#field_names),* ].join(","));
-                        csv.push('\n');
-                        for e in &matched {
+                        let header = [ #(#field_names),* ].join(",");
+                        let rows: Vec<String> = matched.iter().map(|e| {
                             let row = ::serde_json::to_value(e).unwrap();
                             let cells: Vec<String> = vec![ #( ::nirdosha_rt::screens::csv_escape(&::nirdosha_rt::screens::value_display(row.get(#field_names).unwrap_or(&::serde_json::Value::Null))) ),* ];
-                            csv.push_str(&cells.join(","));
-                            csv.push('\n');
+                            cells.join(",")
+                        }).collect();
+                        match ::nirdosha_rt::export::write_governed_export(Some(#purpose), &header, &rows, 24 * 3600) {
+                            Ok((_record, watermark)) => {
+                                let mut csv = String::new();
+                                csv.push_str(&header);
+                                csv.push('\n');
+                                for row in &rows {
+                                    csv.push_str(row);
+                                    csv.push('\n');
+                                }
+                                csv.push_str(&watermark);
+                                csv.push('\n');
+                                ::nirdosha_rt::Response::csv(200, csv)
+                            }
+                            Err(e) => ::nirdosha_rt::Response::text(400, e.to_string()),
                         }
-                        ::nirdosha_rt::Response::csv(200, csv)
                     }
                     Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
                 }

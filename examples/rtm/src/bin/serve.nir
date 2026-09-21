@@ -25,6 +25,10 @@
 //! profile + support tickets).
 
 fn main() {
+    // T-01: register the governed-export sink before any route mounts,
+    // so the first guarded CSV export already has somewhere real to
+    // record its `PG.governed_export` row.
+    rtm::bridge::init_governed_export_sink();
     let router = rtm::m02_dashboards::mount_app_shell(nirdosha_rt::Router::new(|_req| nirdosha_rt::Auth::login("anon", &[])));
     let router = rtm::m01_auth::mount_login(router);
     let router = rtm::m01_auth::mount_avatar_picker(router);

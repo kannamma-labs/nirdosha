@@ -217,3 +217,26 @@ fn q_search_cannot_reach_a_field_outside_the_predicate_use_grant() {
     let rows: serde_json::Value = serde_json::from_str(&resp.body).expect("valid JSON");
     assert!(rows.as_array().unwrap().is_empty(), "card_token is not in predicate_use — a value only present there must not surface the row: {rows:?}");
 }
+
+/// T-01: the guarded CSV export route no longer hands back
+/// `guarded_snapshot`'s rows straight from `Response::csv` (the
+/// documented bypass) — it must route through
+/// `nirdosha_rt::export::write_governed_export` and carry a real
+/// watermark footer (purpose, export id, expiry, content hash) that a
+/// plain unguarded CSV could never have produced.
+#[test]
+fn guarded_csv_export_carries_a_governed_watermark_footer() {
+    let router = router();
+    seed("txn-http-008", 99.0, "4111-1111-1111-1111");
+    let cookie = session_cookie(&router.dispatch(&login_request("analyst", "analyst-demo")));
+
+    let resp = get_as(&router, "/transactions/export.csv", &cookie);
+    assert_eq!(resp.status, 200, "a purpose-carrying guarded export must succeed: {resp:?}");
+    let lines: Vec<&str> = resp.body.lines().collect();
+    let footer = lines.last().expect("export must have a footer line");
+    assert!(footer.starts_with("# governed-export"), "last line must be the governed-export watermark, not a data row: {footer:?}");
+    assert!(footer.contains("purpose=AmlInvestigation"), "watermark must carry the screen's real declared purpose: {footer:?}");
+    assert!(footer.contains("export_id=exp-"), "watermark must carry a real minted export id: {footer:?}");
+    assert!(footer.contains("sha256="), "watermark must carry a real content hash: {footer:?}");
+    assert!(resp.body.contains("txn-http-008"), "the actual guarded row must still be present in the artifact: {}", resp.body);
+}

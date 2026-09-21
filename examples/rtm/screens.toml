@@ -738,7 +738,7 @@ archetype = "crud_screens!"
 combo = ["governed_export"]
 roles = ["Analyst:R/W"]
 datasets = ["GR.link_edge", "PG.governed_export"]
-blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "ticket:T-01"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge"]
 stage = "blocked"
 notes = "egress path; watermarked"
 
@@ -1200,7 +1200,7 @@ archetype = "crud_screens!"
 combo = ["governed_export"]
 roles = ["Mlro:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.sar_bundle", "O.xml", "GW.goaml"]
-blocked_by = ["ticket:T-01", "integration:goAML"]
+blocked_by = ["integration:goAML"]
 stage = "blocked"
 notes = "egress: full audit never sampled; 0 schema errors required"
 
@@ -1387,7 +1387,7 @@ archetype = "crud_screens!"
 combo = ["approval_inbox!"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W", "Auditor:R"]
 datasets = ["PG.governed_export", "O.exports"]
-blocked_by = ["ticket:T-01", "ticket:T-04", "dataset:PG.governed_export"]
+blocked_by = ["ticket:T-04"]
 stage = "blocked"
 notes = "purpose mandatory; expiry on downloads"
 
@@ -1596,7 +1596,7 @@ archetype = "crud_screens!"
 combo = ["governed_export"]
 roles = ["Admin:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.dsar_request", "PG.customer", "O.packs"]
-blocked_by = ["ticket:T-01", "dataset:PG.dsar_request"]
+blocked_by = ["dataset:PG.dsar_request"]
 stage = "blocked"
 notes = "30d deadline; legal-hold conflict flag"
 
@@ -1735,7 +1735,7 @@ archetype = "crud_screens!"
 combo = ["governed_export"]
 roles = ["Mlro:R/W", "Auditor:R/W"]
 datasets = ["AC.all_chains", "O.packs"]
-blocked_by = ["ticket:T-01", "ticket:T-11"]
+blocked_by = ["ticket:T-11"]
 stage = "blocked"
 notes = "encrypted + watermarked; share-link expiry"
 

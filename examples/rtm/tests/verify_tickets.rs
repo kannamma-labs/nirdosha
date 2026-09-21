@@ -439,22 +439,24 @@ fn legend_corpus_facts_match_live_counts() {
     assert_eq!(total, Some(152), "screens.toml metadata.total_screens drifted");
     assert_eq!(screens.len(), 152, "screens.toml holds {} screens, not 152", screens.len());
 
-    // 52 `ticket:T-…` refs on 43 blocked_by lines (the header's `ticket:T-xx`
+    // 39 `ticket:T-…` refs on 33 blocked_by lines (the header's `ticket:T-xx`
     // format example is documentation and excluded by the two-digit filter).
     let occurrences = count_structured_refs(&screens_src);
     let lines = count_structured_ref_lines(&screens_src);
-    assert_eq!(occurrences, 44, "screens.toml now carries {occurrences} ticket refs (legend says 44)");
-    assert_eq!(lines, 36, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 36)");
+    assert_eq!(occurrences, 39, "screens.toml now carries {occurrences} ticket refs (legend says 39)");
+    assert_eq!(lines, 33, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 33)");
 
-    // 7 stage-gating tickets, 4 note-only, 2 reserved — and the legend's
+    // 6 stage-gating tickets, 5 note-only, 2 reserved — and the legend's
     // corpus-facts paragraph still names exactly those sets. (T-03 closed
     // out its stage-gating blockers on 3.3/4.1/4.10/11.2 — its remaining
     // trace is 7.1's historical note-mention, so it moved to note-only.
     // T-14 closed 4.1's drag-graying blocker — its only gate — and dropped
-    // out of both sets entirely.)
+    // out of both sets entirely. T-01 (B7) closed all 5 of its
+    // stage-gating blockers — its remaining trace is menus.toml's
+    // nav.exports/sar-export route notes, so it moved to note-only too.)
     let blocked = blocked_by_tickets(&screens);
     let stage_gating: Vec<&String> = blocked.keys().collect();
-    assert_eq!(stage_gating.len(), 7, "stage-gating tickets drifted: {stage_gating:?}");
+    assert_eq!(stage_gating.len(), 6, "stage-gating tickets drifted: {stage_gating:?}");
 
     let active = tickets.iter().filter(|t| t.status == "active").count();
     let reserved = tickets.iter().filter(|t| t.status == "reserved").count();
@@ -466,7 +468,7 @@ fn legend_corpus_facts_match_live_counts() {
         .collect();
     assert_eq!(referenced.len(), 11, "referenced ticket ids drifted: {referenced:?}");
     let note_only: Vec<String> = referenced.iter().filter(|t| !blocked.contains_key(*t)).cloned().collect();
-    assert_eq!(note_only, vec!["T-02", "T-03", "T-10", "T-12"], "note-only tickets drifted");
+    assert_eq!(note_only, vec!["T-01", "T-02", "T-03", "T-10", "T-12"], "note-only tickets drifted");
 
     let src = read("tickets.md");
     let facts = src
@@ -476,7 +478,7 @@ fn legend_corpus_facts_match_live_counts() {
         .split("---")
         .next()
         .unwrap();
-    for token in ["44", "36", "152", "11 of the 14", "7 stage-gating", "T-02, T-03, T-10, T-12", "T-05 and T-13"] {
+    for token in ["39", "33", "152", "11 of the 14", "6 stage-gating", "T-01, T-02, T-03, T-10, T-12", "T-05 and T-13"] {
         assert!(facts.contains(token), "tickets.md corpus-facts paragraph no longer states `{token}`");
     }
     for tid in stage_gating {

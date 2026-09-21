@@ -673,7 +673,7 @@ route = "/exports"
 guard = { action = "read", resource = "governed_export" }
 roles = ["Analyst", "ComplianceLead", "Auditor"]
 order = 70
-stage_min = "interim"                    # request form works pre-T-01; downloads gate on it
+stage_min = "interim"                    # T-01 downloads are real (watermarked/capped); screen itself still gates on T-04
 
 [[menu]]
 id = "nav.handover"
