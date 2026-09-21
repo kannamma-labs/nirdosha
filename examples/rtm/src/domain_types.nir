@@ -228,10 +228,22 @@ pub struct NotifPrefs {
     pub quiet_hours: Option<String>,
 }
 
-/// Feeds only the `rationale_present` invariant fix in `00_core.nir` — the
-/// doc's original signature (`&AlertUpdate`) never declared this type at all.
+/// Feeds the `rationale_present`/`disposition_code_valid` invariants in
+/// `00_core.nir` — the doc's original signature (`&AlertUpdate`) never
+/// declared this type at all. `disposition_code` added [NEW: T-03].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertUpdate {
+    pub rationale: String,
+    pub disposition_code: String,
+}
+
+/// Case-side counterpart to `AlertUpdate` — `bridge.nir`'s `CaseRow.disposition`
+/// is a flat string projection, not the corpus's own
+/// `Case.disposition: Option<CaseDisposition>` enum, so the closed-vocabulary
+/// check needs its own flat-string invariant input. [NEW: T-03]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseDispositionUpdate {
+    pub disposition: String,
     pub rationale: String,
 }
 

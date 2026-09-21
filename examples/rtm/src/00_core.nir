@@ -8,8 +8,8 @@
 //   (see each one's comment for exactly what was wrong and why).
 // ============================================================================
 
-use crate::domain_types::AlertUpdate;
-use crate::domains::{Customer, SarBundle, Transaction};
+use crate::domain_types::{AlertUpdate, CaseDispositionUpdate};
+use crate::domains::{Customer, Payment, SarBundle, Transaction};
 
 // ---- Roles & principals ---- [RFC 0025 §6.2, §7.4; role set per screen-inventory Part 1]
 nirdosha_rt::roles! {
@@ -106,6 +106,31 @@ fn currency_iso(t: &Transaction) -> bool { t.currency.is_iso_4217() } // real me
 
 #[nirdosha_rt::invariant(name = "rationale_present", schema = "alert")]       // → 3.3 [NEW]
 fn rationale_present(a: &AlertUpdate) -> bool { !a.rationale.is_empty() } // AlertUpdate now declared, domain_types.nir
+
+// ---- T-03: disposition vocabulary + rationale invariant ----
+// Shared reason-code taxonomy (10_domains.nir's DISPOSITION_CODES /
+// CASE_DISPOSITION_CODES / HOLD_REASON_CODES) across alert/case/payment
+// dispositions, per tickets.md T-03. Each check allows "unset yet" (empty
+// string / no hold_reason) but rejects a non-empty value outside the
+// closed set — mirrors `rationale_present`'s own "checked on every write"
+// posture (see bridge.nir's matching `check_invariant` arms).
+#[nirdosha_rt::invariant(name = "disposition_code_valid", schema = "alert")]  // → 3.3 [NEW: T-03]
+fn disposition_code_valid(a: &AlertUpdate) -> bool {
+    a.disposition_code.is_empty() || crate::domains::DISPOSITION_CODES.contains(&a.disposition_code.as_str())
+}
+
+#[nirdosha_rt::invariant(name = "case_disposition_valid", schema = "case")]   // → 4.10 [NEW: T-03]
+fn case_disposition_valid(c: &CaseDispositionUpdate) -> bool {
+    c.disposition.is_empty() || crate::domains::CASE_DISPOSITION_CODES.contains(&c.disposition.as_str())
+}
+
+#[nirdosha_rt::invariant(name = "hold_reason_valid", schema = "payment")]     // → 11.2 [NEW: T-03]
+fn hold_reason_valid(p: &Payment) -> bool {
+    match &p.hold_reason {
+        Some(reason) => crate::domains::HOLD_REASON_CODES.contains(&reason.0.as_str()),
+        None => false,
+    }
+}
 
 // The doc's original `s.case().subjects().contains(s.subject())` wants a
 // cross-entity join (case's subject list) no relation/join feature in this

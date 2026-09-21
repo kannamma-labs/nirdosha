@@ -442,14 +442,16 @@ fn legend_corpus_facts_match_live_counts() {
     // format example is documentation and excluded by the two-digit filter).
     let occurrences = count_structured_refs(&screens_src);
     let lines = count_structured_ref_lines(&screens_src);
-    assert_eq!(occurrences, 52, "screens.toml now carries {occurrences} ticket refs (legend says 52)");
-    assert_eq!(lines, 43, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 43)");
+    assert_eq!(occurrences, 48, "screens.toml now carries {occurrences} ticket refs (legend says 48)");
+    assert_eq!(lines, 40, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 40)");
 
-    // 9 stage-gating tickets, 3 note-only, 2 reserved — and the legend's
-    // corpus-facts paragraph still names exactly those sets.
+    // 8 stage-gating tickets, 4 note-only, 2 reserved — and the legend's
+    // corpus-facts paragraph still names exactly those sets. (T-03 closed
+    // out its stage-gating blockers on 3.3/4.1/4.10/11.2 — its remaining
+    // trace is 7.1's historical note-mention, so it moved to note-only.)
     let blocked = blocked_by_tickets(&screens);
     let stage_gating: Vec<&String> = blocked.keys().collect();
-    assert_eq!(stage_gating.len(), 9, "stage-gating tickets drifted: {stage_gating:?}");
+    assert_eq!(stage_gating.len(), 8, "stage-gating tickets drifted: {stage_gating:?}");
 
     let active = tickets.iter().filter(|t| t.status == "active").count();
     let reserved = tickets.iter().filter(|t| t.status == "reserved").count();
@@ -461,7 +463,7 @@ fn legend_corpus_facts_match_live_counts() {
         .collect();
     assert_eq!(referenced.len(), 12, "referenced ticket ids drifted: {referenced:?}");
     let note_only: Vec<String> = referenced.iter().filter(|t| !blocked.contains_key(*t)).cloned().collect();
-    assert_eq!(note_only, vec!["T-02", "T-10", "T-12"], "note-only tickets drifted");
+    assert_eq!(note_only, vec!["T-02", "T-03", "T-10", "T-12"], "note-only tickets drifted");
 
     let src = read("tickets.md");
     let facts = src
@@ -471,7 +473,7 @@ fn legend_corpus_facts_match_live_counts() {
         .split("---")
         .next()
         .unwrap();
-    for token in ["52", "43", "152", "12 of the 14", "9 stage-gating", "T-02, T-10, T-12", "T-05 and T-13"] {
+    for token in ["48", "40", "152", "12 of the 14", "8 stage-gating", "T-02, T-03, T-10, T-12", "T-05 and T-13"] {
         assert!(facts.contains(token), "tickets.md corpus-facts paragraph no longer states `{token}`");
     }
     for tid in stage_gating {

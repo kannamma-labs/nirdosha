@@ -7,6 +7,7 @@ nirdosha_rt::guard_policy! {                                // svc:ingest parks 
     allow "ingest-create-hold" for SvcIngest
     when action == "create" && resource == "payment"
     purpose(FraudMonitoring)
+    requires invariant(hold_reason_valid)                    // → closed reason-code set [NEW: T-03]
     field_policy { required(tenant_id, rail_ref, originator, beneficiary, amount,
                              currency, status, hold_reason, hold_expires_at)
                    forbidden(decision_by, decision_rationale) }

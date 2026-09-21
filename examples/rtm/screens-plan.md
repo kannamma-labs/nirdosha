@@ -32,7 +32,7 @@
 |----|------|-------|------|---------|--------|------------|
 | A1 | Stale-blocker purge + 17-screen re-stage | A | M | 17 | ☑ done | A2 (landed same commit) |
 | A2 | `read user_role` policy (18.1) | A | S | 1 | ☑ done | — |
-| B1 | T-03 disposition vocabulary (S) | B | S | 2+2 | ☐ pending | — |
+| B1 | T-03 disposition vocabulary (S) | B | S | 2+2 | ☑ done | — |
 | B2 | T-14 kanban drag transitions (S) | B | S | 1 | ☐ pending | B1 (machine) |
 | B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☐ pending | — |
 | B4 | T-10 role-ident canonicalization (S) | B | S | all | ☐ pending | — |
@@ -122,11 +122,15 @@ stage-promoted.
 
 # GROUP B — ticket work-streams (each names its tickets.md section)
 
-## B1 ☐ T-03 — disposition vocabulary + rationale invariant (S)
-**Unlocks.** Unblocks 11.2 Hold Decision to `emittable`; promotes 4.10
-Disposition & Closure (`emittable`→`built` by emitting its screen file);
-gives 4.1's board its transition semantics (with B2); closes 3.3's feature
-gate.
+## B1 ☑ T-03 — disposition vocabulary + rationale invariant (S) (done)
+**Unlocks (landed).** 11.2 Hold Decision → `built` (m11_intervention.nir's
+hold desk was already real; only `hold_reason_valid` was missing); 4.10
+Disposition & Closure → `built` (m04_cases.nir's `case-transition` was
+already real; only `case_disposition_valid` was missing — no new screen
+file needed, `crud_screens!`'s existing `update_fields` mount already
+carries `disposition`); 4.1 keeps its board (T-14 drag graying is its only
+remaining blocker); 3.3 closes its feature gate (`disposition_code_valid`
+added alongside the existing `rationale_present`).
 **Steps.**
 1. Populate `RD.disposition_code` in the refdata corpus
    (`10_domains.nir`'s `#[reference]` block / `80_refdata`-equivalent):
@@ -444,3 +448,4 @@ parallelizes off the core path.
 | — | Blocker D closed: `verify_screen_inventory.rs` (V1/V2/V3/V5/V6/V10); 3 policies added; 1 menu waiver; 1 screen role fix | verify_screen_inventory |
 | — | screens-plan.md revision: fixed A1 emittable count (41 not 23), A2 role mismatch, B10 approval_inbox grouping, C4 unlock count, added performance notes | verify_screen_inventory, verify_tickets_and_blockers, verify_tickets |
 | — | A1+A2 landed: 34 stale blockers removed, 17 screens → emittable (41 built+emittable), pins emptied; `user-role-read` policy added to src/90_ops_admin.nir + roles doc; two-agent split codified in agent-a-engine.md / agent-b-dataplanes.md | all 12 suites green |
+| 2026-09-22 | B1 (T-03) landed: closed vocabularies (`DISPOSITION_CODES`/`CASE_DISPOSITION_CODES`/`HOLD_REASON_CODES`, 10_domains.nir) + 3 new invariants (`disposition_code_valid`/`case_disposition_valid`/`hold_reason_valid`, 00_core.nir + bridge.nir check_invariant arms), wired into `analyst-disposition-alert`/`case-transition`/`ingest-create-hold`; 3.3→built, 4.10→built, 11.2→built, 4.1 drops T-03 (T-14 only remains); executed single-agent (agent-a-engine.md's bridge.nir restriction lifted — no concurrent Agent B this run) | all rtm suites green (verify_tickets corpus-facts recomputed: 48 refs/40 lines/8 stage-gating+4 note-only) |

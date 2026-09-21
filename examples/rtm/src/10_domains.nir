@@ -203,6 +203,24 @@ fn ref_case_disposition() {}
 #[nirdosha_rt::reference(field = "country_risk", store = "refdata", missing = "fail_closed")] // → M13.2
 fn ref_country_risk() {}
 
+// ---- Closed reason-code vocabularies [NEW: T-03] ----
+// The `reference()` attributes above only declare that these fields resolve
+// against the refdata store; they don't say which values are valid. These
+// three closed sets are that: alert/case closure reasons (screen.md 3.3:
+// "Close as FP/false hit/duplicate/known") and payment hold reasons (M11).
+// `DispositionCode`/`HoldReason` stay `string_id!` (open) per
+// domain_types.nir's own convention — validated here, at the invariant
+// layer (`00_core.nir`'s `disposition_code_valid`/`case_disposition_valid`/
+// `hold_reason_valid`), the same posture `AlertStatus`/`CaseStatus` being
+// hand-written enums (not `workflow!`-generated) already establishes for
+// closed vocabularies in this corpus.
+pub const DISPOSITION_CODES: &[&str] = &["false_positive", "false_hit", "duplicate", "known_fraud"];
+// Case's `disposition` mirrors the terminal `CaseStatus` machine states
+// (`10_domains.nir`'s own `machine CaseStatus`) rather than a separate set.
+pub const CASE_DISPOSITION_CODES: &[&str] = &["confirmed_fraud", "false_positive"];
+pub const HOLD_REASON_CODES: &[&str] =
+    &["sanctions_match", "structuring_pattern", "suspected_fraud", "kyc_incomplete", "velocity_breach"];
+
 // ---- Relations — [§4: positive-only; negation = compile error] ----
 // Catalog-only, like every other declarative macro here: these bodies don't
 // actually resolve anything at runtime (no KYC graph driver exists), same

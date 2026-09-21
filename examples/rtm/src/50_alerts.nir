@@ -43,6 +43,7 @@ nirdosha_rt::guard_policy! {
     purpose(AmlInvestigation)
     requires field(status).transition_allowed()             // AlertStatus machine
     requires invariant(rationale_present)                   // → min-rationale gate
+    requires invariant(disposition_code_valid)               // → closed reason-code set [NEW: T-03]
     field_policy {
         allowed(status, assignee, disposition_code, rationale, duplicate_of, case_id)
         forbidden(txn_id, score, rule_hits, model_version, policy_version, tenant_id, sar_linked)

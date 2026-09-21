@@ -32,6 +32,7 @@ nirdosha_rt::guard_policy! {                                // [RFC §8.6 verbat
     field_policy { allowed(status, assigned_to, disposition, rationale, merged_into)
                    forbidden(alert_ids) }                   // composition immutable
     requires invariant(rationale_present)
+    requires invariant(case_disposition_valid)              // → closed reason-code set [NEW: T-03]
     cap(affected_rows = 1)
     obligate audit(full)
 }

@@ -257,6 +257,13 @@ impl GuardedEntity for AlertRow {
     fn check_invariant(&self, name: &str) -> Option<bool> {
         match name {
             "rationale_present" => Some(!self.rationale.is_empty()),
+            // `00_core.nir`'s real `disposition_code_valid` [NEW: T-03] --
+            // unset (not yet dispositioned) is fine; a non-empty value must
+            // be in the closed set.
+            "disposition_code_valid" => Some(
+                self.disposition_code.is_empty()
+                    || crate::domains::DISPOSITION_CODES.contains(&self.disposition_code.as_str()),
+            ),
             _ => None,
         }
     }
@@ -349,6 +356,13 @@ impl GuardedEntity for CaseRow {
     fn check_invariant(&self, name: &str) -> Option<bool> {
         match name {
             "rationale_present" => Some(!self.rationale.is_empty()),
+            // `00_core.nir`'s real `case_disposition_valid` [NEW: T-03] --
+            // unset (still investigating) is fine; a non-empty value must
+            // be in the closed set (mirrors the CaseStatus terminal states).
+            "case_disposition_valid" => Some(
+                self.disposition.is_empty()
+                    || crate::domains::CASE_DISPOSITION_CODES.contains(&self.disposition.as_str()),
+            ),
             _ => None,
         }
     }
@@ -1193,6 +1207,12 @@ impl GuardedEntity for PaymentRow {
             // -- this dataset's rationale field is `decision_rationale`,
             // not the generic `rationale` `AlertRow`/`CaseRow` use.
             "rationale_present" => Some(!self.decision_rationale.is_empty()),
+            // `00_core.nir`'s real `hold_reason_valid` [NEW: T-03] --
+            // `ingest-create-hold` requires `hold_reason` non-empty, so
+            // (unlike the disposition checks) empty is never valid here.
+            "hold_reason_valid" => Some(
+                !self.hold_reason.is_empty() && crate::domains::HOLD_REASON_CODES.contains(&self.hold_reason.as_str()),
+            ),
             _ => None,
         }
     }

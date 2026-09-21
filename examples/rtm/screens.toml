@@ -215,10 +215,10 @@ archetype = "crud_screens!"
 combo = ["workflow_transitions"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.alert", "RD.disposition_code"]
-blocked_by = ["ticket:T-03"]
+blocked_by = []
 stage = "built"
 file = "examples/rtm/src/screens/m03_alerts.nir"
-notes = "AlertStatus machine; rationale invariant; evidence checkboxes"
+notes = "AlertStatus machine; rationale invariant + closed disposition_code set; evidence checkboxes"
 
 [[screen]]
 id = "3.4"
@@ -313,7 +313,7 @@ archetype = "kanban_board!"
 combo = ["crud_screens!"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W", "McpCopilot:R"]
 datasets = ["PG.case"]
-blocked_by = ["ticket:T-03", "ticket:T-14"]
+blocked_by = ["ticket:T-14"]
 stage = "interim"
 notes = "board+list shippable; drag graying T-14 from workflow! table"
 
@@ -417,9 +417,9 @@ archetype = "crud_screens!"
 combo = ["workflow_transitions"]
 roles = ["Analyst:R/W"]
 datasets = ["PG.case", "RD.disposition_code"]
-blocked_by = ["ticket:T-03"]
-stage = "emittable"
-notes = "CaseStatus machine; alert_ids immutable"
+blocked_by = []
+stage = "built"
+notes = "CaseStatus machine; alert_ids immutable; closed disposition set"
 
 [[screen]]
 id = "4.11"
@@ -1044,9 +1044,9 @@ archetype = "crud_screens!"
 combo = ["workflow_transitions"]
 roles = ["OpsAnalyst:R/W"]
 datasets = ["PG.payment", "PG.screening_hit"]
-blocked_by = ["ticket:T-03"]
-stage = "blocked"
-notes = "I3 revalidate at commit; above-authority auto-routes to 11.3"
+blocked_by = []
+stage = "built"
+notes = "I3 revalidate at commit; above-authority auto-routes to 11.3; closed hold_reason set"
 
 [[screen]]
 id = "11.3"

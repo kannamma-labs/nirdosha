@@ -46,11 +46,11 @@ meta.roles_note (T-10).
 | L | cross-cutting runtime + archetype work gating ten or more screens |
 
 **Corpus facts this legend is pinned to** (asserted by tests/verify_tickets.rs):
-52 `ticket:T-…` references on 43 `blocked_by` lines across the 152-screen
-register (9 lines block on two tickets at once); 12 of the 14 ticket slots
-carry references — 9 stage-gating tickets
-(T-01, T-03, T-04, T-06, T-07, T-08, T-09, T-11, T-14) and 3 note/menu-level
-only (T-02, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
+48 `ticket:T-…` references on 40 `blocked_by` lines across the 152-screen
+register (8 lines block on two tickets at once); 12 of the 14 ticket slots
+carry references — 8 stage-gating tickets
+(T-01, T-04, T-06, T-07, T-08, T-09, T-11, T-14) and 4 note/menu-level
+only (T-02, T-03, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
 The register's own header line ("blocked_by: ticket:T-xx | dataset:<id> | …")
 is format documentation, not a reference.
 
@@ -107,24 +107,34 @@ masked placeholder, no empty cell — verified by an emit-level check.
 - status: active
 - size: S
 - meaning: shared reason-code taxonomy and mandatory-rationale invariant across alert/case/payment dispositions
-- blocked-screens: 3.3, 4.1, 4.10, 11.2
+- blocked-screens: none
 - note-mentions: 7.1
 
-**Scope.** Populate RD.disposition_code and bind the disposition machines to
-it: close-as-FP/false-hit/duplicate/known reason codes with mandatory free-text
-rationale and evidence checkboxes on alerts (3.3), case disposition & closure
-(4.10, "CaseStatus machine; alert_ids immutable"), and payment hold/release
-codes (11.2, "I3 revalidate at commit; above-authority auto-routes to 11.3").
-Board/board-column semantics for 4.1 also derive from the machine's allowed
-transitions.
+**Scope.** Closed reason-code vocabularies declared in `10_domains.nir`
+(`DISPOSITION_CODES`, `CASE_DISPOSITION_CODES`, `HOLD_REASON_CODES`) and bound
+to the disposition machines: close-as-FP/false-hit/duplicate/known reason
+codes with mandatory free-text rationale on alerts (3.3, `analyst-disposition-
+alert`'s `requires invariant(rationale_present) requires invariant
+(disposition_code_valid)`), case disposition & closure (4.10, `case-
+transition`'s matching `case_disposition_valid`; "CaseStatus machine;
+alert_ids immutable"), and payment hold reason codes (11.2, `ingest-create-
+hold`'s `hold_reason_valid`; "I3 revalidate at commit; above-authority
+auto-routes to 11.3"). Board/board-column semantics for 4.1 derive from the
+same disposition machine (its remaining blocker is T-14's drag graying only).
+Each invariant is real on both sides: `00_core.nir`'s catalog-registered
+function and `bridge.nir`'s matching `check_invariant` runtime match-arm.
 
-**Gates.** 3.3 Disposition Panel (built), 4.1 Case Queue / Board (interim),
-4.10 Disposition & Closure (emittable), 11.2 Hold Decision (blocked).
+**Gates (closed).** 3.3 Disposition Panel (built), 4.1 Case Queue / Board
+(interim — T-14 is its only remaining blocker), 4.10 Disposition & Closure
+(built), 11.2 Hold Decision (built).
 7.1's note ("corrected sample's T-03 ref") is a historical correction note,
-not a gate — the graph sample once cited the wrong ticket.
+not a gate — the graph sample once cited the wrong ticket; left as-is.
 
-**Done when.** Every disposition write validates its reason code against
-RD.disposition_code and refuses to commit without the rationale invariant.
+**Done when.** Every disposition write validates its reason code against the
+closed set and refuses to commit without the rationale invariant. ✓ — proven
+by `disposition_code_valid`/`case_disposition_valid`/`hold_reason_valid`
+wired into `analyst-disposition-alert`/`case-transition`/`ingest-create-hold`
+and enforced at the row layer in `bridge.nir`.
 
 ---
 
