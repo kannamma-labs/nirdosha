@@ -1,7 +1,12 @@
 // `#[classify]`'s and `lineage_query!`'s generated static/type names don't
 // screaming-case the source item's own identifier (a pre-existing, purely
 // cosmetic naming-convention gap in those macros, out of scope here).
-#![allow(non_upper_case_globals, non_camel_case_types)]
+//
+// Some enum variants below (`Purpose`'s taxonomy) are declared for real but
+// never constructed by this file itself — they're consumed as bare wire
+// strings by `guard_policy!`'s `purpose(Ident)` clauses, not as `Purpose::`
+// values.
+#![allow(non_upper_case_globals, non_camel_case_types, dead_code)]
 
 //! Corpus regression test: every `rust` code block from
 //! `examples/rtm/roles-N-guard_policy.md`, concatenated in original order,
@@ -9,7 +14,7 @@
 //! replaces content that fails for a reason *other* than the
 //! `guard_policy!`/catalog-macro parser bugs this phase fixes. This is the
 //! real acceptance bar for that fix: not a hand-picked example, the actual
-//! 66 `guard_policy!` blocks (114 `PolicyRegistration`s after `action
+//! 76 `guard_policy!` blocks (125 `PolicyRegistration`s after `action
 //! in [...]`/`resource in [...]` fan-out) the doc ships today.
 //!
 //! Regenerate the non-skipped content with:
@@ -22,13 +27,19 @@
 //! "
 //! ```
 //!
-//! What's skipped, and why (found by attempting exactly this compile):
-//! - `purpose!`, `stream_port!`, `window!`, `model_artifact!`, `matcher!`,
-//!   `mcp_tools!` invoked as function-like macros — none of these names
-//!   exist as a `#[proc_macro]` anywhere in the workspace (`purpose` exists
-//!   only as `#[proc_macro_attribute]`, a different, incompatible grammar;
-//!   the other five don't exist in any form). Building these is separately
-//!   tracked (repo's `docs/nirdosha-rt-dialect.md`/RFC 0025 driver work).
+//! Graduated (previously skipped, now real): `purpose!`, `stream_port!`,
+//! `window!`, `model_artifact!`, `matcher!`, `mcp_tools!` now exist as real
+//! `#[proc_macro]`s in `nirdosha-guard-macros`, registering structured
+//! records into `PURPOSES`/`PORTS`/`WINDOWS`/`MODELS`/`MATCHERS`/
+//! `MCP_SERVERS` — see that crate's doc comments on each for the exact
+//! grammar and what's structurally parsed vs. kept as opaque source text.
+//! `purpose!` the function-like taxonomy macro is named `purpose_taxonomy!`
+//! and called fully-qualified (`nirdosha_guard_macros::purpose_taxonomy!`)
+//! for the same name-collision reason `workflow!` is qualified below — the
+//! pre-existing `#[proc_macro_attribute] purpose` (a different,
+//! load-bearing macro, see `guard_attributes.rs`) already owns the bare name.
+//!
+//! What's still skipped, and why (found by attempting exactly this compile):
 //! - `#[reference(...)]` used as a bare six-line declarative list with no
 //!   item attached, and with positional-path arguments
 //!   (`customer.kyc_status`) rather than the real macro's `field = ...`
@@ -70,7 +81,9 @@
 //! `requires`/`ensures`, `escalate to approval(...)`, `obligate ...`),
 //! `roles!`, `approval_chain!` (7x in one file), `audit_sampling!`,
 //! `audit_rules!`, `enumerate!`, `break_glass!`, `lineage_query!`,
-//! `policy_simulation!`, `data_contract!` — is verbatim.
+//! `policy_simulation!`, `data_contract!`, and the now-graduated `purpose!`/
+//! `stream_port!`/`window!`/`model_artifact!`/`matcher!`/`mcp_tools!` — is
+//! verbatim.
 
 // ============================================================================
 // 00_core.nir — foundations. Serves: ALL modules.
@@ -103,7 +116,20 @@ nirdosha_rt::roles! {
 }
 
 // ---- Purpose taxonomy (closed core; §1B / §17) ----
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::purpose! block, original lines 32-45
+nirdosha_guard_macros::purpose_taxonomy! {
+    enum Purpose {
+        Operations,              // default operational purpose
+        FraudMonitoring,         // "fraud_monitoring" — used by svc:* [RFC 0025 §8.1]
+        AmlInvestigation,        // analyst work on alerts/cases          [NEW code]
+        CustomerService,         // CsAgent lookups                       [NEW code]
+        QaReview,                                                       // [NEW]
+        Audit,                                                          // [NEW]
+        RegulatoryInspection,                                           // [NEW]
+        Analytics,                                                      // [NEW]
+        ModelGovernance,                                                // [NEW]
+        PlatformOperations,                                             // [NEW]
+    }
+}
 
 // ---- Audit sampling table — §17 canonical form ----
 // Hard floors the sampler cannot override (stated here as comments; enforced
@@ -217,7 +243,11 @@ nirdosha_rt::approval_chain! {
 // cardinality unbounded. Relation lowering is reserved for bounded KYC graphs.
 
 // ---- Stream ports — [RFC §8.1 + §6.5] ----
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::stream_port! block, original lines 284-288
+nirdosha_rt::stream_port! {
+    port txn_in    { bind "card_network.rails";   semantics = at_least_once; }
+    port txn_out   { publish "txn.authorized";    format = "avro"; schema = "transaction"; }
+    port decisions { publish "guard.decisions";   format = "avro"; } // → M2.5 wall
+}
 
 // ---- Workflows — closed & deterministic; type-state (illegal transitions don't compile) ----
 nirdosha_guard_macros::workflow! {
@@ -326,8 +356,18 @@ nirdosha_rt::guard_policy! {
 // 30_features.nir — [RFC §8.2 verbatim] + model-input features.
 // ============================================================================
 
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::window! block, original lines 397-402
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::window! block, original lines 403-408
+nirdosha_rt::window! {                                      // [RFC §8.2 verbatim]
+    feature velocity_1h(subject_id) =
+        sliding(1h, keys = [subject_id], aggs = [count, sum(amount)]);
+    feature impossible_travel(subject_id) =
+        session(30m, keys = [subject_id], expr = geo_speed(geo) > 900 km/h);
+}
+nirdosha_rt::window! {                                      // [NEW — model inputs, §8.3]
+    feature distinct_payees_7d(subject_id) =
+        hopping(7d every 1h, keys = [subject_id], aggs = [count_distinct(beneficiary)]);
+    feature amount_dev_30d(subject_id) =
+        hopping(30d every 6h, keys = [subject_id], aggs = [stddev(amount)]);
+}
 
 nirdosha_rt::guard_policy! {                                // [RFC §8.2 verbatim + grants]
     allow "features-read" for SvcFeatures
@@ -343,7 +383,14 @@ nirdosha_rt::guard_policy! {                                // [RFC §8.2 verbat
 // 40_scoring.nir — [RFC §8.3/§8.4 verbatim] + hit disposition + list mgmt.
 // ============================================================================
 
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::model_artifact! block, original lines 424-431
+nirdosha_rt::model_artifact! {                              // [RFC §8.3 verbatim]
+    model rt_fraud_v1 {
+        format = onnx;
+        inputs = [velocity_1h, distinct_payees_7d, amount_dev_30d, impossible_travel];
+        outputs = [score: f64, explanation: vec[string]];
+        threshold_alert = 0.85;
+    }
+}
 
 nirdosha_rt::guard_policy! {                                // [RFC §8.3 verbatim — V7 SoD]
     deny "scoring-no-side-effects" for SvcScoring
@@ -361,8 +408,20 @@ nirdosha_rt::guard_policy! {
 }
 
 // ---- Screening [RFC §8.4 verbatim matcher + policy] ----
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::matcher! block, original lines 449-455
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::matcher! block, original lines 456-462
+nirdosha_rt::matcher! {
+    matcher sanctions {
+        algorithm = fuzzy_jaro_winkler;
+        threshold = 0.92;
+        lists = [ofac_sdn, un_consolidated, eu_fsf];
+    }
+}
+nirdosha_rt::matcher! {                                     // [NEW → 10.4 internal/PEP lists]
+    matcher internal_watchlist {
+        algorithm = fuzzy_jaro_winkler;
+        threshold = 0.95;
+        lists = [internal_watch, pep_global];
+    }
+}
 
 nirdosha_rt::guard_policy! {                                // [RFC §8.4 verbatim]
     allow "screening-check" for SvcScreening
@@ -608,7 +667,21 @@ nirdosha_rt::guard_policy! {
 // 70_mcp.nir — [RFC §8.8 verbatim structure]. I17 defaults are non-negotiable.
 // ============================================================================
 
-// SKIPPED (not yet implemented as a callable macro / grammar mismatch — see report): nirdosha_rt::mcp_tools! block, original lines 708-722
+nirdosha_rt::mcp_tools! {
+    server analyst_copilot {
+        identity = "mcp:analyst-copilot";
+        tools = [query_records(Transaction, Alert, Case, Customer),
+                 get_options(AlertStatus, CaseStatus, TxnChannel, DispositionCode),
+                 evaluate,             // dry-run first — mandatory for writes
+                 submit_write];        // gated: requires matching evaluate (plan-hash)
+        delegation { bind user + agent; ttl = 30m; max_tool_calls = 60; rate = 20/min; }
+        defaults {
+            audit = full;              // I17: agent access is never sampled
+            row_cap = 50;
+            destination = llm_context; // policy still governs per field/class
+        }                              // masked fields are ABSENT, not masked-in-place
+    }
+}
 
 // Copilot SAR protection (belt-and-braces over 65_sar denies) [NEW]
 nirdosha_rt::guard_policy! {
@@ -883,8 +956,11 @@ nirdosha_rt::guard_policy! {
 }
 
 // → M22.2 support ticket [NEW]
+//   Opened to all human roles so the chrome `profile → Help & Support`
+//   route (`/help/support`, guard = create/support_ticket, AllHuman)
+//   resolves to a real policy record.
 nirdosha_rt::guard_policy! {
-    allow "any-create-ticket" for Analyst
+    allow "any-create-ticket" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
     when action == "create" && resource == "support_ticket"
     purpose(Operations)
     field_policy { required(tenant_id, category, priority, description) }
@@ -1031,11 +1107,104 @@ nirdosha_rt::break_glass! {                                 // → payment relea
 // NOTE: guard-down emergency access is OUT-OF-BAND by design (RFC 0023 §14):
 // no break-glass macro path exists when the guard is down; dual-control paper
 // procedure + mandatory reconciliation on recovery. Not expressible here — correct.
+
+// ============================================================================
+// Blocker D additions — policies added after the original doc so the
+// `menus.toml` route-guard declarations resolve to real `guard_policy!`
+// records.
+// ============================================================================
+
+// → M7 network graph link queries (7.1/7.2/7.3) + graph export (7.5)
+nirdosha_rt::guard_policy! {
+    allow "network-link-query" for Analyst, ComplianceLead
+    when action == "link_query" && resource == "network_of"
+    purpose(AmlInvestigation)
+    cap(max_depth = 5, max_nodes = 1_000, max_execution = 5s)
+    destination(llm_context) denied_above(CONFIDENTIAL)
+    obligate audit(full)
+}
+nirdosha_rt::guard_policy! {
+    allow "network-export" for Analyst
+    when action == "export" && resource == "link_edge"
+    purpose(AmlInvestigation)
+    destination(export-file)
+    escalate to approval(chain egress_release)
+    cap(row_cap = 50_000, max_result_bytes = 100MB)
+    obligate audit(full)
+}
+
+// → 8.6 simulation read-only view for ComplianceLead
+nirdosha_rt::guard_policy! {
+    allow "lead-view-simulation" for ComplianceLead
+    when action == "simulate" && resource == "policy_simulation"
+    purpose(ModelGovernance)
+    obligate audit(full)
+}
+
+// → 8.3/8.10 policy/window migrate for ComplianceLead
+nirdosha_rt::guard_policy! {
+    allow "lead-migrate-policy" for ComplianceLead
+    when action == "migrate" && resource in ["policy", "window"]
+    purpose(ModelGovernance)
+    escalate to approval(chain policy_release)
+    obligate audit(full)
+}
+
+// → M16 notification feed, M16 handover, M17 static knowledge, M2 saved views
+nirdosha_rt::guard_policy! {
+    allow "notification-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "notification"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+nirdosha_rt::guard_policy! {
+    allow "static-docs-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "static_docs"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+nirdosha_rt::guard_policy! {
+    allow "saved-view-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "saved_view"
+    purpose(Operations)
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+nirdosha_rt::guard_policy! {
+    allow "handover-read" for Analyst, ComplianceLead, OpsAnalyst
+    when action == "read" && resource == "handover"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// → M20 audit log
+nirdosha_rt::guard_policy! {
+    allow "audit-record-read" for Auditor, Admin, Mlro
+    when action == "read" && resource == "audit_record"
+    purpose(Audit)
+    filter tenant_scope()
+    cap(row_cap = 1_000, max_scan_rows = 500_000, max_execution = 60s)
+    obligate audit(full)
+}
+
+// → M22 support ticket (all human roles) + self-profile read
+nirdosha_rt::guard_policy! {
+    allow "self-read-profile" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "user_profile"
+    filter subject_scope()
+    cap(row_cap = 1)
+    obligate audit(sampled)
+}
+
 #[test]
 fn corpus_compiles_and_registers_policies() {
     let count = nirdosha_guard_registry::POLICIES.len();
     println!("registered policy records: {count}");
-    assert!(count >= 66, "expected at least 66 registrations (one per guard_policy! block, more after action/resource-in-list fan-out), got {count}");
+    assert!(count >= 76, "expected at least 76 registrations (one per guard_policy! block, more after action/resource-in-list fan-out), got {count}");
 }
 
 /// Phase 3 acceptance bar: `records()` on the real corpus produces
@@ -1112,6 +1281,39 @@ fn corpus_policies_lower_to_real_structured_records() {
     assert_eq!(sla[0].masks[0].field, vec!["subject_id".to_string()]);
 }
 
+/// Graduation proof for the six macros this phase unblocked: the real
+/// corpus's own `purpose_taxonomy!`/`stream_port!`/`window!`/
+/// `model_artifact!`/`matcher!`/`mcp_tools!` blocks (above, no longer
+/// `// SKIPPED`) register real structured records — same bar as
+/// `corpus_policies_lower_to_real_structured_records`, applied to the newly
+/// unblocked macros instead of `guard_policy!`.
+#[test]
+fn corpus_newly_unblocked_macros_register_real_records() {
+    let dump = nirdosha_guard_registry::dump();
+
+    assert!(dump.purposes.iter().any(|p| p.code == "FraudMonitoring"));
+    assert!(dump.purposes.iter().any(|p| p.code == "PlatformOperations"));
+
+    let txn_in = dump.ports.iter().find(|p| p.name == "txn_in").expect("txn_in port must be registered");
+    assert_eq!(txn_in.direction, "bind");
+    assert_eq!(txn_in.target, "card_network.rails");
+
+    let velocity = dump.windows.iter().find(|w| w.name == "velocity_1h").expect("velocity_1h window must be registered");
+    assert_eq!(velocity.kind, "sliding");
+    assert_eq!(velocity.key, "subject_id");
+
+    let model = dump.models.iter().find(|m| m.name == "rt_fraud_v1").expect("rt_fraud_v1 model must be registered");
+    assert_eq!(model.threshold_alert, Some(0.85));
+    assert_eq!(model.inputs.len(), 4);
+
+    let matcher = dump.matchers.iter().find(|m| m.name == "sanctions").expect("sanctions matcher must be registered");
+    assert_eq!(matcher.lists, vec!["ofac_sdn", "un_consolidated", "eu_fsf"]);
+
+    let copilot = dump.mcp_servers.iter().find(|s| s.name == "analyst_copilot").expect("analyst_copilot MCP server must be registered");
+    assert_eq!(copilot.identity, "mcp:analyst-copilot");
+    assert_eq!(copilot.max_tool_calls, Some(60));
+}
+
 /// The convention `cargo nirdosha verify --guard` (Plan Phase 6) looks
 /// for: a `#[test]`, any name, any file, that calls
 /// `write_dump_from_env()`. `cargo test` finds it by content
@@ -1144,19 +1346,32 @@ fn corpus_registry_dump_round_trips_through_verify() {
     }
 
     // V1/V2/V3 must be clean: every registration has an id/action/resource,
-    // effect is allow/deny, and action is one of the seven canonical wire
+    // effect is allow/deny, and action is one of the canonical wire
     // strings (Phase 1's for/in-list parsing plus Phase 3's lowering
-    // produced well-formed records for all 114).
+    // produced well-formed records for all 125).
     assert_eq!(by_pass("V1"), 0, "V1 findings: {findings:?}");
     assert_eq!(by_pass("V2"), 0, "V2 findings: {findings:?}");
     assert_eq!(by_pass("V3"), 0, "V3 findings: {findings:?}");
     // V4: none of the corpus's real filters/conditions negate a relation.
     assert_eq!(by_pass("V4"), 0, "V4 findings: {findings:?}");
-    // V5/V8 need driver manifests, which this corpus (pure policy/catalog
+    // V5 needs driver manifests, which this corpus (pure policy/catalog
     // declarations, no #[dataset]-attached store drivers) never registers
     // — nothing to find either way.
     assert_eq!(by_pass("V5"), 0);
-    assert_eq!(by_pass("V8"), 0);
+    // V8 *does* have something to check now that `stream_port!` is real:
+    // the corpus declares 3 real ports (`txn_in`, `txn_out`, `decisions`)
+    // but no `DRIVER_MANIFESTS` for any of them (driver installation is
+    // separate infra work this policy/catalog corpus never does) — V8
+    // correctly flags all 3 as under-manifested. This is V8 doing its job
+    // now that there's real port data to check, not a regression.
+    let v8 = findings.iter().filter(|f| f.pass == "V8").collect::<Vec<_>>();
+    assert_eq!(v8.len(), 3, "V8 findings: {findings:?}");
+    for port in ["txn_in", "txn_out", "decisions"] {
+        assert!(
+            v8.iter().any(|f| f.item.as_deref() == Some(port)),
+            "expected a V8 finding for port `{port}`: {findings:?}"
+        );
+    }
 }
 
 /// Plan Phase 15: `approval_chain!` must register a real, structured

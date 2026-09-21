@@ -5,6 +5,7 @@
 //! so `cargo nirdosha verify` can run Gate 2 checks.
 
 use proc_macro::TokenStream;
+use proc_macro2::{Delimiter, TokenStream as TokenStream2, TokenTree};
 use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream},
@@ -540,4 +541,530 @@ pub fn enumerate(input: TokenStream) -> TokenStream {
         };
     }
     .into()
+}
+
+// ============================================================================
+// RFC 0025 §8.2–8.4/§8.8 — feature windows, model artifacts, screening
+// matchers, stream ports, MCP tool servers, and the closed purpose taxonomy.
+//
+// Parsing approach mirrors `approval_chain!`/`workflow!` above (whitespace-
+// stripped `.to_string()` + targeted substring/bracket extraction), not a
+// from-scratch `syn::parse::Parse` grammar tree — the same technique already
+// accepted there as "real, structured" (see `parse_quorum_clause`). The one
+// addition these six need that `approval_chain!`/`workflow!` didn't: several
+// of these grammars nest one named/braced block inside another (`server X {
+// .. delegation { .. } defaults { .. } }`), and repeat a named block more
+// than once per invocation (`port a { .. } port b { .. }`) — plain string
+// search over a flattened token string would mis-split those (it can't tell
+// a nested `}` from the outer one), so block *splitting* walks the real
+// `TokenTree` list tracking brace grouping; only each leaf block's own flat
+// `key = value;` lines still go through string extraction.
+// ============================================================================
+
+/// Strips all whitespace — safe for these six grammars specifically because
+/// none of their string literals contain internal spaces (checked against
+/// every real usage in `examples/rtm/roles-N-guard_policy.md`), the same
+/// precondition `parse_quorum_clause` already relies on.
+fn compact(input_str: &str) -> String {
+    input_str.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Index of the bracket matching the opener at `open_idx` (which must point
+/// at one of `([{`), tracking nesting depth across all three bracket kinds
+/// so a value containing its own brackets (e.g. `outputs = [score: f64,
+/// explanation: vec[string]]`) doesn't truncate at the first inner close.
+fn matching_bracket(s: &str, open_idx: usize) -> Option<usize> {
+    let open = s[open_idx..].chars().next()?;
+    let close = match open {
+        '[' => ']',
+        '(' => ')',
+        '{' => '}',
+        _ => return None,
+    };
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices().skip(open_idx) {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Splits `s` on top-level occurrences of `delim` only (depth 0 across
+/// `()[]{}`) — for list items or statements that may contain their own
+/// nested brackets (`sum(amount)`, `query_records(A, B, C)`).
+fn split_top_level(s: &str, delim: char) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut items = Vec::new();
+    let mut current = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            c if c == delim && depth == 0 => {
+                items.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        items.push(current);
+    }
+    items
+}
+
+/// `key="literal";` -> the literal's content, unquoted.
+fn extract_str_field(compact: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}=\"");
+    let start = compact.find(&marker)? + marker.len();
+    let end = compact[start..].find('"')? + start;
+    Some(compact[start..end].to_string())
+}
+
+/// `key"literal";` -> the literal's content, unquoted. For the two
+/// `stream_port!` clauses that put the string right after the keyword with
+/// no `=` (`bind "card_network.rails";` / `publish "txn.authorized";`),
+/// unlike every other clause in these six grammars.
+fn extract_str_field_no_eq(compact: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}\"");
+    let start = compact.find(&marker)? + marker.len();
+    let end = compact[start..].find('"')? + start;
+    Some(compact[start..end].to_string())
+}
+
+/// `key=<raw tokens>;` -> everything up to the next top-level `;`, verbatim.
+/// Covers every non-string, non-list scalar clause these grammars have —
+/// plain idents (`format=onnx`), numbers (`threshold=0.92`), and mixed-token
+/// values with no shared shape (`ttl=30m`, `rate=20/min`).
+fn extract_raw_field(compact: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}=");
+    let start = compact.find(&marker)? + marker.len();
+    let rest = &compact[start..];
+    let end = split_top_level(rest, ';').into_iter().next()?;
+    if end.is_empty() || end.starts_with('"') || end.starts_with('[') {
+        return None;
+    }
+    Some(end)
+}
+
+/// `key=[a, b, c];` -> the bracket-matched, top-level-comma-split item list.
+fn extract_list_field(compact: &str, key: &str) -> Option<Vec<String>> {
+    let marker = format!("{key}=[");
+    let bracket_start = compact.find(&marker)? + marker.len() - 1;
+    let bracket_end = matching_bracket(compact, bracket_start)?;
+    let inner = &compact[bracket_start + 1..bracket_end];
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    Some(split_top_level(inner, ','))
+}
+
+/// Splits `keyword <name> { .. }` blocks out of a token stream's top level
+/// (repeated: `port a { .. } port b { .. }`), correctly skipping over each
+/// block's own internal braces since it walks real `TokenTree`s rather than
+/// searching flattened text.
+fn top_level_named_blocks(input: TokenStream2, keyword: &str) -> Vec<(String, TokenStream2)> {
+    let tokens: Vec<TokenTree> = input.into_iter().collect();
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if let TokenTree::Ident(ident) = &tokens[i] {
+            if ident == keyword {
+                if let (Some(TokenTree::Ident(name)), Some(TokenTree::Group(group))) =
+                    (tokens.get(i + 1), tokens.get(i + 2))
+                {
+                    if group.delimiter() == Delimiter::Brace {
+                        blocks.push((name.to_string(), group.stream()));
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    blocks
+}
+
+/// Finds an unnamed `keyword { .. }` block (no name identifier in between —
+/// `mcp_tools!`'s nested `delegation { .. }`/`defaults { .. }`) among a
+/// flat `TokenTree` list.
+fn find_labeled_block(tokens: &[TokenTree], keyword: &str) -> Option<TokenStream2> {
+    for i in 0..tokens.len() {
+        if let TokenTree::Ident(ident) = &tokens[i] {
+            if ident == keyword {
+                if let Some(TokenTree::Group(group)) = tokens.get(i + 1) {
+                    if group.delimiter() == Delimiter::Brace {
+                        return Some(group.stream());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn opt_str_lit(value: &Option<String>) -> proc_macro2::TokenStream {
+    match value {
+        Some(v) => {
+            let lit = LitStr::new(v, proc_macro2::Span::call_site());
+            quote!(Some(#lit))
+        }
+        None => quote!(None),
+    }
+}
+
+fn str_lits(values: &[String]) -> Vec<LitStr> {
+    values.iter().map(|v| LitStr::new(v, proc_macro2::Span::call_site())).collect()
+}
+
+/// `purpose_taxonomy! { enum Purpose { Operations, FraudMonitoring, ... } }`
+/// — RTM's closed purpose taxonomy (RFC 0025 §1B/§17). Named
+/// `purpose_taxonomy`, not `purpose`: that name is already taken by the
+/// existing `#[proc_macro_attribute] purpose` (a real, load-bearing,
+/// different-grammar macro — `#[nirdosha_rt::purpose(code = ..., basis =
+/// ..., review = ...)]`, used by `crates/nirdosha-rt/tests/guard_attributes.rs`).
+/// Called fully-qualified as `nirdosha_guard_macros::purpose_taxonomy!` for
+/// the identical reason `nirdosha_guard_macros::workflow!` must be
+/// fully-qualified: `nirdosha_rt` already re-exports a same-named, unrelated
+/// macro (there, the UI screen-flow `workflow!`; here, the attribute
+/// `purpose!`) under the plain name.
+///
+/// The input is literally a valid `enum` item, so this parses it with real
+/// `syn`, not string extraction — unlike the other five macros in this
+/// section, there's no non-standard grammar here to work around. Emits the
+/// real enum (so application code can reference e.g. `Purpose::FraudMonitoring`)
+/// plus one `PurposeRegistration` per variant into `PURPOSES`.
+#[proc_macro]
+pub fn purpose_taxonomy(input: TokenStream) -> TokenStream {
+    let item_enum = match syn::parse::<syn::ItemEnum>(input) {
+        Ok(item) => item,
+        Err(error) => return error.into_compile_error().into(),
+    };
+    let mut registrations = proc_macro2::TokenStream::new();
+    for variant in &item_enum.variants {
+        let variant_ident = &variant.ident;
+        let code_lit = LitStr::new(&variant_ident.to_string(), variant_ident.span());
+        let static_name = format_ident!("__NIRDOSHA_PURPOSE_{}", variant_ident);
+        registrations.extend(quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::PURPOSES)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #static_name: ::nirdosha_guard_registry::PurposeRegistration =
+                ::nirdosha_guard_registry::PurposeRegistration { code: #code_lit };
+        });
+    }
+    quote! {
+        #item_enum
+        #registrations
+    }
+    .into()
+}
+
+/// `stream_port! { port <name> { bind "..." | publish "..."; [semantics = ident;] [format = "..";] [schema = "..";] } ... }`
+/// (RFC 0025 §8.1/§6.5), one or more ports per invocation.
+#[proc_macro]
+pub fn stream_port(input: TokenStream) -> TokenStream {
+    let tokens: TokenStream2 = input.into();
+    let blocks = top_level_named_blocks(tokens, "port");
+    if blocks.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "stream_port! expects at least one `port <name> { .. }` block",
+        )
+        .into_compile_error()
+        .into();
+    }
+    let mut output = proc_macro2::TokenStream::new();
+    for (name, body) in blocks {
+        let body_str = compact(&body.to_string());
+        let (direction, target) = match extract_str_field_no_eq(&body_str, "bind") {
+            Some(t) => ("bind", t),
+            None => match extract_str_field_no_eq(&body_str, "publish") {
+                Some(t) => ("publish", t),
+                None => {
+                    return syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!("port `{name}` needs a `bind \"...\"` or `publish \"...\"` clause"),
+                    )
+                    .into_compile_error()
+                    .into();
+                }
+            },
+        };
+        let format = extract_str_field(&body_str, "format");
+        let schema = extract_str_field(&body_str, "schema");
+        let semantics = extract_raw_field(&body_str, "semantics");
+        let static_name = catalog_static_name("PORT", &format!("{name}|{body_str}"));
+        let name_lit = LitStr::new(&name, proc_macro2::Span::call_site());
+        let direction_lit = LitStr::new(direction, proc_macro2::Span::call_site());
+        let target_lit = LitStr::new(&target, proc_macro2::Span::call_site());
+        let format_expr = opt_str_lit(&format);
+        let schema_expr = opt_str_lit(&schema);
+        let semantics_expr = opt_str_lit(&semantics);
+        output.extend(quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::PORTS)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #static_name: ::nirdosha_guard_registry::PortRegistration = ::nirdosha_guard_registry::PortRegistration {
+                name: #name_lit,
+                direction: #direction_lit,
+                target: #target_lit,
+                format: #format_expr,
+                schema: #schema_expr,
+                semantics: #semantics_expr,
+            };
+        });
+    }
+    output.into()
+}
+
+/// `model_artifact! { model <name> { format = ident; inputs = [ident, ...]; outputs = [ident (: type)?, ...]; threshold_alert = <float>; } ... }`
+/// (RFC 0025 §8.3), one or more models per invocation.
+#[proc_macro]
+pub fn model_artifact(input: TokenStream) -> TokenStream {
+    let tokens: TokenStream2 = input.into();
+    let blocks = top_level_named_blocks(tokens, "model");
+    if blocks.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "model_artifact! expects at least one `model <name> { .. }` block",
+        )
+        .into_compile_error()
+        .into();
+    }
+    let mut output = proc_macro2::TokenStream::new();
+    for (name, body) in blocks {
+        let body_str = compact(&body.to_string());
+        let format = extract_raw_field(&body_str, "format").unwrap_or_default();
+        let inputs = extract_list_field(&body_str, "inputs").unwrap_or_default();
+        let outputs = extract_list_field(&body_str, "outputs").unwrap_or_default();
+        let threshold_alert = extract_raw_field(&body_str, "threshold_alert").and_then(|s| s.parse::<f64>().ok());
+        let static_name = catalog_static_name("MODEL", &format!("{name}|{body_str}"));
+        let name_lit = LitStr::new(&name, proc_macro2::Span::call_site());
+        let version_lit = LitStr::new("", proc_macro2::Span::call_site());
+        let format_lit = LitStr::new(&format, proc_macro2::Span::call_site());
+        let input_lits = str_lits(&inputs);
+        let output_lits = str_lits(&outputs);
+        let threshold_expr = match threshold_alert {
+            Some(v) => quote!(Some(#v)),
+            None => quote!(None),
+        };
+        output.extend(quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::MODELS)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #static_name: ::nirdosha_guard_registry::ModelRegistration = ::nirdosha_guard_registry::ModelRegistration {
+                name: #name_lit,
+                version: #version_lit,
+                format: #format_lit,
+                inputs: &[#(#input_lits),*],
+                outputs: &[#(#output_lits),*],
+                threshold_alert: #threshold_expr,
+            };
+        });
+    }
+    output.into()
+}
+
+/// `matcher! { matcher <name> { algorithm = ident; threshold = <float>; lists = [ident, ...]; } ... }`
+/// (RFC 0025 §8.4), one or more matchers per invocation.
+#[proc_macro]
+pub fn matcher(input: TokenStream) -> TokenStream {
+    let tokens: TokenStream2 = input.into();
+    let blocks = top_level_named_blocks(tokens, "matcher");
+    if blocks.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "matcher! expects at least one `matcher <name> { .. }` block",
+        )
+        .into_compile_error()
+        .into();
+    }
+    let mut output = proc_macro2::TokenStream::new();
+    for (name, body) in blocks {
+        let body_str = compact(&body.to_string());
+        let algorithm = extract_raw_field(&body_str, "algorithm").unwrap_or_default();
+        let threshold: f64 = extract_raw_field(&body_str, "threshold").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let lists = extract_list_field(&body_str, "lists").unwrap_or_default();
+        let static_name = catalog_static_name("MATCHER", &format!("{name}|{body_str}"));
+        let name_lit = LitStr::new(&name, proc_macro2::Span::call_site());
+        let algorithm_lit = LitStr::new(&algorithm, proc_macro2::Span::call_site());
+        let list_lits = str_lits(&lists);
+        output.extend(quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::MATCHERS)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #static_name: ::nirdosha_guard_registry::MatcherRegistration = ::nirdosha_guard_registry::MatcherRegistration {
+                name: #name_lit,
+                algorithm: #algorithm_lit,
+                threshold: #threshold,
+                lists: &[#(#list_lits),*],
+            };
+        });
+    }
+    output.into()
+}
+
+/// `feature <name>(<key>) = <kind>( .. );` (RFC 0025 §8.2), one or more
+/// statements per invocation, split on top-level `;`. `name`/`key`/`kind`
+/// are pulled out structurally; the parenthesized remainder is kept as
+/// opaque `spec` source text rather than parsed further — real usages mix
+/// plain idents (`keys = [subject_id]`), call-shaped aggregates
+/// (`sum(amount)`), and a free-form boolean expression
+/// (`geo_speed(geo) > 900 km/h`) with no shared grammar, so there's nothing
+/// uniform left to structurally extract once `kind`'s own argument list is
+/// reached — the same "structure what's checkable, keep the rest honest as
+/// source" split `PolicyRecord.filter_ref` already uses for clauses this
+/// lowering pass can name but not fully resolve.
+#[proc_macro]
+pub fn window(input: TokenStream) -> TokenStream {
+    let tokens: TokenStream2 = input.into();
+    let body_str = compact(&tokens.to_string());
+    let statements = split_top_level(&body_str, ';');
+    let mut output = proc_macro2::TokenStream::new();
+    let mut found = false;
+    for stmt in statements {
+        if stmt.is_empty() {
+            continue;
+        }
+        let Some((name, key, kind, spec)) = parse_feature_statement(&stmt) else {
+            return syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("window!: cannot parse feature statement `{stmt}` (expected `feature name(key) = kind( .. );`)"),
+            )
+            .into_compile_error()
+            .into();
+        };
+        found = true;
+        let static_name = catalog_static_name("WINDOW", &stmt);
+        let name_lit = LitStr::new(&name, proc_macro2::Span::call_site());
+        let key_lit = LitStr::new(&key, proc_macro2::Span::call_site());
+        let kind_lit = LitStr::new(&kind, proc_macro2::Span::call_site());
+        let spec_lit = LitStr::new(&spec, proc_macro2::Span::call_site());
+        output.extend(quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::WINDOWS)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #static_name: ::nirdosha_guard_registry::WindowRegistration = ::nirdosha_guard_registry::WindowRegistration {
+                name: #name_lit,
+                key: #key_lit,
+                kind: #kind_lit,
+                spec: #spec_lit,
+            };
+        });
+    }
+    if !found {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "window! expects at least one `feature name(key) = kind( .. );` statement",
+        )
+        .into_compile_error()
+        .into();
+    }
+    output.into()
+}
+
+fn parse_feature_statement(stmt: &str) -> Option<(String, String, String, String)> {
+    let rest = stmt.strip_prefix("feature")?;
+    let paren_open = rest.find('(')?;
+    let name = rest[..paren_open].to_string();
+    let paren_close = matching_bracket(rest, paren_open)?;
+    let key = rest[paren_open + 1..paren_close].to_string();
+    let after_paren = &rest[paren_close + 1..];
+    let after_eq = after_paren.strip_prefix('=')?;
+    let kind_paren = after_eq.find('(')?;
+    let kind = after_eq[..kind_paren].to_string();
+    let kind_close = matching_bracket(after_eq, kind_paren)?;
+    let spec = after_eq[kind_paren + 1..kind_close].to_string();
+    Some((name, key, kind, spec))
+}
+
+/// `mcp_tools! { server <name> { identity = "..."; tools = [ .. ]; delegation { bind ..; ttl = ..; max_tool_calls = N; rate = ..; } defaults { audit = ident; row_cap = N; destination = ident; } } }`
+/// (RFC 0024 §1/§5.3, RFC 0025 §8.8), one or more servers per invocation.
+/// `tools` entries — bare idents (`evaluate`) or call-shaped
+/// (`query_records(Transaction, Alert, Case, Customer)`) — are each kept as
+/// their own rendered token string.
+#[proc_macro]
+pub fn mcp_tools(input: TokenStream) -> TokenStream {
+    let tokens: TokenStream2 = input.into();
+    let blocks = top_level_named_blocks(tokens, "server");
+    if blocks.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "mcp_tools! expects at least one `server <name> { .. }` block",
+        )
+        .into_compile_error()
+        .into();
+    }
+    let mut output = proc_macro2::TokenStream::new();
+    for (name, body) in blocks {
+        let body_str = compact(&body.to_string());
+        let identity = extract_str_field(&body_str, "identity").unwrap_or_default();
+        let tools = extract_list_field(&body_str, "tools").unwrap_or_default();
+
+        let body_tokens: Vec<TokenTree> = body.into_iter().collect();
+        let delegation_str = find_labeled_block(&body_tokens, "delegation").map(|ts| compact(&ts.to_string()));
+        let defaults_str = find_labeled_block(&body_tokens, "defaults").map(|ts| compact(&ts.to_string()));
+
+        let ttl = delegation_str.as_deref().and_then(|s| extract_raw_field(s, "ttl"));
+        let max_tool_calls = delegation_str
+            .as_deref()
+            .and_then(|s| extract_raw_field(s, "max_tool_calls"))
+            .and_then(|s| s.parse::<u32>().ok());
+        let rate = delegation_str.as_deref().and_then(|s| extract_raw_field(s, "rate"));
+
+        let audit_default = defaults_str.as_deref().and_then(|s| extract_raw_field(s, "audit"));
+        let row_cap_default = defaults_str
+            .as_deref()
+            .and_then(|s| extract_raw_field(s, "row_cap"))
+            .and_then(|s| s.parse::<u64>().ok());
+        let destination_default = defaults_str.as_deref().and_then(|s| extract_raw_field(s, "destination"));
+
+        let static_name = catalog_static_name("MCP_SERVER", &format!("{name}|{body_str}"));
+        let name_lit = LitStr::new(&name, proc_macro2::Span::call_site());
+        let identity_lit = LitStr::new(&identity, proc_macro2::Span::call_site());
+        let tool_lits = str_lits(&tools);
+        let ttl_expr = opt_str_lit(&ttl);
+        let max_tool_calls_expr = match max_tool_calls {
+            Some(v) => quote!(Some(#v)),
+            None => quote!(None),
+        };
+        let rate_expr = opt_str_lit(&rate);
+        let audit_default_expr = opt_str_lit(&audit_default);
+        let row_cap_default_expr = match row_cap_default {
+            Some(v) => quote!(Some(#v)),
+            None => quote!(None),
+        };
+        let destination_default_expr = opt_str_lit(&destination_default);
+
+        output.extend(quote! {
+            #[used]
+            #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::MCP_SERVERS)]
+            #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+            static #static_name: ::nirdosha_guard_registry::McpServerRegistration = ::nirdosha_guard_registry::McpServerRegistration {
+                name: #name_lit,
+                identity: #identity_lit,
+                tools: &[#(#tool_lits),*],
+                ttl: #ttl_expr,
+                max_tool_calls: #max_tool_calls_expr,
+                rate: #rate_expr,
+                audit_default: #audit_default_expr,
+                row_cap_default: #row_cap_default_expr,
+                destination_default: #destination_default_expr,
+            };
+        });
+    }
+    output.into()
 }

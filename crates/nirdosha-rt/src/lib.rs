@@ -30,8 +30,8 @@ pub use nirdosha_macros::{
 
 pub use nirdosha_guard_macros::{
     approval_chain, audit_rules, audit_sampling, break_glass, classify, dataset, enumerate,
-    invariant, materialize, mask_transform, policy as guard_policy, purpose, reference,
-    relation,
+    invariant, materialize, mask_transform, matcher, mcp_tools, model_artifact,
+    policy as guard_policy, purpose, reference, relation, stream_port, window,
 };
 pub use nirdosha_guard_registry as guard_registry;
 

@@ -224,11 +224,183 @@ pub struct DatasetRecord { pub entity: String, pub store: String, pub fields: Ve
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleRecord { pub name: String }
 
+/// `stream_port!`'s owned record — a `bind`/`publish` binding for one named
+/// port (RFC 0025 §8.1/§6.5). `direction` is `"bind"` or `"publish"`;
+/// `target` is the bound topic/rail literal. `format`/`schema`/`semantics`
+/// mirror the doc's optional `format = "avro"; schema = "transaction";
+/// semantics = at_least_once;` clauses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PortRecord { pub name: String }
+pub struct PortRecord {
+	pub name: String,
+	pub direction: String,
+	pub target: String,
+	pub format: Option<String>,
+	pub schema: Option<String>,
+	pub semantics: Option<String>,
+}
 
+/// Const-constructible counterpart to [`PortRecord`] — see
+/// [`ApprovalChainRegistration`]'s doc comment for why this split exists
+/// (owned `String`/`Option<String>` fields can't be built in a `const`
+/// context, so the macro-facing type is all `&'static str`/`Option<&'static str>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortRegistration {
+	pub name: &'static str,
+	pub direction: &'static str,
+	pub target: &'static str,
+	pub format: Option<&'static str>,
+	pub schema: Option<&'static str>,
+	pub semantics: Option<&'static str>,
+}
+
+impl PortRegistration {
+	pub fn to_record(&self) -> PortRecord {
+		PortRecord {
+			name: self.name.to_string(),
+			direction: self.direction.to_string(),
+			target: self.target.to_string(),
+			format: self.format.map(str::to_string),
+			schema: self.schema.map(str::to_string),
+			semantics: self.semantics.map(str::to_string),
+		}
+	}
+}
+
+/// `model_artifact!`'s owned record (RFC 0025 §8.3). `version` defaults to
+/// `""` when the doc's `model { ... }` block never sets one — this grammar
+/// has no `version = ...` clause today, unlike the pre-existing
+/// `ModelRecord.version` field this record still carries for whatever
+/// future macro/tooling wants to set it explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelRecord {
+	pub name: String,
+	pub version: String,
+	pub format: String,
+	pub inputs: Vec<String>,
+	pub outputs: Vec<String>,
+	pub threshold_alert: Option<f64>,
+}
+
+/// Const-constructible counterpart to [`ModelRecord`] — see
+/// [`ApprovalChainRegistration`]'s doc comment for why this split exists.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelRegistration {
+	pub name: &'static str,
+	pub version: &'static str,
+	pub format: &'static str,
+	pub inputs: &'static [&'static str],
+	pub outputs: &'static [&'static str],
+	pub threshold_alert: Option<f64>,
+}
+
+impl ModelRegistration {
+	pub fn to_record(&self) -> ModelRecord {
+		ModelRecord {
+			name: self.name.to_string(),
+			version: self.version.to_string(),
+			format: self.format.to_string(),
+			inputs: self.inputs.iter().map(|s| s.to_string()).collect(),
+			outputs: self.outputs.iter().map(|s| s.to_string()).collect(),
+			threshold_alert: self.threshold_alert,
+		}
+	}
+}
+
+/// `matcher!`'s owned record (RFC 0025 §8.4) — a fuzzy-matching algorithm
+/// bound to a set of watchlist ids. No pre-existing `MatcherRecord`/slice
+/// existed before this phase (unlike `PORTS`/`MODELS`/`PURPOSES`, which
+/// were declared-but-unpopulated); both are new.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatcherRecord { pub name: String, pub algorithm: String, pub threshold: f64, pub lists: Vec<String> }
+
+/// Const-constructible counterpart to [`MatcherRecord`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatcherRegistration {
+	pub name: &'static str,
+	pub algorithm: &'static str,
+	pub threshold: f64,
+	pub lists: &'static [&'static str],
+}
+
+impl MatcherRegistration {
+	pub fn to_record(&self) -> MatcherRecord {
+		MatcherRecord {
+			name: self.name.to_string(),
+			algorithm: self.algorithm.to_string(),
+			threshold: self.threshold,
+			lists: self.lists.iter().map(|s| s.to_string()).collect(),
+		}
+	}
+}
+
+/// `window!`'s owned record (RFC 0025 §8.2) — a feature window's `name`,
+/// `key`, and `kind` (`sliding`/`hopping`/`session`) are pulled out
+/// structurally; the remainder (the window/period, `keys=[...]`,
+/// `aggs=[...]`/`expr=...`) is kept as opaque `spec` source text — see
+/// `nirdosha-guard-macros::window!`'s own doc comment for why that
+/// remainder isn't parsed further.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelRecord { pub name: String, pub version: String }
+pub struct WindowRecord { pub name: String, pub key: String, pub kind: String, pub spec: String }
+
+/// Const-constructible counterpart to [`WindowRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowRegistration {
+	pub name: &'static str,
+	pub key: &'static str,
+	pub kind: &'static str,
+	pub spec: &'static str,
+}
+
+impl WindowRegistration {
+	pub fn to_record(&self) -> WindowRecord {
+		WindowRecord { name: self.name.to_string(), key: self.key.to_string(), kind: self.kind.to_string(), spec: self.spec.to_string() }
+	}
+}
+
+/// `mcp_tools!`'s owned record (RFC 0024/0025 §8.8) — one registered MCP
+/// server's identity, tool roster, delegation limits, and I17 defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerRecord {
+	pub name: String,
+	pub identity: String,
+	pub tools: Vec<String>,
+	pub ttl: Option<String>,
+	pub max_tool_calls: Option<u32>,
+	pub rate: Option<String>,
+	pub audit_default: Option<String>,
+	pub row_cap_default: Option<u64>,
+	pub destination_default: Option<String>,
+}
+
+/// Const-constructible counterpart to [`McpServerRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpServerRegistration {
+	pub name: &'static str,
+	pub identity: &'static str,
+	pub tools: &'static [&'static str],
+	pub ttl: Option<&'static str>,
+	pub max_tool_calls: Option<u32>,
+	pub rate: Option<&'static str>,
+	pub audit_default: Option<&'static str>,
+	pub row_cap_default: Option<u64>,
+	pub destination_default: Option<&'static str>,
+}
+
+impl McpServerRegistration {
+	pub fn to_record(&self) -> McpServerRecord {
+		McpServerRecord {
+			name: self.name.to_string(),
+			identity: self.identity.to_string(),
+			tools: self.tools.iter().map(|s| s.to_string()).collect(),
+			ttl: self.ttl.map(str::to_string),
+			max_tool_calls: self.max_tool_calls,
+			rate: self.rate.map(str::to_string),
+			audit_default: self.audit_default.map(str::to_string),
+			row_cap_default: self.row_cap_default,
+			destination_default: self.destination_default.map(str::to_string),
+		}
+	}
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowRecord { pub name: String, pub states: Vec<String> }
@@ -275,6 +447,18 @@ pub struct InvariantRecord { pub name: String }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurposeRecord { pub code: String }
 
+/// Const-constructible counterpart to [`PurposeRecord`] — what
+/// `purpose_taxonomy!` emits, one per `enum Purpose { Variant, ... }`
+/// variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PurposeRegistration { pub code: &'static str }
+
+impl PurposeRegistration {
+	pub fn to_record(&self) -> PurposeRecord {
+		PurposeRecord { code: self.code.to_string() }
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriverManifestRecord {
 	pub port: String,
@@ -297,9 +481,9 @@ pub static DATASETS: [DatasetRecord] = [..];
 #[linkme::distributed_slice]
 pub static ROLES: [RoleRecord] = [..];
 #[linkme::distributed_slice]
-pub static PORTS: [PortRecord] = [..];
+pub static PORTS: [PortRegistration] = [..];
 #[linkme::distributed_slice]
-pub static MODELS: [ModelRecord] = [..];
+pub static MODELS: [ModelRegistration] = [..];
 #[linkme::distributed_slice]
 pub static WORKFLOWS: [WorkflowRecord] = [..];
 #[linkme::distributed_slice]
@@ -307,11 +491,17 @@ pub static APPROVAL_CHAINS: [ApprovalChainRegistration] = [..];
 #[linkme::distributed_slice]
 pub static INVARIANTS: [InvariantRecord] = [..];
 #[linkme::distributed_slice]
-pub static PURPOSES: [PurposeRecord] = [..];
+pub static PURPOSES: [PurposeRegistration] = [..];
 #[linkme::distributed_slice]
 pub static DRIVER_MANIFESTS: [DriverManifestRecord] = [..];
+#[linkme::distributed_slice]
+pub static MATCHERS: [MatcherRegistration] = [..];
+#[linkme::distributed_slice]
+pub static WINDOWS: [WindowRegistration] = [..];
+#[linkme::distributed_slice]
+pub static MCP_SERVERS: [McpServerRegistration] = [..];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RegistryDump {
 	/// Fully lowered ("Gate 2" expanded) records, not the raw
 	/// `PolicyRegistration` — a consumer of the dump (`cargo nirdosha
@@ -329,14 +519,23 @@ pub struct RegistryDump {
 	pub invariants: Vec<InvariantRecord>,
 	pub purposes: Vec<PurposeRecord>,
 	pub driver_manifests: Vec<DriverManifestRecord>,
+	pub matchers: Vec<MatcherRecord>,
+	pub windows: Vec<WindowRecord>,
+	pub mcp_servers: Vec<McpServerRecord>,
 }
 
 pub fn dump() -> RegistryDump {
 	RegistryDump {
 		policies: records(), datasets: DATASETS.to_vec(), roles: ROLES.to_vec(),
-		ports: PORTS.to_vec(), models: MODELS.to_vec(), workflows: WORKFLOWS.to_vec(),
+		ports: PORTS.iter().map(PortRegistration::to_record).collect(),
+		models: MODELS.iter().map(ModelRegistration::to_record).collect(),
+		workflows: WORKFLOWS.to_vec(),
 		approval_chains: APPROVAL_CHAINS.iter().map(ApprovalChainRegistration::to_record).collect(), invariants: INVARIANTS.to_vec(),
-		purposes: PURPOSES.to_vec(), driver_manifests: DRIVER_MANIFESTS.to_vec(),
+		purposes: PURPOSES.iter().map(PurposeRegistration::to_record).collect(),
+		driver_manifests: DRIVER_MANIFESTS.to_vec(),
+		matchers: MATCHERS.iter().map(MatcherRegistration::to_record).collect(),
+		windows: WINDOWS.iter().map(WindowRegistration::to_record).collect(),
+		mcp_servers: MCP_SERVERS.iter().map(McpServerRegistration::to_record).collect(),
 	}
 }
 
@@ -374,7 +573,7 @@ pub fn write_dump_from_env() -> std::io::Result<std::path::PathBuf> {
 }
 
 pub fn coverage_matrix() -> Vec<&'static str> {
-	vec!["policies", "datasets", "roles", "ports", "models", "workflows", "approval_chains", "invariants", "purposes", "driver_manifests"]
+	vec!["policies", "datasets", "roles", "ports", "models", "workflows", "approval_chains", "invariants", "purposes", "driver_manifests", "matchers", "windows", "mcp_servers"]
 }
 
 #[cfg(test)]
