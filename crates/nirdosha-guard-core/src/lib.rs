@@ -185,8 +185,10 @@ pub struct EvaluationContext {
 /// `action == "aggregate"`, `lineage-explore`/`lineage-audit` use
 /// `"lineage_query"` (matching `lineage_query!`'s own vocabulary),
 /// `policy-simulate` uses `"simulate"` (matching `policy_simulation!`),
-/// and `admin-mint-delegation` uses `"delegate"`. Every one of those real
-/// policies silently vanished from `PolicyRegistration::to_candidate()`
+/// `admin-mint-delegation` uses `"delegate"`, and the RTM network graph
+/// screens (`7.1`/`7.2`/`7.3`/`7.5`) use `"link_query"` (matching the
+/// menu guard action that was previously unparseable). Every one of those
+/// real policies silently vanished from `PolicyRegistration::to_candidate()`
 /// (which `filter_map`s out an unparseable action) before this — not a
 /// compile error, not a runtime panic, just a policy that looked live in
 /// every listing and never matched a request. `nirdosha-guard-verify`'s V3
@@ -203,6 +205,7 @@ pub enum Action {
     Enumerate,
     Aggregate,
     LineageQuery,
+    LinkQuery,
     Simulate,
     Delegate,
 }
@@ -224,6 +227,7 @@ impl Action {
             "enumerate" => Some(Action::Enumerate),
             "aggregate" => Some(Action::Aggregate),
             "lineage_query" => Some(Action::LineageQuery),
+            "link_query" => Some(Action::LinkQuery),
             "simulate" => Some(Action::Simulate),
             "delegate" => Some(Action::Delegate),
             _ => None,
@@ -247,6 +251,7 @@ impl Action {
             Action::Enumerate => "enumerate",
             Action::Aggregate => "aggregate",
             Action::LineageQuery => "lineage_query",
+            Action::LinkQuery => "link_query",
             Action::Simulate => "simulate",
             Action::Delegate => "delegate",
         }
@@ -800,7 +805,7 @@ mod tests {
 
     #[test]
     fn wire_str_round_trips_through_parse_wire_for_every_action() {
-        for action in [Action::Read, Action::Create, Action::Update, Action::Delete, Action::Migrate, Action::Export, Action::Enumerate, Action::Aggregate, Action::LineageQuery, Action::Simulate, Action::Delegate] {
+        for action in [Action::Read, Action::Create, Action::Update, Action::Delete, Action::Migrate, Action::Export, Action::Enumerate, Action::Aggregate, Action::LineageQuery, Action::LinkQuery, Action::Simulate, Action::Delegate] {
             assert_eq!(Action::parse_wire(action.wire_str()), Some(action.clone()), "wire_str()/parse_wire() must round-trip for {action:?}");
         }
     }

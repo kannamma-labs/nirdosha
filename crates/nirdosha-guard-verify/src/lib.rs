@@ -72,7 +72,7 @@ pub trait VerifyPass { fn name(&self) -> &'static str; fn run(&self, registry: &
 /// has exactly these variants.
 const CANONICAL_ACTIONS: &[&str] = &[
 	"read", "create", "update", "delete", "migrate", "export", "enumerate",
-	"aggregate", "lineage_query", "simulate", "delegate",
+	"aggregate", "lineage_query", "link_query", "simulate", "delegate",
 ];
 
 struct V1; struct V2; struct V3; struct V4; struct V5; struct V6; struct V7; struct V8;

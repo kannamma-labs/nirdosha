@@ -87,7 +87,22 @@ fn matches_context(context: &EvaluationContext, policy: &PolicyCandidate) -> boo
     let role_match = policy.subjects.is_empty() || policy.subjects.iter().any(|subject| context.subject.roles.iter().any(|role| role == subject));
     role_match
         && context.action == policy.action
-        && context.entity == policy.resource
+        // `"*"` is the real, load-bearing sentinel `nirdosha-guard-macros`'s
+        // `guard_policy!` parser emits for a `when action ...` clause with
+        // no `&& resource ...` at all (`lib.rs`'s `PolicyInput::parse`:
+        // `resources = vec![LitStr::new("*", ...)]` before the optional
+        // `&& resource` branch may overwrite it) -- e.g. RTM's real
+        // `deny "auditor-no-write" for Auditor when action in [...]`
+        // (`96_restricted_views.nir`) and `deny "regulator-no-export"`
+        // (same file), both deliberately resource-agnostic denies. Found
+        // by direct trace, not assumed: before this fix, plain string
+        // equality meant `policy.resource == "*"` could never equal any
+        // real `context.entity`, so both denies were silently inert in
+        // this live evaluator (the static/verify-only "Gate 2" path never
+        // exercises `matches_context` at all, which is why `verify_corpus.rs`
+        // never caught this). No real dataset is ever named `"*"`, so this
+        // is unambiguous, not a guessed-at wildcard convention.
+        && (context.entity == policy.resource || policy.resource == "*")
         && policy.purpose.as_ref().is_none_or(|purpose| purpose == &context.purpose.0)
 }
 
@@ -112,4 +127,24 @@ mod tests {
 
     #[test]
     fn exact_match_allows() { assert_eq!(evaluate(&context(), &[candidate(PolicyEffect::Allow)]).decision, Decision::Allow); }
+
+    /// Real bug, found tracing RTM's `auditor-no-write`/`regulator-no-export`
+    /// (`examples/rtm/src/96_restricted_views.nir`) -- both are real,
+    /// deliberately resource-agnostic denies (`when action in [...]`, no
+    /// `&& resource ...` clause at all), which `nirdosha-guard-macros`'s
+    /// `guard_policy!` parser lowers to the literal sentinel `resource:
+    /// "*"`. Before this fix, `matches_context`'s plain string equality
+    /// meant a `"*"`-resource policy could never match any real
+    /// `context.entity`, silently making both denies inert.
+    #[test]
+    fn a_resource_agnostic_deny_matches_every_entity() {
+        let wildcard_deny = PolicyCandidate { effect: PolicyEffect::Deny, subjects: vec!["auditor".into()], action: Action::Update, resource: "*".into(), purpose: None, conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: "auditor-no-write".into() };
+        let mut ctx = context();
+        ctx.subject.roles = vec!["auditor".into()];
+        ctx.action = Action::Update;
+        for entity in ["orders", "transaction", "anything_else"] {
+            ctx.entity = entity.into();
+            assert!(matches!(evaluate(&ctx, &[wildcard_deny.clone()]).decision, Decision::Deny { .. }), "a `resource: \"*\"` deny must block every entity, including `{entity}`");
+        }
+    }
 }
