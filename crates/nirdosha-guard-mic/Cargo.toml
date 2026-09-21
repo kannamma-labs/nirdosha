@@ -16,3 +16,11 @@ serde_json = "1"
 # -- base64-encoding the underlying keyset position keeps it a token to
 # pass back, not a value a caller is meant to construct or interpret.
 base64 = "0.22"
+# Plan Phase 18: AsyncStoreDriver bridges the existing synchronous
+# StoreDriver onto an async caller via spawn_blocking -- real thread-pool
+# offload, not a fake async facade over a sync call.
+tokio = { version = "1", features = ["rt"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

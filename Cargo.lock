@@ -1857,6 +1857,7 @@ dependencies = [
 name = "nirdosha-guard-mic"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "nirdosha-audit",
  "nirdosha-guard-core",
@@ -1865,6 +1866,7 @@ dependencies = [
  "nirdosha-lineage",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1877,6 +1879,19 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nirdosha-guard-snapshot-ws"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "nirdosha-audit",
+ "nirdosha-guard-core",
+ "nirdosha-guard-mic",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

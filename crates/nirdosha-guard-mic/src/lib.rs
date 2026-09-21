@@ -1,5 +1,6 @@
 //! Synchronous mutation-integrity controller for RFC 0023/0025.
 
+pub mod async_driver;
 pub mod attestation;
 pub mod exec;
 pub mod relation;
@@ -244,6 +245,20 @@ impl GuardClient {
 	pub fn with_approval_chains(mut self, definitions: Vec<nirdosha_guard_core::approval_chain::ApprovalChainDefinition>) -> Self {
 		self.approval_chains = nirdosha_guard_core::approval_chain::ApprovalChainRuntime::new(definitions);
 		self
+	}
+
+	/// Plan Phase 18 (async/networked policy store uplift): atomically
+	/// swaps the active policy set — the real effect a live
+	/// `nirdosha_guard_core::snapshot::PolicyStore::on_change` callback
+	/// needs to produce for "a running `GuardClient` picks up a new
+	/// policy version without restart" to mean anything beyond metadata.
+	/// Every decision already in the audit chain keeps the
+	/// `policy_version` it was stamped with at evaluation time (I4) —
+	/// this only changes what *future* `evaluate`/`guarded_apply`/
+	/// `guarded_read` calls match against.
+	pub fn apply_policy_snapshot(&mut self, policies: Vec<PolicyCandidate>) {
+		self.policies = policies;
+		self.cache = DecisionCache::new(std::time::Duration::from_secs(30));
 	}
 
 	/// Records one real approval against a pending escalation
