@@ -156,3 +156,64 @@ fn update_is_blocked_when_the_row_fails_a_re_checked_invariant() {
     let resp = post_form_as(&router, "/transactions/txn-http-004/edit", &cookie, "analyst_flag=true&analyst_flag_reason=x");
     assert_eq!(resp.status, 400, "a row failing amount_positive must block the update, not silently pass it through: {resp:?}");
 }
+
+/// T-12 (I15): `analyst-search-transaction`'s real `grant
+/// predicate_use(amount, currency, channel, merchant_id, device_id,
+/// geo)` — `?q=` pushed down through `GuardedTable::guarded_search`
+/// must actually narrow the result set (not just render decoratively),
+/// restricted to those granted fields. `merchant-zz` only matches one of
+/// the two seeded rows' `merchant_id`.
+#[test]
+fn q_search_on_a_granted_predicate_use_field_returns_policy_correct_rows() {
+    let router = router();
+    let matching = TransactionRow {
+        id: 0,
+        txn_id: "txn-http-005".into(),
+        tenant_id: "acme-demo".into(),
+        subject_id: "subject-1".into(),
+        account_id: "acct-1".into(),
+        amount: 42.50,
+        currency: "USD".into(),
+        status: "Pending".into(),
+        occurred_at: 1_700_000_000,
+        channel: "Card".into(),
+        merchant_id: "merchant-zz".into(),
+        card_token: "4111-1111-1111-1111".into(),
+        device_id: "device-1".into(),
+        geo: "US".into(),
+        analyst_flag: false,
+        analyst_flag_reason: String::new(),
+    };
+    transaction_table().raw_driver_seed("acme-demo", &matching);
+    seed("txn-http-006", 42.50, "4111-1111-1111-1111"); // merchant-1, from seed()
+
+    let cookie = session_cookie(&router.dispatch(&login_request("analyst", "analyst-demo")));
+
+    let json = get_as(&router, "/api/transactions?q=merchant-zz", &cookie);
+    assert_eq!(json.status, 200, "a search on a granted predicate_use field must not be denied: {json:?}");
+    let rows: serde_json::Value = serde_json::from_str(&json.body).expect("valid JSON");
+    let rows = rows.as_array().expect("array of rows");
+    assert!(rows.iter().any(|r| r["txn_id"] == "txn-http-005"), "the matching row must be present: {rows:?}");
+    assert!(!rows.iter().any(|r| r["txn_id"] == "txn-http-006"), "a non-matching row must be filtered out, not just decoratively rendered: {rows:?}");
+
+    let html = get_as(&router, "/transactions?q=merchant-zz", &cookie);
+    assert!(html.body.contains("txn-http-005") && !html.body.contains("txn-http-006"), "the HTML list must reflect the same real filter: {}", html.body);
+}
+
+/// T-12 (I15): `card_token` is a real `TransactionRow` field but is NOT
+/// in `analyst-search-transaction`'s `predicate_use` grant — a `q` that
+/// only exists in `card_token` must find nothing (the field is silently
+/// excluded from the search, per I15's "masked fields excluded from
+/// WHERE"), never accidentally leak via a full-field scan the way the
+/// old decorative substring search would have.
+#[test]
+fn q_search_cannot_reach_a_field_outside_the_predicate_use_grant() {
+    let router = router();
+    seed("txn-http-007", 42.50, "4111-CARDTOKEN-ONLY-VALUE");
+    let cookie = session_cookie(&router.dispatch(&login_request("analyst", "analyst-demo")));
+
+    let resp = get_as(&router, "/api/transactions?q=4111-CARDTOKEN-ONLY-VALUE", &cookie);
+    assert_eq!(resp.status, 200, "the screen still has other granted fields, so this is an empty match, not a deny: {resp:?}");
+    let rows: serde_json::Value = serde_json::from_str(&resp.body).expect("valid JSON");
+    assert!(rows.as_array().unwrap().is_empty(), "card_token is not in predicate_use — a value only present there must not surface the row: {rows:?}");
+}

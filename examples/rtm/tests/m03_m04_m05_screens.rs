@@ -105,6 +105,26 @@ fn analyst_reads_alert_queue_and_dispositions_it_through_real_field_policy() {
     assert_eq!(row["status"], "in_progress");
 }
 
+/// T-12 (I15): `analyst-read-alert`'s real `grant predicate_use(status,
+/// assignee, model_version, policy_version, txn_id)` — `?q=` must
+/// actually narrow the alert queue to matches on those fields, not
+/// render the box decoratively while returning every row regardless.
+#[test]
+fn q_search_on_the_alert_queue_uses_the_real_predicate_use_grant() {
+    let router = router();
+    let matching = AlertRow { id: 0, alert_id: "alert-020".into(), tenant_id: "acme-demo".into(), txn_id: "txn-1".into(), score: 0.9, model_version: "v1".into(), policy_version: "v1".into(), status: "new".into(), assignee: "lead-zz".into(), disposition_code: String::new(), rationale: String::new(), case_id: String::new(), sar_linked: None, severity: "High".into(), tags: String::new() };
+    alert_table().raw_driver_seed("acme-demo", &matching);
+    seed_alert("alert-021", "new"); // assignee stays empty — must not match
+
+    let cookie = login_as(&router, "analyst", "analyst-demo");
+    let json = get_as(&router, "/api/alerts?q=lead-zz", &cookie);
+    assert_eq!(json.status, 200, "assignee is a granted predicate_use field: {json:?}");
+    let rows: serde_json::Value = serde_json::from_str(&json.body).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert!(rows.iter().any(|r| r["alert_id"] == "alert-020"), "the matching row must be present: {rows:?}");
+    assert!(!rows.iter().any(|r| r["alert_id"] == "alert-021"), "a non-matching row must be filtered out, not just decoratively rendered: {rows:?}");
+}
+
 #[test]
 fn illegal_alert_status_transition_is_rejected() {
     let router = router();
@@ -267,4 +287,26 @@ fn auditor_reads_customer_and_analyst_is_denied() {
     let analyst_cookie = login_as(&router, "analyst", "analyst-demo");
     let denied = get_as(&router, "/customers", &analyst_cookie);
     assert_eq!(denied.status, 403, "Analyst has no real guard_policy! grant on customer: {denied:?}");
+}
+
+/// T-12 (I15): `auditor-read` (`96_restricted_views.nir`) grants no
+/// `predicate_use` at all on `customer` — the corpus's own real gap, not
+/// something this ticket invents a grant to route around (see this
+/// file's own module doc comment on `customer`'s missing L1/L2 read
+/// grants for the same posture). A `?q=` here must be a named deny, not
+/// silently ignored or emptied — I15's "reject filters on
+/// non-predicate_use fields" half. A plain, unfiltered read must stay
+/// unaffected — only the *search* is denied.
+#[test]
+fn q_search_on_customers_is_a_named_deny_no_predicate_use_grant_exists_at_all() {
+    let router = router();
+    seed_customer("cust-501");
+    let auditor_cookie = login_as(&router, "auditor", "auditor-demo");
+
+    let denied = get_as(&router, "/api/customers?q=Jane", &auditor_cookie);
+    assert_eq!(denied.status, 403, "no predicate_use grant exists on customer at all — q must be a named deny: {denied:?}");
+    assert!(denied.body.to_lowercase().contains("predicate"), "the deny must name I15/predicate_use, not a generic 403: {}", denied.body);
+
+    let unfiltered = get_as(&router, "/customers", &auditor_cookie);
+    assert_eq!(unfiltered.status, 200, "an unfiltered read must be unaffected by the search denial: {unfiltered:?}");
 }

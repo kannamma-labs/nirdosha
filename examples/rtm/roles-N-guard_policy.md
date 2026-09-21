@@ -580,6 +580,7 @@ nirdosha_rt::guard_policy! {
     cap(row_cap = 200, max_scan_rows = 50_000, max_execution = 5s)
     field_policy { forbidden(sar_linked) }                  // tipping-off: absent, not masked
     grant count_allowed
+    grant predicate_use(status, assignee, model_version, policy_version, txn_id)  // I15: 3.1's ?q= search
     obligate audit(sampled)
 }
 

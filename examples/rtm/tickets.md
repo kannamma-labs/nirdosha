@@ -373,18 +373,39 @@ immutability intact, and sar visibility rules hold at the projection layer.
 - blocked-screens: none
 - note-mentions: 3.1, 6.1
 
-**Scope.** The I15 face of search: `q` and filter fields on list screens
-compile into guarded predicates restricted to the role's `predicate_use(...)`
-grants (masked fields excluded from WHERE/JOIN/GROUP/ORDER per I15 —
-inventory-wiring.md "Masked-but-filterable" row). Until it lands, the fields
-render but do not query.
+**Scope.** The I15 face of search: `q` on list screens compiles into a real,
+policy-restricted predicate — `GuardedTable::guarded_search` (new,
+`crates/nirdosha-guard-screens/src/lib.rs`) ORs a case-insensitive substring
+match only across whichever of the screen's declared fields the winning
+`Allow` record's `grant predicate_use(...)` actually names; a masked/
+ungranted field can never be searched into existence. Applied in-process
+after decode — the same "coarse driver pushdown + fine in-process filter"
+posture `apply_subject_scope_in_process` already uses for `subject_scope()`,
+since arbitrary payload-field predicates aren't yet driver-pushable
+(`read_scope_clauses`'s own doc comment; a separate, pre-existing gap, not
+new). `crud_screens!`'s guarded list/JSON-list routes call it instead of
+the old dead `q` capture (guarded reads never actually filtered on `q` at
+all before this — worse than decorative). `analyst-read-alert`
+(`50_alerts.nir`) gained a real `grant predicate_use(status, assignee,
+model_version, policy_version, txn_id)` so 3.1 has something to search on;
+6.1's transaction grant already existed.
 
-**Gates.** No screen is stage-blocked. Feature gate on 3.1 Alert Work Queue
-("search q is decorative until T-12") and 6.1 Transaction Search ("works now;
-filters real after T-12 (predicate_use fields)").
+**Gates.** No screen is stage-blocked. 3.1 Alert Work Queue and 6.1
+Transaction Search both closed the "decorative search" disclosure — see
+their `screens.toml` notes.
 
 **Done when.** A filter on a non-predicate_use field is rejected with a named
-reason, and a granted filter returns policy-correct results.
+reason, and a granted filter returns policy-correct results. ✓ —
+`examples/rtm/tests/m03_m04_m05_screens.rs`'s
+`q_search_on_the_alert_queue_uses_the_real_predicate_use_grant` /
+`q_search_on_customers_is_a_named_deny_no_predicate_use_grant_exists_at_all`
+and `tests/m06_transactions_screen.rs`'s
+`q_search_on_a_granted_predicate_use_field_returns_policy_correct_rows` /
+`q_search_cannot_reach_a_field_outside_the_predicate_use_grant` prove both
+halves against real HTTP routes. (`customer`'s `auditor-read` grants no
+predicate_use at all — a real corpus gap, not invented for this ticket —
+so its `q` is the "zero eligible fields → named deny" proof; alert/
+transaction prove the "granted filter returns policy-correct rows" half.)
 
 ---
 

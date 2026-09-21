@@ -537,10 +537,10 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         let purpose = &guard.purpose;
         quote! {
             .get_with_auth(#path, "List", |req, _params, auth| {
-                match #table().guarded_snapshot(auth, #purpose) {
+                let q = req.query().get("q").cloned();
+                match #table().guarded_search(auth, #purpose, q.as_deref(), &[ #(#field_names),* ]) {
                     Ok(matched) => {
                         let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
-                        let q = req.query().get("q").cloned();
                         ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::list_html(#title, #path, &__fields(), &rows, #can_create, q.as_deref()))
                     }
                     Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
@@ -599,8 +599,9 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         let table = &guard.table;
         let purpose = &guard.purpose;
         quote! {
-            .get_with_auth(#api_path, "List (JSON)", |_req, _params, auth| {
-                match #table().guarded_snapshot(auth, #purpose) {
+            .get_with_auth(#api_path, "List (JSON)", |req, _params, auth| {
+                let q = req.query().get("q").cloned();
+                match #table().guarded_search(auth, #purpose, q.as_deref(), &[ #(#field_names),* ]) {
                     Ok(matched) => {
                         let rows: Vec<::serde_json::Value> = matched.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect();
                         ::nirdosha_rt::Response::json(200, &::serde_json::json!(rows))

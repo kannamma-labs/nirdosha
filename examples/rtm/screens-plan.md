@@ -36,7 +36,7 @@
 | B2 | T-14 kanban drag transitions (S) | B | S | 1 | ☑ done | B1 (machine) |
 | B3 | T-02 forbidden=absent drop pass (S) | B | S | gate | ☑ done | — |
 | B4 | T-10 role-ident canonicalization (S) | B | S | all | ☑ done | — |
-| B5 | T-12 predicate binding / I15 (S) | B | S | gate | ☐ pending | — |
+| B5 | T-12 predicate binding / I15 (S) | B | S | gate | ☑ done | — |
 | B6 | T-09 live streaming plane (M) | B | M | 4 | ☐ pending | — |
 | B7 | T-01 governed egress (M) | B | M | 5 | ☐ pending | — |
 | B8 | T-11 audit-chain projection (M) | B | M | 4 | ☐ pending | — |
@@ -253,7 +253,7 @@ sweep of screens off the `public`-verb workaround onto `requires role`
 declarations — out of this ticket's real scope once the mapping fn turned
 out to already exist; that's cosmetic cleanup, not a blocker closing.
 
-## B5 ☐ T-12 search/filter predicate binding — I15 (S)
+## B5 ☑ T-12 search/filter predicate binding — I15 (S) — done
 **Goal.** `q`/filter inputs compile into guarded WHERE clauses restricted by
 `predicate_use(...)` grants; masked fields excluded from WHERE/JOIN/GROUP/
 ORDER.
@@ -270,6 +270,33 @@ snapshot is O(N) per keystroke and bypasses `max_scan_rows`. Predicate
 pushdown must still respect the listing policy's `row_cap` and
 `max_execution`; debounce `q` at ≥150 ms and abort scans that exceed the
 policy cap with a named reason rather than silently truncating.
+
+**Landed.** Real *store-level* `FilterExpr` pushdown for arbitrary payload
+fields (step 1 as literally written) isn't possible yet — a pre-existing,
+disclosed gap (`read_scope_clauses`'s own doc comment: `MemStoreDriver`/
+`PostgresStoreDriver`'s flat `resource`/`tenant`/`payload` schema can't
+resolve a payload-field predicate at the driver). Built the same
+"coarse driver pushdown + fine in-process filter" shape the codebase
+already uses for `subject_scope()`: new `GuardedTable::guarded_search`
+(`nirdosha-guard-screens/src/lib.rs`) ORs a case-insensitive substring
+match only across whichever of the screen's fields the winning policy's
+`grant predicate_use(...)` actually names, applied in-process after
+decode/mask; zero eligible fields for a non-empty `q` is a named
+`GuardScreenError::Denied`, not silent. `crud_screens!`'s guarded list/
+JSON-list routes call it instead of the old `q` capture — which, on the
+`guard:` path, never filtered anything at all (worse than decorative:
+`q` was accepted and displayed but `matched` came straight from
+`guarded_snapshot`, unfiltered). Discovered `analyst-read-alert`
+(3.1's policy) had zero `predicate_use` grant at all — added a real one
+(`status, assignee, model_version, policy_version, txn_id`) rather than
+leaving 3.1 permanently un-searchable; mirrored into
+`roles-N-guard_policy.md`'s verbatim copy. Performance note's debounce/
+scan-abort half is client-side/follow-on UX, not built this pass — the
+existing `row_cap`/`widest_caps` enforcement already bounds the scan
+before search narrows it, same tradeoff `apply_subject_scope_in_process`
+already accepts. 6.1 gained its missing `file =` register line and
+flipped `emittable` → `built` (the file already existed and was tested;
+only the search-decorative disclosure was holding its stage back).
 
 ## B6 ☐ T-09 live streaming plane (M)
 **Unlocks.** Builds 11.1 Interception Queue; upgrades 2.5 wall, 10.5
@@ -516,3 +543,4 @@ parallelizes off the core path.
 | 2026-09-22 | B1 (T-03) landed: closed vocabularies (`DISPOSITION_CODES`/`CASE_DISPOSITION_CODES`/`HOLD_REASON_CODES`, 10_domains.nir) + 3 new invariants (`disposition_code_valid`/`case_disposition_valid`/`hold_reason_valid`, 00_core.nir + bridge.nir check_invariant arms), wired into `analyst-disposition-alert`/`case-transition`/`ingest-create-hold`; 3.3→built, 4.10→built, 11.2→built, 4.1 drops T-03 (T-14 only remains); executed single-agent (agent-a-engine.md's bridge.nir restriction lifted — no concurrent Agent B this run) | all rtm suites green (verify_tickets corpus-facts recomputed: 48 refs/40 lines/8 stage-gating+4 note-only) |
 | 2026-09-22 | B3 (T-02) landed: `read_masks_from_field_policy` synthesizes `MaskTransform::Drop` (true key removal) instead of `Full` for `field_policy { forbidden(...) }`; `masking::apply_one` removes the key outright for `Drop`; converted every field currently reachable through a real read policy's `forbidden(...)` to `Option<T>` (`AlertRow.sar_linked`, `CaseRow.sar_id`, `CustomerRow.{name,national_id,dob,risk_rating,pep_flag,sanctions_status}`, `PaymentRow.{rail_ref,originator,beneficiary,amount,hold_reason,decision_by,decision_rationale}`); `crud_screens!`'s ungated `__parse`/`core_fns` (dead code on any guard-only screen, previously always type-checked) now gated off `input.guard.is_none()`. Plan's original macro-level approach (steps 1-2) superseded — disclosed in B3's own section — since `forbidden(...)` is runtime policy, invisible to the macro at compile time | `cargo test -p rtm` (63 tests) + `cargo test -p nirdosha-rt -p nirdosha-macros -p nirdosha-guard-screens` (36+68+other suites) all green; full-workspace build has one pre-existing, unrelated failure in `nirdosha-guard-mcp` (`RegistryDump` missing fields) not touched by this change |
 | 2026-09-22 | B4 (T-10) landed: the central role-name mapping fn already existed (`nirdosha_contract_core::role::role_ident`, already used by `crud_screens!`); `app_shell_from_toml!` now reuses it for every nav-guard/`[landing]` role, plus emits a dead `type __AssertRoleDeclared_<Role> = crate::nirdosha_roles::<Role>;` alias per role so an undeclared role fails the *consuming* crate's build with a named "cannot find type" error instead of silently-dead nav; 2 new unit tests in `app_shell_from_toml.rs` prove the assertion fires for both a stale/typo'd role and a genuinely declared one; disk was found at 100%/60MB free mid-run (`target/` at 84GB) and `cargo clean` reclaimed 93GB before this unit ran | all rtm suites green; `cargo test -p nirdosha-macros app_shell_from_toml` green (2 new tests) |
+| 2026-09-22 | B5 (T-12) landed: new `GuardedTable::guarded_search` (nirdosha-guard-screens/src/lib.rs) — `q` ORs a case-insensitive substring match only across a screen's fields the winning policy's `grant predicate_use(...)` actually names, in-process after decode (driver-level payload-field pushdown is a separate, pre-existing, disclosed gap); zero eligible fields on a non-empty `q` is a named deny; `crud_screens!`'s guarded list/JSON-list routes now call it (previously `q` was captured and displayed but never actually filtered anything on the `guard:` path at all — worse than decorative). `analyst-read-alert` (50_alerts.nir + roles-N-guard_policy.md mirror) gained a real `grant predicate_use(status, assignee, model_version, policy_version, txn_id)` since it had none; 6.1 gained its missing `file =` line and flipped emittable→built | 4 new integration tests (m03_m04_m05_screens.rs, m06_transactions_screen.rs) proving both the granted-rows and named-deny halves through real HTTP routes; all rtm suites green |

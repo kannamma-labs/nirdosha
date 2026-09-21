@@ -254,6 +254,61 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
         self.scan(auth, Action::Aggregate, purpose)
     }
 
+    /// T-12 (I15): a `?q=` search, real rather than decorative. `q` is
+    /// matched case-insensitively, ORed only across whichever of
+    /// `candidate_fields` (the screen's own displayed field list) the
+    /// winning Allow record(s) actually granted via `grant
+    /// predicate_use(...)` -- never a field the policy didn't name, so
+    /// a masked/forbidden field can never be searched into existence.
+    /// Applied in-process, after decode -- the same "coarse driver
+    /// pushdown + fine in-process filter" posture
+    /// [`Self::apply_subject_scope_in_process`] already establishes for
+    /// `subject_scope()`: `read_scope_clauses`'s own doc comment names
+    /// the real reason (`MemStoreDriver`/`PostgresStoreDriver`'s flat
+    /// `resource`/`tenant`/`payload` schema can't push an arbitrary
+    /// payload-field predicate to the driver yet -- a separate,
+    /// pre-existing gap this ticket doesn't newly introduce or silently
+    /// paper over). `q = None`/empty short-circuits to the plain
+    /// `guarded_snapshot` result. A non-empty `q` naming zero eligible
+    /// fields (none of `candidate_fields` are granted) is a named deny,
+    /// not a silent empty result -- I15's "reject filters on
+    /// non-predicate_use fields" half.
+    pub fn guarded_search(&self, auth: &Auth, purpose: &str, q: Option<&str>, candidate_fields: &[&str]) -> Result<Vec<E>, GuardScreenError> {
+        let request = EvalRequest { context: self.context(auth, Action::Read, purpose) };
+        let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        match evaluation.decision {
+            Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
+            Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
+            Decision::Pending { .. } => Err(GuardScreenError::Store("read cannot be pending here".into())),
+            Decision::Allow => {
+                let rows = self.scan_allowed(&request, purpose, &evaluation)?;
+                let Some(needle) = q.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(rows) };
+                let eligible: Vec<&str> = candidate_fields
+                    .iter()
+                    .copied()
+                    .filter(|f| evaluation.predicate_use.iter().any(|p| p == f))
+                    .collect();
+                if eligible.is_empty() {
+                    return Err(GuardScreenError::Denied(format!(
+                        "search not permitted: none of this screen's fields are granted for predicate use (I15) under purpose `{purpose}`"
+                    )));
+                }
+                let needle_lower = needle.to_lowercase();
+                Ok(rows
+                    .into_iter()
+                    .filter(|row| {
+                        let Ok(json) = serde_json::to_value(row) else { return false };
+                        eligible.iter().any(|f| {
+                            json.get(f)
+                                .map(|v| nirdosha_rt::screens::value_display(v).to_lowercase().contains(&needle_lower))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .collect())
+            }
+        }
+    }
+
     fn scan(&self, auth: &Auth, action: Action, purpose: &str) -> Result<Vec<E>, GuardScreenError> {
         let request = EvalRequest { context: self.context(auth, action, purpose) };
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };

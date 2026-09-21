@@ -192,7 +192,7 @@ datasets = ["PG.alert", "RD.disposition_code"]
 blocked_by = []
 stage = "built"
 file = "examples/rtm/src/screens/m03_alerts.nir"
-notes = "search q is decorative until T-12"
+notes = "search q real (I15 predicate_use pushdown, T-12 closed)"
 
 [[screen]]
 id = "3.2"
@@ -594,8 +594,9 @@ combo = []
 roles = ["Analyst:R", "OpsAnalyst:R", "McpCopilot:R"]
 datasets = ["PG.transaction", "RD.currency"]
 blocked_by = []
-stage = "emittable"
-notes = "works now; filters real after T-12 (predicate_use fields)"
+stage = "built"
+file = "examples/rtm/src/screens/m06_transactions.nir"
+notes = "filters real (T-12 closed, predicate_use fields)"
 
 [[screen]]
 id = "6.2"
