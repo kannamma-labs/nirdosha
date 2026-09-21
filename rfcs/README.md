@@ -41,6 +41,8 @@ this list.
 | [0024](./0024-hi-and-guard-mcp-integration.md) | `nirdosha-hi` integration with the data-guard MCP — safe composition of graph authoring and live data access, with delegation tokens, evaluate-then-act, and maker-checker policy mutations — proposed |
 | [0025](./0025-nirdosha-rtm-ecosystem.md) | Nirdosha RTM Ecosystem — vendor-neutral modules on the guard kernel, MIC, rustc + macros + drivers architecture, and conformance suite — draft |
 | [0026](./0026-nirdosha-metadata-plane.md) | The Nirdosha Metadata Plane — governed lineage over the guard kernel, declared/observed graph delta, V10, and lineage query/composition macros — draft |
+| [0027](./0027-verified-stream-compute-layer.md) | A verified stream-compute layer (`dataflow!`) for `nirdosha-rt` — Flink-style operators as contract-checked fns, driver-verified determinism and exactly-once commit order, checkpoint/replay runtime; per-capability adopt/reject map against Flink's distributed model; web-centric fan-out, projections, and audit taps — draft |
+| [0027 implementation plan](./0027-implementation-plan.md) | File-level implementation plan for RFC 0027 — per-crate change list, new files, phase gates, verification commands — draft |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a
