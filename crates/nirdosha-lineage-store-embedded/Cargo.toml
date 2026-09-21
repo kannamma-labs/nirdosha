@@ -11,3 +11,4 @@ nirdosha-lineage = { path = "../nirdosha-lineage" }
 
 [dev-dependencies]
 nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+nirdosha-audit = { path = "../nirdosha-audit" }

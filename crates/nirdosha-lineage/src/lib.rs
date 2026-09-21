@@ -11,6 +11,7 @@
 //! decision-equivalence probe, live query execution through the guard, V10.
 
 pub mod collector;
+pub mod external_admission;
 pub mod projection;
 pub mod query;
 pub mod store;
