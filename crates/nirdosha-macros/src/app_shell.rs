@@ -142,7 +142,7 @@ fn expand_parsed(input: AppShellInput) -> TokenStream2 {
         let label = &e.label;
         let href = &e.href;
         quote! {
-            ::nirdosha_rt::NavLink { label: #label, href: #href }
+            ::nirdosha_rt::NavLink { label: #label, href: #href, group: "" }
         }
     });
 
@@ -152,11 +152,11 @@ fn expand_parsed(input: AppShellInput) -> TokenStream2 {
         match &e.role {
             Some(role) => quote! {
                 if auth.has_role(#role) {
-                    links.push(::nirdosha_rt::NavLink { label: #label, href: #href });
+                    links.push(::nirdosha_rt::NavLink { label: #label, href: #href, group: "" });
                 }
             },
             None => quote! {
-                links.push(::nirdosha_rt::NavLink { label: #label, href: #href });
+                links.push(::nirdosha_rt::NavLink { label: #label, href: #href, group: "" });
             },
         }
     });

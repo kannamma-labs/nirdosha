@@ -482,6 +482,11 @@ struct Route {
 pub struct NavLink {
     pub label: &'static str,
     pub href: &'static str,
+    /// This link's section heading, or `""` for an ungrouped nav (the
+    /// common case for a plain `with_nav(vec![...])` app). Consecutive
+    /// links sharing the same non-empty `group` are rendered clustered
+    /// under one heading instead of as one flat row -- see `render_nav`.
+    pub group: &'static str,
 }
 
 /// `verify(username, password)` returning the session's roles on
@@ -1245,7 +1250,24 @@ impl Router {
         // pulled the header up and left past the viewport edge,
         // clipping it off the top of the page.
         let mut html = String::from("<nav class=\"nir-nav\">");
+        // Links are already ordered so same-`group` entries are
+        // consecutive (the generator sorts by group order first). Cluster
+        // each run under one `.nir-nav-group` heading instead of a flat
+        // row of 15+ ungrouped links; an empty `group` (the ungrouped
+        // default) renders no heading at all, so `with_nav`'s plain
+        // literal lists look exactly as before.
+        let mut current_group: Option<&str> = None;
         for link in &links {
+            let group = if link.group.is_empty() { None } else { Some(link.group) };
+            if group != current_group {
+                if let Some(g) = group {
+                    html.push_str(&format!(
+                        "<span class=\"nir-nav-group\">{}</span>",
+                        html_escape(g)
+                    ));
+                }
+                current_group = group;
+            }
             html.push_str(&format!("<a href=\"{}\">{}</a>", link.href, html_escape(link.label)));
         }
         // No standalone "Login" link for an anonymous visitor: apps built
@@ -1876,7 +1898,7 @@ mod tests {
     #[test]
     fn nav_bar_has_no_login_link_when_anonymous_and_shows_logout_when_authenticated() {
         let router = Router::new(|_| Auth::login("anon", &[]))
-            .with_nav(vec![NavLink { label: "Home", href: "/" }])
+            .with_nav(vec![NavLink { label: "Home", href: "/", group: "" }])
             .with_login("/login", |_, _| Some(vec!["admin".to_string()]))
             .get("/", "home", |_, _| Response::html(200, "<html><body>hi</body></html>"));
 

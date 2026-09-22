@@ -205,6 +205,7 @@ fn concurrent_sessions_keep_roles_and_logout_separate() {
             .with_nav(vec![NavLink {
                 label: "home",
                 href: "/",
+                group: "",
             }])
             .get_gated::<Member>("/private", "private", |_, _, _| {
                 Response::text(200, "allowed")

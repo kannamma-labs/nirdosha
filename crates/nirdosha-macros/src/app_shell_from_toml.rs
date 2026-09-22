@@ -207,11 +207,15 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
     // Groups (ordering)
     // ----------------------------------------------------------------
     let mut group_order: HashMap<String, i64> = HashMap::new();
+    let mut group_label: HashMap<String, String> = HashMap::new();
     if let Some(groups) = menus.get("group").and_then(|v| v.as_array()) {
         for g in groups {
             let id = g.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let order = g.get("order").and_then(|v| v.as_integer()).unwrap_or(0);
             if !id.is_empty() {
+                let key = g.get("label_key").and_then(|v| v.as_str()).unwrap_or(&id);
+                let label = default_en_label(key).map(String::from).unwrap_or_else(|| id.clone());
+                group_label.insert(id.clone(), label);
                 group_order.insert(id, order);
             }
         }
@@ -224,6 +228,7 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
     struct NavEntry {
         label: String,
         href: String,
+        group: String,
         roles: Vec<String>,
         unconditional: bool,
         group_order: i64,
@@ -243,6 +248,7 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
 
             let group = m.get("group").and_then(|v| v.as_str()).unwrap_or("work").to_string();
             let g_order = *group_order.get(&group).unwrap_or(&0);
+            let group_display = group_label.get(&group).cloned().unwrap_or_else(|| group.clone());
             let order = m.get("order").and_then(|v| v.as_integer()).unwrap_or(0);
             let label_key = m.get("label_key").and_then(|v| v.as_str()).unwrap_or(screen_id);
             let label = default_en_label(label_key).map(String::from).unwrap_or_else(|| label_key.to_string());
@@ -260,6 +266,7 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
             nav_entries.push(NavEntry {
                 label,
                 href,
+                group: group_display,
                 roles,
                 unconditional,
                 group_order: g_order,
@@ -273,23 +280,25 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
     let nav_links = nav_entries.iter().map(|e| {
         let label = &e.label;
         let href = &e.href;
-        quote! { ::nirdosha_rt::NavLink { label: #label, href: #href } }
+        let group = &e.group;
+        quote! { ::nirdosha_rt::NavLink { label: #label, href: #href, group: #group } }
     });
 
     let nav_for_pushes = nav_entries.iter().map(|e| {
         let label = &e.label;
         let href = &e.href;
+        let group = &e.group;
         if e.unconditional {
             quote! {
                 if auth.has_any_role() {
-                    links.push(::nirdosha_rt::NavLink { label: #label, href: #href });
+                    links.push(::nirdosha_rt::NavLink { label: #label, href: #href, group: #group });
                 }
             }
         } else {
             let checks = e.roles.iter().map(|r| quote! { auth.has_role(#r) });
             quote! {
                 if #(#checks)||* {
-                    links.push(::nirdosha_rt::NavLink { label: #label, href: #href });
+                    links.push(::nirdosha_rt::NavLink { label: #label, href: #href, group: #group });
                 }
             }
         }
