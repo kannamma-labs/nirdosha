@@ -18,17 +18,29 @@
 //! proposes and is chain-eligible, so this is "four-eyes among peers,"
 //! not `bridge.nir::RefDatasetRow`'s maker≠checker case).
 //!
-//! Not built this pass: 9.2 champion/challenger comparison, 9.3 shadow
-//! mode toggle history, 9.4 drift monitoring, 9.5 explainability, 9.6
-//! model card/lineage -- each names its own dataset/driver
-//! (`screen-field-mappings.md`'s M9 section) with no corresponding
-//! `#[dataset]`/`guard_policy!` anywhere in this corpus; `shadow_mode` is
-//! carried on `bridge.nir::ModelRow` but no policy governs toggling it
-//! independently of a full model swap.
+//! C2 (screens-plan.md) landed 9.2/9.3/9.4/9.5/9.6 for real over the new
+//! `PG.model_run_stat`/`PG.feature_stat`/`PG.model_validation` datasets
+//! (`bridge.nir`) -- see each mount's own doc comment below for exactly
+//! what's real vs. disclosed per screen.
 
+use crate::bridge::alert_explain_header;
+use crate::bridge::alert_table;
+use crate::bridge::feature_drift_table;
+use crate::bridge::model_context_for_alert;
+use crate::bridge::model_run_avg_fp_rate;
+use crate::bridge::model_run_avg_score_by_version;
+use crate::bridge::model_run_fp_rate_by_version;
+use crate::bridge::model_run_volume;
 use crate::bridge::model_table;
+use crate::bridge::model_validation_table;
 use crate::bridge::ModelRow;
+use crate::bridge::ModelValidationRow;
 use nirdosha_rt::prelude::SharedTable;
+
+fn unused_model_validation_store() -> &'static SharedTable<i64, ModelValidationRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, ModelValidationRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
 
 fn unused_model_store() -> &'static SharedTable<i64, ModelRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, ModelRow>> = std::sync::OnceLock::new();
@@ -98,4 +110,137 @@ pub fn mount_model_swap(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
                 Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
             }
         })
+}
+
+// C2: 9.2 Model Performance Monitor -- real `model-run-stat-read`
+// (`PolicyEngineer`/`ComplianceLead`), volume/avg-score/fp-rate-by-version
+// genuinely derived from `alert_table()` (`refresh_model_run_stat`).
+// **Disclosed, not built**: AUC/precision/recall/F1/score-histogram-by-
+// bucket display and the slice-by/export-flag controls
+// (`screen-field-mappings.md`'s 9.2 row) -- the underlying score-band
+// counts exist on each `ModelRunStatRow` but no dedicated chart widget
+// renders them yet this pass. Mounted at a flat `/models/performance`
+// (no `{id}` -- there is one comparison view across every model_version
+// seen, not a per-model drill-down page); `menus.toml`'s stale
+// `/models/{id}/performance` route corrected in the same commit.
+nirdosha_rt::dashboard! {
+    mount: mount_model_performance,
+    path: "/models/performance",
+    title: "Model Performance Monitor",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Total scored volume", fn: model_run_volume, guarded: true },
+        Metric { label: "Avg FP rate", fn: model_run_avg_fp_rate, guarded: true },
+        Chart  { label: "FP rate by model version", fn: model_run_fp_rate_by_version, mark: bar, guarded: true },
+        Chart  { label: "Avg score by model version", fn: model_run_avg_score_by_version, mark: bar, guarded: true },
+    }
+}
+
+// C2: 9.3 Drift Monitoring -- real `feature-stat-read` (`PolicyEngineer`)
+// over `feature_stat_table()`. **Disclosed**: PSI values are demo-seeded
+// reference data, not a live per-transaction drift computation (see
+// `feature_stat_table`'s own doc comment) -- no raw feature value is
+// persisted anywhere in this corpus to compute real PSI from.
+nirdosha_rt::dashboard! {
+    mount: mount_model_drift,
+    path: "/models/drift",
+    title: "Drift Monitoring",
+    refresh_seconds: 60,
+    widgets {
+        Chart { label: "PSI by feature", fn: feature_drift_table, mark: bar, guarded: true },
+    }
+}
+
+// C2: 9.4 Champion/Challenger -- real `model-run-stat-read` combo
+// dashboard (screens.toml's `combo = ["dashboard!"]`) alongside the
+// already-real `model_table` swap propose/confirm flow
+// (`mount_model_swap`, 9.1's infra, reused verbatim -- the "promote
+// challenger" action IS the same escalated-update engine, not a second
+// write surface). **Disclosed, not built**: a dedicated challenger
+// selector/trial-extend/discard UI -- the comparison chart is real, the
+// promotion mechanism is real, the picker chrome around them isn't this
+// pass. Mounted at `/models/challenger` (menus.toml's declared route,
+// no `{id}` needed -- reuses the same fixed-path posture 9.2/9.3 use).
+nirdosha_rt::dashboard! {
+    mount: mount_champion_challenger,
+    path: "/models/challenger",
+    title: "Champion / Challenger",
+    refresh_seconds: 60,
+    widgets {
+        Chart { label: "Avg score by model version", fn: model_run_avg_score_by_version, mark: bar, guarded: true },
+        Chart { label: "FP rate by model version", fn: model_run_fp_rate_by_version, mark: bar, guarded: true },
+    }
+}
+
+// C2: 9.5 Model Validation & Governance -- real `model-validation-*`
+// policies over `model_validation_table()`; `validator ≠ owner` is
+// machine-checked (`requires invariant(validator_ne_owner)` on create,
+// `00_core.nir`), sign-off is a real `status` transition
+// (`in_review -> signed_off`, `bridge.nir::ModelValidationRow::
+// transition_allowed`). Combo `approval_inbox!` already real (B10) --
+// this screen's own sign-off is a direct guarded transition, not an
+// escalation chain (the checklist owner records their own sign-off;
+// `approval_inbox!`'s combo here is the OTHER T-04 approval surfaces
+// this screen links out to, per `menus.toml`'s `nav.approvals` fan-out).
+nirdosha_rt::crud_screens! {
+    mount: mount_model_validations,
+    entity: ModelValidationRow,
+    store: unused_model_validation_store,
+    path: "/model-validations",
+    fields: [
+        model_version: String,
+        owner: String,
+        validator: String,
+        status: String,
+        concept_doc_reviewed: bool,
+        data_lineage_reviewed: bool,
+        perf_test_reviewed: bool,
+        bias_test_reviewed: bool,
+        stability_reviewed: bool,
+        signer: String,
+        signed_at: i64,
+        notes: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: model_validation_table,
+        purpose: "ModelGovernance",
+        create_fields: [
+            model_version: String,
+            owner: String,
+            validator: String,
+        ],
+        update_fields: [
+            concept_doc_reviewed: bool,
+            data_lineage_reviewed: bool,
+            perf_test_reviewed: bool,
+            bias_test_reviewed: bool,
+            stability_reviewed: bool,
+            status: String,
+            signer: String,
+            signed_at: i64,
+            notes: String,
+        ],
+    },
+}
+
+// C2: 9.6 Score Explainability Viewer -- `workspace!` (real since B11)
+// over the alert subject (`alert_table`), one real context need
+// (`model_context_for_alert`: the alert's own model_version's latest
+// `model_run_stat` snapshot). Factor-contribution/counterfactual panels
+// deliberately not built -- see `model_context_for_alert`'s own doc
+// comment for exactly why (no per-feature output persisted anywhere in
+// this corpus; fabricating one would violate R3). Mounted at
+// `/alerts/{id}/explain`, matching `menus.toml`'s declared route exactly.
+nirdosha_rt::workspace! {
+    mount: mount_score_explainability,
+    path: "/alerts/{id}/explain",
+    subject: { table: alert_table, purpose: "AmlInvestigation", label_fn: alert_explain_header },
+    budget: { max_rows: 50, max_execution_ms: 2000 },
+    panels: [
+        { need: "model_context", title: "Model Performance Context", render: "table", source: model_context_for_alert },
+    ],
 }

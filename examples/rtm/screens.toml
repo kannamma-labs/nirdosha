@@ -165,9 +165,10 @@ archetype = "dashboard!"
 combo = []
 roles = ["Mlro:R", "Admin:R"]
 datasets = ["PG.alert", "PG.case", "PG.model_run_stat"]
-blocked_by = ["dataset:PG.model_run_stat"]
-stage = "blocked"
-notes = "period-over-period; model health widget pending"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m02_dashboards.nir"
+notes = "C2: model-run-stat-read real (model_run_stat genuinely derived from alert_table); period-over-period comparison not built (no historical snapshot retention)"
 
 [[screen]]
 id = "2.7"
@@ -915,8 +916,10 @@ archetype = "dashboard!"
 combo = []
 roles = ["PolicyEngineer:R", "ComplianceLead:R"]
 datasets = ["PG.model_run_stat"]
-blocked_by = ["dataset:PG.model_run_stat"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m09_ml_models.nir"
+notes = "C2: volume/avg-score/fp-rate-by-version real, derived from alert_table; AUC/precision/recall/F1 not computed — no independent ground-truth signal in this corpus"
 
 [[screen]]
 id = "9.3"
@@ -926,9 +929,10 @@ archetype = "dashboard!"
 combo = ["heatmap"]
 roles = ["PolicyEngineer:R"]
 datasets = ["PG.feature_stat"]
-blocked_by = ["dataset:PG.feature_stat"]
-stage = "blocked"
-notes = "PSI > 0.2 flagged"
+blocked_by = []
+stage = "interim"
+file = "examples/rtm/src/screens/m09_ml_models.nir"
+notes = "PSI > 0.2 flagged; feature_stat_table real guard-enforced but demo-seeded reference data, not a live per-transaction drift computation — no raw feature values persisted anywhere in this corpus"
 
 [[screen]]
 id = "9.4"
@@ -938,8 +942,10 @@ archetype = "crud_screens!"
 combo = ["dashboard!"]
 roles = ["PolicyEngineer:R/W"]
 datasets = ["CATALOG.model_artifacts", "PG.model_run_stat"]
-blocked_by = ["dataset:PG.model_run_stat"]
-stage = "blocked"
+blocked_by = []
+stage = "interim"
+file = "examples/rtm/src/screens/m09_ml_models.nir"
+notes = "comparison dashboard real; promotion reuses 9.1's real guarded_propose/confirm_escalated_update swap engine; dedicated challenger-picker/trial-extend/discard UI not built"
 
 [[screen]]
 id = "9.5"
@@ -949,9 +955,10 @@ archetype = "crud_screens!"
 combo = ["approval_inbox!"]
 roles = ["PolicyEngineer:R/W", "Mlro:R/W", "Auditor:R"]
 datasets = ["PG.model_validation"]
-blocked_by = ["dataset:PG.model_validation"]
-stage = "blocked"
-notes = "validator ≠ owner enforced"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m09_ml_models.nir"
+notes = "validator ≠ owner machine-checked (requires invariant(validator_ne_owner) on create); sign-off is a real status transition, not an escalation chain"
 
 [[screen]]
 id = "9.6"
@@ -961,9 +968,10 @@ archetype = "workspace!"
 combo = []
 roles = ["Analyst:R", "McpCopilot:R"]
 datasets = ["PG.model_run_stat"]
-blocked_by = ["dataset:PG.model_run_stat"]
-stage = "blocked"
-notes = "factor contributions; embeds in 3.2 — workspace! archetype real since B11; only PG.model_run_stat (C2) remains"
+blocked_by = []
+stage = "interim"
+file = "examples/rtm/src/screens/m09_ml_models.nir"
+notes = "context alert + real model_run_stat context for the alert's model_version; factor-contribution/counterfactual panels not built — no per-feature explanation output persisted anywhere in this corpus"
 
 # --------------------------------------------------------- M10 Screening (6)
 [[screen]]

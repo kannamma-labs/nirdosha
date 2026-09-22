@@ -15,6 +15,8 @@
 use crate::bridge::alert_table;
 use crate::bridge::case_table;
 use crate::bridge::case_task_table;
+use crate::bridge::model_run_avg_fp_rate;
+use crate::bridge::model_run_volume;
 use crate::bridge::model_table;
 use crate::bridge::payment_table;
 use crate::bridge::refdata_table;
@@ -98,6 +100,25 @@ nirdosha_rt::dashboard! {
     widgets {
         Metric { label: "Team alert volume", fn: team_alert_volume, guarded: true },
         Chart  { label: "Team alerts by status", fn: team_alerts_by_status, mark: bar, guarded: true },
+    }
+}
+
+// C2 (screens-plan.md): 2.6 Executive KPI Dashboard's "model health
+// widget pending" note closed -- real `model-run-stat-read`
+// (`Mlro`/`Admin`) over `model_run_stat_table()`
+// (`m09_ml_models.nir`'s own C2 doc comments have the full derivation
+// story). Period-over-period comparison still not built this pass --
+// disclosed, not this ticket's scope (no historical snapshot retention
+// beyond each `refresh_model_run_stat` call's own `computed_at`).
+nirdosha_rt::dashboard! {
+    mount: mount_exec_kpi_dashboard,
+    path: "/exec",
+    title: "Executive KPI Dashboard",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Team alert volume", fn: team_alert_volume, guarded: true },
+        Metric { label: "Model-scored volume", fn: model_run_volume, guarded: true },
+        Metric { label: "Model avg FP rate", fn: model_run_avg_fp_rate, guarded: true },
     }
 }
 

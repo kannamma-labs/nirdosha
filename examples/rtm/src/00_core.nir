@@ -9,7 +9,7 @@
 // ============================================================================
 
 use crate::domain_types::{AlertUpdate, CaseDispositionUpdate};
-use crate::domains::{Customer, Payment, SarBundle, Transaction};
+use crate::domains::{Customer, ModelValidation, Payment, SarBundle, Transaction};
 
 // ---- Roles & principals ---- [RFC 0025 §6.2, §7.4; role set per screen-inventory Part 1]
 nirdosha_rt::roles! {
@@ -204,3 +204,9 @@ fn sar_subject_in_case(s: &SarBundle) -> bool { !s.case_id.0.is_empty() && !s.su
 
 #[nirdosha_rt::invariant(name = "no_legal_hold", schema = "customer")]        // → 18.9 [NEW]
 fn no_legal_hold(c: &Customer) -> bool { !c.legal_hold } // field access, not a method call
+
+// ---- C2 (screens-plan.md): validator ≠ owner, 9.5's own stated
+// requirement ("Validator assignment ... must ≠ model owner (enforced)",
+// screen-field-mappings.md). Mirrored at bridge.nir::ModelValidationRow.
+#[nirdosha_rt::invariant(name = "validator_ne_owner", schema = "model_validation")] // → 9.5 [NEW: C2]
+fn validator_ne_owner(v: &ModelValidation) -> bool { !v.validator.is_empty() && v.validator != v.owner }

@@ -131,6 +131,16 @@ pub struct SarBundle {
     pub next_review_at: Option<Timestamp>,  // continuing-activity (→ 12.9)
 }
 
+// ---- model_validation — [NEW: C2/M9] ----
+#[nirdosha_rt::dataset(entity = "model_validation", store = "pg_primary", kind = "table")]
+pub struct ModelValidation {
+    pub tenant_id: TenantId,
+    pub model_version: String,
+    pub owner: String,
+    pub validator: String,                  // required — invariant-linked, must ≠ owner
+    pub status: String,
+}
+
 // ---- screening_hit — [NEW: M10] ----
 #[nirdosha_rt::dataset(entity = "screening_hit", store = "pg_primary", kind = "table")]
 pub struct ScreeningHit {

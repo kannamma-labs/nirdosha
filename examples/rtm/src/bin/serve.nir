@@ -41,6 +41,7 @@ fn main() {
     let router = rtm::m01_auth::mount_avatar_picker(router);
     let router = rtm::m02_dashboards::mount_l1_dashboard(router);
     let router = rtm::m02_dashboards::mount_team_dashboard(router);
+    let router = rtm::m02_dashboards::mount_exec_kpi_dashboard(router);
     let router = rtm::m02_dashboards::mount_monitoring_wall(router);
     let router = rtm::m02_dashboards::mount_unified_approvals_inbox(router);
     // `mount_*_board`'s own literal `/alerts/board`, `/cases/board`
@@ -76,7 +77,16 @@ fn main() {
     let router = rtm::m08_rules::mount_policy_release_inbox(router);
     let router = rtm::m08_rules::mount_window_config_screens(router);
     let router = rtm::m09_ml_models::mount_model_swap(router);
+    // C2: literal `/models/*` routes registered BEFORE `mount_model_screens`'s
+    // `crud_screens!` `/models/{id}` wildcard -- same ordering reasoning as
+    // every other board/SAR mount above (a literal suffix swallowed by the
+    // `{id}` wildcard is never reached).
+    let router = rtm::m09_ml_models::mount_model_performance(router);
+    let router = rtm::m09_ml_models::mount_model_drift(router);
+    let router = rtm::m09_ml_models::mount_champion_challenger(router);
     let router = rtm::m09_ml_models::mount_model_screens(router);
+    let router = rtm::m09_ml_models::mount_model_validations(router);
+    let router = rtm::m09_ml_models::mount_score_explainability(router);
     let router = rtm::m10_screening::mount_matcher_catalog(router);
     let router = rtm::m10_screening::mount_screening_hit_screens(router);
     let router = rtm::m11_intervention::mount_hold_stats(router);

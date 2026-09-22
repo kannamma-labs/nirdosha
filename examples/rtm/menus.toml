@@ -200,7 +200,7 @@ route = "/exec"
 guard = { action = "aggregate", resource = "alert" }
 roles = ["Mlro", "Admin"]
 order = 40
-stage_min = "blocked"
+stage_min = "interim"                    # C2: model_run_stat real, mounted at /exec
 
 [[menu]]
 id = "nav.wall"
@@ -541,7 +541,7 @@ route = "/models/drift"
 guard = { action = "read", resource = "feature_stat" }
 roles = ["PolicyEngineer"]
 order = 60
-stage_min = "blocked"
+stage_min = "interim"                    # C2: feature_stat real (demo-seeded, disclosed)
 
 [[menu]]
 id = "nav.risk_model"
@@ -1282,10 +1282,13 @@ guard = { action = "migrate", resource = "policy" }
 reach_via = "8.3"
 
 [[route]]
-path = "/models/{id}/performance"
+path = "/models/performance"
 screen_id = "9.2"
 guard = { action = "read", resource = "model_run_stat" }
 reach_via = "9.1"
+# C2: corrected from stale "/models/{id}/performance" -- one comparison
+# view across every model_version, not a per-model drill-down page
+# (`dashboard!` mounts don't take path params anywhere in this corpus).
 
 [[route]]
 path = "/models/challenger"
@@ -1294,10 +1297,13 @@ guard = { action = "update", resource = "model" }
 reach_via = "9.1"
 
 [[route]]
-path = "/models/{id}/validation"
+path = "/model-validations"
 screen_id = "9.5"
 guard = { action = "update", resource = "model_validation" }
 reach_via = "9.1"
+# C2: corrected from stale "/models/{id}/validation" -- mounted as its
+# own flat crud_screens! resource (real `{id}` support lives at
+# /model-validations/{id}, not nested under /models).
 
 [[route]]
 path = "/screening/{id}"

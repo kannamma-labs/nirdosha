@@ -20,7 +20,14 @@ fn router() -> Router {
     let router = rtm::m08_rules::mount_simulation_config(router);
     let router = rtm::m08_rules::mount_window_config_screens(router);
     let router = rtm::m09_ml_models::mount_model_swap(router);
+    // C2: literal `/models/*` routes before `mount_model_screens`'s
+    // `/models/{id}` wildcard (same ordering as serve.nir).
+    let router = rtm::m09_ml_models::mount_model_performance(router);
+    let router = rtm::m09_ml_models::mount_model_drift(router);
+    let router = rtm::m09_ml_models::mount_champion_challenger(router);
     let router = rtm::m09_ml_models::mount_model_screens(router);
+    let router = rtm::m09_ml_models::mount_model_validations(router);
+    let router = rtm::m09_ml_models::mount_score_explainability(router);
     let router = rtm::m10_screening::mount_matcher_catalog(router);
     let router = rtm::m10_screening::mount_screening_hit_screens(router);
     let router = rtm::m13_risk_config::mount_refdata_migrate(router);
@@ -195,4 +202,42 @@ fn window_and_refdata_list_views_also_have_no_read_grant() {
     assert_eq!(windows.status, 403, "{}", windows.body);
     let refdata = get_as(&router, "/risk-config/refdata", &admin);
     assert_eq!(refdata.status, 403, "{}", refdata.body);
+}
+
+/// C2 (screens-plan.md): `model_run_stat` is genuinely derived from
+/// `alert_table()`'s real `score`/`model_version`/`disposition_code`
+/// fields (never a hardcoded fixture) -- `fp_rate` over two seeded
+/// alerts (one `false_positive`, one `known_fraud`) must come out to
+/// exactly `0.5`. `model_validation`'s `validator ≠ owner` invariant is
+/// machine-checked at create time, not a UI-only check.
+#[test]
+fn model_run_stat_derives_from_real_alerts_and_model_validation_enforces_validator_ne_owner() {
+    let router = router();
+    rtm::bridge::alert_table().raw_driver_seed(
+        "acme-demo",
+        &rtm::bridge::AlertRow { id: 0, alert_id: "alert-c2-1".into(), tenant_id: "acme-demo".into(), txn_id: "txn-c2-1".into(), score: 0.95, model_version: "rt_fraud_v1".into(), policy_version: "v1".into(), status: "in_progress".into(), assignee: String::new(), disposition_code: "false_positive".into(), rationale: "reviewed".into(), case_id: String::new(), sar_linked: None, severity: String::new(), tags: String::new() },
+    );
+    rtm::bridge::alert_table().raw_driver_seed(
+        "acme-demo",
+        &rtm::bridge::AlertRow { id: 0, alert_id: "alert-c2-2".into(), tenant_id: "acme-demo".into(), txn_id: "txn-c2-2".into(), score: 0.40, model_version: "rt_fraud_v1".into(), policy_version: "v1".into(), status: "in_progress".into(), assignee: String::new(), disposition_code: "known_fraud".into(), rationale: "reviewed".into(), case_id: String::new(), sar_linked: None, severity: String::new(), tags: String::new() },
+    );
+
+    let pe = login_as(&router, "policyengineer", "policyengineer-demo");
+    let perf = get_as(&router, "/models/performance.json", &pe);
+    assert_eq!(perf.status, 200, "{}", perf.body);
+    assert!(perf.body.contains("rt_fraud_v1"), "dashboard must show the real seeded model_version, not a fixture: {}", perf.body);
+    assert!(perf.body.contains("0.5"), "fp_rate must be genuinely derived (1 of 2 seeded alerts is false_positive): {}", perf.body);
+
+    // validator == owner: a real, machine-checked deny (validator_ne_owner).
+    let same = post_form_as(&router, "/api/model-validations", &pe, "model_version=rt_fraud_v1&owner=alice&validator=alice");
+    assert!(same.status >= 400, "validator == owner must be denied by validator_ne_owner: {}", same.body);
+
+    // validator != owner: real, guard-enforced and committed.
+    let ok = post_form_as(&router, "/api/model-validations", &pe, "model_version=rt_fraud_v1&owner=alice&validator=bob");
+    assert_eq!(ok.status, 201, "{}", ok.body);
+
+    let mlro = login_as(&router, "mlro", "mlro-demo");
+    let list = get_as(&router, "/model-validations", &mlro);
+    assert_eq!(list.status, 200, "model-validation-read grants Mlro: {}", list.body);
+    assert!(list.body.contains("bob"), "Mlro's real read grant must see the committed row: {}", list.body);
 }

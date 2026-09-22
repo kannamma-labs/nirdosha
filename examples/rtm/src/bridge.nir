@@ -1265,6 +1265,348 @@ pub fn case_task_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdos
 }
 
 // ============================================================================
+// C2 (screens-plan.md) — model-stats plane: `PG.model_run_stat`,
+// `PG.feature_stat`, `PG.model_validation`. Feeds 2.6, 9.2, 9.3, 9.4,
+// 9.5, 9.6.
+// ============================================================================
+
+/// One computed snapshot of `alert_table()`'s real `score`/`model_version`/
+/// `disposition_code`/`case_id` fields, grouped by `model_version` —
+/// `run_count`/`avg_score`/score-band histogram/`fp_rate` are genuinely
+/// derived (never fabricated); `sar_conversion_rate` cross-references
+/// `sar_bundle_table()`'s real `case_id` linkage. **Disclosed, not
+/// computed**: AUC/precision/recall/F1 (`screen-field-mappings.md`'s 9.2
+/// row) need an independent labeled ground-truth set this corpus has no
+/// signal for beyond the same `disposition_code` already spent on
+/// `fp_rate` — computing them from it would make the label its own
+/// ground truth, not a real metric.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelRunStatRow {
+    pub id: i64,
+    pub stat_id: String,
+    pub tenant_id: String,
+    pub model_version: String,
+    pub run_count: i64,
+    pub avg_score: f64,
+    pub fp_rate: f64,
+    pub sar_conversion_rate: f64,
+    pub score_band_lt50: i64,
+    pub score_band_50_75: i64,
+    pub score_band_75_90: i64,
+    pub score_band_ge90: i64,
+    pub computed_at: i64,
+}
+
+impl GuardedEntity for ModelRunStatRow {
+    const RESOURCE: &'static str = "model_run_stat";
+    fn row_id(&self) -> String {
+        self.stat_id.clone()
+    }
+}
+
+pub fn model_run_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRunStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRunStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-model-run-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_model_run_stat_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Recomputes one fresh snapshot row per `model_version` seen in
+/// `alert_table()`, materializes each via `system_write` (append-only —
+/// `system_write`'s own `WriteAction::Create` semantics reject an
+/// overwrite of an existing key, so each call mints a new `stat_id` keyed
+/// on `computed_at` rather than mutating in place, the same "derive,
+/// never fabricate" posture `case_transactions_for_case` (B11) set), then
+/// reads back through the real guarded path and keeps only the latest
+/// row per `model_version`.
+pub fn refresh_model_run_stat(auth: &nirdosha_rt::Auth) -> Result<Vec<serde_json::Value>, String> {
+    let alerts = alert_table().system_scan().map_err(|e| e.to_string())?;
+    let sar_case_ids: std::collections::HashSet<String> = sar_bundle_table()
+        .system_scan()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.case_id)
+        .filter(|c| !c.is_empty())
+        .collect();
+
+    let mut by_version: std::collections::BTreeMap<String, Vec<&AlertRow>> = std::collections::BTreeMap::new();
+    for a in &alerts {
+        if !a.model_version.is_empty() {
+            by_version.entry(a.model_version.clone()).or_default().push(a);
+        }
+    }
+
+    let now = nirdosha_rt::screens::now_epoch_secs();
+    for (version, rows) in &by_version {
+        let run_count = rows.len() as i64;
+        let avg_score = rows.iter().map(|r| r.score).sum::<f64>() / run_count as f64;
+        let dispositioned: Vec<&&AlertRow> = rows.iter().filter(|r| !r.disposition_code.is_empty()).collect();
+        let fp_rate = if dispositioned.is_empty() {
+            0.0
+        } else {
+            dispositioned.iter().filter(|r| r.disposition_code == "false_positive" || r.disposition_code == "false_hit").count() as f64 / dispositioned.len() as f64
+        };
+        let converted = rows.iter().filter(|r| !r.case_id.is_empty() && sar_case_ids.contains(&r.case_id)).count() as f64;
+        let sar_conversion_rate = converted / run_count as f64;
+        let (mut lt50, mut b5075, mut b7590, mut ge90) = (0i64, 0i64, 0i64, 0i64);
+        for r in rows {
+            if r.score < 0.50 { lt50 += 1 } else if r.score < 0.75 { b5075 += 1 } else if r.score < 0.90 { b7590 += 1 } else { ge90 += 1 }
+        }
+        let row_id = next_model_run_stat_row_id();
+        model_run_stat_table().system_write(
+            DEMO_TENANT,
+            &ModelRunStatRow {
+                id: row_id,
+                // Includes the atomic row-id counter, not just `now` (whose
+                // 1-second resolution collides when a single dashboard
+                // render calls `refresh_model_run_stat` more than once
+                // within the same second -- one call per widget fn).
+                stat_id: format!("{version}:{now}:{row_id}"),
+                tenant_id: DEMO_TENANT.into(),
+                model_version: version.clone(),
+                run_count,
+                avg_score,
+                fp_rate,
+                sar_conversion_rate,
+                score_band_lt50: lt50,
+                score_band_50_75: b5075,
+                score_band_75_90: b7590,
+                score_band_ge90: ge90,
+                computed_at: now,
+            },
+        );
+    }
+
+    let snap = model_run_stat_table().guarded_snapshot(auth, "ModelGovernance").map_err(|e| e.to_string())?;
+    let mut latest: std::collections::BTreeMap<String, ModelRunStatRow> = std::collections::BTreeMap::new();
+    for row in snap {
+        latest
+            .entry(row.model_version.clone())
+            .and_modify(|existing: &mut ModelRunStatRow| if row.computed_at > existing.computed_at { *existing = row.clone(); })
+            .or_insert(row);
+    }
+    Ok(latest.into_values().map(|r| serde_json::to_value(&r).unwrap_or_default()).collect())
+}
+
+/// PSI feature-drift reference rows for `rt_fraud_v1`'s own declared
+/// inputs (`40_scoring.nir`'s `model_artifact!` block: `velocity_1h,
+/// distinct_payees_7d, amount_dev_30d, impossible_travel`). **Demo
+/// bootstrap only** (same posture `case_task_table`/`qa_review_table`'s
+/// seeds already disclose): no raw per-transaction feature value is
+/// computed or persisted anywhere in this corpus (`TransactionRow` has no
+/// such columns), so there is no live signal to derive real PSI from —
+/// unlike `model_run_stat` above, which genuinely derives from real
+/// `alert_table()` data, this table is real guard-enforced plumbing over
+/// seed reference data, not a live drift computation.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct FeatureStatRow {
+    pub id: i64,
+    pub feature_id: String,
+    pub tenant_id: String,
+    pub model_version: String,
+    pub feature_name: String,
+    pub psi: f64,
+    pub trend: String,
+    pub computed_at: i64,
+}
+
+impl GuardedEntity for FeatureStatRow {
+    const RESOURCE: &'static str = "feature_stat";
+    fn row_id(&self) -> String {
+        self.feature_id.clone()
+    }
+}
+
+pub fn feature_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, FeatureStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, FeatureStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-feature-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        let now = nirdosha_rt::screens::now_epoch_secs();
+        let seeds = [
+            ("velocity_1h", 0.08, "stable"),
+            ("distinct_payees_7d", 0.15, "stable"),
+            ("amount_dev_30d", 0.24, "rising"),
+            ("impossible_travel", 0.05, "stable"),
+        ];
+        for (i, (name, psi, trend)) in seeds.into_iter().enumerate() {
+            table.raw_driver_seed(
+                DEMO_TENANT,
+                &FeatureStatRow { id: (i + 1) as i64, feature_id: format!("feat-{name}"), tenant_id: DEMO_TENANT.into(), model_version: "rt_fraud_v1".into(), feature_name: name.into(), psi, trend: trend.into(), computed_at: now },
+            );
+        }
+        table
+    })
+}
+
+/// Validation/governance record for 9.5 — checklist state + sign-off,
+/// `validator ≠ owner` machine-checked (`00_core.nir`'s
+/// `validator_ne_owner` invariant).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelValidationRow {
+    pub id: i64,
+    pub validation_id: String,
+    pub tenant_id: String,
+    pub model_version: String,
+    pub owner: String,
+    pub validator: String,
+    pub status: String,
+    pub concept_doc_reviewed: bool,
+    pub data_lineage_reviewed: bool,
+    pub perf_test_reviewed: bool,
+    pub bias_test_reviewed: bool,
+    pub stability_reviewed: bool,
+    pub signer: String,
+    pub signed_at: i64,
+    pub notes: String,
+}
+
+impl GuardedEntity for ModelValidationRow {
+    const RESOURCE: &'static str = "model_validation";
+    fn row_id(&self) -> String {
+        self.validation_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "validation_id"]
+    }
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        // `model-validation-create`'s real `field_policy { required(
+        // model_version, owner, validator) forbidden(status, signer,
+        // signed_at) }` — a fresh row starts implicitly at `"in_review"`
+        // with every checklist item unreviewed, same posture
+        // `CaseTaskRow`'s `status`-starts-`"open"` exemption establishes.
+        &["id", "validation_id", "status", "concept_doc_reviewed", "data_lineage_reviewed", "perf_test_reviewed", "bias_test_reviewed", "stability_reviewed", "notes"]
+    }
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            "validator_ne_owner" => Some(!self.validator.is_empty() && self.validator != self.owner),
+            _ => None,
+        }
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        if self.status == requested {
+            return Some(true);
+        }
+        let legal: &[&str] = match self.status.as_str() {
+            "" | "in_review" => &["signed_off"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn model_validation_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelValidationRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelValidationRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-model-validation-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        )
+    })
+}
+
+// ---- 2.6/9.2/9.4 dashboard widget fns — always-live (recompute
+// `refresh_model_run_stat` fresh every call, same posture
+// `team_alert_volume` already established for `alert_table`) ----
+
+pub fn model_run_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    refresh_model_run_stat(auth).map(|rows| rows.iter().filter_map(|r| r.get("run_count").and_then(|v| v.as_i64())).sum()).unwrap_or(0)
+}
+
+pub fn model_run_avg_fp_rate(auth: &nirdosha_rt::Auth) -> f64 {
+    let rows = refresh_model_run_stat(auth).unwrap_or_default();
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = rows.iter().filter_map(|r| r.get("fp_rate").and_then(|v| v.as_f64())).sum();
+    sum / rows.len() as f64
+}
+
+pub fn model_run_fp_rate_by_version(auth: &nirdosha_rt::Auth) -> String {
+    let rows = refresh_model_run_stat(auth).unwrap_or_default();
+    serde_json::to_string(
+        &rows
+            .iter()
+            .map(|r| serde_json::json!({ "label": r.get("model_version").cloned().unwrap_or_default(), "value": r.get("fp_rate").and_then(|v| v.as_f64()).unwrap_or(0.0) }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into())
+}
+
+pub fn model_run_avg_score_by_version(auth: &nirdosha_rt::Auth) -> String {
+    let rows = refresh_model_run_stat(auth).unwrap_or_default();
+    serde_json::to_string(
+        &rows
+            .iter()
+            .map(|r| serde_json::json!({ "label": r.get("model_version").cloned().unwrap_or_default(), "value": r.get("avg_score").and_then(|v| v.as_f64()).unwrap_or(0.0) }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into())
+}
+
+// ---- 9.3 drift dashboard widget ----
+pub fn feature_drift_table(auth: &nirdosha_rt::Auth) -> String {
+    match feature_stat_table().guarded_snapshot(auth, "ModelGovernance") {
+        Ok(rows) => serde_json::to_string(&rows.iter().map(|r| serde_json::json!({ "label": r.feature_name, "value": r.psi })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into()),
+        Err(_) => "[]".into(),
+    }
+}
+
+// ---- 9.6 Score Explainability Viewer: `workspace!` subject + context need ----
+
+/// Subject header for `mount_score_explainability` (9.6) — the alert's
+/// own score/model_version, real fields already on `AlertRow`.
+pub fn alert_explain_header(row: &AlertRow) -> Vec<(String, String)> {
+    vec![("Alert".to_string(), row.alert_id.clone()), ("Score".to_string(), format!("{:.3}", row.score)), ("Model".to_string(), row.model_version.clone())]
+}
+
+/// Model-performance context need: the alert's own `model_version`'s
+/// latest `model_run_stat` snapshot (real, derived — see
+/// `refresh_model_run_stat`). **Disclosed, not built**: per-feature
+/// factor contributions and the counterfactual panel
+/// (`screen-field-mappings.md`'s 9.6 row) need a real SHAP-style
+/// per-transaction breakdown `rt_fraud_v1`'s `model_artifact!` declares
+/// an `explanation: vec[string]` output for, but no scoring execution
+/// anywhere in this corpus persists that output — fabricating numbers
+/// for it would be exactly what R3 forbids, so this panel surfaces only
+/// the real aggregate context, not invented per-feature contributions.
+pub fn model_context_for_alert(auth: &nirdosha_rt::Auth, alert_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let alert = alert_table().guarded_get(auth, "AmlInvestigation", alert_id).map_err(|e| e.to_string())?.ok_or_else(|| format!("alert `{alert_id}` not found"))?;
+    let stats = refresh_model_run_stat(auth)?;
+    Ok(stats.into_iter().filter(|r| r.get("model_version").and_then(|v| v.as_str()) == Some(alert.model_version.as_str())).collect())
+}
+
+// ============================================================================
 // M18 System Administration & Security — screens/m18_admin.nir's row
 // types + tables.
 // ============================================================================

@@ -29,6 +29,55 @@ nirdosha_rt::guard_policy! {
     obligate audit(full)
 }
 
+// ---- C2 (screens-plan.md): model-stats plane guard policies ----
+// PG.model_run_stat (2.6, 9.2, 9.4, 9.6), PG.feature_stat (9.3),
+// PG.model_validation (9.5). Real GuardedTables — see bridge.nir's
+// `refresh_model_run_stat`/`feature_stat_table`/`model_validation_table`.
+nirdosha_rt::guard_policy! {
+    allow "model-run-stat-read" for Mlro, Admin, PolicyEngineer, ComplianceLead, Analyst, McpCopilot
+    when action == "read" && resource == "model_run_stat"
+    purpose(ModelGovernance)
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "feature-stat-read" for PolicyEngineer
+    when action == "read" && resource == "feature_stat"
+    purpose(ModelGovernance)
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "model-validation-read" for PolicyEngineer, Mlro, Auditor
+    when action == "read" && resource == "model_validation"
+    purpose(ModelGovernance)
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "model-validation-create" for PolicyEngineer
+    when action == "create" && resource == "model_validation"
+    purpose(ModelGovernance)
+    field_policy { required(model_version, owner, validator)
+                   forbidden(status, signer, signed_at) }
+    requires invariant(validator_ne_owner)
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "model-validation-update" for PolicyEngineer, Mlro
+    when action == "update" && resource == "model_validation"
+    purpose(ModelGovernance)
+    requires field(status).transition_allowed()
+    field_policy { allowed(concept_doc_reviewed, data_lineage_reviewed, perf_test_reviewed, bias_test_reviewed, stability_reviewed, status, signer, signed_at, notes) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
 // ---- Screening [RFC §8.4 verbatim matcher + policy] ----
 nirdosha_rt::matcher! {
     matcher sanctions {
