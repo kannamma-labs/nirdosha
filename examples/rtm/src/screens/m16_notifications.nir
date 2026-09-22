@@ -12,8 +12,31 @@
 //! `guard_policy!`-gated at runtime. The `notification-read` policy was
 //! added only so the menu route declaration points at a real policy
 //! record.
+use crate::bridge::handover_table;
 use crate::bridge::notification_table;
 use crate::bridge::user_profile_table;
+use nirdosha_rt::screens::FieldSpec;
+
+/// 16.3 Shift Handover -- `handover-read` (real, `Analyst`,
+/// `ComplianceLead`, `OpsAnalyst`; `90_ops_admin.nir`).
+pub fn mount_shift_handover(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/handover", "Shift Handover (16.3)", |_req, _params, auth| {
+        match handover_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "handover_id", input_type: "text" },
+                    FieldSpec { name: "from_user", input_type: "text" },
+                    FieldSpec { name: "to_user", input_type: "text" },
+                    FieldSpec { name: "summary", input_type: "text" },
+                    FieldSpec { name: "acknowledged", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Shift Handover", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 /// Which human roles a given `obligate notify(channel(...))` channel is
 /// meant for -- transcribed from each policy's own real subject +

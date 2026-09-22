@@ -60,7 +60,7 @@ nirdosha_rt::guard_policy! {
 
 // → 11.5 outcomes stats [NEW]
 nirdosha_rt::guard_policy! {
-    allow "hold-stats" for ComplianceLead
+    allow "hold-stats" for ComplianceLead, Mlro
     when action == "aggregate" && resource == "payment"
     purpose(Operations)
     cap(cohort_floor = 5, max_execution = 30s)

@@ -29,6 +29,30 @@
 //! ComplianceLead`, `cap(cohort_floor = 5)`, via `guarded_aggregate`).
 
 use crate::bridge::payment_table;
+use crate::bridge::timeout_config_table;
+use nirdosha_rt::screens::FieldSpec;
+
+/// 11.4 Timeout Config -- `timeout-config-read` (Admin, OpsAnalyst,
+/// ComplianceLead). Read-only: `auto-release-on-timeout`'s own explicit
+/// `deny` (this module's real "timeout resolves to DENY, never
+/// auto-release" stance) means there is no matching write screen to build
+/// alongside it.
+pub fn mount_timeout_config(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/timeout-config", "Timeout Config (11.4)", |_req, _params, auth| {
+        match timeout_config_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "config_id", input_type: "text" },
+                    FieldSpec { name: "rail", input_type: "text" },
+                    FieldSpec { name: "timeout_seconds", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Timeout Config", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 use nirdosha_guard_screens::EscalatedWrite;
 use std::collections::HashSet;
 

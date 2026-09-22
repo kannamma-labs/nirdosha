@@ -27,13 +27,114 @@
 //! `guard_policy!` covers `"matcher"` reads either, same disclosed
 //! posture `m08_rules.nir` uses for `window!`/`model_artifact!`).
 
+use crate::bridge::internal_list_table;
+use crate::bridge::list_versions_table;
+use crate::bridge::rescreen_campaign_table;
+use crate::bridge::rescreen_job_table;
 use crate::bridge::screening_hit_table;
 use crate::bridge::ScreeningHitRow;
 use nirdosha_rt::prelude::SharedTable;
+use nirdosha_rt::screens::FieldSpec;
 
 fn unused_screening_hit_store() -> &'static SharedTable<i64, ScreeningHitRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, ScreeningHitRow>> = std::sync::OnceLock::new();
     STORE.get_or_init(SharedTable::new)
+}
+
+/// 10.3 Screening Configuration -- `list-versions-read` (real,
+/// `97_bulk_policies.nir`; `Admin`, `ComplianceLead`) for `PG.
+/// list_versions`. The matcher half (`CATALOG.matcher_records`) has a
+/// real `matcher-read` policy too now (same file), but no
+/// `GuardedTable` backs the catalog-literal matcher config
+/// (`mount_matcher_catalog` above renders it role-gated, not
+/// policy-gated, for the same reason) -- shown here the same way,
+/// gated on the two roles this screen's own `screens.toml` grants
+/// rather than invented as a fake guarded read.
+pub fn mount_screening_config(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/screening/config", "Screening Configuration (10.3)", |_req, _params, auth| {
+        if !(auth.has_role("Admin") || auth.has_role("ComplianceLead")) {
+            return nirdosha_rt::Response::forbidden();
+        }
+        match list_versions_table().guarded_snapshot(auth, "ModelGovernance") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "version_id", input_type: "text" },
+                    FieldSpec { name: "list_id", input_type: "text" },
+                    FieldSpec { name: "effective_at", input_type: "text" },
+                    FieldSpec { name: "record_count", input_type: "number" },
+                ];
+                let mut values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                values.push(serde_json::json!({
+                    "version_id": "(matcher catalog, role-gated not policy-gated — see mount_matcher_catalog)",
+                    "list_id": "sanctions: fuzzy_jaro_winkler @0.92; internal_watchlist: fuzzy_jaro_winkler @0.95",
+                    "effective_at": "", "record_count": 0,
+                }));
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Screening Configuration", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 10.4 Watchlist Management -- `internal-list-read` (real, `Admin`,
+/// `ComplianceLead`, `Analyst`).
+pub fn mount_watchlist_management(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/screening/lists", "Watchlist Management (10.4)", |_req, _params, auth| {
+        match internal_list_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "entry_id", input_type: "text" },
+                    FieldSpec { name: "list_id", input_type: "text" },
+                    FieldSpec { name: "subject_ref", input_type: "text" },
+                    FieldSpec { name: "reason", input_type: "text" },
+                    FieldSpec { name: "expiry_at", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Watchlist Management", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 10.5 Rescreening Monitor -- `rescreen-job-read` (real, `Admin`,
+/// `ComplianceLead`).
+pub fn mount_rescreen_monitor(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/screening/rescreen", "Rescreening Monitor (10.5)", |_req, _params, auth| {
+        match rescreen_job_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "job_id", input_type: "text" },
+                    FieldSpec { name: "list_id", input_type: "text" },
+                    FieldSpec { name: "status", input_type: "text" },
+                    FieldSpec { name: "progress_pct", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Rescreening Monitor", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 10.6 Historical Rescreen Campaigns -- `rescreen-campaign-read` (real,
+/// `Admin`, `ComplianceLead`).
+pub fn mount_rescreen_campaigns(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/screening/campaigns", "Historical Rescreen Campaigns (10.6)", |_req, _params, auth| {
+        match rescreen_campaign_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "campaign_id", input_type: "text" },
+                    FieldSpec { name: "list_id", input_type: "text" },
+                    FieldSpec { name: "started_at", input_type: "text" },
+                    FieldSpec { name: "matches_found", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Historical Rescreen Campaigns", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
 }
 
 nirdosha_rt::crud_screens! {

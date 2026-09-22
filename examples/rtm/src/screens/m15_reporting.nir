@@ -19,7 +19,53 @@
 
 use crate::bridge::alert_table;
 use crate::bridge::case_table;
+use crate::bridge::report_def_table;
+use crate::bridge::scheduled_report_table;
 use crate::bridge::transaction_table;
+use nirdosha_rt::screens::FieldSpec;
+
+/// 15.1 Standard Report Library -- `report-def-read` (real, `Mlro`,
+/// `ComplianceLead`, `Admin`, `Analyst`; a real dataset/policy landed
+/// after this module's own top doc comment marked 15.2/15.3 "not built
+/// this pass" -- superseded, same posture disclosed elsewhere in this
+/// batch).
+pub fn mount_report_library(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/reports", "Standard Report Library (15.1)", |_req, _params, auth| {
+        match report_def_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "report_id", input_type: "text" },
+                    FieldSpec { name: "name", input_type: "text" },
+                    FieldSpec { name: "category", input_type: "text" },
+                    FieldSpec { name: "schedule", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Standard Report Library", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 15.3 Scheduled Reports & Distribution -- `scheduled-report-read`
+/// (real, `Mlro`, `ComplianceLead`, `Admin`).
+pub fn mount_scheduled_reports(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/reports/scheduled", "Scheduled Reports & Distribution (15.3)", |_req, _params, auth| {
+        match scheduled_report_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "schedule_id", input_type: "text" },
+                    FieldSpec { name: "report_id", input_type: "text" },
+                    FieldSpec { name: "recipients", input_type: "text" },
+                    FieldSpec { name: "next_run", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Scheduled Reports & Distribution", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 fn total_case_volume(auth: &nirdosha_rt::Auth) -> i64 {
     match case_table().guarded_aggregate(auth, "Operations") {
@@ -52,9 +98,18 @@ nirdosha_rt::dashboard! {
 }
 
 /// 15.4 Typology & Trend Analytics -- landing page pointing at the
-/// real leadership aggregate dashboard.
+/// real leadership aggregate dashboard. `screens.toml` grants both
+/// `Mlro:R` and `ComplianceLead:R` here -- `get_gated::<Role>` proves
+/// exactly one compile-time role, so (unlike a single-role screen) this
+/// needs the plain `get_with_auth` + explicit `has_role` OR-check shape
+/// instead, same as `m19_it_ops.nir`'s own `registered_policy_count`
+/// role-gated-not-policy-gated posture for a static, non-`#[dataset]`
+/// page.
 pub fn mount_typology_trends(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
-    router.get_gated::<crate::nirdosha_roles::Mlro>("/reports/typology", "Typology & Trend Analytics (15.4)", |_req, _params, _proof| {
+    router.get_with_auth("/reports/typology", "Typology & Trend Analytics (15.4)", |_req, _params, auth| {
+        if !(auth.has_role("Mlro") || auth.has_role("ComplianceLead")) {
+            return nirdosha_rt::Response::forbidden();
+        }
         nirdosha_rt::Response::html(200, r#"
 <!doctype html>
 <html><head><title>Typology & Trend Analytics</title></head>

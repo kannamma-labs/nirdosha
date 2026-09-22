@@ -29,9 +29,152 @@
 //! evaluate is the honest posture, same as `m10_screening.nir`'s
 //! `matcher!` catalog view and `m16_notifications.nir`'s channel map.
 
+use crate::bridge::batch_job_table;
+use crate::bridge::capacity_stat_table;
 use crate::bridge::ingest_admin_table;
+use crate::bridge::ingest_exception_table;
+use crate::bridge::integration_stat_table;
+use crate::bridge::pipeline_stat_table;
+use crate::bridge::recon_report_table;
+use crate::bridge::sync_stat_table;
 use nirdosha_guard_core::{Action, WriteAction};
+use nirdosha_rt::screens::FieldSpec;
 use std::collections::HashSet;
+
+/// 19.2 Pipeline Lag -- `pipeline-stat-read` (Admin, OpsAnalyst). A real
+/// dataset landed after this module's own doc comment above was written
+/// (disclosing NO such grant existed) -- superseded; this is real.
+pub fn mount_pipeline_stats(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/pipelines", "Pipeline Lag (19.2)", |_req, _params, auth| {
+        match pipeline_stat_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "pipeline_id", input_type: "text" },
+                    FieldSpec { name: "source", input_type: "text" },
+                    FieldSpec { name: "lag_seconds", input_type: "number" },
+                    FieldSpec { name: "throughput", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Pipeline Lag", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 19.3 Ingest Exceptions -- `ingest-exception-read` (Admin, OpsAnalyst).
+pub fn mount_ingest_exceptions(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/exceptions", "Ingest Exceptions (19.3)", |_req, _params, auth| {
+        match ingest_exception_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "exception_id", input_type: "text" },
+                    FieldSpec { name: "source", input_type: "text" },
+                    FieldSpec { name: "error_code", input_type: "text" },
+                    FieldSpec { name: "payload_ref", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Ingest Exceptions", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 19.4 Reconciliation Reports -- `recon-report-read` (Admin, OpsAnalyst).
+pub fn mount_recon_reports(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/recon", "Reconciliation Reports (19.4)", |_req, _params, auth| {
+        match recon_report_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "report_id", input_type: "text" },
+                    FieldSpec { name: "source", input_type: "text" },
+                    FieldSpec { name: "expected", input_type: "number" },
+                    FieldSpec { name: "actual", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Reconciliation Reports", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 19.5 Integration Status -- `integration-stat-read` (Admin, OpsAnalyst).
+pub fn mount_integration_stats(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/integrations", "Integration Status (19.5)", |_req, _params, auth| {
+        match integration_stat_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "integration_id", input_type: "text" },
+                    FieldSpec { name: "target", input_type: "text" },
+                    FieldSpec { name: "status", input_type: "text" },
+                    FieldSpec { name: "latency_ms", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Integration Status", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 19.6 Batch Jobs -- `batch-job-read` (Admin, OpsAnalyst).
+pub fn mount_batch_jobs(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/jobs", "Batch Jobs (19.6)", |_req, _params, auth| {
+        match batch_job_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "job_id", input_type: "text" },
+                    FieldSpec { name: "job_name", input_type: "text" },
+                    FieldSpec { name: "status", input_type: "text" },
+                    FieldSpec { name: "run_at", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Batch Jobs", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 19.7 Capacity Stats -- `capacity-stat-read` (Admin, OpsAnalyst).
+pub fn mount_capacity_stats(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/capacity", "Capacity Stats (19.7)", |_req, _params, auth| {
+        match capacity_stat_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "metric_id", input_type: "text" },
+                    FieldSpec { name: "resource", input_type: "text" },
+                    FieldSpec { name: "usage_pct", input_type: "number" },
+                    FieldSpec { name: "projected_date", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Capacity Stats", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 19.8 Refdata Sync Status -- `sync-stat-read` (Admin, OpsAnalyst).
+pub fn mount_sync_stats(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/ops/refdata-sync", "Refdata Sync Status (19.8)", |_req, _params, auth| {
+        match sync_stat_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "sync_id", input_type: "text" },
+                    FieldSpec { name: "refdata_type", input_type: "text" },
+                    FieldSpec { name: "last_sync", input_type: "text" },
+                    FieldSpec { name: "staleness_hours", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Refdata Sync Status", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 /// 19.1-ish catalog-facts panel -- real compiled-in registry counts,
 /// role-gated (not policy-gated, see this module's own doc comment), not

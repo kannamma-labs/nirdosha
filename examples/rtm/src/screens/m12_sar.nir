@@ -49,13 +49,35 @@
 
 use crate::bridge::refresh_all_chains;
 use crate::bridge::refresh_sar_visibility;
+use crate::bridge::reporting_calendar_table;
 use crate::bridge::sar_bundle_table;
 use crate::bridge::sar_visibility_table;
 use crate::bridge::SarBundleRow;
 use nirdosha_guard_core::Action;
 use nirdosha_guard_screens::EscalatedWrite;
 use nirdosha_rt::prelude::SharedTable;
+use nirdosha_rt::screens::FieldSpec;
 use std::collections::HashSet;
+
+/// 12.8 Reporting Calendar -- `reporting-calendar-read` (real,
+/// `Mlro`, `ComplianceLead`, `Admin`).
+pub fn mount_reporting_calendar(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/sar/calendar", "Reporting Calendar (12.8)", |_req, _params, auth| {
+        match reporting_calendar_table().guarded_snapshot(auth, "RegulatoryFiling") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "calendar_id", input_type: "text" },
+                    FieldSpec { name: "jurisdiction", input_type: "text" },
+                    FieldSpec { name: "deadline", input_type: "text" },
+                    FieldSpec { name: "responsible_role", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Reporting Calendar", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 fn unused_sar_store() -> &'static SharedTable<i64, SarBundleRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, SarBundleRow>> = std::sync::OnceLock::new();

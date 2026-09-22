@@ -36,9 +36,76 @@
 //! counterparty network) -- same real `GraphStore`, additional query
 //! shapes proportionate effort didn't reach this batch.
 
+use crate::bridge::link_edge_table;
+use crate::bridge::transaction_table;
 use nirdosha_guard_core::{Destination, Purpose};
 use nirdosha_lineage::{Authority, DriverRef, EdgeQueryFilter, EdgeStats, EdgeType, FlowCompleteness, GraphStore, LineageEdge, NodeId, TransformId};
 use nirdosha_lineage_store_embedded::EmbeddedGraphStore;
+use nirdosha_rt::screens::FieldSpec;
+
+/// 7.1 Interactive Entity Graph -- genuinely blocked at full
+/// `graph_renderer` fidelity (`screens.toml`'s own `blocked_by`:
+/// `archetype:graph_renderer`, `engine:LinkGraphRuntime`, neither of
+/// which exists in this workspace), but `screens.toml`'s own `interim`
+/// field already names the fallback: "crud_screens! over link_edge
+/// table" -- `link-edge-read` (`Analyst`, `ComplianceLead`) is real and
+/// `link_edge_table()` is a real, seeded `GuardedTable`, so this route
+/// serves that interim shape rather than leaving the nav link dead.
+pub fn mount_network_graph(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/network", "Interactive Entity Graph (7.1, interim)", |_req, _params, auth| {
+        match link_edge_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "edge_id", input_type: "text" },
+                    FieldSpec { name: "from_id", input_type: "text" },
+                    FieldSpec { name: "to_id", input_type: "text" },
+                    FieldSpec { name: "edge_type", input_type: "text" },
+                    FieldSpec { name: "strength", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Interactive Entity Graph (interim)", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 7.4 Shared Attributes -- `screens.toml`'s own "Stage-0: txn-only
+/// version (device/geo filters) needs only policy" note: `Analyst`
+/// already has a real read grant on `transaction`
+/// (`analyst-search-transaction`), so this is that same real,
+/// guard-enforced row set, grouped in-process by `device_id` to surface
+/// subjects who share a device -- the txn-only Stage-0 shape the note
+/// describes, not `PG.device_session`'s own richer cross-entity version.
+pub fn mount_shared_attributes(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/network/shared-attributes", "Shared Attributes (7.4, Stage-0)", |_req, _params, auth| {
+        match transaction_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let mut by_device: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = std::collections::BTreeMap::new();
+                for r in &rows {
+                    if r.device_id.is_empty() { continue; }
+                    by_device.entry(r.device_id.clone()).or_default().insert(r.subject_id.clone());
+                }
+                let fields = [
+                    FieldSpec { name: "device_id", input_type: "text" },
+                    FieldSpec { name: "shared_by_subject_count", input_type: "number" },
+                    FieldSpec { name: "subjects", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = by_device
+                    .into_iter()
+                    .filter(|(_, subjects)| subjects.len() > 1)
+                    .map(|(device_id, subjects)| serde_json::json!({
+                        "device_id": device_id,
+                        "shared_by_subject_count": subjects.len() as i64,
+                        "subjects": subjects.into_iter().collect::<Vec<_>>().join(", "),
+                    }))
+                    .collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Shared Attributes (Stage-0)", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 fn edge(edge_type: EdgeType, src: NodeId, dst: NodeId, transformation: TransformId, driver_port: &str) -> LineageEdge {
     LineageEdge {

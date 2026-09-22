@@ -28,14 +28,144 @@
 //! versioning) name no corresponding `#[dataset]`/`guard_policy!` in
 //! this corpus.
 
+use crate::bridge::assignment_rules_table;
 use crate::bridge::customer_table;
+use crate::bridge::delegation_table;
 use crate::bridge::delegation_token_table;
 use crate::bridge::driver_table;
+use crate::bridge::dsar_request_table;
+use crate::bridge::license_info_table;
+use crate::bridge::notif_template_table;
+use crate::bridge::retention_config_table;
 use crate::bridge::sla_config_table;
 use crate::bridge::user_role_table;
 use crate::bridge::DelegationTokenRow;
 use nirdosha_guard_core::{Action, WriteAction};
+use nirdosha_rt::screens::FieldSpec;
 use std::collections::HashSet;
+
+/// 18.3 Assignment Rules -- `assignment-rules-read` (Admin, ComplianceLead).
+pub fn mount_assignment_rules(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/queues", "Assignment Rules (18.3)", |_req, _params, auth| {
+        match assignment_rules_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "rule_id", input_type: "text" },
+                    FieldSpec { name: "queue", input_type: "text" },
+                    FieldSpec { name: "rule_expr", input_type: "text" },
+                    FieldSpec { name: "assignee_pool", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Assignment Rules", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.6 Notification Templates -- `notif-template-read` (Admin).
+pub fn mount_notif_templates(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/templates", "Notification Templates (18.6)", |_req, _params, auth| {
+        match notif_template_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "template_id", input_type: "text" },
+                    FieldSpec { name: "channel", input_type: "text" },
+                    FieldSpec { name: "subject", input_type: "text" },
+                    FieldSpec { name: "body_template", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Notification Templates", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.7 Retention Config -- `retention-config-read` (Admin, ComplianceLead).
+/// Read-only: the purge escalation itself (`retention-purge`) is a
+/// separate, disclosed-not-built DELETE-shaped write this module's own
+/// doc comment already covers.
+pub fn mount_retention_config(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/retention", "Retention Config (18.7)", |_req, _params, auth| {
+        match retention_config_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "config_id", input_type: "text" },
+                    FieldSpec { name: "data_class", input_type: "text" },
+                    FieldSpec { name: "years", input_type: "number" },
+                    FieldSpec { name: "legal_hold_allowed", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Retention Config", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.8 Delegation list -- `delegation-read` (Admin, ComplianceLead). The
+/// real `DelegationRow`/`delegation_table()` (distinct from
+/// `delegation_token_table()`, which backs `mount_delegation_mint`'s
+/// separate token-minting write below).
+pub fn mount_delegation_list(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/delegation", "Delegations (18.8)", |_req, _params, auth| {
+        match delegation_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "delegation_id", input_type: "text" },
+                    FieldSpec { name: "from_user", input_type: "text" },
+                    FieldSpec { name: "to_user", input_type: "text" },
+                    FieldSpec { name: "scope", input_type: "text" },
+                    FieldSpec { name: "ttl_days", input_type: "number" },
+                    FieldSpec { name: "status", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Delegations", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.9 DSAR requests list -- `dsar-request-read` (Admin, ComplianceLead).
+pub fn mount_dsar_list(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/dsar", "DSAR Requests (18.9)", |_req, _params, auth| {
+        match dsar_request_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "dsar_id", input_type: "text" },
+                    FieldSpec { name: "requester", input_type: "text" },
+                    FieldSpec { name: "request_type", input_type: "text" },
+                    FieldSpec { name: "status", input_type: "text" },
+                    FieldSpec { name: "deadline", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("DSAR Requests", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.10 License info -- `license-info-read` (Admin).
+pub fn mount_license_info(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/license", "License Info (18.10)", |_req, _params, auth| {
+        match license_info_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "license_id", input_type: "text" },
+                    FieldSpec { name: "product", input_type: "text" },
+                    FieldSpec { name: "version", input_type: "text" },
+                    FieldSpec { name: "expiry", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("License Info", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 /// 18.1 User Management -- list pending/requested user-role grants
 /// (real `user_role_table` read under `user-role-read`) plus the

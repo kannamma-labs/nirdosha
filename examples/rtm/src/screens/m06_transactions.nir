@@ -26,13 +26,111 @@
 //! `nirdosha-contract-core`'s role-name grammar and every `00_core.nir`
 //! role).
 
+use crate::bridge::agg_bins_table;
+use crate::bridge::device_session_table;
 use crate::bridge::transaction_table;
 use crate::bridge::TransactionRow;
 use nirdosha_rt::prelude::SharedTable;
+use nirdosha_rt::screens::FieldSpec;
 
 fn unused_transaction_store() -> &'static SharedTable<i64, TransactionRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, TransactionRow>> = std::sync::OnceLock::new();
     STORE.get_or_init(SharedTable::new)
+}
+
+/// 6.5 Counterparty Analysis -- `analyst-search-transaction`'s existing
+/// real grant (`Analyst`, `AmlInvestigation`), not a new `aggregate`
+/// policy: this corpus's only `aggregate`-on-`transaction` grant is
+/// `bi-aggregate` (`SvcBi`-only, a service principal, `80_consumers.nir`)
+/// -- there is no human-facing aggregate policy here to invent. The
+/// per-counterparty (`merchant_id`) grouping and cohort floor below run
+/// in-process over the same real, guard-enforced row set
+/// `analyst-search-transaction` already grants a plain read on, the
+/// same "coarse grant + fine in-process shaping" posture
+/// `guard-screens`'s own `apply_condition_filter_in_process` establishes
+/// -- not a second, weaker enforcement path. `cohort_floor`-style
+/// suppression (drop counterparties under 5 txns) is applied here, not
+/// policy-enforced (disclosed, matching this module's own doc comment
+/// on what `crud_screens!` here does and doesn't wire).
+pub fn mount_counterparty_analysis(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/transactions/counterparties", "Counterparty Analysis (6.5)", |_req, _params, auth| {
+        match transaction_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let mut by_merchant: std::collections::BTreeMap<String, (i64, f64, std::collections::BTreeSet<String>)> = std::collections::BTreeMap::new();
+                for r in &rows {
+                    let entry = by_merchant.entry(r.merchant_id.clone()).or_insert((0, 0.0, std::collections::BTreeSet::new()));
+                    entry.0 += 1;
+                    entry.1 += r.amount;
+                    entry.2.insert(r.subject_id.clone());
+                }
+                const COHORT_FLOOR: i64 = 5;
+                let fields = [
+                    FieldSpec { name: "merchant_id", input_type: "text" },
+                    FieldSpec { name: "txn_count", input_type: "number" },
+                    FieldSpec { name: "total_amount", input_type: "number" },
+                    FieldSpec { name: "distinct_payers", input_type: "number" },
+                    FieldSpec { name: "new_payee", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = by_merchant
+                    .into_iter()
+                    .filter(|(_, (count, _, _))| *count >= COHORT_FLOOR)
+                    .map(|(merchant_id, (count, total, payers))| serde_json::json!({
+                        "merchant_id": merchant_id,
+                        "txn_count": count,
+                        "total_amount": total,
+                        "distinct_payers": payers.len() as i64,
+                        "new_payee": payers.len() == 1,
+                    }))
+                    .collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Counterparty Analysis", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 6.7 Structuring Visual -- `agg-bins-read` (`Analyst`). Interim per
+/// `screens.toml`'s own note ("binned table interim ... bars later"):
+/// the real, guard-enforced `agg_bins_table()` rows rendered as a plain
+/// list, not yet the richer bar/heatmap presentation.
+pub fn mount_structuring_visual(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/transactions/structuring", "Structuring Visual (6.7)", |_req, _params, auth| {
+        match agg_bins_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "bin_id", input_type: "text" },
+                    FieldSpec { name: "bucket_start", input_type: "number" },
+                    FieldSpec { name: "bucket_end", input_type: "number" },
+                    FieldSpec { name: "count", input_type: "number" },
+                    FieldSpec { name: "amount_sum", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Structuring Visual", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 6.8 Device & Session Intelligence -- `device-session-read`
+/// (`Analyst`, `OpsAnalyst`).
+pub fn mount_device_intelligence(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/devices", "Device & Session Intelligence (6.8)", |_req, _params, auth| {
+        match device_session_table().guarded_snapshot(auth, "FraudMonitoring") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "session_id", input_type: "text" },
+                    FieldSpec { name: "subject_id", input_type: "text" },
+                    FieldSpec { name: "device_id", input_type: "text" },
+                    FieldSpec { name: "geo", input_type: "text" },
+                    FieldSpec { name: "occurred_at", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Device & Session Intelligence", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
 }
 
 nirdosha_rt::crud_screens! {

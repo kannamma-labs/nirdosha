@@ -27,14 +27,14 @@ roles_note = "PascalCase logical roles here; app_shell! emission maps to runtime
 # 1) Post-login landing per role — feeds landing! macro (RFC 0022 §4)
 # ----------------------------------------------------------------------------
 [landing]
-Analyst         = "/home"
+Analyst         = "/dashboard/my-day"
 ComplianceLead  = "/approvals"          # leads live in the inbox
 Mlro            = "/sar"
-OpsAnalyst      = "/intervention"
+OpsAnalyst      = "/holds"
 QaReviewer      = "/qa"
-PolicyEngineer  = "/rules"
-Admin           = "/ops/health"
-Auditor         = "/audit/log"
+PolicyEngineer  = "/rules/windows"
+Admin           = "/ops/pipeline-health"
+Auditor         = "/audit/chains"
 CsAgent         = "/cs/lookup"
 RmUser          = "/rm/customers"
 RegulatorViewer = "@dynamic:delegation_scope"   # nav + landing generated from minted scope (V8 waives static check)
@@ -165,7 +165,7 @@ id = "nav.home"
 label_key = "nav.home"
 group = "work"
 screen_id = "2.2"
-route = "/home"
+route = "/dashboard/my-day"
 guard = { action = "aggregate", resource = "alert" }
 roles = ["Analyst"]
 order = 10
@@ -404,7 +404,7 @@ id = "nav.hold_outcomes"
 label_key = "nav.hold_outcomes"
 group = "work"
 screen_id = "11.5"
-route = "/intervention/outcomes"
+route = "/holds/stats"
 guard = { action = "aggregate", resource = "payment" }
 roles = ["ComplianceLead", "Mlro"]
 order = 56
@@ -615,7 +615,7 @@ id = "nav.qa_scorecards"
 label_key = "nav.qa_scorecards"
 group = "assurance"
 screen_id = "14.3"
-route = "/qa/scorecards"
+route = "/qa/mine"
 guard = { action = "read", resource = "qa_review" }
 roles = ["Analyst", "ComplianceLead", "QaReviewer"]
 order = 20
@@ -659,7 +659,7 @@ id = "nav.trends"
 label_key = "nav.trends"
 group = "assurance"
 screen_id = "15.4"
-route = "/reports/trends"
+route = "/reports/typology"
 guard = { action = "aggregate", resource = "alert" }
 roles = ["Mlro", "ComplianceLead"]
 order = 60
@@ -757,7 +757,7 @@ id = "nav.sla_config"
 label_key = "nav.sla_config"
 group = "admin"
 screen_id = "18.4"
-route = "/admin/sla"
+route = "/admin/sla-config"
 guard = { action = "read", resource = "sla_config" }
 roles = ["Admin", "ComplianceLead"]
 order = 63

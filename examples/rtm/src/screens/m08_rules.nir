@@ -34,13 +34,39 @@
 
 use crate::bridge::model_table;
 use crate::bridge::refdata_table;
+use crate::bridge::rule_stat_table;
 use crate::bridge::window_config_table;
 use crate::bridge::WindowConfigRow;
 use nirdosha_rt::prelude::SharedTable;
+use nirdosha_rt::screens::FieldSpec;
 
 fn unused_window_config_store() -> &'static SharedTable<i64, WindowConfigRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, WindowConfigRow>> = std::sync::OnceLock::new();
     STORE.get_or_init(SharedTable::new)
+}
+
+/// 8.12 Scenario Performance -- `rule-stat-read` (real, since
+/// `97_bulk_policies.nir`; a real dataset/policy landed after this
+/// module's own top doc comment listed 8.12 as "not built this pass" --
+/// superseded, same posture `m19_it_ops.nir`'s own doc comment
+/// discloses for its own after-the-fact-real datasets).
+pub fn mount_scenario_performance(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/rules/performance", "Scenario Performance (8.12)", |_req, _params, auth| {
+        match rule_stat_table().guarded_snapshot(auth, "ModelGovernance") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "stat_id", input_type: "text" },
+                    FieldSpec { name: "rule_id", input_type: "text" },
+                    FieldSpec { name: "version", input_type: "text" },
+                    FieldSpec { name: "alert_count", input_type: "number" },
+                    FieldSpec { name: "fp_rate", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Scenario Performance", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
 }
 
 nirdosha_rt::crud_screens! {

@@ -34,9 +34,53 @@
 //! so a separate 13.3/13.4 screen would be inventing a data shape this
 //! corpus doesn't declare.
 
+use crate::bridge::global_params_table;
 use crate::bridge::refdata_table;
+use crate::bridge::risk_factor_table;
 use crate::bridge::RefDatasetRow;
 use nirdosha_rt::prelude::SharedTable;
+use nirdosha_rt::screens::FieldSpec;
+
+/// 13.1 Risk Model & Weights -- `risk-factor-read` (PolicyEngineer,
+/// ComplianceLead, also Analyst via 5.4's shared grant). `CATALOG.
+/// classify_records` names no corresponding `#[dataset]`/table anywhere
+/// in this corpus (same disclosed shape as `refdata`'s own read gap,
+/// this module's own doc comment above) -- `risk_factor` alone.
+pub fn mount_risk_model(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/risk-model", "Risk Model & Weights (13.1)", |_req, _params, auth| {
+        match risk_factor_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "factor_id", input_type: "text" },
+                    FieldSpec { name: "name", input_type: "text" },
+                    FieldSpec { name: "weight", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Risk Model & Weights", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 13.5 Global Params -- `global-params-read` (Analyst, ComplianceLead,
+/// Admin, PolicyEngineer).
+pub fn mount_global_params(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/params", "Global Parameters (13.5)", |_req, _params, auth| {
+        match global_params_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "param_id", input_type: "text" },
+                    FieldSpec { name: "name", input_type: "text" },
+                    FieldSpec { name: "value", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Global Parameters", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 fn unused_refdata_store() -> &'static SharedTable<i64, RefDatasetRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, RefDatasetRow>> = std::sync::OnceLock::new();

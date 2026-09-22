@@ -288,7 +288,7 @@ impl GuardedEntity for AlertRow {
 pub fn alert_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AlertRow> {
     static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AlertRow>> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
-        nirdosha_guard_screens::GuardedTable::new(
+        let table = nirdosha_guard_screens::GuardedTable::new(
             nirdosha_guard_mic::MemStoreDriver::new(),
             nirdosha_guard_registry::candidates(),
             nirdosha_guard_registry::dump().policies,
@@ -301,7 +301,30 @@ pub fn alert_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_g
         // `alert-raise`'s real `obligate notify(channel("analyst-inbox"))`
         // -- see M16's `notify_into_inbox`/`notification_table` doc
         // comments for the real obligation-consumption this wires into.
-        .with_notify_hook(notify_into_inbox)
+        .with_notify_hook(notify_into_inbox);
+        // Demo bootstrap only (see `PaymentRow`'s identical disclosure) --
+        // `lead-sla-aggregate`'s real `cap(cohort_floor = 5)` (3.9 SLA
+        // monitor) structurally can never return anything but a k-anonymity
+        // refusal against an empty table, and this corpus has no live
+        // alert-raising traffic generator (`alert-raise` is `SvcAlerts`
+        // create-only, never invoked by anything running in this binary).
+        // 5 rows, not 1, so the floor is real to satisfy, not just present.
+        for (i, (status, sev, score)) in [
+            ("new", "medium", 42.0), ("in_progress", "high", 71.0), ("in_progress", "low", 18.0),
+            ("escalated", "high", 88.0), ("closed_false_positive", "medium", 35.0),
+        ].into_iter().enumerate() {
+            // `alert-9xx`: outside every literal alert id the test suite
+            // seeds (001/002/010/011/020/021), so this bootstrap can never
+            // collide with a test's own `raw_driver_seed` into the same
+            // process-wide `OnceLock` table.
+            table.raw_driver_seed(DEMO_TENANT, &AlertRow {
+                id: (900 + i + 1) as i64, alert_id: format!("alert-9{:02}", i + 1), tenant_id: DEMO_TENANT.into(),
+                txn_id: format!("txn-9{:02}", i + 1), score, model_version: "rt_fraud_v1".into(), policy_version: "rtm-demo".into(),
+                status: status.into(), assignee: "".into(), disposition_code: "".into(), rationale: "".into(), case_id: "".into(),
+                sar_linked: None, severity: sev.into(), tags: "".into(),
+            });
+        }
+        table
     })
 }
 
@@ -2451,10 +2474,19 @@ pub fn sar_visibility_table() -> &'static nirdosha_guard_screens::GuardedTable<n
 pub fn refresh_sar_visibility() {
     let all = all_chains_table().system_scan().unwrap_or_default();
     let table = sar_visibility_table();
-    let already: std::collections::HashSet<String> = table.system_scan().unwrap_or_default().iter().map(|r: &SarVisibilityRow| r.row_id()).collect();
+    // Mutable + updated as we go (not just seeded once before the loop):
+    // `trace_id` on anonymous/system-attributed reads is timestamp-derived
+    // and two distinct chain entries in the same batch can legitimately
+    // collide on `{module}:{trace_id}` under fast repeated reads (the same
+    // module read twice inside one wall-clock millisecond). A set that's
+    // only a pre-loop snapshot would try to `create` the second one and
+    // panic on the resulting "already exists" guard rejection; checking
+    // and inserting inline makes this call idempotent within itself too,
+    // matching this function's own doc comment above.
+    let mut already: std::collections::HashSet<String> = table.system_scan().unwrap_or_default().iter().map(|r: &SarVisibilityRow| r.row_id()).collect();
     for entry in all.iter().filter(|e: &&AllChainsRow| e.action == "Read" && matches!(e.module.as_str(), "alert" | "case")) {
         let visibility_id = format!("{}:{}", entry.module, entry.trace_id);
-        if already.contains(&visibility_id) {
+        if !already.insert(visibility_id.clone()) {
             continue;
         }
         table.system_write(
