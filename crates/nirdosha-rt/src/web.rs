@@ -1248,19 +1248,20 @@ impl Router {
         for link in &links {
             html.push_str(&format!("<a href=\"{}\">{}</a>", link.href, html_escape(link.label)));
         }
+        // No standalone "Login" link for an anonymous visitor: apps built
+        // on `login!`'s avatar-picker convention (RTM's demo included)
+        // treat the picker itself as the sign-in surface, so a nav link
+        // to the generic username/password form at `login.path` would be
+        // a redundant, confusing second entry point. Signed-in sessions
+        // still get their "Logout" control.
         if let Some(login) = &self.login {
-            html.push_str("<span class=\"nir-nav-spacer\"></span>");
-            match session_auth(&self.sessions, req) {
-                Some(auth) => {
-                    html.push_str(&format!(
-                        "<span style=\"display:flex;align-items:center;gap:0.75rem\">{} <form method=\"post\" action=\"{}/logout\" style=\"display:inline;margin:0\"><button type=\"submit\">Logout</button></form></span>",
-                        html_escape(auth.user()),
-                        login.path.trim_end_matches('/'),
-                    ));
-                }
-                None => {
-                    html.push_str(&format!("<a href=\"{}\">Login</a>", login.path));
-                }
+            if let Some(auth) = session_auth(&self.sessions, req) {
+                html.push_str("<span class=\"nir-nav-spacer\"></span>");
+                html.push_str(&format!(
+                    "<span style=\"display:flex;align-items:center;gap:0.75rem\">{} <form method=\"post\" action=\"{}/logout\" style=\"display:inline;margin:0\"><button type=\"submit\">Logout</button></form></span>",
+                    html_escape(auth.user()),
+                    login.path.trim_end_matches('/'),
+                ));
             }
         }
         html.push_str("</nav>");
@@ -1873,14 +1874,18 @@ mod tests {
     }
 
     #[test]
-    fn nav_bar_shows_login_when_anonymous_and_logout_when_authenticated() {
+    fn nav_bar_has_no_login_link_when_anonymous_and_shows_logout_when_authenticated() {
         let router = Router::new(|_| Auth::login("anon", &[]))
             .with_nav(vec![NavLink { label: "Home", href: "/" }])
             .with_login("/login", |_, _| Some(vec!["admin".to_string()]))
             .get("/", "home", |_, _| Response::html(200, "<html><body>hi</body></html>"));
 
+        // No "Login" nav link for an anonymous visitor -- apps built on
+        // `login!`'s avatar-picker convention treat the picker itself as
+        // the sign-in surface; a nav link to the generic username/
+        // password form would be a redundant second entry point.
         let anon = router.dispatch(&cookie_req("GET", "/", None));
-        assert!(anon.body.contains("Login"), "got: {}", anon.body);
+        assert!(!anon.body.contains("Login"), "got: {}", anon.body);
         assert!(!anon.body.contains("Logout"));
 
         let login_resp = router.dispatch(&form(&[("username", "x"), ("password", "y")]));
