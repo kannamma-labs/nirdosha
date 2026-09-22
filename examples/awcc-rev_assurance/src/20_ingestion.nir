@@ -1,0 +1,12 @@
+//! AWCC Revenue Assurance — ingestion / reconciliation pipeline (stub).
+//!
+//! RA analog of `examples/rtm/src/20_ingestion.nir`.
+//! Full Kafka/Spark reconciliation wiring is Phase C; this module registers
+//! the catalog shape and a minimal seed path.
+
+use crate::domain_types::TenantId;
+
+/// Seed a demo tenant with a few CDR rows for the monitoring wall.
+pub fn seed_demo_tenant() -> TenantId {
+    TenantId("awcc-demo".to_string())
+}

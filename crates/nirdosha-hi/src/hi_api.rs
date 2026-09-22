@@ -14,7 +14,7 @@ use std::path::Path;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 /// Every `nodes`/`edges` listing is hard-capped, never unbounded —
@@ -109,7 +109,7 @@ impl ApiResponse {
 /// POST) -- the two checks together are this transport's real CSRF
 /// defense now that there's no embedded-webview transport left with no
 /// network origin to attack at all.
-const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/packs/install", "/api/generate", "/api/publish", "/api/preview/start", "/api/preview/stop"];
+const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/packs/install", "/api/generate", "/api/publish", "/api/preview/start", "/api/preview/stop", "/api/screen-register/add"];
 
 /// Routes one request against a fresh connection opened on `root`.
 /// `path` excludes the query string; `query` is the raw, still
@@ -156,6 +156,8 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
             Ok(screens) => ApiResponse::json(&screens),
             Err(e) => ApiResponse::error(500, &e),
         },
+        "/api/screen-register" => handle_screen_register_get(root),
+        "/api/screen-register/add" => handle_screen_register_add(root, &conn, body),
         "/api/impact" => match query_param(query, "target") {
             Some(target) => match crate::hi_graph::impact(&conn, &target) {
                 Ok(report) => ApiResponse::json(&report),
@@ -259,6 +261,350 @@ fn handle_pack_install(root: &Path, conn: &Connection, body: &[u8]) -> ApiRespon
         Ok(id) => ApiResponse::json(&serde_json::json!({ "ok": true, "pack_id": id })),
         Err(e) => ApiResponse::error(500, &e),
     }
+}
+
+/// Locates the project's screen register: `screens.toml` at the sync
+/// root, falling back to `screen.toml` (the singular spelling some
+/// projects use). `None` when neither exists -- the + Screen rail then
+/// only offers the free-text describe flow, never a half-working form.
+fn screen_register_path(root: &Path) -> Option<std::path::PathBuf> {
+    for name in ["screens.toml", "screen.toml"] {
+        let p = root.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// GET /api/screen-register -- everything the + Screen rail's register
+/// form needs to render itself from the project's own register: the
+/// module/archetype/stage/role/file vocabularies *as that register
+/// spells them*, the existing ids (uniqueness), and a next-id
+/// suggestion per module. A project without a register answers
+/// `{exists: false}` (200, not an error) so the UI can degrade to the
+/// describe-only rail instead of showing a form that can't validate.
+fn handle_screen_register_get(root: &Path) -> ApiResponse {
+    let Some(path) = screen_register_path(root) else {
+        return ApiResponse::json(&serde_json::json!({ "exists": false }));
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return ApiResponse::error(500, &format!("reading {}: {e}", path.display())),
+    };
+    let doc: toml::Value = match text.parse() {
+        Ok(d) => d,
+        Err(e) => return ApiResponse::error(500, &format!("{} did not parse as TOML: {e}", path.display())),
+    };
+    let screens = doc.get("screen").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut modules: Vec<String> = Vec::new();
+    let mut archetypes: Vec<String> = Vec::new();
+    let mut stages: Vec<String> = Vec::new();
+    let mut role_names: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+    for s in &screens {
+        if let Some(m) = s.get("module").and_then(|v| v.as_str()) {
+            if !modules.contains(&m.to_string()) {
+                modules.push(m.to_string());
+            }
+        }
+        if let Some(a) = s.get("archetype").and_then(|v| v.as_str()) {
+            if !archetypes.contains(&a.to_string()) {
+                archetypes.push(a.to_string());
+            }
+        }
+        if let Some(st) = s.get("stage").and_then(|v| v.as_str()) {
+            if !stages.contains(&st.to_string()) {
+                stages.push(st.to_string());
+            }
+        }
+        if let Some(rs) = s.get("roles").and_then(|v| v.as_array()) {
+            for r in rs.iter().filter_map(|r| r.as_str()) {
+                if let Some((name, _mode)) = r.split_once(':') {
+                    if !role_names.iter().any(|n| n == name) {
+                        role_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(f) = s.get("file").and_then(|v| v.as_str()) {
+            if !files.contains(&f.to_string()) {
+                files.push(f.to_string());
+            }
+        }
+        if let Some(id) = s.get("id").and_then(|v| v.as_str()) {
+            ids.push(id.to_string());
+        }
+    }
+    modules.sort();
+    archetypes.sort();
+    role_names.sort();
+    files.sort();
+    // next-id per module: ids are "<module-serial>.<seq>" (module M4 owns
+    // the "4." prefix), so the suggestion is max-seen-seq + 1 -- the
+    // register's own numbering, extended, never a renumbering of it.
+    let mut next_ids = serde_json::Map::new();
+    for m in &modules {
+        let Some(serial) = m.strip_prefix('M') else { continue };
+        if serial.is_empty() || !serial.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let prefix = format!("{serial}.");
+        let max_seq = ids
+            .iter()
+            .filter_map(|id| id.strip_prefix(&prefix))
+            .filter_map(|seq| seq.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        next_ids.insert(m.clone(), serde_json::json!(format!("{prefix}{}", max_seq + 1)));
+    }
+    ApiResponse::json(&serde_json::json!({
+        "exists": true,
+        "path": path.file_name().and_then(|p| p.to_str()).unwrap_or("screens.toml"),
+        "metadata": doc.get("metadata"),
+        "modules": modules,
+        "archetypes": archetypes,
+        "stages": stages,
+        "roles": role_names,
+        "files": files,
+        "ids": ids,
+        "next_ids": next_ids,
+    }))
+}
+
+/// POST /api/screen-register/add -- validates a structured screen entry
+/// against the project's own register vocabulary and, on success, (1)
+/// appends the `[[screen]]` block to that register (bumping
+/// `[metadata].total_screens`) and (2) records a reviewable `screen`
+/// candidate in the hi graph, so the entry flows through the ordinary
+/// confirm -> generate loop instead of silently claiming to exist.
+/// Every failure is a 400 with a per-field error map, never a partial
+/// write: the register file is only touched when the whole entry
+/// validates.
+fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
+    let Some(path) = screen_register_path(root) else {
+        return ApiResponse::error(400, "no screens.toml / screen.toml in this project -- a register entry needs a register");
+    };
+    let Some(name) = body_param(body, "name").filter(|s| !s.trim().is_empty()) else {
+        return ApiResponse::error(400, "missing required body param `name`");
+    };
+    let name = name.trim().to_string();
+    let Some(id) = body_param(body, "id").filter(|s| !s.trim().is_empty()) else {
+        return ApiResponse::error(400, "missing required body param `id`");
+    };
+    let id = id.trim().to_string();
+    let module = body_param(body, "module").unwrap_or_default();
+    let archetype = body_param(body, "archetype").unwrap_or_default();
+    let stage_in = body_param(body, "stage").unwrap_or_default();
+    let roles_in = body_param(body, "roles").unwrap_or_default();
+    let route = body_param(body, "path").unwrap_or_default();
+    let file = body_param(body, "file").unwrap_or_default();
+    let notes = body_param(body, "notes").unwrap_or_default();
+    let datasets_in = body_param(body, "datasets").unwrap_or_default();
+    let blocked_by_in = body_param(body, "blocked_by").unwrap_or_default();
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return ApiResponse::error(500, &format!("reading {}: {e}", path.display())),
+    };
+    let doc: toml::Value = match text.parse() {
+        Ok(d) => d,
+        Err(e) => return ApiResponse::error(500, &format!("{} did not parse as TOML: {e}", path.display())),
+    };
+    let screens = doc.get("screen").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let existing_ids: Vec<String> = screens.iter().filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let modules: Vec<String> = screens.iter().filter_map(|s| s.get("module").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let archetypes: Vec<String> = screens.iter().filter_map(|s| s.get("archetype").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let files: Vec<String> = screens.iter().filter_map(|s| s.get("file").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let stage_vocab: Vec<String> = screens.iter().filter_map(|s| s.get("stage").and_then(|v| v.as_str()).map(str::to_string)).collect();
+
+    // Validation -- every check appends to a per-field map so the form
+    // can mark exactly what's wrong, in one round trip.
+    let mut fields = serde_json::Map::new();
+    let name_ok = name.len() <= 120;
+    if !name_ok {
+        fields.insert("name".into(), serde_json::json!("keep the name under 120 characters"));
+    }
+    let id_parts: Vec<&str> = id.split('.').collect();
+    let id_shape_ok = id_parts.len() == 2 && id_parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if !id_shape_ok {
+        fields.insert("id".to_string(), serde_json::json!("use the register's <module-serial>.<seq> shape, e.g. 4.14"));
+    } else if existing_ids.iter().any(|existing| existing == &id) {
+        fields.insert("id".to_string(), serde_json::json!(format!("screen {id} already exists in the register")));
+    }
+    if !modules.iter().any(|m| m == &module) {
+        fields.insert("module".to_string(), serde_json::json!(format!("unknown module '{module}' -- pick one the register already uses")));
+    }
+    if !archetypes.iter().any(|a| a == &archetype) {
+        fields.insert("archetype".to_string(), serde_json::json!(format!("unknown archetype '{archetype}' -- pick one the register uses")));
+    }
+    let roles: Vec<String> = roles_in.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if roles.is_empty() {
+        fields.insert("roles".to_string(), serde_json::json!("pick at least one role"));
+    } else {
+        let mut bad = Vec::new();
+        for r in &roles {
+            let ok = match r.split_once(':') {
+                Some((role, mode)) if !role.is_empty() && matches!(mode, "R" | "R/W" | "W") => true,
+                _ => false,
+            };
+            if !ok {
+                bad.push(r.clone());
+            }
+        }
+        if !bad.is_empty() {
+            fields.insert("roles".to_string(), serde_json::json!(format!("roles must be `Name:R`, `Name:R/W` or `Name:W` -- got {}", bad.join(", "))));
+        }
+    }
+    let route = route.trim().to_string();
+    if !route.is_empty() {
+        let chars_ok = route.starts_with('/')
+            && !route.contains("//")
+            && route
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '-' | '{' | '}' | '_'));
+        let params_ok = route.split('/').filter(|s| s.starts_with('{')).all(|s| s.ends_with('}'));
+        if !chars_ok || !params_ok {
+            fields.insert("path".to_string(), serde_json::json!("routes are kebab-case with {param} placeholders, e.g. /holds/{id}"));
+        }
+    }
+    let file = file.trim().to_string();
+    if !file.is_empty() && !files.iter().any(|f| f == &file) {
+        fields.insert("file".to_string(), serde_json::json!("the file must be one the register already tracks"));
+    }
+    let stage = if stage_in.trim().is_empty() {
+        // The register's own convention: a declared-but-unwritten screen
+        // is `emittable`, unless something blocks it.
+        if blocked_by_in.trim().is_empty() { "emittable".to_string() } else { "blocked".to_string() }
+    } else {
+        let s = stage_in.trim().to_string();
+        if !stage_vocab.iter().any(|st| st == &s) {
+            fields.insert("stage".to_string(), serde_json::json!(format!("unknown stage '{s}'")));
+        }
+        s
+    };
+    let split_list = |raw: &str| -> Vec<String> { raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect() };
+    let datasets = split_list(&datasets_in);
+    let blocked_by = split_list(&blocked_by_in);
+    if !fields.is_empty() {
+        let body = serde_json::json!({ "error": "invalid screen entry", "fields": fields });
+        return ApiResponse { status: 400, content_type: "application/json", body: serde_json::to_vec(&body).unwrap_or_default() };
+    }
+
+    // The graph half: a reviewable candidate node (unconfirmed, driving
+    // text = the structured entry), so the screen enters the ordinary
+    // review -> confirm -> generate loop instead of pretending the code
+    // already exists. A name that would overwrite a REAL synced unit is
+    // refused -- candidates never get to clobber synced knowledge. This
+    // check runs BEFORE the register write so a refused entry leaves
+    // every artifact (file and graph) untouched.
+    let graph_name: String = {
+        let mut out = String::new();
+        for part in name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|p| !p.is_empty()) {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    out.extend(first.to_uppercase());
+                    out.push_str(&chars.as_str().to_lowercase());
+                }
+                None => {}
+            }
+        }
+        if out.is_empty() { "NewScreen".to_string() } else { out }
+    };
+    let node_id = crate::hi_graph::code_unit_node_id("screen", &graph_name);
+    let synced: Option<String> = conn
+        .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&node_id], |r| r.get::<_, Option<String>>(0))
+        .optional()
+        .map_err(|e| format!("checking node {node_id}: {e}"))
+        .unwrap_or(None)
+        .flatten();
+    if synced.is_some() {
+        let body = serde_json::json!({
+            "error": format!("the graph already has a synced code unit named `{graph_name}` -- tweak the name so the candidate is a distinct node"),
+        });
+        return ApiResponse { status: 400, content_type: "application/json", body: serde_json::to_vec(&body).unwrap_or_default() };
+    }
+
+    // The register entry, escaped for TOML (values are single-line;
+    // backslash and double-quote are the only escapes a plain string
+    // needs here).
+    fn toml_escape(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    fn toml_str_array(items: &[String]) -> String {
+        format!("[{}]", items.iter().map(|i| format!("\"{}\"", toml_escape(i))).collect::<Vec<_>>().join(", "))
+    }
+    let mut block = String::new();
+    block.push_str("\n[[screen]]\n");
+    block.push_str(&format!("id = \"{}\"\n", toml_escape(&id)));
+    block.push_str(&format!("name = \"{}\"\n", toml_escape(&name)));
+    block.push_str(&format!("module = \"{}\"\n", toml_escape(&module)));
+    block.push_str(&format!("archetype = \"{}\"\n", toml_escape(&archetype)));
+    block.push_str("combo = []\n");
+    block.push_str(&format!("roles = {}\n", toml_str_array(&roles)));
+    if !datasets.is_empty() {
+        block.push_str(&format!("datasets = {}\n", toml_str_array(&datasets)));
+    }
+    if !blocked_by.is_empty() {
+        block.push_str(&format!("blocked_by = {}\n", toml_str_array(&blocked_by)));
+    }
+    block.push_str(&format!("stage = \"{}\"\n", toml_escape(&stage)));
+    if !file.is_empty() {
+        block.push_str(&format!("file = \"{}\"\n", toml_escape(&file)));
+    }
+    if !notes.trim().is_empty() {
+        block.push_str(&format!("notes = \"{}\"\n", toml_escape(notes.trim())));
+    }
+    // The route is deliberately NOT written into the register: routes
+    // live in menus.toml (its V6 invariant tracks route uniqueness), and
+    // inventing a schema key here would be quiet drift. The route still
+    // reaches the graph through the candidate's driving text.
+
+    // total_screens is the register's own declared count -- bump it when
+    // present, so the register never disagrees with itself.
+    let mut updated = text;
+    if let Some(n) = doc
+        .get("metadata")
+        .and_then(|m| m.get("total_screens"))
+        .and_then(|v| v.as_integer())
+    {
+        let old_line = format!("total_screens = {n}");
+        let new_line = format!("total_screens = {}", n + 1);
+        updated = updated.replacen(&old_line, &new_line, 1);
+    }
+    updated.push_str(&block);
+    if let Err(e) = std::fs::write(&path, updated) {
+        return ApiResponse::error(500, &format!("writing {}: {e}", path.display()));
+    }
+    let mut driving = format!(
+        "Screen {id} ({module}) -- {name}. Archetype: {archetype}. Stage: {}.",
+        if stage.is_empty() { "emittable" } else { &stage }
+    );
+    if !roles.is_empty() {
+        driving.push_str(&format!(" Roles: {}.", roles.join(", ")));
+    }
+    if !route.is_empty() {
+        driving.push_str(&format!(" Route: {route}."));
+    }
+    if !file.is_empty() {
+        driving.push_str(&format!(" File: {file}."));
+    }
+    if !notes.trim().is_empty() {
+        driving.push_str(&format!(" Notes: {}.", notes.trim()));
+    }
+    let node = match crate::hi_graph::add_candidate(conn, "screen", &graph_name, &driving, "screen-register-form") {
+        Ok(n) => n,
+        Err(e) => return ApiResponse::error(500, &e),
+    };
+    ApiResponse::json(&serde_json::json!({
+        "ok": true,
+        "node": node,
+        "screen_id": id,
+        "register_path": path.display().to_string(),
+        "appended_toml": block.trim_end().to_string(),
+    }))
 }
 
 fn body_param(body: &[u8], key: &str) -> Option<String> {
@@ -572,8 +918,14 @@ fn handle_publish(root: &Path, _conn: &Connection) -> ApiResponse {
         let signed = if let Some(key_path) = &signing_key_path {
             let cert_bytes = std::fs::read(&publish.certificate_path).map_err(|e| format!("reading {} to sign it: {e}", publish.certificate_path.display()))?;
             let (public_key, signature) = nirdosha_audit::signing::sign_bytes(&cert_bytes, key_path)?;
+            // Preserve the exact certificate emitted by publish_project,
+            // including its UI assurance proof. Reconstructing the payload
+            // from only the source/verdict here would silently discard that
+            // evidence before signing it.
+            let certificate: serde_json::Value = serde_json::from_slice(&cert_bytes)
+                .map_err(|e| format!("parsing {} before signing it: {e}", publish.certificate_path.display()))?;
             let signed_envelope = serde_json::json!({
-                "certificate": crate::v2_verify::certificate_json(&std::fs::read_to_string(&source_path).map_err(|e| e.to_string())?, &publish.verdict),
+                "certificate": certificate,
                 "signature_algorithm": "ed25519",
                 "public_key": public_key,
                 "signature": signature,
@@ -770,7 +1122,7 @@ struct ScreenRow {
     screen_nav: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct NavigationRow {
     source_id: String,
     target_id: String,
@@ -785,10 +1137,20 @@ struct ScreenMap {
 }
 
 /// Screen-only graph payload: every `screen`-kind CodeUnit plus the
-/// navigation edges we can derive from `app_shell!` nav entries.
-/// Navigation edges are labeled `inferred` when we matched a nav href to
-/// a screen path; a synthetic edge from the app shell to every screen
-/// is also included as a fallback so the map is always connected.
+/// screen-to-screen navigation edges (RFC 0022 §2).
+///
+/// Edges come from two tiers, in this order:
+/// 1. **Derived `NAVIGATES_TO` edges in the graph itself** (`hi sync`'s
+///    reverse-engineering pass: `menus.toml` nav/landing entries, static
+///    redirects, approval-inbox detail paths) -- these are `inferred:
+///    false` because they were read out of real code/registers, not
+///    guessed.
+/// 2. **Fallback edges, only where a screen would otherwise be
+///    unreachable**: a synthetic shell fan-out ("app shell") to every
+///    screen no derived edge reaches, and -- only when the project has
+///    no derived nav edges at all -- the legacy synthetic login→landing
+///    and shell→login pairs, so a screen map is never disconnected
+///    even for a project that has no nav register yet.
 fn list_screens(conn: &Connection) -> Result<ScreenMap, String> {
     let mut stmt = conn
         .prepare("SELECT id, title, screen_type, screen_path, screen_nav FROM nodes WHERE kind = 'CodeUnit' AND screen_type IS NOT NULL LIMIT ?1")
@@ -807,13 +1169,35 @@ fn list_screens(conn: &Connection) -> Result<ScreenMap, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("reading screen row: {e}"))?;
 
+    // Derived nav edges straight from the graph -- the real
+    // reverse-engineered navigation, exactly what `hi sync` last
+    // read out of the app's own routes and nav register.
+    let mut nav_stmt = conn
+        .prepare(
+            "SELECT e.src, e.dst, COALESCE(e.label, e.kind) FROM edges e
+             JOIN nodes a ON a.id = e.src AND a.kind = 'CodeUnit' AND a.screen_type IS NOT NULL
+             JOIN nodes b ON b.id = e.dst AND b.kind = 'CodeUnit' AND b.screen_type IS NOT NULL
+             WHERE e.kind = 'NAVIGATES_TO' LIMIT ?1",
+        )
+        .map_err(|e| format!("preparing nav edge listing: {e}"))?;
+    let derived: Vec<NavigationRow> = nav_stmt
+        .query_map([MAX_ROWS], |r| {
+            Ok(NavigationRow { source_id: r.get(0)?, target_id: r.get(1)?, label: r.get(2)?, inferred: false })
+        })
+        .map_err(|e| format!("listing nav edges: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading nav edge row: {e}"))?;
+    drop(nav_stmt);
+
+    let has_derived = !derived.is_empty();
+    let mut navigations = derived;
+
     // Build a path -> screen lookup for inferred nav edges.
     let path_to_id: std::collections::HashMap<String, String> = rows
         .iter()
         .filter_map(|s| s.screen_path.as_ref().map(|p| (p.clone(), s.id.clone())))
         .collect();
 
-    let mut navigations = Vec::new();
     let mut shell_id = None;
     let mut shell_nav_entries: Vec<NavEntryJson> = Vec::new();
 
@@ -828,51 +1212,70 @@ fn list_screens(conn: &Connection) -> Result<ScreenMap, String> {
         }
     }
 
-    // If we found an app shell, draw labeled edges from it to screens
-    // whose paths match nav hrefs.
-    if let Some(shell) = &shell_id {
-        for entry in &shell_nav_entries {
-            if let Some(target) = path_to_id.get(&entry.href) {
-                navigations.push(NavigationRow {
-                    source_id: shell.clone(),
-                    target_id: target.clone(),
-                    label: entry.label.clone(),
-                    inferred: false,
-                });
+    if !has_derived {
+        // No derived edges at all (a project with no menus.toml, no
+        // redirects, no inboxes): the legacy synthetic layer keeps the
+        // map connected exactly as before this pass existed.
+        if let Some(shell) = &shell_id {
+            for entry in &shell_nav_entries {
+                if let Some(target) = path_to_id.get(&entry.href) {
+                    navigations.push(NavigationRow {
+                        source_id: shell.clone(),
+                        target_id: target.clone(),
+                        label: entry.label.clone(),
+                        inferred: false,
+                    });
+                }
+            }
+            // Fallback: connect the shell to every screen so the map is
+            // never disconnected, even when paths do not match.
+            for screen in &rows {
+                if screen.id != *shell {
+                    navigations.push(NavigationRow {
+                        source_id: shell.clone(),
+                        target_id: screen.id.clone(),
+                        label: "app shell".to_string(),
+                        inferred: true,
+                    });
+                }
             }
         }
-        // Fallback: connect the shell to every screen so the map is
-        // never disconnected, even when paths do not match.
-        for screen in &rows {
-            if screen.id != *shell {
-                navigations.push(NavigationRow {
-                    source_id: shell.clone(),
-                    target_id: screen.id.clone(),
-                    label: "app shell".to_string(),
-                    inferred: true,
-                });
+        let login = rows.iter().find(|s| s.screen_type == "login");
+        let landing = rows.iter().find(|s| s.screen_type == "landing");
+        if let (Some(login), Some(landing), Some(shell)) = (login, landing, shell_id) {
+            navigations.push(NavigationRow {
+                source_id: login.id.clone(),
+                target_id: landing.id.clone(),
+                label: "post-login landing".to_string(),
+                inferred: true,
+            });
+            navigations.push(NavigationRow {
+                source_id: shell.clone(),
+                target_id: login.id.clone(),
+                label: "login".to_string(),
+                inferred: true,
+            });
+        }
+    } else {
+        // The map's connectivity guarantee, downgraded from "every
+        // screen is a shell child" to "no screen is orphaned": once
+        // real derived edges exist, only screens NO edge reaches get
+        // the synthetic shell link -- a screen reached by a real menu
+        // entry must not also carry a fake "app shell" edge implying
+        // the shell links to it directly.
+        let reached: std::collections::HashSet<String> = navigations.iter().map(|n| n.target_id.clone()).collect();
+        if let Some(shell) = &shell_id {
+            for screen in &rows {
+                if screen.id != *shell && !reached.contains(&screen.id) {
+                    navigations.push(NavigationRow {
+                        source_id: shell.clone(),
+                        target_id: screen.id.clone(),
+                        label: "app shell".to_string(),
+                        inferred: true,
+                    });
+                }
             }
         }
-    }
-
-    // Login screen always connects to the landing target if we can
-    // resolve it (landing is a role-based redirect, not a screen, so
-    // this is also marked inferred).
-    let login = rows.iter().find(|s| s.screen_type == "login");
-    let landing = rows.iter().find(|s| s.screen_type == "landing");
-    if let (Some(login), Some(landing), Some(shell)) = (login, landing, shell_id) {
-        navigations.push(NavigationRow {
-            source_id: login.id.clone(),
-            target_id: landing.id.clone(),
-            label: "post-login landing".to_string(),
-            inferred: true,
-        });
-        navigations.push(NavigationRow {
-            source_id: shell.clone(),
-            target_id: login.id.clone(),
-            label: "login".to_string(),
-            inferred: true,
-        });
     }
 
     Ok(ScreenMap { screens: rows, navigations })
@@ -903,6 +1306,55 @@ mod tests {
         assert_eq!(percent_decode("hello+world"), "hello world");
         assert_eq!(percent_decode("a%20b%3F"), "a b?");
         assert_eq!(percent_decode("plain"), "plain");
+    }
+
+    /// RFC 0022 §2's /api/screens contract, two tiers: derived
+    /// NAVIGATES_TO edges (real labels, inferred:false) come straight
+    /// from the graph, and the synthetic shell fan-out now applies only
+    /// to screens no real edge reaches -- a screen reached by a real
+    /// menu entry must not ALSO carry a fake "app shell" edge.
+    #[test]
+    fn list_screens_serves_derived_nav_edges_and_falls_back_only_for_orphans() {
+        let dir = scratch_dir("list_screens_nav");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        for (id, title, st, path) in [
+            ("code:screen:app_shell", "Shell", "shell", None::<String>),
+            ("code:screen:my_day", "My Day", "dashboard", Some("/my-day".to_string())),
+            ("code:screen:orph", "Orphan", "page", Some("/orphan".to_string())),
+        ] {
+            conn.execute(
+                "INSERT INTO nodes (id, kind, title, screen_type, screen_path) VALUES (?1, 'CodeUnit', ?2, ?3, ?4)",
+                rusqlite::params![id, title, st, path],
+            )
+            .expect("insert screen");
+        }
+        conn.execute(
+            "INSERT INTO edges (src, dst, kind, label) VALUES ('code:screen:app_shell', 'code:screen:my_day', 'NAVIGATES_TO', 'nav.day')",
+            [],
+        )
+        .expect("insert nav edge");
+        let map = list_screens(&conn).expect("list_screens");
+        assert_eq!(map.screens.len(), 3);
+        let real: Vec<_> = map.navigations.iter().filter(|n| !n.inferred).collect();
+        let nav_debug = format!("{:?}", map.navigations);
+        assert_eq!(real.len(), 1, "exactly one derived edge: {nav_debug}");
+        assert_eq!(real[0].source_id, "code:screen:app_shell");
+        assert_eq!(real[0].target_id, "code:screen:my_day");
+        assert_eq!(real[0].label, "nav.day");
+        // The orphan page still gets its synthetic shell link; the
+        // reached screen does not.
+        let orphan_fallback: Vec<_> = map
+            .navigations
+            .iter()
+            .filter(|n| n.inferred && n.target_id == "code:screen:orph")
+            .collect();
+        assert_eq!(orphan_fallback.len(), 1, "orphan screen gets the synthetic shell edge");
+        let myday_fallback: Vec<_> = map
+            .navigations
+            .iter()
+            .filter(|n| n.inferred && n.target_id == "code:screen:my_day")
+            .collect();
+        assert!(myday_fallback.is_empty(), "a screen reached by a real edge must not also get a synthetic one");
     }
 
     #[test]
@@ -1305,6 +1757,139 @@ mod tests {
         // a regression here would silently start requiring POST for a
         // route that has nothing to protect with that check.
         assert!(!MUTATING_PATHS.contains(&"/api/suggest"));
+    }
+
+    /// The + Screen rail's register form is entirely driven by the
+    /// project's own screens.toml: the GET must surface the register's
+    /// vocabularies (modules/archetypes/stages/roles/files), the
+    /// existing ids, and a next-id suggestion per module that extends
+    /// the register's own numbering (M4's max "4.x" + 0.1).
+    #[test]
+    fn screen_register_get_surfaces_vocabularies_and_next_ids() {
+        let dir = scratch_dir("screen_register_get");
+        std::fs::write(
+            dir.join("screens.toml"),
+            "[metadata]\ntotal_screens = 3\n\n[[screen]]\nid = \"4.1\"\nname = \"Hold List\"\nmodule = \"M4\"\narchetype = \"crud_screens!\"\ncombo = []\nroles = [\"OpsAnalyst:R\", \"Admin:R\"]\nstage = \"built\"\n\n[[screen]]\nid = \"4.13\"\nname = \"Hold Detail\"\nmodule = \"M4\"\narchetype = \"dashboard!\"\ncombo = []\nroles = [\"OpsAnalyst:R\"]\nstage = \"emittable\"\n\n[[screen]]\nid = \"7.1\"\nname = \"Feed\"\nmodule = \"M7\"\narchetype = \"communication_feed!\"\ncombo = []\nroles = [\"CsAgent:R/W\"]\nstage = \"interim\"\n",
+        )
+        .unwrap();
+        let resp = handle_screen_register_get(&dir);
+        assert_eq!(resp.status, 200);
+        let data: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(data["exists"], true);
+        assert_eq!(data["metadata"]["total_screens"], 3);
+        assert_eq!(data["modules"], serde_json::json!(["M4", "M7"]));
+        assert_eq!(data["archetypes"][0], "communication_feed!");
+        assert!(data["roles"].as_array().unwrap().contains(&serde_json::json!("OpsAnalyst")));
+        assert_eq!(data["next_ids"]["M4"], "4.14");
+        assert_eq!(data["next_ids"]["M7"], "7.2");
+    }
+
+    #[test]
+    fn screen_register_get_reports_missing_register_as_exists_false() {
+        let dir = scratch_dir("screen_register_missing");
+        let resp = handle_screen_register_get(&dir);
+        assert_eq!(resp.status, 200);
+        let data: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(data["exists"], false);
+    }
+
+    /// The POST path end-to-end: a valid entry is appended verbatim to
+    /// the register (total_screens bumped), AND a reviewable screen
+    /// candidate appears in the graph with the structured driving text
+    /// -- the entry enters the ordinary confirm -> generate loop, it
+    /// never pretends the code exists.
+    #[test]
+    fn screen_register_add_appends_entry_and_records_candidate() {
+        let dir = scratch_dir("screen_register_add");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        std::fs::write(
+            dir.join("screens.toml"),
+            "[metadata]\ntotal_screens = 1\n\n[[screen]]\nid = \"4.1\"\nname = \"Hold List\"\nmodule = \"M4\"\narchetype = \"crud_screens!\"\ncombo = []\nroles = [\"OpsAnalyst:R\"]\nstage = \"built\"\n",
+        )
+        .unwrap();
+        let body = "name=Payment+Hold+Detail&id=4.14&module=M4&archetype=crud_screens%21&stage=&path=%2Fholds%2F%7Bid%7D&roles=OpsAnalyst%3AR%2CAdmin%3AR%2FW&file=&datasets=PG.payments&blocked_by=&notes=Second+hold+view";
+        let resp = handle_screen_register_add(&dir, &conn, body.as_bytes());
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        let data: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(data["ok"], true);
+        assert_eq!(data["node"], "code:screen:PaymentHoldDetail");
+        assert_eq!(data["screen_id"], "4.14");
+
+        let register = std::fs::read_to_string(dir.join("screens.toml")).unwrap();
+        assert!(register.contains("total_screens = 2"), "count bumped: {register}");
+        assert!(register.contains("[[screen]]\nid = \"4.14\""));
+        assert!(register.contains("name = \"Payment Hold Detail\""));
+        assert!(register.contains("roles = [\"OpsAnalyst:R\", \"Admin:R/W\"]"));
+        assert!(register.contains("stage = \"emittable\""), "empty stage defaults to emittable");
+
+        let candidate: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT driving_text, created_by FROM nodes WHERE id = 'code:screen:PaymentHoldDetail'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        let (driving, created_by) = candidate.expect("candidate node recorded");
+        assert_eq!(created_by.as_deref(), Some("screen-register-form"));
+        assert!(driving.contains("Screen 4.14 (M4)"));
+        assert!(driving.contains("Route: /holds/{id}"));
+    }
+
+    /// Rejections never touch the file: a duplicate id and a bad stage
+    /// both come back as per-field errors with the register byte-identical.
+    #[test]
+    fn screen_register_add_rejects_without_writing_on_invalid_entry() {
+        let dir = scratch_dir("screen_register_reject");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        let register = "[metadata]\ntotal_screens = 1\n\n[[screen]]\nid = \"4.1\"\nname = \"Hold List\"\nmodule = \"M4\"\narchetype = \"crud_screens!\"\ncombo = []\nroles = [\"OpsAnalyst:R\"]\nstage = \"built\"\n";
+        std::fs::write(dir.join("screens.toml"), register).unwrap();
+
+        let dup = handle_screen_register_add(&dir, &conn, b"name=Another&id=4.1&module=M4&archetype=crud_screens%21&roles=OpsAnalyst%3AR");
+        assert_eq!(dup.status, 400);
+        let data: serde_json::Value = serde_json::from_slice(&dup.body).unwrap();
+        assert!(data["fields"]["id"].as_str().unwrap().contains("already exists"));
+
+        let bad_stage = handle_screen_register_add(&dir, &conn, b"name=Another&id=4.2&module=M4&archetype=crud_screens%21&stage=shipped&roles=OpsAnalyst%3AR");
+        assert_eq!(bad_stage.status, 400);
+        let data: serde_json::Value = serde_json::from_slice(&bad_stage.body).unwrap();
+        assert!(data["fields"]["stage"].as_str().unwrap().contains("unknown stage"));
+
+        let no_roles = handle_screen_register_add(&dir, &conn, b"name=Another&id=4.2&module=M4&archetype=crud_screens%21&roles=");
+        assert_eq!(no_roles.status, 400);
+        let data: serde_json::Value = serde_json::from_slice(&no_roles.body).unwrap();
+        assert!(data["fields"]["roles"].as_str().unwrap().contains("at least one role"));
+
+        assert_eq!(std::fs::read_to_string(dir.join("screens.toml")).unwrap(), register, "register untouched on every rejection");
+        let count: i64 = conn.query_row("SELECT count(*) FROM nodes WHERE id LIKE 'code:screen:%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "no candidate recorded for a rejected entry");
+    }
+
+    /// A candidate must never overwrite a REAL synced unit: if the graph
+    /// already holds a synced node under the derived name, the add is
+    /// refused with a name-tweak hint (the register append also must not
+    /// survive -- the entry is only written when the whole request
+    /// validates, graph collision included).
+    #[test]
+    fn screen_register_add_refuses_name_collision_with_synced_unit() {
+        let dir = scratch_dir("screen_register_collision");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        std::fs::write(
+            dir.join("screens.toml"),
+            "[metadata]\ntotal_screens = 1\n\n[[screen]]\nid = \"4.1\"\nname = \"Hold List\"\nmodule = \"M4\"\narchetype = \"crud_screens!\"\ncombo = []\nroles = [\"OpsAnalyst:R\"]\nstage = \"built\"\n",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO nodes (id, kind, title, content_hash) VALUES ('code:screen:PaymentHoldDetail', 'CodeUnit', 'Payment Hold Detail', 'abc123')",
+            [],
+        )
+        .unwrap();
+        let resp = handle_screen_register_add(&dir, &conn, b"name=Payment+Hold+Detail&id=4.14&module=M4&archetype=crud_screens%21&roles=OpsAnalyst%3AR");
+        assert_eq!(resp.status, 400, "{}", String::from_utf8_lossy(&resp.body));
+        let text = String::from_utf8_lossy(&resp.body);
+        assert!(text.contains("synced code unit"), "error names the collision: {text}");
+        let register = std::fs::read_to_string(dir.join("screens.toml")).unwrap();
+        assert!(!register.contains("4.14"), "register untouched on collision: {register}");
     }
 }
 

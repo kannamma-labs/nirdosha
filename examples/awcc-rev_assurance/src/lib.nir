@@ -1,0 +1,69 @@
+//! `awcc-rev-assurance` library target — AWCC Revenue Assurance, Nirdosha v2
+//! dialect demo. Holds the policy/catalog corpus so both the binary and the
+//! integration tests see the same registered `nirdosha_guard_registry` records.
+
+#![allow(non_upper_case_globals, non_camel_case_types, dead_code)]
+
+#[path = "domain_types.nir"]
+pub mod domain_types;
+#[path = "00_core.nir"]
+pub mod core;
+#[path = "10_domains.nir"]
+pub mod domains;
+#[path = "20_ingestion.nir"]
+pub mod ingestion;
+#[path = "bridge.nir"]
+pub mod bridge;
+
+// Re-export roles at crate root so screen macros can name them.
+pub use core::nirdosha_roles;
+
+// ---- Guard-enforced screens (M1–M22) ----
+#[path = "screens/m01_auth.nir"]
+pub mod m01_auth;
+#[path = "screens/m02_shell.nir"]
+pub mod m02_shell;
+#[path = "screens/m02_dashboards.nir"]
+pub mod m02_dashboards;
+#[path = "screens/m03_alerts.nir"]
+pub mod m03_alerts;
+#[path = "screens/m04_cases.nir"]
+pub mod m04_cases;
+#[path = "screens/m05_subscriber.nir"]
+pub mod m05_subscriber;
+#[path = "screens/m06_cdr.nir"]
+pub mod m06_cdr;
+#[path = "screens/m07_network.nir"]
+pub mod m07_network;
+#[path = "screens/m08_rules.nir"]
+pub mod m08_rules;
+#[path = "screens/m09_ml_models.nir"]
+pub mod m09_ml_models;
+#[path = "screens/m10_screening.nir"]
+pub mod m10_screening;
+#[path = "screens/m11_intervention.nir"]
+pub mod m11_intervention;
+#[path = "screens/m12_atra.nir"]
+pub mod m12_atra;
+#[path = "screens/m14_qa.nir"]
+pub mod m14_qa;
+#[path = "screens/m15_reporting.nir"]
+pub mod m15_reporting;
+#[path = "screens/m16_notifications.nir"]
+pub mod m16_notifications;
+#[path = "screens/m17_knowledge.nir"]
+pub mod m17_knowledge;
+#[path = "screens/m18_admin.nir"]
+pub mod m18_admin;
+#[path = "screens/m20_audit.nir"]
+pub mod m20_audit;
+#[path = "screens/m21_restricted.nir"]
+pub mod m21_restricted;
+#[path = "screens/m22_misc.nir"]
+pub mod m22_misc;
+
+// Boot banner — called by the binary to prove the corpus linked.
+pub fn boot_banner() {
+    println!("AWCC Revenue Assurance demo booted");
+    println!("registered policies: {}", nirdosha_guard_registry::POLICIES.len());
+}

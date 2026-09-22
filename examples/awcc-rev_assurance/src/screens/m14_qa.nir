@@ -1,0 +1,80 @@
+//! M14 QA — sampling queue, scorecards, feedback/coaching, overturned decisions log.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{qa_review_table, QaReviewRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_qa_store() -> &'static SharedTable<i64, QaReviewRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, QaReviewRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_qa_review_screens,
+    entity: QaReviewRow,
+    store: unused_qa_store,
+    path: "/qa",
+    fields: [
+        review_id: String,
+        tenant_id: String,
+        reviewer: String,
+        analyst: String,
+        alert_id: String,
+        score: i64,
+        overturned: bool,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: qa_review_table,
+        purpose: "QaReview",
+        update_fields: [
+            score: i64,
+            overturned: bool,
+        ],
+    },
+}
+
+fn analyst_score_summary(auth: &nirdosha_rt::Auth) -> String {
+    let rows = match qa_review_table().guarded_snapshot(auth, "QaReview") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_analyst: std::collections::BTreeMap<String, (i64, i64)> = std::collections::BTreeMap::new();
+    for r in &rows {
+        let (count, total) = by_analyst.entry(r.analyst.clone()).or_insert((0, 0));
+        *count += 1;
+        *total += r.score;
+    }
+    serde_json::to_string(&by_analyst.into_iter().map(|(k, (c, t))| serde_json::json!({ "label": k, "reviews": c, "avg_score": if c > 0 { t as f64 / c as f64 } else { 0.0 } })).collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_analyst_scorecards,
+    path: "/qa/scorecards",
+    title: "Analyst Scorecards",
+    refresh_seconds: 300,
+    widgets {
+        Chart { label: "Average score by analyst", fn: analyst_score_summary, mark: bar, guarded: true },
+    }
+}
+
+pub fn mount_overturned_decisions(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/qa/overturned", "Overturned Decisions Log (14.5)", |_req, _params, auth| {
+        let overturned = match qa_review_table().guarded_snapshot(auth, "QaReview") {
+            Ok(rows) => rows.into_iter().filter(|r| r.overturned).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "overturned": overturned }))
+    })
+}
+
+pub fn mount_m14_qa(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_analyst_scorecards(router);
+    let router = mount_overturned_decisions(router);
+    mount_qa_review_screens(router)
+}

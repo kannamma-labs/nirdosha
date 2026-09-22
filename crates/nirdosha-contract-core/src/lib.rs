@@ -35,3 +35,5 @@ pub mod provenance;
 pub mod role;
 pub mod scan;
 pub mod workflow_spec;
+pub mod ui_assurance;
+pub mod recipe;

@@ -172,6 +172,9 @@ members = [
     # (ingestion -> RFC 0023 data guard -> policy engine -> alerts -> UI),
     # one .nir file that is a plain Rust program under both compilers.
     "examples/rtm",
+    # v2 dialect: AWCC Revenue Assurance companion demo, mirroring RTM's
+    # structure with RA-specific roles, datasets, and screens.
+    "examples/awcc-rev_assurance",
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

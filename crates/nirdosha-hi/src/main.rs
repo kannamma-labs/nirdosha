@@ -71,8 +71,8 @@ fn cmd_graph(cwd: &Path, sub: &str, mut args: impl Iterator<Item = String>) -> E
             match nirdosha_hi::hi_graph::sync(&conn, cwd, &files) {
                 Ok(r) => {
                     println!(
-                        "synced {} file(s): {} unit(s) seen, {} added, {} changed, {} edge(s) flagged possibly_stale",
-                        r.files_scanned, r.units_seen, r.units_added, r.units_changed, r.edges_flagged
+                        "synced {} file(s): {} unit(s) seen, {} added, {} changed, {} edge(s) flagged possibly_stale, {} screen-nav edge(s) derived",
+                        r.files_scanned, r.units_seen, r.units_added, r.units_changed, r.edges_flagged, r.nav_edges
                     );
                     ExitCode::SUCCESS
                 }

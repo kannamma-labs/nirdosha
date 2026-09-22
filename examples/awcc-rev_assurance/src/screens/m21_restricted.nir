@@ -1,0 +1,54 @@
+//! M21 Restricted — auditor read-only portal, CS transaction status lookup, retail/business subscriber status view.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{subscriber_table, payment_table, cdr_table};
+
+pub fn mount_auditor_portal(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/audit/portal", "Auditor Read-Only Portal (21.1)", |_req, _params, auth| {
+        let records = match audit_record_table_proxy(auth) {
+            Ok(rows) => rows.len() as i64,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let body = format!(
+            r#"<!doctype html>
+<html><head><title>Auditor Portal</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Auditor Read-Only Portal</h1>
+<p>Watermark: AUDIT READ-ONLY · {records} audit records visible</p>
+</body></html>"#
+        );
+        nirdosha_rt::Response::html(200, body)
+    })
+}
+
+fn audit_record_table_proxy(auth: &nirdosha_rt::Auth) -> Result<Vec<crate::bridge::AuditRecordRow>, nirdosha_guard_screens::GuardScreenError> {
+    crate::bridge::audit_record_table().guarded_snapshot(auth, "Audit")
+}
+
+pub fn mount_cs_lookup(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cs/lookup", "CS Transaction Status Lookup (21.3)", |_req, _params, auth| {
+        let payments = match payment_table().guarded_snapshot(auth, "CustomerService") {
+            Ok(rows) => rows.into_iter().map(|r| serde_json::json!({ "payment_id": r.payment_id, "status": r.status, "amount": r.amount, "currency": r.currency })).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "payments": payments }))
+    })
+}
+
+pub fn mount_retail_status_view(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/rm/subscribers", "Retail/Business Subscriber Status View (21.4)", |_req, _params, auth| {
+        let subs = match subscriber_table().guarded_snapshot(auth, "CustomerService") {
+            Ok(rows) => rows.into_iter().map(|r| serde_json::json!({ "subscriber_id": r.subscriber_id, "restriction_status": r.restriction_status })).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "subscribers": subs }))
+    })
+}
+
+pub fn mount_m21_restricted(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let _ = cdr_table;
+    let router = mount_auditor_portal(router);
+    let router = mount_cs_lookup(router);
+    mount_retail_status_view(router)
+}

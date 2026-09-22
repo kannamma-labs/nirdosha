@@ -86,7 +86,15 @@ pub fn ensure_repo(root: &Path) -> Result<(), String> {
 /// a failure). Returns the new commit's hash on a real commit.
 pub fn commit_revision(root: &Path, message: &str) -> Result<Option<String>, String> {
     ensure_repo(root)?;
-    let paths = tracked_paths(root);
+    // Stage only tracked paths that actually exist: `git add` fails
+    // outright on a pathspec matching nothing ("fatal: pathspec '.nir'
+    // did not match any files"), so a fresh repo whose `.nir/` hasn't
+    // been created yet must take the same silent no-op path an empty
+    // diff takes -- not an error.
+    let paths: Vec<std::path::PathBuf> = tracked_paths(root).into_iter().filter(|p| p.exists()).collect();
+    if paths.is_empty() {
+        return Ok(None);
+    }
     let mut add_args: Vec<&str> = vec!["add", "-A", "--"];
     let path_strs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     add_args.extend(path_strs.iter().map(|s| s.as_str()));

@@ -107,6 +107,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "awcc-rev-assurance"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-audit",
+ "nirdosha-guard-core",
+ "nirdosha-guard-macros",
+ "nirdosha-guard-mic",
+ "nirdosha-guard-registry",
+ "nirdosha-guard-screens",
+ "nirdosha-guard-verify",
+ "nirdosha-lineage",
+ "nirdosha-lineage-store-embedded",
+ "nirdosha-rt",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "toml",
+]
+
+[[package]]
 name = "aws-lc-fips-sys"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1773,6 +1793,7 @@ dependencies = [
  "quote",
  "rusqlite",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "syn 2.0.119",
@@ -1942,6 +1963,7 @@ dependencies = [
  "base64 0.22.1",
  "cargo-nirdosha",
  "nirdosha-audit",
+ "nirdosha-contract-core",
  "nirdosha-graph",
  "nirdosha-rt",
  "nirdosha-workflow",
@@ -1954,6 +1976,7 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
  "tiny_http",
+ "toml",
 ]
 
 [[package]]

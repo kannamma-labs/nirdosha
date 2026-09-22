@@ -188,6 +188,7 @@ a:focus-visible { outline: 2px solid var(--nir-primary-light); outline-offset: 2
 .nir-nav a.nir-active { background: linear-gradient(135deg, var(--nir-primary), var(--nir-primary-light)); color: var(--nir-text-inverse); box-shadow: var(--nir-shadow-sm), var(--nir-shadow-glow); }
 .nir-nav-spacer { flex: 1; }
 .nir-nav-menu { position: relative; height: 100%; display: flex; align-items: center; }
+.nir-nav-menu::before { content: ""; position: absolute; top: 100%; left: 0; right: 0; height: 0.4rem; }
 .nir-nav-top { padding: 0.5rem 0.85rem; border-radius: var(--nir-radius-md); color: var(--nir-text-muted); font-weight: 500; font-size: 0.92rem; cursor: pointer; user-select: none; transition: all var(--nir-anim-fast) var(--nir-easing); white-space: nowrap; }
 .nir-nav-top::after { content: " \25BE"; font-size: 0.7em; opacity: 0.6; }
 .nir-nav-menu:hover .nir-nav-top, .nir-nav-menu:focus-within .nir-nav-top { background: var(--nir-surface-hover); color: var(--nir-text); }

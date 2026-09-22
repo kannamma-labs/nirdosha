@@ -507,6 +507,9 @@ strict-mode docs, not a silent tightening.
 - **Multi-node** — out of scope for v1 by design; the open question is
   only whether the `DurableLog` source abstraction should reserve a
   partition/shard parameter now to avoid a surface change later.
+  See [RFC 0027.a](./0027.a-cluster-native-dataflow.md) for the
+  cluster-native amendment: identical processes over a partitioned
+  durable log, no task-manager/worker split.
 - **`nfr` on streams** — `nfr(latency_ms)` on an operator currently
   means per-call measurement, which is meaningless for a continuously
   running operator. A queue-depth/end-to-end-lag NFR clause needs new

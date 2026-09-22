@@ -1,0 +1,128 @@
+//! AWCC Revenue Assurance — primitive ID/enum/struct types.
+//!
+//! This is the RA analog of `examples/rtm/src/domain_types.nir`.
+//! It declares the small newtypes and enums referenced by the domain
+//! dataset structs and guard invariants.
+
+macro_rules! string_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub struct $name(pub String);
+    };
+}
+
+string_id!(TenantId);
+string_id!(Msisdn);
+string_id!(Imsi);
+string_id!(Iccid);
+string_id!(AccountId);
+string_id!(UserId);
+string_id!(CaseId);
+string_id!(AlertId);
+string_id!(AtraBundleId);
+string_id!(SubscriberId);
+string_id!(PaymentId);
+string_id!(RuleId);
+string_id!(ModelId);
+string_id!(WindowId);
+string_id!(PolicyVersion);
+string_id!(DispositionCode);
+string_id!(CustomerRef);
+string_id!(SubjectRef);
+string_id!(HoldReason);
+string_id!(Locale);
+string_id!(Tz);
+string_id!(Date);
+string_id!(Phone);
+string_id!(Email);
+string_id!(BatchId);
+string_id!(JobId);
+string_id!(CampaignId);
+
+/// Epoch milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Timestamp(pub u64);
+
+/// ISO 4217 currency code. Structural check only (three uppercase ASCII letters).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrencyCode(pub String);
+
+impl CurrencyCode {
+    pub fn is_iso_4217(&self) -> bool {
+        self.0.len() == 3 && self.0.bytes().all(|b| b.is_ascii_uppercase())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CdrStatus {
+    Missing,
+    Duplicate,
+    Rated,
+    Billed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentStatus {
+    Pending,
+    Authorized,
+    Settled,
+    Declined,
+    Reversed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertStatus {
+    New,
+    InProgress,
+    ClosedFalsePositive,
+    Escalated,
+    PendingInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeakCaseStatus {
+    Open,
+    Investigating,
+    ConfirmedLeak,
+    FalsePositive,
+    Escalate,
+    AtraFiled,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtraStatus {
+    Draft,
+    PendingReview,
+    Approved,
+    Submitted,
+    Continuing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriberRestriction {
+    None,
+    SoftBlock,
+    HardBlock,
+    Monitoring,
+}
+
+/// One matched reconciliation rule contributing to an alert's score.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleHit {
+    pub rule_id: String,
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlertUpdate {
+    pub rationale: String,
+    pub disposition_code: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaseDispositionUpdate {
+    pub disposition: String,
+    pub rationale: String,
+}

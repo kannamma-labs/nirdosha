@@ -1,0 +1,37 @@
+//! M8 Rules — approval workflow, scheduling/go-live, scenario library, threshold editor.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::alert_table;
+
+pub fn mount_approval_workflow(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/rules/approvals", "Approval Workflow (8.8)", |_req, _params, auth| {
+        let pending = match alert_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "escalated").count() as i64,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "pending_approvals": pending }))
+    })
+}
+
+pub fn mount_scheduling_go_live(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/rules/go-live", "Scheduling & Go-Live (8.10)", |_req, _params, _auth| {
+        let body = r#"<!doctype html>
+<html><head><title>Scheduling & Go-Live</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Rule Scheduling & Go-Live</h1>
+<p>Schedule policy releases with a mandatory cooling period (1 day).</p>
+<form method="post" action="/rules/go-live">
+<p><label>Rule ID:<br><input name="rule_id" type="text" /></label></p>
+<p><label>Go-live date:<br><input name="go_live_at" type="date" /></label></p>
+<p><button type="submit">Schedule</button></p>
+</form>
+</body></html>"#;
+        nirdosha_rt::Response::html(200, body)
+    })
+}
+
+pub fn mount_m08_rules(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_scheduling_go_live(router);
+    mount_approval_workflow(router)
+}

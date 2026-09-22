@@ -1,0 +1,55 @@
+//! M1 Auth — demo avatar login. AWCC Revenue Assurance.
+//!
+//! RA analog of `examples/rtm/src/screens/m01_auth.nir`.
+
+use crate::bridge::HUMAN_ROLES;
+use crate::m02_dashboards::landing_path;
+
+fn demo_password_for(role: &str) -> String {
+    format!("{}-demo", role.to_lowercase())
+}
+
+nirdosha_rt::login! {
+    mount: mount_login,
+    path: "/login",
+    mode: demo,
+    demo_users: [
+        { username: "raanalyst", password: "raanalyst-demo", roles: ["RaAnalyst"] },
+        { username: "ralead", password: "ralead-demo", roles: ["RaLead"] },
+        { username: "financecontroller", password: "financecontroller-demo", roles: ["FinanceController"] },
+        { username: "opsengineer", password: "opsengineer-demo", roles: ["OpsEngineer"] },
+        { username: "policyengineer", password: "policyengineer-demo", roles: ["PolicyEngineer"] },
+        { username: "admin", password: "admin-demo", roles: ["Admin"] },
+        { username: "auditor", password: "auditor-demo", roles: ["Auditor"] },
+        { username: "qareviewer", password: "qareviewer-demo", roles: ["QaReviewer"] },
+        { username: "csagent", password: "csagent-demo", roles: ["CsAgent"] },
+        { username: "retailliaison", password: "retailliaison-demo", roles: ["RetailLiaison"] },
+        { username: "regulatorviewer", password: "regulatorviewer-demo", roles: ["RegulatorViewer"] },
+    ],
+    landing: landing_path,
+}
+
+pub fn mount_avatar_picker(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get("/", "Choose a role", |_req, _params| {
+        let mut tiles = String::new();
+        for role in HUMAN_ROLES {
+            let username = role.to_lowercase();
+            let password = demo_password_for(role);
+            tiles.push_str(&format!(
+                "<form method=\"post\" action=\"/login\" style=\"display:inline-block;margin:8px\">
+                    <input type=\"hidden\" name=\"username\" value=\"{username}\">
+                    <input type=\"hidden\" name=\"password\" value=\"{password}\">
+                    <button type=\"submit\" style=\"padding:16px 24px;font-size:16px\">{role}</button>
+                </form>"
+            ));
+        }
+        nirdosha_rt::Response::html(
+            200,
+            format!(
+                "<html><body><h1>AWCC Revenue Assurance demo &mdash; choose who you are</h1>\
+                 <p>Demo mode: clicking a role signs you in as that identity and its claims are assumed true. Nothing else is faked.</p>\
+                 {tiles}</body></html>"
+            ),
+        )
+    })
+}

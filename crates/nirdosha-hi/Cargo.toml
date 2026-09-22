@@ -18,6 +18,7 @@ path = "src/lib.rs"
 # `fix`/`certify_code`/`build_project`/`publish_project` can check a v2
 # source string's declared-vs-actual claims without a subprocess.
 cargo-nirdosha = { path = "../cargo-nirdosha" }
+nirdosha-contract-core = { path = "../nirdosha-contract-core" }
 # `v2_verify.rs`'s `build_project`/`ensure_scratch_package` build a real
 # v2 candidate against this crate as its own `nirdosha-rt` path
 # dependency.
@@ -40,6 +41,13 @@ quote = "1"
 proc-macro2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `hi_graph::derive_screen_navigation` reads the app shell's own nav
+# register (`app_shell_from_toml!("menus.toml", ...)`'s file) at sync
+# time so the screen-only graph's nav edges stay in sync with what the
+# app actually ships -- the same dependency nirdosha-macros and
+# nirdosha-contract-core already pin ("0.8", one shared lockfile entry,
+# no new vendored source).
+toml = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 # `hi_plugin::pack_content_id` (RFC 0016 "the pack ID is the law"):
 # JCS (RFC 8785) canonicalization so two byte-different encodings of

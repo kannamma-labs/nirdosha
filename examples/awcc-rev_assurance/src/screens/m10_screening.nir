@@ -1,0 +1,60 @@
+//! M10 Screening — watchlist hit queue, hit review/disposition, configuration, watchlist management, rescreening.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{screening_hit_table, ScreeningHitRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_hit_store() -> &'static SharedTable<i64, ScreeningHitRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, ScreeningHitRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_screening_hit_screens,
+    entity: ScreeningHitRow,
+    store: unused_hit_store,
+    path: "/screening-hits",
+    fields: [
+        hit_id: String,
+        tenant_id: String,
+        entity_id: String,
+        list_name: String,
+        status: String,
+        matched_name: String,
+        score: f64,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: screening_hit_table,
+        purpose: "Operations",
+        update_fields: [
+            status: String,
+        ],
+    },
+}
+
+pub fn mount_watchlist_management(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/screening/watchlists", "Watchlist Management (10.4)", |_req, _params, _auth| {
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "watchlists": [{"name":"AWCC_SANCTIONS"},{"name":"ATRA_PEP"},{"name":"ADVERSE_MEDIA"}] }))
+    })
+}
+
+pub fn mount_rescreen_monitor(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/screening/rescreen", "Rescreening Monitor (10.5)", |_req, _params, auth| {
+        let pending = match screening_hit_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "new").count() as i64,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "pending_rescreens": pending }))
+    })
+}
+
+pub fn mount_m10_screening(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_watchlist_management(router);
+    let router = mount_rescreen_monitor(router);
+    mount_screening_hit_screens(router)
+}

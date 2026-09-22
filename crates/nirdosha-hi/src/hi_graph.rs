@@ -162,6 +162,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     // JSON nav entries for app_shell-kind nodes.
     add_column_if_missing(conn, "nodes", "screen_path", "TEXT")?;
     add_column_if_missing(conn, "nodes", "screen_nav", "TEXT")?;
+    // screen-only graph, edges half (RFC 0022 §2): a human-readable
+    // label for derived `NAVIGATES_TO` edges ("nav.approvals",
+    // "landing: Analyst", "redirect", "detail"). NULL for every other
+    // edge kind, whose kinds already say what they mean.
+    add_column_if_missing(conn, "edges", "label", "TEXT")?;
     Ok(())
 }
 
@@ -175,6 +180,73 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, sql_type:
             .map_err(|e| format!("adding {table}.{column}: {e}"))?;
     }
     Ok(())
+}
+
+/// One GET route registration found by reverse-engineering a fn body
+/// (`router.get_with_auth("/admin/queues", "Assignment Rules (18.3)",
+/// ...)`) -- a real screen the app serves, whether or not any UI macro
+/// produced it. These become `screen`-kind nodes of type `page` so the
+/// screen-only graph shows the app's whole surface, not just its macro
+/// screens.
+#[derive(Debug, Clone)]
+pub(crate) struct RouteReg {
+    /// The registered path, verbatim (`/cases/{id}/alerts` -- `{...}`
+    /// params kept, so template matching downstream sees the app's own
+    /// spelling of the path).
+    path: String,
+    /// The human title passed alongside the path, when the call carries
+    /// one (`get_with_auth`'s second argument). `None` for a bare
+    /// `router.get(path, ...)` with no title literal.
+    title: Option<String>,
+    /// The top-level fn the registration sits in (`mount_case_context_
+    /// tabs`) -- grouping context for the derived node, and how a route
+    /// stays attributable to the module that mounts it.
+    mount_fn: String,
+}
+
+/// Per-file reverse-engineering facts that `hi sync`'s screen-navigation
+/// pass consumes. Everything here is *code-derived* (parsed out of real
+/// registrations/macros, never guessed), which is what makes the
+/// resulting `NAVIGATES_TO` edges honest enough to draw as solid graph
+/// edges rather than "inferred" dashes.
+#[derive(Default)]
+pub(crate) struct ScreenFacts {
+    /// GET route registrations, each tagged with the top-level fn it
+    /// sits in (so a file's own sync pass can claim exactly its own).
+    pub routes: Vec<RouteReg>,
+    /// `(from_route_path, target_path)`: a static string-literal
+    /// `Response::redirect(...)` inside one GET route's handler.
+    /// `format!(...)`-built dynamic redirects are deliberately skipped
+    /// -- their target isn't a literal, so guessing would be a lie.
+    pub redirects: Vec<(String, String)>,
+    /// `(mount_name, detail_path)`: every `detail_path:` an
+    /// `approval_inbox!` macro declares -- the real "this inbox links
+    /// out to that screen" relationship, taken from the macro's own
+    /// `sources: [...]` table.
+    pub detail_paths: Vec<(String, String)>,
+    /// The TOML register path each `app_shell_from_toml!("menus.toml",
+    /// ...)` invocation names, verbatim from source. Resolved against
+    /// the sync root (the macro resolves it against
+    /// `CARGO_MANIFEST_DIR`, which for an app crate is the same
+    /// directory `hi sync` walks from).
+    pub shell_tomls: Vec<String>,
+}
+
+impl ScreenFacts {
+    fn merge(&mut self, other: ScreenFacts) {
+        self.routes.extend(other.routes);
+        self.redirects.extend(other.redirects);
+        self.detail_paths.extend(other.detail_paths);
+        self.shell_tomls.extend(other.shell_tomls);
+    }
+
+    /// Routes declared by fns this file itself declares -- the per-file
+    /// slice of the accumulated facts, so a re-sync of one file only
+    /// upserts that file's own route nodes (same file-at-a-time rule
+    /// the rest of `sync_file` follows).
+    fn routes_owned_by(&self, fn_names: &HashSet<&str>) -> Vec<&RouteReg> {
+        self.routes.iter().filter(|r| fn_names.contains(r.mount_fn.as_str())).collect()
+    }
 }
 
 /// One `fn`/`struct`/`enum`/`screen` top-level item, identity =
@@ -212,11 +284,18 @@ fn hash_tokens<T: quote::ToTokens>(item: &T) -> String {
 /// retired native parser, `syn::parse_file` never injects anything a
 /// file didn't actually write). A screen is identified by the UI
 /// macro's `mount_<ScreenName>` function, giving it a graph identity.
-fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File), String> {
+///
+/// The third element of the tuple is this file's screen-facts yield
+/// (RFC 0022 §2's reverse-engineering pass): GET route registrations,
+/// static redirects, approval-inbox detail paths, and shell TOML
+/// registers -- everything the whole-project navigation pass in `sync`
+/// needs, extracted here where the parse already happened.
+fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File, ScreenFacts), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let file = syn::parse_file(&src).map_err(|e| format!("parse error in {}: {e}", path.display()))?;
 
     let mut units = Vec::with_capacity(file.items.len());
+    let mut facts = ScreenFacts::default();
     for item in &file.items {
         let (qualified_name, kind, screen_type, screen_path, screen_nav): (
             String,
@@ -225,12 +304,34 @@ fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File), String>
             Option<String>,
             Option<String>,
         ) = match item {
-            syn::Item::Fn(f) => (f.sig.ident.to_string(), "fn", None, None, None),
+            syn::Item::Fn(f) => {
+                collect_screen_facts_from_fn(&f.sig.ident.to_string(), f, &mut facts);
+                (f.sig.ident.to_string(), "fn", None, None, None)
+            }
             syn::Item::Struct(s) => (s.ident.to_string(), "struct", None, None, None),
             syn::Item::Enum(e) => (e.ident.to_string(), "enum", None, None, None),
             syn::Item::Macro(m) => {
-                let Some(name) = screen_name_from_macro(m) else { continue };
                 let macro_name = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                if macro_name == "approval_inbox" {
+                    // The inbox's own mount identity (what
+                    // `screen_name_from_macro` would return) pairs each
+                    // `detail_path` with the inbox screen that declares
+                    // it, so the nav pass can draw inbox -> detail
+                    // edges without re-parsing this file later.
+                    if let Some(mount) = screen_name_from_macro(m) {
+                        for detail in string_values_after_key(&m.mac.tokens, "detail_path") {
+                            facts.detail_paths.push((mount.clone(), detail));
+                        }
+                    }
+                }
+                if macro_name == "app_shell_from_toml" {
+                    // First positional argument is the nav register path
+                    // (`app_shell_from_toml!("menus.toml", title: ...)`).
+                    if let Some(lit) = first_string_literal(&m.mac.tokens) {
+                        facts.shell_tomls.push(lit);
+                    }
+                }
+                let Some(name) = screen_name_from_macro(m) else { continue };
                 let st = screen_type_from_macro(&macro_name).to_string();
                 let sp = screen_path_from_macro(&m.mac.tokens);
                 let sn = if macro_name == "app_shell" {
@@ -254,7 +355,7 @@ fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File), String>
             screen_nav,
         });
     }
-    Ok((units, file))
+    Ok((units, file, facts))
 }
 
 const UI_MACROS: &[&str] = &[
@@ -267,6 +368,19 @@ const UI_MACROS: &[&str] = &[
     "landing",
     "login",
     "app_shell",
+    // RFC 0023's approval inbox is a real screen (a mount + path + a
+    // list the user opens), not just an approval-policy artifact -- the
+    // screen-only graph must show it, or the T-04 inbox screens
+    // (mounted at /approvals, /four-eyes, ...) are invisible in it.
+    "approval_inbox",
+    // Same for T-06's workspace! archetype (multi-panel investigation
+    // workspace, again mount + path).
+    "workspace",
+    // `app_shell_from_toml!("menus.toml", ...)` generates the same
+    // `mount_app_shell` surface `app_shell!` would -- same shell node
+    // identity (`code:screen:app_shell`), but its nav register lives in
+    // the named TOML file, which the navigation pass reads.
+    "app_shell_from_toml",
 ];
 
 fn screen_type_from_macro(macro_name: &str) -> &'static str {
@@ -280,29 +394,21 @@ fn screen_type_from_macro(macro_name: &str) -> &'static str {
         "landing" => "landing",
         "login" => "login",
         "app_shell" => "shell",
+        "app_shell_from_toml" => "shell",
+        "approval_inbox" => "inbox",
+        "workspace" => "workspace",
         _ => "screen",
     }
 }
 
 fn screen_path_from_macro(tokens: &proc_macro2::TokenStream) -> Option<String> {
-    let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<Option<String>> {
-        while !input.is_empty() {
-            let key: syn::Ident = input.parse()?;
-            input.parse::<syn::Token![:]>()?;
-            if key == "path" {
-                let path: syn::LitStr = input.parse()?;
-                return Ok(Some(path.value()));
-            } else {
-                // consume the value so we can keep scanning
-                let _: proc_macro2::TokenTree = input.parse()?;
-            }
-            if input.peek(syn::Token![,]) {
-                input.parse::<syn::Token![,]>()?;
-            }
-        }
-        Ok(None)
-    };
-    syn::parse::Parser::parse2(parser, tokens.clone()).ok().flatten()
+    // Token-scan, not a stream parser: the macro bodies carry arbitrary
+    // domain content (login!'s demo user rows, approval_inbox!'s
+    // `access: requires role "..."`) that a key:value stream parser
+    // trips over. Only the token sequence `Ident("path") Punct(:)
+    // Literal(str)` matters, anywhere in the invocation -- every UI
+    // macro spells the screen's route exactly that way.
+    string_values_after_key(tokens, "path").into_iter().next()
 }
 
 #[derive(serde::Serialize)]
@@ -363,10 +469,169 @@ fn app_shell_nav_from_macro(tokens: &proc_macro2::TokenStream) -> Option<String>
     syn::parse::Parser::parse2(parser, tokens.clone()).ok().flatten()
 }
 
+/// The GET route-registration methods a v2 `Router` offers that serve a
+/// page a human opens (`web.rs`'s own method list, filtered to the
+/// read side). POST/PUT/DELETE are actions (endpoints), not screens --
+/// they carry no surface to draw, so the screen-only graph excludes
+/// them rather than pretending every endpoint is a screen.
+const SCREEN_ROUTE_METHODS: &[&str] = &["get", "get_gated", "get_gated_claim", "get_with_auth"];
+
+/// First (optionally second) positional string-literal argument of a
+/// call's argument list -- how a route registration's path (and its
+/// human title, when present) are read back without any macro context.
+fn positional_string_literals(args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>) -> Vec<String> {
+    args.iter()
+        .filter_map(|a| match a {
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(s.value()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Walks one top-level fn's body collecting the screen-facts yield:
+/// every GET route registration (with the title literal when present),
+/// and every static `Response::redirect(...)` string inside a route
+/// handler attributed to the route whose arguments contain it.
+fn collect_screen_facts_from_fn(mount_fn: &str, f: &syn::ItemFn, facts: &mut ScreenFacts) {
+    struct Collector<'a> {
+        mount_fn: &'a str,
+        current_route: Option<String>,
+        facts: &'a mut ScreenFacts,
+    }
+    impl syn::visit::Visit<'_> for Collector<'_> {
+        fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            if SCREEN_ROUTE_METHODS.contains(&method.as_str()) {
+                let lits = positional_string_literals(&node.args);
+                if let Some(path) = lits.first().filter(|p| p.starts_with('/')) {
+                    let title = lits.get(1).cloned();
+                    self.facts.routes.push(RouteReg { path: path.clone(), title, mount_fn: self.mount_fn.to_string() });
+                    // The handler closure is among this call's args --
+                    // walking it with `current_route` set attributes any
+                    // static redirect inside it to THIS route, then
+                    // restores whatever outer registration (if any) we
+                    // were already inside.
+                    let prev = self.current_route.replace(path.clone());
+                    syn::visit::visit_expr_method_call(self, node);
+                    self.current_route = prev;
+                    return;
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+        fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+            if let syn::Expr::Path(p) = node.func.as_ref() {
+                if p.path.segments.last().map(|s| s.ident.to_string()).as_deref() == Some("redirect") {
+                    if let Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) = node.args.first() {
+                        if let Some(route) = &self.current_route {
+                            self.facts.redirects.push((route.clone(), s.value()));
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    syn::visit::Visit::visit_block(
+        &mut Collector { mount_fn, current_route: None, facts },
+        &f.block,
+    );
+}
+
+/// The first string literal in a macro's token stream -- how
+/// `app_shell_from_toml!("menus.toml", ...)`'s positional register-path
+/// argument is read back (it has no `key:` spelling to scan for).
+fn first_string_literal(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    tokens.clone().into_iter().find_map(|t| match t {
+        proc_macro2::TokenTree::Literal(l) => {
+            let text = l.to_string();
+            if text.starts_with('"') {
+                Some(literal_string_value(&text))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    })
+}
+
+/// Every string-literal value that follows `key :` anywhere in a macro's
+/// token stream, descending into groups (`sources: [{ ... detail_path:
+/// "/cases/{id}" }]` nests the values inside `Group`s, so a top-level
+/// walk never sees them). How `detail_path:` entries are pulled out of
+/// `approval_inbox!`'s sources table -- and how `path:` is read for
+/// every UI macro -- without writing a full grammar for each macro's
+/// input (the real parsers live in `nirdosha-macros`; here only these
+/// token sequences are needed, and matching `Ident(key) Punct(:)
+/// Literal(str)` is exact for them).
+fn string_values_after_key(tokens: &proc_macro2::TokenStream, key: &str) -> Vec<String> {
+    fn flatten(trees: proc_macro2::TokenStream, out: &mut Vec<proc_macro2::TokenTree>) {
+        for t in trees {
+            if let proc_macro2::TokenTree::Group(g) = &t {
+                flatten(g.stream(), out);
+            }
+            out.push(t);
+        }
+    }
+    let mut trees: Vec<proc_macro2::TokenTree> = Vec::new();
+    flatten(tokens.clone(), &mut trees);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 2 < trees.len() {
+        let is_key = matches!(&trees[i], proc_macro2::TokenTree::Ident(id) if id.to_string() == key);
+        let is_colon = matches!(&trees[i + 1], proc_macro2::TokenTree::Punct(p) if p.as_char() == ':');
+        if is_key && is_colon {
+            if let proc_macro2::TokenTree::Literal(l) = &trees[i + 2] {
+                let text = l.to_string();
+                if text.starts_with('"') {
+                    out.push(literal_string_value(&text));
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `proc_macro2::Literal`'s Display keeps source quoting (`"text"`, and
+/// escapes inside), so a `.nir`-side string value is recovered with a
+/// tiny un-escape (the two escapes a real v2 string literal can carry
+/// here: `"` and `\\`). Full grammar-faithful unescaping lives in the
+/// compiler's own lexer; this only needs to be right for plain route
+/// paths.
+fn literal_string_value(quoted: &str) -> String {
+    let inner = &quoted[1..quoted.len().saturating_sub(1)];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub(crate) fn screen_name_from_macro(item: &syn::ItemMacro) -> Option<String> {
     let macro_name = item.mac.path.segments.last()?.ident.to_string();
     if !UI_MACROS.contains(&macro_name.as_str()) || item.mac.path.segments.first()?.ident != "nirdosha_rt" {
         return None;
+    }
+    // `app_shell_from_toml!` takes the register path as its first
+    // argument, not a `mount:` key -- the generated mount fn is always
+    // the fixed name `mount_app_shell` (see the macro's own doc
+    // comment), so the screen node gets that fixed identity too.
+    if macro_name == "app_shell_from_toml" {
+        return Some("app_shell".to_string());
     }
     let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<String> {
         let key: syn::Ident = input.parse()?;
@@ -390,6 +655,13 @@ pub struct SyncReport {
     pub units_added: usize,
     pub units_changed: usize,
     pub edges_flagged: usize,
+    /// RFC 0022 §2: how many `NAVIGATES_TO` screen-navigation edges the
+    /// reverse-engineering pass just (re)derived -- menus.toml entries,
+    /// landing routes, static redirects, and approval-inbox detail
+    /// paths. Reported separately from `edges_flagged` because these
+    /// edges are regenerated wholesale each sync (pure derived data,
+    /// never human-authored), not stale-flagged.
+    pub nav_edges: usize,
 }
 
 impl SyncReport {
@@ -409,9 +681,10 @@ impl SyncReport {
 /// deletes or rewrites an edge, a node's title, or the `.nir` source
 /// itself -- only ever adds a flag, per the RFC's "explicit vs.
 /// inferred knowledge stay separate" principle.
-fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
+fn sync_file(conn: &Connection, path: &Path, facts: &mut ScreenFacts) -> Result<SyncReport, String> {
     let mut report = SyncReport { files_scanned: 1, ..Default::default() };
-    let (units, file) = code_units_in_file(path)?;
+    let (units, file, file_facts) = code_units_in_file(path)?;
+    facts.merge(file_facts);
     report.units_seen = units.len();
     let source_ref = path.display().to_string();
 
@@ -468,6 +741,30 @@ fn sync_file(conn: &Connection, path: &Path) -> Result<SyncReport, String> {
                 report.edges_flagged += flagged;
             }
         }
+    }
+
+    // RFC 0022 §2's reverse-engineering pass, nodes half: every GET
+    // route this file registers is a real screen the app serves, so it
+    // becomes a `screen`-kind node of type `page` even though no UI
+    // macro produced it. Identity is the route path itself (the one
+    // thing `menus.toml`'s V6 invariant already guarantees unique), so
+    // a route can never be confused with a macro screen's mount-based
+    // identity. A macro screen that declares the same path keeps
+    // priority downstream (the nav pass prefers non-page screens when
+    // resolving paths), so this can only ever ADD surface the macro
+    // catalog didn't capture -- exactly what it's for.
+    let fn_names: HashSet<&str> = units.iter().filter(|u| u.kind == "fn").map(|u| u.qualified_name.as_str()).collect();
+    for reg in facts.routes_owned_by(&fn_names) {
+        let id = code_unit_node_id("screen", &reg.path);
+        report.units_seen += 1;
+        let title = reg.title.clone().unwrap_or_else(|| reg.path.clone());
+        conn.execute(
+            "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, line, col, screen_type, screen_path, screen_nav)
+             VALUES (?1, 'CodeUnit', ?2, NULL, ?3, ?4, NULL, NULL, 'page', ?5, NULL)
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title, source_ref = excluded.source_ref, screen_path = excluded.screen_path",
+            params![id, title, sha256_hex(format!("{}\n{}", reg.path, title).as_bytes()), source_ref, reg.path],
+        )
+        .map_err(|e| format!("upserting route screen node {id}: {e}"))?;
     }
 
     // rfcs/0014's 2026-09-14 amendment, step 5: mark which `fn`s are the
@@ -624,21 +921,263 @@ fn find_nir_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 /// file -- the "fast no-op" property rfcs/0013's auto-scaffold section
 /// depends on.
 pub fn sync(conn: &Connection, root: &Path, files: &[String]) -> Result<SyncReport, String> {
+    let mut screen_facts = ScreenFacts::default();
+    let mut total = SyncReport::default();
     if files.is_empty() {
-        let mut total = SyncReport::default();
         for path in find_nir_files(root)? {
-            let r = sync_file(conn, &path)?;
+            let r = sync_file(conn, &path, &mut screen_facts)?;
             total.merge(r);
         }
-        Ok(total)
     } else {
-        let mut total = SyncReport::default();
         for f in files {
-            let r = sync_file(conn, Path::new(f))?;
+            let r = sync_file(conn, Path::new(f), &mut screen_facts)?;
             total.merge(r);
         }
-        Ok(total)
     }
+    // The navigation pass runs on the accumulated whole-project view,
+    // not per file -- a menus.toml edge needs the shell (declared in
+    // one file) AND the target screen (declared in another) to both be
+    // in the graph before either edge can be drawn.
+    total.nav_edges = derive_screen_navigation(conn, root, &screen_facts)?;
+    Ok(total)
+}
+
+/// RFC 0022 §2's reverse-engineering pass, edges half: (re)derives every
+/// `NAVIGATES_TO` screen-navigation edge from the accumulated code
+/// facts (static redirects, approval-inbox detail paths), the app
+/// shell's TOML nav register (`menus.toml`: per-menu routes and
+/// per-role post-login landings), and the screen inventory now in the
+/// graph. Returns the number of edges inserted.
+///
+/// `NAVIGATES_TO` edges are pure derived data -- nothing human- or
+/// model-authored ever writes this kind (`hi link` writes only the
+/// `IMPLEMENTS`/`IMPLEMENTED_BY` pair; prompt-mode writes `depends_on`)
+/// -- so unlike every other edge kind this pass regenerates them
+/// wholesale: a menu entry removed from `menus.toml` disappears from
+/// the graph the same sync that removed it from the code, instead of
+/// lingering forever as an unflagged ghost. Everything is skipped-not-
+/// failed: an unreadable/missing nav register degrades to "fewer
+/// edges", never a sync error, matching this module's own "never be
+/// the thing that breaks `hi`" posture.
+fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, screen_type, screen_path FROM nodes WHERE kind = 'CodeUnit' AND screen_type IS NOT NULL")
+        .map_err(|e| format!("listing screen nodes for the navigation pass: {e}"))?;
+    let screens: Vec<(String, Option<String>, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| format!("reading screen nodes: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("reading a screen node row: {e}"))?;
+    drop(stmt);
+
+    // path -> node-id lookup. Two passes so a macro screen (crud,
+    // dashboard, ...) that declares a path always wins over a
+    // reverse-engineered `page` node registering the same path -- the
+    // macro screen is the richer node (its own archetype, title,
+    // confirmed state), the page node only exists because no macro
+    // covered that route.
+    let mut path_to_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for pass in [true, false] {
+        for (id, screen_type, screen_path) in &screens {
+            let is_page = screen_type.as_deref() == Some("page");
+            if is_page != pass {
+                continue;
+            }
+            if let Some(path) = screen_path {
+                path_to_id.entry(path.clone()).or_insert_with(|| id.clone());
+            }
+        }
+    }
+    let lookup = |pattern: &str| -> Option<String> {
+        if pattern.is_empty() || pattern.starts_with('@') {
+            return None;
+        }
+        if let Some(id) = path_to_id.get(pattern) {
+            return Some(id.clone());
+        }
+        // Template match, deterministic by candidate path, in three
+        // passes of decreasing strictness: (a) same shape -- pattern
+        // params may only stand in for candidate params, literals must
+        // be equal; (b) crud-subtree -- the pattern's trailing params
+        // stripped off match a macro screen that owns the entity's base
+        // path (the compiled macro registers `/<path>/{id}` detail
+        // routes source scanning can never see); (c) loose -- a param in
+        // either pattern or candidate matches any one segment (a
+        // concrete redirect target like `/cs/payments/42` finding its
+        // registered `/cs/payments/{txn}` route). (a) before (b) so an
+        // exactly-shaped route always wins over the owning macro screen;
+        // (b) before (c) so `/cases/{id}` resolves to the crud screen
+        // that actually renders case details, not to the first 3-segment
+        // candidate a loose match happens to land on (that was
+        // `/cases/board` -- a real but different screen).
+        let candidates_of = |min_segs: usize| -> Vec<(&String, &String)> {
+            let mut v: Vec<(&String, &String)> = path_to_id
+                .iter()
+                .filter(|(path, _)| path.split('/').count() == min_segs)
+                .collect();
+            v.sort();
+            v
+        };
+        fn segs_of(s: &str) -> Vec<&str> {
+            s.split('/').collect()
+        }
+        let p_segs = segs_of(pattern);
+        let is_param = |s: &str| s.starts_with('{') && s.ends_with('}');
+        let exact_shape = candidates_of(p_segs.len()).iter().find_map(|(path, id)| {
+            let c = segs_of(path);
+            if c.iter().zip(p_segs.iter()).all(|(cseg, pseg)| cseg == pseg || (is_param(pseg) && is_param(cseg))) {
+                Some((*id).clone())
+            } else {
+                None
+            }
+        });
+        if let Some(shape_hit) = exact_shape {
+            return Some(shape_hit);
+        }
+        {
+            let mut stripped = p_segs.clone();
+            let mut stripped_any = false;
+            while stripped.last().map(|s| is_param(s)).unwrap_or(false) {
+                stripped.pop();
+                stripped_any = true;
+            }
+            if stripped_any {
+                let base = stripped.join("/");
+                if base != pattern {
+                    if let Some(id) = path_to_id.get(base.as_str()) {
+                        return Some(id.clone());
+                    }
+                }
+            }
+        }
+        candidates_of(p_segs.len())
+            .iter()
+            .find_map(|(path, id)| {
+                let c = segs_of(path);
+                if c.iter().zip(p_segs.iter()).all(|(cseg, pseg)| cseg == pseg || is_param(pseg) || is_param(cseg)) {
+                    Some((*id).clone())
+                } else {
+                    None
+                }
+            })
+    };
+
+    let shell_id = screens.iter().find(|(_, t, _)| t.as_deref() == Some("shell")).map(|(id, _, _)| id.clone());
+    let login_id = screens.iter().find(|(_, t, _)| t.as_deref() == Some("login")).map(|(id, _, _)| id.clone());
+
+    let mut edges: Vec<(String, String, String)> = Vec::new();
+
+    // menus.toml: the shell's own nav register. `app_shell_from_toml!`
+    // reads it at compile time; reading it here at sync time keeps the
+    // graph's navigation half in sync with what the app actually
+    // ships, without any generated-code parsing.
+    if let Some(toml_rel) = facts.shell_tomls.first() {
+        let toml_path = root.join(toml_rel);
+        match std::fs::read_to_string(&toml_path) {
+            Ok(text) => match text.parse::<toml::Value>() {
+                Ok(doc) => {
+                    // [landing] role -> route: the login screen's real
+                    // post-login target per role (menus.toml V8). A
+                    // project without a login macro node falls back to
+                    // the shell as the source so the landing edges still
+                    // exist; with neither there is nothing to attach
+                    // them to, and they are simply absent.
+                    let landing_src = login_id.clone().or_else(|| shell_id.clone());
+                    if let Some(landing) = doc.get("landing").and_then(|v| v.as_table()) {
+                        for (role, target) in landing {
+                            let Some(route) = target.as_str() else { continue };
+                            if let (Some(src), Some(dst)) = (landing_src.as_ref(), lookup(route)) {
+                                edges.push((src.clone(), dst, format!("landing: {role}")));
+                            }
+                        }
+                    }
+                    // [[menu]] entries: shell -> route, labeled by the
+                    // register's own label_key (falls back to the menu
+                    // id when no key is set).
+                    if let Some(shell) = &shell_id {
+                        if let Some(menus) = doc.get("menu").and_then(|v| v.as_array()) {
+                            for menu in menus {
+                                let Some(route) = menu.get("route").and_then(|v| v.as_str()) else { continue };
+                                let Some(target) = lookup(route) else { continue };
+                                if target == *shell {
+                                    continue;
+                                }
+                                let label = menu
+                                    .get("label_key")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| menu.get("id").and_then(|v| v.as_str()))
+                                    .unwrap_or("nav")
+                                    .to_string();
+                                edges.push((shell.clone(), target, label));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // A malformed register is the app's own build
+                    // problem (the macro already hard-errors at compile
+                    // time); sync only notes it in the report stream
+                    // through the missing edges, never a hard failure.
+                    eprintln!("hi: nav register {} did not parse as TOML, skipping its nav edges: {e}", toml_path.display());
+                }
+            },
+            Err(e) => {
+                eprintln!("hi: nav register {} not readable, skipping its nav edges: {e}", toml_path.display());
+            }
+        }
+    }
+
+    // Static redirects: from the route whose handler redirects, to the
+    // target screen (e.g. /cs/lookup/go -> /cs/payments/{id}).
+    for (from, target) in &facts.redirects {
+        if let (Some(src), Some(dst)) = (lookup(from), lookup(target)) {
+            if src != dst {
+                edges.push((src, dst, "redirect".to_string()));
+            }
+        }
+    }
+    // approval_inbox detail paths: the inbox links out to its own
+    // detail screens (e.g. /four-eyes -> /cases/{id}).
+    for (mount, detail) in &facts.detail_paths {
+        let src = code_unit_node_id("screen", mount);
+        if let Some(target) = lookup(detail) {
+            if target != src {
+                edges.push((src, target, "detail".to_string()));
+            }
+        }
+    }
+
+    // Regenerate wholesale (see this fn's doc comment for why this is
+    // safe for this kind only), recording provenance so a future pass
+    // can tell derived nav edges from anything else.
+    conn.execute(
+        "DELETE FROM provenance WHERE edge_id IN (SELECT id FROM edges WHERE kind = 'NAVIGATES_TO')",
+        [],
+    )
+    .map_err(|e| format!("clearing provenance of old nav edges: {e}"))?;
+    conn.execute("DELETE FROM edges WHERE kind = 'NAVIGATES_TO'", [])
+        .map_err(|e| format!("clearing old nav edges: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let mut inserted = 0usize;
+    for (src, dst, label) in edges {
+        conn.execute(
+            "INSERT OR IGNORE INTO edges (src, dst, kind, label) VALUES (?1, ?2, 'NAVIGATES_TO', ?3)",
+            params![src, dst, label],
+        )
+        .map_err(|e| format!("inserting nav edge {src} -> {dst}: {e}"))?;
+        if conn.changes() > 0 {
+            conn.execute(
+                "INSERT INTO provenance (edge_id, created_by, ts) VALUES (?1, 'code-sync', ?2)",
+                params![conn.last_insert_rowid(), ts],
+            )
+            .map_err(|e| format!("recording nav-edge provenance: {e}"))?;
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
 }
 
 /// Resolves a `hi link`/`hi impact` code-side target: either an
@@ -1512,7 +2051,7 @@ mod tests {
     fn code_units_in_file_extracts_fn_struct_and_enum_by_name() {
         let dir = scratch_dir("code_units_v2");
         let path = write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n");
-        let (units, _file) = code_units_in_file(&path).expect("code_units_in_file parse");
+        let (units, _file, _facts) = code_units_in_file(&path).expect("code_units_in_file parse");
         let actual: Vec<(&str, String)> = units.iter().map(|u| (u.kind, u.qualified_name.clone())).collect();
         assert_eq!(actual, vec![("fn", "add".to_string()), ("struct", "Point".to_string()), ("enum", "Color".to_string())]);
     }
@@ -1521,7 +2060,7 @@ mod tests {
     fn screen_macro_syncs_under_its_confirmed_identity() {
         let dir = scratch_dir("screen_macro_sync");
         let path = write_nir(&dir, "a.nir", "nirdosha_rt::dashboard! { mount: mount_TaskListScreen, path: \"/tasks\", title: \"Tasks\", widgets {} }\n");
-        let (units, _) = code_units_in_file(&path).unwrap();
+        let (units, _, _) = code_units_in_file(&path).unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].kind, "screen");
         assert_eq!(units[0].qualified_name, "TaskListScreen");
@@ -1558,15 +2097,18 @@ mod tests {
     /// own convention).
     #[test]
     fn sync_records_real_call_edges_so_main_is_no_longer_falsely_unlinked() {
+        // v2 fixtures are real Rust (syn-parsed -- `requires(...)`
+        // suffixes and statement-less bodies are native-v1 syntax that
+        // no longer parses here).
         let dir = scratch_dir("call_edges");
         write_nir(
             &dir,
             "a.nir",
             "struct Account { id: i64 }\n\
              fn helper(a: Account) -> i64 { return a.id }\n\
-             fn main() -> unit requires(public) {\n\
-                 let acc: Account = Account(1)\n\
-                 let _v: i64 = helper(acc)\n\
+             fn main() {\n\
+                 let acc = Account(1);\n\
+                 let _v: i64 = helper(acc);\n\
              }\n",
         );
         let conn = open(&dir).expect("open");
@@ -1578,28 +2120,33 @@ mod tests {
         assert!(hit_ids.contains(&"code:struct:Account"), "main constructs Account -- expected it in impact, got {hit_ids:?}");
     }
 
-    /// rfcs/0014's 2026-09-14 amendment, step 5: a `serve { expose }`d
-    /// fn is the real security boundary (`typeck::check_serve_config`'s
-    /// deny-by-default rule) -- marked so the build-mode UI can color
-    /// it differently from the internal helpers it calls, which don't
-    /// need their own `requires(role:)` the way the exposed fn does.
+    /// rfcs/0014's 2026-09-14 amendment, step 5 -- and its v2 reality
+    /// since the 2026-09-16 extraction: the native `serve { expose ... }`
+    /// list that once drove `nodes.status = 'exposed'` no longer exists,
+    /// and file-at-a-time syn parsing cannot see v2's exposure shape (a
+    /// `#[nirdosha_rt::contract(...)]`-gated fn reached through an
+    /// archetype macro -- see the disclosed-gap comment in `sync_file`).
+    /// The marker is a claim about a real access-control boundary, so it
+    /// must never be stamped speculatively: nothing synced is marked,
+    /// and this test locks that in until v2 exposure is actually
+    /// recognized, at which point this assertion is DELIBERATELY allowed
+    /// to fail and be rewritten.
     #[test]
-    fn sync_marks_serve_exposed_fns_as_exposed_but_not_their_internal_callees() {
+    fn sync_stamps_no_exposed_status_until_v2_exposure_is_recognized() {
         let dir = scratch_dir("serve_exposed");
         write_nir(
             &dir,
             "a.nir",
             "fn internal_helper() -> i64 { return 1 }\n\
-             fn public_action() -> i64 requires(public) { return internal_helper() }\n\
-             serve { expose public_action }\n",
+             fn public_action() -> i64 { return internal_helper() }\n",
         );
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("sync");
 
         let exposed_status: Option<String> = conn.query_row("SELECT status FROM nodes WHERE id = 'code:fn:public_action'", [], |r| r.get(0)).expect("read status");
-        assert_eq!(exposed_status.as_deref(), Some("exposed"));
+        assert_eq!(exposed_status, None, "v2 sync cannot see exposure -- nothing may be stamped 'exposed' speculatively");
         let internal_status: Option<String> = conn.query_row("SELECT status FROM nodes WHERE id = 'code:fn:internal_helper'", [], |r| r.get(0)).expect("read status");
-        assert_eq!(internal_status, None, "an internal helper the exposed fn calls must NOT be marked exposed itself");
+        assert_eq!(internal_status, None, "an internal helper must NOT be marked exposed itself");
     }
 
     #[test]
@@ -1885,18 +2432,23 @@ mod tests {
         // github #49: this is the one input `hi_llm::suggest_gaps` reads
         // to spot an exposed fn with no role/claim gate -- so the exact
         // markers it needs (sub-kind, `[API-exposed]`, attribute text)
-        // have to actually survive into the summary line.
+        // have to actually survive into the summary line. The `[API-
+        // exposed]` half is exercised directly through `nodes.status`,
+        // the one writer v2 has for it today (v2 sync cannot see the
+        // contract-attr exposure shape itself -- disclosed gap, see the
+        // status test above), so the marker's rendering is still under
+        // test even though nothing stamps it from source right now.
         let dir = scratch_dir("suggestion_context");
         write_nir(
             &dir,
             "a.nir",
             "fn internal_helper() -> i64 { return 1 }\n\
-             fn public_action() -> i64 requires(public) { return internal_helper() }\n\
-             serve { expose public_action }\n",
+             fn public_action() -> i64 { return internal_helper() }\n",
         );
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("sync");
         attach_attribute(&conn, "code:fn:internal_helper", "requires(role: admin)").expect("attach");
+        conn.execute("UPDATE nodes SET status = 'exposed' WHERE id = 'code:fn:public_action'", []).expect("stamp status");
 
         let context = suggestion_context(&conn).expect("suggestion_context");
         assert!(context.contains("fn public_action [API-exposed] -- attributes: (none)"), "got: {context}");
@@ -1999,5 +2551,147 @@ mod tests {
         assert!(prompt.contains("DOMAIN LAW"), "pack units must render in a dedicated section, got:\n{prompt}");
         assert!(prompt.contains("charge_cents_conservation"), "the demand text must appear, got:\n{prompt}");
         assert!(prompt.contains("MUST carry a separate top-level `validate charge_cents`"), "exact validate target must be named, got:\n{prompt}");
+    }
+
+    // ---- RFC 0022 §2's reverse-engineering pass: hand-registered GET
+    // routes become screen nodes, and the whole screen-navigation edge
+    // set (menus.toml + landing + redirects + inbox detail paths) is
+    // (re)derived per sync.
+
+    #[test]
+    fn hand_registered_get_routes_become_page_screen_nodes() {
+        let dir = scratch_dir("route_screens");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn mount_admin(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/admin/queues\", \"Assignment Rules (18.3)\", |_req, _params, _auth| { nirdosha_rt::Response::html(200, \"q\") })\n\
+             }\n",
+        );
+        let conn = open(&dir).expect("open");
+        let report = sync(&conn, &dir, &[]).expect("sync");
+        assert_eq!(report.nav_edges, 0, "no nav facts in this fixture");
+        let (title, screen_type, path): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT title, screen_type, screen_path FROM nodes WHERE id = 'code:screen:/admin/queues'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("route screen node exists");
+        assert_eq!(title, "Assignment Rules (18.3)");
+        assert_eq!(screen_type, "page");
+        assert_eq!(path.as_deref(), Some("/admin/queues"));
+    }
+
+    #[test]
+    fn nav_edges_derive_from_menus_toml_landing_and_menu_routes() {
+        let dir = scratch_dir("menus_nav");
+        std::fs::write(
+            dir.join("menus.toml"),
+            "[landing]\nAnalyst = \"/my-day\"\n\n[[menu]]\nid = \"nav.day\"\nlabel_key = \"nav.day\"\ngroup = \"work\"\nscreen_id = \"2.2\"\nroute = \"/my-day\"\n\n[[menu]]\nid = \"nav.dynamic\"\nroute = \"@dynamic:scope\"\n",
+        )
+        .expect("write menus.toml");
+        write_nir(
+            &dir,
+            "a.nir",
+            "nirdosha_rt::login! { mount: mount_login, path: \"/login\", mode: demo, demo_users: [{ username: \"a\", password: \"a\", roles: [\"Analyst\"] }], landing: landing_path }\n\
+             nirdosha_rt::dashboard! { mount: mount_my_day, path: \"/my-day\", title: \"My Day\", widgets {} }\n\
+             nirdosha_rt::app_shell_from_toml!(\"menus.toml\", title: \"T\");\n",
+        );
+        let conn = open(&dir).expect("open");
+        let report = sync(&conn, &dir, &[]).expect("sync");
+        // Two real edges (landing + menu); the @dynamic route resolves
+        // to nothing and contributes none.
+        assert_eq!(report.nav_edges, 2, "expected the landing + menu edges");
+        let (src, label): (String, String) = conn
+            .query_row(
+                "SELECT src, label FROM edges WHERE kind = 'NAVIGATES_TO' AND dst = 'code:screen:my_day' AND label LIKE 'landing:%'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("landing edge");
+        assert_eq!(src, "code:screen:login");
+        assert_eq!(label, "landing: Analyst");
+        let (src, _menu_label): (String, String) = conn
+            .query_row(
+                "SELECT src, label FROM edges WHERE kind = 'NAVIGATES_TO' AND dst = 'code:screen:my_day' AND label = 'nav.day'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("menu edge");
+        assert_eq!(src, "code:screen:app_shell");
+        // The shell came from app_shell_from_toml! -- a screen node of
+        // type shell, name app_shell (the generated mount_app_shell).
+        let st: String = conn.query_row("SELECT screen_type FROM nodes WHERE id = 'code:screen:app_shell'", [], |r| r.get(0)).expect("shell node");
+        assert_eq!(st, "shell");
+        // Regeneration is wholesale: a second sync with the menu entry
+        // removed must drop the edge, not accumulate a ghost.
+        std::fs::write(
+            dir.join("menus.toml"),
+            "[landing]\nAnalyst = \"/my-day\"\n",
+        )
+        .expect("rewrite menus.toml");
+        let again = sync(&conn, &dir, &[]).expect("resync");
+        assert_eq!(again.nav_edges, 1, "only the landing edge remains");
+        let menu_edges: i64 = conn.query_row("SELECT COUNT(*) FROM edges WHERE kind = 'NAVIGATES_TO' AND label = 'nav.day'", [], |r| r.get(0)).expect("count");
+        assert_eq!(menu_edges, 0, "the removed menu entry must not linger");
+    }
+
+    #[test]
+    fn redirects_and_inbox_detail_paths_become_nav_edges() {
+        let dir = scratch_dir("redirect_nav");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn mount_go(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cs/lookup/go\", \"CS redirect\", |_req, params, _auth| {\n\
+             let Some(id) = params.get(\"id\") else { return nirdosha_rt::Response::bad_request(\"id\") };\n\
+             let _ = &id;\n\
+             nirdosha_rt::Response::redirect(format!(\"/cs/payments/{id}\"))\n\
+             })\n\
+             }\n\
+             fn mount_static_redirect(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cs/lookup/go2\", \"CS redirect static\", |_req, _params, _auth| { nirdosha_rt::Response::redirect(\"/cs/payments/x\") })\n\
+             }\n\
+             nirdosha_rt::approval_inbox! { mount: mount_four_eyes, path: \"/four-eyes\", access: requires role \"ComplianceLead\", sources: [{ table: case_table, chain: \"case_review\", resource: \"case\", detail_path: \"/cases/{id}\" }] }\n\
+             fn mount_payments(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cs/payments/{txn}\", \"Payment detail\", |_req, _params, _auth| { nirdosha_rt::Response::html(200, \"p\") })\n\
+             }\n\
+             fn mount_case_detail(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cases/{id}\", \"Case detail\", |_req, _params, _auth| { nirdosha_rt::Response::html(200, \"d\") })\n\
+             }\n",
+        );
+        let conn = open(&dir).expect("open");
+        let report = sync(&conn, &dir, &[]).expect("sync");
+        // redirect: /cs/lookup/go2 -> /cs/payments/x. The STATIC literal
+        // redirect becomes an edge; the format!()-built dynamic one in
+        // the sibling handler is deliberately skipped (its target isn't
+        // a literal, so guessing it would be a lie).
+        let redirect: Option<String> = conn
+            .query_row(
+                "SELECT dst FROM edges WHERE kind = 'NAVIGATES_TO' AND src = 'code:screen:/cs/lookup/go2' AND label = 'redirect'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("redirect edge");
+        assert_eq!(redirect.as_deref(), Some("code:screen:/cs/payments/{txn}"));
+        let dynamic: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE kind = 'NAVIGATES_TO' AND src = 'code:screen:/cs/lookup/go'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(dynamic, 0, "the dynamic format! redirect must be skipped, not guessed");
+        // detail: /four-eyes -> /cases/{id} via template match.
+        let detail: Option<String> = conn
+            .query_row(
+                "SELECT dst FROM edges WHERE kind = 'NAVIGATES_TO' AND src = 'code:screen:four_eyes' AND label = 'detail'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("detail edge");
+        assert_eq!(detail.as_deref(), Some("code:screen:/cases/{id}"));
+        assert!(report.nav_edges >= 2);
     }
 }

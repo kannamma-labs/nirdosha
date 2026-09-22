@@ -1,0 +1,1392 @@
+# ============================================================================
+# menus.toml — Role→Menu→Route register. Companion to screens.toml.
+# Consumed by: app_shell! (nav), landing! (post-login), tests/verify_screen_inventory.rs
+#
+# Domain:  AWCC (Afghan Wireless Communication Company) Revenue Assurance product.
+#          Mirrors the AML corpus's nav structure with RA-specific roles, routes,
+#          guards, and badges. ATRA Reporting (M12) replaces SAR with the same
+#          tipping-off controls (V7: routes ABSENT for CsAgent/RetailLiaison/McpCopilot).
+#
+# Cross-file invariants (enforced by verify):
+#   V1  every menu.screen_id / route.screen_id exists in screens.toml
+#   V2  menu.roles ⊆ screens.roles for that screen_id
+#   V3  stage(screen_id) >= stage_min, else item hidden (no dead links)
+#   V4  every human role in screen.roles can REACH the screen: nav item OR reach_via chain
+#   V5  every route.guard{action,resource} resolves to an existing guard_policy! record
+#       (this is the T-10 "public must reference guard:" probe input)
+#   V6  route paths unique; param names in {} defined
+#   V7  ATRA routes absent from CsAgent/RetailLiaison/McpCopilot visibility (tipping-off:
+#       absence, never disabled-state)
+#   V8  landing keys ⊆ human roles; every role lands on a route it can guard-read
+#   V9  badge.source must be a declared guarded aggregate (badge = surface, not chrome)
+#   V10 delegated screens (stage=delegated) never appear anywhere in this file
+# ============================================================================
+
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+route_style = "kebab-case; list=plural noun; detail=/noun/{id}; action=/noun/{id}/{verb}"
+roles_note = "PascalCase logical roles here; app_shell! emission maps to runtime role idents (T-10 fixes snake_case blocker). Service principals (svc:*, McpCopilot as caller) get NO menus — see [non_menu_personas]."
+
+# ----------------------------------------------------------------------------
+# 1) Post-login landing per role — feeds landing! macro (RFC 0022 §4)
+# ----------------------------------------------------------------------------
+[landing]
+RaAnalyst         = "/dashboard/my-day"
+RaLead            = "/approvals"          # leads live in the inbox
+FinanceController = "/atra"                # FC lives in the ATRA inbox
+OpsEngineer      = "/holds"
+QaReviewer        = "/qa"
+PolicyEngineer    = "/rules/windows"
+Admin             = "/ops/pipeline-health"
+Auditor           = "/audit/chains"
+CsAgent           = "/cs/lookup"
+RetailLiaison     = "/rm/subscribers"
+RegulatorViewer   = "@dynamic:delegation_scope"   # nav + landing generated from minted scope (V8 waives static check)
+
+# Unauthorized / deep-link-to-forbidden behavior
+[fallbacks]
+forbidden    = { redirect = "/denied", screen_id = "1.6", preserve_target = true }  # logged for unlock-req context
+not_found    = { redirect = "/denied?code=404" }
+session_dead = { redirect = "/login?reason=session" }
+
+# ----------------------------------------------------------------------------
+# 2) Shell variants (21.1 auditor watermark portal; 21.2 regulator scope)
+# ----------------------------------------------------------------------------
+[[shell_variant]]
+id = "auditor_portal"
+screen_id = "21.1"
+roles = ["Auditor"]
+watermark = "AUDIT READ-ONLY · {user} · {ts}"
+nav = "restricted_to_auditor_items"     # variant renders only items whose roles==[Auditor]
+chrome_overrides = { omnibar = false, bell = false, tasks = false }
+
+[[shell_variant]]
+id = "regulator_inspection"
+screen_id = "21.2"
+roles = ["RegulatorViewer"]
+nav_source = "@dynamic:delegation_scope"   # items minted per §9.4 exact-scope; never static
+watermark = "REGULATORY INSPECTION · recorded session"
+chrome_overrides = { omnibar = false, bell = false, tasks = false, export = false }
+
+# ----------------------------------------------------------------------------
+# 3) Chrome — app_shell! top bar (not group nav)
+# ----------------------------------------------------------------------------
+[[chrome]]
+id = "omnibar"
+screen_id = "5.1"
+render = "topbar.left"
+guard = { action = "read", resource = "cdr" }
+roles = ["RaAnalyst", "RaLead", "OpsEngineer", "QaReviewer", "PolicyEngineer"]
+notes = "global entity search (MSISDN/IMSI/ICCID); Ctrl+K"
+
+[[chrome]]
+id = "bell"
+screen_id = "16.1"
+render = "topbar.right"
+route = "/notifications"
+guard = { action = "read", resource = "notification" }
+badge = { source = "PG.notification", filter = "user_id=me AND read=false", cap = 99 }
+roles = ["AllHuman"]
+
+[[chrome]]
+id = "my_tasks"
+screen_id = "16.4"
+render = "topbar.right"
+route = "/tasks"
+guard = { action = "read", resource = "case_task" }
+badge = { source = "PG.case_task", filter = "assignee=me AND due<=today", cap = 99 }
+roles = ["AllHuman"]
+
+[[chrome]]
+id = "saved_views"
+screen_id = "2.7"
+render = "topbar.left"
+route = "/preferences/saved-views"
+guard = { action = "read", resource = "saved_view" }
+roles = ["AllHuman"]
+
+[[chrome]]
+id = "profile"
+screen_id = "22.1"
+render = "avatar_menu"
+route = "/preferences/profile"
+guard = { action = "read", resource = "user_profile", filter = "subject_scope" }
+roles = ["AllHuman"]
+children = [
+  { label_key = "chrome.about", screen_id = "22.3", route = "/about" },
+  { label_key = "chrome.support", screen_id = "22.2", route = "/help/support" },
+]
+
+# ----------------------------------------------------------------------------
+# 4) Nav groups (order = top-bar order; overflow collapses into "More")
+# ----------------------------------------------------------------------------
+[[group]]
+id = "work"
+label_key = "nav.group.work"
+order = 10
+[[group]]
+id = "investigate"
+label_key = "nav.group.investigate"
+order = 20
+[[group]]
+id = "screening"
+label_key = "nav.group.screening"
+order = 30
+[[group]]
+id = "atra"
+label_key = "nav.group.atra"
+order = 40
+[[group]]
+id = "governance"
+label_key = "nav.group.governance"
+order = 50
+[[group]]
+id = "assurance"
+label_key = "nav.group.assurance"
+order = 60   # QA + reports + exports
+[[group]]
+id = "ops"
+label_key = "nav.group.ops"
+order = 70
+overflow = true
+[[group]]
+id = "admin"
+label_key = "nav.group.admin"
+order = 80
+overflow = true
+[[group]]
+id = "audit"
+label_key = "nav.group.audit"
+order = 90
+overflow = true
+
+# ----------------------------------------------------------------------------
+# 5) Nav items — one row each. stage_min: built (default) | interim
+#    items auto-appear as screens reach stage (V3). roles ⊆ screen.roles (V2).
+# ----------------------------------------------------------------------------
+[[menu]]
+id = "nav.home"
+label_key = "nav.home"
+group = "work"
+screen_id = "2.2"
+route = "/dashboard/my-day"
+guard = { action = "aggregate", resource = "alert" }
+roles = ["RaAnalyst"]
+order = 10
+
+[[menu]]
+id = "nav.team_dash"
+label_key = "nav.team_dash"
+group = "work"
+screen_id = "2.3"
+route = "/dashboard/team"
+guard = { action = "aggregate", resource = "alert" }
+roles = ["RaLead"]
+order = 20
+
+[[menu]]
+id = "nav.fc_dash"
+label_key = "nav.fc_dash"
+group = "work"
+screen_id = "2.4"
+route = "/dashboard/finance"
+guard = { action = "aggregate", resource = "leak_case" }
+roles = ["FinanceController", "RaLead"]      # Lead sees masked widgets (⛔ atra rows) — V2 allows, field-level via policy
+order = 30
+stage_min = "blocked"                    # ⚠ stays hidden until atra_bundle lands (V3)
+
+[[menu]]
+id = "nav.exec_kpi"
+label_key = "nav.exec_kpi"
+group = "work"
+screen_id = "2.6"
+route = "/exec"
+guard = { action = "aggregate", resource = "alert" }
+roles = ["FinanceController", "Admin"]
+order = 40
+stage_min = "interim"                    # C2: model_run_stat real, mounted at /exec
+
+[[menu]]
+id = "nav.wall"
+label_key = "nav.wall"
+group = "work"
+screen_id = "2.5"
+route = "/wall"
+guard = { action = "read", resource = "cdr" }
+roles = ["OpsEngineer", "RaLead"]
+order = 50
+stage_min = "interim"
+
+[[menu]]
+id = "nav.approvals"                     # THE unified inbox — one instance, many screens
+label_key = "nav.approvals"
+group = "work"
+screen_id = "8.8"                        # primary ref must carry every nav role (V2) — 8.8, not 4.11, lists both RaLead and FinanceController
+also_screens = ["4.11", "11.3", "12.6", "5.10", "15.5", "18.7", "9.5"]
+route = "/approvals"
+guard = { action = "update", resource = "pending_approval" }
+badge = { source = "RUNTIME.pending_approvals", filter = "approver=me", cap = 99 }
+roles = ["RaLead", "FinanceController"]
+order = 5                                # first item for approver-heavy roles
+stage_min = "interim"                    # appears the moment T-04 mounts anything
+
+[[menu]]
+id = "nav.alerts"
+label_key = "nav.alerts"
+group = "work"
+screen_id = "3.1"
+route = "/alerts"
+guard = { action = "read", resource = "alert" }
+roles = ["RaAnalyst", "RaLead", "QaReviewer"]
+order = 60
+
+[[menu]]
+id = "nav.alerts_sla"
+label_key = "nav.alerts_sla"
+group = "work"
+screen_id = "3.9"
+route = "/alerts/sla"
+guard = { action = "aggregate", resource = "alert" }
+roles = ["RaLead", "FinanceController"]
+order = 70
+
+[[menu]]
+id = "nav.cases"
+label_key = "nav.cases"
+group = "investigate"
+screen_id = "4.1"
+route = "/cases"
+guard = { action = "read", resource = "leak_case" }
+roles = ["RaAnalyst", "RaLead"]
+order = 10
+stage_min = "interim"
+
+[[menu]]
+id = "nav.search"
+label_key = "nav.search"
+group = "investigate"
+screen_id = "5.1"
+route = "/search"
+guard = { action = "read", resource = "subscriber" }
+roles = ["RaAnalyst", "RaLead", "OpsEngineer", "QaReviewer"]
+order = 20
+stage_min = "interim"                    # cdr-only search interim; full at subscriber dataset
+
+[[menu]]
+id = "nav.cdrs"
+label_key = "nav.cdrs"
+group = "investigate"
+screen_id = "6.1"
+route = "/cdrs"
+guard = { action = "read", resource = "cdr" }
+roles = ["RaAnalyst", "OpsEngineer"]
+order = 30
+
+[[menu]]
+id = "nav.counterparties"
+label_key = "nav.counterparties"
+group = "investigate"
+screen_id = "6.5"
+route = "/cdrs/counterparties"
+guard = { action = "aggregate", resource = "cdr" }
+roles = ["RaAnalyst"]
+order = 40
+
+[[menu]]
+id = "nav.structuring"
+label_key = "nav.structuring"
+group = "investigate"
+screen_id = "6.7"
+route = "/cdrs/structuring"
+guard = { action = "read", resource = "agg_bins" }
+roles = ["RaAnalyst"]
+order = 50
+stage_min = "interim"
+
+[[menu]]
+id = "nav.devices"
+label_key = "nav.devices"
+group = "investigate"
+screen_id = "6.8"
+route = "/devices"
+guard = { action = "read", resource = "device_session" }
+roles = ["RaAnalyst", "OpsEngineer"]
+order = 60
+stage_min = "blocked"                    # appears when device_session lands
+
+[[menu]]
+id = "nav.network"
+label_key = "nav.network"
+group = "investigate"
+screen_id = "7.1"
+route = "/network"
+guard = { action = "link_query", resource = "network_of" }
+roles = ["RaAnalyst", "RaLead"]
+order = 70
+stage_min = "interim"                    # interim = link_edge table (Stage 0/1)
+
+[[menu]]
+id = "nav.shared_attrs"
+label_key = "nav.shared_attrs"
+group = "investigate"
+screen_id = "7.4"
+route = "/network/shared-attributes"
+guard = { action = "read", resource = "cdr" }
+roles = ["RaAnalyst"]
+order = 80
+
+[[menu]]
+id = "nav.screening"
+label_key = "nav.screening"
+group = "screening"
+screen_id = "10.1"
+route = "/screening/hits"
+guard = { action = "read", resource = "screening_hit" }
+badge = { source = "PG.screening_hit", filter = "assignee is null AND status=new", cap = 99 }
+roles = ["RaAnalyst"]
+order = 10
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.screening_config"
+label_key = "nav.screening_config"
+group = "screening"
+screen_id = "10.3"
+route = "/screening/config"
+guard = { action = "read", resource = "matcher" }
+roles = ["Admin", "RaLead"]
+order = 20
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.watchlists"
+label_key = "nav.watchlists"
+group = "screening"
+screen_id = "10.4"
+route = "/screening/lists"
+guard = { action = "read", resource = "sanctions_lists" }
+roles = ["Admin", "RaLead", "RaAnalyst"]
+order = 30
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.rescreen"
+label_key = "nav.rescreen"
+group = "screening"
+screen_id = "10.5"
+route = "/screening/rescreen"
+guard = { action = "read", resource = "rescreen_job" }
+roles = ["Admin"]
+order = 40
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.rescreen_campaigns"
+label_key = "nav.rescreen_campaigns"
+group = "screening"
+screen_id = "10.6"
+route = "/screening/campaigns"
+guard = { action = "read", resource = "rescreen_campaign" }
+roles = ["Admin", "RaLead"]
+order = 50
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.intervention"
+label_key = "nav.intervention"
+group = "work"
+screen_id = "11.1"
+route = "/holds"
+guard = { action = "read", resource = "payment" }
+badge = { source = "PG.payment", filter = "status=held", cap = 99 }
+roles = ["OpsEngineer", "RaLead"]
+order = 55
+stage_min = "blocked"                    # T-09 closed; 11.1 is now stage=built
+
+[[menu]]
+id = "nav.hold_outcomes"
+label_key = "nav.hold_outcomes"
+group = "work"
+screen_id = "11.5"
+route = "/holds/stats"
+guard = { action = "aggregate", resource = "payment" }
+roles = ["RaLead", "FinanceController"]
+order = 56
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.timeout_config"
+label_key = "nav.timeout_config"
+group = "ops"
+screen_id = "11.4"
+route = "/ops/timeout-config"
+guard = { action = "read", resource = "timeout_config" }
+roles = ["Admin", "RaLead"]
+order = 25
+stage_min = "blocked"
+notes = "UI exposes escalate/block actions; release-on-timeout NOT renderable (structurally denied)"
+
+[[menu]]
+id = "nav.atra"                    # tipping-off: group ABSENT for CS/RM/CP by V7
+label_key = "nav.atra"
+group = "atra"
+screen_id = "12.1"
+route = "/atra"
+guard = { action = "read", resource = "atra_bundle" }
+roles = ["RaAnalyst", "FinanceController", "RaLead"]
+order = 10
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.atra_submissions"
+label_key = "nav.atra_submissions"
+group = "atra"
+screen_id = "12.7"
+route = "/atra/submissions"
+guard = { action = "read", resource = "atra_submission" }
+roles = ["FinanceController", "RaLead"]
+order = 20
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.atra_calendar"
+label_key = "nav.atra_calendar"
+group = "atra"
+screen_id = "12.8"
+route = "/atra/calendar"
+guard = { action = "read", resource = "reporting_calendar" }
+roles = ["FinanceController", "RaLead"]
+order = 30
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.atra_continuations"
+label_key = "nav.atra_continuations"
+group = "atra"
+screen_id = "12.9"
+route = "/atra/continuations"
+guard = { action = "read", resource = "atra_bundle" }
+roles = ["FinanceController"]
+order = 40
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.atra_controls"
+label_key = "nav.atra_controls"
+group = "atra"
+screen_id = "12.11"
+route = "/atra/tipping-off"
+guard = { action = "read", resource = "atra_visibility" }
+roles = ["FinanceController", "Auditor"]
+order = 50
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.rules"
+label_key = "nav.rules"
+group = "governance"
+screen_id = "8.1"
+route = "/rules/windows"
+guard = { action = "read", resource = "catalog_item" }
+roles = ["PolicyEngineer", "RaLead", "Auditor", "Admin"]
+order = 10
+stage_min = "interim"
+
+[[menu]]
+id = "nav.rules_sim"
+label_key = "nav.rules_sim"
+group = "governance"
+screen_id = "8.6"
+route = "/rules/simulations"
+guard = { action = "simulate", resource = "policy_simulation" }
+roles = ["PolicyEngineer", "RaLead"]
+order = 20
+stage_min = "blocked"                    # RFC 0026 P4
+
+[[menu]]
+id = "nav.allowlist"
+label_key = "nav.allowlist"
+group = "governance"
+screen_id = "8.11"
+route = "/rules/allowlist"
+guard = { action = "read", resource = "allowlist" }
+roles = ["PolicyEngineer", "RaLead", "RaAnalyst"]
+order = 30
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.rule_perf"
+label_key = "nav.rule_perf"
+group = "governance"
+screen_id = "8.12"
+route = "/rules/performance"
+guard = { action = "read", resource = "rule_stat" }
+roles = ["PolicyEngineer", "RaLead"]
+order = 40
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.models"
+label_key = "nav.models"
+group = "governance"
+screen_id = "9.1"
+route = "/models"
+guard = { action = "read", resource = "model" }
+roles = ["PolicyEngineer", "Auditor"]
+order = 50
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.model_drift"
+label_key = "nav.model_drift"
+group = "governance"
+screen_id = "9.3"
+route = "/models/drift"
+guard = { action = "read", resource = "feature_stat" }
+roles = ["PolicyEngineer"]
+order = 60
+stage_min = "interim"                    # C2: feature_stat real (demo-seeded, disclosed)
+
+[[menu]]
+id = "nav.risk_model"
+label_key = "nav.risk_model"
+group = "admin"
+screen_id = "13.1"
+route = "/admin/risk-model"
+guard = { action = "read", resource = "risk_factor" }
+roles = ["PolicyEngineer", "RaLead"]
+order = 10
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.country_risk"
+label_key = "nav.country_risk"
+group = "admin"
+screen_id = "13.2"
+route = "/admin/country-risk"
+guard = { action = "read", resource = "country_risk" }
+roles = ["Admin", "RaLead", "RaAnalyst"]
+order = 20
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.product_risk"
+label_key = "nav.product_risk"
+group = "admin"
+screen_id = "13.3"
+route = "/admin/product-risk"
+guard = { action = "read", resource = "product_risk" }
+roles = ["Admin", "RaLead"]
+order = 30
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.pep_config"
+label_key = "nav.pep_config"
+group = "admin"
+screen_id = "13.4"
+route = "/admin/pep"
+guard = { action = "read", resource = "pep_category" }
+roles = ["Admin", "RaLead"]
+order = 40
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.global_params"
+label_key = "nav.global_params"
+group = "admin"
+screen_id = "13.5"
+route = "/admin/params"
+guard = { action = "read", resource = "global_params" }
+roles = ["Admin", "RaLead"]
+order = 50
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.qa"
+label_key = "nav.qa"
+group = "assurance"
+screen_id = "14.1"
+route = "/qa"
+guard = { action = "read", resource = "qa_review" }
+badge = { source = "PG.qa_review", filter = "assignee=me AND status=assigned", cap = 99 }
+roles = ["QaReviewer"]
+order = 10
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.qa_scorecards"
+label_key = "nav.qa_scorecards"
+group = "assurance"
+screen_id = "14.3"
+route = "/qa/mine"
+guard = { action = "read", resource = "qa_review" }
+roles = ["RaAnalyst", "RaLead", "QaReviewer"]
+order = 20
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.qa_overturned"
+label_key = "nav.qa_overturned"
+group = "assurance"
+screen_id = "14.5"
+route = "/qa/overturned"
+guard = { action = "read", resource = "qa_review" }
+roles = ["RaLead", "FinanceController"]
+order = 30
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.reports"
+label_key = "nav.reports"
+group = "assurance"
+screen_id = "15.1"
+route = "/reports"
+guard = { action = "read", resource = "report_def" }
+roles = ["RaLead", "FinanceController", "Admin"]
+order = 40
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.reports_scheduled"
+label_key = "nav.reports_scheduled"
+group = "assurance"
+screen_id = "15.3"
+route = "/reports/scheduled"
+guard = { action = "read", resource = "scheduled_report" }
+roles = ["RaLead"]
+order = 50
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.trends"
+label_key = "nav.trends"
+group = "assurance"
+screen_id = "15.4"
+route = "/reports/typology"
+guard = { action = "aggregate", resource = "alert" }
+roles = ["FinanceController", "RaLead"]
+order = 60
+
+[[menu]]
+id = "nav.exports"
+label_key = "nav.exports"
+group = "assurance"
+screen_id = "15.5"
+route = "/exports"
+guard = { action = "read", resource = "governed_export" }
+roles = ["RaAnalyst", "RaLead", "Auditor"]
+order = 70
+stage_min = "interim"                    # T-01 downloads are real (watermarked/capped); screen itself still gates on T-04
+
+[[menu]]
+id = "nav.handover"
+label_key = "nav.handover"
+group = "work"
+screen_id = "16.3"
+route = "/handover"
+guard = { action = "read", resource = "handover" }
+roles = ["RaAnalyst", "RaLead", "OpsEngineer"]
+order = 80
+stage_min = "blocked"
+
+# ---- Knowledge group (low-chrome; also linked from help)
+[[menu]]
+id = "nav.typologies"
+label_key = "nav.typologies"
+group = "assurance"
+screen_id = "17.1"
+route = "/help/typologies"
+guard = { action = "read", resource = "static_docs" }
+roles = ["AllHuman"]
+order = 90
+
+[[menu]]
+id = "nav.sop"
+label_key = "nav.sop"
+group = "assurance"
+screen_id = "17.2"
+route = "/help/sop"
+guard = { action = "read", resource = "static_docs" }
+roles = ["AllHuman"]
+order = 91
+
+[[menu]]
+id = "nav.regref"
+label_key = "nav.regref"
+group = "assurance"
+screen_id = "17.3"
+route = "/help/regulatory"
+guard = { action = "read", resource = "static_docs" }
+roles = ["AllHuman"]
+order = 92
+
+# ---- Admin group (overflow)
+[[menu]]
+id = "nav.users"
+label_key = "nav.users"
+group = "admin"
+screen_id = "18.1"
+route = "/admin/users"
+guard = { action = "read", resource = "user_role" }
+roles = ["Admin"]
+order = 60
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.permissions"
+label_key = "nav.permissions"
+group = "admin"
+screen_id = "18.2"
+route = "/admin/permissions"
+guard = { action = "read", resource = "catalog_item" }
+roles = ["Admin"]
+order = 61
+stage_min = "blocked"
+notes = "READ-ONLY view of compiled policies; edits go through /rules proposal flow"
+
+[[menu]]
+id = "nav.queue_rules"
+label_key = "nav.queue_rules"
+group = "admin"
+screen_id = "18.3"
+route = "/admin/queues"
+guard = { action = "read", resource = "assignment_rules" }
+roles = ["Admin", "RaLead"]
+order = 62
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.sla_config"
+label_key = "nav.sla_config"
+group = "admin"
+screen_id = "18.4"
+route = "/admin/sla-config"
+guard = { action = "read", resource = "sla_config" }
+roles = ["Admin", "RaLead"]
+order = 63
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.reason_codes"
+label_key = "nav.reason_codes"
+group = "admin"
+screen_id = "18.5"
+route = "/admin/reason-codes"
+guard = { action = "read", resource = "disposition_code" }
+roles = ["Admin", "RaLead", "RaAnalyst"]
+order = 64
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.templates"
+label_key = "nav.templates"
+group = "admin"
+screen_id = "18.6"
+route = "/admin/templates"
+guard = { action = "read", resource = "notif_template" }
+roles = ["Admin"]
+order = 65
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.retention"
+label_key = "nav.retention"
+group = "admin"
+screen_id = "18.7"
+route = "/admin/retention"
+guard = { action = "read", resource = "retention_config" }
+roles = ["Admin", "RaLead"]
+order = 66
+stage_min = "interim"
+
+[[menu]]
+id = "nav.delegation"
+label_key = "nav.delegation"
+group = "admin"
+screen_id = "18.8"
+route = "/admin/delegation"
+guard = { action = "read", resource = "delegation" }
+roles = ["Admin", "RaLead"]
+order = 67
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.dsar"
+label_key = "nav.dsar"
+group = "admin"
+screen_id = "18.9"
+route = "/admin/dsar"
+guard = { action = "read", resource = "dsar_request" }
+roles = ["Admin", "RaLead"]
+order = 68
+stage_min = "interim"
+
+[[menu]]
+id = "nav.license"
+label_key = "nav.license"
+group = "admin"
+screen_id = "18.10"
+route = "/admin/license"
+guard = { action = "read", resource = "license_info" }
+roles = ["Admin"]
+order = 69
+stage_min = "blocked"
+
+# ---- Ops group (overflow)
+[[menu]]
+id = "nav.health"
+label_key = "nav.health"
+group = "ops"
+screen_id = "19.1"
+route = "/ops/health"
+guard = { action = "read", resource = "svc_health" }
+roles = ["Admin"]
+order = 10
+stage_min = "interim"
+
+[[menu]]
+id = "nav.pipelines"
+label_key = "nav.pipelines"
+group = "ops"
+screen_id = "19.2"
+route = "/ops/pipelines"
+guard = { action = "read", resource = "pipeline_stat" }
+roles = ["Admin"]
+order = 11
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.exceptions"
+label_key = "nav.exceptions"
+group = "ops"
+screen_id = "19.3"
+route = "/ops/exceptions"
+guard = { action = "read", resource = "ingest_exception" }
+badge = { source = "PG.ingest_exception", filter = "status=open", cap = 99 }
+roles = ["Admin"]
+order = 12
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.recon"
+label_key = "nav.recon"
+group = "ops"
+screen_id = "19.4"
+route = "/ops/recon"
+guard = { action = "read", resource = "recon_report" }
+roles = ["Admin"]
+order = 13
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.integrations"
+label_key = "nav.integrations"
+group = "ops"
+screen_id = "19.5"
+route = "/ops/integrations"
+guard = { action = "read", resource = "integration_stat" }
+roles = ["Admin"]
+order = 14
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.jobs"
+label_key = "nav.jobs"
+group = "ops"
+screen_id = "19.6"
+route = "/ops/jobs"
+guard = { action = "read", resource = "batch_job" }
+roles = ["Admin"]
+order = 15
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.capacity"
+label_key = "nav.capacity"
+group = "ops"
+screen_id = "19.7"
+route = "/ops/capacity"
+guard = { action = "read", resource = "capacity_stat" }
+roles = ["Admin"]
+order = 16
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.refsync"
+label_key = "nav.refsync"
+group = "ops"
+screen_id = "19.8"
+route = "/ops/refdata-sync"
+guard = { action = "read", resource = "sync_stat" }
+roles = ["Admin"]
+order = 17
+stage_min = "blocked"
+
+# ---- Audit group (overflow)
+[[menu]]
+id = "nav.audit_log"
+label_key = "nav.audit_log"
+group = "audit"
+screen_id = "20.1"
+route = "/audit/chains"
+guard = { action = "read", resource = "audit_record" }
+roles = ["Auditor", "Admin", "FinanceController"]
+order = 10
+stage_min = "interim"                    # AC.all_chains projection real (B8); timeline via T-06
+
+[[menu]]
+id = "nav.audit_changes"
+label_key = "nav.audit_changes"
+group = "audit"
+screen_id = "20.2"
+route = "/audit/config-history"
+guard = { action = "read", resource = "audit_record" }
+roles = ["Auditor", "FinanceController"]
+order = 20
+stage_min = "interim"
+
+[[menu]]
+id = "nav.audit_packs"
+label_key = "nav.audit_packs"
+group = "audit"
+screen_id = "20.3"
+route = "/audit/pack/export"
+guard = { action = "read", resource = "audit_record" }
+roles = ["FinanceController", "Auditor"]
+order = 30
+stage_min = "interim"
+
+# ---- Restricted personas: single-item navs
+[[menu]]
+id = "nav.cs_lookup"
+label_key = "nav.cs_lookup"
+group = "work"
+screen_id = "21.3"
+route = "/cs/lookup"
+guard = { action = "read", resource = "payment" }
+roles = ["CsAgent"]
+order = 1
+stage_min = "blocked"
+
+[[menu]]
+id = "nav.rm_status"
+label_key = "nav.rm_status"
+group = "work"
+screen_id = "21.4"
+route = "/rm/subscribers"
+guard = { action = "read", resource = "subscriber" }
+roles = ["RetailLiaison"]
+
+# ----------------------------------------------------------------------------
+# 6) Sub-routes — reachable screens WITHOUT nav entries (reach_via satisfies V4)
+# ----------------------------------------------------------------------------
+[[route]]
+path = "/alerts/{id}"
+screen_id = "3.2"
+guard = { action = "read", resource = "alert" }
+reach_via = "3.1"
+
+[[route]]
+path = "/alerts/{id}/audit"
+screen_id = "3.10"
+guard = { action = "read", resource = "audit_record" }
+reach_via = "3.2"
+
+[[route]]
+path = "/alerts/{id}/related"
+screen_id = "3.4"
+guard = { action = "read", resource = "alert" }
+reach_via = "3.2"
+
+[[route]]
+path = "/alerts/{id}/disposition"
+screen_id = "3.3"
+guard = { action = "update", resource = "alert" }
+reach_via = "3.2"
+
+[[route]]
+path = "/alerts/{id}/rfi"
+screen_id = "3.7"
+guard = { action = "read", resource = "case_task" }
+reach_via = "3.2"
+
+[[route]]
+path = "/alerts/{id}/explain"
+screen_id = "9.6"
+guard = { action = "read", resource = "model_run_stat" }
+reach_via = "3.2"
+
+[[route]]
+path = "/alerts/{id}/escalate"
+screen_id = "3.8"
+guard = { action = "create", resource = "leak_case" }
+reach_via = "3.2"
+notes = "single-form, deliberately not upgraded to a persistent wizard — T-07 closed without one (see screens.toml 3.8/12.2 notes); a single guarded write has no session to crash"
+
+[[route]]
+path = "/cases/{id}"
+screen_id = "4.2"
+guard = { action = "read", resource = "leak_case" }
+reach_via = "4.1"
+
+[[route]]
+path = "/cases/{id}/workspace"
+screen_id = "4.3"
+guard = { action = "read", resource = "leak_case" }
+reach_via = "4.2"
+
+[[route]]
+path = "/cases/{id}/alerts"
+screen_id = "4.4"
+guard = { action = "read", resource = "alert" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/cdrs"
+screen_id = "4.5"
+guard = { action = "read", resource = "cdr" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/evidence"
+screen_id = "4.6"
+guard = { action = "create", resource = "evidence_doc" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/notes"
+screen_id = "4.7"
+guard = { action = "create", resource = "case_note" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/tasks"
+screen_id = "4.8"
+guard = { action = "read", resource = "case_task" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/rfi"
+screen_id = "4.9"
+guard = { action = "create", resource = "case_task" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/disposition"
+screen_id = "4.10"
+guard = { action = "update", resource = "leak_case" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/review"
+screen_id = "4.11"
+guard = { action = "update", resource = "pending_approval" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/escalate-fc"
+screen_id = "4.12"
+guard = { action = "update", resource = "leak_case" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/merge"
+screen_id = "4.13"
+guard = { action = "update", resource = "leak_case" }
+reach_via = "4.3"
+
+[[route]]
+path = "/cases/{id}/initiate-atra"
+screen_id = "4.14"
+guard = { action = "create", resource = "atra_bundle" }
+reach_via = "4.3"
+notes = "reaches the real crud_screens! create form (POST /atra, GET /atra/new); resource renamed atra_draft->atra_bundle, T-07 closed via B9 (no wizard-step chain — see 12.2's note)"
+
+[[route]]
+path = "/atra/new"
+screen_id = "12.2"
+guard = { action = "create", resource = "atra_bundle" }
+reach_via = "4.14"
+
+[[route]]
+path = "/atra/{id}/step/subjects"
+screen_id = "12.4"
+guard = { action = "update", resource = "atra_bundle" }
+reach_via = "12.2"
+notes = "reaches the real crud_screens! edit form (POST /atra/{id}/edit) — one combined form, not a separate physical step (see 12.2's note)"
+
+[[route]]
+path = "/atra/{id}/step/narrative"
+screen_id = "12.3"
+guard = { action = "update", resource = "atra_bundle" }
+reach_via = "12.2"
+notes = "reaches the real crud_screens! edit form (POST /atra/{id}/edit) — one combined form, not a separate physical step (see 12.2's note)"
+
+[[route]]
+path = "/atra/{id}/attachments"
+screen_id = "12.5"
+guard = { action = "create", resource = "evidence_doc" }
+reach_via = "12.2"
+
+[[route]]
+path = "/atra/{id}/export"
+screen_id = "12.10"
+guard = { action = "export", resource = "atra_bundle" }
+reach_via = "12.1"
+notes = "egress via atra_release quorum; T-01 path mandatory"
+
+[[route]]
+path = "/subscribers/{id}"
+screen_id = "5.2"
+guard = { action = "read", resource = "subscriber" }
+reach_via = "5.1"
+
+[[route]]
+path = "/subscribers/{id}/kyc"
+screen_id = "5.3"
+guard = { action = "read", resource = "kyc_doc" }
+reach_via = "5.2"
+
+[[route]]
+path = "/subscribers/{id}/risk"
+screen_id = "5.4"
+guard = { action = "read", resource = "risk_factor" }
+reach_via = "5.2"
+
+[[route]]
+path = "/subscribers/{id}/profile-vs-actual"
+screen_id = "5.5"
+guard = { action = "aggregate", resource = "cdr" }
+reach_via = "5.2"
+
+[[route]]
+path = "/subscribers/{id}/parties"
+screen_id = "5.6"
+guard = { action = "read", resource = "subscriber_rel" }
+reach_via = "5.2"
+
+[[route]]
+path = "/subscribers/{id}/adverse-media"
+screen_id = "5.7"
+guard = { action = "read", resource = "adverse_media" }
+reach_via = "5.2"
+
+[[route]]
+path = "/subscribers/{id}/history"
+screen_id = "5.8"
+guard = { action = "read", resource = "alert" }
+reach_via = "5.2"
+
+[[route]]
+path = "/subscribers/{id}/flags"
+screen_id = "5.9"
+guard = { action = "create", resource = "entity_flag" }
+reach_via = "5.2"
+
+[[route]]
+path = "/subscribers/{id}/restriction"
+screen_id = "5.10"
+guard = { action = "create", resource = "subscriber_restriction" }
+reach_via = "5.2"
+
+[[route]]
+path = "/cdrs/{id}"
+screen_id = "6.2"
+guard = { action = "read", resource = "cdr" }
+reach_via = "6.1"
+
+[[route]]
+path = "/accounts/{id}/ledger"
+screen_id = "6.3"
+guard = { action = "read", resource = "cdr" }
+reach_via = "6.1"
+
+[[route]]
+path = "/cdrs/{id}/typology"
+screen_id = "6.6"
+guard = { action = "read", resource = "alert" }
+reach_via = "6.2"
+
+[[route]]
+path = "/network/path"
+screen_id = "7.2"
+guard = { action = "link_query", resource = "network_of" }
+reach_via = "7.1"
+
+[[route]]
+path = "/network/clusters"
+screen_id = "7.3"
+guard = { action = "link_query", resource = "network_of" }
+reach_via = "7.1"
+
+[[route]]
+path = "/network/export"
+screen_id = "7.5"
+guard = { action = "export", resource = "link_edge" }
+reach_via = "7.1"
+
+[[route]]
+path = "/rules/{id}/params"
+screen_id = "8.3"
+guard = { action = "migrate", resource = "window" }
+reach_via = "8.1"
+
+[[route]]
+path = "/rules/new"
+screen_id = "8.2"
+guard = { action = "migrate", resource = "policy" }
+reach_via = "8.1"
+notes = "textarea→graph_apply proposal interim"
+
+[[route]]
+path = "/rules/{id}/scope"
+screen_id = "8.4"
+guard = { action = "migrate", resource = "policy" }
+reach_via = "8.1"
+
+[[route]]
+path = "/rules/{id}/suppression"
+screen_id = "8.5"
+guard = { action = "migrate", resource = "policy" }
+reach_via = "8.1"
+
+[[route]]
+path = "/rules/{id}/sensitivity"
+screen_id = "8.7"
+guard = { action = "simulate", resource = "policy_simulation" }
+reach_via = "8.6"
+
+[[route]]
+path = "/rules/versions"
+screen_id = "8.9"
+guard = { action = "read", resource = "catalog_item" }
+reach_via = "8.1"
+
+[[route]]
+path = "/rules/{id}/schedule"
+screen_id = "8.10"
+guard = { action = "migrate", resource = "policy" }
+reach_via = "8.3"
+
+[[route]]
+path = "/models/performance"
+screen_id = "9.2"
+guard = { action = "read", resource = "model_run_stat" }
+reach_via = "9.1"
+# C2: corrected from stale "/models/{id}/performance" -- one comparison
+# view across every model_version, not a per-model drill-down page
+# (`dashboard!` mounts don't take path params anywhere in this corpus).
+
+[[route]]
+path = "/models/challenger"
+screen_id = "9.4"
+guard = { action = "update", resource = "model" }
+reach_via = "9.1"
+
+[[route]]
+path = "/model-validations"
+screen_id = "9.5"
+guard = { action = "update", resource = "model_validation" }
+reach_via = "9.1"
+# C2: corrected from stale "/models/{id}/validation" -- mounted as its
+# own flat crud_screens! resource (real `{id}` support lives at
+# /model-validations/{id}, not nested under /models).
+
+[[route]]
+path = "/screening/{id}"
+screen_id = "10.2"
+guard = { action = "update", resource = "screening_hit" }
+reach_via = "10.1"
+
+[[route]]
+path = "/intervention/{id}"
+screen_id = "11.2"
+guard = { action = "update", resource = "payment" }
+reach_via = "11.1"
+notes = "commit-time revalidation (I3); >authority auto-routes to /approvals"
+
+[[route]]
+path = "/qa/{id}"
+screen_id = "14.2"
+guard = { action = "update", resource = "qa_review" }
+reach_via = "14.1"
+
+[[route]]
+path = "/qa/{id}/feedback"
+screen_id = "14.4"
+guard = { action = "update", resource = "qa_review" }
+reach_via = "14.2"
+
+[[route]]
+path = "/reports/builder"
+screen_id = "15.2"
+guard = { action = "aggregate", resource = "alert" }
+reach_via = "15.1"
+stage_min = "blocked"
+
+[[route]]
+path = "/preferences/notifications"
+screen_id = "16.5"
+guard = { action = "update", resource = "user_profile", filter = "subject_scope" }
+reach_via = "22.1"
+
+[[route]]
+path = "/notifications"
+screen_id = "16.1"
+guard = { action = "read", resource = "notification" }
+reach_via = "@chrome:bell"
+
+[[route]]
+path = "/tasks"
+screen_id = "16.4"
+guard = { action = "read", resource = "case_task" }
+reach_via = "@chrome:my_tasks"
+
+[[route]]
+path = "/preferences/saved-views"
+screen_id = "2.7"
+guard = { action = "read", resource = "saved_view" }
+reach_via = "@chrome:saved_views"
+
+[[route]]
+path = "/preferences/profile"
+screen_id = "22.1"
+guard = { action = "update", resource = "user_profile", filter = "subject_scope" }
+reach_via = "@chrome:profile"
+
+[[route]]
+path = "/help/support"
+screen_id = "22.2"
+guard = { action = "create", resource = "support_ticket" }
+reach_via = "@chrome:profile"
+
+[[route]]
+path = "/about"
+screen_id = "22.3"
+guard = { action = "read", resource = "static_docs" }
+reach_via = "@chrome:profile"
+
+[[route]]
+path = "/denied"
+screen_id = "1.6"
+guard = { action = "create", resource = "unlock_request" }
+reach_via = "@fallback:forbidden"
+
+# ----------------------------------------------------------------------------
+# 7) Exclusions & personas
+# ----------------------------------------------------------------------------
+[non_menu_personas]
+services = ["SvcIngest", "SvcRecon", "SvcScoring", "SvcScreening",
+            "SvcAlerts", "SvcCase", "SvcBi"]      # no menus; tool/policy surfaces only
+copilot = "McpCopilot exposes MCP tools (query_records/get_options/evaluate/submit_write), not menus. Its visible surface is the copilot panel inside 3.2/4.3/5.2."
+
+[nav_semantics]
+hidden_vs_disabled = "If a role lacks screen access, the item is ABSENT (existence oracle / tipping-off rule). Never render grayed."
+stage_gating = "item visible iff screens.stage ∈ {built} or (stage_min=interim AND stage ∈ {interim, built}). emittable/blocked/delegated ⇒ hidden."
+badge_awareness = "badge counts come from guarded aggregates; a badge the role can't drill into must not exist (V9)."
+ordering = "order is per-group; 5 first for approver-heavy roles (approvals pinned via landing)."
+shortcuts = { g_a = "/alerts", g_c = "/cases", g_s = "/atra", g_p = "/approvals", ctrl_k = "omnibar" }
+i18n = "label_key resolves via PG.notif_template/locale tables (18.6); en + fa-AF defaults compiled in."
+env_gates = "env field: omit = all environments; demo items hard-hidden in prod (V-rule bonus)."

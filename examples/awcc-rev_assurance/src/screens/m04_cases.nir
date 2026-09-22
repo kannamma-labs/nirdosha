@@ -1,0 +1,246 @@
+//! M4 Leak Cases — investigation workspace, tasks, RFIs, disposition, four-eyes review, merge/link, escalation to Finance Controller.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{alert_table, case_task_table, leak_case_table, task_store, LeakCaseRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn case_overview_html(case_id: &str, row: &LeakCaseRow) -> String {
+    format!(
+        r#"<!doctype html>
+<html><head><title>Leak Case Overview - {case_id}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Leak Case {case_id}</h1>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Status</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Assignee</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Alert IDs</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Subject</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+</table>
+<p><a href="/cases/{case_id}">Edit case</a> · <a href="/cases/{case_id}/escalate-fc">Escalate to Finance Controller</a> · <a href="/cases/{case_id}/merge">Merge/link</a></p>
+</body></html>"#,
+        nirdosha_rt::html_escape(&row.status),
+        nirdosha_rt::html_escape(&row.assigned_to),
+        nirdosha_rt::html_escape(&row.alert_ids),
+        nirdosha_rt::html_escape(&row.subject_ref)
+    )
+}
+
+pub fn mount_case_overview(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cases/{id}/overview", "Leak Case Overview (4.2)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        match leak_case_table().guarded_get(auth, "Operations", &id) {
+            Ok(Some(row)) => nirdosha_rt::Response::html(200, case_overview_html(&id, &row)),
+            Ok(None) => nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+pub fn mount_escalate_to_fc(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/escalate-fc", "Escalate to Finance Controller (4.12)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Escalate {id} to FC</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Escalate case {id} to Finance Controller</h1>
+<form method="post" action="/cases/{id}/escalate-fc">
+<p><label>Recommendation:<br><textarea name="recommendation" rows="4" cols="50"></textarea></label></p>
+<p><button type="submit">Escalate</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/cases/{id}/escalate-fc", "Escalate to FC submit", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let _recommendation = req.form_or_json().get("recommendation").cloned().unwrap_or_default();
+            let changed: std::collections::HashSet<String> = ["status".into()].into();
+            match leak_case_table().guarded_update(auth, "Operations", &id, &changed, |row| row.status = "escalate".into()) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "escalated", "row": row })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+pub fn mount_merge_link_cases(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/merge", "Merge / Link Leak Cases (4.13)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Merge/Link {id}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Merge or link case {id}</h1>
+<form method="post" action="/cases/{id}/merge">
+<p><label>Related case IDs (comma-separated):<br><input name="related_case_ids" type="text" size="50" /></label></p>
+<p><button type="submit">Record link</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/cases/{id}/merge", "Merge/link submit", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let related = req.form_or_json().get("related_case_ids").cloned().unwrap_or_default();
+            let changed: std::collections::HashSet<String> = ["alert_ids".into()].into();
+            match leak_case_table().guarded_update(auth, "Operations", &id, &changed, |row| {
+                if !row.alert_ids.is_empty() {
+                    row.alert_ids.push_str(",");
+                }
+                row.alert_ids.push_str(&related);
+            }) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "linked", "row": row })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+fn unused_case_store() -> &'static SharedTable<i64, LeakCaseRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, LeakCaseRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_case_screens,
+    entity: LeakCaseRow,
+    store: unused_case_store,
+    path: "/cases",
+    fields: [
+        case_id: String,
+        tenant_id: String,
+        status: String,
+        assigned_to: String,
+        alert_ids: String,
+        subject_ref: String,
+        atra_id: String,
+        disposition: String,
+        rationale: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: leak_case_table,
+        purpose: "Operations",
+        create_fields: [
+            case_id: String,
+            tenant_id: String,
+            subject_ref: String,
+            alert_ids: String,
+            rationale: String,
+        ],
+        update_fields: [
+            status: String,
+            assigned_to: String,
+            disposition: String,
+            rationale: String,
+        ],
+    },
+}
+
+nirdosha_rt::kanban_board! {
+    mount: mount_case_board,
+    entity: LeakCaseRow,
+    store: unused_case_store,
+    path: "/cases/board",
+    access: public,
+    title_field: case_id,
+    column_field: status,
+    columns: ["open", "investigating", "confirmed_leak", "false_positive", "atra_filed", "closed"],
+    move_path: "/cases/{id}/board-move/{to}",
+    guard: {
+        table: leak_case_table,
+        purpose: "Operations",
+    },
+}
+
+/// 4.3 Investigation Workspace — hand-written workspace!-shaped page.
+pub fn mount_investigation_workspace(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cases/{id}/workspace", "Investigation Workspace (4.3)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        let case_data = match leak_case_table().guarded_get(auth, "Operations", &id) {
+            Ok(Some(row)) => serde_json::json!({ "case_id": row.case_id, "status": row.status, "assignee": row.assigned_to }),
+            Ok(None) => return nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let alerts = match alert_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows.into_iter().filter(|r| r.case_id == id).map(|r| serde_json::json!({ "alert_id": r.alert_id, "status": r.status })).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let tasks = match case_task_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows.into_iter().filter(|r| r.item_ref == id).map(|r| serde_json::json!({ "task_id": r.task_id, "title": r.title, "status": r.status })).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "case": case_data, "alerts": alerts, "tasks": tasks }))
+    })
+}
+
+// 4.8 Tasks & Checklist — guard-enforced list/create/update over `PG.case_task`.
+nirdosha_rt::crud_screens! {
+    mount: mount_case_tasks,
+    entity: crate::bridge::CaseTaskRow,
+    store: task_store,
+    path: "/case-tasks",
+    fields: [
+        task_id: String,
+        tenant_id: String,
+        item_ref: String,
+        task_type: String,
+        title: String,
+        assignee: String,
+        due_date: String,
+        priority: String,
+        status: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: case_task_table,
+        purpose: "Operations",
+        create_fields: [
+            task_id: String,
+            tenant_id: String,
+            item_ref: String,
+            task_type: String,
+            title: String,
+            assignee: String,
+            due_date: String,
+            priority: String,
+        ],
+        update_fields: [
+            status: String,
+            blocked_reason: String,
+            completion_note: String,
+        ],
+    },
+}
+
+/// 4.9 Internal RFI — reuses case_task with `task_type = "rfi"`.
+pub fn mount_case_rfi(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cases/{id}/rfi", "Internal RFI (4.9)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        let rfis = match case_task_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows.into_iter().filter(|r| r.item_ref == id && r.task_type == "rfi").collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "case_id": id, "rfis": rfis }))
+    })
+}
+
+pub fn mount_m04_cases(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let _ = task_store;
+    let router = mount_case_overview(router);
+    let router = mount_escalate_to_fc(router);
+    let router = mount_merge_link_cases(router);
+    let router = mount_investigation_workspace(router);
+    let router = mount_case_rfi(router);
+    let router = mount_case_board(router);
+    let router = mount_case_tasks(router);
+    mount_case_screens(router)
+}

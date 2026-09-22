@@ -43,6 +43,11 @@
   #header-actions button.primary { background:#564cbe; border-color:#564cbe; color:#fff; }
   #header-actions button:disabled { opacity:0.45; cursor:default; }
   #header-actions button:disabled:hover { border-color:#3a3a52; }
+  /* The view toggle's active state (RFC 0022 §2): filled like `primary`
+     but in the screen-map amber, so "you are looking at the screens
+     interconnections map right now" reads at a glance -- and the same
+     button, now reading Data, is the one way back. */
+  #header-actions button.active { background:#ef9f30; border-color:#ef9f30; color:#15151f; }
   #ask-toggle { background:transparent; border:1px solid #3a3a52; color:#a9a9bd; }
 
   /* ---- Ask rail: a persistent, collapsible search surface -- present
@@ -78,12 +83,45 @@
   /* ---- New Screen rail: same frame as Ask, reuses the real /api/prompt
      route -- no new backend, the same mechanism the very first prompt
      goes through. */
-  #new-screen-rail { position:absolute; top:64px; right:0; bottom:200px; width:300px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; }
+  #new-screen-rail { position:absolute; top:64px; right:0; bottom:200px; width:340px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; overflow-y:auto; }
   #new-screen-rail.open { display:flex; }
   #new-screen-form { display:flex; flex-direction:column; gap:8px; padding:12px 14px; }
   #new-screen-input { background:#0b0b12; border:1px solid #3a3a52; border-radius:4px; color:#e8e8f0; font:13px ui-monospace, monospace; padding:8px; resize:vertical; }
   #new-screen-input:focus { outline:none; border-color:#564cbe; }
   #new-screen-form button { background:#564cbe; color:#fff; border:none; border-radius:4px; padding:8px; font:12px ui-monospace, monospace; font-weight:bold; align-self:flex-start; padding-left:16px; padding-right:16px; }
+  /* ---- + Screen rail: describe vs register-entry tabs ---- */
+  #ns-tabs { display:flex; gap:6px; padding:10px 14px 0; }
+  .ns-tab { flex:1; background:#0b0b12; color:#78768e; border:1px solid #26263a; border-radius:4px; padding:6px 0; font:11px ui-monospace, monospace; cursor:pointer; letter-spacing:0.05em; text-transform:uppercase; }
+  .ns-tab:hover { color:#a9a9bd; }
+  .ns-tab.active { background:#2a2450; border-color:#564cbe; color:#e8e8f0; }
+  .ns-tab:disabled { opacity:0.4; cursor:not-allowed; }
+  #ns-register-form { display:none; flex-direction:column; gap:10px; padding:12px 14px; }
+  #ns-register-form.open { display:flex; }
+  #new-screen-form.open { display:flex; }
+  .ns-field { display:flex; flex-direction:column; gap:3px; }
+  .ns-field label { font-size:11px; color:#78768e; letter-spacing:0.04em; }
+  .ns-field .req { color:#e0566b; }
+  .ns-field .opt { color:#4d4b63; font-weight:normal; }
+  .ns-row { display:flex; gap:8px; }
+  .ns-row .ns-field { flex:1; min-width:0; }
+  #ns-register-form input, #ns-register-form select, #ns-register-form textarea {
+    background:#0b0b12; border:1px solid #3a3a52; border-radius:4px; color:#e8e8f0;
+    font:12px ui-monospace, monospace; padding:6px 8px; width:100%; box-sizing:border-box;
+  }
+  #ns-register-form textarea { resize:vertical; }
+  #ns-register-form input:focus, #ns-register-form select:focus, #ns-register-form textarea:focus { outline:none; border-color:#564cbe; }
+  #ns-register-form input.invalid, #ns-register-form select.invalid { border-color:#e0566b; }
+  .ns-err { font-size:11px; color:#e0566b; min-height:0; display:none; }
+  .ns-err.show { display:block; }
+  #ns-roles { display:flex; flex-wrap:wrap; gap:4px; }
+  .ns-chip { background:#0b0b12; border:1px solid #3a3a52; color:#78768e; border-radius:10px; padding:3px 9px; font:11px ui-monospace, monospace; cursor:pointer; }
+  .ns-chip:hover { color:#a9a9bd; border-color:#564cbe; }
+  .ns-chip.on { background:#2a2450; border-color:#564cbe; color:#e8e8f0; }
+  #ns-register-submit { background:#564cbe; color:#fff; border:none; border-radius:4px; padding:8px; font:12px ui-monospace, monospace; font-weight:bold; align-self:flex-start; padding-left:16px; padding-right:16px; cursor:pointer; }
+  #ns-register-submit:disabled { opacity:0.5; cursor:not-allowed; }
+  #ns-register-form .hint { font-size:11px; color:#78768e; }
+  #ns-register-result { margin:0 14px 12px; padding:8px; background:#0b0b12; border:1px solid #26263a; border-radius:4px; font:11px ui-monospace, monospace; color:#9be29b; white-space:pre-wrap; display:none; max-height:180px; overflow-y:auto; }
+  #ns-register-result.show { display:block; }
 
   /* ---- Governing rules panel: RFC 0016's sealed-plugin provenance,
      read from `/api/nodes`' `plugin_origin`/`non_waivable` (previously
@@ -187,9 +225,20 @@
   #panel details.advanced { margin-top:4px; }
   #panel details.advanced summary { font-size:11px; color:#78768e; cursor:pointer; margin-bottom:6px; }
 
-  #legend { position:absolute; bottom:208px; left:8px; font-size:13px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; }
+  #legend { position:absolute; bottom:208px; left:8px; font-size:13px; background:rgba(21,21,31,0.85); border:1px solid #26263a; border-radius:4px; padding:6px 10px; z-index:5; min-width:150px; }
   #legend .item { display:flex; align-items:center; gap:6px; margin:2px 0; }
   #legend .swatch { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  /* The legend's own hide/show toggle: a header row (title + chevron)
+     that collapses every .item underneath it. Collapsed keeps just the
+     header so the control stays findable -- a legend you can't find
+     again is worse than one that's in the way. State persists across
+     reloads via the same localStorage convention loadZoom uses. */
+  #legend-head { display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:pointer; user-select:none; }
+  #legend-title { font-weight:bold; font-size:11px; letter-spacing:0.08em; color:#78768e; text-transform:uppercase; }
+  #legend-chevron { border:none; background:transparent; color:#a9a9bd; font:12px ui-monospace, monospace; cursor:pointer; padding:0 2px; line-height:1; }
+  #legend-chevron:hover { color:#e8e8f0; }
+  #legend.collapsed #legend-chevron { transform:rotate(-90deg); }
+  #legend.collapsed .item { display:none; }
 
   /* ---- console: transcript + bottom text entry ---- */
   #console { position:absolute; left:0; right:0; bottom:0; height:200px; box-sizing:border-box; background:rgba(11,11,18,0.92); border-top:1px solid #26263a; z-index:5; display:flex; flex-direction:column; }
@@ -263,13 +312,16 @@
 </div>
 
 <!-- rfcs/0014 "1. Prompt mode": the default mode on entry, shown only
-     while this project's graph has never had a prompt populate it
-     (checked against a fresh /api/nodes fetch on every load -- so
-     closing and reopening `hi` after a successful :prompt reopens
-     straight into build mode below, never back here). Once shown, it
-     stays hidden for the rest of this session the moment population
-     succeeds -- "the mode ... change[s] to build mode the first time a
-     prompt is consumed," not a toggle the user flips back and forth. -->
+     while this project's graph has never been populated -- by a prompt
+     OR by `hi sync` finding real code (a reverse-engineered app opens
+     straight into build mode; asking an existing app "what do you want
+     to build?" was wrong). Checked against a fresh /api/nodes fetch on
+     every load -- so closing and reopening `hi` after a successful
+     :prompt reopens straight into build mode below, never back here).
+     Once shown, it stays hidden for the rest of this session the moment
+     population succeeds -- "the mode ... change[s] to build mode the
+     first time a prompt is consumed," not a toggle the user flips back
+     and forth. -->
 <div id="prompt-screen">
   <div id="prompt-screen-inner">
     <div id="prompt-screen-title">What do you want to build?</div>
@@ -286,6 +338,7 @@
   <span id="status"><span class="dot"></span><span id="status-text">loading…</span></span>
   <div id="header-actions">
     <span id="pending-count"></span>
+    <button id="screens-toggle" type="button" title="Toggle between the code datastructure graph (every fn/struct/enum unit and its tracked relationships) and the screens interconnections map (which screens link to which, derived from the app's own nav register and routes)">Screens</button>
     <button id="rebuild-btn" type="button" title="Send every confirmed piece to the model and compile -- this is real work, not instant">Rebuild</button>
     <button id="new-screen-toggle" type="button" title="Describe a new screen">+ Screen</button>
     <button id="governing-toggle" type="button" title="What's enforced, and what sealed packs lock down">Rules</button>
@@ -297,7 +350,10 @@
 <div id="graph"></div>
 <canvas id="fallback-canvas"></canvas>
 <div id="panel"></div>
-<div id="legend"></div>
+<div id="legend">
+  <div id="legend-head" title="show / hide the legend"><span id="legend-title">Legend</span><button id="legend-chevron" type="button" aria-label="toggle legend">▾</button></div>
+  <div id="legend-body"></div>
+</div>
 
 <div id="ask-rail">
   <div class="ask-head"><span>Ask &middot; searches this project's ingested docs and code units (keyword search, not a conversation)</span><button type="button" id="ask-close" class="rail-close" title="close">✕</button></div>
@@ -306,13 +362,84 @@
 </div>
 
 <div id="new-screen-rail">
-  <div class="ask-head"><span>New screen &middot; describe it in plain language -- goes through the same model call as the original prompt</span><button type="button" id="new-screen-close" class="rail-close" title="close">✕</button></div>
-  <div class="sub" style="padding:0 14px;font-size:11px;color:#78768e;line-height:1.5;">e.g. "a screen showing every overdue invoice, with a button to send a reminder"</div>
-  <form id="new-screen-form">
+  <div class="ask-head"><span>New screen &middot; a register entry validated against this project's screen.toml, or a plain-language description for the model</span><button type="button" id="new-screen-close" class="rail-close" title="close">✕</button></div>
+  <div id="ns-tabs">
+    <button type="button" id="ns-tab-register" class="ns-tab active" title="A validated entry in the project's screen register">Register</button>
+    <button type="button" id="ns-tab-describe" class="ns-tab" title="Describe it in plain language -- goes through the same model call as the original prompt">Describe</button>
+  </div>
+  <div class="sub" id="ns-describe-sub" style="padding:0 14px;font-size:11px;color:#78768e;line-height:1.5;">e.g. "a screen showing every overdue invoice, with a button to send a reminder"</div>
+  <form id="new-screen-form" style="display:none;">
     <textarea id="new-screen-input" rows="4" placeholder="What should this screen show, and to whom?"></textarea>
     <button type="submit">Add</button>
   </form>
   <div id="new-screen-status" class="form-status" style="padding:0 14px 12px;"></div>
+  <form id="ns-register-form" autocomplete="off">
+    <div class="ns-field">
+      <label for="ns-name">Name <span class="req">*</span></label>
+      <input id="ns-name" type="text" placeholder="e.g. Payment Hold Detail" maxlength="120">
+      <div class="ns-err" data-err="name"></div>
+    </div>
+    <div class="ns-row">
+      <div class="ns-field">
+        <label for="ns-module">Module <span class="req">*</span></label>
+        <select id="ns-module"></select>
+        <div class="ns-err" data-err="module"></div>
+      </div>
+      <div class="ns-field">
+        <label for="ns-id">Screen id <span class="req">*</span></label>
+        <input id="ns-id" type="text" placeholder="4.14">
+        <div class="ns-err" data-err="id"></div>
+      </div>
+    </div>
+    <div class="ns-row">
+      <div class="ns-field">
+        <label for="ns-archetype">Archetype <span class="req">*</span></label>
+        <select id="ns-archetype"></select>
+        <div class="ns-err" data-err="archetype"></div>
+      </div>
+      <div class="ns-field">
+        <label for="ns-stage">Stage</label>
+        <select id="ns-stage"></select>
+        <div class="ns-err" data-err="stage"></div>
+      </div>
+    </div>
+    <div class="ns-field">
+      <label for="ns-path">Route path <span class="opt">optional</span></label>
+      <input id="ns-path" type="text" placeholder="/holds/{id}" spellcheck="false">
+      <div class="ns-err" data-err="path"></div>
+    </div>
+    <div class="ns-field">
+      <label>Roles <span class="req">*</span> <span class="opt">click to toggle, one access level for all</span></label>
+      <div id="ns-roles"></div>
+      <div class="ns-row" style="margin-top:6px;">
+        <select id="ns-role-level"><option value="R">R</option><option value="R/W">R/W</option><option value="W">W</option></select>
+      </div>
+      <div class="ns-err" data-err="roles"></div>
+    </div>
+    <div class="ns-field">
+      <label for="ns-file">Lives in <span class="opt">optional</span></label>
+      <select id="ns-file"></select>
+      <div class="ns-err" data-err="file"></div>
+    </div>
+    <div class="ns-field">
+      <label for="ns-datasets">Datasets <span class="opt">optional, comma-separated</span></label>
+      <input id="ns-datasets" type="text" placeholder="PG.payments, AC.audit_chain" spellcheck="false">
+      <div class="ns-err" data-err="datasets"></div>
+    </div>
+    <div class="ns-field">
+      <label for="ns-blocked">Blocked by <span class="opt">optional, comma-separated</span></label>
+      <input id="ns-blocked" type="text" placeholder="ticket:T-14, dataset:PG.holds" spellcheck="false">
+      <div class="ns-err" data-err="blocked_by"></div>
+    </div>
+    <div class="ns-field">
+      <label for="ns-notes">Notes <span class="opt">optional</span></label>
+      <textarea id="ns-notes" rows="2" placeholder="purpose, quirks, pointers"></textarea>
+      <div class="ns-err" data-err="notes"></div>
+    </div>
+    <button type="submit" id="ns-register-submit">Add to register</button>
+  </form>
+  <div id="ns-register-result" title="the exact block appended to the register"></div>
+  <div id="ns-register-status" class="form-status" style="padding:0 14px 12px;"></div>
 </div>
 
 <div id="governing-panel">
@@ -429,6 +556,10 @@
   }
 
   function colorFor(node) {
+    // The screens view colors by UI archetype, not by code-unit kind --
+    // all screen nodes are CodeUnits (they'd all render amber), which
+    // would make the whole map one color and unreadable.
+    if (viewMode === 'screens') return screenColorFor(node);
     const base = node.status === 'exposed' ? EXPOSED_COLOR : (KIND_COLORS[subKind(node)] || KIND_COLORS.default);
     // `blendTowardBackground` only parses a `#rrggbb` hex input (it
     // returns an `rgb(...)` string, which isn't re-parseable) -- so
@@ -600,12 +731,14 @@
     const div = document.createElement('div');
     div.style.cssText = 'font:12px ui-monospace,monospace;color:#e8e8f0;background:#15151f;border:1px solid #3a3a52;border-radius:4px;padding:6px 10px;max-width:280px;';
     const title = document.createElement('div');
-    title.style.cssText = 'font-weight:bold;color:#ef9f30;word-break:break-all;';
+    title.style.cssText = 'font-weight:bold;color:' + (viewMode === 'screens' ? (SCREEN_COLORS[node.screen_type] || '#e8e8f0') : '#ef9f30') + ';word-break:break-all;';
     title.textContent = node.title || node.id;
     div.appendChild(title);
     const kind = document.createElement('div');
     kind.style.opacity = '0.7';
-    kind.textContent = subKind(node) + (node.status ? ' · ' + node.status : '');
+    kind.textContent = viewMode === 'screens'
+      ? (node.screen_type || 'screen') + (node.screen_path ? ' · ' + node.screen_path : '')
+      : subKind(node) + (node.status ? ' · ' + node.status : '');
     div.appendChild(kind);
     return div;
   }
@@ -1165,7 +1298,7 @@
   }
 
   function buildLegend() {
-    const legend = document.getElementById('legend');
+    const legend = document.getElementById('legend-body');
     legend.replaceChildren();
     Object.keys(KIND_COLORS).filter(k => k !== 'default').forEach(kind => {
       const item = document.createElement('div');
@@ -1253,7 +1386,10 @@
   }
   let graphPollBusy = false;
   setInterval(async () => {
-    if (!typedGraph || !reloadGraph || graphPollBusy) return;
+    // The revision poll watches the typed code graph; the screens view
+    // is a snapshot of /api/screens and has no revision to poll
+    // against -- polling it would just fight the user's exploration.
+    if (!typedGraph || !reloadGraph || graphPollBusy || viewMode !== 'data') return;
     graphPollBusy = true;
     try {
       const response = await fetch('/api/graph/head');
@@ -1349,6 +1485,15 @@
   }
 
   function onNodeSelected(node) {
+    // The screens view's panel is about interconnections (where this
+    // screen links, what reaches it), not impact analysis -- the code
+    // graph's /api/impact round-trip would answer a question this view
+    // isn't asking.
+    if (viewMode === 'screens') {
+      selectedNodeId = node.id;
+      showScreenPanel(node);
+      return;
+    }
     const reclick = selectedNodeId === node.id;
     selectedNodeId = node.id;
     if (reclick && !node.confirmed && node.driving_text) {
@@ -1392,7 +1537,7 @@
       });
     setStatus(data.nodes.length + ' node(s), ' + data.links.length + ' edge(s) · settling…');
     reloadGraph = () =>
-      fetchGraphData()
+      fetchViewData()
         .then(fresh => {
           current = fresh;
           Graph.graphData(fresh);
@@ -1431,7 +1576,7 @@
       links = fresh.links.map(l => ({ source: byId.get(l.source), target: byId.get(l.target) })).filter(l => l.source && l.target);
     }
     applyData(data);
-    reloadGraph = () => fetchGraphData().then(applyData).catch(err => reportError('reloading graph data', err));
+    reloadGraph = () => fetchViewData().then(applyData).catch(err => reportError('reloading graph data', err));
 
     canvas.addEventListener('click', e => {
       const rect = canvas.getBoundingClientRect();
@@ -1854,11 +1999,205 @@
   });
   loadZoom();
 
-  // ---- rfcs/0014 mode: prompt (default on entry) -> build (once a
-  // prompt has ever populated this project's graph). See
-  // `#prompt-screen`'s own HTML comment for the exact persistence rule.
+  // ---- rfcs/0014 mode: prompt (default on entry) -> build (once this
+  // project's graph has been populated -- by a prompt OR by `hi sync`
+  // finding real code). See `#prompt-screen`'s own HTML comment for
+  // the exact persistence rule.
   function hasPromptHistory(nodes) {
     return nodes.some(n => n.created_by === 'llm-prompt-mode');
+  }
+
+  // The prompt screen asks "what do you want to build?" -- a question
+  // that only makes sense for a graph with nothing in it yet. A
+  // project whose graph was populated by CODE sync (a reverse-
+  // engineered app: every CodeUnit carrying a real content_hash from
+  // its source file) is not an empty project, and asking it to describe
+  // itself from scratch was wrong: it opens straight into build mode
+  // now. Draft candidates created by a prompt (created_by set,
+  // content_hash NULL until Generate materializes them) still count as
+  // prompt history exactly as before.
+  function graphIsAlreadyPopulated(nodes) {
+    return nodes.some(n => n.created_by === 'llm-prompt-mode' || (n.kind === 'CodeUnit' && !!n.content_hash));
+  }
+
+  // ---- view mode (RFC 0022 §2): 'data' is today's code-datastructure
+  // graph; 'screens' swaps the same renderer over to the screens
+  // interconnections map served by `/api/screens` (screen nodes + the
+  // navigation edges hi sync reverse-engineered from the app's own nav
+  // register, redirects, and inbox detail paths). One toggle button
+  // flips both ways.
+  let viewMode = 'data';
+  let screensNavigations = [];
+
+  const SCREEN_COLORS = {
+    shell: '#c67bff',
+    login: '#ff6b6b',
+    landing: '#ffd166',
+    dashboard: '#3ddc84',
+    crud: '#ef9f30',
+    kanban: '#5b9dff',
+    wizard: '#c67bff',
+    settings: '#9dd6ff',
+    feed: '#3ddcdc',
+    inbox: '#f28bdc',
+    workspace: '#b7ff5e',
+    page: '#a9a9bd',
+    screen: '#ef9f30',
+    default: '#e8e8f0',
+  };
+
+  function screenColorFor(node) {
+    return SCREEN_COLORS[node.screen_type] || SCREEN_COLORS.default;
+  }
+
+  // /api/screens -> the same {nodes, links} shape the code graph feeds
+  // the renderers, so one renderer serves both views. Links dedupe by
+  // (source,target) preferring derived (inferred:false) edges over the
+  // synthetic shell fan-out, and keep their label for the click panel.
+  function fetchScreensData() {
+    return fetch('/api/screens')
+      .then(r => r.json())
+      .then(map => {
+        screensNavigations = map.navigations || [];
+        const nodes = (map.screens || []).map(s => ({
+          id: s.id,
+          kind: 'CodeUnit',
+          title: s.name,
+          screen_type: s.screen_type,
+          screen_path: s.screen_path,
+          confirmed: true,
+        }));
+        const ids = new Set(nodes.map(n => n.id));
+        const best = new Map();
+        (screensNavigations || []).forEach(n => {
+          if (!ids.has(n.source_id) || !ids.has(n.target_id)) return;
+          const key = n.source_id + '→' + n.target_id;
+          const prev = best.get(key);
+          if (!prev || (prev.inferred && !n.inferred)) best.set(key, n);
+        });
+        const links = [...best.values()].map(n => ({ source: n.source_id, target: n.target_id, kind: 'NAVIGATES_TO', label: n.label, inferred: n.inferred }));
+        return { nodes, links };
+      });
+  }
+
+  function fetchViewData() {
+    return viewMode === 'screens' ? fetchScreensData() : fetchGraphData();
+  }
+
+  function setViewMode(mode) {
+    if (mode === viewMode) return;
+    viewMode = mode;
+    const btn = document.getElementById('screens-toggle');
+    btn.classList.toggle('active', viewMode === 'screens');
+    btn.textContent = viewMode === 'screens' ? 'Data' : 'Screens';
+    btn.title = viewMode === 'screens'
+      ? 'Back to the code datastructure graph'
+      : 'Show the screens interconnections map -- which screens link to which';
+    document.getElementById('panel').style.display = 'none';
+    selectedNodeId = null;
+    if (viewMode === 'screens') {
+      buildScreensLegend();
+    } else {
+      buildLegend();
+    }
+    return fetchViewData()
+      .then(data => {
+        if (hasWebGL() && typeof ForceGraph3D === 'function') {
+          run3D(data);
+        } else {
+          run2D(data);
+        }
+      })
+      .catch(err => reportError('switching view', err));
+  }
+
+  function initScreensToggle() {
+    document.getElementById('screens-toggle').addEventListener('click', () => {
+      setViewMode(viewMode === 'data' ? 'screens' : 'data');
+    });
+  }
+
+  // The screens view's click panel: what this screen is, where it
+  // links to, and what links here -- the interconnections answer the
+  // whole view exists to show, one screen at a time.
+  function showScreenPanel(screen) {
+    const panel = document.getElementById('panel');
+    panel.replaceChildren();
+    const titleRow = document.createElement('div');
+    titleRow.className = 'title-row';
+    const h2 = document.createElement('h2');
+    h2.textContent = (screen.title || screen.id) + ' · screen';
+    titleRow.appendChild(h2);
+    panel.appendChild(titleRow);
+    const typeRow = document.createElement('div');
+    typeRow.className = 'row';
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = screenColorFor(screen);
+    swatch.style.display = 'inline-block';
+    swatch.style.marginRight = '6px';
+    typeRow.appendChild(swatch);
+    typeRow.appendChild(document.createTextNode((screen.screen_type || 'screen') + (screen.screen_path ? ' · ' + screen.screen_path : '')));
+    panel.appendChild(typeRow);
+    const out = screensNavigations.filter(n => n.source_id === screen.id);
+    const inc = screensNavigations.filter(n => n.target_id === screen.id);
+    function navSection(label, rows, pick) {
+      if (!rows.length) return;
+      const h3 = document.createElement('h3');
+      h3.textContent = label;
+      panel.appendChild(h3);
+      const ul = document.createElement('ul');
+      rows.forEach(n => {
+        const li = document.createElement('li');
+        li.textContent = n.label + (n.inferred ? ' (inferred)' : '') + ' → ' + (pick(n).title || pick(n).id);
+        ul.appendChild(li);
+      });
+      panel.appendChild(ul);
+    }
+    navSection('Links to', out, n => ({ title: (n.target_id || '').replace('code:screen:', ''), id: n.target_id }));
+    navSection('Reached from', inc, n => ({ title: (n.source_id || '').replace('code:screen:', ''), id: n.source_id }));
+    panel.style.display = 'block';
+  }
+
+  function buildScreensLegend() {
+    const legend = document.getElementById('legend-body');
+    legend.replaceChildren();
+    Object.keys(SCREEN_COLORS).filter(k => k !== 'default' && k !== 'screen').forEach(type => {
+      const item = document.createElement('div');
+      item.className = 'item';
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = SCREEN_COLORS[type];
+      item.appendChild(swatch);
+      const text = document.createElement('span');
+      text.textContent = type;
+      item.appendChild(text);
+      legend.appendChild(item);
+    });
+    const note = document.createElement('div');
+    note.className = 'item';
+    note.style.opacity = '0.7';
+    note.style.fontSize = '11px';
+    note.textContent = 'edges = navigation derived from the app\'s own nav register, redirects, and inbox detail paths (inferred = synthetic shell link)';
+    legend.appendChild(note);
+  }
+
+  // The legend's hide/show toggle -- same persistence convention as
+  // loadZoom's hi-ui-zoom key, so a collapsed legend stays collapsed
+  // across reloads. Applies immediately (before the first buildLegend),
+  // so a reload never flashes the open legend for one frame.
+  function initLegendToggle() {
+    const legend = document.getElementById('legend');
+    const LEGEND_KEY = 'hi-ui-legend-collapsed';
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(LEGEND_KEY) === '1'; } catch (_) {}
+    const apply = () => legend.classList.toggle('collapsed', collapsed);
+    apply();
+    document.getElementById('legend-head').addEventListener('click', () => {
+      collapsed = !collapsed;
+      try { localStorage.setItem(LEGEND_KEY, collapsed ? '1' : '0'); } catch (_) {}
+      apply();
+    });
   }
 
   function enterBuildMode() {
@@ -1915,6 +2254,182 @@
     });
   }
 
+  // The + Screen rail's register half: everything is driven by the
+  // project's own screens.toml (fetched once on first open) -- module /
+  // archetype / stage / role / file vocabularies come from the register,
+  // the id prefill is the register's next number in that module, and
+  // submit posts to /api/screen-register/add which re-validates
+  // server-side (the client is UX, the server is the gatekeeper). A
+  // project without a register keeps the describe tab only.
+  const nsRegister = { loaded: false, data: null };
+  function nsFetchRegister() {
+    if (nsRegister.loaded) return Promise.resolve(nsRegister.data);
+    return fetch('/api/screen-register').then(r => r.json()).then(data => {
+      nsRegister.loaded = true;
+      nsRegister.data = data;
+      return data;
+    }).catch(() => { nsRegister.loaded = true; nsRegister.data = { exists: false }; return nsRegister.data; });
+  }
+
+  function nsFillSelect(sel, values, emptyLabel) {
+    sel.replaceChildren();
+    if (emptyLabel !== undefined) {
+      const opt = document.createElement('option');
+      opt.value = ''; opt.textContent = emptyLabel;
+      sel.appendChild(opt);
+    }
+    for (const v of values) {
+      const opt = document.createElement('option');
+      opt.value = v; opt.textContent = v;
+      sel.appendChild(opt);
+    }
+  }
+
+  function nsSetError(name, msg) {
+    const err = document.querySelector(`#ns-register-form .ns-err[data-err="${name}"]`);
+    if (!err) return;
+    err.textContent = msg || '';
+    err.classList.toggle('show', !!msg);
+    const field = err.closest('.ns-field');
+    if (field) {
+      const input = field.querySelector('input, select, textarea');
+      if (input) input.classList.toggle('invalid', !!msg);
+    }
+  }
+
+  function nsClearErrors() {
+    for (const err of document.querySelectorAll('#ns-register-form .ns-err')) nsSetError(err.dataset.err, '');
+    document.getElementById('ns-register-result').classList.remove('show');
+  }
+
+  function nsPrefillId() {
+    const data = nsRegister.data;
+    if (!data || !data.exists) return;
+    const module = document.getElementById('ns-module').value;
+    const next = data.next_ids && data.next_ids[module];
+    if (next) document.getElementById('ns-id').value = next;
+  }
+
+  function nsBuildRoleChips(roles) {
+    const box = document.getElementById('ns-roles');
+    box.replaceChildren();
+    for (const role of roles) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'ns-chip';
+      chip.textContent = role;
+      chip.addEventListener('click', () => chip.classList.toggle('on'));
+      box.appendChild(chip);
+    }
+  }
+
+  function nsSelectedRoles() {
+    const level = document.getElementById('ns-role-level').value;
+    return [...document.querySelectorAll('#ns-roles .ns-chip.on')].map(chip => `${chip.textContent}:${level}`);
+  }
+
+  function nsSubmitRegister() {
+    const statusEl = document.getElementById('ns-register-status');
+    nsClearErrors();
+    // Client-side gate for the required bits (the server is the real
+    // validator) so an obviously-incomplete form never round-trips.
+    let bad = false;
+    const name = document.getElementById('ns-name').value.trim();
+    const id = document.getElementById('ns-id').value.trim();
+    const module = document.getElementById('ns-module').value;
+    const archetype = document.getElementById('ns-archetype').value;
+    const path = document.getElementById('ns-path').value.trim();
+    if (!name) { nsSetError('name', 'give the screen a name'); bad = true; }
+    if (!/^\d+\.\d+$/.test(id)) { nsSetError('id', 'use the register\'s <module-serial>.<seq> shape, e.g. 4.14'); bad = true; }
+    if (!module) { nsSetError('module', 'pick a module'); bad = true; }
+    if (!archetype) { nsSetError('archetype', 'pick an archetype'); bad = true; }
+    if (path && !/^\/[a-z0-9\-{}\/_]*$/.test(path)) { nsSetError('path', 'routes are kebab-case with {param} placeholders, e.g. /holds/{id}'); bad = true; }
+    const roles = nsSelectedRoles();
+    if (!roles.length) { nsSetError('roles', 'pick at least one role'); bad = true; }
+    if (bad) return;
+
+    const params = new URLSearchParams({
+      name, id, module, archetype,
+      stage: document.getElementById('ns-stage').value,
+      path,
+      roles: roles.join(','),
+      file: document.getElementById('ns-file').value,
+      datasets: document.getElementById('ns-datasets').value,
+      blocked_by: document.getElementById('ns-blocked').value,
+      notes: document.getElementById('ns-notes').value,
+    });
+    const btn = document.getElementById('ns-register-submit');
+    btn.disabled = true;
+    statusEl.textContent = 'validating + appending...';
+    fetch('/api/screen-register/add', { method: 'POST', body: params.toString() })
+      .then(async r => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          if (data.fields) {
+            for (const [field, msg] of Object.entries(data.fields)) nsSetError(field, msg);
+            statusEl.textContent = 'the register refused this entry -- fix the marked fields';
+          } else {
+            statusEl.textContent = data.error || `failed (${r.status})`;
+          }
+          return;
+        }
+        statusEl.textContent = `added to ${data.register_path} as screen ${data.screen_id} -- candidate ${data.node} is in the graph for review/confirm.`;
+        const result = document.getElementById('ns-register-result');
+        result.textContent = data.appended_toml;
+        result.classList.add('show');
+        document.getElementById('ns-name').value = '';
+        document.getElementById('ns-path').value = '';
+        document.getElementById('ns-datasets').value = '';
+        document.getElementById('ns-blocked').value = '';
+        document.getElementById('ns-notes').value = '';
+        document.getElementById('ns-id').value = '';
+        nsPrefillId();
+        nsRegister.loaded = false; // re-fetch on next open: the register just changed
+        if (typeof reloadGraph === 'function') reloadGraph();
+      })
+      .catch(e => { statusEl.textContent = `failed: ${e}`; })
+      .finally(() => { btn.disabled = false; });
+  }
+
+  function nsInitRegisterTab() {
+    const tabBtn = document.getElementById('ns-tab-register');
+    nsFetchRegister().then(data => {
+      if (!data || !data.exists) {
+        tabBtn.disabled = true;
+        tabBtn.title = 'no screens.toml / screen.toml in this project';
+        nsSetTab('describe');
+        return;
+      }
+      nsFillSelect(document.getElementById('ns-module'), data.modules);
+      nsFillSelect(document.getElementById('ns-archetype'), data.archetypes);
+      nsFillSelect(document.getElementById('ns-stage'), data.stages, '(default: emittable)');
+      nsFillSelect(document.getElementById('ns-file'), data.files, '(none)');
+      nsBuildRoleChips(data.roles || []);
+      document.getElementById('ns-module').addEventListener('change', nsPrefillId);
+      nsPrefillId(); // prefill before the first change too, not just on module switches
+      document.getElementById('ns-register-form').addEventListener('submit', e => { e.preventDefault(); nsSubmitRegister(); });
+      nsSetTab('register');
+    });
+  }
+
+  function nsSetTab(which) {
+    const reg = document.getElementById('ns-tab-register');
+    const desc = document.getElementById('ns-tab-describe');
+    const regForm = document.getElementById('ns-register-form');
+    const descForm = document.getElementById('new-screen-form');
+    const regActive = which === 'register';
+    reg.classList.toggle('active', regActive);
+    desc.classList.toggle('active', !regActive);
+    regForm.classList.toggle('open', regActive);
+    regForm.style.display = regActive ? 'flex' : 'none';
+    descForm.style.display = regActive ? 'none' : 'flex';
+    document.getElementById('ns-describe-sub').style.display = regActive ? 'none' : 'block';
+    document.getElementById('new-screen-status').style.display = regActive ? 'none' : 'block';
+    document.getElementById('ns-register-status').style.display = regActive ? 'block' : 'none';
+    if (regActive) document.getElementById('ns-name').focus();
+    else document.getElementById('new-screen-input').focus();
+  }
+
   function initNewScreenRail() {
     const rail = document.getElementById('new-screen-rail');
     document.getElementById('new-screen-toggle').addEventListener('click', () => {
@@ -1936,6 +2451,12 @@
         onSuccess: () => { input.value = ''; statusEl.textContent = 'added -- review it with the click panel, then Confirm.'; },
       });
     });
+    // Register-entry tab: default when the project HAS a register
+    // (that's the validated path the + Screen button exists for);
+    // describe stays the only tab when it doesn't.
+    document.getElementById('ns-tab-register').addEventListener('click', () => nsSetTab('register'));
+    document.getElementById('ns-tab-describe').addEventListener('click', () => nsSetTab('describe'));
+    nsInitRegisterTab();
   }
 
   function initPromptScreen() {
@@ -2358,6 +2879,8 @@
   }
 
   document.getElementById('rebuild-btn').addEventListener('click', doRebuild);
+  initScreensToggle();
+  initLegendToggle();
   initAskRail();
   initGoverningPanel();
   initNewScreenRail();
@@ -2376,7 +2899,7 @@
       } else {
         run2D(data);
       }
-      if (typedGraph || hasPromptHistory(nodes)) {
+      if (typedGraph || graphIsAlreadyPopulated(nodes)) {
         enterBuildMode();
       } else {
         document.getElementById('prompt-screen').classList.add('visible');

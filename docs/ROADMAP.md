@@ -45,7 +45,70 @@ A, Track B, Track C below) — but the specs themselves stay put.
   existing graph storage, MCP tools and whole-program LLM generation
   are unchanged. Core phases A–E and all extension stages are pending.
 
+- `[PARTIAL — SHIPPED 2026-09-22]` **RFC 0022: the screen-only graph
+  view (its §2) is real.**
+  [The RFC](../rfcs/0022-screen-map-app-shell-login.md) proposed a
+  header toggle between the code datastructure graph and a screens
+  interconnections map; the toggle now exists (`hi_graph.html`'s
+  Screens/Data button), `/api/screens` serves every screen-kind node
+  (macro screens **and** reverse-engineered `router.get*` route pages,
+  typed `page`) plus the navigation edges `hi sync` derives from the
+  app's own code: `menus.toml` per-menu routes and per-role post-login
+  landings (read from the register `app_shell_from_toml!` names),
+  static string-literal redirects, and `approval_inbox!` detail paths
+  (template- and crud-subtree-resolved). Derived edges are real
+  `NAVIGATES_TO` edges with labels, regenerated wholesale each sync
+  (pure derived data — never human-authored); the synthetic shell
+  fan-out now applies only to screens no derived edge reaches. The
+  prompt screen (RFC 0014 §1) no longer blocks a code-populated graph:
+  any project whose units carry synced `content_hash`es opens straight
+  into build mode; the screen remains only for genuinely empty
+  projects. Same-day follow-up: the `+ Screen` rail now offers a
+  **register-entry form** next to the free-text describe flow — a
+  structured, validated screen entry driven entirely by the project's
+  own `screens.toml` (its module/archetype/stage/role/file
+  vocabularies, next-id prefill, role chips, inline per-field errors);
+  a valid entry is appended to the register (`total_screens` bumped)
+  and recorded as a reviewable `screen` candidate, never silently
+  pretending code exists; and the graph legend has its own
+  hide/show toggle with persisted state. §3–§5 (login!/app_shell!
+  macros, prompt taxonomy) shipped
+  earlier; §2's acceptance criterion 5 is met on the examples/rtm
+  corpus (130 screens, 88 derived nav edges). Proven end-to-end:
+  `cargo test -p nirdosha-hi`, then `nirdosha-hi sync` + `serve` against
+  `examples/rtm` and `GET /api/screens`.
+
 ## V2 issue fixes
+
+- `[PARTIAL — SHIPPED 2026-09-23]` **Finite UI assurance proof harness.**
+  `nirdosha-contract-core::ui_assurance` accepts a `.nir/ui-proof.json`
+  declaration and exhaustively proves finite-model invariants (unique
+  identities, declared transition endpoints, explicit roles/postconditions,
+  and reachability). `nirdosha-hi publish` fails closed on an invalid proof
+  and embeds the proof summary in its certificate; absent declarations are
+  explicitly reported as `not_declared`, never treated as proof. Browser and
+  backend runtime adapters remain the next layer.
+
+- `[PARTIAL — SHIPPED 2026-09-23]` **Recipe Format v1 deterministic core.**
+  `nirdosha-contract-core::recipe` provides byte-preserving DSSE PAE, RFC
+  8785 JCS, self-nulled `recipe_id`, `result_hash`, and the normative
+  non-empty/strictly-sorted invariant flattening rule. Sigstore discovery,
+  Ed25519 key policy, OCI reproduction, and the runtime recipe runner remain
+  integration work. The recipe spec's raw-byte self-hash needs a fixed
+  sentinel or an external immutable copy; replacing its placeholder in-place
+  would otherwise be self-referential.
+
+- `[OPEN — CURRENT PHASE]` **Browser-backed UI assurance and Z3 model
+  encoding.** Add a real-browser runner (Playwright/Chromium adapter), stable
+  semantic selectors, DOM/accessibility/network/audit evidence, an independent
+  backend oracle, and signed runtime traces. Encode the finite screen/action
+  contracts as Z3 obligations; `unknown`, missing evidence, selector drift, or
+  build/environment mismatch fails closed. Test ownership is split: product
+  owners define requirements and invariants, the solution agent generates
+  positive cases, the problem-finder agent generates adversarial cases, and a
+  deterministic runner/verifier writes and decides the executable result. No
+  agent certifies its own proposed tests; humans approve the declared claims,
+  not every repeated execution.
 
 - `[DONE]` **2026-09-18, Hi graph screen generation and preview.**
   Generate still makes one whole-program LLM request per attempt; it
@@ -2617,7 +2680,14 @@ interpreter/compiler capabilities, not blocked on either track.
 
 ---
 
-## Track D — Mobile app generation (`docs/MOBILE.md`)
+## Track D — Mobile app generation (`docs/MOBILE.md`) — superseded, see `rfcs/0028-mobile-client-codegen.md`
+
+**This track targeted `crates/compiler`/`ui_gen.rs`, retired
+2026-09-20 — D1-D5 below were never built and the IR they depend on no
+longer exists.** `rfcs/0028-mobile-client-codegen.md` re-specifies the
+same "generate a real native iOS/Android client" goal against the v2
+(Rust + `nirdosha_rt` macros) dialect that actually ships today; treat
+that RFC as current and this track as historical.
 
 *Priority: independent of Tracks A–C — a second renderer of `ui_gen.rs`'s
 existing manifest, not a change to the interpreter/compiler/agent-API
@@ -3513,6 +3583,58 @@ sequencing in `docs/ECOSYSTEM.md`; this entry only tracks status.*
   record), so real bus-factor improvement still needs those seats
   used, not just held. See `docs/ECOSYSTEM.md` §G5 for the full
   before/after.
+
+---
+
+## Track H — Cluster-native `dataflow!` (`rfcs/0027.a-cluster-native-dataflow.md`)
+
+*Priority: depends on RFC 0027 v1 landing first; does not block any existing track.*
+
+Cluster-scale execution for the verified stream-compute layer, designed
+so that one process is a one-member cluster and adding capacity means
+starting more identical processes. The surface syntax (`dataflow!`,
+contracts, driver checks) does not change; clustering is a runtime/
+deployment configuration. Operators are local tasks inside a process,
+not separate processes; cross-node traffic goes only through the shared
+durable log, not RPC.
+
+- `[OPEN]` **H1. Provider-agnostic `LogProvider` abstraction.** Generalize
+  the v1 `DurableLog` into a trait with an `EmbeddedLog` (single-node)
+  and a `KafkaLog` (cluster) implementation. Selection is runtime
+  configuration, never source syntax. `HttpWebhook` sources append to
+  the shared log from the compiled-`serve` route and return HTTP 202
+  once the append is durable; the caller is decoupled from stream
+  processing. Blocked on RFC 0027 Phase 2 runtime.
+- `[OPEN]` **H2. Consumer-group partition ownership + failure model.**
+  Assign source partitions to identical processes via the log's
+  consumer-group protocol (KIP-848 incremental cooperative rebalance).
+  Run one local topology executor per owned partition. Implement
+  graceful revoke (finish in-flight, snapshot, commit offset) and
+  restore on rebalance. Define node-failure windows: HTTP retry +
+  idempotent log producer for pre-202; snapshot + replay for processing
+  node death; `exactly_once` key deduplication for sink-effect replay.
+- `[OPEN]` **H3. Cross-node shuffle through repartition topics.** Map
+  inter-operator edges that need a different key grouping to compacted
+  repartition topics, with credit-based in-flight caps to preserve
+  bounded-mailbox backpressure across the network. No direct node-to-node
+  RPC.
+- `[OPEN]` **H4. Partition-scoped state snapshots and restore.** Snapshot
+  keyed state per partition on barrier, write to changelog/object store,
+  and restore from snapshot + replay after rebalance. Depends on H2.
+- `[OPEN]` **H5. Global barriers and multi-input windows.** Coordinate
+  barrier injection across source partitions and combine per-partition
+  watermarks for joins/session windows. Driver/runtime proof of
+  cross-partition alignment is part of this item.
+- `[OPEN]` **H6. Fleet attestation and node identity.** Apply Row 12
+  identity and the v2 guarantee bundle to cluster membership: mTLS/
+  token-based node identity, binary hash check before a process joins
+  the group, and cluster-scaled evidence for `deterministic_execution`,
+  `durable_transactions`, `authenticated_identity`, `build_provenance`,
+  and `deadlock_freedom`.
+- `[OPEN]` **H7. Self-contained Raft+SWIM mode.** Optional later mode with
+  no external Kafka dependency: SWIM gossip for membership, Raft for the
+  metadata/control log, and a `RaftLog` `LogProvider` implementation.
+  Surface unchanged from H1.
 
 ---
 

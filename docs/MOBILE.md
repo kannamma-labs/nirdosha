@@ -1,5 +1,16 @@
 # Nirdosha mobile — native iOS/Android app generation (design)
 
+**Superseded by `rfcs/0028-mobile-client-codegen.md`.** This doc's
+`mobile_gen.rs`/`ui_gen.rs::build_screens` plan targeted `crates/compiler`,
+the from-scratch interpreted-language compiler retired 2026-09-20 — its
+`Screen`/`FieldSpec` IR no longer exists, and Track D below was never
+built. RFC 0028 re-does the same idea against the v2 (Rust +
+`nirdosha_rt` macros) dialect that actually ships today: a shared
+`nirdosha-screen-ir` crate parsing `crud_screens!`/`login!`/`app_shell!`
+with the macros' own grammar, plus a `cargo nirdosha emit-mobile`
+subcommand. Read that RFC for the current plan; the rest of this file is
+kept for historical design rationale only.
+
 **Status: design only. Nothing in this document is implemented.** No
 `mobile_gen.rs`, no `emit-mobile` CLI verb, no generated Swift/Kotlin
 anywhere in this repo as of this writing. This doc is the spec Track D

@@ -1,0 +1,8 @@
+//! `awcc-rev-assurance` binary — thin entry point.
+//!
+//! The actual policy/catalog corpus lives in `src/lib.nir`. This binary just
+//! boots and proves everything linked and registered.
+
+fn main() {
+    awcc_rev_assurance::boot_banner();
+}

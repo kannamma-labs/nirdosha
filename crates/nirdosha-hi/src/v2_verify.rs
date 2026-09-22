@@ -237,6 +237,23 @@ pub struct PublishResult {
     pub verdict: V2Verdict,
 }
 
+/// Load and exhaustively verify the optional project UI proof declaration.
+/// A malformed declaration is an error (publish must fail closed); absence is
+/// represented as `None` so existing non-UI projects remain publishable while
+/// their certificate honestly says that no UI proof was supplied.
+pub fn ui_assurance(root: &Path) -> Result<Option<nirdosha_contract_core::ui_assurance::UiProof>, String> {
+    let path = root.join(".nir").join("ui-proof.json");
+    if !path.exists() { return Ok(None); }
+    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let spec: nirdosha_contract_core::ui_assurance::UiProofSpec = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    let proof = nirdosha_contract_core::ui_assurance::verify(&spec);
+    if !proof.passed {
+        return Err(format!("UI proof rejected for {}: {}", path.display(), proof.counterexamples.join("; ")));
+    }
+    Ok(Some(proof))
+}
+
 /// Builds `root`'s generated source for real and, only if it passes its
 /// own check, copies the binary to `.nir/generated/hi_build` and writes
 /// a certificate alongside it (the same `nirdosha.certificate/v2-
@@ -255,11 +272,12 @@ pub fn publish_project(root: &Path, generated_source_path: &Path) -> Result<Publ
             verdict.build_diagnostic.as_deref().map(|d| format!("\n{d}")).unwrap_or_default()
         ));
     }
+    let ui_proof = ui_assurance(root)?;
     let out_path = root.join(".nir").join("generated").join("hi_build");
     std::fs::copy(&binary_path, &out_path).map_err(|e| format!("copying {} to {}: {e}", binary_path.display(), out_path.display()))?;
 
     let source = std::fs::read_to_string(generated_source_path).map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
-    let certificate = certificate_json(&source, &verdict);
+    let certificate = certificate_json_with_ui(&source, &verdict, ui_proof.as_ref());
     let cert_path = out_path.with_extension("certificate.json");
     std::fs::write(&cert_path, serde_json::to_string_pretty(&certificate).expect("this JSON value always serializes")).map_err(|e| format!("writing {}: {e}", cert_path.display()))?;
 
@@ -271,6 +289,14 @@ pub fn publish_project(root: &Path, generated_source_path: &Path) -> Result<Publ
 /// [`publish_project`] (over a real project's generated source), so the
 /// two can never quietly disagree about what a v2 certificate contains.
 pub fn certificate_json(source: &str, verdict: &V2Verdict) -> serde_json::Value {
+    certificate_json_with_ui(source, verdict, None)
+}
+
+/// Certificate payload with the finite UI model proof, when a project
+/// declares `.nir/ui-proof.json`. The distinction between `proved` and
+/// `not_declared` is intentional: a certificate never upgrades missing UI
+/// evidence into a guarantee.
+pub fn certificate_json_with_ui(source: &str, verdict: &V2Verdict, ui_proof: Option<&nirdosha_contract_core::ui_assurance::UiProof>) -> serde_json::Value {
     serde_json::json!({
         "certificate_version": "nirdosha.certificate/v2-source-scan",
         "source_hash": crate::hi_graph::sha256_hex(source.as_bytes()),
@@ -281,6 +307,10 @@ pub fn certificate_json(source: &str, verdict: &V2Verdict) -> serde_json::Value 
         "build_diagnostic": verdict.build_diagnostic,
         "contracts_found": verdict.contracts_found,
         "violations": verdict.violations,
+        "ui_assurance": ui_proof.map_or_else(
+            || serde_json::json!({"status": "not_declared"}),
+            |proof| serde_json::json!({"status": "proved", "proof": proof}),
+        ),
     })
 }
 
