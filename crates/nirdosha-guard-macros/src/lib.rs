@@ -260,10 +260,207 @@ fn attribute_impl(kind: &'static str, args: TokenStream, input: TokenStream) -> 
     .into()
 }
 
-/// `#[dataset(entity = "...", store = "...")]` — binds an entity to a store.
+/// `#[dataset(entity = "...", store = "...", maps = { cvv = ["_CCV"], pin = ["PIN_HASH"] })]`.
+/// Registers the entity into the Guard catalog and also emits one
+/// `LOGGING_FIELD_MAPS` static per `(concept, physical_path)` pair, so
+/// the logging policy guard can resolve canonical compliance field names
+/// (e.g. `cvv`) to the actual store column names used by this dataset.
 #[proc_macro_attribute]
 pub fn dataset(args: TokenStream, input: TokenStream) -> TokenStream {
-    attribute_impl("dataset", args, input)
+    let item = match syn::parse::<syn::Item>(input.clone()) {
+        Ok(item) => item,
+        Err(error) => return error.into_compile_error().into(),
+    };
+    let name = match &item {
+        syn::Item::Const(item) => item.ident.clone(),
+        syn::Item::Enum(item) => item.ident.clone(),
+        syn::Item::Fn(item) => item.sig.ident.clone(),
+        syn::Item::Struct(item) => item.ident.clone(),
+        syn::Item::Type(item) => item.ident.clone(),
+        _ => {
+            return syn::Error::new_spanned(item, "#[dataset] requires a named item")
+                .into_compile_error()
+                .into()
+        }
+    };
+    let source = args.to_string();
+    let maps = parse_dataset_maps(&source);
+    let entity_owned = maps.entity.unwrap_or_else(|| name.to_string());
+    let entity = entity_owned.as_str();
+    let entity_lit = syn::LitStr::new(entity, proc_macro2::Span::call_site());
+
+    let static_name = format_ident!("__NIRDOSHA_DATASET_{}", name.to_string().to_ascii_uppercase());
+    let source_lit = syn::LitStr::new(&source, proc_macro2::Span::call_site());
+    let kind_lit = syn::LitStr::new("dataset", proc_macro2::Span::call_site());
+    let name_lit = syn::LitStr::new(&name.to_string(), proc_macro2::Span::call_site());
+
+    let mut output = quote! {
+        #item
+        #[used]
+        #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::CATALOG)]
+        #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+        static #static_name: ::nirdosha_guard_registry::CatalogRegistration = ::nirdosha_guard_registry::CatalogRegistration {
+            kind: #kind_lit,
+            name: #name_lit,
+            source: #source_lit,
+        };
+    };
+
+    for (concept, physicals) in &maps.concepts {
+        let concept_lit = syn::LitStr::new(concept, proc_macro2::Span::call_site());
+        for (idx, physical) in physicals.iter().enumerate() {
+            let physical_tokens = vec![syn::LitStr::new(physical, proc_macro2::Span::call_site())];
+            let hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                entity.hash(&mut hasher);
+                concept.hash(&mut hasher);
+                physical.hash(&mut hasher);
+                idx.hash(&mut hasher);
+                hasher.finish()
+            };
+            let map_static_name = format_ident!("__NIRDOSHA_LOG_FIELD_MAP_{:016X}", hash);
+            output.extend(quote! {
+                #[used]
+                #[::nirdosha_guard_registry::linkme::distributed_slice(::nirdosha_guard_registry::LOGGING_FIELD_MAPS)]
+                #[linkme(crate = ::nirdosha_guard_registry::linkme)]
+                static #map_static_name: ::nirdosha_guard_registry::FieldMapRegistration = ::nirdosha_guard_registry::FieldMapRegistration {
+                    entity: #entity_lit,
+                    concept: #concept_lit,
+                    physical: &[#(#physical_tokens),*],
+                };
+            });
+        }
+    }
+
+    output.into()
+}
+
+#[derive(Debug, Default)]
+struct DatasetMaps {
+    entity: Option<String>,
+    concepts: Vec<(String, Vec<String>)>,
+}
+
+/// Parse `maps = { cvv = ["_CCV", "card_verification_value"], pin = ["PIN_HASH"] }`
+/// plus `entity = "..."` from the attribute token string. Also supports the
+/// `fields = [ "_CCV as cvv", "card_verification_value as cvv" ]` spelling.
+fn parse_dataset_maps(source: &str) -> DatasetMaps {
+    let mut out = DatasetMaps::default();
+
+    // entity = "..."
+    if let Some((_key, value)) = find_key_value(source, "entity") {
+        if let Some(v) = find_quoted(&value) {
+            out.entity = Some(v);
+        }
+    }
+
+    // maps = { concept = ["a", "b"], concept2 = ["c"] }
+    if let Some(body) = find_block_after_key(source, "maps", '{') {
+        for (concept, list_body) in split_key_value_list(&body) {
+            let physicals: Vec<String> =
+                list_body.split(',').filter_map(|s| find_quoted(s.trim())).collect();
+            if !physicals.is_empty() {
+                out.concepts.push((concept, physicals));
+            }
+        }
+    }
+
+    // fields = [ "_CCV as cvv", "PAN as pan" ]
+    if let Some(body) = find_block_after_key(source, "fields", '[') {
+        for item in body.split(',') {
+            let item = item.trim();
+            if let Some((physical, concept)) = parse_as_alias(item) {
+                out.concepts.push((concept, vec![physical]));
+            }
+        }
+    }
+
+    out
+}
+
+/// Find `key = ...` returning the raw text after `=` (trimmed).
+fn find_key_value(source: &str, key: &str) -> Option<(String, String)> {
+    let pattern = format!("{} =", key);
+    let start = source.find(&pattern)?;
+    let after = &source[start + pattern.len()..];
+    let end = after.find(',').or_else(|| Some(after.len())).unwrap();
+    let value = &after[..end];
+    Some((key.to_string(), value.trim().to_string()))
+}
+
+/// Find `key = <delim>...<matching delim>` and return the inner body.
+fn find_block_after_key(source: &str, key: &str, delim: char) -> Option<String> {
+    let pattern = format!("{} =", key);
+    let start = source.find(&pattern)?;
+    let after = &source[start + pattern.len()..];
+    let open = after.find(delim)?;
+    let body_start = open + 1;
+    let mut depth = 1;
+    for (i, c) in after[body_start..].char_indices() {
+        match c {
+            c if c == delim => depth += 1,
+            '}' if delim == '{' => depth -= 1,
+            ']' if delim == '[' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return Some(after[body_start..body_start + i].to_string());
+        }
+    }
+    None
+}
+
+fn split_key_value_list(body: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, c) in body.char_indices() {
+        match c {
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                if let Some((k, v)) = split_key_value(&body[start..i]) {
+                    out.push((k, v));
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some((k, v)) = split_key_value(&body[start..]) {
+        out.push((k, v));
+    }
+    out
+}
+
+fn split_key_value(pair: &str) -> Option<(String, String)> {
+    let pair = pair.trim();
+    let eq = pair.find('=')?;
+    let key = pair[..eq].trim().to_string();
+    let value = pair[eq + 1..].trim().to_string();
+    Some((key, value))
+}
+
+fn find_quoted(s: &str) -> Option<String> {
+    let open = s.find('"')?;
+    let rest = &s[open + 1..];
+    let close = rest.find('"')?;
+    Some(rest[..close].to_string())
+}
+
+fn parse_as_alias(item: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = item.split_whitespace().collect();
+    if parts.len() == 3 && parts[1] == "as" {
+        Some((strip_quotes(parts[0]).to_string(), strip_quotes(parts[2]).to_string()))
+    } else {
+        None
+    }
+}
+
+fn strip_quotes(s: &str) -> &str {
+    s.trim_matches('"')
 }
 
 /// `#[relation(source = "...", cardinality = N, ttl = ...)]`.

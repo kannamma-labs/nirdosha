@@ -13,6 +13,7 @@ quote = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+toml = "0.8"
 # `pack.rs` (issue #76): reads the same `.nir/hi.db` `plugins` table
 # `nirdosha-hi::hi_plugin` already writes, so a real compile path can
 # see which domain packs are actually installed and trusted. Same

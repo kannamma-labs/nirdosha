@@ -31,6 +31,7 @@ Verification tools that require a bespoke language put a trapdoor in front of ad
 | `effects(pure)` claim | not checked | verified against the function's real, resolved effects — an obvious lie is a build error even under plain `cargo`'s own macro expansion |
 | `requires(role = "…")` | **enforced by types** — an unforgeable proof token, uncallable without one, under *any* compiler | same enforcement, plus the claim is recorded in the certificate |
 | `nfr(latency_ms/…)` | enforced by an injected runtime guard | same, plus the SLA lands in the certificate |
+| `logging(domain, country)` | policy resolved and guard injected; metadata recorded | same, plus the resolved policy hash lands in the certificate |
 | Lying program | builds and runs | **refused, with the exact lines named** |
 
 ## See it refuse a lie — 30 seconds, no setup beyond `cargo`
@@ -49,7 +50,7 @@ cd examples/rt-payroll-lying && cargo nirdosha build   # same source, the real c
 ```
 nirdosha: error .../main.rs:32 fn `snapshot_audit` — claims effects(pure) but the body performs std::time::Instant::now (clock access) — a contract is a checked declaration, not a comment
 nirdosha: error .../main.rs:33 fn `snapshot_audit` — claims effects(pure) but the body performs std::fs::read_to_string (file system access) — a contract is a checked declaration, not a comment
-nirdosha: error .../main.rs:38 fn `mislabeled` — malformed `nirdosha:contract` JSON: unknown field `effekts`, expected one of `effects`, `requires`, `ensures`, `nfr`, `crud`, `resource`, `sequence` at line 1 column 10
+nirdosha: error .../main.rs:38 fn `mislabeled` — malformed `nirdosha:contract` JSON: unknown field `effekts`, expected one of `effects`, `requires`, `ensures`, `nfr`, `crud`, `resource`, `sequence`, `logging` at line 1 column 10
 nirdosha: rt-payroll-lying — source_scan: 1 files, 2 contracts inspected, 3 violations
 nirdosha: refusing to build — plain `cargo build` would have accepted this code; that difference is the product
 ```

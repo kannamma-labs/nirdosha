@@ -48,6 +48,7 @@ pub mod audit_projection;
 pub mod dashboard;
 pub mod export;
 pub mod nfr;
+pub mod logging_guard;
 pub mod policy;
 pub mod prelude;
 #[cfg(feature = "native")]

@@ -221,6 +221,31 @@ pub struct CatalogRegistration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetRecord { pub entity: String, pub store: String, pub fields: Vec<String>, pub classification: nirdosha_guard_core::Classification }
 
+/// Const-constructible logging field map entry. One registration per
+/// `(entity, concept, physical)` triple; the runtime builds a
+/// `DatasetFieldMap` by grouping all registrations for the same entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldMapRegistration {
+	pub entity: &'static str,
+	pub concept: &'static str,
+	pub physical: &'static [&'static str],
+}
+
+impl FieldMapRegistration {
+	pub fn to_field_map(entity: &str) -> nirdosha_guard_core::DatasetFieldMap {
+		let mut map: std::collections::BTreeMap<String, Vec<Vec<String>>> = std::collections::BTreeMap::new();
+		for reg in LOGGING_FIELD_MAPS.iter().filter(|r| r.entity == entity) {
+			map.entry(reg.concept.to_string())
+				.or_default()
+				.push(reg.physical.iter().map(|s| s.to_string()).collect());
+		}
+		nirdosha_guard_core::DatasetFieldMap {
+			entity: entity.to_string(),
+			concept_to_physical: map,
+		}
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleRecord { pub name: String }
 
@@ -535,6 +560,8 @@ pub static CATALOG: [CatalogRegistration] = [..];
 pub static DATASETS: [DatasetRecord] = [..];
 #[linkme::distributed_slice]
 pub static ROLES: [RoleRecord] = [..];
+#[linkme::distributed_slice]
+pub static LOGGING_FIELD_MAPS: [FieldMapRegistration] = [..];
 #[linkme::distributed_slice]
 pub static PORTS: [PortRegistration] = [..];
 #[linkme::distributed_slice]

@@ -20,7 +20,7 @@
 //! Unknown clauses are hard errors — in the dialect, a contract is a
 //! checked declaration, so a typo can never degrade into a comment.
 
-use crate::model::{Contract, Crud, Ensures, Nfr, Requires, Resource, Sequence};
+use crate::model::{Contract, Crud, Ensures, Logging, Nfr, Requires, Resource, Sequence};
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
 pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
@@ -62,6 +62,7 @@ pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
             "crud" => contract.crud = Some(parse_crud(&group)?),
             "resource" => contract.resource = Some(parse_resource(&group)?),
             "sequence" => contract.sequence = Some(parse_sequence(&group)?),
+            "logging" => contract.logging = Some(parse_logging(&group)?),
             other => {
                 return Err(syn::Error::new(
                     span,
@@ -73,7 +74,8 @@ pub fn parse_contract(tokens: TokenStream) -> syn::Result<Contract> {
                          nfr(latency_ms = N, concurrency_max = N), \
                          crud(op = \"delete\", policy = \"name\"), \
                          resource(kind = \"name\"), \
-                         sequence(before = \"name\", after = \"name\")"
+                         sequence(before = \"name\", after = \"name\"), \
+                         logging(domain = \"name\", country = \"code\")"
                     ),
                 ))
             }
@@ -405,6 +407,78 @@ fn parse_sequence(group: &proc_macro2::Group) -> syn::Result<Sequence> {
     let before = before.ok_or_else(|| syn::Error::new(group.span(), "sequence(..) requires `before`"))?;
     let after = after.ok_or_else(|| syn::Error::new(group.span(), "sequence(..) requires `after`"))?;
     Ok(Sequence { before, after })
+}
+
+/// `logging(domain = "payments", country = "US", entity = "transaction", event_class = "audit")`.
+/// `domain` and `country` are required; `entity` and `event_class` are optional.
+fn parse_logging(group: &proc_macro2::Group) -> syn::Result<Logging> {
+    let mut domain: Option<String> = None;
+    let mut country: Option<String> = None;
+    let mut entity: Option<String> = None;
+    let mut event_class: Option<String> = None;
+    let trees: Vec<TokenTree> = group.stream().into_iter().collect();
+    let mut i = 0;
+    while i < trees.len() {
+        let key = match &trees[i] {
+            TokenTree::Ident(id) => id.to_string(),
+            TokenTree::Punct(p) if p.as_char() == ',' => {
+                i += 1;
+                continue;
+            }
+            other => return Err(syn::Error::new(other.span(), "logging keys: domain, country, entity, event_class")),
+        };
+        match trees.get(i + 1) {
+            Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+            _ => return Err(syn::Error::new(trees[i].span(), "expected `=`")),
+        }
+        let span = trees[i].span();
+        let value = match trees.get(i + 2) {
+            Some(TokenTree::Literal(lit)) => match syn::Lit::new(lit.clone()) {
+                syn::Lit::Str(s) => s.value(),
+                _ => return Err(syn::Error::new(lit.span(), "logging values are string literals")),
+            },
+            _ => return Err(syn::Error::new(span, "logging values are string literals")),
+        };
+        match key.as_str() {
+            "domain" => {
+                if domain.is_some() { return Err(syn::Error::new(span, "domain declared twice")); }
+                domain = Some(value);
+            }
+            "country" => {
+                if country.is_some() { return Err(syn::Error::new(span, "country declared twice")); }
+                country = Some(value);
+            }
+            "entity" => {
+                if entity.is_some() { return Err(syn::Error::new(span, "entity declared twice")); }
+                entity = Some(value);
+            }
+            "event_class" => {
+                if event_class.is_some() { return Err(syn::Error::new(span, "event_class declared twice")); }
+                event_class = Some(value);
+            }
+            other => {
+                return Err(syn::Error::new(
+                    span,
+                    format!("unknown logging key `{other}` — valid keys: domain, country, entity, event_class"),
+                ))
+            }
+        }
+        i += 3;
+        if i < trees.len() {
+            match &trees[i] {
+                TokenTree::Punct(p) if p.as_char() == ',' => i += 1,
+                other => {
+                    return Err(syn::Error::new(
+                        other.span(),
+                        "logging items are comma-separated: logging(domain = \"payments\", country = \"US\")",
+                    ))
+                }
+            }
+        }
+    }
+    let domain = domain.ok_or_else(|| syn::Error::new(group.span(), "logging(..) requires `domain`"))?;
+    let country = country.ok_or_else(|| syn::Error::new(group.span(), "logging(..) requires `country`"))?;
+    Ok(Logging { domain, country, entity, event_class })
 }
 
 fn parse_number(lit: &proc_macro2::Literal, span: proc_macro2::Span) -> syn::Result<f64> {

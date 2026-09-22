@@ -69,6 +69,25 @@ pub fn extract_tenant(filter: &FilterExpr) -> Option<String> {
     }
 }
 
+/// Logical-to-physical field-name mapping for a dataset, used by the
+/// logging policy guard to resolve canonical compliance concepts (e.g.
+/// `cvv`) into the actual column names a store uses (e.g. `_CCV`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DatasetFieldMap {
+    pub entity: EntityId,
+    /// concept name -> list of physical field paths that carry that concept.
+    pub concept_to_physical: BTreeMap<String, Vec<FieldPath>>,
+}
+
+impl DatasetFieldMap {
+    pub fn physical_for(&self, concept: &str) -> &[FieldPath] {
+        self.concept_to_physical
+            .get(concept)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
 /// A path to a field inside a record, e.g. `customer.address.zip`.
 pub type FieldPath = Vec<String>;
 

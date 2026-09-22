@@ -165,6 +165,7 @@ data struct), consecutive doc lines joined before parsing.
 | `struct Case { id: i64, title: str }` | `pub struct Case { id: i64, title: String }` | Rust | rustc |
 | `str` / `unit` / `print(..)` | `String`/`&str` / `()` / `println!` | Rust | rustc |
 | contracts: `requires(role:)`, effects, nfr | `#[contract(..)]` **or** `/// nirdosha:contract {json}` | both (shipped) | macro + scanners + driver |
+| **logging-policy guard** | `#[contract(logging(domain = "..", country = "..", entity = ".."))]` **or** `/// nirdosha:contract {"logging":{"domain":"..","country":"..","entity":".."}}` | both | macro resolves policy register, runtime guard scrubs fields |
 | `requires(role)` gating, `acquire f(proof)` | `RoleProof<R>` typestate + `Auth::prove` (shipped) | Rust types | **rustc itself** — uncallable without proof, under any compiler |
 | CRUD conventions `list_/create_/update_/delete_<S>`, `stat_/chart_<name>` | the same names on real Rust fns | Rust | emit-ui infers from names — **zero encoding needed** |
 | `workflow Approval { data{..} state .. }` | `/// nirdosha:workflow {json}` on the real `ApprovalData` struct; `start_approval`/`advance_approval` are real Rust fns | comment | Nirdosha cross-references states↔events↔fns |

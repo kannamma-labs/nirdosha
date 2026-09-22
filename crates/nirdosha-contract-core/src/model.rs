@@ -38,6 +38,8 @@ pub struct Contract {
     pub resource: Option<Resource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<Sequence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<Logging>,
 }
 
 /// A role gate (`requires(role = "hr_staff")`), a claim gate
@@ -60,6 +62,17 @@ pub struct Requires {
     /// encodes as `Some(("department".into(), "cardiology".into()))`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Logging {
+    pub domain: String,
+    pub country: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_class: Option<String>,
 }
 
 /// `ensures(result >= 0)` — a postcondition over the function's own
@@ -237,6 +250,20 @@ impl Contract {
                 issues.push("sequence(before = ..., after = ...) — before and after must name different fns".into());
             }
         }
+        if let Some(logging) = &self.logging {
+            if logging.domain.is_empty() {
+                issues.push("logging(domain = ...) — domain must not be empty".into());
+            }
+            if logging.country.is_empty() {
+                issues.push("logging(country = ...) — country must not be empty".into());
+            }
+            match crate::logging_policy::load_register()
+                .and_then(|reg| reg.resolve(&logging.domain, &logging.country, logging.event_class.as_deref().unwrap_or("audit"), None))
+            {
+                Err(e) => issues.push(format!("logging policy resolution failed: {e}")),
+                Ok(_) => {}
+            }
+        }
         issues
     }
 }
@@ -274,12 +301,32 @@ mod tests {
                 before: "debit".into(),
                 after: "credit".into(),
             }),
+            logging: None,
         };
         let doc = c.doc_string();
         assert!(doc.starts_with("nirdosha:contract {"));
         match crate::docparse::parse_doc(&doc) {
             Ok(Some(back)) => assert_eq!(back, c),
             _ => panic!("doc contract did not roundtrip: {doc}"),
+        }
+    }
+
+    #[test]
+    fn doc_encoding_roundtrips_logging() {
+        let c = Contract {
+            logging: Some(Logging {
+                domain: "payments".into(),
+                country: "US".into(),
+                entity: Some("transaction".into()),
+                event_class: Some("auth".into()),
+            }),
+            ..Default::default()
+        };
+        let doc = c.doc_string();
+        assert!(doc.contains("logging"));
+        match crate::docparse::parse_doc(&doc) {
+            Ok(Some(back)) => assert_eq!(back, c),
+            _ => panic!("doc contract did not roundtrip logging: {doc}"),
         }
     }
 

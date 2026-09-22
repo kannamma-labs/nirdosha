@@ -36,6 +36,7 @@ If a new mechanism can't be expressed as one of the three real
 | `effects(pure)` | fast local scan in the macro: an obvious lie is a `compile_error!` even here | full source verification of every claim, incl. hand-written doc contracts |
 | `requires(role)` | **enforced by types** — unforgeable proof token, uncallable without a minted proof | same enforcement + the claim is verified and recorded |
 | `nfr(..)` | enforced by an injected runtime guard (latency recorded, concurrency gated) | same + SLA lands in the certificate |
+| `logging(domain, country)` | policy resolved and guard injected; metadata recorded | same + policy hash lands in the certificate |
 | dialect rules (`unsafe`, raw threads, raw locks) | not enforced (plain Rust) | **build errors** |
 | Certificate | none | `<target>/nirdosha/contract-report-<pkg>.json` |
 | Lying program | builds and runs | **refused, with exact lines named** |
@@ -184,7 +185,42 @@ injected proof parameter does not resolve.
   vendored source anywhere in it), so there is currently nothing to
   migrate onto.
 
-## 5. What each surface catches (the honest matrix)
+## 5. Jurisdiction-aware logging policy (new)
+
+`#[contract(logging(domain = "payments", country = "US", entity = "transaction"))]`
+resolves a signed, versioned policy register at compile time and
+injects a `Drop`-based logging guard. The guard records per-call
+metadata and, when the caller emits an event, scrubs it against the
+resolved rules:
+
+- **Level** — the policy selects `debug`/`info`/`notice`/`warn`/`error`/`fatal`.
+- **Retention** — `retention_days` and `min_retention_days` travel in the
+  metadata for downstream collectors; the macro lint rejects a ceiling
+  below a statutory floor.
+- **Field dictionary + dataset maps** — the policy uses canonical names
+  (`cvv`, `pan`, `ssn`). `#[dataset(..., maps = { cvv = ["_CCV"] })]` binds
+  those canonical names to the physical columns a store actually uses,
+  so scrubbing works even when the column is named `_CCV` or
+  `card_verification_value`.
+- **Mask / forbid / require** — masked fields are rewritten before egress;
+  forbidden fields abort the event; required fields must be present.
+
+The default policy register is embedded in `assets/logging-policies/default.toml`.
+A custom signed policy can be staged by `cargo nirdosha` via
+`NIRDOSHA_LOGGING_POLICY_PATH` before rustc is invoked. The proc macro
+never performs network I/O; policy download and signature verification
+happen in the build driver. Because cargo does not automatically
+rerun proc macros when an arbitrary env var changes, switch the policy
+file with a clean build or by touching the source file that carries the
+`#[contract(logging(...))]` claim.
+
+**Honesty note:** field maps are resolved at runtime from the
+`LOGGING_FIELD_MAPS` distributed slice. A missing map falls back to
+using the logical name as the physical path, which is the safe default
+for schemas that already use canonical names. Compile-time cross-checks
+between policy concepts and declared dataset maps are follow-on work.
+
+## 6. What each surface catches (the honest matrix)
 
 | Lie | plain cargo | `cargo nirdosha build --fast` (Stage 1) | `cargo nirdosha build` (Stage 2, default) |
 |---|---|---|---|
@@ -198,14 +234,17 @@ injected proof parameter does not resolve.
 | unsafe / raw threads / raw locks | runs | **refused** | refused (same rules, spans from MIR) |
 | SLA breach (`nfr(latency_ms)`) | invisible | `cargo nirdosha bench` gates p95 under the real workload | same (Stage 2.5 binds Z3-guided synthetic benches) |
 
-## 6. Crate map
+## 7. Crate map
 
 | Crate | Job |
 |---|---|
-| `crates/nirdosha-contract-core` | contract model + JSON encoding, attribute parser, impure/dialect scanners (shared by macro, compiler, driver) |
-| `crates/nirdosha-macros` | `#[contract]`: parse, honesty-check locally, inject proof param + NFR guard, emit doc encoding |
-| `crates/nirdosha-rt` | runtime: `roles!`, `RoleProof`, `Auth`, NFR guard + flight recorder; re-exports `contract` |
-| `crates/cargo-nirdosha` | the Nirdosha compiler CLI: verify → refuse-or-delegate → certificates; `--workspace` strict gate; `bench` SLA gate; wires in the driver by default, `--fast`/`--shallow` opts out |
+| `crates/nirdosha-contract-core` | contract model + JSON encoding, attribute parser, impure/dialect scanners, **logging-policy register parser + resolver** (shared by macro, compiler, driver) |
+| `crates/nirdosha-macros` | `#[contract]`: parse, honesty-check locally, inject proof param + NFR guard + **logging guard**, emit doc encoding |
+| `crates/nirdosha-rt` | runtime: `roles!`, `RoleProof`, `Auth`, NFR guard + flight recorder + **logging guard + dataset field maps**; re-exports `contract` + `dataset` |
+| `crates/nirdosha-guard-core` | store-agnostic access-control IR + **DatasetFieldMap** type |
+| `crates/nirdosha-guard-registry` | distributed slices: `POLICIES`, `CATALOG`, `DATASETS`, `ROLES`, **LOGGING_FIELD_MAPS** |
+| `crates/nirdosha-guard-macros` | `#[dataset(..., maps = { ... })]` + other Guard catalog macros |
+| `crates/cargo-nirdosha` | the Nirdosha compiler CLI: verify → refuse-or-delegate → certificates; `--workspace` strict gate; `bench` SLA gate; **stages signed logging-policy TOML**; wires in the driver by default, `--fast`/`--shallow` opts out |
 | `crates/nirdosha-driver` | Stage 2 rustc driver: MIR interprocedural effects, real name resolution, totality checks, default-deny third party |
 | `examples/rt-payroll` | compliant program; all contract forms on display; passes the default (Stage 2) gate |
 | `examples/rt-payroll-lying` | zero-dependency lying program; plain cargo runs it, nirdosha refuses it |
@@ -276,7 +315,7 @@ cargo nirdosha verify-certificate <path> --public-key <base64>  # check a signed
 cargo build --features fips -p cargo-nirdosha                   # CMVP-validatable signing backend (aws-lc-rs)
 ```
 
-## 7. What this borrows from the `.nir` compiler (and what replaces it)
+## 8. What this borrows from the `.nir` compiler (and what replaces it)
 
 `effects.rs` semantics (the effect vocabulary, declared-vs-actual
 checking) now live over Rust syntax as the MIR effect lattice.
@@ -288,7 +327,7 @@ The `.nir` frontend (token/parser/ast) is *replaced by rustc itself* —
 that is the point: we stop maintaining a grammar and start inheriting
 the entire Rust ecosystem, LLM training priors included.
 
-## 8. Relationship to the strategy
+## 9. Relationship to the strategy
 
 - **The category claim, sharpened:** "guarantees about the language, not
   the model" now applies to the language agents already write. The

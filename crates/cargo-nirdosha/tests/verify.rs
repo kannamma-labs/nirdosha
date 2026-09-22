@@ -198,6 +198,7 @@ fn bench_gates_hold_and_breach() {
             }),
             crud: None,
             sequence: None,
+            logging: None,
         },
         is_pub: true,
     };

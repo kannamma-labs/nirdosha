@@ -24,6 +24,7 @@ pub mod claim;
 pub mod docparse;
 pub mod declarations;
 pub mod evidence;
+pub mod logging_policy;
 pub mod model;
 pub mod naming;
 pub mod pack;

@@ -333,6 +333,86 @@ fn expand(
         .expect("nfr guard wrapper always parses");
     }
 
+    // --- runtime injection: logging(..) wraps the body in a Drop-based guard ---
+    if let Some(logging) = &contract.logging {
+        let event_class = logging.event_class.as_deref().unwrap_or("audit");
+        let resolved = match cc::logging_policy::load_register()
+            .and_then(|reg| reg.resolve(&logging.domain, &logging.country, event_class, None))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return syn::Error::new(
+                    fn_item.sig.ident.span(),
+                    format!(
+                        "logging policy resolution failed for domain={} country={}: {}",
+                        logging.domain, logging.country, e
+                    ),
+                )
+                .to_compile_error();
+            }
+        };
+
+        let policy_const_name = quote::format_ident!("__NIRDOSHA_LOG_POLICY_{}", fn_item.sig.ident.to_string().to_ascii_uppercase());
+        let domain_lit = syn::LitStr::new(&logging.domain, fn_item.sig.ident.span());
+        let country_lit = syn::LitStr::new(&logging.country, fn_item.sig.ident.span());
+        let rule_ids_lit = syn::LitStr::new(&resolved.rule_ids.join(", "), fn_item.sig.ident.span());
+        let basis_lit = syn::LitStr::new(&resolved.basis.join(", "), fn_item.sig.ident.span());
+        let retention_lit = syn::LitInt::new(&resolved.retention_days.to_string(), proc_macro2::Span::call_site());
+        let level_expr = log_level_to_tokens(resolved.level);
+
+        let mask_fields: Vec<_> = resolved
+            .mask
+            .iter()
+            .map(|(f, t)| {
+                let f_lit = syn::LitStr::new(f, proc_macro2::Span::call_site());
+                let t_lit = syn::LitStr::new(t, proc_macro2::Span::call_site());
+                quote!((#f_lit, #t_lit))
+            })
+            .collect();
+        let forbid_fields: Vec<_> = resolved
+            .forbid
+            .iter()
+            .map(|f| syn::LitStr::new(f, proc_macro2::Span::call_site()))
+            .collect();
+        let require_fields: Vec<_> = resolved
+            .require_in_event
+            .iter()
+            .map(|f| syn::LitStr::new(f, proc_macro2::Span::call_site()))
+            .collect();
+
+        let entity_expr = match &logging.entity {
+            Some(e) => {
+                let e_lit = syn::LitStr::new(e, proc_macro2::Span::call_site());
+                quote!(Some(#e_lit))
+            }
+            None => quote!(None),
+        };
+        let fn_name_lit = syn::LitStr::new(&fn_name, fn_item.sig.ident.span());
+
+        let original = &fn_item.block;
+        fn_item.block = syn::parse2(quote! {{
+            const #policy_const_name: ::nirdosha_rt::logging_guard::Policy =
+                ::nirdosha_rt::logging_guard::Policy {
+                    rule_ids: #rule_ids_lit,
+                    domain: #domain_lit,
+                    country: #country_lit,
+                    level: #level_expr,
+                    retention_days: #retention_lit,
+                    mask_fields: &[#(#mask_fields),*],
+                    forbid_fields: &[#(#forbid_fields),*],
+                    require_fields: &[#(#require_fields),*],
+                    basis: #basis_lit,
+                };
+            let __nirdosha_logging_guard = ::nirdosha_rt::logging_guard::enter(
+                #fn_name_lit,
+                &#policy_const_name,
+                #entity_expr,
+            );
+            #original
+        }})
+        .expect("logging guard wrapper always parses");
+    }
+
     // --- policy cross-check: crud(op, policy) becomes a real const assertion,
     // not a doc-comment scanner. rustc's own const-evaluator refuses the
     // build if the named policy forbids the named operation — see
@@ -367,3 +447,15 @@ fn expand(
         #fn_item
     }
 }
+
+fn log_level_to_tokens(level: nirdosha_contract_core::logging_policy::LogLevel) -> proc_macro2::TokenStream {
+    match level {
+        nirdosha_contract_core::logging_policy::LogLevel::Debug => quote::quote!(::nirdosha_rt::logging_guard::Level::Debug),
+        nirdosha_contract_core::logging_policy::LogLevel::Info => quote::quote!(::nirdosha_rt::logging_guard::Level::Info),
+        nirdosha_contract_core::logging_policy::LogLevel::Notice => quote::quote!(::nirdosha_rt::logging_guard::Level::Notice),
+        nirdosha_contract_core::logging_policy::LogLevel::Warn => quote::quote!(::nirdosha_rt::logging_guard::Level::Warn),
+        nirdosha_contract_core::logging_policy::LogLevel::Error => quote::quote!(::nirdosha_rt::logging_guard::Level::Error),
+        nirdosha_contract_core::logging_policy::LogLevel::Fatal => quote::quote!(::nirdosha_rt::logging_guard::Level::Fatal),
+    }
+}
+
