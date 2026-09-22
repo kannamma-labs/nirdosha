@@ -37,7 +37,7 @@ pub use entity::GuardedEntity;
 pub use error::{guard_error_response, GuardScreenError};
 
 use nirdosha_audit::envelope::{AuditEnvelope, AuditRecordKind};
-use nirdosha_guard_core::approval_chain::{ApprovalChainDefinition, ApprovalChainError, ApprovalChainRuntime, EscalationStatus};
+use nirdosha_guard_core::approval_chain::{ApprovalChainDefinition, ApprovalChainError, ApprovalChainRuntime, EscalationOutcome, EscalationStatus};
 use nirdosha_guard_core::evaluator::{EvaluationResult, PolicyCandidate};
 use nirdosha_guard_core::{
     Action, Cap, Classification, Decision, Destination, EscalateTarget, Environment, EvaluationContext, FilterExpr,
@@ -63,6 +63,34 @@ pub struct PendingApproval {
     pub chain: String,
     pub quorum: u8,
     pub approvals_so_far: u8,
+    /// `Some(ready_at_ms)` once quorum is real but the chain's
+    /// `cooling(...)` window hasn't elapsed yet — `approvals_so_far ==
+    /// quorum` in this state, but the write has NOT committed (T-04:
+    /// "cooling period on approve"). `None` for an ordinary still-short
+    /// pending escalation.
+    pub cooling_ready_at: Option<u64>,
+}
+
+/// One row of a cross-entity approval inbox: everything
+/// `approval_inbox!` needs to render an escalation without the caller
+/// re-deriving quorum/status math itself. Built from
+/// `ApprovalChainRuntime::list_pending`'s real per-table state -- not a
+/// separate, weaker tracking structure.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PendingApprovalRow {
+    pub escalation_id: String,
+    pub chain: String,
+    pub resource: String,
+    pub proposer: String,
+    pub opened_at: u64,
+    pub deadline: u64,
+    pub quorum: u8,
+    pub approvals_so_far: u8,
+    pub approver_ids: Vec<String>,
+    /// One of: "pending", "cooling", "approved", "denied_timeout", "returned".
+    pub status: String,
+    pub cooling_ready_at: Option<u64>,
+    pub return_reason: Option<String>,
 }
 
 /// The outcome of a two-step escalated write: either quorum was already
@@ -941,18 +969,20 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
                 let resource = scope::storage_key(E::RESOURCE, row_id);
                 let deadline = now_ms + 24 * 60 * 60 * 1000;
                 approvals.open(escalation_id.clone(), &chain, resource, auth.user(), now_ms, deadline).map_err(|e| GuardScreenError::Store(format!("{e:?}")))?;
-                let (approvals_so_far, quorum) = match proposer_role {
+                let (approvals_so_far, quorum, cooling_ready_at) = match proposer_role {
                     Some(role) => {
                         let status = approvals.approve(&escalation_id, auth.user(), &role, now_ms).map_err(|e| GuardScreenError::Store(format!("{e:?}")))?;
                         match status {
-                            EscalationStatus::Pending { approvals_so_far, quorum } => (approvals_so_far, quorum),
-                            EscalationStatus::Approved => (definition.quorum, definition.quorum), // quorum == 1: proposer alone satisfies it
+                            EscalationStatus::Pending { approvals_so_far, quorum } => (approvals_so_far, quorum, None),
+                            EscalationStatus::Approved => (definition.quorum, definition.quorum, None), // quorum == 1, no cooling: proposer alone satisfies it
+                            EscalationStatus::Cooling { ready_at } => (definition.quorum, definition.quorum, Some(ready_at)), // quorum == 1, cooling: proposer alone reached quorum but window hasn't elapsed
                             EscalationStatus::DeniedTimeout => return Err(GuardScreenError::Store("escalation timed out immediately — check the chain's own deadline arithmetic".into())),
+                            EscalationStatus::Returned { .. } => return Err(GuardScreenError::Store("a freshly-opened escalation cannot already be returned".into())),
                         }
                     }
-                    None => (0, definition.quorum),
+                    None => (0, definition.quorum, None),
                 };
-                Ok(EscalatedWrite::Pending(PendingApproval { escalation_id, chain, quorum, approvals_so_far }))
+                Ok(EscalatedWrite::Pending(PendingApproval { escalation_id, chain, quorum, approvals_so_far, cooling_ready_at }))
             }
             Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
         }
@@ -1010,9 +1040,118 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
                 let allow_records = self.matching_allow_records(&purpose_request.context.subject.roles, action_str, purpose);
                 self.commit_action(row_id, &allow_records, apply, None, &purpose_request.context.policy_version, write_action, &purpose_request.context.subject.id).map(EscalatedWrite::Committed)
             }
-            EscalationStatus::Pending { approvals_so_far, .. } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far })),
+            EscalationStatus::Cooling { ready_at } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far: quorum, cooling_ready_at: Some(ready_at) })),
+            EscalationStatus::Pending { approvals_so_far, .. } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far, cooling_ready_at: None })),
             EscalationStatus::DeniedTimeout => Err(GuardScreenError::Denied("escalation timed out before reaching quorum (I3: timeout resolves to deny)".into())),
+            EscalationStatus::Returned { reason } => Err(GuardScreenError::Denied(format!("escalation was returned: {reason}"))),
         }
+    }
+
+    /// Finalizes a `Cooling` escalation once its window has elapsed --
+    /// the counterpart to `guarded_confirm_escalated_action` for chains
+    /// with `cooling(...)`. Does not require a fresh distinct approval
+    /// (quorum was already real); any role eligible on the chain may
+    /// call this once `now_ms` has passed the cooling deadline, same
+    /// `apply` contract as confirm (caller re-derives the identical
+    /// mutation).
+    #[allow(clippy::too_many_arguments)]
+    pub fn guarded_finalize_escalated_action(&self, auth: &Auth, purpose: &str, action: Action, action_str: &str, write_action: WriteAction, row_id: &str, chain: &str, escalation_id: &str, changed_fields: &HashSet<String>, apply: impl FnOnce(&mut E), now_ms: u64) -> Result<EscalatedWrite<E>, GuardScreenError> {
+        let (quorum, status) = {
+            let mut approvals = self.approvals.lock().expect("approval runtime lock poisoned");
+            let definition = approvals
+                .definition(chain)
+                .cloned()
+                .ok_or_else(|| GuardScreenError::Store(format!("chain `{chain}` has no registered approval_chain! definition")))?;
+            definition
+                .approver_roles
+                .iter()
+                .find(|role| auth.has_role(role))
+                .ok_or_else(|| GuardScreenError::Denied(format!("no role held by `{}` is eligible on chain `{chain}`", auth.user())))?;
+            let status = approvals.finalize(escalation_id, now_ms).map_err(|e| GuardScreenError::Store(format!("{e:?}")))?;
+            (definition.quorum, status)
+        };
+        match status {
+            EscalationStatus::Approved => {
+                let purpose_request = EvalRequest { context: self.context(auth, action, purpose) };
+                let mut submitted = changed_fields.clone();
+                for exempt in E::field_policy_exempt() {
+                    submitted.remove(*exempt);
+                }
+                let allow_records = self.matching_allow_records(&purpose_request.context.subject.roles, action_str, purpose);
+                self.commit_action(row_id, &allow_records, apply, None, &purpose_request.context.policy_version, write_action, &purpose_request.context.subject.id).map(EscalatedWrite::Committed)
+            }
+            EscalationStatus::Cooling { ready_at } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far: quorum, cooling_ready_at: Some(ready_at) })),
+            EscalationStatus::Pending { approvals_so_far, .. } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far, cooling_ready_at: None })),
+            EscalationStatus::DeniedTimeout => Err(GuardScreenError::Denied("escalation timed out before reaching quorum (I3: timeout resolves to deny)".into())),
+            EscalationStatus::Returned { reason } => Err(GuardScreenError::Denied(format!("escalation was returned: {reason}"))),
+        }
+    }
+
+    /// An eligible approver actively returns (rejects) a still-open
+    /// escalation with a mandatory reason -- T-04's return-with-reason
+    /// invariant, machine-checked at this layer (empty reason is a
+    /// named deny, not a silent no-op).
+    pub fn guarded_return_escalated(&self, auth: &Auth, chain: &str, escalation_id: &str, reason: &str, now_ms: u64) -> Result<(), GuardScreenError> {
+        let mut approvals = self.approvals.lock().expect("approval runtime lock poisoned");
+        let definition = approvals
+            .definition(chain)
+            .cloned()
+            .ok_or_else(|| GuardScreenError::Store(format!("chain `{chain}` has no registered approval_chain! definition")))?;
+        let role = definition
+            .approver_roles
+            .iter()
+            .find(|role| auth.has_role(role))
+            .cloned()
+            .ok_or_else(|| GuardScreenError::Denied(format!("no role held by `{}` is eligible to return chain `{chain}`", auth.user())))?;
+        approvals.return_with_reason(escalation_id, auth.user(), &role, reason, now_ms).map_err(|e| match e {
+            ApprovalChainError::EmptyReturnReason => GuardScreenError::Denied("a return requires a non-empty reason".into()),
+            ApprovalChainError::AlreadyResolved(_) => GuardScreenError::Denied("escalation already resolved".into()),
+            ApprovalChainError::Expired => GuardScreenError::Denied("escalation timed out before it could be returned".into()),
+            other => GuardScreenError::Store(format!("{other:?}")),
+        })?;
+        Ok(())
+    }
+
+    /// This table's own pending/cooling/recently-resolved escalations --
+    /// the real per-entity slice an `approval_inbox!` screen merges
+    /// across the several `GuardedTable`s it names (case/rule-catalog/
+    /// payment/sar_bundle/...), the same merge-projection shape B8's
+    /// `AC.all_chains` already established for audit chains.
+    pub fn list_pending_approvals(&self) -> Vec<PendingApprovalRow> {
+        let approvals = self.approvals.lock().expect("approval runtime lock poisoned");
+        approvals
+            .list_pending()
+            .into_iter()
+            .map(|escalation| {
+                let quorum = approvals.definition(&escalation.chain).map(|d| d.quorum).unwrap_or(0);
+                let (status, cooling_ready_at, return_reason) = match &escalation.outcome {
+                    Some(EscalationOutcome::Approved) => ("approved".to_string(), None, None),
+                    Some(EscalationOutcome::DeniedTimeout) => ("denied_timeout".to_string(), None, None),
+                    Some(EscalationOutcome::Returned { reason, .. }) => ("returned".to_string(), None, Some(reason.clone())),
+                    None => match escalation.quorum_reached_at {
+                        Some(reached_at) => {
+                            let cooling_ms = approvals.definition(&escalation.chain).map(|d| d.cooling_period_ms).unwrap_or(0);
+                            ("cooling".to_string(), Some(reached_at + cooling_ms), None)
+                        }
+                        None => ("pending".to_string(), None, None),
+                    },
+                };
+                PendingApprovalRow {
+                    escalation_id: escalation.id,
+                    chain: escalation.chain,
+                    resource: escalation.resource,
+                    proposer: escalation.subject_id,
+                    opened_at: escalation.opened_at,
+                    deadline: escalation.deadline,
+                    quorum,
+                    approvals_so_far: escalation.approvals.len() as u8,
+                    approver_ids: escalation.approvals.iter().map(|a| a.approver_id.clone()).collect(),
+                    status,
+                    cooling_ready_at,
+                    return_reason,
+                }
+            })
+            .collect()
     }
 
     /// Export's own propose/confirm pair -- real corpus policies
@@ -1053,18 +1192,20 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
                 let resource = format!("{}:export", E::RESOURCE);
                 let deadline = now_ms + 24 * 60 * 60 * 1000;
                 approvals.open(escalation_id.clone(), &chain, resource, auth.user(), now_ms, deadline).map_err(|e| GuardScreenError::Store(format!("{e:?}")))?;
-                let (approvals_so_far, quorum) = match proposer_role {
+                let (approvals_so_far, quorum, cooling_ready_at) = match proposer_role {
                     Some(role) => {
                         let status = approvals.approve(&escalation_id, auth.user(), &role, now_ms).map_err(|e| GuardScreenError::Store(format!("{e:?}")))?;
                         match status {
-                            EscalationStatus::Pending { approvals_so_far, quorum } => (approvals_so_far, quorum),
-                            EscalationStatus::Approved => (definition.quorum, definition.quorum),
+                            EscalationStatus::Pending { approvals_so_far, quorum } => (approvals_so_far, quorum, None),
+                            EscalationStatus::Approved => (definition.quorum, definition.quorum, None),
+                            EscalationStatus::Cooling { ready_at } => (definition.quorum, definition.quorum, Some(ready_at)),
                             EscalationStatus::DeniedTimeout => return Err(GuardScreenError::Store("escalation timed out immediately".into())),
+                            EscalationStatus::Returned { .. } => return Err(GuardScreenError::Store("a freshly-opened escalation cannot already be returned".into())),
                         }
                     }
-                    None => (0, definition.quorum),
+                    None => (0, definition.quorum, None),
                 };
-                Ok(EscalatedWrite::Pending(PendingApproval { escalation_id, chain, quorum, approvals_so_far }))
+                Ok(EscalatedWrite::Pending(PendingApproval { escalation_id, chain, quorum, approvals_so_far, cooling_ready_at }))
             }
             Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
         }
@@ -1118,8 +1259,10 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
                 self.record_audit_decision(&request, &evaluation);
                 self.scan_allowed(&request, purpose, &evaluation).map(EscalatedWrite::Committed)
             }
-            EscalationStatus::Pending { approvals_so_far, .. } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far })),
+            EscalationStatus::Cooling { ready_at } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far: quorum, cooling_ready_at: Some(ready_at) })),
+            EscalationStatus::Pending { approvals_so_far, .. } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far, cooling_ready_at: None })),
             EscalationStatus::DeniedTimeout => Err(GuardScreenError::Denied("escalation timed out before reaching quorum (I3: timeout resolves to deny)".into())),
+            EscalationStatus::Returned { reason } => Err(GuardScreenError::Denied(format!("escalation was returned: {reason}"))),
         }
     }
 
@@ -1559,7 +1702,7 @@ mod tests {
     }
 
     fn case_review_chain() -> ApprovalChainDefinition {
-        ApprovalChainDefinition { name: "case_review".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()] }
+        ApprovalChainDefinition { name: "case_review".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()], cooling_period_ms: 0 }
     }
 
     /// `60_case_management.nir`'s real shape: `case-close-confirm` is
@@ -1609,7 +1752,7 @@ mod tests {
         let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
         let mut migrate_candidate = candidate("widget-migrate", PolicyEffect::Allow, &["Admin"], Action::Migrate, Some("Ops"), None, vec![]);
         migrate_candidate.escalation = Some(EscalateTarget::Approval { chain: "policy_release".into() });
-        let chain = ApprovalChainDefinition { name: "policy_release".into(), quorum: 2, approver_roles: vec!["PolicyEngineer".into(), "ComplianceLead".into()] };
+        let chain = ApprovalChainDefinition { name: "policy_release".into(), quorum: 2, approver_roles: vec!["PolicyEngineer".into(), "ComplianceLead".into()], cooling_period_ms: 0 };
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, migrate_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Admin".into(), "PolicyEngineer".into(), "ComplianceLead".into()], "tenant-a", vec![chain]);
         table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
 
@@ -1673,6 +1816,127 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn case_review_chain_with_cooling() -> ApprovalChainDefinition {
+        ApprovalChainDefinition { name: "case_review".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()], cooling_period_ms: 1_000 }
+    }
+
+    /// T-04/B10: a chain with `cooling(...)` doesn't commit the instant
+    /// quorum is reached -- `guarded_confirm_escalated_update` surfaces
+    /// `Cooling` as `Pending` (real, not a silent auto-approve), and only
+    /// `guarded_finalize_escalated_action`, called once the window has
+    /// genuinely elapsed, commits.
+    #[test]
+    fn escalated_update_with_cooling_stays_pending_until_finalized_after_the_window() {
+        let root = scratch_dir("escalate-cooling");
+        let driver = MemStoreDriver::new();
+        let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
+        let mut close_candidate = candidate("widget-close-confirm", PolicyEffect::Allow, &["ComplianceLead"], Action::Update, Some("Ops"), None, vec![]);
+        close_candidate.escalation = Some(EscalateTarget::Approval { chain: "case_review".into() });
+        let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, close_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "ComplianceLead".into()], "tenant-a", vec![case_review_chain_with_cooling()]);
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
+
+        let lead_a = Auth::login("lead-a", &["ComplianceLead"]);
+        let lead_b = Auth::login("lead-b", &["ComplianceLead"]);
+        let changed: HashSet<String> = ["name".into()].into();
+        let pending = match table.guarded_propose_escalated_update(&lead_a, "Ops", "w-1", &changed, |w| w.name = "closed".into(), 1_000).expect("propose") {
+            EscalatedWrite::Pending(p) => p,
+            EscalatedWrite::Committed(_) => panic!("must be pending after one approval"),
+        };
+
+        let after_quorum = table
+            .guarded_confirm_escalated_update(&lead_b, "Ops", "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 2_000)
+            .expect("quorum reached");
+        match after_quorum {
+            EscalatedWrite::Pending(p) => assert_eq!(p.cooling_ready_at, Some(3_000), "quorum(2) at t=2000 + cooling(1000ms)"),
+            EscalatedWrite::Committed(row) => panic!("cooling(...) must not commit on the same call quorum was reached: {row:?}"),
+        }
+
+        let too_early = table
+            .guarded_finalize_escalated_action(&lead_a, "Ops", Action::Update, "update", WriteAction::Update, "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 2_500)
+            .expect("finalize before ready_at");
+        assert!(matches!(too_early, EscalatedWrite::Pending(_)), "still cooling at t=2500 (ready_at=3000): {too_early:?}");
+
+        let finalized = table
+            .guarded_finalize_escalated_action(&lead_a, "Ops", Action::Update, "update", WriteAction::Update, "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 3_000)
+            .expect("finalize at ready_at");
+        match finalized {
+            EscalatedWrite::Committed(row) => assert_eq!(row.name, "closed"),
+            EscalatedWrite::Pending(p) => panic!("cooling window elapsed at t=3000; finalize must commit: {p:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// T-04/B10: `guarded_return_escalated` is real and generic -- an
+    /// eligible approver returns a cooling escalation with a mandatory
+    /// reason, and it never reaches `Approved` even once the clock would
+    /// otherwise have finalized it.
+    #[test]
+    fn guarded_return_escalated_blocks_finalize_and_requires_a_real_reason() {
+        let root = scratch_dir("escalate-return");
+        let driver = MemStoreDriver::new();
+        let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
+        let mut close_candidate = candidate("widget-close-confirm", PolicyEffect::Allow, &["ComplianceLead"], Action::Update, Some("Ops"), None, vec![]);
+        close_candidate.escalation = Some(EscalateTarget::Approval { chain: "case_review".into() });
+        let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, close_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "ComplianceLead".into()], "tenant-a", vec![case_review_chain_with_cooling()]);
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
+
+        let lead_a = Auth::login("lead-a", &["ComplianceLead"]);
+        let lead_b = Auth::login("lead-b", &["ComplianceLead"]);
+        let changed: HashSet<String> = ["name".into()].into();
+        let pending = match table.guarded_propose_escalated_update(&lead_a, "Ops", "w-1", &changed, |w| w.name = "closed".into(), 1_000).expect("propose") {
+            EscalatedWrite::Pending(p) => p,
+            EscalatedWrite::Committed(_) => panic!("must be pending after one approval"),
+        };
+        table.guarded_confirm_escalated_update(&lead_b, "Ops", "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 2_000).expect("quorum reached, now cooling");
+
+        let empty_reason = table.guarded_return_escalated(&lead_a, &pending.chain, &pending.escalation_id, "   ", 2_100);
+        assert_eq!(empty_reason, Err(GuardScreenError::Denied("a return requires a non-empty reason".into())));
+
+        table.guarded_return_escalated(&lead_a, &pending.chain, &pending.escalation_id, "wrong widget targeted", 2_200).expect("real reason returns it");
+
+        let after_return = table
+            .guarded_finalize_escalated_action(&lead_b, "Ops", Action::Update, "update", WriteAction::Update, "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 5_000)
+            .expect_err("a returned escalation must never finalize to Approved, even long past the original ready_at");
+        assert!(matches!(after_return, GuardScreenError::Denied(_)), "{after_return:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// T-04/B10: `list_pending_approvals` -- the real per-table read
+    /// `approval_inbox!`'s merged cross-entity view is built from.
+    #[test]
+    fn list_pending_approvals_reflects_cooling_and_resolved_state() {
+        let root = scratch_dir("list-pending");
+        let driver = MemStoreDriver::new();
+        let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
+        let mut close_candidate = candidate("widget-close-confirm", PolicyEffect::Allow, &["ComplianceLead"], Action::Update, Some("Ops"), None, vec![]);
+        close_candidate.escalation = Some(EscalateTarget::Approval { chain: "case_review".into() });
+        let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, close_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "ComplianceLead".into()], "tenant-a", vec![case_review_chain_with_cooling()]);
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
+
+        let lead_a = Auth::login("lead-a", &["ComplianceLead"]);
+        let lead_b = Auth::login("lead-b", &["ComplianceLead"]);
+        let changed: HashSet<String> = ["name".into()].into();
+        let pending = match table.guarded_propose_escalated_update(&lead_a, "Ops", "w-1", &changed, |w| w.name = "closed".into(), 1_000).expect("propose") {
+            EscalatedWrite::Pending(p) => p,
+            EscalatedWrite::Committed(_) => panic!("must be pending"),
+        };
+        let before_quorum = table.list_pending_approvals();
+        assert_eq!(before_quorum.len(), 1);
+        assert_eq!(before_quorum[0].status, "pending");
+        assert_eq!(before_quorum[0].proposer, "lead-a");
+
+        table.guarded_confirm_escalated_update(&lead_b, "Ops", "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 2_000).expect("quorum reached");
+        let cooling = table.list_pending_approvals();
+        assert_eq!(cooling[0].status, "cooling");
+        assert_eq!(cooling[0].cooling_ready_at, Some(3_000));
+        assert_eq!(cooling[0].approver_ids, vec!["lead-a".to_string(), "lead-b".to_string()]);
+
+        table.guarded_finalize_escalated_action(&lead_a, "Ops", Action::Update, "update", WriteAction::Update, "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 3_000).expect("finalize");
+        let resolved = table.list_pending_approvals();
+        assert_eq!(resolved[0].status, "approved");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn obligate_notify_fires_the_registered_hook_on_a_real_committed_write() {
         let root = scratch_dir("obligate-notify");
@@ -1730,7 +1994,7 @@ mod tests {
         let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
         let mut export_candidate = candidate("widget-export", PolicyEffect::Allow, &["Analyst"], Action::Export, Some("Ops"), None, vec![]);
         export_candidate.escalation = Some(EscalateTarget::Approval { chain: "egress_release".into() });
-        let egress_chain = ApprovalChainDefinition { name: "egress_release".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()] };
+        let egress_chain = ApprovalChainDefinition { name: "egress_release".into(), quorum: 2, approver_roles: vec!["ComplianceLead".into()], cooling_period_ms: 0 };
         let table = GuardedTable::<_, Widget>::new(driver, vec![write_candidate, export_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "Analyst".into(), "ComplianceLead".into()], "tenant-a", vec![egress_chain]);
         table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "n".into(), secret_note: Some("s".into()) }).expect("seed");
 

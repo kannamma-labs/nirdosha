@@ -42,6 +42,7 @@ fn main() {
     let router = rtm::m02_dashboards::mount_l1_dashboard(router);
     let router = rtm::m02_dashboards::mount_team_dashboard(router);
     let router = rtm::m02_dashboards::mount_monitoring_wall(router);
+    let router = rtm::m02_dashboards::mount_unified_approvals_inbox(router);
     // `mount_*_board`'s own literal `/alerts/board`, `/cases/board`
     // registered BEFORE the sibling `crud_screens!` mount: `Router::
     // dispatch` matches in registration order, and `crud_screens!`'s own
@@ -59,12 +60,14 @@ fn main() {
     let router = rtm::m04_cases::mount_case_board(router);
     let router = rtm::m04_cases::mount_case_screens(router);
     let router = rtm::m04_cases::mount_case_four_eyes(router);
+    let router = rtm::m04_cases::mount_case_review_inbox(router);
     let router = rtm::m05_customer::mount_customer_screens(router);
     let router = rtm::m06_transactions::mount_transaction_screens(router);
     let router = rtm::m07_network::mount_lineage_explore(router);
     let router = rtm::m07_network::mount_lineage_audit(router);
     let router = rtm::m08_rules::mount_window_migrate(router);
     let router = rtm::m08_rules::mount_simulation_config(router);
+    let router = rtm::m08_rules::mount_policy_release_inbox(router);
     let router = rtm::m08_rules::mount_window_config_screens(router);
     let router = rtm::m09_ml_models::mount_model_swap(router);
     let router = rtm::m09_ml_models::mount_model_screens(router);
@@ -72,6 +75,7 @@ fn main() {
     let router = rtm::m10_screening::mount_screening_hit_screens(router);
     let router = rtm::m11_intervention::mount_hold_stats(router);
     let router = rtm::m11_intervention::mount_hold_decision(router);
+    let router = rtm::m11_intervention::mount_hold_override_inbox(router);
     let router = rtm::m11_intervention::mount_hold_queue(router);
     let router = rtm::m11_intervention::mount_hold_detail(router);
     // `mount_sar_mlro_decision`/`mount_sar_export`'s own literal
@@ -81,6 +85,7 @@ fn main() {
     // above.
     let router = rtm::m12_sar::mount_sar_mlro_decision(router);
     let router = rtm::m12_sar::mount_sar_export(router);
+    let router = rtm::m12_sar::mount_sar_release_inbox(router);
     let router = rtm::m12_sar::mount_tipping_off_controls(router);
     let router = rtm::m12_sar::mount_sar_screens(router);
     let router = rtm::m13_risk_config::mount_refdata_migrate(router);

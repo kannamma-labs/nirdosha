@@ -13,7 +13,13 @@
 //! **Real, disclosed corpus gaps** remain listed for 2.4–2.7.
 
 use crate::bridge::alert_table;
+use crate::bridge::case_table;
+use crate::bridge::model_table;
 use crate::bridge::payment_table;
+use crate::bridge::refdata_table;
+use crate::bridge::sar_bundle_table;
+use crate::bridge::transaction_table;
+use crate::bridge::window_config_table;
 use nirdosha_rt::prelude::SharedTable;
 
 fn unused_wall_store() -> &'static SharedTable<i64, crate::bridge::PaymentRow> {
@@ -135,3 +141,39 @@ nirdosha_rt::app_shell_from_toml!(
     "menus.toml",
     title: "RTM — Real-Time Transaction Monitoring (demo)",
 );
+
+// T-04/B10: `nav.approvals`'s real, single unified inbox (`menus.toml`'s
+// own `id = "nav.approvals"` names `route = "/approvals"` with
+// `also_screens = ["8.8", "11.3", "12.6", ...]` -- one nav entry fanning
+// out to every T-04 screen) -- merges every chain this corpus's real
+// `escalate to approval(...)` policies use, across every module, the
+// same `AC.all_chains`-style merge-projection B8 already established for
+// audit chains. The four per-module mounts (`mount_case_review_inbox`,
+// `mount_policy_release_inbox`, `mount_hold_override_inbox`,
+// `mount_sar_release_inbox`) stay mounted too, at their own module-scoped
+// paths -- a ComplianceLead drilling into "case reviews only" isn't
+// forced through the noisier merged view, same as `crud_screens!`'s
+// list/detail split.
+nirdosha_rt::approval_inbox! {
+    mount: mount_unified_approvals_inbox,
+    path: "/approvals",
+    access: requires role "ComplianceLead",
+    sources: [
+        { table: case_table, chain: "case_review", resource: "case", detail_path: "/cases/{id}" },
+        { table: payment_table, chain: "override_release", resource: "payment", detail_path: "/holds/{id}" },
+        { table: sar_bundle_table, chain: "sar_release", resource: "sar_bundle", detail_path: "/sar" },
+        { table: window_config_table, chain: "policy_release", resource: "window", detail_path: "/rules/windows/{id}" },
+        { table: refdata_table, chain: "policy_release", resource: "refdata", detail_path: "/risk-config/refdata/{id}" },
+        { table: model_table, chain: "policy_release", resource: "model", detail_path: "/models/{id}" },
+        // 15.5 Governed Export Center's own `egress_release` escalations
+        // (`mount_governed_export`'s real `/exports/{alert,case,transaction}/
+        // propose|confirm` -- B7's disclosed gap: this path doesn't yet
+        // route through B7's watermarked O.* writer, so it's genuinely
+        // real but not the full governed path; `/reporting/mis` is the
+        // nearest real screen to review exports on, no dedicated
+        // per-export detail page exists yet).
+        { table: alert_table, chain: "egress_release", resource: "alert-export", detail_path: "/reporting/mis" },
+        { table: case_table, chain: "egress_release", resource: "case-export", detail_path: "/reporting/mis" },
+        { table: transaction_table, chain: "egress_release", resource: "transaction-export", detail_path: "/reporting/mis" },
+    ],
+}

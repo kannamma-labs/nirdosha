@@ -217,8 +217,8 @@ stage_min = "interim"
 id = "nav.approvals"                     # THE unified inbox — one instance, many screens
 label_key = "nav.approvals"
 group = "work"
-screen_id = "4.11"
-also_screens = ["8.8", "11.3", "12.6", "5.10", "15.5", "18.7", "9.5"]
+screen_id = "8.8"                        # primary ref must carry every nav role (V2) — 8.8, not 4.11, lists both ComplianceLead and Mlro
+also_screens = ["4.11", "11.3", "12.6", "5.10", "15.5", "18.7", "9.5"]
 route = "/approvals"
 guard = { action = "update", resource = "pending_approval" }
 badge = { source = "RUNTIME.pending_approvals", filter = "approver=me", cap = 99 }

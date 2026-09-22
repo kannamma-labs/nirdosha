@@ -1397,7 +1397,7 @@ fn corpus_approval_chains_are_really_registered_and_sar_release_escalates_end_to
     let definitions: Vec<nirdosha_guard_core::approval_chain::ApprovalChainDefinition> = dump
         .approval_chains
         .iter()
-        .map(|record| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: record.name.clone(), quorum: record.quorum, approver_roles: record.approvers.clone() })
+        .map(|record| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: record.name.clone(), quorum: record.quorum, approver_roles: record.approvers.clone(), cooling_period_ms: record.cooling_ms })
         .collect();
     let mut runtime = nirdosha_guard_core::approval_chain::ApprovalChainRuntime::new(definitions);
 

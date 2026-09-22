@@ -46,18 +46,21 @@ meta.roles_note (T-10).
 | L | cross-cutting runtime + archetype work gating ten or more screens |
 
 **Corpus facts this legend is pinned to** (asserted by tests/verify_tickets.rs):
-23 `ticket:T-…` references on 23 `blocked_by` lines across the 152-screen
-register (0 lines block on two tickets at once now); 9 of the 14 ticket slots
-carry references — 3 stage-gating tickets
-(T-04, T-06, T-09) and 6 note/menu-level
-only (T-01, T-02, T-03, T-07, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
+11 `ticket:T-…` references on 11 `blocked_by` lines across the 152-screen
+register (0 lines block on two tickets at once); 9 of the 14 ticket slots
+carry references — 2 stage-gating tickets
+(T-06, T-09) and 7 note/menu-level
+only (T-01, T-02, T-03, T-04, T-07, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
 T-08, T-11, and T-14 each closed their only gates and are no longer
 referenced anywhere in the corpus (they stay `active`, not `reserved` — a
 closed-out ticket keeps its slot's identity, it just currently gates/notes
-nothing). T-01 (B7) and T-07 (B9) closed all their stage-gating blockers the
-same way and moved to note-only (T-01: menus.toml's nav.exports/sar-export
-route comments; T-07: 3.8's screens.toml note + menus.toml's escalate route
-note).
+nothing). T-01 (B7), T-04 (B10), and T-07 (B9) closed all their
+stage-gating blockers and moved to note-only: T-01 via menus.toml's
+nav.exports/sar-export route comments; T-04 via menus.toml's
+nav.approvals/nav.exports route comments ("appears the moment T-04 mounts
+anything", "screen itself still gates on T-04" — both pre-date this
+closure and are now historical, like 7.1's T-03 correction note); T-07 via
+3.8's screens.toml note + menus.toml's escalate route note.
 The register's own header line ("blocked_by: ticket:T-xx | dataset:<id> | …")
 is format documentation, not a reference.
 
@@ -196,28 +199,66 @@ and enforced at the row layer in `bridge.nir`.
 ## T-04 — Approval chain runtime + approval_inbox! emission
 - status: active
 - size: L
-- meaning: maker≠checker approval inbox backed by RUNTIME.pending_approvals and approval_chain! quorum/timeout/cooling
-- blocked-screens: 4.11, 4.12, 5.10, 8.3, 8.8, 8.10, 9.5, 11.3, 12.6, 13.1, 15.5, 18.7
+- meaning: maker≠checker approval_inbox! over a real cross-entity pending-approvals read; approval_chain! quorum/timeout/cooling/return-with-reason
+- blocked-screens: none
 - note-mentions: none
 
-**Scope.** The approval engine the whole compliance posture hangs off:
-`approval_chain!` chains (quorum, timeout(deny), cooling period on approve,
-return-with-reason) surfaced as the `approval_inbox!` archetype with
-RUNTIME.pending_approvals as the inbox dataset. Covers dual-control purge
-(18.7), validator≠owner (9.5), diff-vs-current + cooling period (8.8),
-authority-limit checks (11.3), and sar_release quorum(2) consumption (12.6).
+**Scope (closed).** `ApprovalChainRuntime` (`nirdosha-guard-core`) gained
+`cooling_period_ms` (a `cooling(days|hours|minutes|seconds = N)` clause,
+parsed by `approval_chain!`), `return_with_reason` (mandatory non-empty
+reason, machine-checked, not a UI hint), `finalize` (resolves a `Cooling`
+escalation once its window elapses, no fresh approval needed), and
+`list_pending`. `GuardedTable` gained `list_pending_approvals`,
+`guarded_return_escalated`, and `guarded_finalize_escalated_action` on top
+of the pre-existing `guarded_propose/confirm_escalated_{update,action,
+export}` pairs (which already implemented real maker≠checker and
+quorum — found already built per-module across M4/M8/M9/M11/M12/M13/M15/
+M18 before this ticket, not invented here). New `approval_inbox!` macro
+(`crates/nirdosha-macros/src/approval_inbox.rs`) merges one or more named
+`GuardedTable`s' pending escalations into one real cross-entity worklist,
+with a generic return-with-reason action and per-row links out to the
+entity's own real propose/confirm screen (a cross-entity list has no way
+to know the domain-specific mutation fields a specific confirm needs —
+see that file's own doc comment).
 
-**Gates.** Twelve screens — 4.11 Four-Eyes Review, 4.12 Escalation to MLRO,
-5.10 Restriction/Exit Recommendation, 8.3 Threshold & Parameter Editor, 8.8
-Approval Workflow, 8.10 Scheduling & Go-Live, 9.5 Model Validation &
-Governance, 11.3 Override/Exception Approval, 12.6 MLRO Review & Decision,
-13.1 Customer Risk Model Config, 15.5 Governed Export Center, 18.7 Data
-Retention & Purge. Largest ticket in the register. Menus.toml: the approvals
-inbox nav item "appears the moment T-04 mounts anything" (stage_min=interim).
+**Landed.** Four dedicated inboxes — `mount_case_review_inbox` (4.11,
+`case_review`), `mount_hold_override_inbox` (11.3, `override_release`),
+`mount_sar_release_inbox` (12.6, `sar_release`), `mount_policy_release_inbox`
+(8.8, `policy_release` across window/refdata/model) — plus
+`mount_unified_approvals_inbox` at `/approvals` (menus.toml's real
+`nav.approvals` target) merging all of the above and 15.5's
+`egress_release` escalations. `policy_release` also gained
+`cooling(days = 1)` (real go-live cooling, screen-field-mappings.md's
+"cooling period on approve"), which flipped 4 pre-existing HTTP tests'
+final assertions from an immediate 200 commit to a 202 cooling-pending
+state (M8/M13/M18/M19's own migrate/replay/grant tests) — the underlying
+maker≠checker/quorum mechanics those tests prove are unchanged, only the
+post-quorum resolution timing is.
 
-**Done when.** pending_approvals round-trips: mint → inbox render →
-approve/return with the chain's quorum/timeout semantics enforced and
-maker≠checker + return-reason invariants machine-checked.
+**Screens.** 4.11, 11.3, 12.6 → `built` (archetype, dataset, and
+guard_policy! all real). 8.8 → `interim`, not `built`: the merged
+`policy_release` worklist is real, but its declared `GR.project_graph`
+rule-dependency diff view is C4's engine and stays honestly empty (same
+posture `m08_rules.nir`'s `v10_findings`/`policy_simulation` already use —
+screens-plan.md's own C4 section: "8.8 is entirely owned by B10... not
+unlocked by C4"). 15.5 → `interim`: `governed-export-read` (new
+`guard_policy!`) and a real `GET /exports` land, but B7's own disclosed
+reconciliation gap is still open (the quorum path commits via
+`scan_allowed`, not yet through B7's watermarked `write_governed_export`).
+4.12, 8.3, 8.10, 5.10, 9.5, 13.1, 18.7 keep whatever OTHER blocker they
+already carried (`dataset:`/`engine:`) — T-04 was the only thing closing
+for them; per-screen detail in `screens-plan.md`'s B10 ledger entry.
+
+**Done when (met).** Mint → inbox render → approve/return round-trips with
+quorum/timeout enforced (`nirdosha-guard-core`'s own
+`approval_chain::tests`, `nirdosha-guard-screens`'s
+`escalated_update_with_cooling_stays_pending_until_finalized_after_the_window`/
+`guarded_return_escalated_blocks_finalize_and_requires_a_real_reason`/
+`list_pending_approvals_reflects_cooling_and_resolved_state`, and rtm's own
+`approval_inbox_lists_a_real_pending_escalation_and_return_with_reason_closes_it`
+over real HTTP); maker≠checker deny proven by the pre-existing
+`escalated_update_blocks_self_review_and_leaves_it_pending`/
+`admin_grant_role_is_a_real_maker_neq_checker_escalation` tests, unchanged.
 
 ---
 

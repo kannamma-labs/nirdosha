@@ -397,6 +397,32 @@ fn parse_quorum_clause(input_str: &str) -> Option<(u8, Vec<String>)> {
     Some((quorum, roles))
 }
 
+/// Parses an optional `cooling(days = N)` / `cooling(hours = N)` /
+/// `cooling(minutes = N)` / `cooling(seconds = N)` clause into
+/// milliseconds. Same whitespace-insensitive substring approach as
+/// `parse_quorum_clause`. Returns `0` (no cooling) if the clause is
+/// absent — every existing chain declared before this clause existed
+/// keeps its immediate-on-quorum behavior unchanged.
+fn parse_cooling_clause(input_str: &str) -> u64 {
+    let compact: String = input_str.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(after_marker) = compact.find("cooling(") else { return 0 };
+    let args_start = after_marker + "cooling(".len();
+    let rest = &compact[args_start..];
+    let Some(args_end) = rest.find(')') else { return 0 };
+    let args = &rest[..args_end];
+    let Some(eq) = args.find('=') else { return 0 };
+    let unit = &args[..eq];
+    let Ok(n) = args[eq + 1..].parse::<u64>() else { return 0 };
+    match unit {
+        "days" => n * 24 * 60 * 60 * 1000,
+        "hours" => n * 60 * 60 * 1000,
+        "minutes" => n * 60 * 1000,
+        "seconds" => n * 1000,
+        "ms" => n,
+        _ => 0,
+    }
+}
+
 /// `approval_chain! { chain name { quorum(N, of = [Role, ...]); timeout(deny); } }`.
 ///
 /// Plan Phase 15: previously this only registered the block's raw source
@@ -427,6 +453,7 @@ pub fn approval_chain(input: TokenStream) -> TokenStream {
             source: #input_str,
         };
     };
+    let cooling_ms = parse_cooling_clause(&input_str);
     let record_registration = match parse_quorum_clause(&input_str) {
         Some((quorum, approvers)) => quote! {
             #[used]
@@ -436,6 +463,7 @@ pub fn approval_chain(input: TokenStream) -> TokenStream {
                 name: #name,
                 quorum: #quorum,
                 approvers: &[ #(#approvers),* ],
+                cooling_ms: #cooling_ms,
             };
         },
         // No parseable quorum(...) clause: register the raw catalog entry

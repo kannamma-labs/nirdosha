@@ -75,7 +75,7 @@ nirdosha_rt::approval_chain! {
     chain case_review { quorum(2, of = [ComplianceLead]); timeout(deny); }   // → 4.11 [NEW]
 }
 nirdosha_rt::approval_chain! {
-    chain policy_release { quorum(2, of = [PolicyEngineer, ComplianceLead]); timeout(deny); } // → 8.8 [NEW]
+    chain policy_release { quorum(2, of = [PolicyEngineer, ComplianceLead]); timeout(deny); cooling(days = 1); } // → 8.8 [NEW]; go-live cooling per screen-field-mappings.md
 }
 nirdosha_rt::approval_chain! {
     chain model_release { quorum(2, of = [PolicyEngineer, ComplianceLead]); timeout(deny); }  // → 9.1 [NEW]
@@ -88,6 +88,35 @@ nirdosha_rt::approval_chain! {
 }
 nirdosha_rt::approval_chain! {
     chain egress_release { quorum(1, of = [ComplianceLead]); timeout(deny); } // → 15.5, 21.1 [NEW]
+}
+
+// T-04/B10: nav-visibility gate only — menus.toml's `nav.approvals` names
+// `action=update, resource=pending_approval` purely so the shell's V5
+// check resolves; the real per-escalation reads/writes are each screen's
+// own resource-specific policy above (`case-close-confirm`,
+// `threshold-migrate`, `refdata-migrate`, `ops-decide-hold-highvalue`,
+// `mlro-decide-sar`/`sar-export`) via `GuardedTable::list_pending_approvals`/
+// `guarded_return_escalated`/`guarded_finalize_escalated_action`, exactly
+// the same "grant exists only to make a real nav link V5-reachable"
+// posture `90_ops_admin.nir`'s `user-role-read` (A2) already established.
+nirdosha_rt::guard_policy! {
+    allow "approvals-nav-gate" for ComplianceLead, Mlro
+    when action == "update" && resource == "pending_approval"
+    purpose(PlatformOperations)
+    cap(affected_rows = 1)
+    obligate audit(sampled)
+}
+
+// T-04/B10: 15.5's own `governed-export-read` -- `bridge.nir`'s
+// `GovernedExportRow` doc comment explicitly deferred this "once 15.5
+// actually needs one"; it does now (`nav.exports`'s V5 check goes red
+// the moment 15.5 leaves `blocked`).
+nirdosha_rt::guard_policy! {
+    allow "governed-export-read" for Analyst, ComplianceLead, Auditor
+    when action == "read" && resource == "governed_export"
+    purpose(PlatformOperations)
+    cap(row_cap = 200)
+    obligate audit(sampled)
 }
 
 // ---- Global invariant registrations (referenced by policies below) ----

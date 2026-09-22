@@ -118,4 +118,18 @@ pub fn mount_governed_export(router: nirdosha_rt::Router) -> nirdosha_rt::Router
                 Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
             }
         })
+        // 15.5's own read side -- `nav.exports`'s real `governed-export-read`
+        // (`00_core.nir`) over the SAME `PG.governed_export` row
+        // `nirdosha_rt::export::write_governed_export` writes for every
+        // guarded CSV export (`crud_screens!`'s watermarked path, T-01).
+        // The `/exports/{resource}/propose|confirm` quorum routes above
+        // are a real, SEPARATE `egress_release` escalation path this
+        // read does not (yet) unify with -- disclosed, see this module's
+        // own screens.toml note.
+        .get_with_auth("/exports", "Governed Export Center", |_req, _params, auth| {
+            match crate::bridge::governed_export_table().guarded_snapshot(auth, "PlatformOperations") {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
 }

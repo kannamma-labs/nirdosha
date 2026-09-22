@@ -32,6 +32,8 @@
 //! dataset/driver `screen-field-mappings.md` invents with no
 //! corresponding `#[dataset]`/`guard_policy!` in this corpus.
 
+use crate::bridge::model_table;
+use crate::bridge::refdata_table;
 use crate::bridge::window_config_table;
 use crate::bridge::WindowConfigRow;
 use nirdosha_rt::prelude::SharedTable;
@@ -126,4 +128,30 @@ pub fn mount_simulation_config(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
             },
         }))
     })
+}
+
+// T-04/B10: 8.8's approval_inbox! -- the real, generic worklist over
+// EVERY table in this corpus whose write escalates through the
+// `policy_release` chain (quorum(2, of = [PolicyEngineer,
+// ComplianceLead]), cooling(days = 1) -- see 00_core.nir), merged
+// across modules the same way B8's `AC.all_chains` merges per-domain
+// audit chains: `threshold-migrate` (this module's own
+// `window_config_table`), `refdata-migrate` (M13's `refdata_table`),
+// and model-swap re-attestation (M9's `model_table`). **Disclosed
+// gap**: `admin-grant-role`/`driver-migrate` (M18) also escalate
+// through `policy_release`, but neither `user_role_table` nor
+// `driver_table` has a real GET detail page anywhere in this corpus
+// yet for "Review & approve" to link to, so they're left out of this
+// merge rather than linking to a page that doesn't exist -- a future
+// M18 detail screen would add them here as a fourth/fifth source, not
+// require a new inbox.
+nirdosha_rt::approval_inbox! {
+    mount: mount_policy_release_inbox,
+    path: "/rules/approvals",
+    access: requires role "ComplianceLead",
+    sources: [
+        { table: window_config_table, chain: "policy_release", resource: "window", detail_path: "/rules/windows/{id}" },
+        { table: refdata_table, chain: "policy_release", resource: "refdata", detail_path: "/risk-config/refdata/{id}" },
+        { table: model_table, chain: "policy_release", resource: "model", detail_path: "/models/{id}" },
+    ],
 }

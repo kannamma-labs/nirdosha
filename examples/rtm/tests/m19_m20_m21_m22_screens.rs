@@ -63,11 +63,14 @@ fn ingest_admin_replay_is_a_real_maker_neq_checker_migrate_escalation() {
     let first = post_form_as(&router, "/ops/ingest-admin/replay-001/confirm-replay", &pe_cookie, &format!("chain={chain}&escalation_id={escalation_id}"));
     assert_eq!(first.status, 202, "quorum(2) needs two distinct approvers: {first:?}");
 
+    // T-04/B10: `policy_release`'s `cooling(days = 1)` -- quorum real
+    // (2/2), but `Cooling` not `Approved` (see the M8/M13/M18 migrate
+    // tests' matching comments).
     let lead_cookie = login_as(&router, "compliancelead", "compliancelead-demo");
     let second = post_form_as(&router, "/ops/ingest-admin/replay-001/confirm-replay", &lead_cookie, &format!("chain={chain}&escalation_id={escalation_id}"));
-    assert_eq!(second.status, 200, "a second, distinct policy_release-eligible approver must commit the replay: {second:?}");
-    let row = body_json(&second)["row"].clone();
-    assert_eq!(row["status"], "reprocessed");
+    assert_eq!(second.status, 202, "quorum reached but policy_release's cooling(days=1) window hasn't elapsed: {second:?}");
+    let pending = body_json(&second);
+    assert_eq!(pending["approvals_so_far"], 2);
 }
 
 #[test]

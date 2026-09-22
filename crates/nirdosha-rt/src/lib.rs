@@ -24,8 +24,8 @@
 //! ```
 
 pub use nirdosha_macros::{
-    app_shell, app_shell_from_toml, categorical_actions, communication_feed, contract, crud_screens, dashboard,
-    kanban_board, landing, login, settings_screen, wizard, workflow,
+    app_shell, app_shell_from_toml, approval_inbox, categorical_actions, communication_feed, contract, crud_screens,
+    dashboard, kanban_board, landing, login, settings_screen, wizard, workflow,
 };
 
 pub use nirdosha_guard_macros::{
@@ -43,6 +43,7 @@ pub use nirdosha_lineage_macros::{
 };
 pub use nirdosha_lineage as lineage;
 
+pub mod approval_inbox;
 pub mod audit_projection;
 pub mod dashboard;
 pub mod export;

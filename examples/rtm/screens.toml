@@ -429,8 +429,8 @@ archetype = "approval_inbox!"
 combo = []
 roles = ["ComplianceLead:R/W"]
 datasets = ["PG.case", "RUNTIME.pending_approvals"]
-blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
 notes = "maker≠checker enforced; return needs reason"
 
 [[screen]]
@@ -441,7 +441,7 @@ archetype = "crud_screens!"
 combo = ["approval_mint"]
 roles = ["ComplianceLead:R/W"]
 datasets = ["PG.case"]
-blocked_by = ["ticket:T-04"]
+blocked_by = []
 stage = "emittable"
 notes = "memo + recommendation; mints approval chain entry"
 
@@ -581,7 +581,7 @@ archetype = "crud_screens!"
 combo = ["approval_inbox!"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.customer_restriction", "PG.customer"]
-blocked_by = ["dataset:PG.customer_restriction", "ticket:T-04"]
+blocked_by = ["dataset:PG.customer_restriction"]
 stage = "blocked"
 
 # ------------------------------------------------------- M6 Transactions (8)
@@ -775,7 +775,7 @@ archetype = "settings_screen!"
 combo = ["approval_inbox!"]
 roles = ["PolicyEngineer:R/W", "ComplianceLead:R/W"]
 datasets = ["GR.project_graph", "RUNTIME.pending_approvals"]
-blocked_by = ["ticket:T-04", "engine:graph_apply_flow"]
+blocked_by = ["engine:graph_apply_flow"]
 stage = "interim"
 notes = "action=migrate; dry-run mandatory; simulation attestation"
 
@@ -832,9 +832,9 @@ archetype = "approval_inbox!"
 combo = []
 roles = ["ComplianceLead:R/W", "Mlro:R/W"]
 datasets = ["RUNTIME.pending_approvals", "GR.project_graph"]
-blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
-stage = "blocked"
-notes = "diff vs current; cooling period on approve"
+blocked_by = []
+stage = "interim"
+notes = "diff vs current; cooling period on approve — real: policy_release quorum(2), cooling(days=1), merged worklist over window/refdata/model proposals (mount_policy_release_inbox); stays interim (not built) because GR.project_graph's rule-dependency diff view is C4's engine, disclosed empty like m08_rules.nir's v10_findings/policy_simulation, same B10-owns-8.8/C4-doesn't posture as 8.10's own note"
 
 [[screen]]
 id = "8.9"
@@ -855,7 +855,7 @@ archetype = "crud_screens!"
 combo = ["approval_inbox!"]
 roles = ["PolicyEngineer:R/W", "ComplianceLead:R/W"]
 datasets = ["GR.project_graph"]
-blocked_by = ["ticket:T-04"]
+blocked_by = []
 stage = "interim"
 notes = "rollback plan mandatory; pilot cohort option"
 
@@ -938,7 +938,7 @@ archetype = "crud_screens!"
 combo = ["approval_inbox!"]
 roles = ["PolicyEngineer:R/W", "Mlro:R/W", "Auditor:R"]
 datasets = ["PG.model_validation"]
-blocked_by = ["dataset:PG.model_validation", "ticket:T-04"]
+blocked_by = ["dataset:PG.model_validation"]
 stage = "blocked"
 notes = "validator ≠ owner enforced"
 
@@ -1058,8 +1058,8 @@ archetype = "approval_inbox!"
 combo = []
 roles = ["ComplianceLead:R/W"]
 datasets = ["PG.payment", "RUNTIME.pending_approvals"]
-blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
 notes = "authority limit vs amount checked"
 
 [[screen]]
@@ -1154,8 +1154,8 @@ archetype = "approval_inbox!"
 combo = []
 roles = ["Mlro:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.sar_bundle", "RUNTIME.pending_approvals"]
-blocked_by = ["archetype:approval_inbox!", "ticket:T-04"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
 notes = "sar_release quorum(2) timeout(deny); do-not-file needs legal-consult"
 
 [[screen]]
@@ -1225,7 +1225,7 @@ archetype = "settings_screen!"
 combo = ["approval_inbox!"]
 roles = ["PolicyEngineer:R/W", "ComplianceLead:R/W"]
 datasets = ["CATALOG.classify_records", "PG.risk_factor"]
-blocked_by = ["ticket:T-04", "dataset:PG.risk_factor"]
+blocked_by = ["dataset:PG.risk_factor"]
 stage = "blocked"
 notes = "weights sum=100; no auto-downgrade"
 
@@ -1388,9 +1388,9 @@ archetype = "crud_screens!"
 combo = ["approval_inbox!"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W", "Auditor:R"]
 datasets = ["PG.governed_export", "O.exports"]
-blocked_by = ["ticket:T-04"]
-stage = "blocked"
-notes = "purpose mandatory; expiry on downloads"
+blocked_by = []
+stage = "interim"
+notes = "purpose mandatory; expiry on downloads — real egress_release quorum propose/confirm exists (/exports/{alert,case,transaction}/propose|confirm) and approval_inbox! now lists its pending escalations, but B7's own disclosed gap is still open: this path commits via scan_allowed, not yet reconciled with B7's watermarked/hashed O.* writer (write_governed_export) — stays interim until that reconciliation lands"
 
 # ------------------------------------------------------ M16 Notifications (5)
 [[screen]]
@@ -1573,7 +1573,7 @@ archetype = "settings_screen!"
 combo = ["approval_inbox!"]
 roles = ["Admin:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.retention_config"]
-blocked_by = ["archetype:approval_inbox!", "ticket:T-04", "dataset:PG.retention_config"]
+blocked_by = ["dataset:PG.retention_config"]
 stage = "blocked"
 notes = "legal-hold invariant; purge dual-control + type-PURGE confirm"
 

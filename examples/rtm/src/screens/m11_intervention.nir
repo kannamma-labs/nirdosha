@@ -179,3 +179,19 @@ pub fn mount_hold_stats(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
         }
     })
 }
+
+// T-04/B10: 11.3's approval_inbox! -- the real worklist over
+// `override_release`'s pending escalations (above-$100k holds that hit
+// `ops-decide-hold-highvalue`'s own `escalate to approval(chain
+// override_release)`, opened by this module's own handler above).
+// Mounted at a literal path so it's registered before `mount_hold_detail`'s
+// `/holds/{id}` wildcard, same ordering rule this file's own doc comment
+// and `serve.nir` already establish for every sibling literal route.
+nirdosha_rt::approval_inbox! {
+    mount: mount_hold_override_inbox,
+    path: "/holds/approvals",
+    access: requires role "ComplianceLead",
+    sources: [
+        { table: payment_table, chain: "override_release", resource: "payment", detail_path: "/holds/{id}" },
+    ],
+}

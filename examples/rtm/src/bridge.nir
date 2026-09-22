@@ -176,7 +176,7 @@ pub fn corpus_approval_chains() -> Vec<nirdosha_guard_core::approval_chain::Appr
     nirdosha_guard_registry::dump()
         .approval_chains
         .into_iter()
-        .map(|c| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: c.name, quorum: c.quorum, approver_roles: c.approvers })
+        .map(|c| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: c.name, quorum: c.quorum, approver_roles: c.approvers, cooling_period_ms: c.cooling_ms })
         .collect()
 }
 
@@ -1522,8 +1522,12 @@ pub fn governed_export_table() -> &'static nirdosha_guard_screens::GuardedTable<
     TABLE.get_or_init(|| {
         nirdosha_guard_screens::GuardedTable::new(
             nirdosha_guard_mic::MemStoreDriver::new(),
-            vec![],
-            vec![],
+            // T-04/B10: wired to the real corpus now that
+            // `governed-export-read` (`00_core.nir`) exists — was `vec![]`
+            // (disclosed, no policy existed yet; see this row type's own
+            // doc comment above).
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
             "rtm-demo",
             std::env::temp_dir().join(format!("rtm-demo-audit-governed-export-{}.jsonl", std::process::id())),
             HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),

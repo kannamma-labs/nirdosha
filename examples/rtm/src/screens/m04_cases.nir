@@ -136,3 +136,21 @@ pub fn mount_case_four_eyes(router: nirdosha_rt::Router) -> nirdosha_rt::Router 
             }
         })
 }
+
+// T-04/B10: 4.11's approval_inbox! — the real cross-entity worklist over
+// `case_review`'s pending escalations (`ApprovalChainRuntime`, reused,
+// not forked). "Review & approve" still lands on `/cases/{id}` (the
+// real `crud_screens!` detail page for this case) rather than a
+// one-click approve here — `mount_case_four_eyes`'s own
+// `confirm-close` route re-derives the exact `review_verdict`/
+// `review_note` mutation the proposal fixed, which this cross-entity
+// list has no way to know generically (see `approval_inbox.rs`'s own
+// module doc comment). Return-with-reason is real and generic here.
+nirdosha_rt::approval_inbox! {
+    mount: mount_case_review_inbox,
+    path: "/four-eyes",
+    access: requires role "ComplianceLead",
+    sources: [
+        { table: case_table, chain: "case_review", resource: "case", detail_path: "/cases/{id}" },
+    ],
+}

@@ -457,7 +457,7 @@ pub fn workflow_allowed_transitions(name: &str) -> std::collections::HashMap<Str
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApprovalChainRecord { pub name: String, pub quorum: u8, pub approvers: Vec<String> }
+pub struct ApprovalChainRecord { pub name: String, pub quorum: u8, pub approvers: Vec<String>, pub cooling_ms: u64 }
 
 /// Const-constructible counterpart to [`ApprovalChainRecord`] — what
 /// `approval_chain!` actually emits into a `static` (`APPROVAL_CHAINS`
@@ -484,11 +484,15 @@ pub struct ApprovalChainRegistration {
 	pub name: &'static str,
 	pub quorum: u8,
 	pub approvers: &'static [&'static str],
+	/// `cooling(days = N)` in milliseconds; `0` when the chain declares no
+	/// cooling clause. See [`ApprovalChainDefinition::cooling_period_ms`]
+	/// (`nirdosha-guard-core`) for the runtime semantics.
+	pub cooling_ms: u64,
 }
 
 impl ApprovalChainRegistration {
 	pub fn to_record(&self) -> ApprovalChainRecord {
-		ApprovalChainRecord { name: self.name.to_string(), quorum: self.quorum, approvers: self.approvers.iter().map(|s| s.to_string()).collect() }
+		ApprovalChainRecord { name: self.name.to_string(), quorum: self.quorum, approvers: self.approvers.iter().map(|s| s.to_string()).collect(), cooling_ms: self.cooling_ms }
 	}
 }
 

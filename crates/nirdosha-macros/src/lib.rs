@@ -44,6 +44,7 @@ mod categorical;
 mod communication_feed;
 mod crud_screens;
 mod dashboard;
+mod approval_inbox;
 mod kanban_board;
 mod landing;
 mod login;
@@ -103,6 +104,15 @@ pub fn wizard(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn kanban_board(input: TokenStream) -> TokenStream {
     kanban_board::expand(input)
+}
+
+/// See `approval_inbox::expand`'s module doc — T-04's archetype: a
+/// real, cross-entity worklist over pending `approval_chain!`
+/// escalations, with a generic return-with-reason action and per-entity
+/// review/approve links.
+#[proc_macro]
+pub fn approval_inbox(input: TokenStream) -> TokenStream {
+    approval_inbox::expand(input)
 }
 
 /// See `communication_feed::expand`'s module doc — RFC 0009 Track C's

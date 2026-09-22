@@ -157,3 +157,21 @@ pub fn mount_tipping_off_controls(router: nirdosha_rt::Router) -> nirdosha_rt::R
         }
     })
 }
+
+// T-04/B10: 12.6's approval_inbox! -- the real worklist over
+// `sar_release`'s pending escalations. Today those are only ever
+// resource-wide export proposals (`mount_sar_export`'s own
+// `guarded_propose_escalated_export`, escalation id shape
+// `"sar_bundle:export:{ts}"` -- no single row to review), so
+// `detail_path` points at the SAR list itself rather than a per-row
+// detail page; a future row-level `sar-release-confirm` escalation
+// (distinct from `mlro-decide-sar`'s own plain, non-escalated
+// `guarded_update`) would get its own source here with a real `{id}`.
+nirdosha_rt::approval_inbox! {
+    mount: mount_sar_release_inbox,
+    path: "/sar/approvals",
+    access: requires role "ComplianceLead",
+    sources: [
+        { table: sar_bundle_table, chain: "sar_release", resource: "sar_bundle", detail_path: "/sar" },
+    ],
+}

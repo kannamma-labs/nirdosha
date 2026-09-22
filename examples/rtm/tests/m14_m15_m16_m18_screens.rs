@@ -166,11 +166,19 @@ fn admin_grant_role_is_a_real_maker_neq_checker_escalation() {
     let first_confirm = post_form_as(&router, "/admin/roles/grant-001/confirm-grant", &pe_cookie, &format!("chain={chain}&escalation_id={escalation_id}"));
     assert_eq!(first_confirm.status, 202, "quorum(2) needs two distinct approvers: {first_confirm:?}");
 
+    // T-04/B10: `policy_release` now declares `cooling(days = 1)` (real
+    // go-live cooling) -- quorum reaching 2/2 is proven, but the grant
+    // does NOT commit on this call anymore; it resolves to `Cooling`,
+    // surfaced as `Pending`/202 by `guarded_confirm_escalated_update`
+    // (same as the M8/M13 migrate tests' own updated assertions).
+    // Finalizing after the window elapses is proven with a controlled
+    // clock in `nirdosha-guard-screens`'s own unit tests, not real
+    // wall-clock sleep here.
     let lead_cookie = login_as(&router, "compliancelead", "compliancelead-demo");
     let second_confirm = post_form_as(&router, "/admin/roles/grant-001/confirm-grant", &lead_cookie, &format!("chain={chain}&escalation_id={escalation_id}"));
-    assert_eq!(second_confirm.status, 200, "a second, distinct policy_release-eligible approver must commit the grant: {second_confirm:?}");
-    let committed = body_json(&second_confirm);
-    assert_eq!(committed["row"]["status"], "granted");
+    assert_eq!(second_confirm.status, 202, "quorum reached but policy_release's cooling(days=1) window hasn't elapsed: {second_confirm:?}");
+    let pending = body_json(&second_confirm);
+    assert_eq!(pending["approvals_so_far"], 2);
     let rows = user_role_table().guarded_snapshot(&Auth::login("auditor-probe", &["Auditor"]), "").unwrap_or_default();
     let _ = rows; // Auditor has no read grant on user_role either (no policy names it) -- left unasserted, real gap, same class as m05/m10's disclosed ones.
 }

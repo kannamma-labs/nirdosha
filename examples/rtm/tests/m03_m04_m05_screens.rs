@@ -24,6 +24,7 @@ fn router() -> Router {
     let router = rtm::m04_cases::mount_case_board(router);
     let router = rtm::m04_cases::mount_case_screens(router);
     let router = rtm::m04_cases::mount_case_four_eyes(router);
+    let router = rtm::m04_cases::mount_case_review_inbox(router);
     rtm::m05_customer::mount_customer_screens(router)
 }
 
@@ -210,6 +211,47 @@ fn four_eyes_review_blocks_self_approval_and_commits_on_a_second_distinct_lead()
         nirdosha_guard_screens::EscalatedWrite::Committed(row) => assert_eq!(row.review_verdict, "confirmed"),
         nirdosha_guard_screens::EscalatedWrite::Pending(p) => panic!("must commit at quorum: {p:?}"),
     }
+}
+
+/// T-04/B10: the real `approval_inbox!` archetype -- 4.11's `/four-eyes`
+/// merges `case_table()`'s own real `list_pending_approvals()` (the
+/// SAME escalation `mount_case_four_eyes`'s `propose-close` route
+/// above opens; no separate/weaker tracking), and its generic
+/// return-with-reason action actually resolves the escalation so a
+/// stale proposal can never later be confirmed.
+#[test]
+fn approval_inbox_lists_a_real_pending_escalation_and_return_with_reason_closes_it() {
+    let router = router();
+    seed_case("case-201", "confirmed_fraud");
+    let lead_a_cookie = login_as(&router, "compliancelead", "compliancelead-demo");
+
+    let before = get_as(&router, "/four-eyes", &lead_a_cookie);
+    assert_eq!(before.status, 200);
+    assert!(before.body.contains("Nothing pending"), "no escalation opened yet: {}", before.body);
+
+    let propose = post_form_as(&router, "/cases/case-201/propose-close", &lead_a_cookie, "review_verdict=confirmed&review_note=first+pass");
+    assert_eq!(propose.status, 202, "{propose:?}");
+    let proposed: serde_json::Value = serde_json::from_str(&propose.body).unwrap();
+    let escalation_id = proposed["escalation_id"].as_str().unwrap().to_string();
+
+    let listed = get_as(&router, "/four-eyes", &lead_a_cookie);
+    assert_eq!(listed.status, 200);
+    assert!(listed.body.contains(&escalation_id), "the merged inbox must show the real escalation the propose route opened: {}", listed.body);
+    assert!(listed.body.contains("case-201") || listed.body.contains("/cases/case-201"), "detail_url must link out to the case's own real screen: {}", listed.body);
+    assert!(listed.body.contains("lead-a") || listed.body.contains("compliancelead"), "proposer must be visible: {}", listed.body);
+
+    let empty_reason = post_form_as(&router, &format!("/four-eyes/case/{escalation_id}/return"), &lead_a_cookie, "reason=");
+    assert_eq!(empty_reason.status, 403, "an empty reason must be a named deny, not silently accepted: {empty_reason:?}");
+
+    let returned = post_form_as(&router, &format!("/four-eyes/case/{escalation_id}/return"), &lead_a_cookie, "reason=wrong+case+targeted");
+    assert_eq!(returned.status, 200, "{returned:?}");
+
+    let after_return = get_as(&router, "/four-eyes", &lead_a_cookie);
+    assert!(!after_return.body.contains(&format!("data-escalation-id=\"{escalation_id}\"")) || after_return.body.contains("returned"), "a returned escalation must render as resolved, not actionable-pending: {}", after_return.body);
+
+    let lead_b = Auth::login("lead-b", &["ComplianceLead"]);
+    let confirm_after_return = case_table().guarded_confirm_escalated_update(&lead_b, "Operations", "case-201", &proposed["chain"].as_str().unwrap().to_string(), &escalation_id, &["review_verdict".to_string(), "review_note".to_string()].into_iter().collect(), |row| { row.review_verdict = "confirmed".into(); row.review_note = "should not land".into(); }, 9_000);
+    assert!(confirm_after_return.is_err(), "a returned escalation must never be confirmable afterward: {confirm_after_return:?}");
 }
 
 /// Regression: `crud_screens!`'s own `/{id}` wildcard (registered by

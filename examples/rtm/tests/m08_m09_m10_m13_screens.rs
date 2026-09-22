@@ -122,9 +122,19 @@ fn refdata_migrate_is_real_maker_neq_checker_admin_proposes_neither_approver() {
     assert_eq!(first.status, 202, "{}", first.body);
     assert!(first.body.contains("\"approvals_so_far\":1"), "{}", first.body);
 
+    // T-04/B10: `policy_release` now declares `cooling(days = 1)` (real
+    // go-live cooling, per screen-field-mappings.md's "cooling period on
+    // approve" for 8.8/8.10) — quorum being real is proven by
+    // `approvals_so_far` reaching 2/2, but the write does NOT commit on
+    // this call anymore; it resolves to `Cooling`, not `Approved`. This
+    // route (`confirm-migrate`) only ever calls `guarded_confirm_escalated_action`,
+    // which surfaces `Cooling` as `Pending` (202) — actually finalizing
+    // once the window elapses is `guarded_finalize_escalated_action`'s
+    // job, exercised with a controlled clock (not real wall-clock sleep)
+    // in `nirdosha-guard-screens`' own unit tests.
     let second = post_form_as(&router, "/risk-config/refdata/USD/confirm-migrate", &cl, &format!("label=US Dollar (updated)&chain={chain}&escalation_id={escalation_id}"));
-    assert_eq!(second.status, 200, "two distinct real approvers must commit: {}", second.body);
-    assert!(second.body.contains("US Dollar (updated)"), "{}", second.body);
+    assert_eq!(second.status, 202, "quorum reached but policy_release's cooling(days=1) window hasn't elapsed: {}", second.body);
+    assert!(second.body.contains("\"approvals_so_far\":2"), "{}", second.body);
 }
 
 /// M8: `threshold-migrate` is "four-eyes among peers" again
@@ -147,9 +157,13 @@ fn policy_engineer_migrates_a_window_threshold_with_a_second_engineer() {
     // role-hardcoded to PolicyEngineer alone.
     let chain = json_field(&propose.body, "chain").to_string();
     let escalation_id = json_field(&propose.body, "escalation_id").to_string();
+    // Same `policy_release` `cooling(days = 1)` as the refdata test
+    // above: quorum real (2/2), but `Cooling` not `Approved` — 202, not
+    // 200 (see that test's own comment for the full explanation).
     let cl = login_as(&router, "compliancelead", "compliancelead-demo");
     let confirm = post_form_as(&router, "/rules/windows/velocity_1h/confirm-migrate", &cl, &format!("velocity_1h_threshold=12&chain={chain}&escalation_id={escalation_id}"));
-    assert_eq!(confirm.status, 200, "{}", confirm.body);
+    assert_eq!(confirm.status, 202, "quorum reached but policy_release's cooling(days=1) window hasn't elapsed: {}", confirm.body);
+    assert!(confirm.body.contains("\"approvals_so_far\":2"), "{}", confirm.body);
 }
 
 /// A role with no matching allow policy anywhere in this batch's four
