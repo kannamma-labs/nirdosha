@@ -47,3 +47,21 @@ pub fn mount_notification_feed(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
         nirdosha_rt::Response::json(200, &serde_json::json!(visible))
     })
 }
+
+/// C1 (screens-plan.md): 16.4 My Tasks -- real guard-enforced,
+/// cross-entity `PG.case_task` list (`case-task-read`, `00_core.nir`),
+/// the same shape `mount_notification_feed` gives 16.1. **Disclosed
+/// gap**: menus.toml's own badge filter ("assignee=me AND due<=today")
+/// is not implemented -- this route returns every row the requester's
+/// `case-task-read` grant can see (tenant-scoped, not self-scoped); no
+/// screen or badge anywhere in this corpus computes a live count yet
+/// (the same gap B6 already disclosed for every other `badge = {...}`
+/// declaration in menus.toml).
+pub fn mount_my_tasks(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/tasks", "My Tasks (16.4)", |_req, _params, auth| {
+        match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}

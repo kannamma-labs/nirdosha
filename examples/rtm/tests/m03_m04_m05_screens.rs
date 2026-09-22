@@ -21,10 +21,12 @@ fn router() -> Router {
     let router = rtm::m03_alerts::mount_alert_board(router);
     let router = rtm::m03_alerts::mount_alert_screens(router);
     let router = rtm::m03_alerts::mount_bulk_alert_reassign(router);
+    let router = rtm::m03_alerts::mount_alert_rfi(router);
     let router = rtm::m04_cases::mount_case_board(router);
     let router = rtm::m04_cases::mount_case_screens(router);
     let router = rtm::m04_cases::mount_case_four_eyes(router);
     let router = rtm::m04_cases::mount_case_review_inbox(router);
+    let router = rtm::m04_cases::mount_case_tasks(router);
     rtm::m05_customer::mount_customer_screens(router)
 }
 
@@ -351,4 +353,55 @@ fn q_search_on_customers_is_a_named_deny_no_predicate_use_grant_exists_at_all() 
 
     let unfiltered = get_as(&router, "/customers", &auditor_cookie);
     assert_eq!(unfiltered.status, 200, "an unfiltered read must be unaffected by the search denial: {unfiltered:?}");
+}
+
+/// C1 (screens-plan.md): `PG.case_task` is real, guard-enforced CRUD —
+/// `case-task-create`/`case-task-read`/`case-task-update` (`00_core.nir`).
+/// An `Analyst` raises a real RFI on an alert (3.7), reads it back, then
+/// advances its status through the real `CaseTaskStatus` machine
+/// (`open -> in_progress`); an `Auditor` (real `case-task-read` grant,
+/// no `case-task-create` grant) is denied the write — proving this is
+/// guard-enforced, not merely UI-shaped.
+#[test]
+fn case_task_rfi_is_real_guard_enforced_crud_over_case_task() {
+    let router = router();
+    seed_alert("alert-rfi-1", "pending_info");
+    let analyst_cookie = login_as(&router, "analyst", "analyst-demo");
+
+    let created = post_form_as(&router, "/alerts/alert-rfi-1/rfi", &analyst_cookie, "title=Need+source+of+funds&assignee=an&due_date=2026-10-05&priority=high");
+    assert_eq!(created.status, 201, "Analyst has a real case-task-create grant: {created:?}");
+    let task: serde_json::Value = serde_json::from_str(&created.body).expect("created row is real JSON");
+    let task_id = task["task_id"].as_str().expect("task_id present").to_string();
+    assert_eq!(task["status"], "open", "a fresh task starts open (CaseTaskStatus machine)");
+
+    let listed = get_as(&router, "/alerts/alert-rfi-1/rfi", &analyst_cookie);
+    assert_eq!(listed.status, 200);
+    assert!(listed.body.contains(&task_id), "the created RFI must be readable back through the real list: {}", listed.body);
+
+    // Auditor: real read grant, no create grant.
+    let auditor_cookie = login_as(&router, "auditor", "auditor-demo");
+    let auditor_read = get_as(&router, "/alerts/alert-rfi-1/rfi", &auditor_cookie);
+    assert_eq!(auditor_read.status, 200, "case-task-read grants Auditor too: {auditor_read:?}");
+    let auditor_create = post_form_as(&router, "/alerts/alert-rfi-1/rfi", &auditor_cookie, "title=should+be+denied&due_date=2026-10-05&priority=low");
+    assert_eq!(auditor_create.status, 403, "Auditor has no case-task-create grant — must be a named deny, not silently accepted: {auditor_create:?}");
+
+    // Case-scoped checklist task (4.8): create, then a real transition
+    // (`open -> in_progress`) through `CaseTaskStatus`.
+    seed_case("case-task-1", "investigating");
+    let checklist = post_form_as(&router, "/cases/case-task-1/tasks", &analyst_cookie, "title=Confirm+KYC&due_date=2026-10-05&priority=high");
+    assert_eq!(checklist.status, 201, "case-task-create over a case-scoped item_ref: {checklist:?}");
+    let checklist_task: serde_json::Value = serde_json::from_str(&checklist.body).unwrap();
+    let checklist_task_id = checklist_task["task_id"].as_str().unwrap().to_string();
+
+    let advanced = post_form_as(&router, &format!("/cases/case-task-1/tasks/{checklist_task_id}/status"), &analyst_cookie, "status=in_progress");
+    assert_eq!(advanced.status, 200, "open -> in_progress is a real CaseTaskStatus-legal transition: {advanced:?}");
+
+    // `in_progress -> done` is legal, but the machine forbids jumping a
+    // fresh `open` task straight to `done` — re-seed to prove the
+    // illegal edge is denied, not silently accepted.
+    let checklist2 = post_form_as(&router, "/cases/case-task-1/tasks", &analyst_cookie, "title=Second+item&due_date=2026-10-05&priority=low");
+    let checklist2_task: serde_json::Value = serde_json::from_str(&checklist2.body).unwrap();
+    let checklist2_task_id = checklist2_task["task_id"].as_str().unwrap().to_string();
+    let illegal = post_form_as(&router, &format!("/cases/case-task-1/tasks/{checklist2_task_id}/status"), &analyst_cookie, "status=done");
+    assert_eq!(illegal.status, 400, "open -> done skips in_progress; CaseTaskStatus must reject it (ConditionFailed -> 400): {illegal:?}");
 }

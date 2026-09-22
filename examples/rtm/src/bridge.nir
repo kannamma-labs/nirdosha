@@ -1171,6 +1171,100 @@ pub fn qa_review_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdos
 }
 
 // ============================================================================
+// C1 (screens-plan.md): `PG.case_task` — a single cross-module task/RFI
+// resource shared by 5 screens with genuinely different presentations
+// (3.7 Pending Info/RFI on an alert, 4.8 Tasks & Checklist on a case, 4.9
+// Internal RFI on a case, 14.4's coaching action-item mini-form, 16.4's
+// cross-entity "My Tasks" list) plus 2.2's dashboard widget — mirrors
+// `QaReviewRow`'s `item_ref` pattern (a generic "alert:<id>"/"case:<id>"
+// owning-entity reference) rather than a `case_id`-only column, since 3.7
+// is alert-scoped, not case-scoped. `task_type` distinguishes the
+// screen-facing shapes (`"checklist"` / `"rfi"` / `"coaching_action"`)
+// over one real table instead of three, the same "one resource, several
+// screen views" posture `case`/`alert` themselves already have.
+// **Disclosed simplification**: `screen-field-mappings.md`'s per-shape
+// validation (3.7's SLA-clock pause, 4.9's deadline/escalate-after-
+// deadline, 4.8's checklist-template dropdown) is real business logic
+// this table's flat fields don't encode — `due_date`/`status` are real
+// and guard-enforced, the SLA/deadline semantics on top are UI concerns
+// this batch doesn't build, the same posture every prior batch's own
+// "not built this pass" notes already established for comparable gaps.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CaseTaskRow {
+    pub id: i64,
+    pub task_id: String,
+    pub tenant_id: String,
+    pub item_ref: String,
+    pub task_type: String,
+    pub title: String,
+    pub detail: String,
+    pub assignee: String,
+    pub due_date: String,
+    pub priority: String,
+    pub status: String,
+    pub blocked_reason: String,
+    pub completion_note: String,
+}
+
+impl GuardedEntity for CaseTaskRow {
+    const RESOURCE: &'static str = "case_task";
+    fn row_id(&self) -> String {
+        self.task_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "task_id"]
+    }
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        // `tenant_id`/`status` are real screen plumbing `case-task-create`
+        // is silent on (status always starts `"open"`, same posture
+        // `QaReviewRow`'s create-time exemptions already establish) —
+        // not a gap in the policy's own `field_policy`.
+        &["id", "task_id", "tenant_id", "status", "blocked_reason", "completion_note"]
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        if self.status == requested {
+            return Some(true);
+        }
+        // `10_domains.nir`'s real `machine CaseTaskStatus`, verbatim:
+        // `open -> in_progress -> [done, blocked, escalated]; blocked ->
+        // in_progress; escalated -> in_progress;` — a fresh row (this
+        // table's seed below) starts at `"open"`.
+        let legal: &[&str] = match self.status.as_str() {
+            "open" => &["in_progress"],
+            "in_progress" => &["done", "blocked", "escalated"],
+            "blocked" => &["in_progress"],
+            "escalated" => &["in_progress"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn case_task_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTaskRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTaskRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-case-task-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        // Demo bootstrap only (same posture `qa_review_table`'s seed
+        // discloses): one open checklist task assigned to the same real
+        // analyst test identity (`"an"`) prior batches' own tests use,
+        // standing in for whatever 4.2's "create a case" flow would have
+        // produced a checklist template for.
+        table.raw_driver_seed(DEMO_TENANT, &CaseTaskRow { id: 1, task_id: "task-001".into(), tenant_id: DEMO_TENANT.into(), item_ref: "case:case-001".into(), task_type: "checklist".into(), title: "Confirm subject KYC on file".into(), detail: String::new(), assignee: "an".into(), due_date: "2026-10-01".into(), priority: "high".into(), status: "open".into(), blocked_reason: String::new(), completion_note: String::new() });
+        table
+    })
+}
+
+// ============================================================================
 // M18 System Administration & Security — screens/m18_admin.nir's row
 // types + tables.
 // ============================================================================

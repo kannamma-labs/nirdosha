@@ -20,16 +20,20 @@
 //! (`crates/nirdosha-guard-screens`'s own `escalated_update_*` tests),
 //! not a single-click "approve" button.
 //!
+//! Also real, guard-enforced (T-06/B11): 4.3 investigation workspace,
+//! 4.4 Linked Alerts Tab, 4.5 Case Transactions Tab. Also real (C1,
+//! screens-plan.md): 4.8 Tasks & Checklist, 4.9 Internal RFI — both
+//! guard-enforced list/create/update over `PG.case_task`.
+//!
 //! Not built this pass (same reasoning as `m03_alerts.nir`'s doc
 //! comment: this is UX chrome the `guard_policy!` corpus doesn't encode,
-//! not a guard-enforcement question): 4.3 investigation workspace tabs,
-//! 4.4-4.9 (linked alerts / transactions / documents / notes / tasks /
-//! internal RFI -- each names its own dataset `screen-field-mappings.md`
-//! invents with no corresponding `#[dataset]`/`guard_policy!` anywhere
-//! in this corpus), 4.12 escalation to MLRO (no distinct policy from
-//! 4.11's own `case-close-confirm`), 4.13 merge/link cases (no corpus
-//! policy). 4.14 Initiate SAR is a plain link to `/sar/draft?case_id=`
-//! -- M12 itself is a later, bespoke batch.
+//! not a guard-enforcement question): 4.6/4.7 (documents/notes -- each
+//! names its own dataset `screen-field-mappings.md` invents with no
+//! corresponding `#[dataset]`/`guard_policy!` anywhere in this corpus),
+//! 4.12 escalation to MLRO (no distinct policy from 4.11's own
+//! `case-close-confirm`), 4.13 merge/link cases (no corpus policy). 4.14
+//! Initiate SAR is a plain link to `/sar/draft?case_id=` -- M12 itself is
+//! a later, bespoke batch.
 
 use crate::bridge::case_table;
 use crate::bridge::case_transactions_for_case;
@@ -201,4 +205,97 @@ pub fn mount_case_context_tabs(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
                 Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{}</p>", nirdosha_rt::screens::value_display(&serde_json::Value::String(reason)))),
             }
         })
+}
+
+/// C1 (screens-plan.md): 4.8 Tasks & Checklist + 4.9 Internal RFI — both
+/// real guard-enforced list/create/update over `PG.case_task`
+/// (`case-task-read`/`case-task-create`/`case-task-update`,
+/// `00_core.nir`), scoped to this case via `item_ref = "case:<id>"`,
+/// distinguished by `task_type` (`"checklist"` vs `"rfi"`) — `menus.toml`
+/// declares these as two separate routes/screens over the same resource,
+/// the same "one table, several screen-facing views" posture `case`/
+/// `alert` themselves already have.
+pub fn mount_case_tasks(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .get_with_auth("/cases/{id}/tasks", "Tasks & Checklist (4.8)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let item_ref = format!("case:{id}");
+            match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+                Ok(rows) => {
+                    let filtered: Vec<_> = rows.into_iter().filter(|r| r.item_ref == item_ref && r.task_type == "checklist").collect();
+                    nirdosha_rt::Response::json(200, &serde_json::json!(filtered))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/cases/{id}/tasks", "Add checklist task (4.8)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            create_case_task(req, auth, &id, "checklist")
+        })
+        .post_with_auth("/cases/{id}/tasks/{task_id}/status", "Update task status (4.8)", |req, params, auth| {
+            let Some(task_id) = params.get("task_id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("task_id required") };
+            let form = req.form_or_json();
+            let Some(status) = form.get("status").cloned() else { return nirdosha_rt::Response::bad_request("status required") };
+            let blocked_reason = form.get("blocked_reason").cloned().unwrap_or_default();
+            if status == "blocked" && blocked_reason.is_empty() {
+                return nirdosha_rt::Response::bad_request("blocked_reason required when status = blocked");
+            }
+            let completion_note = form.get("completion_note").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["status".into(), "blocked_reason".into(), "completion_note".into()].into();
+            match crate::bridge::case_task_table().guarded_update(auth, "Operations", &task_id, &changed, move |row| {
+                row.status = status;
+                row.blocked_reason = blocked_reason;
+                row.completion_note = completion_note;
+            }) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/cases/{id}/rfi", "Internal RFI (4.9)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let item_ref = format!("case:{id}");
+            match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+                Ok(rows) => {
+                    let filtered: Vec<_> = rows.into_iter().filter(|r| r.item_ref == item_ref && r.task_type == "rfi").collect();
+                    nirdosha_rt::Response::json(200, &serde_json::json!(filtered))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/cases/{id}/rfi", "Send Internal RFI (4.9)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            create_case_task(req, auth, &id, "rfi")
+        })
+}
+
+fn create_case_task(req: &nirdosha_rt::Request, auth: &nirdosha_rt::Auth, case_id: &str, task_type: &str) -> nirdosha_rt::Response {
+    use std::collections::HashSet;
+    let form = req.form_or_json();
+    let Some(title) = form.get("title").cloned() else { return nirdosha_rt::Response::bad_request("title required") };
+    let assignee = form.get("assignee").cloned().unwrap_or_else(|| auth.user().to_string());
+    let due_date = form.get("due_date").cloned().unwrap_or_default();
+    let priority = form.get("priority").cloned().unwrap_or_else(|| "normal".into());
+    let detail = form.get("detail").cloned().unwrap_or_default();
+    let task_id = format!("task-{}", ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis());
+    let submitted: HashSet<String> = ["item_ref".into(), "task_type".into(), "title".into(), "assignee".into(), "due_date".into(), "priority".into()].into();
+    let entity = crate::bridge::CaseTaskRow {
+        id: 0,
+        task_id,
+        tenant_id: crate::bridge::DEMO_TENANT.into(),
+        item_ref: format!("case:{case_id}"),
+        task_type: task_type.into(),
+        title,
+        detail,
+        assignee,
+        due_date,
+        priority,
+        status: "open".into(),
+        blocked_reason: String::new(),
+        completion_note: String::new(),
+    };
+    match crate::bridge::case_task_table().guarded_insert_checked(auth, "Operations", &submitted, entity) {
+        Ok(row) => nirdosha_rt::Response::json(201, &serde_json::json!(row)),
+        Err(e) => nirdosha_guard_screens::guard_error_response(e),
+    }
 }

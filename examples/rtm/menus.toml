@@ -1018,6 +1018,12 @@ guard = { action = "update", resource = "alert" }
 reach_via = "3.2"
 
 [[route]]
+path = "/alerts/{id}/rfi"
+screen_id = "3.7"
+guard = { action = "read", resource = "case_task" }
+reach_via = "3.2"
+
+[[route]]
 path = "/alerts/{id}/explain"
 screen_id = "9.6"
 guard = { action = "read", resource = "model_run_stat" }

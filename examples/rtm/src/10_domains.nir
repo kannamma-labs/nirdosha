@@ -278,6 +278,13 @@ nirdosha_guard_macros::workflow! {                                   // [NEW →
 nirdosha_guard_macros::workflow! {                                   // [NEW → M14]
     machine QaReviewStatus { assigned -> scored -> [closed, returned]; }
 }
+nirdosha_guard_macros::workflow! {                                   // [NEW → C1: 3.7/4.8/4.9/14.4/16.4]
+    machine CaseTaskStatus {
+        open -> in_progress -> [done, blocked, escalated];
+        blocked -> in_progress;                             // unblocked, same posture QaReviewStatus lacks (no loop needed there)
+        escalated -> in_progress;                            // RFI answered / re-opened
+    }
+}
 
 // ---- Enumerations (get_options screens) — §8.4 / §1C.2: both hops guarded ----
 nirdosha_rt::enumerate! { options from alert.disposition_code filter active == true cap(row_cap = 50) } // → 3.3

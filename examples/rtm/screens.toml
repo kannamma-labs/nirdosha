@@ -117,9 +117,9 @@ archetype = "dashboard!"
 combo = []
 roles = ["Analyst:R"]
 datasets = ["PG.alert", "PG.case_task"]
-blocked_by = ["dataset:PG.case_task"]
-stage = "emittable"
-notes = "core alert widgets shippable; tasks widget pending case_task"
+blocked_by = []
+stage = "built"
+notes = "C1: tasks widget real (case-task-read); not self-scoped (assignee=me), disclosed"
 
 [[screen]]
 id = "2.3"
@@ -265,9 +265,10 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R/W"]
 datasets = ["PG.alert", "PG.case_task"]
-blocked_by = ["dataset:PG.case_task"]
-stage = "blocked"
-notes = "SLA clock pause on status"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m03_alerts.nir"
+notes = "C1: real list+create over case_task (item_ref=alert:<id>); SLA-clock-pause is AlertStatus's own pending_info state, set separately"
 
 [[screen]]
 id = "3.8"
@@ -401,8 +402,10 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R/W", "ComplianceLead:R/W"]
 datasets = ["PG.case_task"]
-blocked_by = ["dataset:PG.case_task"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m04_cases.nir"
+notes = "C1: real list/create/update over case_task (item_ref=case:<id>, task_type=checklist)"
 
 [[screen]]
 id = "4.9"
@@ -412,8 +415,10 @@ archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R/W"]
 datasets = ["PG.case_task"]
-blocked_by = ["dataset:PG.case_task"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m04_cases.nir"
+notes = "C1: real list+create over case_task (item_ref=case:<id>, task_type=rfi)"
 
 [[screen]]
 id = "4.10"
@@ -1319,13 +1324,14 @@ notes = "self view = own row only"
 id = "14.4"
 name = "Feedback & Coaching"
 module = "M14"
-archetype = "communication_feed!"
+archetype = "crud_screens!"
 combo = ["task_form"]
 roles = ["ComplianceLead:R/W", "Analyst:R/W"]
 datasets = ["PG.qa_review", "PG.case_task"]
-blocked_by = ["dataset:PG.case_task"]
-stage = "blocked"
-notes = "close blocked until ack + action items done"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m14_qa.nir"
+notes = "C1: task_form combo real over case_task (item_ref=qa:<id>); archetype corrected communication_feed! -> crud_screens! (never mounted, same stale-label pattern B9 fixed for SAR); primary resource stays qa_review (/qa/{id}/feedback)"
 
 [[screen]]
 id = "14.5"
@@ -1441,8 +1447,10 @@ archetype = "crud_screens!"
 combo = []
 roles = ["AllRoles:R"]
 datasets = ["PG.case_task", "PG.alert"]
-blocked_by = ["dataset:PG.case_task"]
-stage = "blocked"
+blocked_by = []
+stage = "interim"
+file = "examples/rtm/src/screens/m16_notifications.nir"
+notes = "C1: real case_task list (case-task-read); the PG.alert half (assigned alerts surfaced as tasks, per screen-field-mappings.md's 'source' column) not merged in this pass"
 
 [[screen]]
 id = "16.5"

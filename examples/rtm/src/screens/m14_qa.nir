@@ -12,8 +12,15 @@
 //! denies (`qa-no-disposition`, `analyst-no-qa`) -- exercised by this
 //! batch's own test suite as real denials, not asserted as theory.
 //!
-//! Not built this pass: 14.4 (feedback loop to model retraining --
-//! depends on C1's `PG.case_task` plane, per `screens-plan.md`).
+//! Also real, guard-enforced (C1, screens-plan.md): 14.4 Feedback &
+//! Coaching's `task_form` combo -- a real, guard-enforced coaching
+//! action-item mini-list/create over `PG.case_task`
+//! (`case-task-read`/`case-task-create`), scoped to the review via
+//! `item_ref = "qa:<id>"`, `task_type = "coaching_action"`. The screen's
+//! own primary resource stays `qa_review` (`/qa/{id}/feedback`,
+//! `mount_qa_review_screens`'s `update_fields` -- `feedback`); this is
+//! the embedded action-items widget the combo label names, not a second
+//! primary resource.
 //!
 //! 14.5 Overturned Decisions Log (T-11, this batch): `qa_review_table`'s
 //! own `returned` status (`QaReviewStatus`'s real machine, `scored ->
@@ -111,4 +118,54 @@ pub fn mount_overturned_decisions_log(router: nirdosha_rt::Router) -> nirdosha_r
         };
         nirdosha_rt::Response::json(200, &serde_json::json!({ "overturned_reviews": overturned, "alert_chain": alert_chain }))
     })
+}
+
+/// C1 (screens-plan.md): 14.4's `task_form` combo -- real guard-enforced
+/// list + create over `PG.case_task` (`case-task-read`/`case-task-
+/// create`, `00_core.nir`), scoped to this review via `item_ref =
+/// "qa:<id>"`, `task_type = "coaching_action"`.
+pub fn mount_qa_task_form(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .get_with_auth("/qa/{id}/tasks", "Coaching action items (14.4)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let item_ref = format!("qa:{id}");
+            match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+                Ok(rows) => {
+                    let filtered: Vec<_> = rows.into_iter().filter(|r| r.item_ref == item_ref && r.task_type == "coaching_action").collect();
+                    nirdosha_rt::Response::json(200, &serde_json::json!(filtered))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/qa/{id}/tasks", "Add coaching action item (14.4)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let form = req.form_or_json();
+            let Some(title) = form.get("title").cloned() else { return nirdosha_rt::Response::bad_request("title required") };
+            let assignee = form.get("assignee").cloned().unwrap_or_else(|| auth.user().to_string());
+            let due_date = form.get("due_date").cloned().unwrap_or_default();
+            let priority = form.get("priority").cloned().unwrap_or_else(|| "normal".into());
+            let detail = form.get("detail").cloned().unwrap_or_default();
+            let task_id = format!("task-{}", ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis());
+            let submitted: HashSet<String> = ["item_ref".into(), "task_type".into(), "title".into(), "assignee".into(), "due_date".into(), "priority".into()].into();
+            let entity = crate::bridge::CaseTaskRow {
+                id: 0,
+                task_id,
+                tenant_id: crate::bridge::DEMO_TENANT.into(),
+                item_ref: format!("qa:{id}"),
+                task_type: "coaching_action".into(),
+                title,
+                detail,
+                assignee,
+                due_date,
+                priority,
+                status: "open".into(),
+                blocked_reason: String::new(),
+                completion_note: String::new(),
+            };
+            match crate::bridge::case_task_table().guarded_insert_checked(auth, "Operations", &submitted, entity) {
+                Ok(row) => nirdosha_rt::Response::json(201, &serde_json::json!(row)),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
 }

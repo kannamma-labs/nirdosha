@@ -15,12 +15,16 @@
 //! iteration independently policy-checked — not a single bulk grant
 //! rubber-stamped once).
 //!
+//! Also real, guard-enforced (C1, screens-plan.md): 3.7 Pending Info/RFI
+//! — list + create over `PG.case_task` (`case-task-read`/`case-task-
+//! create`), scoped to this alert.
+//!
 //! Not built this pass (`screen-field-mappings.md`'s own validation-UX
 //! detail — checklists, attestation modals, min/max text lengths — is a
 //! frontend concern the `guard_policy!` corpus doesn't encode at all,
 //! and building it wouldn't prove anything about guard enforcement):
 //! 3.4 related/merge, 3.6 reassignment (single-row shortcut of 3.5, not
-//! separately wired), 3.7 RFI, 3.8 escalation form (3.8's real
+//! separately wired), 3.8 escalation form (3.8's real
 //! substance — creating a case draft — is M4's `analyst-create-case`,
 //! reachable from the case screens instead), 3.9 SLA monitor
 //! (`lead-sla-aggregate` — an `aggregate` action, same shape M2's
@@ -143,6 +147,60 @@ pub fn mount_alert_context(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
             match crate::bridge::entity_audit_timeline(auth, "alert", &id) {
                 Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
                 Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{reason}</p>")),
+            }
+        })
+}
+
+/// C1 (screens-plan.md): 3.7 Pending Info/RFI — real guard-enforced list
+/// + create over `PG.case_task` (`case-task-read`/`case-task-create`,
+/// `00_core.nir`), scoped to this alert via `item_ref = "alert:<id>"`,
+/// `task_type = "rfi"`. **Disclosed scope**: the screen's own SLA-clock-
+/// pause semantics are `AlertStatus`'s already-real `pending_info` state
+/// (`10_domains.nir`'s `machine AlertStatus`), set independently through
+/// `mount_alert_screens`'s `update_fields` — this route only tracks the
+/// RFI task record itself, not the clock.
+pub fn mount_alert_rfi(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .get_with_auth("/alerts/{id}/rfi", "Pending Info / RFI (3.7)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let item_ref = format!("alert:{id}");
+            match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+                Ok(rows) => {
+                    let filtered: Vec<_> = rows.into_iter().filter(|r| r.item_ref == item_ref && r.task_type == "rfi").collect();
+                    nirdosha_rt::Response::json(200, &serde_json::json!(filtered))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/alerts/{id}/rfi", "Raise RFI (3.7)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let form = req.form_or_json();
+            let Some(title) = form.get("title").cloned() else { return nirdosha_rt::Response::bad_request("title required") };
+            let assignee = form.get("assignee").cloned().unwrap_or_else(|| auth.user().to_string());
+            let due_date = form.get("due_date").cloned().unwrap_or_default();
+            let priority = form.get("priority").cloned().unwrap_or_else(|| "normal".into());
+            let detail = form.get("detail").cloned().unwrap_or_default();
+            let task_id = format!("task-{}", ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis());
+            let submitted: HashSet<String> = ["item_ref".into(), "task_type".into(), "title".into(), "assignee".into(), "due_date".into(), "priority".into()].into();
+            let entity = crate::bridge::CaseTaskRow {
+                id: 0,
+                task_id,
+                tenant_id: crate::bridge::DEMO_TENANT.into(),
+                item_ref: format!("alert:{id}"),
+                task_type: "rfi".into(),
+                title,
+                detail,
+                assignee,
+                due_date,
+                priority,
+                status: "open".into(),
+                blocked_reason: String::new(),
+                completion_note: String::new(),
+            };
+            match crate::bridge::case_task_table().guarded_insert_checked(auth, "Operations", &submitted, entity) {
+                Ok(row) => nirdosha_rt::Response::json(201, &serde_json::json!(row)),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
             }
         })
 }

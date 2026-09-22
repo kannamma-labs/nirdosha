@@ -119,6 +119,39 @@ nirdosha_rt::guard_policy! {
     obligate audit(sampled)
 }
 
+// ---- C1 (screens-plan.md): `PG.case_task` guard policies ----
+// Cross-module resource (3.7/4.8/4.9/14.4/16.4 + 2.2's widget) — placed
+// here rather than a single owning module file for the same reason
+// `notification-read` (90_ops_admin.nir) is the one policy every module's
+// notify obligation resolves against: no single M-module owns it.
+nirdosha_rt::guard_policy! {
+    allow "case-task-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "case_task"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 20_000)
+    grant predicate_use(item_ref, assignee, status, task_type)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "case-task-create" for Analyst, ComplianceLead
+    when action == "create" && resource == "case_task"
+    purpose(Operations)
+    field_policy { required(item_ref, task_type, title, assignee, due_date, priority) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "case-task-update" for Analyst, ComplianceLead
+    when action == "update" && resource == "case_task"
+    requires field(status).transition_allowed()
+    field_policy { allowed(status, blocked_reason, completion_note) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
 // ---- Global invariant registrations (referenced by policies below) ----
 // [RFC 0023 §2 Condition::Custom registry; §17; RFC 0026 §10.1 examples]
 //

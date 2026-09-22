@@ -14,6 +14,7 @@
 
 use crate::bridge::alert_table;
 use crate::bridge::case_table;
+use crate::bridge::case_task_table;
 use crate::bridge::model_table;
 use crate::bridge::payment_table;
 use crate::bridge::refdata_table;
@@ -46,6 +47,18 @@ fn my_alerts_by_status(auth: &nirdosha_rt::Auth) -> String {
     serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
 }
 
+// C1 (screens-plan.md): 2.2's tasks widget -- real, guard-enforced
+// (`case-task-read`, `00_core.nir`), counting every open/in_progress
+// `PG.case_task` row the requester's grant can see. **Disclosed gap**:
+// not filtered to `assignee = auth.user()` -- same "no self-scope
+// filter built yet" gap `mount_my_tasks` (16.4) discloses.
+fn my_open_task_count(auth: &nirdosha_rt::Auth) -> i64 {
+    match case_task_table().guarded_snapshot(auth, "Operations") {
+        Ok(rows) => rows.iter().filter(|r| r.status == "open" || r.status == "in_progress").count() as i64,
+        Err(_) => 0,
+    }
+}
+
 fn team_alert_volume(auth: &nirdosha_rt::Auth) -> i64 {
     match alert_table().guarded_aggregate(auth, "Operations") {
         Ok(rows) => rows.len() as i64,
@@ -73,6 +86,7 @@ nirdosha_rt::dashboard! {
     widgets {
         Metric { label: "My pending alerts", fn: my_pending_alerts, guarded: true },
         Chart  { label: "My alerts by status", fn: my_alerts_by_status, mark: bar, guarded: true },
+        Metric { label: "My open tasks", fn: my_open_task_count, guarded: true },
     }
 }
 

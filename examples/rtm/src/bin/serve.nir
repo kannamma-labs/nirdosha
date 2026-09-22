@@ -58,12 +58,14 @@ fn main() {
     let router = rtm::m03_alerts::mount_alert_screens(router);
     let router = rtm::m03_alerts::mount_bulk_alert_reassign(router);
     let router = rtm::m03_alerts::mount_alert_context(router);
+    let router = rtm::m03_alerts::mount_alert_rfi(router);
     let router = rtm::m04_cases::mount_case_board(router);
     let router = rtm::m04_cases::mount_case_screens(router);
     let router = rtm::m04_cases::mount_case_four_eyes(router);
     let router = rtm::m04_cases::mount_case_review_inbox(router);
     let router = rtm::m04_cases::mount_investigation_workspace(router);
     let router = rtm::m04_cases::mount_case_context_tabs(router);
+    let router = rtm::m04_cases::mount_case_tasks(router);
     let router = rtm::m05_customer::mount_customer_screens(router);
     let router = rtm::m06_transactions::mount_transaction_screens(router);
     let router = rtm::m06_transactions::mount_transaction_context(router);
@@ -96,10 +98,12 @@ fn main() {
     let router = rtm::m13_risk_config::mount_refdata_screens(router);
     let router = rtm::m14_qa::mount_qa_self_scorecard(router);
     let router = rtm::m14_qa::mount_overturned_decisions_log(router);
+    let router = rtm::m14_qa::mount_qa_task_form(router);
     let router = rtm::m14_qa::mount_qa_review_screens(router);
     let router = rtm::m15_reporting::mount_governed_export(router);
     let router = rtm::m15_reporting::mount_mis_dashboard(router);
     let router = rtm::m16_notifications::mount_notification_feed(router);
+    let router = rtm::m16_notifications::mount_my_tasks(router);
     let router = rtm::m18_admin::mount_role_grant(router);
     let router = rtm::m18_admin::mount_delegation_mint(router);
     let router = rtm::m18_admin::mount_driver_migrate(router);
