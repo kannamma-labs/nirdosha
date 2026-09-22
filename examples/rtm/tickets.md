@@ -283,32 +283,55 @@ together.
 ## T-06 — Cross-entity linked-context assembly
 - status: active
 - size: L
-- meaning: one guarded cross-entity context read feeding workspaces and tabs (related alerts, txn scope, 360, explainability, audit timeline)
-- blocked-screens: 3.2, 3.4, 3.10, 4.3, 4.4, 4.5, 5.2, 6.2, 9.6, 20.1
+- meaning: real, capped guarded context reads (related alerts, txn scope, audit timeline) merged under one shared budget that fails whole-not-partial
+- blocked-screens: 5.2
 - note-mentions: 12.4
 
-**Scope.** The linked-context layer every detail/workspace screen composes
-from instead of N ad-hoc joins: related alerts on the same
-customer/counterparty/period, transactions inside a case's scope
-(PG.case_txn_scope), Customer 360 roll-ups, score-explainability embeds, and
-per-entity audit timelines. Feeds the `workspace!` archetype, the
-`linked_detail`/tab combos, and cross-chain search (20.1 pairs it with T-11's
-unified chain store). menus.toml: nav.audit_log — "T-11 projection; timeline
-via T-06".
+**Scope, as closed (B11).** The declarative `workspace!` archetype
+(`crates/nirdosha-macros/src/workspace.rs`, `nirdosha_rt::workspace`)
+retired the hand-built `LayoutNode`/`render_workspace`/`render_custom_screen`
+anti-pattern (`showcase_screens.rs`, zero call sites before this ticket).
+Each declared "context need" is a real guarded sub-read
+(`bridge.nir`'s `related_alerts_for_case`/`case_transactions_for_case`/
+`related_alerts_for_alert`/`related_alerts_for_transaction`/
+`entity_audit_timeline`) run in parallel and merged under a shared
+`WorkspaceBudget` — `nirdosha_rt::workspace::assemble_context` fails the
+WHOLE assembly with a named reason on any sub-read error or budget
+overflow, never a partial render (proven by unit tests in
+`workspace.rs`). `PG.case_txn_scope` is real: derived from a case's
+linked alerts' `txn_id`s and materialized via `system_write`, read
+through a real `case-txn-scope-read` policy (`60_case_management.nir`).
 
-**Gates.** Ten screens — 3.2 Alert Detail, 3.4 Related & Linked Alerts, 3.10
-Alert Audit History, 4.3 Investigation Workspace, 4.4 Linked Alerts Tab, 4.5
-Case Transactions Tab, 5.2 Customer 360, 6.2 Transaction Detail, 9.6 Score
-Explainability Viewer, 20.1 Audit Log Search. Most of these ship an
-`interim = crud/table` shape today; full fidelity waits on this ticket.
-Note-only on 12.4 Subjects & Activity Tabs (B9): its totals-consistency
-advance-block needs this ticket's case/transaction-scope context read to
-compare `amount_total` against the case's real txn scope — not itself
-stage-gated, since 12.4 is `built` on its own real fields already.
+**Gates closed for real.** 3.2, 3.4, 4.4, 4.5, 6.2 → `built` (real guarded
+context reads, own routes). 3.10, 20.1 → `built` (`entity_audit_timeline`
+reuses T-11/B8's `AC.all_chains` real projection under `purpose(Audit)`).
+4.3 Investigation Workspace → `interim` (`workspace!` real, two panels;
+`PG.case_evidence` still unbuilt — that dataset gap is its own remaining
+blocker, unrelated to this ticket). 9.6 → still `blocked`, but ONLY on
+`dataset:PG.model_run_stat` (C2) now — the archetype itself is real.
 
-**Done when.** A screen declares its context needs once (related/alerts,
-case/transactions, entity/360, ...) and the emitted screen gets one guarded,
-policy-capped context read — not per-screen bespoke joins.
+**5.2 deliberately NOT closed.** No `guard_policy!` anywhere in this
+corpus grants `Analyst`/`ComplianceLead`/`McpCopilot` (5.2's own declared
+roles) any read on `customer` — only `RmUser` (one masked field) and
+`Auditor` (broad) — `m05_customer.nir`'s own doc comment discloses this
+pre-existing gap. Inventing a grant to make the screen "work" is a policy
+decision outside this ticket's authority (same restraint that file's own
+comment already establishes), so `ticket:T-06` stays on 5.2 as the real
+remaining blocker — this corpus's `blocked_by` vocabulary has no
+dedicated token for "missing role grant."
+
+**4.3's audit_timeline panel deliberately omitted.** `entity_audit_timeline`
+runs under `purpose(Audit)`; `Analyst` — 4.3's own primary declared role —
+has no grant on that resource. Since one failing need fails the whole
+workspace read (never partial), including it would 422 this screen for
+its main user on every request.
+
+**Done when (met, for the closed gates).** A screen declares its context
+needs once (related/alerts, case/transactions, audit timeline) and the
+emitted screen gets one guarded, policy-capped, budget-merged context
+read — not per-screen bespoke joins. Explainability (9.6) and Customer
+360 (5.2) each have their own separate, disclosed remaining blocker
+(dataset, missing role grant) — this ticket's own scope is closed.
 
 ---
 

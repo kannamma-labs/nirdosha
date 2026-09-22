@@ -409,6 +409,211 @@ pub fn case_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_gu
 }
 
 // ============================================================================
+// T-06/B11 — `PG.case_txn_scope` + the real guarded context-read fns
+// `workspace!`'s declared panels call (`nirdosha_rt::workspace::
+// ContextNeed::source`). Each fn below is a real guarded read (or, for
+// `case_transactions_for_case`, a real guarded read plus a `system_write`
+// materialization step) over `bridge.nir`'s own tables -- never
+// fabricated rows. See `60_case_management.nir`'s `case-txn-scope-read`
+// policy for the real grant these reads run under.
+// ============================================================================
+
+/// One transaction known to be inside a case's investigation scope.
+/// Derived (below) from the case's own linked alerts' `txn_id`s --
+/// `screens-plan.md` B11's own "PG.case_txn_scope" scope line, not a
+/// speculative table.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CaseTxnScopeRow {
+    pub id: i64,
+    pub scope_id: String,
+    pub tenant_id: String,
+    pub case_id: String,
+    pub txn_id: String,
+    pub added_at: i64,
+}
+
+impl GuardedEntity for CaseTxnScopeRow {
+    const RESOURCE: &'static str = "case_txn_scope";
+    fn row_id(&self) -> String {
+        self.scope_id.clone()
+    }
+}
+
+pub fn case_txn_scope_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTxnScopeRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTxnScopeRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-case-txn-scope-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_case_txn_scope_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Subject header for `mount_investigation_workspace` (4.3) — the
+/// `label_fn` `workspace!`'s expansion calls once per request.
+pub fn case_workspace_header(row: &CaseRow) -> Vec<(String, String)> {
+    vec![
+        ("Case".to_string(), row.case_id.clone()),
+        ("Status".to_string(), row.status.clone()),
+        ("Assigned to".to_string(), row.assigned_to.clone()),
+    ]
+}
+
+/// Related-alerts context need (4.3's workspace panel, and 4.4 Linked
+/// Alerts Tab's own dedicated route): the case's own linked `alert_ids`
+/// -- a real, checked field already on `CaseRow` -- resolved one guarded
+/// `alert_table().guarded_get` at a time. This IS "related alerts" for
+/// an investigation workspace: the alert set the case was actually
+/// opened from, not a speculative similarity join this corpus's
+/// `AlertRow` (no `customer_id` field) cannot support today.
+pub fn related_alerts_for_case(auth: &nirdosha_rt::Auth, case_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let case = case_table()
+        .guarded_get(auth, "AmlInvestigation", case_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("case `{case_id}` not found"))?;
+    let mut rows = Vec::new();
+    for alert_id in case.alert_ids.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match alert_table().guarded_get(auth, "AmlInvestigation", alert_id) {
+            Ok(Some(alert)) => rows.push(serde_json::to_value(&alert).map_err(|e| e.to_string())?),
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(rows)
+}
+
+/// Case-transactions context need (4.3's workspace panel, and 4.5 Case
+/// Transactions Tab's own dedicated route). Derives the case's
+/// transaction scope from its linked alerts' `txn_id`s (never
+/// fabricated), materializes any newly-seen `(case_id, txn_id)` pair
+/// into the real `PG.case_txn_scope` table via `system_write` — this
+/// automatic derivation is the "scope discovery" half; the table's own
+/// `guarded_insert`/`guarded_update` paths stay open for a future
+/// explicit "add to scope"/"remove from scope" analyst action, not
+/// built this pass — then reads the scoped rows back through the real
+/// guarded path and resolves each into its transaction.
+pub fn case_transactions_for_case(auth: &nirdosha_rt::Auth, case_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let case = case_table()
+        .guarded_get(auth, "AmlInvestigation", case_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("case `{case_id}` not found"))?;
+
+    let mut txn_ids: Vec<String> = Vec::new();
+    for alert_id in case.alert_ids.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Ok(Some(alert)) = alert_table().guarded_get(auth, "AmlInvestigation", alert_id) {
+            if !alert.txn_id.is_empty() && !txn_ids.contains(&alert.txn_id) {
+                txn_ids.push(alert.txn_id.clone());
+            }
+        }
+    }
+
+    let already: std::collections::HashSet<String> = case_txn_scope_table()
+        .system_scan()
+        .unwrap_or_default()
+        .iter()
+        .filter(|r: &&CaseTxnScopeRow| r.case_id == case_id)
+        .map(|r| r.txn_id.clone())
+        .collect();
+    for txn_id in &txn_ids {
+        if already.contains(txn_id) {
+            continue;
+        }
+        case_txn_scope_table().system_write(
+            DEMO_TENANT,
+            &CaseTxnScopeRow {
+                id: next_case_txn_scope_row_id(),
+                scope_id: format!("{case_id}:{txn_id}"),
+                tenant_id: DEMO_TENANT.into(),
+                case_id: case_id.to_string(),
+                txn_id: txn_id.clone(),
+                added_at: nirdosha_rt::screens::now_epoch_secs(),
+            },
+        );
+    }
+
+    let scoped = case_txn_scope_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for scope_row in scoped.into_iter().filter(|r| r.case_id == case_id) {
+        if let Ok(Some(txn)) = transaction_table().guarded_get(auth, "AmlInvestigation", &scope_row.txn_id) {
+            rows.push(serde_json::to_value(&txn).map_err(|e| e.to_string())?);
+        }
+    }
+    Ok(rows)
+}
+
+/// Related-alerts context need for 3.4 (Related & Linked Alerts): alerts
+/// sharing this alert's own case (if escalated), falling back to alerts
+/// on the same transaction's `subject_id` (the "same customer/
+/// counterparty" half of T-06's own scope description) when the alert
+/// has no case yet.
+pub fn related_alerts_for_alert(auth: &nirdosha_rt::Auth, alert_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let alert = alert_table()
+        .guarded_get(auth, "AmlInvestigation", alert_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("alert `{alert_id}` not found"))?;
+
+    if !alert.case_id.is_empty() {
+        return related_alerts_for_case(auth, &alert.case_id);
+    }
+
+    let Ok(Some(txn)) = transaction_table().guarded_get(auth, "AmlInvestigation", &alert.txn_id) else {
+        return Ok(Vec::new());
+    };
+    let siblings = transaction_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let sibling_txn_ids: std::collections::HashSet<String> = siblings.iter().filter(|t| t.subject_id == txn.subject_id).map(|t| t.txn_id.clone()).collect();
+
+    let alerts = alert_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for other in alerts.into_iter().filter(|a| a.alert_id != alert_id && sibling_txn_ids.contains(&a.txn_id)) {
+        rows.push(serde_json::to_value(&other).map_err(|e| e.to_string())?);
+    }
+    Ok(rows)
+}
+
+/// Related-alerts context need for 6.2 (Transaction Detail): every
+/// alert opened on this exact transaction — real, `AmlInvestigation`-
+/// purpose, no join beyond the `txn_id` equality every alert already
+/// carries.
+pub fn related_alerts_for_transaction(auth: &nirdosha_rt::Auth, txn_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let alerts = alert_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for alert in alerts.into_iter().filter(|a| a.txn_id == txn_id) {
+        rows.push(serde_json::to_value(&alert).map_err(|e| e.to_string())?);
+    }
+    Ok(rows)
+}
+
+/// Per-entity audit-timeline context need (3.10 Alert Audit History):
+/// reuses T-11/B8's real `AC.all_chains` projection
+/// (`refresh_all_chains`/`all_chains_table`) rather than a second audit
+/// mechanism, filtered to the one module + id this screen names. Runs
+/// under `purpose(Audit)` — the same real grant 20.1/20.2 already use
+/// (`Auditor`/`Mlro`/`ComplianceLead`/`Admin`; `Analyst` has none, a
+/// pre-existing corpus gap `96_restricted_views.nir`'s own doc comment
+/// already discloses, not invented or routed around here).
+pub fn entity_audit_timeline(auth: &nirdosha_rt::Auth, module: &str, id_needle: &str) -> Result<Vec<serde_json::Value>, String> {
+    refresh_all_chains();
+    let rows = all_chains_table().guarded_snapshot(auth, "Audit").map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows.into_iter().filter(|r| r.module == module && r.content_json.contains(id_needle)) {
+        out.push(serde_json::to_value(&row).map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// ============================================================================
 // M5 Customer — screens/m05_customer.nir's row type + table.
 //
 // **Real, disclosed corpus gap** (found building this module, not

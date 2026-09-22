@@ -440,16 +440,20 @@ fn legend_corpus_facts_match_live_counts() {
     assert_eq!(total, Some(152), "screens.toml metadata.total_screens drifted");
     assert_eq!(screens.len(), 152, "screens.toml holds {} screens, not 152", screens.len());
 
-    // 11 `ticket:T-…` refs on 11 blocked_by lines (the header's `ticket:T-xx`
+    // 2 `ticket:T-…` refs on 2 blocked_by lines (the header's `ticket:T-xx`
     // format example is documentation and excluded by the two-digit filter).
     // (B10/T-04 closed all 12 of its stage-gating refs — 4.11, 4.12, 5.10,
     // 8.3, 8.8, 8.10, 9.5, 11.3, 12.6, 13.1, 15.5, 18.7 — down from 23; each
     // of those 8 combo screens that stayed blocked now carries its OWN
-    // remaining dataset:/engine: blocker instead, not a ticket ref.)
+    // remaining dataset:/engine: blocker instead, not a ticket ref. B11/T-06
+    // closed all its stage-gating refs except 5.2 (deliberately, disclosed —
+    // no guard_policy! grants its declared roles a customer read at all) —
+    // down from 10 to 1. The other survivor is 19.1's own `ticket:T-09`
+    // (B6's disclosed poll-only gap).)
     let occurrences = count_structured_refs(&screens_src);
     let lines = count_structured_ref_lines(&screens_src);
-    assert_eq!(occurrences, 11, "screens.toml now carries {occurrences} ticket refs (legend says 11)");
-    assert_eq!(lines, 11, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 11)");
+    assert_eq!(occurrences, 2, "screens.toml now carries {occurrences} ticket refs (legend says 2)");
+    assert_eq!(lines, 2, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 2)");
 
     // 3 stage-gating tickets, 6 note-only, 2 reserved — and the legend's
     // corpus-facts paragraph still names exactly those sets. (T-03 closed

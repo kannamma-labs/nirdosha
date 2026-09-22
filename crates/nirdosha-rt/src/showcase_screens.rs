@@ -1,171 +1,21 @@
 //! Runtime HTML renderers for the declarative UI screen archetypes that
-//! `crud_screens!`/`dashboard!` do not cover out of the box:
-//! custom `screen` + `layout`, `workspace`, `workflow` queue, standalone
-//! `visual` pages, and a role-based `landing` page.
+//! `crud_screens!`/`dashboard!` do not cover out of the box: `workflow`
+//! queue, standalone `visual` pages, and a role-based `landing` page.
+//!
+//! T-06/B11 retired this module's former `render_workspace`/
+//! `render_custom_screen`/`LayoutNode` — hand-built layout trees with
+//! zero call sites anywhere in this corpus (the "unverified HTML"
+//! anti-pattern `screens-plan.md`'s B11 section names), superseded by
+//! the real, declarative `nirdosha_rt::workspace!` archetype. This
+//! module's generic renderers (`render_table`/`render_graph`/
+//! `render_heatmap`/`render_timeline` below) are reused by
+//! `workspace::workspace_html`, not duplicated.
 //!
 //! These are intentionally plain HTML — no client-side JS — so every
 //! screen works as a real `Router` route today under plain `cargo`.
 
 use crate::theme::themed_page_shell;
 use crate::web::html_escape;
-
-/// One field shown on a custom screen or workspace subject header.
-#[derive(Clone)]
-pub struct LayoutField {
-    pub name: String,
-    pub label: String,
-    pub value: String,
-}
-
-/// One button/action on a custom screen.
-#[derive(Clone)]
-pub struct LayoutAction {
-    pub label: String,
-    pub href: String,
-    pub style: String,
-}
-
-/// A simplified layout tree: row/column/group/tabs/timeline.
-/// This is the runtime side of `/// nirdosha:layout { ... }` claims.
-#[derive(Clone)]
-pub enum LayoutNode {
-    Row(Vec<LayoutNode>),
-    Column(Vec<LayoutNode>),
-    Group { title: String, fields: Vec<String> },
-    Tabs(Vec<(String, LayoutNode)>),
-    Timeline { source_label: String, events: Vec<TimelineEvent> },
-    Divider,
-}
-
-#[derive(Clone)]
-pub struct TimelineEvent {
-    pub ts: i64,
-    pub label: String,
-    pub detail: String,
-}
-
-fn field_value(fields: &[LayoutField], name: &str) -> String {
-    fields.iter().find(|f| f.name == name).map(|f| f.value.clone()).unwrap_or_default()
-}
-
-fn render_layout_node(node: &LayoutNode, fields: &[LayoutField], actions: &[LayoutAction]) -> String {
-    match node {
-        LayoutNode::Row(children) => {
-            let cols: String = children.iter().map(|c| format!("<div style=\"flex:1;min-width:280px;margin:0.5rem\">{}</div>", render_layout_node(c, fields, actions))).collect();
-            format!("<div class=\"nir-card\" style=\"display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-start\">{cols}</div>")
-        }
-        LayoutNode::Column(children) => {
-            let rows: String = children.iter().map(|c| format!("<div style=\"margin:0.5rem 0\">{}</div>", render_layout_node(c, fields, actions))).collect();
-            format!("<div class=\"nir-card\" style=\"display:flex;flex-direction:column;gap:0.5rem\">{rows}</div>")
-        }
-        LayoutNode::Group { title, fields: field_names } => {
-            let rows: String = field_names.iter().map(|n| {
-                format!(
-                    "<p><label>{}</label> {}</p>",
-                    html_escape(&fields.iter().find(|f| f.name == *n).map(|f| f.label.clone()).unwrap_or_else(|| n.clone())),
-                    html_escape(&field_value(fields, n))
-                )
-            }).collect();
-            format!("<div class=\"nir-card\" style=\"margin:0.5rem 0\"><h4>{}</h4>{rows}</div>", html_escape(title))
-        }
-        LayoutNode::Tabs(tabs) => {
-            let ids: Vec<String> = tabs.iter().enumerate().map(|(i, _)| format!("tab{i}")).collect();
-            let labels: String = tabs.iter().enumerate().map(|(i, (label, _))| {
-                format!(
-                    "<button type=\"button\" class=\"nir-btn tab-btn\" data-target=\"{id}\">{}</button>",
-                    html_escape(label),
-                    id = ids[i]
-                )
-            }).collect();
-            let bodies: String = tabs.iter().enumerate().map(|(i, (_, node))| {
-                format!(
-                    "<div class=\"tab-panel\" id=\"{}\" style=\"display:none\">{}</div>",
-                    ids[i],
-                    render_layout_node(node, fields, actions)
-                )
-            }).collect();
-            let script = r#"<script>
-(function(){
-  var first = document.querySelector('.tab-btn');
-  if(first){ first.classList.add('active'); first.click(); }
-  document.querySelectorAll('.tab-btn').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      var target = this.getAttribute('data-target');
-      document.querySelectorAll('.tab-btn').forEach(function(b){ b.classList.remove('active'); });
-      this.classList.add('active');
-      document.querySelectorAll('.tab-panel').forEach(function(p){ p.style.display = 'none'; });
-      document.getElementById(target).style.display = 'block';
-    });
-  });
-})();
-</script>"#;
-            format!("<div class=\"nir-card\">{labels}{bodies}{script}</div>")
-        }
-        LayoutNode::Timeline { source_label, events } => {
-            let rows: String = events.iter().map(|e| {
-                format!(
-                    "<li style=\"margin:0.5rem 0\"><strong>{}</strong> <span class=\"nir-text-muted\">({})</span> — {}</li>",
-                    html_escape(&e.label),
-                    e.ts,
-                    html_escape(&e.detail)
-                )
-            }).collect();
-            format!("<div><h4>{}</h4><ul>{rows}</ul></div>", html_escape(source_label))
-        }
-        LayoutNode::Divider => "<hr style=\"border:none;border-top:1px solid var(--nir-border);margin:1rem 0\">".to_string(),
-    }
-}
-
-/// Render a custom screen (e.g. the Purchase Order screen) from a
-/// layout tree, a field set, and a row of data.
-pub fn render_custom_screen(
-    title: &str,
-    fields: &[LayoutField],
-    actions: &[LayoutAction],
-    layout: &LayoutNode,
-    _row: &serde_json::Value,
-) -> String {
-    let layout_html = render_layout_node(layout, fields, actions);
-    let action_html: String = actions.iter().map(|a| {
-        format!(
-            "<a href=\"{}\" class=\"nir-btn nir-btn-secondary\">{}</a>",
-            html_escape(&a.href), html_escape(&a.label)
-        )
-    }).collect();
-    let action_block = if actions.is_empty() { String::new() } else { format!("<div class=\"nir-card\" style=\"margin:1rem 0\">{action_html}</div>") };
-    themed_page_shell(title, "", &format!("{action_block}{layout_html}"))
-}
-
-/// One panel in a workspace.
-#[derive(Clone)]
-pub struct WorkspacePanel {
-    pub title: String,
-    pub render: String, // "table", "graph", "timeline"
-    pub data: serde_json::Value,
-}
-
-/// Render a composite workspace page: subject header + panels.
-pub fn render_workspace(title: &str, subject_fields: &[LayoutField], panels: &[WorkspacePanel]) -> String {
-    let header: String = subject_fields.iter().map(|f| {
-        format!("<span style=\"margin-right:1.5rem\"><strong>{}:</strong> {}</span>", html_escape(&f.label), html_escape(&f.value))
-    }).collect();
-    let panels_html: String = panels.iter().map(|p| {
-        let body = match p.render.as_str() {
-            "graph" => render_graph(&p.data),
-            "heatmap" => render_heatmap(&p.data),
-            "timeline" => render_timeline(&p.data),
-            _ => render_table(&p.data),
-        };
-        format!(
-            "<div class=\"nir-card\" style=\"margin:0.5rem 0\">\
-             <h3>{}</h3>{body}</div>",
-            html_escape(&p.title)
-        )
-    }).collect();
-    themed_page_shell(title, "", &format!(
-        "<div class=\"nir-card\" style=\"margin-bottom:1rem\">{header}</div>{panels_html}"
-    ))
-}
 
 /// Render a generic table from a JSON array of objects.
 pub fn render_table(data: &serde_json::Value) -> String {

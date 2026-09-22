@@ -32,6 +32,9 @@
 //! -- M12 itself is a later, bespoke batch.
 
 use crate::bridge::case_table;
+use crate::bridge::case_transactions_for_case;
+use crate::bridge::case_workspace_header;
+use crate::bridge::related_alerts_for_case;
 use crate::bridge::CaseRow;
 use nirdosha_rt::prelude::SharedTable;
 
@@ -153,4 +156,49 @@ nirdosha_rt::approval_inbox! {
     sources: [
         { table: case_table, chain: "case_review", resource: "case", detail_path: "/cases/{id}" },
     ],
+}
+
+// T-06/B11: 4.3 Investigation Workspace — `workspace!`'s two real
+// context needs for this corpus's `Analyst`/`ComplianceLead` case-read
+// grant (`related_alerts_for_case`, `case_transactions_for_case`, both
+// `bridge.nir`). An `audit_timeline` panel was deliberately NOT added
+// here: `entity_audit_timeline` runs under `purpose(Audit)`, and
+// `Analyst` — 4.3's own primary declared role — has no grant on that
+// resource (`96_restricted_views.nir`'s disclosed gap); since one
+// failing need fails the WHOLE workspace read (never a partial render),
+// including it would 422 this screen for its main user on every
+// request. Evidence pinboard (`PG.case_evidence`) stays unbuilt — this
+// screen's remaining blocker after this ticket.
+nirdosha_rt::workspace! {
+    mount: mount_investigation_workspace,
+    path: "/cases/{id}/workspace",
+    subject: { table: case_table, purpose: "AmlInvestigation", label_fn: case_workspace_header },
+    budget: { max_rows: 500, max_execution_ms: 2000 },
+    panels: [
+        { need: "related_alerts", title: "Related Alerts", render: "table", source: related_alerts_for_case },
+        { need: "case_transactions", title: "Transactions In Scope", render: "table", source: case_transactions_for_case },
+    ],
+}
+
+/// 4.4 Linked Alerts Tab / 4.5 Case Transactions Tab: the same two real
+/// context reads `mount_investigation_workspace` uses, each as its own
+/// dedicated route rather than only embedded in the composite workspace
+/// — these two screens are declared separately in `screens.toml` with
+/// their own roles/blockers.
+pub fn mount_case_context_tabs(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/alerts", "Linked Alerts Tab (4.4)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            match related_alerts_for_case(auth, &id) {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{}</p>", nirdosha_rt::screens::value_display(&serde_json::Value::String(reason)))),
+            }
+        })
+        .get_with_auth("/cases/{id}/transactions", "Case Transactions Tab (4.5)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            match case_transactions_for_case(auth, &id) {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{}</p>", nirdosha_rt::screens::value_display(&serde_json::Value::String(reason)))),
+            }
+        })
 }

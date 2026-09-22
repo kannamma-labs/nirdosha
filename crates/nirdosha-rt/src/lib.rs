@@ -25,7 +25,7 @@
 
 pub use nirdosha_macros::{
     app_shell, app_shell_from_toml, approval_inbox, categorical_actions, communication_feed, contract, crud_screens,
-    dashboard, kanban_board, landing, login, settings_screen, wizard, workflow,
+    dashboard, kanban_board, landing, login, settings_screen, wizard, workflow, workspace,
 };
 
 pub use nirdosha_guard_macros::{
@@ -61,6 +61,7 @@ pub mod showcase_screens;
 pub mod theme;
 pub mod watermark;
 pub mod web;
+pub mod workspace;
 pub mod wizard;
 
 pub use nfr::{enter, events, reset_events, Guard, Limits, NfrEvent};

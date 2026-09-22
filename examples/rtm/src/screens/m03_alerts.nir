@@ -121,3 +121,28 @@ pub fn mount_bulk_alert_reassign(router: nirdosha_rt::Router) -> nirdosha_rt::Ro
         nirdosha_rt::Response::json(200, &serde_json::json!({ "results": results }))
     })
 }
+
+/// T-06/B11: 3.4 Related & Linked Alerts (`related_alerts_for_alert` —
+/// same-case alerts, or same-customer-transaction siblings when the
+/// alert has no case yet) and 3.10 Alert Audit History
+/// (`entity_audit_timeline`, reusing T-11/B8's real `AC.all_chains`
+/// projection under `purpose(Audit)` — `Auditor`/`Mlro`/`ComplianceLead`/
+/// `Admin` only; `Analyst` has no grant on this resource, a pre-existing,
+/// disclosed corpus gap, not invented around here).
+pub fn mount_alert_context(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/alerts/{id}/related", "Related & Linked Alerts (3.4)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            match crate::bridge::related_alerts_for_alert(auth, &id) {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{reason}</p>")),
+            }
+        })
+        .get_with_auth("/alerts/{id}/audit", "Alert Audit History (3.10)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            match crate::bridge::entity_audit_timeline(auth, "alert", &id) {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{reason}</p>")),
+            }
+        })
+}

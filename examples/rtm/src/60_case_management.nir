@@ -48,6 +48,20 @@ nirdosha_rt::guard_policy! {
     obligate audit(full)
 }
 
+// T-06/B11: real read grant for `workspace!`'s case-scoped context needs
+// (`case_transactions_for_case`) — `PG.case_txn_scope`, derived and
+// materialized by `bridge.nir`, same `AmlInvestigation` purpose and role
+// as `case-read` above (the screens that read this, 4.3/4.5, carry the
+// identical `Analyst` role grant on their own `case`/`alert` reads).
+nirdosha_rt::guard_policy! {
+    allow "case-txn-scope-read" for Analyst
+    when action == "read" && resource == "case_txn_scope"
+    purpose(AmlInvestigation)
+    filter tenant_scope()
+    cap(row_cap = 500, max_scan_rows = 50_000)
+    obligate audit(sampled)
+}
+
 // svc:case internal transitions (status seeding, sar_id attach) [NEW]
 nirdosha_rt::guard_policy! {
     allow "case-svc-write" for SvcCase

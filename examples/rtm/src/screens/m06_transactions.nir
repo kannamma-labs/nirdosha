@@ -68,3 +68,20 @@ nirdosha_rt::crud_screens! {
         ],
     },
 }
+
+/// T-06/B11: 6.2 Transaction Detail's "alert/case links" context need —
+/// every alert opened on this exact transaction
+/// (`related_alerts_for_transaction`, `bridge.nir`), real and
+/// `AmlInvestigation`-purpose, closing the note's own disclosed gap
+/// ("copilot ⛔ alert/case links" — `McpCopilot` still denied per its
+/// own corpus posture; `Analyst`/`OpsAnalyst`/`QaReviewer`/`Auditor`
+/// resolve for real here).
+pub fn mount_transaction_context(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/transactions/{id}/related-alerts", "Transaction Detail: related alerts (6.2)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        match crate::bridge::related_alerts_for_transaction(auth, &id) {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{reason}</p>")),
+        }
+    })
+}

@@ -52,6 +52,7 @@ mod settings_screen;
 mod util;
 mod wizard;
 mod workflow;
+mod workspace;
 
 use nirdosha_contract_core as cc;
 use proc_macro::TokenStream;
@@ -121,6 +122,15 @@ pub fn approval_inbox(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn communication_feed(input: TokenStream) -> TokenStream {
     communication_feed::expand(input)
+}
+
+/// See `workspace::expand`'s module doc — T-06's archetype: a composite
+/// subject screen whose declared context needs each resolve to a real,
+/// independently-capped guarded sub-read, merged under one shared budget
+/// (never one bespoke per-screen join).
+#[proc_macro]
+pub fn workspace(input: TokenStream) -> TokenStream {
+    workspace::expand(input)
 }
 
 /// See `app_shell_from_toml::expand`'s module doc — generate the

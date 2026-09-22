@@ -57,12 +57,16 @@ fn main() {
     let router = rtm::m03_alerts::mount_alert_board(router);
     let router = rtm::m03_alerts::mount_alert_screens(router);
     let router = rtm::m03_alerts::mount_bulk_alert_reassign(router);
+    let router = rtm::m03_alerts::mount_alert_context(router);
     let router = rtm::m04_cases::mount_case_board(router);
     let router = rtm::m04_cases::mount_case_screens(router);
     let router = rtm::m04_cases::mount_case_four_eyes(router);
     let router = rtm::m04_cases::mount_case_review_inbox(router);
+    let router = rtm::m04_cases::mount_investigation_workspace(router);
+    let router = rtm::m04_cases::mount_case_context_tabs(router);
     let router = rtm::m05_customer::mount_customer_screens(router);
     let router = rtm::m06_transactions::mount_transaction_screens(router);
+    let router = rtm::m06_transactions::mount_transaction_context(router);
     let router = rtm::m07_network::mount_lineage_explore(router);
     let router = rtm::m07_network::mount_lineage_audit(router);
     let router = rtm::m08_rules::mount_window_migrate(router);

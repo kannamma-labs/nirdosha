@@ -202,10 +202,10 @@ archetype = "crud_screens!"
 combo = ["workspace!"]
 roles = ["Analyst:R/W", "ComplianceLead:R/W", "QaReviewer:R", "McpCopilot:R/W"]
 datasets = ["PG.alert", "PG.transaction", "PG.customer", "AC.alert_chain"]
-blocked_by = ["archetype:workspace!", "ticket:T-06"]
+blocked_by = []
 stage = "built"
 file = "examples/rtm/src/screens/m03_alerts.nir"
-notes = "sar_linked must be absent (T-02 drop-mask); copilot: score absent"
+notes = "sar_linked must be absent (T-02 drop-mask); copilot: score absent — workspace! real since B11 (related_alerts_for_alert combo lives on 3.4)"
 
 [[screen]]
 id = "3.3"
@@ -228,9 +228,10 @@ archetype = "crud_screens!"
 combo = ["workspace!"]
 roles = ["Analyst:R", "McpCopilot:R"]
 datasets = ["PG.alert", "PG.case"]
-blocked_by = ["archetype:workspace!", "ticket:T-06"]
-stage = "interim"
-notes = "filtered-list interim shippable"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m03_alerts.nir"
+notes = "related_alerts_for_alert (B11): same-case alerts, or same-customer-transaction siblings when no case yet — real guarded read at /alerts/{id}/related"
 
 [[screen]]
 id = "3.5"
@@ -300,9 +301,10 @@ archetype = "crud_screens!"
 combo = ["workspace!", "ac_timeline"]
 roles = ["AllRoles:R", "Auditor:R"]
 datasets = ["AC.alert_chain"]
-blocked_by = ["ticket:T-06"]
-stage = "blocked"
-notes = "immutable before→after rows — AC.alert_chain real since B8; still waits on workspace!/context (B11)"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m03_alerts.nir"
+notes = "immutable before→after rows — entity_audit_timeline (B11) reuses AC.all_chains real since B8, at /alerts/{id}/audit, purpose(Audit) — real for Auditor/Mlro/ComplianceLead/Admin; Analyst has no audit_chain grant (96_restricted_views.nir's disclosed gap, not invented around here), so 'AllRoles:R' is aspirational for that one role"
 
 # -------------------------------------------------------------- M4 Cases (14)
 [[screen]]
@@ -337,9 +339,10 @@ archetype = "workspace!"
 combo = []
 roles = ["Analyst:R/W", "ComplianceLead:R/W", "McpCopilot:R/W"]
 datasets = ["PG.case", "PG.alert", "PG.transaction", "PG.customer", "PG.case_evidence", "AC.case_chain"]
-blocked_by = ["archetype:workspace!", "ticket:T-06", "dataset:PG.case_evidence"]
-stage = "blocked"
-notes = "interim = crud detail; evidence pinboard = guarded rows"
+blocked_by = ["dataset:PG.case_evidence"]
+stage = "interim"
+file = "examples/rtm/src/screens/m04_cases.nir"
+notes = "workspace! real since B11 — related_alerts_for_case + case_transactions_for_case panels, budget-capped, at /cases/{id}/workspace; evidence pinboard (PG.case_evidence) still unbuilt, sole remaining blocker"
 
 [[screen]]
 id = "4.4"
@@ -349,8 +352,10 @@ archetype = "crud_screens!"
 combo = ["workspace!"]
 roles = ["Analyst:R", "McpCopilot:R"]
 datasets = ["PG.alert", "PG.case"]
-blocked_by = ["ticket:T-06"]
-stage = "interim"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m04_cases.nir"
+notes = "real guarded read at /cases/{id}/alerts (related_alerts_for_case, B11) — no longer filtered-list interim"
 
 [[screen]]
 id = "4.5"
@@ -360,9 +365,10 @@ archetype = "crud_screens!"
 combo = ["workspace!"]
 roles = ["Analyst:R/W", "McpCopilot:R"]
 datasets = ["PG.transaction", "PG.case_txn_scope"]
-blocked_by = ["ticket:T-06", "dataset:PG.case_txn_scope"]
-stage = "interim"
-notes = "annotate via analyst_flag now; scope table pending"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m04_cases.nir"
+notes = "PG.case_txn_scope real (B11) — derived from the case's linked alerts' txn_ids, materialized via system_write, read at /cases/{id}/transactions under case-txn-scope-read (Analyst, AmlInvestigation)"
 
 [[screen]]
 id = "4.6"
@@ -490,9 +496,9 @@ archetype = "workspace!"
 combo = []
 roles = ["Analyst:R", "ComplianceLead:R", "McpCopilot:R"]
 datasets = ["PG.customer", "PG.account", "PG.transaction", "L.sanctions_lists", "AC.entity_chain"]
-blocked_by = ["archetype:workspace!", "ticket:T-06"]
+blocked_by = ["ticket:T-06"]
 stage = "blocked"
-notes = "masked fields ABSENT; national_id partial_last4; copilot restricted set"
+notes = "masked fields ABSENT; national_id partial_last4; copilot restricted set — workspace! archetype real since B11 (dropped from blocked_by), but this screen deliberately NOT mounted: no guard_policy! anywhere in this corpus grants Analyst/ComplianceLead/McpCopilot (this screen's own declared roles) any read on customer — only RmUser (one masked field) and Auditor (broad) — m05_customer.nir's own doc comment discloses this pre-existing gap; inventing a grant to make this screen 'work' is a policy decision outside this rollout's authority, so the cross-entity-context ticket stays blocking even though this corpus has no dedicated token for 'missing role grant'"
 
 [[screen]]
 id = "5.3"
@@ -606,9 +612,9 @@ archetype = "crud_screens!"
 combo = ["workspace!"]
 roles = ["Analyst:R", "OpsAnalyst:R", "QaReviewer:R", "Auditor:R", "McpCopilot:R"]
 datasets = ["PG.transaction", "K.guard.decisions", "PG.screening_hit"]
-blocked_by = ["ticket:T-06"]
-stage = "interim"
-notes = "crud detail now; card_token masked; copilot ⛔ alert/case links"
+blocked_by = []
+stage = "built"
+notes = "crud detail + real alert/case links (B11): related_alerts_for_transaction at /transactions/{id}/related-alerts; card_token masked; copilot ⛔ alert/case links (unchanged, McpCopilot's own corpus posture)"
 
 [[screen]]
 id = "6.3"
@@ -950,9 +956,9 @@ archetype = "workspace!"
 combo = []
 roles = ["Analyst:R", "McpCopilot:R"]
 datasets = ["PG.model_run_stat"]
-blocked_by = ["ticket:T-06", "dataset:PG.model_run_stat"]
+blocked_by = ["dataset:PG.model_run_stat"]
 stage = "blocked"
-notes = "factor contributions; embeds in 3.2"
+notes = "factor contributions; embeds in 3.2 — workspace! archetype real since B11; only PG.model_run_stat (C2) remains"
 
 # --------------------------------------------------------- M10 Screening (6)
 [[screen]]
@@ -1713,9 +1719,10 @@ archetype = "crud_screens!"
 combo = ["timeline"]
 roles = ["Auditor:R", "Admin:R", "Mlro:R"]
 datasets = ["AC.all_chains"]
-blocked_by = ["ticket:T-06"]
-stage = "blocked"
-notes = "immutable; export via governed path — AC.all_chains projection + /audit/chains route real since B8; still waits on B11's cross-entity context layer"
+blocked_by = []
+stage = "built"
+file = "examples/rtm/src/screens/m20_audit.nir"
+notes = "immutable; export via governed path — AC.all_chains projection + /audit/chains route real since B8; B11's cross-entity context layer closes this ticket for real (no code change needed here — the route was already complete)"
 
 [[screen]]
 id = "20.2"
