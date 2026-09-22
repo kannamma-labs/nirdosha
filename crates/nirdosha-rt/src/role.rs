@@ -173,6 +173,17 @@ impl Auth {
         self.roles.iter().any(|r| r == role)
     }
 
+    /// `true` iff this session carries at least one role — i.e. a real
+    /// signed-in identity, not the zero-role default an app's
+    /// `authenticate` closure typically returns for an anonymous
+    /// request (e.g. `Auth::login("anon", &[])`). Distinguishes "any
+    /// authenticated human" from "literally anyone, logged in or not",
+    /// which a bare `has_role` check can't: an `AllHuman`/`AllRoles`
+    /// nav entry should mean the former, not the latter.
+    pub fn has_any_role(&self) -> bool {
+        !self.roles.is_empty()
+    }
+
     /// `true` iff the session's claim set maps `name` to exactly
     /// `value` — an absent `name`, or `name` present with a different
     /// value, are both `false`. Never a substring/prefix match.

@@ -180,7 +180,9 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
         let href = &e.href;
         if e.unconditional {
             quote! {
-                links.push(::nirdosha_rt::NavLink { label: #label, href: #href });
+                if auth.has_any_role() {
+                    links.push(::nirdosha_rt::NavLink { label: #label, href: #href });
+                }
             }
         } else {
             let checks = e.roles.iter().map(|r| quote! { auth.has_role(#r) });
