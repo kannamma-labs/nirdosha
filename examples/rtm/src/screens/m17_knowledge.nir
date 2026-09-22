@@ -55,12 +55,27 @@ fn glossary_digest() -> String {
 /// (searchable KB, contextual help panels, release notes) are the same
 /// static content re-sliced by UX chrome, not a distinct data source.
 pub fn mount_knowledge(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
-    router.get("/knowledge", "Knowledge base", |_req, _params| {
+    fn render_body() -> String {
         let digest = glossary_digest();
-        let body = format!(
+        format!(
             "<pre style=\"white-space:pre-wrap;max-width:80ch;margin:2rem auto;font-family:ui-monospace,monospace\">{}</pre><p style=\"text-align:center;color:#666\">sha256: {digest}</p>",
             nirdosha_rt::html_escape(GLOSSARY_MD)
-        );
-        nirdosha_rt::Response::html(200, body)
-    })
+        )
+    }
+    router
+        .get("/knowledge", "Knowledge base", |_req, _params| {
+            nirdosha_rt::Response::html(200, render_body())
+        })
+        .get("/help/typologies", "Typology library (17.1)", |_req, _params| {
+            nirdosha_rt::Response::html(200, render_body())
+        })
+        .get("/help/sop", "SOP / Procedure viewer (17.2)", |_req, _params| {
+            nirdosha_rt::Response::html(200, render_body())
+        })
+        .get("/help/regulatory", "Regulatory reference (17.3)", |_req, _params| {
+            nirdosha_rt::Response::html(200, render_body())
+        })
+        .get("/help/context", "In-context help (17.4)", |_req, _params| {
+            nirdosha_rt::Response::html(200, render_body())
+        })
 }

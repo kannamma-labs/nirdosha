@@ -3,7 +3,25 @@
 // Verbatim from examples/rtm/roles-N-guard_policy.md.
 // ============================================================================
 
-// → M18.1/18.2 runtime user↔role grants (roles themselves are compiled; this is assignment)
+// → M18.4 SLA & Workflow Config read/write [NEW]
+nirdosha_rt::guard_policy! {
+    allow "sla-config-read" for Admin, ComplianceLead
+    when action == "read" && resource == "sla_config"
+    purpose(PlatformOperations)
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "sla-config-migrate" for Admin, ComplianceLead
+    when action == "migrate" && resource == "sla_config"
+    purpose(PlatformOperations)
+    escalate to approval(chain policy_release)
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// → M18.1/18.2 runtime user↔role grants (roles themselves are compiled; this is assignment assignment)
 nirdosha_rt::guard_policy! {
     allow "admin-grant-role" for Admin
     when action in ["create", "update", "delete"] && resource == "user_role"

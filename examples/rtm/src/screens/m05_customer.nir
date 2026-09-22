@@ -25,9 +25,50 @@
 //! below (functionally covering what 5.1/5.2 could show for `RmUser`/
 //! `Auditor`) is built.
 
+use crate::bridge::alert_table;
+use crate::bridge::case_table;
 use crate::bridge::customer_table;
 use crate::bridge::CustomerRow;
 use nirdosha_rt::prelude::SharedTable;
+
+/// 5.1 Global Entity Search -- search transactions by txn_id or merchant_id,
+/// with placeholder for customer-axis search until customer read grants
+/// are added for L1/L2 roles.
+pub fn mount_global_entity_search(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/search", "Global Entity Search (5.1)", |req, _params, auth| {
+        let q = req.query().get("q").cloned().unwrap_or_default();
+        let rows = if q.is_empty() {
+            Vec::new()
+        } else {
+            match crate::bridge::transaction_table().guarded_search(auth, "AmlInvestigation", Some(&q), &["txn_id", "merchant_id", "subject_id"]) {
+                Ok(rows) => rows,
+                Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+            }
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "q": q, "results": rows }))
+    })
+}
+
+/// 5.8 Entity Alert/Case History -- per-subject list of alerts and cases.
+/// `AlertRow` has no subject_id field, so resolve via txn_id lookup.
+pub fn mount_entity_history(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/customers/{id}/history", "Entity Alert/Case History (5.8)", |_req, params, auth| {
+        let Some(subject_id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        let txns: std::collections::HashSet<String> = match crate::bridge::transaction_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => rows.into_iter().filter(|r| r.subject_id == subject_id).map(|r| r.txn_id).collect(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let alerts = match alert_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => rows.into_iter().filter(|r| txns.contains(&r.txn_id)).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let cases = match case_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => rows.into_iter().filter(|r| r.subject_ref == subject_id).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "subject_id": subject_id, "alerts": alerts, "cases": cases }))
+    })
+}
 
 fn unused_customer_store() -> &'static SharedTable<i64, CustomerRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, CustomerRow>> = std::sync::OnceLock::new();

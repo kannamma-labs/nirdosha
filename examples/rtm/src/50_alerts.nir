@@ -63,6 +63,16 @@ nirdosha_rt::guard_policy! {
     obligate audit(full)
 }
 
+// → 3.9 SLA monitor read (ComplianceLead/Mlro) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "sla-config-read" for ComplianceLead, Mlro
+    when action == "read" && resource == "sla_config"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+
 // → 3.9 SLA monitor (aggregate; cohort floor — no analyst-level rows leak) [NEW]
 nirdosha_rt::guard_policy! {
     allow "lead-sla-aggregate" for ComplianceLead

@@ -31,10 +31,33 @@
 use crate::bridge::customer_table;
 use crate::bridge::delegation_token_table;
 use crate::bridge::driver_table;
+use crate::bridge::sla_config_table;
 use crate::bridge::user_role_table;
 use crate::bridge::DelegationTokenRow;
 use nirdosha_guard_core::{Action, WriteAction};
 use std::collections::HashSet;
+
+/// 18.1 User Management -- list pending/requested user-role grants
+/// (real `user_role_table` read under `user-role-read`) plus the
+/// existing propose/confirm grant flow.
+pub fn mount_user_management(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/users", "User Management (18.1)", |_req, _params, auth| {
+        match user_role_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!({ "users": rows })),
+            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.4 SLA & Workflow Config -- list SLA configurations.
+pub fn mount_sla_config(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/sla-config", "SLA & Workflow Config (18.4)", |_req, _params, auth| {
+        match sla_config_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!({ "sla_configs": rows })),
+            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
 
 /// 18.1/18.2 -- `admin-grant-role` moving a pre-seeded `UserRoleRow`
 /// (`bridge.nir`'s `grant-001`, status `requested`) to `granted`.

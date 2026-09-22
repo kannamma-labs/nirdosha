@@ -58,6 +58,8 @@ pub mod ops_admin;
 pub mod qa;
 #[path = "96_restricted_views.nir"]
 pub mod restricted_views;
+#[path = "97_bulk_policies.nir"]
+pub mod bulk_policies;
 #[path = "99_break_glass.nir"]
 pub mod break_glass;
 

@@ -130,6 +130,33 @@ pub fn mount_simulation_config(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
     })
 }
 
+/// 8.8 Approval Workflow -- the existing `/rules/approvals` inbox covers
+/// the workflow; this route provides an HTML landing page describing it.
+pub fn mount_approval_workflow(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::ComplianceLead>("/rules/workflow", "Approval Workflow (8.8)", |_req, _params, _proof| {
+        nirdosha_rt::Response::html(200, r#"<!doctype html>
+<html><head><title>Approval Workflow</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Approval Workflow</h1>
+<p>Pending policy-release escalations are reviewed at <a href="/rules/approvals">/rules/approvals</a>.</p>
+<p>Chains: policy_release, case_review, override_release, sar_release, egress_release.</p>
+</body></html>"#)
+    })
+}
+
+/// 8.10 Scheduling & Go-Live -- static page for deployment governance.
+pub fn mount_scheduling_go_live(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::PolicyEngineer>("/rules/schedule", "Scheduling & Go-Live (8.10)", |_req, _params, _proof| {
+        nirdosha_rt::Response::html(200, r#"<!doctype html>
+<html><head><title>Scheduling & Go-Live</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Scheduling & Go-Live</h1>
+<p>Deployment windows, pilot cohorts, and rollback plans are recorded here.</p>
+<p>All threshold/model/refdata changes require policy_release approval before go-live.</p>
+</body></html>"#)
+    })
+}
+
 // T-04/B10: 8.8's approval_inbox! -- the real, generic worklist over
 // EVERY table in this corpus whose write escalates through the
 // `policy_release` chain (quorum(2, of = [PolicyEngineer,

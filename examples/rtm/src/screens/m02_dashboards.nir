@@ -103,6 +103,41 @@ nirdosha_rt::dashboard! {
     }
 }
 
+/// 2.4 MLRO Dashboard -- guard-enforced aggregate dashboard for Mlro /
+/// ComplianceLead over sar_bundle + case + alert tables.
+pub fn mount_mlro_dashboard(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    fn sar_due_count(auth: &nirdosha_rt::Auth) -> i64 {
+        match sar_bundle_table().guarded_aggregate(auth, "RegulatoryInspection") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "continuation_due").count() as i64,
+            Err(_) => 0,
+        }
+    }
+    fn sar_pending_review(auth: &nirdosha_rt::Auth) -> i64 {
+        match sar_bundle_table().guarded_aggregate(auth, "RegulatoryInspection") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "in_review").count() as i64,
+            Err(_) => 0,
+        }
+    }
+    fn case_escalated_count(auth: &nirdosha_rt::Auth) -> i64 {
+        match case_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "escalate").count() as i64,
+            Err(_) => 0,
+        }
+    }
+    nirdosha_rt::dashboard! {
+        mount: mount_mlro_dashboard_internal,
+        path: "/dashboard/mlro",
+        title: "MLRO Dashboard",
+        refresh_seconds: 60,
+        widgets {
+            Metric { label: "SARs due for continuation", fn: sar_due_count, guarded: true },
+            Metric { label: "SARs pending MLRO review", fn: sar_pending_review, guarded: true },
+            Metric { label: "Escalated cases", fn: case_escalated_count, guarded: true },
+        }
+    }
+    mount_mlro_dashboard_internal(router)
+}
+
 // C2 (screens-plan.md): 2.6 Executive KPI Dashboard's "model health
 // widget pending" note closed -- real `model-run-stat-read`
 // (`Mlro`/`Admin`) over `model_run_stat_table()`

@@ -101,6 +101,20 @@ nirdosha_rt::crud_screens! {
     },
 }
 
+/// 12.9 Continuing Activity SAR -- dashboard/queue for SAR bundles in
+/// continuation_due status, with transaction delta since filing.
+pub fn mount_continuing_activity_sar(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/sar/continuations", "Continuing Activity SAR (12.9)", |_req, _params, auth| {
+        match sar_bundle_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let continuing: Vec<_> = rows.into_iter().filter(|r| r.status == "continuation_due" || r.status == "filed").collect();
+                nirdosha_rt::Response::json(200, &serde_json::json!({ "continuing": continuing }))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
 /// 12.6 MLRO decision -- `mlro-decide-sar` (`Mlro`, real `SarStatus`
 /// transition check).
 pub fn mount_sar_mlro_decision(router: nirdosha_rt::Router) -> nirdosha_rt::Router {

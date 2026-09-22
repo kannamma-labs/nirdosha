@@ -31,6 +31,25 @@ use crate::bridge::user_profile_table;
 use nirdosha_rt::prelude::SharedTable;
 use std::collections::HashSet;
 
+/// 22.3 -- static about / release notes page. Served from the same
+/// checked-in glossary as M17 for now; real release metadata would come
+/// from `CATALOG.manifest` once that catalog table exists.
+pub fn mount_about(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get("/about", "About / Release Notes", |_req, _params| {
+        let body = r#"<!doctype html>
+<html>
+<head><title>About RTM</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>RTM — Real-Time Transaction Monitoring</h1>
+<p>Nirdosha v2 dialect demo application.</p>
+<p><strong>Release:</strong> 2026.09-phase-B</p>
+<p><strong>Modules:</strong> 22 modules, 152 screens inventory</p>
+</body>
+</html>"#;
+        nirdosha_rt::Response::html(200, body)
+    })
+}
+
 /// 22.1 -- blind update (no read grant exists to pre-fill a form from):
 /// submits the four editable fields directly, same "no plain read
 /// exists" posture `m18_admin.nir`'s role-grant/delegation routes

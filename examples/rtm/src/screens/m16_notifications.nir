@@ -13,6 +13,7 @@
 //! added only so the menu route declaration points at a real policy
 //! record.
 use crate::bridge::notification_table;
+use crate::bridge::user_profile_table;
 
 /// Which human roles a given `obligate notify(channel(...))` channel is
 /// meant for -- transcribed from each policy's own real subject +
@@ -58,10 +59,22 @@ pub fn mount_notification_feed(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
 /// (the same gap B6 already disclosed for every other `badge = {...}`
 /// declaration in menus.toml).
 pub fn mount_my_tasks(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
-    router.get_with_auth("/tasks", "My Tasks (16.4)", |_req, _params, auth| {
-        match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
-            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
-            Err(e) => nirdosha_guard_screens::guard_error_response(e),
-        }
-    })
+    router
+        .get_with_auth("/tasks", "My Tasks (16.4)", |_req, _params, auth| {
+            match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/preferences/notifications", "Notification Preferences (16.5)", |_req, _params, auth| {
+            let user_id = auth.user().to_string();
+            match user_profile_table().guarded_get(auth, "Operations", &user_id) {
+                Ok(Some(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({
+                    "digest": row.digest,
+                    "quiet_hours": row.quiet_hours,
+                })),
+                Ok(None) => nirdosha_rt::Response::json(200, &serde_json::json!({ "digest": true, "quiet_hours": "" })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
 }

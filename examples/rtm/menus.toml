@@ -1138,7 +1138,7 @@ notes = "reaches the real crud_screens! edit form (POST /sar/{id}/edit) — one 
 [[route]]
 path = "/sar/{id}/attachments"
 screen_id = "12.5"
-guard = { action = "create", resource = "sar_draft" }
+guard = { action = "create", resource = "evidence_doc" }
 reach_via = "12.2"
 
 [[route]]

@@ -51,6 +51,40 @@ nirdosha_rt::dashboard! {
     }
 }
 
+/// 15.4 Typology & Trend Analytics -- landing page pointing at the
+/// real leadership aggregate dashboard.
+pub fn mount_typology_trends(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::Mlro>("/reports/typology", "Typology & Trend Analytics (15.4)", |_req, _params, _proof| {
+        nirdosha_rt::Response::html(200, r#"
+<!doctype html>
+<html><head><title>Typology & Trend Analytics</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Typology & Trend Analytics</h1>
+<p>Aggregates by typology, geography, and product: <a href="/reporting/mis">/reporting/mis</a>.</p>
+<p><em>Scheduled/ad-hoc report builder remains future work.</em></p>
+</body></html>"#)
+    })
+}
+
+/// 15.5 Governed Export Center -- landing page describing the export paths.
+pub fn mount_export_center(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/exports", "Governed Export Center (15.5)", |_req, _params, _auth| {
+        nirdosha_rt::Response::html(200, r#"
+<!doctype html>
+<html><head><title>Governed Export Center</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Governed Export Center</h1>
+<p>Propose/confirm governed exports per resource:</p>
+<ul>
+<li>POST /exports/alert/propose | /exports/alert/confirm</li>
+<li>POST /exports/case/propose | /exports/case/confirm</li>
+<li>POST /exports/transaction/propose | /exports/transaction/confirm</li>
+</ul>
+<p>Exports require <code>egress_release</code> quorum approval and are watermarked/content-hashed.</p>
+</body></html>"#)
+    })
+}
+
 /// 15.5 Governed Export Center -- `governed-export` (`Analyst`, `action
 /// == "export" && resource in ["alert", "case", "transaction"]`,
 /// `escalate to approval(chain egress_release)`). One route per real

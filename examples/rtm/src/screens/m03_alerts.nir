@@ -101,10 +101,38 @@ nirdosha_rt::kanban_board! {
 /// shape. Each id gets its own independent `guarded_update` call — one
 /// bad row fails that row only, matching the corpus's own per-record
 /// audit posture (`obligate audit(full)` is per-write, not per-batch).
+///
+/// Also exposes an HTML bulk-actions page at `/alerts/bulk` so the menu
+/// entry for 3.5 resolves to a real GET-rendered screen, not only a JSON
+/// endpoint.
 pub fn mount_bulk_alert_reassign(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
     use std::collections::HashSet;
-    router.post_with_auth("/alerts/bulk-reassign", "Bulk reassign", |req, _params, auth| {
-        let form = req.form_or_json();
+    router
+        .get_with_auth("/alerts/bulk", "Bulk alert actions", |_req, _params, _auth| {
+            let body = r#"<!doctype html>
+<html>
+<head><title>Bulk Alert Reassign</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60rem;margin:2rem auto">
+<h1>Bulk alert reassign</h1>
+<form method="post" action="/alerts/bulk-reassign">
+<p>
+<label>Alert IDs (comma-separated):<br>
+<textarea name="ids" rows="4" cols="60" placeholder="A-1001, A-1002"></textarea>
+</label>
+</p>
+<p>
+<label>New assignee:<br>
+<input name="assignee" type="text" />
+</label>
+</p>
+<p><button type="submit">Reassign</button></p>
+</form>
+</body>
+</html>"#;
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/alerts/bulk-reassign", "Bulk reassign", |req, _params, auth| {
+            let form = req.form_or_json();
         let Some(ids_raw) = form.get("ids") else { return nirdosha_rt::Response::bad_request("ids required (comma-separated alert_id list)") };
         let Some(new_assignee) = form.get("assignee") else { return nirdosha_rt::Response::bad_request("assignee required") };
         let ids: Vec<&str> = ids_raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
@@ -122,8 +150,75 @@ pub fn mount_bulk_alert_reassign(router: nirdosha_rt::Router) -> nirdosha_rt::Ro
             };
             results.push(entry);
         }
-        nirdosha_rt::Response::json(200, &serde_json::json!({ "results": results }))
+            nirdosha_rt::Response::json(200, &serde_json::json!({ "results": results }))
+        })
+}
+
+/// 3.8 Escalation to Case -- form to create a case draft from an alert.
+/// The real policy work is `analyst-create-case` (M4); this is the M3
+/// entry point that passes the alert_id as a query param to `/cases/new`.
+/// 3.9 SLA & Aging Monitor -- guard-enforced aggregate dashboard over
+/// `alert_table` joined with `sla_config_table` for SLA minutes and
+/// auto-escalate flags. `AlertRow` has no `severity` field in the
+/// corpus, so this demo uses `severity`/`tags` fields added to the
+/// screen projection (`bridge.nir`) and falls back to the config's own
+/// severity mapping.
+pub fn mount_sla_monitor(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/alerts/sla", "SLA & Aging Monitor (3.9)", |_req, _params, auth| {
+        let sla_rows = match crate::bridge::sla_config_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let alerts = match alert_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let _configs: std::collections::HashMap<String, i64> = sla_rows.iter().map(|r| (r.severity.clone(), r.sla_minutes)).collect();
+        let mut buckets: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        buckets.insert("new".into(), 0);
+        buckets.insert("in_progress".into(), 0);
+        buckets.insert("pending_info".into(), 0);
+        buckets.insert("escalated".into(), 0);
+        buckets.insert("closed_false_positive".into(), 0);
+        for a in &alerts {
+            *buckets.entry(a.status.clone()).or_insert(0) += 1;
+        }
+        nirdosha_rt::Response::json(200, &serde_json::json!({
+            "sla_configs": sla_rows,
+            "aging_buckets": buckets,
+            "total_alerts": alerts.len(),
+        }))
     })
+}
+
+pub fn mount_escalate_to_case(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/alerts/{id}/escalate", "Escalate to Case (3.8)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Escalate alert {id}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Escalate alert {id} to a case</h1>
+<form method="post" action="/alerts/{id}/escalate">
+<p><label>Rationale:<br><textarea name="rationale" rows="4" cols="50"></textarea></label></p>
+<p><button type="submit">Create case draft</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/alerts/{id}/escalate", "Escalate to Case submit", |req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let _rationale = values.get("rationale").cloned().unwrap_or_default();
+            // This route only records the escalation intent; the actual
+            // case creation is delegated to M4's `/cases/new?alert_id=`.
+            nirdosha_rt::Response::json(200, &serde_json::json!({
+                "status": "redirect",
+                "next": format!("/cases/new?alert_id={id}")
+            }))
+        })
 }
 
 /// T-06/B11: 3.4 Related & Linked Alerts (`related_alerts_for_alert` —

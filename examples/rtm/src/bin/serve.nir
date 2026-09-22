@@ -42,6 +42,7 @@ fn main() {
     let router = rtm::m02_dashboards::mount_l1_dashboard(router);
     let router = rtm::m02_dashboards::mount_team_dashboard(router);
     let router = rtm::m02_dashboards::mount_exec_kpi_dashboard(router);
+    let router = rtm::m02_dashboards::mount_mlro_dashboard(router);
     let router = rtm::m02_dashboards::mount_monitoring_wall(router);
     let router = rtm::m02_dashboards::mount_unified_approvals_inbox(router);
     // `mount_*_board`'s own literal `/alerts/board`, `/cases/board`
@@ -60,20 +61,29 @@ fn main() {
     let router = rtm::m03_alerts::mount_bulk_alert_reassign(router);
     let router = rtm::m03_alerts::mount_alert_context(router);
     let router = rtm::m03_alerts::mount_alert_rfi(router);
+    let router = rtm::m03_alerts::mount_escalate_to_case(router);
+    let router = rtm::m03_alerts::mount_sla_monitor(router);
     let router = rtm::m04_cases::mount_case_board(router);
     let router = rtm::m04_cases::mount_case_screens(router);
+    let router = rtm::m04_cases::mount_case_overview(router);
+    let router = rtm::m04_cases::mount_escalate_to_mlro(router);
+    let router = rtm::m04_cases::mount_merge_link_cases(router);
     let router = rtm::m04_cases::mount_case_four_eyes(router);
     let router = rtm::m04_cases::mount_case_review_inbox(router);
     let router = rtm::m04_cases::mount_investigation_workspace(router);
     let router = rtm::m04_cases::mount_case_context_tabs(router);
     let router = rtm::m04_cases::mount_case_tasks(router);
     let router = rtm::m05_customer::mount_customer_screens(router);
+    let router = rtm::m05_customer::mount_global_entity_search(router);
+    let router = rtm::m05_customer::mount_entity_history(router);
     let router = rtm::m06_transactions::mount_transaction_screens(router);
     let router = rtm::m06_transactions::mount_transaction_context(router);
     let router = rtm::m07_network::mount_lineage_explore(router);
     let router = rtm::m07_network::mount_lineage_audit(router);
     let router = rtm::m08_rules::mount_window_migrate(router);
     let router = rtm::m08_rules::mount_simulation_config(router);
+    let router = rtm::m08_rules::mount_approval_workflow(router);
+    let router = rtm::m08_rules::mount_scheduling_go_live(router);
     let router = rtm::m08_rules::mount_policy_release_inbox(router);
     let router = rtm::m08_rules::mount_window_config_screens(router);
     let router = rtm::m09_ml_models::mount_model_swap(router);
@@ -83,10 +93,13 @@ fn main() {
     // `{id}` wildcard is never reached).
     let router = rtm::m09_ml_models::mount_model_performance(router);
     let router = rtm::m09_ml_models::mount_model_drift(router);
+    let router = rtm::m09_ml_models::mount_drift_monitor(router);
     let router = rtm::m09_ml_models::mount_champion_challenger(router);
+    let router = rtm::m09_ml_models::mount_champion_challenger_landing(router);
     let router = rtm::m09_ml_models::mount_model_screens(router);
     let router = rtm::m09_ml_models::mount_model_validations(router);
     let router = rtm::m09_ml_models::mount_score_explainability(router);
+    let router = rtm::m09_ml_models::mount_score_explainability_landing(router);
     let router = rtm::m10_screening::mount_matcher_catalog(router);
     let router = rtm::m10_screening::mount_screening_hit_screens(router);
     let router = rtm::m11_intervention::mount_hold_stats(router);
@@ -104,6 +117,7 @@ fn main() {
     let router = rtm::m12_sar::mount_sar_release_inbox(router);
     let router = rtm::m12_sar::mount_tipping_off_controls(router);
     let router = rtm::m12_sar::mount_sar_screens(router);
+    let router = rtm::m12_sar::mount_continuing_activity_sar(router);
     let router = rtm::m13_risk_config::mount_refdata_migrate(router);
     let router = rtm::m13_risk_config::mount_refdata_screens(router);
     let router = rtm::m14_qa::mount_qa_self_scorecard(router);
@@ -112,8 +126,12 @@ fn main() {
     let router = rtm::m14_qa::mount_qa_review_screens(router);
     let router = rtm::m15_reporting::mount_governed_export(router);
     let router = rtm::m15_reporting::mount_mis_dashboard(router);
+    let router = rtm::m15_reporting::mount_typology_trends(router);
+    let router = rtm::m15_reporting::mount_export_center(router);
     let router = rtm::m16_notifications::mount_notification_feed(router);
     let router = rtm::m16_notifications::mount_my_tasks(router);
+    let router = rtm::m18_admin::mount_user_management(router);
+    let router = rtm::m18_admin::mount_sla_config(router);
     let router = rtm::m18_admin::mount_role_grant(router);
     let router = rtm::m18_admin::mount_delegation_mint(router);
     let router = rtm::m18_admin::mount_driver_migrate(router);
@@ -125,6 +143,7 @@ fn main() {
     let router = rtm::m21_restricted::mount_cs_payment_status(router);
     let router = rtm::m21_restricted::mount_rm_restriction_view(router);
     let router = rtm::m21_restricted::mount_auditor_portal(router);
+    let router = rtm::m22_misc::mount_about(router);
     let router = rtm::m22_misc::mount_self_profile(router);
     let router = rtm::m22_misc::mount_support_ticket_screens(router);
     let router = rtm::m17_knowledge::mount_knowledge(router);

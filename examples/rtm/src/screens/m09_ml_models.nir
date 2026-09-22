@@ -136,6 +136,52 @@ nirdosha_rt::dashboard! {
     }
 }
 
+/// 9.3 Drift Monitoring dashboard is already mounted; this route adds an
+/// HTML landing page for the drift monitor at `/models/drift-monitor`
+/// so the screen inventory entry has a dedicated route.
+pub fn mount_drift_monitor(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::PolicyEngineer>("/models/drift-monitor", "Drift Monitoring (9.3)", |_req, _params, _proof| {
+        nirdosha_rt::Response::html(200, r#"
+<!doctype html>
+<html><head><title>Drift Monitoring</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Drift Monitoring</h1>
+<p>Per-feature PSI dashboard: <a href="/models/drift">/models/drift</a>.</p>
+<p><em>PSI values are demo-seeded reference data; live per-transaction drift computation is future work.</em></p>
+</body></html>"#)
+    })
+}
+
+/// 9.4 Champion/Challenger dashboard is already mounted; this route adds a
+/// dedicated landing page.
+pub fn mount_champion_challenger_landing(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::PolicyEngineer>("/models/challenger-landing", "Champion/Challenger (9.4)", |_req, _params, _proof| {
+        nirdosha_rt::Response::html(200, r#"
+<!doctype html>
+<html><head><title>Champion / Challenger</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Champion / Challenger</h1>
+<p>Comparison dashboard: <a href="/models/challenger">/models/challenger</a>.</p>
+<p>Promotion uses the same escalated model-swap flow as 9.1.</p>
+</body></html>"#)
+    })
+}
+
+/// 9.6 Score Explainability workspace is already mounted; this route adds a
+/// dedicated landing page.
+pub fn mount_score_explainability_landing(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_gated::<crate::nirdosha_roles::Analyst>("/alerts/{id}/explain-landing", "Score Explainability (9.6)", |_req, _params, _proof| {
+        nirdosha_rt::Response::html(200, r#"
+<!doctype html>
+<html><head><title>Score Explainability</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Score Explainability</h1>
+<p>Per-alert model context: replace <code>{id}</code> in <code>/alerts/{id}/explain</code>.</p>
+<p><em>Factor-contribution panels require per-feature explanation output not yet persisted.</em></p>
+</body></html>"#)
+    })
+}
+
 // C2: 9.3 Drift Monitoring -- real `feature-stat-read` (`PolicyEngineer`)
 // over `feature_stat_table()`. **Disclosed**: PSI values are demo-seeded
 // reference data, not a live per-transaction drift computation (see

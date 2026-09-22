@@ -42,6 +42,107 @@ use crate::bridge::related_alerts_for_case;
 use crate::bridge::CaseRow;
 use nirdosha_rt::prelude::SharedTable;
 
+fn case_overview_html(case_id: &str, row: &CaseRow) -> String {
+    format!(
+        r#"<!doctype html>
+<html><head><title>Case Overview - {case_id}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Case {case_id}</h1>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Status</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Assignee</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Alert IDs</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+</table>
+<p><a href="/cases/{case_id}">Edit case</a> · <a href="/cases/{case_id}/escalate-mlro">Escalate to MLRO</a> · <a href="/cases/{case_id}/merge">Merge/link</a></p>
+</body></html>"#,
+        nirdosha_rt::html_escape(&row.status),
+        nirdosha_rt::html_escape(&row.assigned_to),
+        nirdosha_rt::html_escape(&row.alert_ids)
+    )
+}
+
+/// 4.2 Case Overview -- read-only summary of a case, with links to
+/// escalation/merge actions (4.12, 4.13).
+pub fn mount_case_overview(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cases/{id}/overview", "Case Overview (4.2)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        match case_table().guarded_get(auth, "AmlInvestigation", &id) {
+            Ok(Some(row)) => nirdosha_rt::Response::html(200, case_overview_html(&id, &row)),
+            Ok(None) => nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 4.12 Escalation to MLRO -- form that updates case status to
+/// `escalate` with a recommendation field (reuses the existing
+/// `case-transition` update policy).
+pub fn mount_escalate_to_mlro(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/escalate-mlro", "Escalate to MLRO (4.12)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Escalate {id} to MLRO</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Escalate case {id} to MLRO</h1>
+<form method="post" action="/cases/{id}/escalate-mlro">
+<p><label>Recommendation:<br><textarea name="recommendation" rows="4" cols="50"></textarea></label></p>
+<p><button type="submit">Escalate</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/cases/{id}/escalate-mlro", "Escalate to MLRO submit", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let _recommendation = values.get("recommendation").cloned().unwrap_or_default();
+            let changed: std::collections::HashSet<String> = ["status".into()].into();
+            match case_table().guarded_update(auth, "AmlInvestigation", &id, &changed, |row| row.status = "escalate".into()) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "escalated", "row": row })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+/// 4.13 Merge / Link Cases -- form to record a merge/link decision
+/// against a case. For demo purposes this writes `related_case_ids`
+/// into the case's `alert_ids` field under a separate policy action.
+pub fn mount_merge_link_cases(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/merge", "Merge / Link Cases (4.13)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Merge/Link {id}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Merge or link case {id}</h1>
+<form method="post" action="/cases/{id}/merge">
+<p><label>Related case IDs (comma-separated):<br><input name="related_case_ids" type="text" size="50" /></label></p>
+<p><button type="submit">Record link</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/cases/{id}/merge", "Merge/link submit", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let related = values.get("related_case_ids").cloned().unwrap_or_default();
+            let changed: std::collections::HashSet<String> = ["alert_ids".into()].into();
+            match case_table().guarded_update(auth, "AmlInvestigation", &id, &changed, |row| {
+                if !row.alert_ids.is_empty() {
+                    row.alert_ids.push_str(",");
+                }
+                row.alert_ids.push_str(&related);
+            }) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "linked", "row": row })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
 fn unused_case_store() -> &'static SharedTable<i64, CaseRow> {
     static STORE: std::sync::OnceLock<SharedTable<i64, CaseRow>> = std::sync::OnceLock::new();
     STORE.get_or_init(SharedTable::new)
