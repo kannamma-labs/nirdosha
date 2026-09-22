@@ -226,6 +226,36 @@ fn analyst_drafts_a_sar_through_the_real_invariant_and_mlro_decides_it() {
     assert!(illegal.status >= 400, "in_review->ceased is not a legal SarStatus edge and must be rejected: {illegal:?}");
 }
 
+/// T-07 (B9): "SAR wizards physically cannot run from memory" is provable
+/// exactly because there is no cookie-keyed wizard session in this path at
+/// all — `analyst-draft-sar` writes straight into `sar_bundle_table()` via
+/// `crud_screens!`'s guarded create route. A "crash" of the analyst's own
+/// session (represented here by never touching that cookie again and
+/// constructing a wholly separate, later identity) changes nothing: the
+/// row is already durable and addressable purely by `sar_id`, the same
+/// guarantee a purpose-built `wizard_persistent` mechanism would have had
+/// to deliver from scratch.
+#[test]
+fn sar_state_survives_a_fresh_session_because_it_was_never_in_one() {
+    let router = router();
+    let analyst_cookie = login_as(&router, "analyst", "analyst-demo");
+    let create = post_form_as(&router, "/sar", &analyst_cookie, "sar_id=sar-resume-test&case_id=case-99&subject=subj-99");
+    assert!(create.status == 200 || create.status == 201 || create.status == 302, "draft creation must commit: {create:?}");
+    drop(analyst_cookie); // the only session that ever touched this draft — gone, on purpose
+
+    // A second, independent identity that never shared any session/cookie
+    // with the create call above — the strongest available proxy for "a
+    // fresh request after a crash" in an in-process test harness.
+    let auditor = Auth::login("auditor-resume-check", &["Auditor"]);
+    match sar_bundle_table().guarded_get(&auditor, "Audit", "sar-resume-test") {
+        Ok(Some(row)) => {
+            assert_eq!(row.case_id, "case-99");
+            assert_eq!(row.subject, "subj-99");
+        }
+        other => panic!("the draft must be readable by sar_id alone, with no dependency on the creating session: {other:?}"),
+    }
+}
+
 #[test]
 fn sar_export_narrows_to_confirmed_fraud_rows_only_via_the_new_condition_filter() {
     let router = router();

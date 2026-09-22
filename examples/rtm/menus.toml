@@ -1028,7 +1028,7 @@ path = "/alerts/{id}/escalate"
 screen_id = "3.8"
 guard = { action = "create", resource = "case" }
 reach_via = "3.2"
-notes = "single-form now; persistent wizard after T-07"
+notes = "single-form, deliberately not upgraded to a persistent wizard — T-07 closed without one (see screens.toml 3.8/12.2 notes); a single guarded write has no session to crash"
 
 [[route]]
 path = "/cases/{id}"
@@ -1105,27 +1105,29 @@ reach_via = "4.3"
 [[route]]
 path = "/cases/{id}/initiate-sar"
 screen_id = "4.14"
-guard = { action = "create", resource = "sar_draft" }
+guard = { action = "create", resource = "sar_bundle" }
 reach_via = "4.3"
-notes = "wizard entry; steps below"
+notes = "reaches the real crud_screens! create form (POST /sar, GET /sar/new); resource renamed sar_draft->sar_bundle, T-07 closed via B9 (no wizard-step chain — see 12.2's note)"
 
 [[route]]
 path = "/sar/new"
 screen_id = "12.2"
-guard = { action = "create", resource = "sar_draft" }
+guard = { action = "create", resource = "sar_bundle" }
 reach_via = "4.14"
 
 [[route]]
 path = "/sar/{id}/step/subjects"
 screen_id = "12.4"
-guard = { action = "update", resource = "sar_draft" }
+guard = { action = "update", resource = "sar_bundle" }
 reach_via = "12.2"
+notes = "reaches the real crud_screens! edit form (POST /sar/{id}/edit) — one combined form, not a separate physical step (see 12.2's note)"
 
 [[route]]
 path = "/sar/{id}/step/narrative"
 screen_id = "12.3"
-guard = { action = "update", resource = "sar_draft" }
+guard = { action = "update", resource = "sar_bundle" }
 reach_via = "12.2"
+notes = "reaches the real crud_screens! edit form (POST /sar/{id}/edit) — one combined form, not a separate physical step (see 12.2's note)"
 
 [[route]]
 path = "/sar/{id}/attachments"

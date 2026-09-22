@@ -46,16 +46,18 @@ meta.roles_note (T-10).
 | L | cross-cutting runtime + archetype work gating ten or more screens |
 
 **Corpus facts this legend is pinned to** (asserted by tests/verify_tickets.rs):
-39 `ticket:T-…` references on 33 `blocked_by` lines across the 152-screen
-register (6 lines block on two tickets at once); 11 of the 14 ticket slots
-carry references — 6 stage-gating tickets
-(T-04, T-06, T-07, T-08, T-09, T-11) and 5 note/menu-level
-only (T-01, T-02, T-03, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
-T-14 closed its only gate (4.1) and is no longer referenced anywhere in the
-corpus (it stays `active`, not `reserved` — a closed-out ticket keeps its
-slot's identity, it just currently gates/notes nothing). T-01 (B7) closed
-all 5 of its stage-gating blockers the same way and moved to note-only
-(menus.toml's nav.exports/sar-export route comments still cite it).
+23 `ticket:T-…` references on 23 `blocked_by` lines across the 152-screen
+register (0 lines block on two tickets at once now); 9 of the 14 ticket slots
+carry references — 3 stage-gating tickets
+(T-04, T-06, T-09) and 6 note/menu-level
+only (T-01, T-02, T-03, T-07, T-10, T-12); T-05 and T-13 are reserved and referenced nowhere.
+T-08, T-11, and T-14 each closed their only gates and are no longer
+referenced anywhere in the corpus (they stay `active`, not `reserved` — a
+closed-out ticket keeps its slot's identity, it just currently gates/notes
+nothing). T-01 (B7) and T-07 (B9) closed all their stage-gating blockers the
+same way and moved to note-only (T-01: menus.toml's nav.exports/sar-export
+route comments; T-07: 3.8's screens.toml note + menus.toml's escalate route
+note).
 The register's own header line ("blocked_by: ticket:T-xx | dataset:<id> | …")
 is format documentation, not a reference.
 
@@ -242,7 +244,7 @@ together.
 - size: L
 - meaning: one guarded cross-entity context read feeding workspaces and tabs (related alerts, txn scope, 360, explainability, audit timeline)
 - blocked-screens: 3.2, 3.4, 3.10, 4.3, 4.4, 4.5, 5.2, 6.2, 9.6, 20.1
-- note-mentions: none
+- note-mentions: 12.4
 
 **Scope.** The linked-context layer every detail/workspace screen composes
 from instead of N ad-hoc joins: related alerts on the same
@@ -258,6 +260,10 @@ Alert Audit History, 4.3 Investigation Workspace, 4.4 Linked Alerts Tab, 4.5
 Case Transactions Tab, 5.2 Customer 360, 6.2 Transaction Detail, 9.6 Score
 Explainability Viewer, 20.1 Audit Log Search. Most of these ship an
 `interim = crud/table` shape today; full fidelity waits on this ticket.
+Note-only on 12.4 Subjects & Activity Tabs (B9): its totals-consistency
+advance-block needs this ticket's case/transaction-scope context read to
+compare `amount_total` against the case's real txn scope — not itself
+stage-gated, since 12.4 is `built` on its own real fields already.
 
 **Done when.** A screen declares its context needs once (related/alerts,
 case/transactions, entity/360, ...) and the emitted screen gets one guarded,
@@ -268,48 +274,69 @@ policy-capped context read — not per-screen bespoke joins.
 ## T-07 — Case→SAR conversion + persistent wizard framework
 - status: active
 - size: M
-- meaning: wizard state lives in a guarded entity (wizard_persistent), never in memory; case-to-SAR promotion built on it
-- blocked-screens: 3.8, 4.14, 12.2, 12.3, 12.4
-- note-mentions: none
+- meaning: SAR draft state lives only in the guarded sar_bundle entity — no in-memory session ever holds SAR content
+- blocked-screens: none
+- note-mentions: 3.8
 
-**Scope.** The `wizard_persistent` combo's backing: multi-step wizard state
-stored as a guarded entity row so a wizard survives restart, timeout, and
-handover — "in-memory wizard FORBIDDEN for SAR — draft must be guarded
-entity" (12.2's note). On top of it, the escalation/convert flow: escalate
-alert→case (3.8, menus.toml: "single-form now; persistent wizard after T-07"),
-initiate SAR from a case past investigating (4.14), SAR Draft Wizard (12.2),
-Narrative Editor with who/what/when/where/why/how attestations (12.3),
-Subjects & Activity Tabs with case-scoped lookup and totals-consistency
-advance-blocking (12.4).
+**Scope, as closed.** batch 2's own investigation (documented in
+`m12_sar.nir`'s header) judged giving `wizard!` a guarded/persistent mode
+disproportionate to one module's forms and used `crud_screens!`'s
+`guard: { create_fields, update_fields }` instead — every SAR field write is
+already a direct `guarded_insert_checked`/`guarded_update` against
+`sar_bundle_table()`, addressable by `sar_id` from the moment the row is
+created. There is no cookie-keyed session store involved at any point for
+SAR, which satisfies this ticket's real intent (no in-memory SAR wizard,
+ever) more directly than a purpose-built stateful wizard mechanism would
+have. 3.8 Escalation to Case deliberately keeps its existing single-form
+shape (a one-shot guarded write has no multi-step session to lose).
 
-**Gates.** 3.8 Escalation to Case (interim single-form today), 4.14 Initiate
-SAR, 12.2 SAR Draft Wizard, 12.3 Narrative Editor, 12.4 Subjects & Activity
-Tabs.
+**Disclosed, not built.** The six who/what/when/where/why/how attestation
+sub-fields (12.3) and a multi-subject registry (12.4) collapse into single
+flat fields (`narrative`, `subject`) rather than being separately modeled —
+see 12.2/12.3/12.4's screens.toml notes.
 
-**Done when.** A crashed mid-wizard session resumes from the guarded draft
-row, and SAR wizards physically cannot run from memory.
+**Gates.** None — 3.8 stays `interim` by design (see its note); 4.14, 12.2,
+12.3, 12.4 are `built`.
+
+**Done when.** ~~A crashed mid-wizard session resumes from the guarded draft
+row~~ — moot: SAR writes never leave the guarded row in the first place, so
+there is no session state to resume FROM (proven by
+`sar_state_survives_a_fresh_session_because_it_was_never_in_one` in
+`tests/m07_m11_m12_m17_screens.rs`). SAR wizards physically cannot run from
+memory: true, no in-memory store is ever used.
 
 ---
 
 ## T-08 — SAR draft/bundle datasets + attachments
 - status: active
 - size: M
-- meaning: PG.sar_draft and PG.sar_bundle guarded tables with subject/activity registries and document attachments
-- blocked-screens: 4.14, 12.2, 12.3, 12.4, 12.5
+- meaning: PG.sar_bundle is the one real guarded table backing both draft and bundle state; a field value, not a separate resource
+- blocked-screens: none
 - note-mentions: none
 
-**Scope.** The SAR data plane the T-07 wizard writes into: PG.sar_draft
-(versioned narrative + attestations), PG.sar_bundle (subjects, activity codes
-RD.jurisdiction/RD.activity_code, assembled filing payload), and supporting
-document attachments via PG.evidence_doc/O.* storage with redaction-confirm
-and "≥1 statement to submit" (12.5).
+**Scope, as closed.** `65_sar.nir`'s real policies (`analyst-draft-sar`,
+`analyst-edit-sar`, `mlro-decide-sar`, `sar-export`) all name resource
+`sar_bundle` — the corpus never actually split draft/bundle into two tables;
+`bridge.nir`'s `SarBundleRow`/`sar_bundle_table()` is the one real
+`GuardedTable`, real `SarStatus` machine (`draft -> in_review -> [filed,
+rejected, do_not_file]; ...`), real `sar_subject_in_case` invariant.
+screens.toml's `PG.sar_draft` dataset references were renamed to
+`PG.sar_bundle` to match (stale-name correction, same class as A1's stale
+blockers). Subjects/activity codes/filing payload live as flat fields
+(`subject`, `activity_codes`, `amount_total`, `txn_refs`, `goaml_ref`), not
+`RD.jurisdiction`/`RD.activity_code` lookup-backed registries (disclosed
+gap).
 
-**Gates.** 4.14 Initiate SAR, 12.2 SAR Draft Wizard, 12.3 Narrative Editor,
-12.4 Subjects & Activity Tabs, 12.5 Supporting Attachments. Always cited
-alongside T-07 (T-07 = flow, T-08 = storage).
+**Gates.** None. 12.5 Supporting Attachments still shows `stage = "blocked"`
+but on `dataset:PG.evidence_doc` alone now (C10's scope) — this ticket no
+longer gates it.
 
-**Done when.** sar_draft/sar_bundle rows exist as guarded tables with the
-attachment pipeline, and 12.10's filing export can read a completed bundle.
+**Done when.** sar_bundle rows exist as a guarded table (true) with the
+attachment pipeline (still open, C10) and 12.10's filing export can read a
+completed bundle (true — `mount_sar_export`'s `guarded_propose/confirm_escalated_export`
+reads real `sar_bundle_table()` rows filtered to `confirmed_fraud`,
+`sar_export_narrows_to_confirmed_fraud_rows_only_via_the_new_condition_filter`
+proves it).
 
 ---
 

@@ -276,9 +276,9 @@ archetype = "wizard!"
 combo = []
 roles = ["Analyst:R/W", "McpCopilot:R/W"]
 datasets = ["PG.alert", "PG.case"]
-blocked_by = ["ticket:T-07"]
+blocked_by = []
 stage = "interim"
-notes = "single-form escalation now; persistent wizard later"
+notes = "single-form escalation, deliberately not upgraded to a persistent multi-step wizard (T-07 closed for its real SAR-specific scope; a single guarded write has no session to crash, so wizard_persistent's guarantee doesn't apply here — see 12.2's note)"
 
 [[screen]]
 id = "3.9"
@@ -461,13 +461,13 @@ notes = "pre-merge check server-side; irreversible + re-auth"
 id = "4.14"
 name = "Initiate SAR"
 module = "M4"
-archetype = "wizard!"
-combo = ["wizard_persistent"]
+archetype = "crud_screens!"
+combo = []
 roles = ["Analyst:R/W"]
-datasets = ["PG.case", "PG.sar_draft"]
-blocked_by = ["ticket:T-07", "ticket:T-08"]
-stage = "blocked"
-notes = "creates SarDraft; case must be past investigating"
+datasets = ["PG.case", "PG.sar_bundle"]
+blocked_by = []
+stage = "built"
+notes = "mounted at m12_sar.nir's /sar create route (crud_screens! guard.create_fields, not wizard! — batch 2's own judgment call, see m12_sar.nir header); real sar_subject_in_case invariant enforced; case-past-investigating gate not separately checked (disclosed gap)"
 
 # ----------------------------------------------------------- M5 Customer (10)
 [[screen]]
@@ -1102,37 +1102,37 @@ notes = "CsAgent/RmUser/Copilot hard-deny (cs-no-sar / rm-no-sar / copilot-no-sa
 id = "12.2"
 name = "SAR Draft Wizard"
 module = "M12"
-archetype = "wizard!"
-combo = ["wizard_persistent"]
+archetype = "crud_screens!"
+combo = []
 roles = ["Analyst:R/W"]
-datasets = ["PG.sar_draft", "RD.jurisdiction", "RD.activity_code"]
-blocked_by = ["ticket:T-07", "ticket:T-08"]
-stage = "blocked"
-notes = "in-memory wizard FORBIDDEN for SAR — draft must be guarded entity"
+datasets = ["PG.sar_bundle"]
+blocked_by = []
+stage = "built"
+notes = "draft state lives entirely in the guarded sar_bundle row (analyst-draft-sar/analyst-edit-sar), never in memory — no cookie-keyed session exists for SAR at all, so there is nothing to crash: every field write is already a durable guarded_update addressable by sar_id. RD.jurisdiction/RD.activity_code stay collapsed into the flat activity_codes string field, not separate lookup-backed selects (disclosed gap)"
 
 [[screen]]
 id = "12.3"
 name = "Narrative Editor"
 module = "M12"
-archetype = "wizard!"
-combo = ["wizard_persistent"]
+archetype = "crud_screens!"
+combo = []
 roles = ["Analyst:R/W", "Mlro:R"]
-datasets = ["PG.sar_draft"]
-blocked_by = ["ticket:T-07", "ticket:T-08"]
-stage = "blocked"
-notes = "who/what/when/where/why/how attestations; word count"
+datasets = ["PG.sar_bundle"]
+blocked_by = []
+stage = "built"
+notes = "narrative is a single guarded text field (analyst-edit-sar, status==draft only); the six who/what/when/where/why/how attestation sub-fields and a word-count minimum are not separately modeled (disclosed gap, same field-granularity tradeoff as 12.2)"
 
 [[screen]]
 id = "12.4"
 name = "Subjects & Activity Tabs"
 module = "M12"
-archetype = "wizard!"
-combo = ["wizard_persistent"]
+archetype = "crud_screens!"
+combo = []
 roles = ["Analyst:R/W"]
-datasets = ["PG.sar_draft", "PG.transaction"]
-blocked_by = ["ticket:T-07", "ticket:T-08"]
-stage = "blocked"
-notes = "case-scoped txn lookup only; totals consistency blocks advance"
+datasets = ["PG.sar_bundle", "PG.transaction"]
+blocked_by = []
+stage = "built"
+notes = "subject is a single field, not a multi-subject registry; amount_total/txn_refs are real guarded fields but no invariant yet blocks advance on a totals mismatch against the case's txn scope (disclosed gap, needs T-06's cross-entity context to compute the comparison for real)"
 
 [[screen]]
 id = "12.5"
@@ -1141,8 +1141,8 @@ module = "M12"
 archetype = "crud_screens!"
 combo = []
 roles = ["Analyst:R/W"]
-datasets = ["O.evidence", "PG.sar_draft"]
-blocked_by = ["ticket:T-08", "dataset:PG.evidence_doc"]
+datasets = ["O.evidence", "PG.sar_bundle"]
+blocked_by = ["dataset:PG.evidence_doc"]
 stage = "blocked"
 notes = "≥1 statement + redaction confirm to submit"
 

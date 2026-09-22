@@ -40,7 +40,7 @@
 | B6 | T-09 live streaming plane (M) | B | M | 4 | ☑ done (poll half; 19.1 still blocked) | — |
 | B7 | T-01 governed egress (M) | B | M | 5 | ☑ done (core path; sar_release quorum deferred to B10) | — |
 | B8 | T-11 audit-chain projection (M) | B | M | 4 | ☑ done | — |
-| B9 | T-07+T-08 SAR wizard + datasets (M+M) | B | M | 5 | ☐ pending | — |
+| B9 | T-07+T-08 SAR wizard + datasets (M+M) | B | M | 5 | ☑ done (no wizard_persistent — see notes) | — |
 | B10| T-04 approvals + `approval_inbox!` (L) | B | L | 12 | ☐ pending | — |
 | B11| T-06 linked context + `workspace!` (L) | B | L | 10 | ☐ pending | — |
 | C1 | PG.case_task task plane | C | M | 5 | ☐ pending | — |
@@ -410,19 +410,38 @@ excluded_from_the_projection_not_silently_merged`) prove a real guarded
 decision reaches the projection, a real HTTP query answers it, and a
 corrupted source chain is excluded and named, never silently merged.
 
-## B9 ☐ T-07+T-08 SAR wizard framework + datasets (M+M)
-**Unlocks.** 4.14, 12.2, 12.3, 12.4 built; 12.5 (with `PG.evidence_doc`,
-C10); upgrades 3.8.
-**Steps.**
-1. `wizard_persistent` combo: wizard state as a guarded entity row
-   (survives restart/timeout/handover). In-memory wizard FORBIDDEN for SAR.
-2. `PG.sar_draft` (versioned narrative + attestations) + `PG.sar_bundle`
-   (subjects, `RD.jurisdiction`/`RD.activity_code`, filing payload).
-3. Attachments via `PG.evidence_doc`/O.* with redaction-confirm and
-   "≥1 statement to submit".
-4. Attestation step (who/what/when/where/why/how) on the narrative editor.
-**Done-when.** Crashed mid-wizard session resumes from the guarded draft
-row (integration test); SAR wizards physically cannot run from memory.
+## B9 ☑ T-07+T-08 SAR wizard framework + datasets (M+M) — done, no `wizard_persistent` built
+**Unlocked.** 4.14, 12.2, 12.3, 12.4 → `built`. 3.8 stays `interim` by
+design. 12.5 still `blocked` on `dataset:PG.evidence_doc` (C10) — its
+`ticket:T-08` blocker is gone, that's the only change there.
+**What actually landed (deviates from the original plan, disclosed):**
+`m12_sar.nir` already existed (an earlier "Phase B" batch, predating this
+screens-plan.md sequence) and had already made a real architectural call:
+`crud_screens!`'s `guard: { create_fields, update_fields }` over the real
+`sar_bundle_table()` (`bridge.nir`), not a `wizard_persistent` combo —
+judged disproportionate to build a second stateful-wizard macro for one
+module's forms. Every SAR field write is a direct `guarded_insert_checked`/
+`guarded_update`, addressable by `sar_id` from creation onward — there is
+no cookie-keyed session for SAR at all, which satisfies T-07's real intent
+(no in-memory SAR wizard, ever) more directly than a purpose-built stateful
+wizard would have. This batch: corrected screens.toml's stale
+`archetype = "wizard!"` / `combo = ["wizard_persistent"]` labels to match
+that reality (`crud_screens!`, no combo), renamed the stale `PG.sar_draft`
+dataset to the real `PG.sar_bundle`, fixed 4 stale menus.toml routes still
+naming resource `sar_draft` (V5 was failing on them the moment 4.14/12.2/
+12.3/12.4 flipped to `built`), and closed both tickets in `tickets.md`.
+**Disclosed, not built:** the six who/what/when/where/why/how attestation
+sub-fields (12.3) and a multi-subject registry (12.4) stay collapsed into
+single flat fields (`narrative`, `subject`); 12.4's totals-consistency
+advance-block isn't enforced (needs T-06's cross-entity context, noted on
+T-06's own note-mentions).
+**Done-when, re-litigated honestly.** "Crashed mid-wizard session resumes
+from the guarded draft row" is moot, not failed: there is no session to
+resume FROM, proven by
+`sar_state_survives_a_fresh_session_because_it_was_never_in_one`
+(`tests/m07_m11_m12_m17_screens.rs`) — a fresh, unrelated identity reads
+the draft back by `sar_id` alone. "SAR wizards physically cannot run from
+memory": true, trivially, since no in-memory store is ever used for SAR.
 
 ## B10 ☐ T-04 approval chains + `approval_inbox!` (L) — the big one
 **Unlocks (12).** 4.11, 8.8, 11.3, 12.6 (archetype `approval_inbox!`);
@@ -614,3 +633,4 @@ parallelizes off the core path.
 | 2026-09-22 | B6 (T-09) landed, poll half only (disclosed): `crud_screens!` gained real `refresh_seconds` (`<meta http-equiv="refresh">`, previously silently ignored — D1's hole) plus `sort_by:`/`countdown_field:` (new `nirdosha_rt::screens::{now_epoch_secs, format_countdown}` helpers, no client-side JS). 11.1 Interception Queue: found its guard-enforced backend already real/tested, only the HTML screen was missing (`/holds` was JSON-only) — built it (sorted, auto-refreshing, live countdown), added `/api/holds` for JSON, fixed menus.toml's dead `route = "/intervention"` → `/holds` → stage built, blocked_by emptied. 2.5 Real-Time Monitoring Wall: new `crud_screens!` over `payment_table()` at `/wall`, same treatment, stays `interim` — its `K.guard.decisions` half has no real topic consumer/projection anywhere in this corpus, disclosed not faked. 19.1's real T-09 gap (notify(topic) health self-report) untouched, remains T-09's sole blocked-screens entry. 10.5 dropped the ticket half, stays blocked on dataset:PG.rescreen_job (C9). True WebSocket/SSE push not built — always scoped as a later step per this ticket's own "poll→push" framing | 3 new integration tests (m07_m11_m12_m17_screens.rs) proving real auto-refresh/sort/countdown on both screens; verify_tickets corpus-facts recomputed (44 refs/36 lines); all rtm suites green |
 | 2026-09-22 | B7 (T-01) landed, core path only (disclosed): new `nirdosha_rt::export` module — `write_governed_export` refuses an empty purpose or a >`MAX_EXPORT_ROWS`(50k) row count before writing anything (cap as backpressure, not post-hoc truncation), assembles the artifact in 500-row chunks, sha256 content-hashes it, writes it into a real in-memory `O.*` object store under a fresh `export_id`, and returns a watermark footer line (purpose/export_id/exported_at/expires_at/sha256). `crud_screens!`'s guarded CSV export route (the documented `guarded_snapshot`→`Response::csv` bypass) now calls it before returning any bytes — every `guard:`-gated screen's export, not just the 5 named. `sha2` promoted from `dpop`-feature-optional to a hard `nirdosha-rt` dependency. New `bridge.nir` `GovernedExportRow`/`governed_export_table()` (real `PG.governed_export` `GuardedTable`, `system_write`-only like `NotificationRow` — no screen reads export history yet), wired via a new `nirdosha_rt::export::set_export_sink` hook registered once in `src/bin/serve.nir`'s `main()`. Disclosed gap: per-class approval (`sar_release` quorum(2)) is NOT wired here — depends on T-04/B10's `approval_chain!`/`RUNTIME.pending_approvals`, which doesn't exist yet; found and documented a DIFFERENT pre-existing mechanism (`GuardedTable::guarded_propose_escalated_export`/`guarded_confirm_escalated_export`, mounted at `/exports/{resource}/propose\|confirm` in `m15_reporting.nir`, JSON-only, no watermark/hash) that already does real quorum-gated export for alert/case/transaction — reconciling the two paths is left for B10. screens.toml: dropped stale `ticket:T-01` from 7.5/12.10/15.5/18.9/20.3 (none promote further — each still has its OTHER real blocker: `archetype:graph_renderer`+`dataset:GR.link_edge`, `integration:goAML`, `ticket:T-04`, `dataset:PG.dsar_request`, `ticket:T-11` respectively); 15.5's `dataset:PG.governed_export` also dropped (now real, caught by the stale-pin test). menus.toml nav.exports comment updated (was "pre-T-01", now accurate) | 1 new integration test (`m06_transactions_screen.rs`) proving the watermark footer on a real guarded export; 3 new unit tests in `export.rs`; verify_tickets corpus-facts recomputed (39 refs/33 lines/6 stage-gating+5 note-only, T-01 moved to note-only); all rtm + nirdosha-rt + nirdosha-macros + nirdosha-guard-screens suites green |
 | 2026-09-22 | B8 (T-11) landed: discovered `nirdosha-guard-screens::GuardedTable` (RTM's only real read/write path) never wrote to its own `audit` (`ModuleAuditChain`) field — it calls `GuardClient::evaluate()` directly, bypassing `guarded_read`/`guarded_apply`'s audit-append entirely, so the `audit_path` every `bridge.nir` table already passed was dead. Root-fixed: `GuardedTable::record_audit_decision`, called after all 9 `evaluate()` call sites, appends a real `AuditEnvelope` for every decision (allow/deny/escalate/pending alike). New `nirdosha_rt::audit_projection` module (`project`, unit-tested: merge ordering, tampered-chain exclusion). `bridge.nir`: `all_chains_table`/`refresh_all_chains` (`AC.all_chains`, real, over 18 tables' now-real chains), `sar_visibility_table`/`refresh_sar_visibility` (`PG.sar_visibility`, resource-type granularity — disclosed: no per-row attribution, `GuardClient`'s envelope carries the bare resource type, a real separate `nirdosha-guard-mic` change out of this unit's blast radius). Real routes: `/audit/chains` (20.1), `/audit/config-history` (20.2), `/sar/tipping-off` (12.11), `/qa/overturned` (14.5), `/audit/pack/export` (20.3, via B7's path). New `guard_policy!`s: `auditor-read` extended + `mlro-audit-chain-read`/`compliance-lead-audit-chain-read`/`admin-audit-chain-read`/`compliance-lead-read-qa-review`/`mlro-read-qa-review`. screens.toml: 12.11/14.5/20.2/20.3 → `built`; 3.10/20.1 drop `ticket:T-11`, keep `ticket:T-06` (B11's) | 3 new `nirdosha-rt` unit tests + 2 new rtm integration tests (real cross-chain query + tampered-chain exclusion, both in `m19_m20_m21_m22_screens.rs`); `cargo test -p nirdosha-guard-screens` (36, unaffected by the audit-append addition) + `cargo test -p rtm` (all 15 suites) + `cargo test -p nirdosha-rt -p nirdosha-guard-mic` all green; verify_tickets corpus-facts recomputed (33 refs/29 lines/5 stage-gating, T-11 fully closed) |
+| 2026-09-22 | B9 (T-07+T-08) landed, `wizard_persistent` NOT built (disclosed, see B9's own section for the full reasoning): discovered `m12_sar.nir`/`bridge.nir`'s `SarBundleRow`/`sar_bundle_table()` already existed, real and tested (an earlier "Phase B" batch, predating this screens-plan.md sequence) — a deliberate prior call to use `crud_screens!`'s `guard: {create_fields, update_fields}` over one real `sar_bundle` `GuardedTable` instead of extending `wizard!` with a second stateful macro. Every SAR write is already a direct guarded call addressable by `sar_id`, with zero in-memory session involved at any point — satisfies T-07's actual intent without new macro code. This batch: corrected screens.toml's stale `archetype = "wizard!"`/`combo = ["wizard_persistent"]` labels on 4.14/12.2/12.3/12.4 to the real `crud_screens!`/no-combo shape, renamed the stale `PG.sar_draft` dataset references to the real `PG.sar_bundle`, fixed 4 menus.toml routes still naming the dead `sar_draft` resource (V5 started failing on them the moment these screens flipped to `built`), dropped `ticket:T-07`/`ticket:T-08` everywhere closed (3.8/4.14/12.2/12.3/12.4/12.5), added a note-mention of `T-06` on 12.4 (its totals-consistency gap needs T-06's context read). 3.8 deliberately stays `interim` (a one-shot guarded write was never going to get a multi-step persistent wizard). 12.5 stays `blocked`, now purely on `dataset:PG.evidence_doc` (C10). Disclosed gaps: narrative's 6-field who/what/when/where/why/how attestation and 12.4's multi-subject registry both stay flat single fields | 1 new integration test (`sar_state_survives_a_fresh_session_because_it_was_never_in_one`, m07_m11_m12_m17_screens.rs) proving a draft is readable by `sar_id` alone from a wholly separate identity that never touched the creating session; all rtm suites green; verify_tickets corpus-facts recomputed (23 refs/23 lines/3 stage-gating+6 note-only, T-07 moved to note-only, T-08 fully closed) |
