@@ -175,7 +175,7 @@ id = "nav.team_dash"
 label_key = "nav.team_dash"
 group = "work"
 screen_id = "2.3"
-route = "/team"
+route = "/dashboard/team"
 guard = { action = "aggregate", resource = "alert" }
 roles = ["ComplianceLead"]
 order = 20
@@ -185,7 +185,7 @@ id = "nav.mlro_dash"
 label_key = "nav.mlro_dash"
 group = "work"
 screen_id = "2.4"
-route = "/mlro"
+route = "/dashboard/mlro"
 guard = { action = "aggregate", resource = "case" }
 roles = ["Mlro", "ComplianceLead"]      # Lead sees masked widgets (⛔ sar rows) — V2 allows, field-level via policy
 order = 30
@@ -336,7 +336,7 @@ id = "nav.screening"
 label_key = "nav.screening"
 group = "screening"
 screen_id = "10.1"
-route = "/screening"
+route = "/screening/hits"
 guard = { action = "read", resource = "screening_hit" }
 badge = { source = "PG.screening_hit", filter = "assignee is null AND status=new", cap = 99 }
 roles = ["Analyst"]
@@ -471,7 +471,7 @@ id = "nav.sar_controls"
 label_key = "nav.sar_controls"
 group = "sar"
 screen_id = "12.11"
-route = "/sar/controls"
+route = "/sar/tipping-off"
 guard = { action = "read", resource = "sar_visibility" }
 roles = ["Mlro", "Auditor"]
 order = 50
@@ -482,7 +482,7 @@ id = "nav.rules"
 label_key = "nav.rules"
 group = "governance"
 screen_id = "8.1"
-route = "/rules"
+route = "/rules/windows"
 guard = { action = "read", resource = "catalog_item" }
 roles = ["PolicyEngineer", "ComplianceLead", "Auditor", "Admin"]
 order = 10
@@ -925,7 +925,7 @@ id = "nav.audit_log"
 label_key = "nav.audit_log"
 group = "audit"
 screen_id = "20.1"
-route = "/audit/log"
+route = "/audit/chains"
 guard = { action = "read", resource = "audit_record" }
 roles = ["Auditor", "Admin", "Mlro"]
 order = 10
@@ -936,7 +936,7 @@ id = "nav.audit_changes"
 label_key = "nav.audit_changes"
 group = "audit"
 screen_id = "20.2"
-route = "/audit/changes"
+route = "/audit/config-history"
 guard = { action = "read", resource = "audit_record" }
 roles = ["Auditor", "Mlro"]
 order = 20
@@ -947,7 +947,7 @@ id = "nav.audit_packs"
 label_key = "nav.audit_packs"
 group = "audit"
 screen_id = "20.3"
-route = "/audit/packs"
+route = "/audit/pack/export"
 guard = { action = "read", resource = "audit_record" }
 roles = ["Mlro", "Auditor"]
 order = 30

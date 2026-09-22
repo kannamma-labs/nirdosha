@@ -57,12 +57,12 @@ fn main() {
     // sibling literal-path routes (propose/confirm, matcher catalog,
     // simulations) are mounted first.
     let router = rtm::m03_alerts::mount_alert_board(router);
+    let router = rtm::m03_alerts::mount_sla_monitor(router);
     let router = rtm::m03_alerts::mount_alert_screens(router);
     let router = rtm::m03_alerts::mount_bulk_alert_reassign(router);
     let router = rtm::m03_alerts::mount_alert_context(router);
     let router = rtm::m03_alerts::mount_alert_rfi(router);
     let router = rtm::m03_alerts::mount_escalate_to_case(router);
-    let router = rtm::m03_alerts::mount_sla_monitor(router);
     let router = rtm::m04_cases::mount_case_board(router);
     let router = rtm::m04_cases::mount_case_screens(router);
     let router = rtm::m04_cases::mount_case_overview(router);
@@ -116,8 +116,8 @@ fn main() {
     let router = rtm::m12_sar::mount_sar_export(router);
     let router = rtm::m12_sar::mount_sar_release_inbox(router);
     let router = rtm::m12_sar::mount_tipping_off_controls(router);
-    let router = rtm::m12_sar::mount_sar_screens(router);
     let router = rtm::m12_sar::mount_continuing_activity_sar(router);
+    let router = rtm::m12_sar::mount_sar_screens(router);
     let router = rtm::m13_risk_config::mount_refdata_migrate(router);
     let router = rtm::m13_risk_config::mount_refdata_screens(router);
     let router = rtm::m14_qa::mount_qa_self_scorecard(router);
@@ -140,7 +140,9 @@ fn main() {
     let router = rtm::m19_it_ops::mount_ingest_admin(router);
     let router = rtm::m20_audit::mount_audit_trail(router);
     let router = rtm::m20_audit::mount_audit_chain_search(router);
+    let router = rtm::m21_restricted::mount_cs_lookup(router);
     let router = rtm::m21_restricted::mount_cs_payment_status(router);
+    let router = rtm::m21_restricted::mount_rm_lookup(router);
     let router = rtm::m21_restricted::mount_rm_restriction_view(router);
     let router = rtm::m21_restricted::mount_auditor_portal(router);
     let router = rtm::m22_misc::mount_about(router);

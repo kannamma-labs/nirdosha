@@ -24,9 +24,10 @@ nirdosha_rt::guard_policy! {
     reason(sod.alert_writer_is_blind_to_status)
 }
 
-// → 3.1/3.2/3.4 queue + detail + related (Analyst)
+// → 3.1/3.2/3.4 queue + detail + related (Analyst, ComplianceLead, QaReviewer
+// oversight per screens.toml's 3.1 roles)
 nirdosha_rt::guard_policy! {
-    allow "analyst-read-alert" for Analyst
+    allow "analyst-read-alert" for Analyst, ComplianceLead, QaReviewer
     when action == "read" && resource == "alert"
     purpose(AmlInvestigation)
     filter tenant_scope()
@@ -75,7 +76,7 @@ nirdosha_rt::guard_policy! {
 
 // → 3.9 SLA monitor (aggregate; cohort floor — no analyst-level rows leak) [NEW]
 nirdosha_rt::guard_policy! {
-    allow "lead-sla-aggregate" for ComplianceLead
+    allow "lead-sla-aggregate" for ComplianceLead, Mlro
     when action == "aggregate" && resource == "alert"
     purpose(Operations)
     filter time_range(created_at, within, retention_window())

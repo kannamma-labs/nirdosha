@@ -199,12 +199,12 @@ fn monitoring_wall_auto_refreshes_and_shows_a_live_sorted_countdown() {
     let later_pos = resp.body.find("pay-wall-later").expect("later row must render");
     assert!(soon_pos < later_pos, "sort_by must order soonest-expiring first: {}", resp.body);
 
-    // ComplianceLead is also in this screen's `roles`, but the corpus
-    // has no plain `read payment` grant for it (only `hold-stats`'s
-    // `aggregate`) — a real, disclosed denial, not routed around.
+    // ComplianceLead is also in this screen's `roles` — `ops-read-holds`
+    // now grants it a plain `read payment` alongside `hold-stats`'s
+    // `aggregate`, so the wall is reachable for both roles it's mounted for.
     let lead_cookie = login_as(&router, "compliancelead", "compliancelead-demo");
-    let denied = get_as(&router, "/wall", &lead_cookie);
-    assert_eq!(denied.status, 403, "ComplianceLead has no plain read grant on payment: {denied:?}");
+    let allowed = get_as(&router, "/wall", &lead_cookie);
+    assert_eq!(allowed.status, 200, "ComplianceLead must also see the wall (screens.toml 2.5 roles): {allowed:?}");
 }
 
 // ---- M12 SAR / Regulatory Reporting ----

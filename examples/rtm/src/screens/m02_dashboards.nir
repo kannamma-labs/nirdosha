@@ -227,7 +227,7 @@ nirdosha_rt::app_shell_from_toml!(
 nirdosha_rt::approval_inbox! {
     mount: mount_unified_approvals_inbox,
     path: "/approvals",
-    access: requires role "ComplianceLead",
+    access: requires role "ComplianceLead" or role "Mlro",
     sources: [
         { table: case_table, chain: "case_review", resource: "case", detail_path: "/cases/{id}" },
         { table: payment_table, chain: "override_release", resource: "payment", detail_path: "/holds/{id}" },

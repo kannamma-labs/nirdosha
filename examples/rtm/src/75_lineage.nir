@@ -103,6 +103,16 @@ nirdosha_rt::guard_policy! {
     obligate audit(full)
 }
 
+// → 8.1 Rules & Windows Catalog read (PolicyEngineer, ComplianceLead,
+// Auditor, Admin — screens.toml's 8.1 roles) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "rules-window-read" for PolicyEngineer, ComplianceLead, Auditor, Admin
+    when action == "read" && resource == "window"
+    purpose(ModelGovernance)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
 // → V10 findings read (dormant/undeclared/issued-unconsumed/pending) [NEW → new screens]
 nirdosha_rt::guard_policy! {
     allow "v10-findings-read" for PolicyEngineer

@@ -15,9 +15,11 @@ nirdosha_rt::guard_policy! {                                // svc:ingest parks 
     obligate audit(full)
 }
 
-// → 11.1/11.2 desk queue + decision [NEW]
+// → 11.1/11.2 desk queue + decision; 2.5 monitoring wall (ComplianceLead is
+// also in both screens' `roles` — a plain read grant alongside the
+// existing `hold-stats` aggregate, not routed around it) [NEW]
 nirdosha_rt::guard_policy! {
-    allow "ops-read-holds" for OpsAnalyst
+    allow "ops-read-holds" for OpsAnalyst, ComplianceLead
     when action == "read" && resource == "payment"
     purpose(FraudMonitoring)
     filter tenant_scope()

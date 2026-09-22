@@ -15,7 +15,7 @@ nirdosha_rt::guard_policy! {                                // [NEW — 3.8 esca
 }
 
 nirdosha_rt::guard_policy! {                                // → 4.2/4.3 read [NEW]
-    allow "case-read" for Analyst
+    allow "case-read" for Analyst, ComplianceLead
     when action == "read" && resource == "case"
     purpose(AmlInvestigation)
     filter tenant_scope()

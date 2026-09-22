@@ -113,6 +113,17 @@ nirdosha_rt::guard_policy! {
     obligate audit(full)
 }
 
+// → 10.1 Screening Hit Queue (Analyst) [NEW]
+nirdosha_rt::guard_policy! {
+    allow "analyst-read-screening-hit" for Analyst
+    when action == "read" && resource == "screening_hit"
+    purpose(AmlInvestigation)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 50_000)
+    grant count_allowed
+    obligate audit(sampled)
+}
+
 // → 10.2 Hit disposition (Analyst) [NEW]
 nirdosha_rt::guard_policy! {
     allow "analyst-disposition-hit" for Analyst

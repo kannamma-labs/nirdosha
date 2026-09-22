@@ -99,7 +99,7 @@ fn ingest_create_txn_commits_through_the_real_corpus_policy() {
 fn analyst_search_transaction_reads_through_the_real_corpus_policy() {
     let root = scratch_dir("analyst-search-transaction");
     let mut policy = corpus_candidate("analyst-search-transaction");
-    assert_eq!(policy.subjects, vec!["Analyst".to_string()]);
+    assert_eq!(policy.subjects, vec!["Analyst".to_string(), "OpsAnalyst".to_string()]);
     assert_eq!(policy.purpose.as_deref(), Some("AmlInvestigation"));
     // The one patched field — see module doc comment for exactly why.
     policy.filter = Some(FilterExpr::TenantEq { value: Value::Str("tenant-rtm".into()) });

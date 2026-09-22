@@ -91,13 +91,13 @@ fn policy_engineer_proposes_model_swap_and_compliance_lead_confirms() {
 /// corpus gap) cannot list/browse hits at all, since no `read` policy on
 /// `screening_hit` exists anywhere in this corpus.
 #[test]
-fn analyst_dispositions_a_screening_hit_but_cannot_browse_the_list() {
+fn analyst_dispositions_a_screening_hit_and_can_browse_the_list() {
     let router = router();
     screening_hit_table();
     let analyst = login_as(&router, "analyst", "analyst-demo");
 
     let list = get_as(&router, "/screening/hits", &analyst);
-    assert_eq!(list.status, 403, "no read policy exists on screening_hit — this must deny, not silently return rows: {}", list.body);
+    assert_eq!(list.status, 200, "analyst-read-screening-hit (10.1) must let Analyst browse the queue: {}", list.body);
 
     let update = post_form_as(&router, "/screening/hits/hit-001/edit", &analyst, "disposition=true_match&rationale=matches national id and DOB");
     assert_eq!(update.status, 302, "the real update grant must still work even though list/detail don't: {}", update.body);
@@ -192,14 +192,18 @@ fn a_role_with_no_grant_on_any_of_this_batchs_resources_is_denied() {
 /// originally claimed a working "view" screen; fixed to match what the
 /// corpus actually grants, not what would have been convenient).
 #[test]
-fn window_and_refdata_list_views_also_have_no_read_grant() {
+fn refdata_list_view_still_has_no_read_grant_but_window_now_does() {
     let router = router();
     window_config_table();
     refdata_table();
     let pe = login_as(&router, "policyengineer", "policyengineer-demo");
     let admin = login_as(&router, "admin", "admin-demo");
+    // rules-window-read (8.1) now grants PolicyEngineer/ComplianceLead/
+    // Auditor/Admin a plain read on "window".
     let windows = get_as(&router, "/rules/windows", &pe);
-    assert_eq!(windows.status, 403, "{}", windows.body);
+    assert_eq!(windows.status, 200, "{}", windows.body);
+    // "refdata" is a separate resource this batch never touched — still
+    // genuinely ungranted.
     let refdata = get_as(&router, "/risk-config/refdata", &admin);
     assert_eq!(refdata.status, 403, "{}", refdata.body);
 }

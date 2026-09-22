@@ -29,9 +29,9 @@ nirdosha_rt::guard_policy! {                                // [RFC §8.1 verbat
     reason(sod.ingestion_is_write_only)
 }
 
-// → 6.1 Transaction search (Analyst) — listing; caps + predicate_use per I15
+// → 6.1 Transaction search (Analyst, OpsAnalyst) — listing; caps + predicate_use per I15
 nirdosha_rt::guard_policy! {
-    allow "analyst-search-transaction" for Analyst
+    allow "analyst-search-transaction" for Analyst, OpsAnalyst
     when action == "read" && resource == "transaction"
     purpose(AmlInvestigation)
     filter tenant_scope()

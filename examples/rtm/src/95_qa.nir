@@ -14,6 +14,15 @@ nirdosha_rt::guard_policy! {                                // → 14.1/14.2 rea
     obligate audit(sampled)
 }
 
+nirdosha_rt::guard_policy! {                                // → 14.1 QA review queue read
+    allow "qa-review-queue-read" for QaReviewer
+    when action == "read" && resource == "qa_review"
+    purpose(QaReview)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 50_000)
+    obligate audit(sampled)
+}
+
 nirdosha_rt::guard_policy! {                                // → 14.2/14.4 scorecard + feedback
     allow "qa-write-review" for QaReviewer
     when action in ["create", "update"] && resource == "qa_review"

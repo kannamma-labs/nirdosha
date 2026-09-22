@@ -40,7 +40,7 @@ use syn::{Ident, LitStr, Token};
 
 enum Access {
     Public,
-    Role(LitStr),
+    Role(Vec<LitStr>),
 }
 
 impl Parse for Access {
@@ -55,13 +55,35 @@ impl Parse for Access {
             if role_kw != "role" {
                 return Err(syn::Error::new(role_kw.span(), "expected `role`"));
             }
+            let mut roles = Vec::new();
             let role: LitStr = input.parse()?;
             if let Err(e) = role_ident(&role.value(), role.span()) {
                 return Err(e);
             }
-            return Ok(Access::Role(role));
+            roles.push(role);
+            // Additional roles: `requires role "X" or role "Y" or role "Z"`
+            // — an inbox that fans out to several module-scoped inboxes
+            // (T-04's own doc comment) is legitimately shared by more than
+            // one approving role (e.g. ComplianceLead + Mlro on the unified
+            // `/approvals` view), so a single hardcoded role is too narrow.
+            while input.peek(syn::Ident) {
+                let or_kw = Ident::parse_any(input)?;
+                if or_kw != "or" {
+                    return Err(syn::Error::new(or_kw.span(), "expected `or role \"...\"`"));
+                }
+                let role_kw = Ident::parse_any(input)?;
+                if role_kw != "role" {
+                    return Err(syn::Error::new(role_kw.span(), "expected `role`"));
+                }
+                let role: LitStr = input.parse()?;
+                if let Err(e) = role_ident(&role.value(), role.span()) {
+                    return Err(e);
+                }
+                roles.push(role);
+            }
+            return Ok(Access::Role(roles));
         }
-        Err(syn::Error::new(ident.span(), "expected `public` or `requires role \"...\"`"))
+        Err(syn::Error::new(ident.span(), "expected `public` or `requires role \"...\"` (optionally `or role \"...\"`)"))
     }
 }
 
@@ -218,19 +240,53 @@ fn expand_parsed(input: ApprovalInboxInput) -> TokenStream2 {
         ::nirdosha_rt::Response::html(200, ::nirdosha_rt::approval_inbox::approval_inbox_html(#title, &__rows))
     };
 
-    let view_route = match &input.access {
-        Access::Public => quote! { .get(#path, #title, |_req, _params| { #view_body }) },
-        Access::Role(role) => {
+    let (view_route, role_assertions) = match &input.access {
+        Access::Public => (quote! { .get(#path, #title, |_req, _params| { #view_body }) }, quote! {}),
+        Access::Role(roles) if roles.len() == 1 => {
+            let role = &roles[0];
             let role_ident_tok = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
-            quote! {
-                .get_gated::<crate::nirdosha_roles::#role_ident_tok>(#path, #title, |_req, _params, _proof| {
-                    #view_body
-                })
-            }
+            (
+                quote! {
+                    .get_gated::<crate::nirdosha_roles::#role_ident_tok>(#path, #title, |_req, _params, _proof| {
+                        #view_body
+                    })
+                },
+                quote! {},
+            )
+        }
+        Access::Role(roles) => {
+            // More than one role: `get_gated::<R>` only ever checks one
+            // type parameter, so a real multi-role gate uses `auth.has_role`
+            // directly. Each named role still gets the same dead-type-alias
+            // existence assertion `app_shell_from_toml!`'s T-10 mechanism
+            // uses, so an undeclared/typo'd role here is a named compile
+            // error too, not a runtime surprise.
+            let role_strs = roles.iter().map(|r| r.value());
+            let assertions = roles.iter().map(|role| {
+                let role_ident_tok = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
+                let alias = quote::format_ident!("__AssertApprovalInboxRoleDeclared_{}", role_ident_tok);
+                quote! {
+                    #[allow(dead_code, non_camel_case_types)]
+                    type #alias = crate::nirdosha_roles::#role_ident_tok;
+                }
+            });
+            (
+                quote! {
+                    .get_with_auth(#path, #title, |_req, _params, auth| {
+                        if !(#(auth.has_role(#role_strs))||*) {
+                            return ::nirdosha_rt::Response::forbidden();
+                        }
+                        #view_body
+                    })
+                },
+                quote! { #(#assertions)* },
+            )
         }
     };
 
     quote! {
+        #role_assertions
+
         pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
             router
                 #view_route

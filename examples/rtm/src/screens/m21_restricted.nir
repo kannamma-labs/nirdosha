@@ -79,6 +79,26 @@ fn watermarked(auth: &nirdosha_rt::Auth, html: String) -> String {
     with_watermark(html, &banner)
 }
 
+/// 21.3 lookup landing (`/cs/lookup`) -- a real id-entry form, not a
+/// list: `cs-payment-status`'s own `cap(row_cap = 1)` means the guard
+/// only ever answers "this one payment", so the honest UI for that shape
+/// is a lookup box, same posture as `mount_cs_payment_status` below.
+pub fn mount_cs_lookup(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cs/lookup", "CS payment status lookup", |_req, _params, auth| {
+        let body = "<form method=\"get\" action=\"/cs/lookup/go\">\
+            <label for=\"id\">Payment ID</label> \
+            <input type=\"text\" id=\"id\" name=\"id\" placeholder=\"pay-001\" required> \
+            <button type=\"submit\">Look up</button>\
+            </form>"
+            .to_string();
+        nirdosha_rt::Response::html(200, watermarked(auth, nirdosha_rt::web::page_shell("CS Payment Status Lookup", "", &body)))
+    })
+    .get_with_auth("/cs/lookup/go", "CS payment status lookup redirect", |req, _params, _auth| {
+        let id = req.query().get("id").cloned().unwrap_or_default();
+        nirdosha_rt::Response::redirect(format!("/cs/payments/{id}"))
+    })
+}
+
 /// 21.3 -- masked payment-status lookup, keyed by the one seeded payment
 /// (`bridge.nir`'s `pay-001`) -- a real per-id `guarded_get`, not a list,
 /// matching `cs-payment-status`'s own `cap(row_cap = 1)`.
@@ -90,6 +110,24 @@ pub fn mount_cs_payment_status(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
             Ok(None) => nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
             Err(e) => nirdosha_guard_screens::guard_error_response(e),
         }
+    })
+}
+
+/// 21.4 lookup landing (`/rm/customers`) -- same id-entry-form shape as
+/// `mount_cs_lookup`, matching `rm-restriction-view`'s own `cap(row_cap = 1)`.
+pub fn mount_rm_lookup(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/rm/customers", "RM restriction-band lookup", |_req, _params, auth| {
+        let body = "<form method=\"get\" action=\"/rm/customers/go\">\
+            <label for=\"id\">Customer ID</label> \
+            <input type=\"text\" id=\"id\" name=\"id\" placeholder=\"cust-001\" required> \
+            <button type=\"submit\">Look up</button>\
+            </form>"
+            .to_string();
+        nirdosha_rt::Response::html(200, watermarked(auth, nirdosha_rt::web::page_shell("RM Restriction-Band Lookup", "", &body)))
+    })
+    .get_with_auth("/rm/customers/go", "RM restriction-band lookup redirect", |req, _params, _auth| {
+        let id = req.query().get("id").cloned().unwrap_or_default();
+        nirdosha_rt::Response::redirect(format!("/rm/customers/{id}"))
     })
 }
 
