@@ -1235,23 +1235,31 @@ impl Router {
             .map(|b| b(&auth))
             .unwrap_or_else(|| self.nav.clone());
 
-        let mut html = String::from(
-            "<nav style=\"margin:-2rem -2rem 2rem -2rem;padding:0.75rem 2rem;background:#f5f5f5;border-bottom:1px solid #ddd\">",
-        );
+        // Uses the theme's `.nir-nav` class (sticky, backdrop-blurred,
+        // themed background) so this renders as the same header the
+        // CSS in theme.rs already defines. Previously this built a bare
+        // `<nav style="margin:-2rem -2rem 2rem -2rem;...">` — negative
+        // margins sized for nesting inside a padded container — but
+        // `with_nav_bar` splices this HTML in as the first child of
+        // `<body>` (outside `.nir-shell`'s padding), so those margins
+        // pulled the header up and left past the viewport edge,
+        // clipping it off the top of the page.
+        let mut html = String::from("<nav class=\"nir-nav\">");
         for link in &links {
-            html.push_str(&format!("<a href=\"{}\" style=\"margin-right:1.5rem\">{}</a>", link.href, html_escape(link.label)));
+            html.push_str(&format!("<a href=\"{}\">{}</a>", link.href, html_escape(link.label)));
         }
         if let Some(login) = &self.login {
+            html.push_str("<span class=\"nir-nav-spacer\"></span>");
             match session_auth(&self.sessions, req) {
                 Some(auth) => {
                     html.push_str(&format!(
-                        "<span style=\"float:right\">{} — <form method=\"post\" action=\"{}/logout\" style=\"display:inline;margin:0\"><button type=\"submit\">Logout</button></form></span>",
+                        "<span style=\"display:flex;align-items:center;gap:0.75rem\">{} <form method=\"post\" action=\"{}/logout\" style=\"display:inline;margin:0\"><button type=\"submit\">Logout</button></form></span>",
                         html_escape(auth.user()),
                         login.path.trim_end_matches('/'),
                     ));
                 }
                 None => {
-                    html.push_str(&format!("<a href=\"{}\" style=\"float:right\">Login</a>", login.path));
+                    html.push_str(&format!("<a href=\"{}\">Login</a>", login.path));
                 }
             }
         }
