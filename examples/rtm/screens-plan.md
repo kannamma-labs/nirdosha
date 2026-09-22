@@ -39,7 +39,7 @@
 | B5 | T-12 predicate binding / I15 (S) | B | S | gate | ☑ done | — |
 | B6 | T-09 live streaming plane (M) | B | M | 4 | ☑ done (poll half; 19.1 still blocked) | — |
 | B7 | T-01 governed egress (M) | B | M | 5 | ☑ done (core path; sar_release quorum deferred to B10) | — |
-| B8 | T-11 audit-chain projection (M) | B | M | 4 | ☐ pending | — |
+| B8 | T-11 audit-chain projection (M) | B | M | 4 | ☑ done | — |
 | B9 | T-07+T-08 SAR wizard + datasets (M+M) | B | M | 5 | ☐ pending | — |
 | B10| T-04 approvals + `approval_inbox!` (L) | B | L | 12 | ☐ pending | — |
 | B11| T-06 linked context + `workspace!` (L) | B | L | 10 | ☐ pending | — |
@@ -369,16 +369,46 @@ be streaming/chunked; materializing a full result set in memory before
 writing O.* will hit `max_result_bytes` and likely OOM. Use the guard's
 `row_cap` and `max_execution` as backpressure, not just post-hoc checks.
 
-## B8 ☐ T-11 unified audit-chain projection (M)
-**Unlocks.** 14.5, 20.2 built; 3.10/20.1 (with B11); 12.11 tipping-off
-controls.
-**Steps.**
-1. `AC.all_chains` projection over the per-domain append-only chains,
-   immutability preserved (append-only at the projection layer too).
-2. `PG.sar_visibility` visibility rules at the projection layer.
-3. `timeline`/`ac_timeline` combos read from it.
-**Done-when.** One guarded query answers cross-chain search; sar visibility
-holds; export still egresses via B7.
+## B8 ☑ T-11 unified audit-chain projection (M) — done
+**Real, first-time fix this unit found and closed**: `nirdosha-guard-screens
+::GuardedTable` — every table `bridge.nir` builds, RTM's only write/read
+path — calls `GuardClient::evaluate()` directly and never appended to its
+own `audit` (`ModuleAuditChain`) field; the `audit_path` every
+`GuardedTable::new(...)` call site already passed was dead. Fixed at the
+root (`GuardedTable::record_audit_decision`, called after all 9 `evaluate()`
+call sites) rather than building a projection over data that would always
+have been empty — the actual per-table chains are real now, not just the
+projection code that reads them.
+
+**Landed.** `nirdosha_rt::audit_projection` (`project`, tested: merge
+ordering, a tampered chain excluded-and-named not merged). `bridge.nir`:
+`all_chains_table`/`refresh_all_chains` (`AC.all_chains`, real, sourced from
+18 tables' own now-real chains), `sar_visibility_table`/
+`refresh_sar_visibility` (`PG.sar_visibility`, resource-type granularity —
+disclosed limitation: `GuardClient`'s audit envelope carries the bare
+resource type, not a per-row id, so it can't attribute a read to the
+*specific* SAR-linked row; a real, separate `nirdosha-guard-mic` change, out
+of this unit's blast radius). Real routes: `/audit/chains` (20.1),
+`/audit/config-history` (20.2, `window_config`/`user_role`/
+`delegation_token` chains only — `AC.policy_chain` has no runtime table,
+`guard_policy!` is static corpus), `/sar/tipping-off` (12.11),
+`/qa/overturned` (14.5), `/audit/pack/export` (20.3, via B7's governed-export
+path). New `guard_policy!`s: `auditor-read` extended to `audit_chain`/
+`sar_visibility`; new `mlro-audit-chain-read`, `compliance-lead-audit-chain-
+read`, `admin-audit-chain-read`, `compliance-lead-read-qa-review`,
+`mlro-read-qa-review`.
+
+**Screens.** 12.11, 14.5, 20.2, 20.3 → `built`. 3.10, 20.1 drop `ticket:T-11`
+but keep `ticket:T-06` (their own cross-entity context/`workspace!`
+requirement, B11's — the projection dataset each declares is now real, their
+context requirement isn't).
+
+**Done-when.** Met: `nirdosha_rt::audit_projection`'s own unit tests plus two
+rtm integration tests (`t11_audit_chain_projection_answers_a_real_cross_
+chain_query_and_feeds_sar_visibility`, `t11_a_tampered_source_chain_is_
+excluded_from_the_projection_not_silently_merged`) prove a real guarded
+decision reaches the projection, a real HTTP query answers it, and a
+corrupted source chain is excluded and named, never silently merged.
 
 ## B9 ☐ T-07+T-08 SAR wizard framework + datasets (M+M)
 **Unlocks.** 4.14, 12.2, 12.3, 12.4 built; 12.5 (with `PG.evidence_doc`,
@@ -583,3 +613,4 @@ parallelizes off the core path.
 | 2026-09-22 | B5 (T-12) landed: new `GuardedTable::guarded_search` (nirdosha-guard-screens/src/lib.rs) — `q` ORs a case-insensitive substring match only across a screen's fields the winning policy's `grant predicate_use(...)` actually names, in-process after decode (driver-level payload-field pushdown is a separate, pre-existing, disclosed gap); zero eligible fields on a non-empty `q` is a named deny; `crud_screens!`'s guarded list/JSON-list routes now call it (previously `q` was captured and displayed but never actually filtered anything on the `guard:` path at all — worse than decorative). `analyst-read-alert` (50_alerts.nir + roles-N-guard_policy.md mirror) gained a real `grant predicate_use(status, assignee, model_version, policy_version, txn_id)` since it had none; 6.1 gained its missing `file =` line and flipped emittable→built | 4 new integration tests (m03_m04_m05_screens.rs, m06_transactions_screen.rs) proving both the granted-rows and named-deny halves through real HTTP routes; all rtm suites green |
 | 2026-09-22 | B6 (T-09) landed, poll half only (disclosed): `crud_screens!` gained real `refresh_seconds` (`<meta http-equiv="refresh">`, previously silently ignored — D1's hole) plus `sort_by:`/`countdown_field:` (new `nirdosha_rt::screens::{now_epoch_secs, format_countdown}` helpers, no client-side JS). 11.1 Interception Queue: found its guard-enforced backend already real/tested, only the HTML screen was missing (`/holds` was JSON-only) — built it (sorted, auto-refreshing, live countdown), added `/api/holds` for JSON, fixed menus.toml's dead `route = "/intervention"` → `/holds` → stage built, blocked_by emptied. 2.5 Real-Time Monitoring Wall: new `crud_screens!` over `payment_table()` at `/wall`, same treatment, stays `interim` — its `K.guard.decisions` half has no real topic consumer/projection anywhere in this corpus, disclosed not faked. 19.1's real T-09 gap (notify(topic) health self-report) untouched, remains T-09's sole blocked-screens entry. 10.5 dropped the ticket half, stays blocked on dataset:PG.rescreen_job (C9). True WebSocket/SSE push not built — always scoped as a later step per this ticket's own "poll→push" framing | 3 new integration tests (m07_m11_m12_m17_screens.rs) proving real auto-refresh/sort/countdown on both screens; verify_tickets corpus-facts recomputed (44 refs/36 lines); all rtm suites green |
 | 2026-09-22 | B7 (T-01) landed, core path only (disclosed): new `nirdosha_rt::export` module — `write_governed_export` refuses an empty purpose or a >`MAX_EXPORT_ROWS`(50k) row count before writing anything (cap as backpressure, not post-hoc truncation), assembles the artifact in 500-row chunks, sha256 content-hashes it, writes it into a real in-memory `O.*` object store under a fresh `export_id`, and returns a watermark footer line (purpose/export_id/exported_at/expires_at/sha256). `crud_screens!`'s guarded CSV export route (the documented `guarded_snapshot`→`Response::csv` bypass) now calls it before returning any bytes — every `guard:`-gated screen's export, not just the 5 named. `sha2` promoted from `dpop`-feature-optional to a hard `nirdosha-rt` dependency. New `bridge.nir` `GovernedExportRow`/`governed_export_table()` (real `PG.governed_export` `GuardedTable`, `system_write`-only like `NotificationRow` — no screen reads export history yet), wired via a new `nirdosha_rt::export::set_export_sink` hook registered once in `src/bin/serve.nir`'s `main()`. Disclosed gap: per-class approval (`sar_release` quorum(2)) is NOT wired here — depends on T-04/B10's `approval_chain!`/`RUNTIME.pending_approvals`, which doesn't exist yet; found and documented a DIFFERENT pre-existing mechanism (`GuardedTable::guarded_propose_escalated_export`/`guarded_confirm_escalated_export`, mounted at `/exports/{resource}/propose\|confirm` in `m15_reporting.nir`, JSON-only, no watermark/hash) that already does real quorum-gated export for alert/case/transaction — reconciling the two paths is left for B10. screens.toml: dropped stale `ticket:T-01` from 7.5/12.10/15.5/18.9/20.3 (none promote further — each still has its OTHER real blocker: `archetype:graph_renderer`+`dataset:GR.link_edge`, `integration:goAML`, `ticket:T-04`, `dataset:PG.dsar_request`, `ticket:T-11` respectively); 15.5's `dataset:PG.governed_export` also dropped (now real, caught by the stale-pin test). menus.toml nav.exports comment updated (was "pre-T-01", now accurate) | 1 new integration test (`m06_transactions_screen.rs`) proving the watermark footer on a real guarded export; 3 new unit tests in `export.rs`; verify_tickets corpus-facts recomputed (39 refs/33 lines/6 stage-gating+5 note-only, T-01 moved to note-only); all rtm + nirdosha-rt + nirdosha-macros + nirdosha-guard-screens suites green |
+| 2026-09-22 | B8 (T-11) landed: discovered `nirdosha-guard-screens::GuardedTable` (RTM's only real read/write path) never wrote to its own `audit` (`ModuleAuditChain`) field — it calls `GuardClient::evaluate()` directly, bypassing `guarded_read`/`guarded_apply`'s audit-append entirely, so the `audit_path` every `bridge.nir` table already passed was dead. Root-fixed: `GuardedTable::record_audit_decision`, called after all 9 `evaluate()` call sites, appends a real `AuditEnvelope` for every decision (allow/deny/escalate/pending alike). New `nirdosha_rt::audit_projection` module (`project`, unit-tested: merge ordering, tampered-chain exclusion). `bridge.nir`: `all_chains_table`/`refresh_all_chains` (`AC.all_chains`, real, over 18 tables' now-real chains), `sar_visibility_table`/`refresh_sar_visibility` (`PG.sar_visibility`, resource-type granularity — disclosed: no per-row attribution, `GuardClient`'s envelope carries the bare resource type, a real separate `nirdosha-guard-mic` change out of this unit's blast radius). Real routes: `/audit/chains` (20.1), `/audit/config-history` (20.2), `/sar/tipping-off` (12.11), `/qa/overturned` (14.5), `/audit/pack/export` (20.3, via B7's path). New `guard_policy!`s: `auditor-read` extended + `mlro-audit-chain-read`/`compliance-lead-audit-chain-read`/`admin-audit-chain-read`/`compliance-lead-read-qa-review`/`mlro-read-qa-review`. screens.toml: 12.11/14.5/20.2/20.3 → `built`; 3.10/20.1 drop `ticket:T-11`, keep `ticket:T-06` (B11's) | 3 new `nirdosha-rt` unit tests + 2 new rtm integration tests (real cross-chain query + tampered-chain exclusion, both in `m19_m20_m21_m22_screens.rs`); `cargo test -p nirdosha-guard-screens` (36, unaffected by the audit-append addition) + `cargo test -p rtm` (all 15 suites) + `cargo test -p nirdosha-rt -p nirdosha-guard-mic` all green; verify_tickets corpus-facts recomputed (33 refs/29 lines/5 stage-gating, T-11 fully closed) |

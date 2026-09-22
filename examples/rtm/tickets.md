@@ -397,24 +397,36 @@ of RTM's declared roles.
 ## T-11 — Unified audit chain projection + tipping-off visibility
 - status: active
 - size: M
-- meaning: per-domain AC.* chains projected into one queryable store (AC.all_chains) plus PG.sar_visibility tipping-off controls
-- blocked-screens: 3.10, 12.11, 14.5, 20.1, 20.2, 20.3
+- meaning: AC.all_chains + PG.sar_visibility are real, hash-chain-verified projections; no screen is gated on this ticket anymore
+- blocked-screens: none
 - note-mentions: none
 
-**Scope.** Consolidate the per-domain append-only chains (AC.alert_chain,
-AC.case_chain, AC.entity_chain, AC.access_log, ...) into the AC.all_chains
-projection that audit screens search, with the `timeline`/`ac_timeline`
-combos reading from it; plus PG.sar_visibility as the tipping-off visibility
-projection (12.11), overturned-decision records (14.5), and config-change
-history (20.2). Export of the projection still egresses via T-01 (20.3).
+**Scope (closed, B8).** `AC.all_chains` (`bridge.nir::all_chains_table` +
+`nirdosha_rt::audit_projection`) reads every table's real, already-written
+`ModuleAuditChain` (the hash-chained log `GuardClient` appends to on every
+guarded decision — not a second audit mechanism) and merges them, excluding
+(and naming) any chain that fails its own hash-chain verification —
+immutability enforced at the projection layer, not just the source chains.
+`PG.sar_visibility` (`sar_visibility_table`) derives from it: every real
+`alert`/`case` read-decision becomes one visibility record. **Disclosed
+limitation**: `GuardClient`'s own audit envelope carries the bare resource
+*type* (`"alert"`), not a per-row id (a real, separate `nirdosha-guard-mic`
+change, out of this ticket's blast radius) — so `sar_visibility` cannot
+attribute a read to the *specific* SAR-linked row, only to the resource type.
+14.5/20.2/20.3 close fully on this ticket (real routes: `/qa/overturned`,
+`/audit/config-history`, `/audit/pack/export`); 20.2's `AC.policy_chain` half
+stays undeclared (`guard_policy!` corpus is static, not a runtime dataset).
 
-**Gates.** 3.10 Alert Audit History, 12.11 Tipping-Off Controls, 14.5
-Overturned Decisions Log, 20.1 Audit Log Search, 20.2 Config Change History,
-20.3 Regulatory Audit Pack Export. Menus.toml: nav.audit_log — "T-11
-projection; timeline via T-06".
+**Still gated (not by T-11 anymore).** 3.10 Alert Audit History and 20.1
+Audit Log Search both keep `ticket:T-06` (cross-entity context / `workspace!`,
+B11) — the projection dataset each declares is now real, but their own
+context/workspace requirement isn't.
 
-**Done when.** One guarded projection answers cross-chain audit queries with
-immutability intact, and sar visibility rules hold at the projection layer.
+**Done when.** ~~One guarded projection answers cross-chain audit queries
+with immutability intact, and sar visibility rules hold at the projection
+layer.~~ Done: proven by `nirdosha-rt`'s `audit_projection` unit tests (merge
+ordering, tampered-chain exclusion) and the rtm integration test asserting a
+real query result + a real B10-independent access record.
 
 ---
 

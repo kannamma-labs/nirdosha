@@ -1263,6 +1263,27 @@ nirdosha_rt::guard_policy! {
     cap(row_cap = 50)
     obligate audit(full)
 }
+
+// → 14.5 Overturned Decisions Log (T-11): ComplianceLead/Mlro read the
+// full qa_review set (not subject-scoped like `self-read-qa`, not
+// closed-only like `qa-read-closed`) to see every `returned` (overturned)
+// review, cross-referenced against the `audit_chain` alert history.
+nirdosha_rt::guard_policy! {
+    allow "compliance-lead-read-qa-review" for ComplianceLead
+    when action == "read" && resource == "qa_review"
+    purpose(QaReview)
+    filter tenant_scope()
+    cap(row_cap = 500, max_scan_rows = 50_000)
+    obligate audit(full)
+}
+nirdosha_rt::guard_policy! {
+    allow "mlro-read-qa-review" for Mlro
+    when action == "read" && resource == "qa_review"
+    purpose(QaReview)
+    filter tenant_scope()
+    cap(row_cap = 500, max_scan_rows = 50_000)
+    obligate audit(full)
+}
 ```
 
 ---
@@ -1302,11 +1323,16 @@ nirdosha_rt::guard_policy! {
 }
 
 // → 21.1 Auditor: broad READ, zero WRITE, egress gated
+// T-11 (B8): "audit_chain"/"sar_visibility" joined this list — the
+// AC.all_chains projection and PG.sar_visibility tables `bridge.nir`
+// builds for 20.1/20.2/12.11/14.5, same broad-Audit-purpose read posture
+// as every other resource here.
 nirdosha_rt::guard_policy! {
     allow "auditor-read" for Auditor
     when action == "read" && resource in ["alert", "case", "transaction",
                                           "customer", "sar_bundle", "payment",
-                                          "screening_hit", "qa_review"]
+                                          "screening_hit", "qa_review",
+                                          "audit_chain", "sar_visibility"]
     purpose(Audit)
     filter tenant_scope()
     field_policy { forbidden(sar_linked) }                  // existence still controlled
@@ -1317,6 +1343,34 @@ nirdosha_rt::guard_policy! {
     deny "auditor-no-write" for Auditor
     when action in ["create", "update", "delete", "migrate"]
     reason(audit.read_only_principal)
+}
+
+// → 20.1/20.2/14.5 (T-11): Mlro/ComplianceLead/Admin also read the
+// unified chain projection — same broad Audit-purpose grant `auditor-read`
+// gives Auditor, for the other roles those three screens name.
+nirdosha_rt::guard_policy! {
+    allow "mlro-audit-chain-read" for Mlro
+    when action == "read" && resource in ["audit_chain", "sar_visibility"]
+    purpose(Audit)
+    filter tenant_scope()
+    cap(row_cap = 1_000, max_scan_rows = 500_000, max_execution = 60s)
+    obligate audit(full)
+}
+nirdosha_rt::guard_policy! {
+    allow "compliance-lead-audit-chain-read" for ComplianceLead
+    when action == "read" && resource == "audit_chain"
+    purpose(Audit)
+    filter tenant_scope()
+    cap(row_cap = 1_000, max_scan_rows = 500_000, max_execution = 60s)
+    obligate audit(full)
+}
+nirdosha_rt::guard_policy! {
+    allow "admin-audit-chain-read" for Admin
+    when action == "read" && resource == "audit_chain"
+    purpose(Audit)
+    filter tenant_scope()
+    cap(row_cap = 1_000, max_scan_rows = 500_000, max_execution = 60s)
+    obligate audit(full)
 }
 nirdosha_rt::guard_policy! {                                // auditor pack export → 20.3
     allow "auditor-export" for Auditor

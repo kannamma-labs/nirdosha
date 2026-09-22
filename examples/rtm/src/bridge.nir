@@ -1563,3 +1563,223 @@ fn record_export(record: &nirdosha_rt::export::GovernedExportRecord) {
 pub fn init_governed_export_sink() {
     nirdosha_rt::export::set_export_sink(record_export);
 }
+
+// ============================================================================
+// T-11 — `AC.all_chains` unified audit-chain projection + `PG.sar_visibility`
+// tipping-off visibility (screens 20.1/20.2/12.11/14.5). See
+// `nirdosha_rt::audit_projection`'s own module doc comment for what this
+// projects FROM: every `GuardedTable` above already writes a real,
+// hash-chained `ModuleAuditChain` on every guarded decision (its
+// `audit_path` constructor arg) -- this section reads those chains back
+// and re-projects them into a guarded, queryable dataset of their own,
+// rather than inventing a second audit mechanism.
+// ============================================================================
+
+/// One row of the `AC.all_chains` projection. `module` is the *source*
+/// chain's own label (`"alert"`, `"case"`, ...), not the constant
+/// `"rtm-demo"` every table's underlying `GuardClient` shares -- see
+/// `audit_projection::project`'s doc comment for why the projection has
+/// to carry that itself rather than reading it back out of the envelope.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AllChainsRow {
+    pub id: i64,
+    pub module: String,
+    pub seq: i64,
+    pub ts_ms: i64,
+    pub trace_id: String,
+    pub subject: String,
+    pub action: String,
+    pub resource: String,
+    pub decision: String,
+    pub kind: String,
+    pub content_json: String,
+}
+
+impl GuardedEntity for AllChainsRow {
+    const RESOURCE: &'static str = "audit_chain";
+    fn row_id(&self) -> String {
+        format!("{}:{}", self.module, self.seq)
+    }
+}
+
+pub fn all_chains_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AllChainsRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AllChainsRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-all-chains-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_all_chains_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Every `bridge.nir` table whose real, per-domain audit chain the
+/// projection reads from -- one `ChainSource` per `GuardedTable::new`
+/// call site above, reconstructing the exact `audit_path` each one was
+/// built with (same process, same `std::process::id()`, so the paths
+/// are deterministic; `GuardedTable` has no public getter for its own
+/// `audit_path` to read this back through instead -- disclosed, not a
+/// missing feature this pass needed to add).
+fn all_chain_sources() -> Vec<nirdosha_rt::audit_projection::ChainSource> {
+    use nirdosha_audit::envelope::ModuleAuditChain;
+    use nirdosha_rt::audit_projection::ChainSource;
+    let pid = std::process::id();
+    let path = |name: &str| std::env::temp_dir().join(format!("rtm-demo-audit-{name}-{pid}.jsonl"));
+    [
+        ("alert", "alert"),
+        ("case", "case"),
+        ("entity", "customer"),
+        ("model", "model"),
+        ("screening", "screening"),
+        ("refdata", "refdata"),
+        ("window_config", "window"),
+        ("notification", "notification"),
+        ("qa_review", "qa"),
+        ("user_role", "user-role"),
+        ("delegation_token", "delegation"),
+        ("driver", "driver"),
+        ("ingest_admin", "ingest-admin"),
+        ("payment", "payment"),
+        ("user_profile", "user-profile"),
+        ("support_ticket", "support-ticket"),
+        ("sar_bundle", "sar-bundle"),
+        ("governed_export", "governed-export"),
+    ]
+    .into_iter()
+    .map(|(label, file_tag)| ChainSource { label: Box::leak(label.to_string().into_boxed_str()), chain: ModuleAuditChain::new("rtm-demo", path(file_tag)) })
+    .collect()
+}
+
+/// Rebuilds the `AC.all_chains` projection from the real source chains.
+/// Idempotent by `(module, seq)`: re-running after more events have been
+/// appended only inserts the new rows, so this is cheap to call before
+/// every read rather than only once at boot (a chain grows for as long
+/// as the demo runs). Tampered source chains (T-11's immutability
+/// requirement) are excluded from the projection and returned by label
+/// so a caller can surface them, never silently merged in.
+pub fn refresh_all_chains() -> Vec<String> {
+    let (rows, tampered) = nirdosha_rt::audit_projection::project(&all_chain_sources());
+    let table = all_chains_table();
+    let already: std::collections::HashSet<String> = table.system_scan().unwrap_or_default().iter().map(|r: &AllChainsRow| r.row_id()).collect();
+    for entry in rows {
+        let row = AllChainsRow {
+            id: next_all_chains_row_id(),
+            module: entry.module.clone(),
+            seq: entry.seq as i64,
+            ts_ms: entry.ts_ms as i64,
+            trace_id: entry.trace_id,
+            subject: entry.subject,
+            action: entry.action,
+            resource: entry.resource,
+            decision: entry.decision,
+            kind: entry.kind,
+            content_json: entry.content.to_string(),
+        };
+        if already.contains(&row.row_id()) {
+            continue;
+        }
+        table.system_write(DEMO_TENANT, &row);
+    }
+    tampered.into_iter().map(|t| format!("{}: {}", t.label, t.error)).collect()
+}
+
+/// `PG.sar_visibility` (12.11 Tipping-Off Controls): who has read a
+/// SAR-linked alert/case row, derived from the same projection rather
+/// than a second, independent audit path -- an access to a row this
+/// corpus already knows is `sar_linked`/has a `sar_id` (B1/B3's real
+/// fields on `AlertRow`/`CaseRow`) is exactly the tipping-off-relevant
+/// event this screen exists to surface.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SarVisibilityRow {
+    pub id: i64,
+    pub visibility_id: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub accessed_by: String,
+    pub accessed_at: i64,
+    pub purpose: String,
+}
+
+impl GuardedEntity for SarVisibilityRow {
+    const RESOURCE: &'static str = "sar_visibility";
+    fn row_id(&self) -> String {
+        self.visibility_id.clone()
+    }
+}
+
+pub fn sar_visibility_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarVisibilityRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarVisibilityRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-sar-visibility-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+/// Rebuilds `PG.sar_visibility` from the current `AC.all_chains`
+/// projection: every `read` decision on the `alert`/`case` resource
+/// becomes one visibility record, real per-tenant access accounting for
+/// the two resources SAR linkage lives on.
+///
+/// **Disclosed limitation, not silently papered over**: this cannot
+/// attribute a read to the *specific* row that was accessed, only to the
+/// resource *type* (`"alert"`, `"case"`) -- `GuardClient`'s own audit
+/// envelope deliberately carries `resource = request.context.entity`
+/// (the bare type `evaluator::matches_context` policy-matches against,
+/// e.g. `"alert"`), not the per-row `"<type>:<row-id>"` storage key
+/// `GuardedTable`'s own module doc comment explains it builds
+/// separately for storage identity (the G4 workaround). So this table
+/// answers "who read alert/case data, when, under what decision" (a
+/// real, corpus-wide access ledger) rather than "who read *this*
+/// SAR-linked row specifically" -- true row-level tipping-off
+/// attribution needs a row-scoped audit envelope, a real, separate
+/// change to `nirdosha-guard-mic::GuardClient` shared by every app on
+/// this crate, out of this ticket's honest blast radius (same posture
+/// `nirdosha-audit/src/audit_chain.rs`'s own doc comment already takes
+/// on a comparably-scoped decision). `AlertRow.sar_linked`/
+/// `CaseRow.sar_id` (real since B1/B3) still gate what a *screen* built
+/// on this table is allowed to render per-row -- this table's job is
+/// only to say who touched the resource type at all. Call
+/// [`refresh_all_chains`] first -- this reads the projection table, it
+/// does not re-derive from the raw source chains itself.
+pub fn refresh_sar_visibility() {
+    let all = all_chains_table().system_scan().unwrap_or_default();
+    let table = sar_visibility_table();
+    let already: std::collections::HashSet<String> = table.system_scan().unwrap_or_default().iter().map(|r: &SarVisibilityRow| r.row_id()).collect();
+    for entry in all.iter().filter(|e: &&AllChainsRow| e.action == "Read" && matches!(e.module.as_str(), "alert" | "case")) {
+        let visibility_id = format!("{}:{}", entry.module, entry.trace_id);
+        if already.contains(&visibility_id) {
+            continue;
+        }
+        table.system_write(
+            DEMO_TENANT,
+            &SarVisibilityRow {
+                id: next_all_chains_row_id(),
+                visibility_id,
+                resource_type: entry.module.clone(),
+                resource_id: entry.resource.clone(),
+                accessed_by: entry.subject.clone(),
+                accessed_at: entry.ts_ms,
+                purpose: "Audit".into(),
+            },
+        );
+    }
+}

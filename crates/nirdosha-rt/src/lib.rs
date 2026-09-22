@@ -43,6 +43,7 @@ pub use nirdosha_lineage_macros::{
 };
 pub use nirdosha_lineage as lineage;
 
+pub mod audit_projection;
 pub mod dashboard;
 pub mod export;
 pub mod nfr;

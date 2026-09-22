@@ -261,7 +261,7 @@ fn every_ticket_reference_resolves_to_a_defined_active_ticket() {
     }
     // The 11 referenced slots: T-01..T-04, T-06..T-12 (T-05/T-13 reserved;
     // T-14 closed its only gate and is no longer referenced anywhere).
-    assert_eq!(checked, 11, "expected exactly 11 distinct referenced ticket ids");
+    assert_eq!(checked, 10, "expected exactly 10 distinct referenced ticket ids");
 
     // Every structured blocker in a parsed `blocked_by` array is well-formed
     // (`ticket:T-xx`). The register header's format example (`ticket:T-xx`)
@@ -443,8 +443,8 @@ fn legend_corpus_facts_match_live_counts() {
     // format example is documentation and excluded by the two-digit filter).
     let occurrences = count_structured_refs(&screens_src);
     let lines = count_structured_ref_lines(&screens_src);
-    assert_eq!(occurrences, 39, "screens.toml now carries {occurrences} ticket refs (legend says 39)");
-    assert_eq!(lines, 33, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 33)");
+    assert_eq!(occurrences, 33, "screens.toml now carries {occurrences} ticket refs (legend says 33)");
+    assert_eq!(lines, 29, "screens.toml now has {lines} ticket-bearing blocked_by lines (legend says 29)");
 
     // 6 stage-gating tickets, 5 note-only, 2 reserved — and the legend's
     // corpus-facts paragraph still names exactly those sets. (T-03 closed
@@ -456,7 +456,7 @@ fn legend_corpus_facts_match_live_counts() {
     // nav.exports/sar-export route notes, so it moved to note-only too.)
     let blocked = blocked_by_tickets(&screens);
     let stage_gating: Vec<&String> = blocked.keys().collect();
-    assert_eq!(stage_gating.len(), 6, "stage-gating tickets drifted: {stage_gating:?}");
+    assert_eq!(stage_gating.len(), 5, "stage-gating tickets drifted: {stage_gating:?}");
 
     let active = tickets.iter().filter(|t| t.status == "active").count();
     let reserved = tickets.iter().filter(|t| t.status == "reserved").count();
@@ -466,7 +466,7 @@ fn legend_corpus_facts_match_live_counts() {
         .chain(scan_ticket_ids(&screens_src))
         .chain(scan_ticket_ids(&read("menus.toml")))
         .collect();
-    assert_eq!(referenced.len(), 11, "referenced ticket ids drifted: {referenced:?}");
+    assert_eq!(referenced.len(), 10, "referenced ticket ids drifted: {referenced:?}");
     let note_only: Vec<String> = referenced.iter().filter(|t| !blocked.contains_key(*t)).cloned().collect();
     assert_eq!(note_only, vec!["T-01", "T-02", "T-03", "T-10", "T-12"], "note-only tickets drifted");
 

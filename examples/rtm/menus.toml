@@ -929,7 +929,7 @@ route = "/audit/log"
 guard = { action = "read", resource = "audit_record" }
 roles = ["Auditor", "Admin", "Mlro"]
 order = 10
-stage_min = "interim"                    # T-11 projection; timeline via T-06
+stage_min = "interim"                    # AC.all_chains projection real (B8); timeline via T-06
 
 [[menu]]
 id = "nav.audit_changes"

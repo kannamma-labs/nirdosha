@@ -36,6 +36,7 @@ pub mod scope;
 pub use entity::GuardedEntity;
 pub use error::{guard_error_response, GuardScreenError};
 
+use nirdosha_audit::envelope::{AuditEnvelope, AuditRecordKind};
 use nirdosha_guard_core::approval_chain::{ApprovalChainDefinition, ApprovalChainError, ApprovalChainRuntime, EscalationStatus};
 use nirdosha_guard_core::evaluator::{EvaluationResult, PolicyCandidate};
 use nirdosha_guard_core::{
@@ -198,6 +199,47 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
         }
     }
 
+    /// T-11: real audit-chain enforcement, closing this module's own
+    /// doc-comment-disclosed gap ("neither method's write-side
+    /// idempotency/audit-envelope shape is replicated yet ... a named
+    /// Phase B item, not attempted here"). Every `evaluate()` call site
+    /// in this file calls this immediately after, so `self.client`'s
+    /// `GuardClient::audit` (`ModuleAuditChain`, the exact hash-chained
+    /// log `GuardClient::guarded_read`/`guarded_apply` already write to,
+    /// for a caller that goes through THAT api instead of this crate's
+    /// own `evaluate()`-direct path) gets a real entry for every
+    /// decision this crate makes too -- allow, deny, escalate, and
+    /// pending alike, matching `GuardClient`'s own "audit the decision
+    /// regardless of outcome" posture. This is what makes `AC.<domain>_chain`
+    /// (T-11's `audit_projection`) a real per-table log instead of an
+    /// always-empty one.
+    fn record_audit_decision(&self, request: &EvalRequest, evaluation: &EvaluationResult) {
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let trace_id = format!("{}-{}-{now_ms}", E::RESOURCE, request.context.subject.id);
+        let client = self.client.lock().expect("guard client lock poisoned");
+        // `ModuleAuditChain::append` asserts `envelope.module ==
+        // self.module` -- `client.audit.module` is whatever `module`
+        // string `GuardedTable::new`'s constructor arg actually was
+        // (RTM passes the literal `"rtm-demo"` at every call site, not a
+        // per-domain name), so the envelope must echo that back, not
+        // `E::RESOURCE` -- the per-domain distinction lives in WHICH
+        // FILE this chain is (`audit_path`), not in the envelope content.
+        let envelope = AuditEnvelope {
+            trace_id,
+            ts: now_ms.to_string(),
+            module: client.audit.module.clone(),
+            subject: request.context.subject.id.clone(),
+            action: format!("{:?}", request.context.action),
+            resource: request.context.entity.clone(),
+            policy_versions: vec![request.context.policy_version.clone()],
+            decision: format!("{:?}", evaluation.decision),
+            obligations: evaluation.obligations.iter().map(|o| format!("{o:?}")).collect(),
+            kind: AuditRecordKind::Decision,
+            content: serde_json::json!({}),
+        };
+        client.audit.append(&envelope, now_ms);
+    }
+
     /// `PolicyRecord`s (not candidates) whose `subjects`/`action`/
     /// `resource`/`purpose` match this request the same way
     /// `evaluator::matches_context` does, restricted to `effect ==
@@ -276,6 +318,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
     pub fn guarded_search(&self, auth: &Auth, purpose: &str, q: Option<&str>, candidate_fields: &[&str]) -> Result<Vec<E>, GuardScreenError> {
         let request = EvalRequest { context: self.context(auth, Action::Read, purpose) };
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
@@ -312,6 +355,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
     fn scan(&self, auth: &Auth, action: Action, purpose: &str) -> Result<Vec<E>, GuardScreenError> {
         let request = EvalRequest { context: self.context(auth, action, purpose) };
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
@@ -408,6 +452,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
     pub fn guarded_get(&self, auth: &Auth, purpose: &str, row_id: &str) -> Result<Option<E>, GuardScreenError> {
         let request = EvalRequest { context: self.context(auth, Action::Read, purpose) };
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
@@ -558,6 +603,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
             field_policy::check_custom_conditions(record, &entity, &entity, &requested_status_value(&after_json)).map_err(GuardScreenError::ConditionFailed)?;
         }
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
@@ -699,6 +745,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
         }
 
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Escalate { to } => self.downgrade_if_escalation_condition_fails(row_id, &allow_records, apply, evaluation.affected_row_cap, &request, to),
@@ -858,6 +905,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
             field_policy::check_field_policy(record, &submitted).map_err(GuardScreenError::FieldPolicyViolation)?;
         }
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Pending { .. } => Err(GuardScreenError::Store("write cannot be pending here".into())),
@@ -985,6 +1033,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
         let _ = action_str; // signature symmetry with the confirm half / the update-side propose/confirm pair; scan_allowed derives its own wire string via action_wire_str(request.context.action)
         let request = EvalRequest { context: self.context(auth, action, purpose) };
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Pending { .. } => Err(GuardScreenError::Store("export cannot be pending here".into())),
@@ -1066,6 +1115,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
                 // decision) is what makes proceeding to the real scan
                 // correct here, not a fabricated `Allow`.
                 let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+                self.record_audit_decision(&request, &evaluation);
                 self.scan_allowed(&request, purpose, &evaluation).map(EscalatedWrite::Committed)
             }
             EscalationStatus::Pending { approvals_so_far, .. } => Ok(EscalatedWrite::Pending(PendingApproval { escalation_id: escalation_id.to_string(), chain: chain.to_string(), quorum, approvals_so_far })),
@@ -1076,6 +1126,7 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
     pub fn guarded_delete(&self, auth: &Auth, purpose: &str, row_id: &str) -> Result<(), GuardScreenError> {
         let request = EvalRequest { context: self.context(auth, Action::Delete, purpose) };
         let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
         match evaluation.decision {
             Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
             Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),

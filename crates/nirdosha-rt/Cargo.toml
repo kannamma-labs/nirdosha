@@ -55,6 +55,11 @@ nirdosha-guard-macros = { path = "../nirdosha-guard-macros" }
 nirdosha-guard-registry = { path = "../nirdosha-guard-registry" }
 nirdosha-lineage = { path = "../nirdosha-lineage" }
 nirdosha-lineage-macros = { path = "../nirdosha-lineage-macros" }
+# T-11 (audit_projection): the per-module hash-chained audit log
+# `GuardClient` already writes to on every guarded decision (`ModuleAuditChain`)
+# is this crate's real substrate for "AC.<domain>_chain" -- read back and
+# reconciled across modules here, not a second audit mechanism.
+nirdosha-audit = { path = "../nirdosha-audit" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nirdosha-runtime-kernels = { path = "../runtime-kernels", optional = true }

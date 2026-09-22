@@ -300,9 +300,9 @@ archetype = "crud_screens!"
 combo = ["workspace!", "ac_timeline"]
 roles = ["AllRoles:R", "Auditor:R"]
 datasets = ["AC.alert_chain"]
-blocked_by = ["ticket:T-06", "ticket:T-11"]
+blocked_by = ["ticket:T-06"]
 stage = "blocked"
-notes = "immutable before→after rows"
+notes = "immutable before→after rows — AC.alert_chain real since B8; still waits on workspace!/context (B11)"
 
 # -------------------------------------------------------------- M4 Cases (14)
 [[screen]]
@@ -1212,8 +1212,9 @@ archetype = "settings_screen!"
 combo = ["ac_timeline"]
 roles = ["Mlro:R/W", "Auditor:R"]
 datasets = ["PG.sar_visibility", "AC.access_log"]
-blocked_by = ["dataset:PG.sar_visibility", "ticket:T-11"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
+notes = "read-only this pass; resource-type-level access accounting, not row-level (bridge.nir sar_visibility_table's own doc comment) — Mlro's write half (acknowledge/dismiss) not built"
 
 # --------------------------------------------------------- M13 Risk Config (5)
 [[screen]]
@@ -1328,8 +1329,8 @@ archetype = "crud_screens!"
 combo = ["timeline"]
 roles = ["ComplianceLead:R", "Mlro:R"]
 datasets = ["PG.qa_review", "AC.alert_chain"]
-blocked_by = ["ticket:T-11"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
 
 # ----------------------------------------------------------- M15 Reporting (5)
 [[screen]]
@@ -1712,9 +1713,9 @@ archetype = "crud_screens!"
 combo = ["timeline"]
 roles = ["Auditor:R", "Admin:R", "Mlro:R"]
 datasets = ["AC.all_chains"]
-blocked_by = ["ticket:T-11", "ticket:T-06"]
+blocked_by = ["ticket:T-06"]
 stage = "blocked"
-notes = "immutable; export via governed path"
+notes = "immutable; export via governed path — AC.all_chains projection + /audit/chains route real since B8; still waits on B11's cross-entity context layer"
 
 [[screen]]
 id = "20.2"
@@ -1724,8 +1725,9 @@ archetype = "crud_screens!"
 combo = ["diff_view"]
 roles = ["Auditor:R", "Mlro:R"]
 datasets = ["AC.policy_chain", "AC.config_chains"]
-blocked_by = ["ticket:T-11"]
-stage = "blocked"
+blocked_by = []
+stage = "built"
+notes = "AC.config_chains half real (window_config/user_role/delegation_token audit chains via /audit/config-history); AC.policy_chain has no runtime table — guard_policy! corpus is static, not a runtime-editable dataset in this demo"
 
 [[screen]]
 id = "20.3"
@@ -1735,9 +1737,9 @@ archetype = "crud_screens!"
 combo = ["governed_export"]
 roles = ["Mlro:R/W", "Auditor:R/W"]
 datasets = ["AC.all_chains", "O.packs"]
-blocked_by = ["ticket:T-11"]
-stage = "blocked"
-notes = "encrypted + watermarked; share-link expiry"
+blocked_by = []
+stage = "built"
+notes = "watermarked + content-hashed via the governed-export path (B7); NOT encrypted-at-rest (export.rs's own disclosed limitation, inherited from B7)"
 
 # ------------------------------------------------------ M21 Restricted (4)
 [[screen]]

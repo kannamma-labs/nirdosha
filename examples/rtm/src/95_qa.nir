@@ -45,3 +45,24 @@ nirdosha_rt::guard_policy! {
     cap(row_cap = 50)
     obligate audit(full)
 }
+
+// → 14.5 Overturned Decisions Log (T-11): ComplianceLead/Mlro read the
+// full qa_review set (not subject-scoped like `self-read-qa`, not
+// closed-only like `qa-read-closed`) to see every `returned` (overturned)
+// review, cross-referenced against the `audit_chain` alert history.
+nirdosha_rt::guard_policy! {
+    allow "compliance-lead-read-qa-review" for ComplianceLead
+    when action == "read" && resource == "qa_review"
+    purpose(QaReview)
+    filter tenant_scope()
+    cap(row_cap = 500, max_scan_rows = 50_000)
+    obligate audit(full)
+}
+nirdosha_rt::guard_policy! {
+    allow "mlro-read-qa-review" for Mlro
+    when action == "read" && resource == "qa_review"
+    purpose(QaReview)
+    filter tenant_scope()
+    cap(row_cap = 500, max_scan_rows = 50_000)
+    obligate audit(full)
+}

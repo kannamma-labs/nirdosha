@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 nirdosha-rt = { path = "../../crates/nirdosha-rt" }
+nirdosha-audit = { path = "../../crates/nirdosha-audit" }
 # Guard proc-macro expansions emit `::nirdosha_guard_registry::...` paths;
 # name resolution for expanded code needs a direct dependency entry
 # (same posture as the v2 corpus, see its Cargo.toml for the why).

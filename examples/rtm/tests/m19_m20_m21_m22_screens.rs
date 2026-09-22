@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use nirdosha_rt::{Auth, Request, Response, Router};
-use rtm::bridge::{customer_table, transaction_table, user_profile_table, CustomerRow, TransactionRow};
+use rtm::bridge::{alert_table, all_chains_table, customer_table, refresh_all_chains, refresh_sar_visibility, sar_visibility_table, transaction_table, user_profile_table, AlertRow, CustomerRow, TransactionRow};
 
 fn router() -> Router {
     let router = rtm::m02_dashboards::mount_app_shell(Router::new(|_req| Auth::login("anon", &[])));
@@ -19,6 +19,7 @@ fn router() -> Router {
     let router = rtm::m19_it_ops::mount_it_ops_dashboard(router);
     let router = rtm::m19_it_ops::mount_ingest_admin(router);
     let router = rtm::m20_audit::mount_audit_trail(router);
+    let router = rtm::m20_audit::mount_audit_chain_search(router);
     let router = rtm::m21_restricted::mount_cs_payment_status(router);
     let router = rtm::m21_restricted::mount_rm_restriction_view(router);
     let router = rtm::m21_restricted::mount_auditor_portal(router);
@@ -256,4 +257,95 @@ fn no_role_can_browse_support_tickets_or_profiles_real_disclosed_gap() {
     let cookie = login_as(&router, "analyst", "analyst-demo");
     let resp = get_as(&router, "/support-tickets", &cookie);
     assert_eq!(resp.status, 403, "no read grant exists for support_ticket, so the list route must deny by default: {resp:?}");
+}
+
+#[test]
+fn t11_audit_chain_projection_answers_a_real_cross_chain_query_and_feeds_sar_visibility() {
+    // T-11: `AC.all_chains` (`bridge.nir::all_chains_table`) is a real
+    // projection over every `GuardedTable`'s own hash-chained audit log,
+    // not a synthetic feed. Drive a real guarded read through
+    // `alert_table` (which writes a real `Read` decision envelope to its
+    // own chain), refresh the projection, and prove: (1) an Auditor's
+    // `/audit/chains` request sees that real decision, and (2) it feeds
+    // `PG.sar_visibility` for the tipping-off screen.
+    let seeded = AlertRow { id: 0, alert_id: "alert-t11-1".into(), tenant_id: "acme-demo".into(), txn_id: "txn-1".into(), score: 0.9, model_version: "v1".into(), policy_version: "v1".into(), status: "new".into(), assignee: String::new(), disposition_code: String::new(), rationale: String::new(), case_id: String::new(), sar_linked: Some("sar-1".into()), severity: "High".into(), tags: String::new() };
+    alert_table().raw_driver_seed("acme-demo", &seeded);
+    let router = router();
+
+    // A real guarded read against `alert_table` under an Analyst session
+    // -- this is the event the projection must pick up.
+    let analyst_auth = Auth::login("an", &["Analyst"]);
+    let _ = alert_table().guarded_snapshot(&analyst_auth, "AmlInvestigation").expect("real analyst read on alert must be allowed");
+
+    let tampered = refresh_all_chains();
+    assert!(tampered.is_empty(), "no source chain should be tampered in this test: {tampered:?}");
+
+    let projected = all_chains_table().system_scan().expect("all_chains_table must be readable");
+    assert!(
+        projected.iter().any(|r| r.module == "alert" && r.action == "Read"),
+        "the real analyst read on alert_table must appear in the AC.all_chains projection: {projected:?}"
+    );
+
+    // The real HTTP route: an Auditor sees the same projection.
+    let auditor_cookie = login_as(&router, "auditor", "auditor-demo");
+    let chains_resp = get_as(&router, "/audit/chains", &auditor_cookie);
+    assert_eq!(chains_resp.status, 200, "auditor-read's real Audit-purpose grant on audit_chain must let Auditor query it: {chains_resp:?}");
+    assert!(chains_resp.body.contains("\"module\":\"alert\""), "the HTTP response must carry the real projected alert entry: {}", chains_resp.body);
+
+    // PG.sar_visibility derives from the same projection.
+    refresh_sar_visibility();
+    let visibility = sar_visibility_table().system_scan().expect("sar_visibility_table must be readable");
+    assert!(
+        visibility.iter().any(|r| r.resource_type == "alert"),
+        "a real alert read must produce a sar_visibility record: {visibility:?}"
+    );
+}
+
+#[test]
+fn t11_a_tampered_source_chain_is_excluded_from_the_projection_not_silently_merged() {
+    // T-11's own done-when: immutability preserved AT THE PROJECTION
+    // LAYER, not just the source chains. Uses isolated, throwaway chain
+    // files (not `alert_table()`'s own real, process-global audit file —
+    // corrupting a live table's chain would race with every other test
+    // in this binary that also reads it via `refresh_all_chains`) to
+    // prove `nirdosha_rt::audit_projection::project` (the exact fn
+    // `bridge.nir::refresh_all_chains` calls) excludes and names a
+    // tampered chain rather than merging it in.
+    use nirdosha_audit::envelope::{AuditEnvelope, AuditRecordKind, ModuleAuditChain};
+    use nirdosha_rt::audit_projection::{project, ChainSource};
+
+    let intact_path = std::env::temp_dir().join(format!("rtm_t11_intact_{}.jsonl", std::process::id()));
+    let tampered_path = std::env::temp_dir().join(format!("rtm_t11_tampered_{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&intact_path);
+    let _ = std::fs::remove_file(&tampered_path);
+    let intact_path_for_cleanup = intact_path.clone();
+
+    let envelope = |trace_id: &str| AuditEnvelope {
+        trace_id: trace_id.into(),
+        ts: "2026-09-22T00:00:00.000Z".into(),
+        module: "rtm-demo".into(),
+        subject: "analyst-1".into(),
+        action: "Read".into(),
+        resource: "alert".into(),
+        policy_versions: vec!["v1".into()],
+        decision: "Allow".into(),
+        obligations: vec![],
+        kind: AuditRecordKind::Decision,
+        content: serde_json::json!({}),
+    };
+    let intact = ModuleAuditChain::new("rtm-demo", intact_path.clone());
+    intact.append(&envelope("intact-1"), 100);
+    let tampered_chain = ModuleAuditChain::new("rtm-demo", tampered_path.clone());
+    tampered_chain.append(&envelope("tampered-1"), 200);
+    let original = std::fs::read_to_string(&tampered_path).unwrap();
+    std::fs::write(&tampered_path, original.replacen("\"Read\"", "\"Delete\"", 1)).unwrap();
+
+    let (rows, tampered) = project(&[ChainSource { label: "intact", chain: intact }, ChainSource { label: "tampered", chain: tampered_chain }]);
+    assert_eq!(tampered.len(), 1, "the corrupted chain must be named as tampered: {tampered:?}");
+    assert_eq!(tampered[0].label, "tampered");
+    assert_eq!(rows.len(), 1, "only the intact chain's entry may appear in the projection: {rows:?}");
+    assert_eq!(rows[0].trace_id, "intact-1");
+
+    let _ = std::fs::remove_file(&intact_path_for_cleanup);
+    let _ = std::fs::remove_file(&tampered_path);
 }

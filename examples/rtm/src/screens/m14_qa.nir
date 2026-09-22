@@ -12,11 +12,18 @@
 //! denies (`qa-no-disposition`, `analyst-no-qa`) -- exercised by this
 //! batch's own test suite as real denials, not asserted as theory.
 //!
-//! Not built this pass: 14.4/14.5 (feedback loop to model retraining,
-//! QA trend analytics) -- no corresponding `#[dataset]`/`guard_policy!`
-//! beyond the `retraining_flag` field this row already carries.
+//! Not built this pass: 14.4 (feedback loop to model retraining --
+//! depends on C1's `PG.case_task` plane, per `screens-plan.md`).
+//!
+//! 14.5 Overturned Decisions Log (T-11, this batch): `qa_review_table`'s
+//! own `returned` status (`QaReviewStatus`'s real machine, `scored ->
+//! returned` -- a QA reviewer overturning an analyst's disposition) cross-
+//! referenced against `AC.all_chains`'s `alert` entries, the real
+//! `AC.alert_chain` half of this screen's declared `datasets`.
 
+use crate::bridge::all_chains_table;
 use crate::bridge::qa_review_table;
+use crate::bridge::refresh_all_chains;
 use crate::bridge::QaReviewRow;
 use nirdosha_rt::prelude::SharedTable;
 
@@ -83,5 +90,25 @@ pub fn mount_qa_self_scorecard(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
     router.get_with_auth("/qa/mine", "My QA scorecard", |_req, _params, auth| match qa_review_table().guarded_snapshot(auth, "") {
         Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
         Err(e) => nirdosha_guard_screens::guard_error_response(e),
+    })
+}
+
+/// 14.5 Overturned Decisions Log -- `ComplianceLead`/`Mlro`: every QA
+/// review that reached `returned` (the real `QaReviewStatus` machine's
+/// "overturn" edge, `scored -> returned`), alongside the real alert
+/// audit-chain activity (`AC.all_chains` filtered to the `alert` module)
+/// for context on what was overturned.
+pub fn mount_overturned_decisions_log(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/qa/overturned", "Overturned Decisions Log (14.5)", |_req, _params, auth| {
+        refresh_all_chains();
+        let overturned = match qa_review_table().guarded_snapshot(auth, "QaReview") {
+            Ok(rows) => rows.into_iter().filter(|r: &QaReviewRow| r.status == "returned").collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let alert_chain = match all_chains_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => rows.into_iter().filter(|r| r.module == "alert").collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "overturned_reviews": overturned, "alert_chain": alert_chain }))
     })
 }

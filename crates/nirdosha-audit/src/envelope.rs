@@ -49,6 +49,9 @@ impl ModuleAuditChain {
 
     pub fn verify(&self) -> Result<usize, ChainError> { audit_chain::verify_chain(&self.path) }
     pub fn path(&self) -> &Path { &self.path }
+    /// Real entries, for a projection to read (T-11) -- `verify` alone
+    /// only proves the chain is intact, it doesn't hand the entries back.
+    pub fn entries(&self) -> Vec<AuditEntry> { audit_chain::read_entries(&self.path) }
 }
 
 #[derive(Debug, Default)]

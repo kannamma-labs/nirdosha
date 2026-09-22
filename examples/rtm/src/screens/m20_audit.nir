@@ -37,9 +37,11 @@
 //! scope, not silently faked with a fabricated graph.
 
 use crate::bridge::alert_table;
+use crate::bridge::all_chains_table;
 use crate::bridge::case_table;
 use crate::bridge::customer_table;
 use crate::bridge::qa_review_table;
+use crate::bridge::refresh_all_chains;
 use crate::bridge::screening_hit_table;
 use crate::bridge::transaction_table;
 
@@ -75,5 +77,89 @@ pub fn mount_audit_trail(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
         .get_with_auth("/audit/qa-reviews", "Audit: QA reviews", |_req, _params, auth| match qa_review_table().guarded_snapshot(auth, "Audit") {
             Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
             Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        })
+}
+
+/// 20.1 Audit Log Search (T-11): one guarded query answering a
+/// cross-chain search over `AC.all_chains` -- the real projection built
+/// in `bridge.nir` from every table's own hash-chained audit log, not a
+/// per-resource read like `mount_audit_trail` above (that reads the
+/// business ROWS under `purpose(Audit)`; this reads the DECISION chain
+/// itself). Refreshes the projection from the source chains before every
+/// read so the view stays live as the demo runs (T-11's "immutability
+/// preserved (append-only at the projection layer too)": a source chain
+/// that fails its own hash-chain check is excluded and named in
+/// `X-Tampered-Chains`, never silently merged in).
+///
+/// 20.2 Config Change History reuses the same projection, filtered to
+/// the `window_config`/`user_role`/`delegation_token` modules -- the
+/// real "config"-shaped tables this corpus has (`AC.policy_chain`'s
+/// other half, guard-policy corpus edits, has no runtime table at all:
+/// `guard_policy!` blocks are static, compiled corpus, not a
+/// runtime-editable dataset in this demo -- disclosed, not faked).
+pub fn mount_audit_chain_search(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/audit/chains", "Audit: unified chain search (20.1)", |req, _params, auth| {
+            let tampered = refresh_all_chains();
+            let q = req.query().get("q").cloned();
+            match all_chains_table().guarded_search(auth, "Audit", q.as_deref(), &["module", "action", "resource", "subject", "decision"]) {
+                Ok(rows) => {
+                    let mut resp = nirdosha_rt::Response::json(200, &serde_json::json!(rows));
+                    if !tampered.is_empty() {
+                        resp.extra_headers.push(("X-Tampered-Chains".to_string(), tampered.join("; ")));
+                    }
+                    resp
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/audit/config-history", "Audit: config change history (20.2)", |_req, _params, auth| {
+            refresh_all_chains();
+            match all_chains_table().guarded_snapshot(auth, "Audit") {
+                Ok(rows) => {
+                    let config_only: Vec<_> = rows.into_iter().filter(|r| matches!(r.module.as_str(), "window_config" | "user_role" | "delegation_token")).collect();
+                    nirdosha_rt::Response::json(200, &serde_json::json!(config_only))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        // 20.3 Regulatory Audit Pack Export: the same T-01 governed-egress
+        // path `crud_screens!`'s own CSV export route uses (watermark +
+        // content hash + `PG.governed_export` record via `bridge.nir`'s
+        // `record_export` sink) -- hand-mounted rather than generated,
+        // since this screen exports the `AC.all_chains` PROJECTION
+        // (`all_chains_table`), not a plain `crud_screens!`-declared
+        // entity list.
+        .get_with_auth("/audit/pack/export", "Regulatory Audit Pack Export (20.3)", |_req, _params, auth| {
+            refresh_all_chains();
+            match all_chains_table().guarded_snapshot(auth, "Audit") {
+                Ok(rows) => {
+                    let field_names = ["module", "seq", "ts_ms", "trace_id", "subject", "action", "resource", "decision", "kind"];
+                    let header = field_names.join(",");
+                    let csv_rows: Vec<String> = rows
+                        .iter()
+                        .map(|r| {
+                            let value = serde_json::to_value(r).unwrap();
+                            field_names.iter().map(|f| nirdosha_rt::screens::csv_escape(&nirdosha_rt::screens::value_display(value.get(f).unwrap_or(&serde_json::Value::Null)))).collect::<Vec<_>>().join(",")
+                        })
+                        .collect();
+                    match nirdosha_rt::export::write_governed_export(Some("Audit"), &header, &csv_rows, 24 * 3600) {
+                        Ok((_record, watermark)) => {
+                            let mut csv = String::new();
+                            csv.push_str(&header);
+                            csv.push('\n');
+                            for row in &csv_rows {
+                                csv.push_str(row);
+                                csv.push('\n');
+                            }
+                            csv.push_str(&watermark);
+                            csv.push('\n');
+                            nirdosha_rt::Response::csv(200, csv)
+                        }
+                        Err(e) => nirdosha_rt::Response::text(400, e.to_string()),
+                    }
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
         })
 }

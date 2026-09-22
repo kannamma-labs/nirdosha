@@ -29,6 +29,13 @@ fn main() {
     // so the first guarded CSV export already has somewhere real to
     // record its `PG.governed_export` row.
     rtm::bridge::init_governed_export_sink();
+    // T-11: seed the AC.all_chains / PG.sar_visibility projections once at
+    // boot (each guarded read route also refreshes before it reads, so
+    // this isn't the only refresh -- see m20_audit.nir/m12_sar.nir -- but
+    // an empty projection at first request would otherwise 404-shaped
+    // confuse an early curl against a fresh boot).
+    let _tampered_at_boot = rtm::bridge::refresh_all_chains();
+    rtm::bridge::refresh_sar_visibility();
     let router = rtm::m02_dashboards::mount_app_shell(nirdosha_rt::Router::new(|_req| nirdosha_rt::Auth::login("anon", &[])));
     let router = rtm::m01_auth::mount_login(router);
     let router = rtm::m01_auth::mount_avatar_picker(router);
@@ -74,10 +81,12 @@ fn main() {
     // above.
     let router = rtm::m12_sar::mount_sar_mlro_decision(router);
     let router = rtm::m12_sar::mount_sar_export(router);
+    let router = rtm::m12_sar::mount_tipping_off_controls(router);
     let router = rtm::m12_sar::mount_sar_screens(router);
     let router = rtm::m13_risk_config::mount_refdata_migrate(router);
     let router = rtm::m13_risk_config::mount_refdata_screens(router);
     let router = rtm::m14_qa::mount_qa_self_scorecard(router);
+    let router = rtm::m14_qa::mount_overturned_decisions_log(router);
     let router = rtm::m14_qa::mount_qa_review_screens(router);
     let router = rtm::m15_reporting::mount_governed_export(router);
     let router = rtm::m15_reporting::mount_mis_dashboard(router);
@@ -89,6 +98,7 @@ fn main() {
     let router = rtm::m19_it_ops::mount_it_ops_dashboard(router);
     let router = rtm::m19_it_ops::mount_ingest_admin(router);
     let router = rtm::m20_audit::mount_audit_trail(router);
+    let router = rtm::m20_audit::mount_audit_chain_search(router);
     let router = rtm::m21_restricted::mount_cs_payment_status(router);
     let router = rtm::m21_restricted::mount_rm_restriction_view(router);
     let router = rtm::m21_restricted::mount_auditor_portal(router);

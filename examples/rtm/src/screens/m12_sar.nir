@@ -38,10 +38,19 @@
 //! a service-principal write path, not a human screen), 12.8/12.9
 //! (goAML XSD preview, continuing-activity reminders -- Phase C's real
 //! `nirdosha-egress-report-goaml` driver, not this phase's `MemStoreDriver`
-//! scope), 12.11 (regulator inbox -- `regulator-scoped-read`'s own
-//! `delegation_scope()` gap, already disclosed since M21).
+//! scope).
+//!
+//! 12.11 Tipping-Off Controls (T-11, this batch): `PG.sar_visibility` +
+//! `AC.access_log` (`bridge.nir`'s `sar_visibility_table`/
+//! `all_chains_table`) -- real alert/case read-access accounting, not a
+//! synthetic feed. See `sar_visibility_table`'s own doc comment for the
+//! one disclosed limitation: it can't attribute a read to the specific
+//! row, only to the `alert`/`case` resource type.
 
+use crate::bridge::refresh_all_chains;
+use crate::bridge::refresh_sar_visibility;
 use crate::bridge::sar_bundle_table;
+use crate::bridge::sar_visibility_table;
 use crate::bridge::SarBundleRow;
 use nirdosha_guard_core::Action;
 use nirdosha_guard_screens::EscalatedWrite;
@@ -131,4 +140,20 @@ pub fn mount_sar_export(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
                 Err(e) => nirdosha_guard_screens::guard_error_response(e),
             }
         })
+}
+
+/// 12.11 Tipping-Off Controls (T-11): who has accessed `alert`/`case`
+/// resources, real read-access accounting for `Mlro`/`Auditor` to review.
+/// Refreshes `AC.all_chains` then `PG.sar_visibility` from it (in that
+/// order -- `refresh_sar_visibility` reads the projection table, it
+/// doesn't re-derive from the raw source chains) before every read.
+pub fn mount_tipping_off_controls(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/sar/tipping-off", "Tipping-Off Controls (12.11)", |_req, _params, auth| {
+        refresh_all_chains();
+        refresh_sar_visibility();
+        match sar_visibility_table().guarded_snapshot(auth, "Audit") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
 }

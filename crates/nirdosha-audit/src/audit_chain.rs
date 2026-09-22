@@ -119,7 +119,11 @@ pub fn append_entry(path: &Path, content: serde_json::Value, now: u64) -> AuditE
     entry
 }
 
-fn read_entries(path: &Path) -> Vec<AuditEntry> {
+/// Public per T-11 (RTM `screens-plan.md` B8): the audit-projection layer
+/// needs to read a module chain's entries back, not just verify their
+/// count -- `verify_chain` alone can't feed `ChainReconciler::reconcile`.
+/// Same file-format contract `verify_chain`/`append_entry` already share.
+pub fn read_entries(path: &Path) -> Vec<AuditEntry> {
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| serde_json::from_str(l).ok()).collect()
 }

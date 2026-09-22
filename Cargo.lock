@@ -2068,6 +2068,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "jsonwebtoken",
+ "nirdosha-audit",
  "nirdosha-guard-core",
  "nirdosha-guard-federation",
  "nirdosha-guard-macros",
@@ -3008,6 +3009,7 @@ version = "0.1.0"
 name = "rtm"
 version = "0.1.0"
 dependencies = [
+ "nirdosha-audit",
  "nirdosha-guard-core",
  "nirdosha-guard-macros",
  "nirdosha-guard-mic",
