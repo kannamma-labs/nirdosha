@@ -187,8 +187,13 @@ a:focus-visible { outline: 2px solid var(--nir-primary-light); outline-offset: 2
 .nir-nav a.nir-active::after { display: none; }
 .nir-nav a.nir-active { background: linear-gradient(135deg, var(--nir-primary), var(--nir-primary-light)); color: var(--nir-text-inverse); box-shadow: var(--nir-shadow-sm), var(--nir-shadow-glow); }
 .nir-nav-spacer { flex: 1; }
-.nir-nav-group { margin-left: 0.75rem; padding-left: 0.75rem; border-left: 1px solid var(--nir-border); font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--nir-text-muted); opacity: 0.75; white-space: nowrap; }
-.nir-nav-group:first-child { margin-left: 0; padding-left: 0; border-left: none; }
+.nir-nav-menu { position: relative; height: 100%; display: flex; align-items: center; }
+.nir-nav-top { padding: 0.5rem 0.85rem; border-radius: var(--nir-radius-md); color: var(--nir-text-muted); font-weight: 500; font-size: 0.92rem; cursor: pointer; user-select: none; transition: all var(--nir-anim-fast) var(--nir-easing); white-space: nowrap; }
+.nir-nav-top::after { content: " \25BE"; font-size: 0.7em; opacity: 0.6; }
+.nir-nav-menu:hover .nir-nav-top, .nir-nav-menu:focus-within .nir-nav-top { background: var(--nir-surface-hover); color: var(--nir-text); }
+.nir-nav-dropdown { display: none; flex-direction: column; position: absolute; top: 100%; left: 0; min-width: 200px; padding: 0.5rem; margin-top: 0.4rem; background: var(--nir-surface); border: {card_border}; border-radius: var(--nir-radius-lg); box-shadow: var(--nir-shadow-lg); z-index: 150; animation: fadeInDown var(--nir-anim-fast) var(--nir-easing); }
+.nir-nav-menu:hover .nir-nav-dropdown, .nir-nav-menu:focus-within .nir-nav-dropdown { display: flex; }
+.nir-nav-dropdown a { padding: 0.55rem 0.75rem; }
 
 button, .nir-btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; padding: 0.55rem 1.1rem; border: none; border-radius: var(--nir-radius-md); background: linear-gradient(135deg, var(--nir-primary), var(--nir-primary-light)); color: var(--nir-text-inverse); font-weight: 600; font-size: 0.92rem; cursor: pointer; box-shadow: {btn_shadow}; transition: transform var(--nir-anim-fast) var(--nir-easing), box-shadow var(--nir-anim-fast) var(--nir-easing), filter var(--nir-anim-fast); }
 button:hover, .nir-btn:hover { transform: {btn_hover_lift}; box-shadow: {btn_hover_shadow}; filter: brightness(1.05); }

@@ -973,22 +973,6 @@ screen_id = "21.4"
 route = "/rm/customers"
 guard = { action = "read", resource = "customer" }
 roles = ["RmUser"]
-order = 1
-stage_min = "blocked"
-
-# ---- Demo-env-only (V10 exempt; V3 waived — dev furniture)
-[[menu]]
-id = "nav.demo_seed"
-label_key = "nav.demo_seed"
-group = "ops"
-screen_id = "2.2"                        # piggybacks home; loads golden-trace seed
-route = "/ops/demo-seed"
-guard = { action = "update", resource = "ingest_admin" }
-roles = ["Admin"]
-env = ["demo", "staging"]
-waive = ["V2"]                            # dev furniture: intentionally piggybacks screen 2.2 (Analyst) with an Admin role
-order = 99
-notes = "loads seed/ golden trace; hidden in prod by env gate"
 
 # ----------------------------------------------------------------------------
 # 6) Sub-routes — reachable screens WITHOUT nav entries (reach_via satisfies V4)

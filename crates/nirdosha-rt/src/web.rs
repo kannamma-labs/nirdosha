@@ -1251,24 +1251,31 @@ impl Router {
         // clipping it off the top of the page.
         let mut html = String::from("<nav class=\"nir-nav\">");
         // Links are already ordered so same-`group` entries are
-        // consecutive (the generator sorts by group order first). Cluster
-        // each run under one `.nir-nav-group` heading instead of a flat
-        // row of 15+ ungrouped links; an empty `group` (the ungrouped
-        // default) renders no heading at all, so `with_nav`'s plain
-        // literal lists look exactly as before.
-        let mut current_group: Option<&str> = None;
-        for link in &links {
-            let group = if link.group.is_empty() { None } else { Some(link.group) };
-            if group != current_group {
-                if let Some(g) = group {
-                    html.push_str(&format!(
-                        "<span class=\"nir-nav-group\">{}</span>",
-                        html_escape(g)
-                    ));
-                }
-                current_group = group;
+        // consecutive (the generator sorts by group order first). Each
+        // run of same-group links renders as one top-level menu (the
+        // group name) that reveals its links as a dropdown on hover/
+        // focus -- the standard enterprise-app pattern, instead of a
+        // flat row of 15+ links or a run of non-interactive headings.
+        // An empty `group` (the ungrouped default) renders as a plain
+        // top-level link, so `with_nav`'s literal lists look exactly as
+        // before.
+        let mut i = 0;
+        while i < links.len() {
+            let link = &links[i];
+            if link.group.is_empty() {
+                html.push_str(&format!("<a href=\"{}\">{}</a>", link.href, html_escape(link.label)));
+                i += 1;
+                continue;
             }
-            html.push_str(&format!("<a href=\"{}\">{}</a>", link.href, html_escape(link.label)));
+            let group = link.group;
+            html.push_str("<div class=\"nir-nav-menu\"><span class=\"nir-nav-top\">");
+            html.push_str(&html_escape(group));
+            html.push_str("</span><div class=\"nir-nav-dropdown\">");
+            while i < links.len() && links[i].group == group {
+                html.push_str(&format!("<a href=\"{}\">{}</a>", links[i].href, html_escape(links[i].label)));
+                i += 1;
+            }
+            html.push_str("</div></div>");
         }
         // No standalone "Login" link for an anonymous visitor: apps built
         // on `login!`'s avatar-picker convention (RTM's demo included)
