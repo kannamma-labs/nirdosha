@@ -21,6 +21,106 @@
 //! in `menus.toml`'s `[meta]` (default `screens.toml`) to skip nav
 //! items whose target screen is `blocked` or `delegated`.
 
+/// English default text for a `menus.toml` `label_key`, resolved and
+/// baked into the generated `NavLink` literal at macro-expansion time --
+/// this is the "en defaults compiled in" half of `menus.toml`'s own
+/// `i18n` doc note (the other half, per-locale override via
+/// `PG.notif_template`, is runtime and out of this macro's scope). A key
+/// with no entry here falls back to its own raw text rather than failing
+/// the build, so a newly added menu item is never a hard error -- just a
+/// prompt to add its label here too.
+fn default_en_label(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "nav.home" => "My Day",
+        "nav.team_dash" => "Team Dashboard",
+        "nav.mlro_dash" => "MLRO Dashboard",
+        "nav.exec_kpi" => "Executive KPIs",
+        "nav.wall" => "Monitoring Wall",
+        "nav.approvals" => "Approvals",
+        "nav.alerts" => "Alerts",
+        "nav.alerts_sla" => "Alert SLA",
+        "nav.cases" => "Cases",
+        "nav.search" => "Search",
+        "nav.transactions" => "Transactions",
+        "nav.counterparties" => "Counterparties",
+        "nav.structuring" => "Structuring",
+        "nav.devices" => "Devices",
+        "nav.network" => "Network",
+        "nav.shared_attrs" => "Shared Attributes",
+        "nav.screening" => "Screening",
+        "nav.screening_config" => "Screening Config",
+        "nav.watchlists" => "Watchlists",
+        "nav.rescreen" => "Rescreen",
+        "nav.rescreen_campaigns" => "Rescreen Campaigns",
+        "nav.intervention" => "Payment Holds",
+        "nav.hold_outcomes" => "Hold Outcomes",
+        "nav.timeout_config" => "Timeout Config",
+        "nav.sar" => "SAR",
+        "nav.sar_submissions" => "SAR Submissions",
+        "nav.sar_calendar" => "SAR Calendar",
+        "nav.sar_continuations" => "Continuing Activity SAR",
+        "nav.sar_controls" => "Tipping-Off Controls",
+        "nav.rules" => "Rules",
+        "nav.rules_sim" => "Simulation",
+        "nav.allowlist" => "Allowlist",
+        "nav.rule_perf" => "Rule Performance",
+        "nav.models" => "Models",
+        "nav.model_drift" => "Model Drift",
+        "nav.risk_model" => "Risk Model",
+        "nav.country_risk" => "Country Risk",
+        "nav.product_risk" => "Product Risk",
+        "nav.pep_config" => "PEP Config",
+        "nav.global_params" => "Global Parameters",
+        "nav.qa" => "QA Reviews",
+        "nav.qa_scorecards" => "Scorecards",
+        "nav.qa_overturned" => "Overturned Decisions",
+        "nav.reports" => "Reports",
+        "nav.reports_scheduled" => "Scheduled Reports",
+        "nav.trends" => "Typology Trends",
+        "nav.exports" => "Exports",
+        "nav.handover" => "Shift Handover",
+        "nav.typologies" => "Typologies",
+        "nav.sop" => "SOPs",
+        "nav.regref" => "Regulatory Reference",
+        "nav.users" => "Users",
+        "nav.permissions" => "Permissions",
+        "nav.queue_rules" => "Queue Rules",
+        "nav.sla_config" => "SLA Config",
+        "nav.reason_codes" => "Reason Codes",
+        "nav.templates" => "Templates",
+        "nav.retention" => "Retention",
+        "nav.delegation" => "Delegation",
+        "nav.dsar" => "DSAR Requests",
+        "nav.license" => "License Info",
+        "nav.health" => "Service Health",
+        "nav.pipelines" => "Pipelines",
+        "nav.exceptions" => "Ingest Exceptions",
+        "nav.recon" => "Reconciliation",
+        "nav.integrations" => "Integrations",
+        "nav.jobs" => "Batch Jobs",
+        "nav.capacity" => "Capacity",
+        "nav.refsync" => "Reference Sync",
+        "nav.audit_log" => "Audit Log",
+        "nav.audit_changes" => "Audit Changes",
+        "nav.audit_packs" => "Audit Packs",
+        "nav.cs_lookup" => "Customer Lookup",
+        "nav.rm_status" => "Restriction Status",
+        "nav.demo_seed" => "Demo Seed",
+        "chrome.about" => "About",
+        "chrome.support" => "Support",
+        "nav.group.work" => "Work",
+        "nav.group.investigate" => "Investigate",
+        "nav.group.screening" => "Screening",
+        "nav.group.sar" => "SAR",
+        "nav.group.governance" => "Governance",
+        "nav.group.assurance" => "Assurance",
+        "nav.group.ops" => "Operations",
+        "nav.group.admin" => "Admin",
+        "nav.group.audit" => "Audit",
+        _ => return None,
+    })
+}
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -144,7 +244,8 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
             let group = m.get("group").and_then(|v| v.as_str()).unwrap_or("work").to_string();
             let g_order = *group_order.get(&group).unwrap_or(&0);
             let order = m.get("order").and_then(|v| v.as_integer()).unwrap_or(0);
-            let label = m.get("label_key").and_then(|v| v.as_str()).unwrap_or(screen_id).to_string();
+            let label_key = m.get("label_key").and_then(|v| v.as_str()).unwrap_or(screen_id);
+            let label = default_en_label(label_key).map(String::from).unwrap_or_else(|| label_key.to_string());
             let href = m.get("route").and_then(|v| v.as_str()).unwrap_or("/").to_string();
 
             let roles: Vec<String> = m
