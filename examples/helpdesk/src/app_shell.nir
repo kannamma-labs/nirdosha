@@ -1,0 +1,18 @@
+//! Generated app shell + landing (menus.toml, read at compile time) + login.
+
+nirdosha_rt::app_shell_from_toml!(
+    "menus.toml",
+    title: "Helpdesk (generated demo)",
+);
+
+nirdosha_rt::login! {
+    mount: mount_login,
+    path: "/login",
+    mode: demo,
+    demo_users: [
+        { username: "sam", password: "agent123", roles: ["Agent"] },
+        { username: "ada", password: "admin123", roles: ["Admin", "Agent"] },
+    ],
+    landing: landing_path,
+}
+

@@ -1,0 +1,97 @@
+# ============================================================================
+# menus.toml — helpdesk demo role→menu→route register.
+# Consumed at compile time by `app_shell_from_toml!` (generated into
+# src/app_shell.nir) and by the generator's own landing/boot wiring.
+# ============================================================================
+
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Helpdesk (generated demo)"
+app_name = "helpdesk"
+org_name = "Nirdosha"
+environment_name = "local"
+
+# Post-login landing per role (feeds login!'s `landing:` fn)
+[landing]
+Agent = "/tickets"
+Admin = "/dashboard/ops"
+
+[fallbacks]
+forbidden = { redirect = "/login", preserve_target = true }
+not_found = { redirect = "/login" }
+
+[[group]]
+id = "work"
+label_key = "nav.group.work"
+order = 10
+
+[[group]]
+id = "collab"
+label_key = "nav.group.collab"
+order = 20
+
+[[group]]
+id = "admin"
+label_key = "nav.group.admin"
+order = 30
+
+[[menu]]
+id = "nav.tickets"
+label_key = "nav.tickets"
+group = "work"
+screen_id = "3.1"
+route = "/tickets"
+guard = { action = "read", resource = "ticket" }
+roles = ["Agent", "Admin"]
+order = 10
+
+[[menu]]
+id = "nav.new_ticket"
+label_key = "nav.new_ticket"
+group = "work"
+screen_id = "3.2"
+route = "/tickets/wizard"
+guard = { action = "create", resource = "ticket" }
+roles = ["Agent"]
+order = 20
+
+[[menu]]
+id = "nav.board"
+label_key = "nav.board"
+group = "work"
+screen_id = "6.1"
+route = "/tickets/board"
+guard = { action = "read", resource = "ticket" }
+roles = ["Agent", "Admin"]
+order = 30
+
+[[menu]]
+id = "nav.ops_dashboard"
+label_key = "nav.ops_dashboard"
+group = "work"
+screen_id = "4.1"
+route = "/dashboard/ops"
+guard = { action = "read", resource = "ticket" }
+roles = ["Agent", "Admin"]
+order = 40
+
+[[menu]]
+id = "nav.feed"
+label_key = "nav.feed"
+group = "collab"
+screen_id = "5.2"
+route = "/feed"
+guard = { action = "read", resource = "feedpost" }
+roles = ["Agent"]
+order = 50
+
+[[menu]]
+id = "nav.settings"
+label_key = "nav.settings"
+group = "admin"
+screen_id = "5.1"
+route = "/settings"
+guard = { action = "read", resource = "settings" }
+roles = ["Admin"]
+order = 60

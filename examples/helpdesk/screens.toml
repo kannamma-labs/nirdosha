@@ -1,0 +1,199 @@
+# ============================================================================
+# screens.toml — helpdesk demo screen register (v2 from day one).
+#
+# This is the greenfield proof of "the register is the source of truth":
+# `cargo nirdosha generate-screens` reads THIS file + menus.toml and emits
+# the whole `src/*.nir` tree. A screen marked `built` here must appear in
+# the generated code; an archetype with no generator template must be
+# marked `blocked` with `blocked_by = ["archetype:<name>"]`. There is no
+# third state and no hand-maintained copy of any of this.
+#
+# Guard posture (see docs/VALUES.md): the guard is the single authority
+# for all data decisions. Every entity a generated screen touches must
+# have a `data_binding.guard` somewhere in this register — a screen that
+# touches an unguarded entity is a generator error, not a runtime risk.
+# The `access_*` fields are vestigial route metadata (OpenAPI docs) once
+# `guard:` is present: guard-mode routes are `*_with_auth` and the
+# synthesized `guard_policy!` records decide who sees what.
+# ============================================================================
+
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "helpdesk"
+version = "1.0.0"
+total_screens = 8
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+# ---------------------------------------------------------------- M1 Auth (2)
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.users_file"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/app_shell.nir"
+codegen = { template = "login", mount_symbol = "mount_login", route_path = "/login", generated_files = ["src/app_shell.nir"] }
+parameters.demo_users = [
+    { username = "sam", password = "agent123", roles = ["Agent"] },
+    { username = "ada", password = "admin123", roles = ["Admin", "Agent"] },
+]
+notes = "mode: demo — fixture-grade auth, disclosed as such; production mode reads NIRDOSHA_LOGIN_USERS"
+
+[[screen]]
+id = "1.2"
+name = "Nav Shell"
+module = "M1"
+archetype = "app_shell_from_toml"
+combo = []
+roles = ["AllRoles:R"]
+datasets = []
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/app_shell.nir"
+codegen = { template = "app_shell_from_toml", mount_symbol = "mount_app_shell", generated_files = ["src/app_shell.nir"] }
+notes = "nav/landing generated from menus.toml at compile time"
+
+# ------------------------------------------------------------ M3 Tickets (2)
+[[screen]]
+id = "3.1"
+name = "Tickets"
+module = "M3"
+archetype = "crud_screens"
+combo = []
+roles = ["Agent:R/W", "Admin:R/W"]
+datasets = ["PG.tickets"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m03_tickets.nir"
+codegen = { template = "crud_screens", mount_symbol = "mount_tickets", route_path = "/tickets", generated_files = ["src/screens/m03_tickets.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [
+    { name = "title", type = "String" },
+    { name = "priority", type = "String" },
+    { name = "status", type = "String" },
+    { name = "body", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["read", "create", "update"] }
+parameters = { access_create = 'requires role "Agent"', access_read = 'requires role "Agent"', access_update = 'requires role "Agent"', access_delete = 'public', create_fields = ["ticket_id", "title", "priority", "body"], update_fields = ["status", "priority"] }
+notes = "the single write surface for Ticket; guard owns field masking + required/forbidden fields"
+
+[[screen]]
+id = "3.2"
+name = "New Ticket Wizard"
+module = "M3"
+archetype = "wizard"
+combo = []
+roles = ["Agent:R/W"]
+datasets = ["PG.tickets"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m03_tickets.nir"
+codegen = { template = "wizard", mount_symbol = "mount_new_ticket_wizard", route_path = "/tickets/wizard", generated_files = ["src/screens/m03_tickets.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [
+    { name = "title", type = "String" },
+    { name = "priority", type = "String" },
+    { name = "status", type = "String" },
+    { name = "body", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["create"] }
+parameters = { access = 'requires role "Agent"', steps = [
+    { name = "Basics", fields = [ { name = "ticket_id", type = "String" }, { name = "title", type = "String" }, { name = "priority", type = "String" } ] },
+    { name = "Confirm", fields = [ { name = "body", type = "String" } ] },
+] }
+notes = "final step routes through GuardedTable::guarded_insert_checked"
+
+# ---------------------------------------------------------- M4 Dashboards (1)
+[[screen]]
+id = "4.1"
+name = "Ops Dashboard"
+module = "M4"
+archetype = "dashboard"
+combo = []
+roles = ["Agent:R", "Admin:R"]
+datasets = ["PG.tickets"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m04_dashboards.nir"
+codegen = { template = "dashboard", mount_symbol = "mount_ops_dashboard", route_path = "/dashboard/ops", generated_files = ["src/screens/m04_dashboards.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", fields = [
+    { name = "title", type = "String" },
+    { name = "priority", type = "String" },
+    { name = "status", type = "String" },
+    { name = "body", type = "String" },
+] }
+parameters = { title = "Ops Dashboard", refresh_seconds = 10, widgets = [
+    { kind = "Metric", label = "Open tickets", fn = "open_ticket_count", source = { table = "ticket_table", purpose = "Operations", action = "read" }, filter = { field = "status", equals = "open" }, target = 5, alert_below = false },
+    { kind = "Chart", label = "Tickets by priority", fn = "tickets_by_priority", source = { table = "ticket_table", purpose = "Operations", action = "read" }, group_by = "priority", mark = "bar" },
+] }
+notes = "Ticket is guarded by 3.1; widget reads route through the same guard corpus"
+
+# ---------------------------------------------------------- M5 Settings (2)
+[[screen]]
+id = "5.1"
+name = "App Settings"
+module = "M5"
+archetype = "settings_screen"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.settings"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m05_admin.nir"
+codegen = { template = "settings_screen", mount_symbol = "mount_app_settings", route_path = "/settings", generated_files = ["src/screens/m05_admin.nir"] }
+data_binding = { entities = ["Settings"], primary_key = "setting_id", guard = { table = "settings_table", purpose = "Administration", row_id = "singleton" }, fields = [
+    { name = "site_name", type = "String" },
+    { name = "maintenance_mode", type = "bool" },
+] }
+policy = { purpose = "Administration", allowed_actions = ["read", "update"] }
+parameters = { access = 'requires role "Admin"' }
+notes = "singleton row seeded by bridge::seed_singletons() at boot"
+
+[[screen]]
+id = "5.2"
+name = "Team Feed"
+module = "M5"
+archetype = "communication_feed"
+combo = []
+roles = ["Agent:R/W"]
+datasets = ["PG.feed_posts"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m05_admin.nir"
+codegen = { template = "communication_feed", mount_symbol = "mount_team_feed", route_path = "/feed", generated_files = ["src/screens/m05_admin.nir"] }
+data_binding = { entities = ["FeedPost"], primary_key = "post_id", guard = { table = "feed_post_table", purpose = "Operations" }, fields = [
+    { name = "author", type = "String" },
+    { name = "body", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["read", "create"] }
+parameters = { post_access = 'requires role "Agent"', read_access = 'requires role "Agent"', refresh_seconds = 5 }
+notes = "append-only via SharedCell; guard decides who reads and who posts"
+
+# -------------------------------------------------------------- M6 Board (1)
+[[screen]]
+id = "6.1"
+name = "Ticket Board"
+module = "M6"
+archetype = "kanban_board"
+combo = []
+roles = ["Agent:R/W", "Admin:R/W"]
+datasets = ["PG.tickets"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m06_board.nir"
+codegen = { template = "kanban_board", mount_symbol = "mount_ticket_board", route_path = "/tickets/board", generated_files = ["src/screens/m06_board.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [
+    { name = "title", type = "String" },
+    { name = "priority", type = "String" },
+    { name = "status", type = "String" },
+    { name = "body", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["read", "update"] }
+parameters = { title_field = "title", column_field = "status", columns = ["open", "in_progress", "done"], move_path = "/tickets/{id}/move/{to}", access = 'requires role "Agent"' }
+notes = "move route generated with guarded_update — status changes are policy-checked writes, not presentational drags"

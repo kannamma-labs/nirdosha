@@ -1,0 +1,30 @@
+[package]
+name = "helpdesk"
+version = "0.1.0"
+edition = "2024"
+description = "Greenfield proof of the generator: the whole app (bridge, shell, screens, serve) is emitted by `cargo nirdosha generate-screens` from screens.toml + menus.toml. Edit the registers, regenerate, never hand-edit src/*.nir."
+publish = false
+
+[dependencies]
+nirdosha-rt = { path = "../../crates/nirdosha-rt" }
+nirdosha-guard-registry = { path = "../../crates/nirdosha-guard-registry" }
+nirdosha-guard-macros = { path = "../../crates/nirdosha-guard-macros" }
+nirdosha-guard-mic = { path = "../../crates/nirdosha-guard-mic" }
+nirdosha-guard-core = { path = "../../crates/nirdosha-guard-core" }
+nirdosha-guard-screens = { path = "../../crates/nirdosha-guard-screens" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+toml = "0.8"
+
+[package.metadata.nirdosha-rt]
+dialect = true
+
+[lib]
+name = "helpdesk"
+path = "src/lib.nir"
+
+[[bin]]
+name = "helpdesk-serve"
+path = "src/bin/serve.nir"
