@@ -19,6 +19,13 @@
       "items": {
         "$ref": "#/$defs/screen"
       }
+    },
+    "approval_chain": {
+      "type": "array",
+      "description": "App-wide approval chains, emitted as nirdosha_rt::approval_chain! into bridge.nir and passed to every GuardedTable constructor. An approval_inbox source's chain must name one of these (verbatim).",
+      "items": {
+        "$ref": "#/$defs/approval_chain_decl"
+      }
     }
   },
   "$defs": {
@@ -247,6 +254,12 @@
             },
             {
               "$ref": "#/$defs/params_app_shell"
+            },
+            {
+              "$ref": "#/$defs/params_approval_inbox"
+            },
+            {
+              "$ref": "#/$defs/params_workspace"
             }
           ]
         },
@@ -1043,6 +1056,144 @@
       "type": "object",
       "additionalProperties": false,
       "description": "app_shell_from_toml: no parameters \u2014 the shell macro re-reads menus.toml at compile time; the generator validates the register pair instead."
+    },
+    "approval_chain_decl": {
+      "type": "object",
+      "required": [
+        "name",
+        "quorum",
+        "approvers"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quorum": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Refused below 1 at generation."
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Role names; must be declared by some screen (exact string compares at the data plane)."
+        },
+        "cooling_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "params_approval_inbox": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "approval_inbox guard mode (generated). sources[] each carry { table, chain, detail_path }; purpose derives from the entity's guard, resource derives from the entity, chain must be a declared [[approval_chain]].",
+      "properties": {
+        "access": {
+          "type": "string",
+          "description": "Vestigial route metadata only."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "table",
+              "chain"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "table": {
+                "type": "string",
+                "description": "The source entity's generated GuardedTable fn (e.g. ticket_table)."
+              },
+              "chain": {
+                "type": "string",
+                "description": "A declared [[approval_chain]] name, verbatim."
+              },
+              "detail_path": {
+                "type": "string",
+                "description": "Route the escalation's entity detail page serves; {id} is substituted."
+              }
+            }
+          }
+        }
+      }
+    },
+    "params_workspace": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "workspace! (generated). subject.entity/guard/label derive from the register; panels[] use inline { entity, link_field } sources \u2014 each a generated guarded_scan(..., Action::Read) filtered in-process to the subject row.",
+      "properties": {
+        "subject": {
+          "type": "object",
+          "required": [
+            "entity",
+            "label_field"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "entity": {
+              "type": "string"
+            },
+            "label_field": {
+              "type": "string",
+              "description": "Declared String field of the subject entity used for the header label."
+            }
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "panels": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "need",
+              "title",
+              "render",
+              "source"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "need": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "render": {
+                "type": "string"
+              },
+              "source": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": [
+                      "entity",
+                      "link_field"
+                    ],
+                    "additionalProperties": true,
+                    "description": "Generated guarded read of entity filtered to link_field == subject id."
+                  },
+                  {
+                    "type": "string",
+                    "description": "Refused at generation: a hand-written fn the generator cannot emit."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

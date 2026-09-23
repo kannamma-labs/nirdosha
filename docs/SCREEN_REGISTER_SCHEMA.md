@@ -137,7 +137,18 @@ The generator refuses, as generation errors:
 - **tree_view `id_field` / `parent_field` / `label_field`** naming undeclared
   fields, or fields that are not `String`-typed;
 - **report_builder `dimensions`** naming undeclared fields, or dimensions
-  that are not `String`-typed.
+  that are not `String`-typed;
+- **approval_inbox `sources`** whose `table` matches no registered entity
+  (or the entity has no guard anywhere — the worklist read must be
+  guard-gated) or whose `chain` is not a declared `[[approval_chain]]`;
+- **workspace** `subject.entity` / `label_field` and each panel's
+  `source.entity` / `link_field` naming undeclared fields (the panel's
+  link field must be `String`-typed, since it joins to the subject id);
+  a hand-written-string panel `source` is refused — the generator can
+  only emit the inline `{ entity, link_field }` form;
+- **`[[approval_chain]]`** (app-wide, not per-screen): `quorum < 1` is
+  refused, and every `approver` must be a role some screen declares
+  (approvers are exact string compares at the data plane).
 
 Two archetypes with fully-specified parameters (shipped 2026-09-23):
 
@@ -156,6 +167,13 @@ Two archetypes with fully-specified parameters (shipped 2026-09-23):
   `parameters = { access, id_field, parent_field, label_field }`, all
   `String`-typed; nests the guard-decoded snapshot in-process, cycle-safe,
   orphans rendered honestly. Guard-required by design.
+
+Two archetypes that became generator-emittable together (2026-09-23):
+
+- **`approval_inbox`** — guard-mode by generation. `parameters.sources = [{ table, chain, detail_path }]`; the generator derives the source `purpose` from the entity's own guard, derives `resource` (no drift), and requires `chain` to be a registered `[[approval_chain]]`. Every source is guard-gated, the view route is `get_with_auth`, and rows come from `GuardedTable::guarded_list_pending_approvals` (one `read` evaluation per source, fail-whole-not-partial). `access` stays vestigial metadata.
+- **`workspace!`** — `parameters.subject = { entity, label_field }` (guard purpose derived, `label_fn` generated) and `parameters.panels = [{ need, title, render, source = { entity, link_field } }]`. Each panel's `source` is a real generated guarded read of the named entity filtered in-process to the subject row; a hand-written-string `source` is refused. `budget.max_rows`/`budget.max_execution_ms` are optional.
+
+App-wide `[[approval_chain]]` entries (`name`, `quorum`, `approvers`, optional `cooling_seconds`) are emitted as `nirdosha_rt::approval_chain!` blocks and passed into every `GuardedTable` constructor; they are the only way an `approval_inbox` source's `chain` resolves.
 
 Field flags in `data_binding.fields` are **security inputs** the generator
 synthesizes into the screen's `guard_policy!` records (shipped 2026-09-23):

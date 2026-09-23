@@ -143,7 +143,20 @@ A, Track B, Track C below) — but the specs themselves stay put.
   (`params_*` defs), and generator-enforced field-membership checks
   (crud write lists vs declared/masked fields, kanban column/title,
   tree_view id/parent/label, report dimensions — all typo-proofed,
-  10 harness tests in `generate.rs`). Remaining generator gaps:
+  10 harness tests in `generate.rs`). The approval/workflow archetypes
+  are now guard-complete in the generator (2026-09-23):
+  `approval_inbox!` gains a guard clause (per-source `purpose:`, all-or-
+  nothing; the view routes `get_with_auth` and reads the worklist via the
+  new `GuardedTable::guarded_list_pending_approvals` — one real `read`
+  evaluation per source, fail-whole-not-partial; `access:` stays
+  vestigial metadata), a new `[[approval_chain]]` register section emits
+  real `nirdosha_rt::approval_chain!` blocks + the registry-dump helper
+  into every `GuardedTable` constructor, and `workspace!` emits real
+  guarded panel fns (inline `{ entity, link_field }` sources = a
+  `guarded_snapshot` filtered to the subject row) plus a generated
+  `label_fn` — a hand-written-string source is refused with a named
+  error rather than emitted as a compile error later. Remaining
+  generator gaps:
   missing archetype macros (sankey, graph_renderer, rule_builder!,
   whatif!), business-logic fn generation, `codegen_profile` selection,
   full JSON-Schema validation of the registers (the generator today
