@@ -25,7 +25,8 @@
 
 pub use nirdosha_macros::{
     app_shell, app_shell_from_toml, approval_inbox, categorical_actions, communication_feed, contract, crud_screens,
-    dashboard, kanban_board, landing, login, settings_screen, wizard, workflow, workspace,
+    dashboard, kanban_board, landing, login, report_builder, settings_screen, static_embed, wizard, workflow,
+    workspace,
 };
 
 pub use nirdosha_guard_macros::{

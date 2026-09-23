@@ -27,6 +27,8 @@ fn router() -> Router {
     let router = helpdesk::m05_admin::mount_team_feed(router);
     let router = helpdesk::m06_board::mount_ticket_board(router);
     let router = helpdesk::m06_board::mount_ticket_board_move(router);
+    let router = helpdesk::m07_help::mount_ticket_report(router);
+    let router = helpdesk::m07_help::mount_getting_started(router);
     helpdesk::m03_tickets::mount_tickets(router)
 }
 
@@ -146,4 +148,39 @@ fn dashboard_widgets_route_through_the_guard() {
     let agent = login_as(&router, "sam", "agent123");
     let resp = get_as(&router, "/dashboard/ops", &agent);
     assert_eq!(resp.status, 200, "dashboard widgets (guarded: true) must read ticket_table through the guard: {resp:?}");
+}
+
+#[test]
+fn static_help_page_serves_with_its_pinned_digest() {
+    // Public: no cookie, no login — static_embed is presentational and
+    // the route gate is the whole story.
+    let router = router();
+    let resp = router.dispatch(&Request { method: "GET".into(), path: "/help".into(), headers: HashMap::new(), body: String::new() });
+    assert_eq!(resp.status, 200, "the help page is public: {resp:?}");
+    assert!(resp.body.contains("Getting Started"), "page must render the embedded content");
+    assert!(resp.body.contains("8b758e64117e038bfddb5132615ca6dce3ffa86a24a7f7106f2a6960e7bfa72a"), "page must disclose its pinned sha256: {}", resp.body);
+}
+
+#[test]
+fn report_runs_under_the_aggregate_policy_and_counts_by_dimension() {
+    let router = router();
+    let agent = login_as(&router, "sam", "agent123");
+    post_form_as(&router, "/tickets", &agent, "ticket_id=r-1&title=One&priority=high&body=x");
+    post_form_as(&router, "/tickets", &agent, "ticket_id=r-2&title=Two&priority=low&body=y");
+    let resp = post_form_as(&router, "/reports/tickets", &agent, "dimension=priority");
+    assert_eq!(resp.status, 200, "aggregate policy helpdesk-7-2-aggregate must allow Agent: {resp:?}");
+    assert!(resp.body.contains("high") && resp.body.contains("low"), "report must group counts by the chosen dimension: {}", resp.body);
+    assert!(resp.body.contains("2"), "counts must sum the created rows: {}", resp.body);
+    let unknown = post_form_as(&router, "/reports/tickets", &agent, "dimension=body");
+    assert_eq!(unknown.status, 400, "a non-declared dimension must be refused, not silently run: {unknown:?}");
+}
+
+#[test]
+fn anonymous_report_run_is_denied_by_the_guard() {
+    // No session cookie: the *_with_auth fallback yields an Auth with no
+    // roles, and no aggregate policy matches — deny by default, at the
+    // data plane.
+    let router = router();
+    let resp = router.dispatch(&Request { method: "POST".into(), path: "/reports/tickets".into(), headers: HashMap::from([("content-type".into(), "application/x-www-form-urlencoded".into())]), body: "dimension=status".into() });
+    assert_eq!(resp.status, 403, "no policy for anon = guard deny: {resp:?}");
 }

@@ -15,3 +15,5 @@ pub mod m04_dashboards;
 pub mod m05_admin;
 #[path = "screens/m06_board.nir"]
 pub mod m06_board;
+#[path = "screens/m07_help.nir"]
+pub mod m07_help;

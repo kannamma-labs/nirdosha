@@ -15,6 +15,10 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 toml = "0.8"
+# `static_embed!` pins its content file's SHA-256 in the invocation and
+# verifies the pin at macro-expansion time (a lie is a build error) —
+# the same backend `examples/rtm` and the fixture crates already share.
+sha2 = "0.10"
 # The dialect's own toolchain: explicitly exempt from itself (the
 # verifier does not lint its own implementation — see
 # docs/nirdosha-rt-dialect.md §5).

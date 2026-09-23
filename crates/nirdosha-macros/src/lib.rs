@@ -49,6 +49,8 @@ mod kanban_board;
 mod landing;
 mod login;
 mod settings_screen;
+mod static_embed;
+mod report_builder;
 mod util;
 mod wizard;
 mod workflow;
@@ -131,6 +133,26 @@ pub fn communication_feed(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn workspace(input: TokenStream) -> TokenStream {
     workspace::expand(input)
+}
+
+/// See `static_embed::expand`'s module doc — the static-page archetype:
+/// one checked-in content file embedded with `include_str!`, its
+/// SHA-256 digest pinned in the invocation and verified at expansion
+/// time (a lie is a build error). Presentational — no `GuardedTable`;
+/// the route gate (`access:`) is the whole story.
+#[proc_macro]
+pub fn static_embed(input: TokenStream) -> TokenStream {
+    static_embed::expand(input)
+}
+
+/// See `report_builder::expand`'s module doc — the ad-hoc report
+/// archetype (RTM's 15.2): a dimension picker over one `GuardedTable`'s
+/// `guarded_aggregate` read, counts only. Guard-required by design —
+/// there is no unguarded path, and the guard is the single authority
+/// for whether a report runs at all.
+#[proc_macro]
+pub fn report_builder(input: TokenStream) -> TokenStream {
+    report_builder::expand(input)
 }
 
 /// See `app_shell_from_toml::expand`'s module doc — generate the

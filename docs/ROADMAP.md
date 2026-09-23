@@ -125,12 +125,12 @@ A, Track B, Track C below) — but the specs themselves stay put.
   macros emit only `*_with_auth` routes (declared `access_*` become
   vestigial OpenAPI metadata, not a second check), and unsupported
   archetypes hard-error instead of silently skipping. End-to-end proof:
-  `examples/helpdesk/` — 8 screens → generated app → 8 passing smoke
+  `examples/helpdesk/` — 10 screens → generated app → 11 passing smoke
   tests (including Agent 403 on /settings with no policy, proving the
   corpus decides). Remaining generator gaps: missing archetype macros
-  (graph_renderer, static_embed, rule_builder!, report_builder!,
-  whatif!, sankey!), business-logic fn generation, `codegen_profile`
-  selection, strict JSON-Schema validation of the registers.
+  (tree_view, sankey, graph_renderer, rule_builder!, whatif!),
+  business-logic fn generation, `codegen_profile` selection, strict
+  JSON-Schema validation of the registers.
 
 - `[PARTIAL — CURRENT PHASE]` **Screen-register v2 schema.**
   `docs/SCREEN_REGISTER_SCHEMA.json` and its companion guide define the

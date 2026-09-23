@@ -87,6 +87,25 @@ roles = ["Agent"]
 order = 50
 
 [[menu]]
+id = "nav.report"
+label_key = "nav.report"
+group = "work"
+screen_id = "7.2"
+route = "/reports/tickets"
+guard = { action = "aggregate", resource = "ticket" }
+roles = ["Agent", "Admin"]
+order = 45
+
+[[menu]]
+id = "nav.help"
+label_key = "nav.help"
+group = "collab"
+screen_id = "7.1"
+route = "/help"
+roles = ["Agent", "Admin"]
+order = 55
+
+[[menu]]
 id = "nav.settings"
 label_key = "nav.settings"
 group = "admin"

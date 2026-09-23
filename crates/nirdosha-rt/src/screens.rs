@@ -219,6 +219,60 @@ pub fn read_only_list_html(title: &str, fields: &[FieldSpec], rows: &[serde_json
     themed_page_shell(title, "", &table)
 }
 
+/// A checked-in static page served by `static_embed!`: escaped content
+/// in a `<pre>`, with the file's SHA-256 digest rendered alongside it —
+/// the workspace's pinned-digest convention for checked-in fixtures
+/// (the same shape RTM's M17 knowledge pages serve by hand, minus the
+/// hand-written glue).
+pub fn static_page_html(title: &str, content: &str, sha256: &str) -> String {
+    themed_page_shell(
+        title,
+        "",
+        &format!(
+            "<pre style=\"white-space:pre-wrap;max-width:80ch;margin:2rem auto;font-family:ui-monospace,monospace\">{}</pre>\
+             <p style=\"text-align:center;color:#666\">sha256: {sha256}</p>",
+            html_escape(content)
+        ),
+    )
+}
+
+/// `report_builder!`'s dimension picker: one `<select>` over the
+/// screen's declared dimensions plus the run button. Dimensions come
+/// from the invocation itself, so the form can never offer a dimension
+/// the generated POST route can't run.
+pub fn report_form_html(title: &str, path: &str, dimensions: &[&str]) -> String {
+    let mut options = String::new();
+    for dimension in dimensions {
+        options.push_str(&format!("<option value=\"{dimension}\">{} per {}</option>", html_escape(dimension), html_escape(dimension)));
+    }
+    let body = format!(
+        "<form method=\"post\" action=\"{path}\" style=\"max-width:40ch;margin:2rem auto;display:flex;gap:1rem;align-items:center\">\
+         <select name=\"dimension\" class=\"nir-input\" required>{options}</select>\
+         <button type=\"submit\" class=\"nir-btn\">Run report</button></form>",
+    );
+    themed_page_shell(title, "", &body)
+}
+
+/// `report_builder!`'s result: a count-per-group table over the one
+/// requested dimension, rendered from the guard-decoded rows (counts
+/// only — PII auto-masked in aggregates, per 15.2's register note).
+/// Group keys are whatever the guard's masks left in the decoded rows,
+/// so a masked dimension groups into its mask value rather than leaking
+/// the underlying values.
+pub fn aggregate_table_html(title: &str, path: &str, dimension: &str, counts: &[(String, u64)]) -> String {
+    let mut table = String::from("<table><thead><tr><th>");
+    table.push_str(&html_escape(dimension));
+    table.push_str("<th>count</th></tr></thead><tbody>");
+    for (key, count) in counts {
+        table.push_str(&format!("<tr><td>{}</td><td>{count}</td></tr>", html_escape(key)));
+    }
+    table.push_str("</tbody></table>");
+    let total: u64 = counts.iter().map(|(_, c)| c).sum();
+    let back = format!("<p><a href=\"{path}\" class=\"nir-btn nir-btn-secondary\">New report</a></p>");
+    let summary = format!("<p style=\"color:#666\">{total} row(s) aggregated, {} groups</p>", counts.len());
+    themed_page_shell(title, "", &format!("{summary}{table}{back}"))
+}
+
 /// Escapes one CSV field per RFC 4180: wrap in quotes (doubling any
 /// embedded quote) whenever the value contains a comma, quote, or
 /// newline — left bare otherwise, matching how every spreadsheet

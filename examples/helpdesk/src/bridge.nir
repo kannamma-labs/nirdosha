@@ -101,6 +101,15 @@ nirdosha_rt::guard_policy! {
     obligate audit(sampled)
 }
 
+nirdosha_rt::guard_policy! {
+    allow "helpdesk-7-2-aggregate" for Agent, Admin
+    when action == "aggregate" && resource == "ticket"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 20_000)
+    obligate audit(sampled)
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FeedPostRow {
     pub id: i64,

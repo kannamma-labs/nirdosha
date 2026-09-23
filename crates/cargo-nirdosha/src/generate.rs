@@ -467,6 +467,8 @@ fn plan_screen(screen: &ScreenDecl) -> Result<PlannedScreen, String> {
             | "settings_screen"
             | "wizard"
             | "workspace"
+            | "static_embed"
+            | "report_builder"
     );
     if !supported {
         return Err(format!(
@@ -485,6 +487,7 @@ fn plan_screen(screen: &ScreenDecl) -> Result<PlannedScreen, String> {
             | "workspace"
             | "approval_inbox"
             | "dashboard"
+            | "report_builder"
     );
     if needs_data && screen.data_binding.is_none() {
         return Err(format!(
@@ -1037,6 +1040,61 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
                     "pub fn {mount}_move(router: nirdosha_rt::Router) -> nirdosha_rt::Router {{\n    router.post({move_path:?}, \"Move card\", |_req, params| {{\n        let Some(id) = params.get(\"id\").and_then(|s| s.parse::<i64>().ok()) else {{ return nirdosha_rt::Response::bad_request(\"id must be an integer\") }};\n        let Some(to) = params.get(\"to\") else {{ return nirdosha_rt::Response::bad_request(\"to required\") }};\n        let to = to.to_string();\n        {store}().update(&id, |e| match e {{\n            Some(e) => {{ e.{column_field} = to.clone(); Ok(e.clone()) }}\n            None => Err(\"not found\".to_string()),\n        }});\n        nirdosha_rt::Response::redirect({base:?})\n    }})\n}}\n"
                 ));
             }
+            Ok(out)
+        }
+        "static_embed" => {
+            // Presentational: the pinned-digest integrity check happens
+            // in the macro at expansion time; the generator just refuses
+            // an invocation missing its inputs, so a register that
+            // forgot the pin fails at generation, not at compile.
+            let title = params.get("title").and_then(toml::Value::as_str).unwrap_or(&plan.decl.name);
+            let content_file = params
+                .get("content_file")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("screen {}: static_embed needs parameters.content_file (project-root-relative)", plan.id))?;
+            let sha256 = params
+                .get("sha256")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("screen {}: static_embed needs parameters.sha256 (pin the content file's SHA-256)", plan.id))?;
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let mut out = String::new();
+            out.push_str(&format!(
+                "nirdosha_rt::static_embed! {{\n    mount: {mount},\n    path: {path:?},\n    title: {title:?},\n    content_file: {content_file:?},\n    sha256: {sha256:?},\n    access: {access},\n}}\n"
+            ));
+            Ok(out)
+        }
+        "report_builder" => {
+            let entity = binding.and_then(|b| b.entities.first()).ok_or("report_builder needs an entity")?;
+            let decl = entities.get(entity).ok_or("entity missing from bridge plan")?;
+            let struct_name = decl.struct_name();
+            let table = decl.guard_table_fn();
+            let purpose = guard
+                .ok_or_else(|| format!("screen {}: report_builder reads a GuardedTable and needs data_binding.guard", plan.id))?
+                .purpose
+                .clone();
+            let dimensions: Vec<String> = params
+                .get("dimensions")
+                .and_then(toml::Value::as_array)
+                .ok_or_else(|| format!("screen {}: report_builder needs parameters.dimensions", plan.id))?
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(|n| format!("{}: {}", n, decl.type_of(n)))
+                .collect();
+            if dimensions.is_empty() {
+                return Err(format!("screen {}: report_builder needs at least one dimension", plan.id));
+            }
+            for entry in &dimensions {
+                if !entry.ends_with("String") {
+                    return Err(format!("screen {}: report_builder dimensions must be String-typed (got `{entry}`)", plan.id));
+                }
+            }
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let mut out = String::new();
+            out.push_str(&format!(
+                "nirdosha_rt::report_builder! {{\n    mount: {mount},\n    entity: {struct_name},\n    table: {table},\n    path: {path:?},\n    title: {:?},\n    purpose: {purpose:?},\n    access: {access},\n    dimensions: [ {} ],\n}}\n",
+                plan.decl.name,
+                dimensions.join(", ")
+            ));
             Ok(out)
         }
         "approval_inbox" => {

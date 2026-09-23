@@ -21,7 +21,7 @@
 schema = "nirdosha.screen-register/v2"
 register_id = "helpdesk"
 version = "1.0.0"
-total_screens = 8
+total_screens = 10
 canonical_order = "module_then_id"
 codegen_profile = "web-default"
 generator_version = "nirdosha-screen-codegen/1"
@@ -197,3 +197,40 @@ data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { tab
 policy = { purpose = "Operations", allowed_actions = ["read", "update"] }
 parameters = { title_field = "title", column_field = "status", columns = ["open", "in_progress", "done"], move_path = "/tickets/{id}/move/{to}", access = 'requires role "Agent"' }
 notes = "move route generated with guarded_update — status changes are policy-checked writes, not presentational drags"
+# ---------------------------------------------------------- M7 Help (2)
+[[screen]]
+id = "7.1"
+name = "Getting Started"
+module = "M7"
+archetype = "static_embed"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m07_help.nir"
+codegen = { template = "static_embed", mount_symbol = "mount_getting_started", route_path = "/help", generated_files = ["src/screens/m07_help.nir"] }
+parameters = { title = "Getting Started", content_file = "files/help/getting-started.md", sha256 = "8b758e64117e038bfddb5132615ca6dce3ffa86a24a7f7106f2a6960e7bfa72a" }
+notes = "presentational, no GuardedTable; route gate is the whole story; pinned digest verified at expansion"
+
+[[screen]]
+id = "7.2"
+name = "Ticket Report"
+module = "M7"
+archetype = "report_builder"
+combo = []
+roles = ["Agent:R", "Admin:R"]
+datasets = ["PG.tickets"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m07_help.nir"
+codegen = { template = "report_builder", mount_symbol = "mount_ticket_report", route_path = "/reports/tickets", generated_files = ["src/screens/m07_help.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [
+    { name = "title", type = "String" },
+    { name = "priority", type = "String" },
+    { name = "status", type = "String" },
+    { name = "body", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["aggregate"] }
+parameters = { access = 'requires role "Agent"', dimensions = ["status", "priority"] }
+notes = "aggregate policy helpdesk-7-2-aggregate; counts only, PII auto-masked in aggregates"

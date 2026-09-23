@@ -119,6 +119,20 @@ The schema permits any key under `parameters` because different archetypes
 accept different clauses; generators should validate the key/value shape against
 the selected archetype.
 
+Two archetypes with fully-specified parameters (shipped 2026-09-23):
+
+- **`static_embed`** — presentational, no `GuardedTable`; the route gate is the
+  whole story. `parameters = { title, content_file, sha256, access }`, with
+  `content_file` project-root-relative and `sha256` the content file's
+  SHA-256 — **verified at macro expansion** (a content edit without a re-pin
+  is a build error), and disclosed on the served page as a digest footer.
+- **`report_builder`** — ad-hoc aggregate report (RTM's 15.2 archetype).
+  `parameters = { access, dimensions = ["status", "priority"] }`; reads
+  `GuardedTable::guarded_aggregate` under the **aggregate** guard action, so
+  the screen's `policy.allowed_actions` must name `"aggregate"`. Counts only;
+  dimensions must be `String`-typed fields of the entity; guard-required by
+  design (no unguarded path exists).
+
 ## Minimal v2 shape
 
 ```toml
