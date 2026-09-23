@@ -169,14 +169,43 @@ struct Policy {
 }
 
 // ---------------------------------------------------------------------------
-// menus.toml — only what the generator itself needs (the app-shell macro
-// re-reads the file at compile time; the generator just needs the title).
+// menus.toml — typed enough to VALIDATE against the screen register; the
+// app-shell macro re-reads the file at compile time, but the generator is
+// the one that can prove the register pair agrees before emitting code.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct MenusFile {
     #[serde(default = "empty_table")]
     meta: toml::Value,
+    /// Post-login landing per human role.
+    #[serde(default)]
+    landing: std::collections::BTreeMap<String, String>,
+    /// Nav entries. `[[group]]` blocks are ordering chrome the shell macro
+    /// owns; the generator validates entries, not group order.
+    #[serde(default)]
+    menu: Vec<MenuEntry>,
+}
+
+#[derive(Deserialize)]
+struct MenuEntry {
+    id: String,
+    #[serde(default)]
+    label_key: String,
+    #[serde(default)]
+    screen_id: String,
+    #[serde(default)]
+    route: String,
+    #[serde(default)]
+    guard: Option<MenuGuard>,
+    #[serde(default)]
+    roles: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct MenuGuard {
+    action: String,
+    resource: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,12 +221,14 @@ const KNOWN_PROFILES: &[&str] = &["web-default"];
 // Entry point
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct GenerateReport {
     pub files: Vec<String>,
     pub screens_emitted: usize,
     pub screens_skipped: Vec<String>,
     pub entities: usize,
     pub policies: usize,
+    pub invariants_checked: usize,
 }
 
 /// Generates a crate's `src/` tree from `<project_dir>/screens.toml` +
@@ -333,6 +364,13 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
         }
     }
 
+    // ---- the register pair must agree (menus vs screens) ----
+    // The two registers are one contract: a menu item is a promise that
+    // the generated app serves a screen at a route, for roles, gated by
+    // a policy the generator synthesized. Each violated promise is a
+    // build-time error here, not a dead link or a silent deny at runtime.
+    let invariants = validate_menus(&menus, &register, &planned, &entities)?;
+
     // ---- emit ----
     let src_dir = project_dir.join("src");
     std::fs::create_dir_all(src_dir.join("screens")).map_err(|e| e.to_string())?;
@@ -428,6 +466,7 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
         screens_skipped: skipped,
         entities: entities.len(),
         policies: policy_count,
+        invariants_checked: invariants,
     })
 }
 
@@ -459,6 +498,18 @@ impl EntityDecl {
             .unwrap_or_else(|| "String".to_string())
     }
 
+    /// Membership check, not a silent String fallback: `type_of` returns
+    /// "String" for a *nonexistent* field too, so parameter validation
+    /// that wants to typo-proof a field name must use this. The primary
+    /// key counts as a declared field (it is one).
+    fn has_field(&self, field: &str) -> bool {
+        field == self.primary_key || self.fields.iter().any(|f| f.name == field)
+    }
+
+    fn field_decl(&self, field: &str) -> Option<&FieldDecl> {
+        self.fields.iter().find(|f| f.name == field)
+    }
+
     fn guard_table_fn(&self) -> String {
         format!("{}_table", pascal_to_snake(&self.name))
     }
@@ -480,6 +531,171 @@ struct PlannedScreen {
     route_path: String,
     output_file: Option<String>,
     decl: ScreenDecl,
+}
+
+/// Cross-file invariants between `menus.toml` and the (planned) screen
+/// register — the generated-app edition of RTM's menus.toml V-probes.
+/// Returns the number of invariant checks performed (for the report).
+/// Every violation is a hard error: a menu item is a promise the
+/// generated app can keep, or the build refuses.
+fn validate_menus(
+    menus: &MenusFile,
+    register: &RegisterFile,
+    planned: &[PlannedScreen],
+    entities: &BTreeMap<String, EntityDecl>,
+) -> Result<usize, String> {
+    let mut checks = 0usize;
+
+    // Every register screen by id — including non-built ones, so a menu
+    // pointing at a blocked screen gets the V3 message, not V1. The
+    // stage check below refuses it either way.
+    let screen_by_id: BTreeMap<&str, &ScreenDecl> =
+        register.screen.iter().map(|s| (s.id.as_str(), s)).collect();
+    // Synthesized policy surface: (resource, action) pairs the generated
+    // app can actually enforce.
+    let mut policy_surface: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for plan in planned {
+        let Some(binding) = plan.decl.data_binding.as_ref() else { continue };
+        let Some(entity) = binding.entities.first() else { continue };
+        let Some(guard) = binding.guard.as_ref() else { continue };
+        let Some(policy) = plan.decl.policy.as_ref() else { continue };
+        let resource = entity.to_lowercase();
+        for action in &policy.allowed_actions {
+            policy_surface.insert((resource.clone(), action.clone()));
+            let _ = guard;
+        }
+    }
+    // Human roles the register declares (from every screen's roles).
+    let mut human_roles: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for screen in &register.screen {
+        for role in &screen.roles {
+            let name = role.split(':').next().unwrap_or(role).to_string();
+            if name != "AllRoles" && name != "AllHuman" {
+                human_roles.insert(name);
+            }
+        }
+    }
+
+    // V1 + V2 + V3 + route-agreement + V5-lite, per menu entry.
+    let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in &menus.menu {
+        let target = screen_by_id
+            .get(entry.screen_id.as_str())
+            .ok_or_else(|| format!("menu {} references screen_id `{}` which does not exist in the register (V1)", entry.id, entry.screen_id))?;
+        checks += 1;
+
+        let stage = if target.stage.is_empty() { "blocked" } else { target.stage.as_str() };
+        if stage != "built" {
+            return Err(format!(
+                "menu {} references screen {} which is stage `{stage}` — a generated app cannot promise a route for a screen the register does not build (V3); hide it in menus.toml or build the screen",
+                entry.id, entry.screen_id
+            ));
+        }
+
+        // V2: menu.roles ⊆ screen.roles (universal screen roles satisfy
+        // every role).
+        let screen_role_names: Vec<String> = target
+            .roles
+            .iter()
+            .map(|r| r.split(':').next().unwrap_or(r).to_string())
+            .collect();
+        let universal = screen_role_names.iter().any(|r| r == "AllRoles" || r == "AllHuman");
+        if !universal {
+            for role in &entry.roles {
+                if !screen_role_names.contains(role) {
+                    return Err(format!(
+                        "menu {} grants role `{role}` but its target screen {} declares roles {:?} — menu.roles must be a subset of screen.roles (V2)",
+                        entry.id, entry.screen_id, target.roles
+                    ));
+                }
+            }
+        }
+        checks += 1;
+
+        // Route agreement: the menu's route is the route the generator
+        // actually emits for that screen — not a related route, not a
+        // hand-written spelling of it.
+        let emitted_route = target
+            .codegen
+            .as_ref()
+            .and_then(|c| c.route_path.clone())
+            .unwrap_or_default();
+        if entry.route != emitted_route {
+            return Err(format!(
+                "menu {} routes to `{}` but screen {} emits `{}` — menu.route must equal codegen.route_path, or the nav link 404s the app it ships in",
+                entry.id, entry.route, entry.screen_id, emitted_route
+            ));
+        }
+        if !seen_routes.insert(entry.route.clone()) {
+            return Err(format!(
+                "menu {} duplicates route `{}` (already used by another menu entry) — nav routes must be unique (V6-lite)",
+                entry.id, entry.route
+            ));
+        }
+        checks += 1;
+
+        // V5-lite: a guard reference must resolve to a policy the
+        // generator synthesizes. static_embed screens have no data plane,
+        // so a guard reference there is always a mistake.
+        if let Some(menu_guard) = &entry.guard {
+            if target.archetype == "static_embed" || target.archetype == "login" || target.archetype == "app_shell_from_toml" {
+                return Err(format!(
+                    "menu {} declares guard {{ action = \"{}\", resource = \"{}\" }} but targets {} `{}` — presentational screens have no guard surface; drop the guard reference",
+                    entry.id, menu_guard.action, menu_guard.resource, target.archetype, target.name
+                ));
+            }
+            let key = (menu_guard.resource.to_lowercase(), menu_guard.action.clone());
+            if !policy_surface.contains(&key) {
+                return Err(format!(
+                    "menu {} declares guard {{ action = \"{}\", resource = \"{}\" }} but no synthesized policy covers that (resource, action) — add the action to the owning screen's [screen.policy].allowed_actions (V5-lite)",
+                    entry.id, menu_guard.action, menu_guard.resource
+                ));
+            }
+            checks += 1;
+        }
+    }
+
+    // V8-lite: each landing key is a declared human role, and its target
+    // is a route the generated app serves for a screen that role may
+    // reach.
+    for (role, target_route) in &menus.landing {
+        if !human_roles.contains(role) {
+            return Err(format!(
+                "[landing].{role} is not a human role any screen declares (V8-lite): declared roles are {:?}",
+                human_roles
+            ));
+        }
+        let reachable = planned.iter().any(|p| {
+            p.route_path == *target_route
+                && (p.decl.roles.iter().any(|r| {
+                    let name = r.split(':').next().unwrap_or(r);
+                    name == "AllRoles" || name == "AllHuman" || name == *role
+                }))
+        });
+        if !reachable {
+            return Err(format!(
+                "[landing].{role} targets `{target_route}` which no built screen at that route offers to role `{role}` (V8-lite: every role lands on a screen it can read)"
+            ));
+        }
+        checks += 1;
+    }
+
+    // Guard resources must name real entities (typo-proofing the V5
+    // references even before the action check above).
+    for entry in &menus.menu {
+        if let Some(menu_guard) = &entry.guard {
+            if !entities.values().any(|d| d.resource() == menu_guard.resource.to_lowercase()) {
+                return Err(format!(
+                    "menu {} guard resource \"{}\" matches no entity in the register (expected the entity's lowercase name)",
+                    entry.id, menu_guard.resource
+                ));
+            }
+            checks += 1;
+        }
+    }
+
+    Ok(checks)
 }
 
 fn plan_screen(screen: &ScreenDecl) -> Result<PlannedScreen, String> {
@@ -941,11 +1157,29 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
                 // live inside the guard block, not as top-level keys.
                 for clause in ["update_fields", "create_fields"] {
                     if let Some(names) = params.get(clause).and_then(toml::Value::as_array) {
-                        let typed: Vec<String> = names
-                            .iter()
-                            .filter_map(toml::Value::as_str)
-                            .map(|n| format!("{}: {}", n, decl.type_of(n)))
-                            .collect();
+                        let own_masked: Vec<String> = binding
+                            .map(|b| b.fields.iter().filter(|f| f.is_masked()).map(|f| f.name.clone()).collect())
+                            .unwrap_or_default();
+                        let mut typed: Vec<String> = Vec::new();
+                        for name in names.iter().filter_map(toml::Value::as_str) {
+                            if !decl.has_field(name) {
+                                return Err(format!(
+                                    "screen {}: {clause} names `{name}` which the entity does not declare — a typo here would emit a field the macro cannot parse; declare it in data_binding.fields or fix the spelling",
+                                    plan.id
+                                ));
+                            }
+                            if own_masked.iter().any(|m| m == name) {
+                                // masked on this screen = forbidden by
+                                // this screen's own synthesized policy —
+                                // a write list naming one could never
+                                // succeed.
+                                return Err(format!(
+                                    "screen {}: {clause} includes `{name}` which the screen itself declares masked — the guard forbids submitting it, so the form would always fail",
+                                    plan.id
+                                ));
+                            }
+                            typed.push(format!("{}: {}", name, decl.type_of(name)));
+                        }
                         out.push_str(&format!(" {}: [ {} ],", clause, typed.join(", ")));
                     }
                 }
@@ -1109,6 +1343,20 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
                 .and_then(toml::Value::as_str)
                 .ok_or("kanban_board needs parameters.column_field")?
                 .to_string();
+            if !decl.has_field(&column_field) {
+                return Err(format!(
+                    "screen {}: kanban column_field `{column_field}` is not a declared field of `{}` — the generated move handler writes through it",
+                    plan.id,
+                    decl.name
+                ));
+            }
+            if !decl.has_field(title_field) {
+                return Err(format!(
+                    "screen {}: kanban title_field `{title_field}` is not a declared field of `{}`",
+                    plan.id,
+                    decl.name
+                ));
+            }
             let columns: Vec<String> = params
                 .get("columns")
                 .and_then(toml::Value::as_array)
@@ -1190,6 +1438,14 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
                 return Err(format!("screen {}: report_builder needs at least one dimension", plan.id));
             }
             for entry in &dimensions {
+                let name = entry.split(':').next().unwrap_or(entry);
+                if !decl.has_field(name) {
+                    return Err(format!(
+                        "screen {}: report_builder dimension `{name}` is not a declared field of `{}`",
+                        plan.id,
+                        decl.name
+                    ));
+                }
                 if !entry.ends_with("String") {
                     return Err(format!("screen {}: report_builder dimensions must be String-typed (got `{entry}`)", plan.id));
                 }
@@ -1225,6 +1481,13 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
                 .and_then(toml::Value::as_str)
                 .ok_or_else(|| format!("screen {}: tree_view needs parameters.label_field", plan.id))?;
             for field in [id_field, parent_field, label_field] {
+                if !decl.has_field(field) {
+                    return Err(format!(
+                        "screen {}: tree_view field `{field}` is not a declared field of `{}`",
+                        plan.id,
+                        decl.name
+                    ));
+                }
                 if decl.type_of(field) != "String" {
                     return Err(format!("screen {}: tree_view fields must be String-typed (`{field}` is `{}`)", plan.id, decl.type_of(field)));
                 }
@@ -1402,3 +1665,161 @@ fn render_serve(register_id: &str, screens: &[PlannedScreen]) -> String {
     out
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal valid register pair for the temp-dir harness: 2 screens,
+    /// 1 entity, 1 role, 1 landing, 1 menu item.
+    const SCREENS: &str = r#"
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "t"
+version = "1.0.0"
+total_screens = 2
+codegen_profile = "web-default"
+
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login"
+roles = ["AllRoles:R"]
+stage = "built"
+codegen = { template = "login", mount_symbol = "mount_login", route_path = "/login", generated_files = ["src/app_shell.nir"] }
+parameters.demo_users = [ { username = "u", password = "p", roles = ["Agent"] } ]
+
+[[screen]]
+id = "2.1"
+name = "Tickets"
+module = "M2"
+archetype = "crud_screens"
+roles = ["Agent:R/W"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_tickets", route_path = "/tickets", generated_files = ["src/screens/m02.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [ { name = "title", type = "String" }, { name = "internal_notes", type = "Option<String>", masked = true } ] }
+policy = { purpose = "Operations", allowed_actions = ["read"] }
+"#;
+
+    const MENUS: &str = r#"
+[meta]
+app_title = "t"
+screens_source = "screens.toml"
+
+[landing]
+Agent = "/tickets"
+
+[[menu]]
+id = "nav.tickets"
+screen_id = "2.1"
+route = "/tickets"
+guard = { action = "read", resource = "ticket" }
+roles = ["Agent"]
+"#;
+
+    fn write_project(screens: &str, menus: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
+        std::fs::write(dir_path.join("screens.toml"), screens).unwrap();
+        std::fs::write(dir_path.join("menus.toml"), menus).unwrap();
+        (dir, dir_path)
+    }
+
+    #[test]
+    fn happy_path_passes_every_invariant() {
+        let (_dir, dir) = write_project(SCREENS, MENUS);
+        let report = run(&dir).expect("a consistent register pair must generate");
+        assert_eq!(report.screens_emitted, 2);
+        assert!(report.invariants_checked >= 4, "menu + landing invariants must be counted, got {}", report.invariants_checked);
+    }
+
+    #[test]
+    fn menu_referencing_an_unknown_screen_id_is_refused() {
+        let menus = MENUS.replace("screen_id = \"2.1\"", "screen_id = \"9.9\"");
+        let (_dir, dir) = write_project(SCREENS, &menus);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("which does not exist in the register (V1)"), "{err}");
+    }
+
+    #[test]
+    fn menu_referencing_a_non_built_screen_is_refused() {
+        let screens = SCREENS.replace(
+            "[[screen]]\nid = \"2.1\"\nname = \"Tickets\"\nmodule = \"M2\"\narchetype = \"crud_screens\"\nroles = [\"Agent:R/W\"]\nstage = \"built\"",
+            "[[screen]]\nid = \"2.1\"\nname = \"Tickets\"\nmodule = \"M2\"\narchetype = \"crud_screens\"\nroles = [\"Agent:R/W\"]\nstage = \"blocked\"\nblocked_by = [\"archetype:stub\"]",
+        );
+        assert!(screens.contains("stage = \"blocked\"\nblocked_by"), "test setup must actually flip 2.1 to blocked");
+        let (_dir, dir) = write_project(&screens, MENUS);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("(V3)"), "non-built target must be refused: {err}");
+    }
+
+    #[test]
+    fn menu_granting_an_undeclared_role_is_refused() {
+        let menus = MENUS.replace("roles = [\"Agent\"]", "roles = [\"Mlro\"]");
+        let (_dir, dir) = write_project(SCREENS, &menus);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("(V2)"), "{err}");
+    }
+
+    #[test]
+    fn menu_route_disagreeing_with_codegen_route_is_refused() {
+        let menus = MENUS.replace("route = \"/tickets\"", "route = \"/tickets/list\"");
+        let (_dir, dir) = write_project(SCREENS, &menus);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("menu.route must equal codegen.route_path"), "{err}");
+    }
+
+    #[test]
+    fn menu_guard_with_no_synthesized_policy_is_refused() {
+        let menus = MENUS.replace("action = \"read\"", "action = \"aggregate\"");
+        let (_dir, dir) = write_project(SCREENS, &menus);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("(V5-lite)"), "{err}");
+    }
+
+    #[test]
+    fn landing_for_an_undeclared_role_is_refused() {
+        let menus = MENUS.replace("[landing]\nAgent = \"/tickets\"", "[landing]\nMlro = \"/tickets\"");
+        let (_dir, dir) = write_project(SCREENS, &menus);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("V8-lite"), "{err}");
+    }
+
+    #[test]
+    fn landing_targeting_a_route_the_role_cannot_reach_is_refused() {
+        // A route that exists but offers nothing to the landing role:
+        // screen 3.1 at /admin declares only Admin.
+        let screens = format!(
+            "{SCREENS}\n\n[[screen]]\nid = \"3.1\"\nname = \"Admin Only\"\nmodule = \"M3\"\narchetype = \"app_shell_from_toml\"\nroles = [\"Admin:R\"]\nstage = \"built\"\ncodegen = {{ template = \"app_shell_from_toml\", mount_symbol = \"mount_admin\", route_path = \"/admin\", generated_files = [\"src/app_shell.nir\"] }}\n"
+        );
+        let screens = screens.replace("total_screens = 2", "total_screens = 3");
+        let menus = MENUS.replace("Agent = \"/tickets\"", "Agent = \"/admin\"");
+        let (_dir, dir) = write_project(&screens, &menus);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("V8-lite"), "{err}");
+    }
+
+    #[test]
+    fn crud_create_fields_naming_an_undeclared_field_is_refused() {
+        let screens = SCREENS.replace(
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }",
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\nparameters.create_fields = [ \"tiitle\" ]",
+        );
+        let (_dir, dir) = write_project(&screens, MENUS);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("which the entity does not declare"), "{err}");
+    }
+
+    #[test]
+    fn create_fields_naming_a_masked_field_is_refused() {
+        let screens = SCREENS.replace(
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }",
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\nparameters.create_fields = [ \"title\", \"internal_notes\" ]",
+        );
+        let (_dir, dir) = write_project(&screens, MENUS);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("the screen itself declares masked"), "{err}");
+    }
+}

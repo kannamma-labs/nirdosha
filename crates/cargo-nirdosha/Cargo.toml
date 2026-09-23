@@ -32,6 +32,9 @@ syn = { version = "2", features = ["full"] }
 toml = "0.8"
 
 [dev-dependencies]
+# Validation harness tests in src/generate.rs: build a throwaway
+# project directory (screens.toml + menus.toml) per test case.
+tempfile = "3"
 # Only for tests/pack_invariants.rs, to write a fixture `.nir/hi.db`
 # in the exact shape `nirdosha-contract-core::pack` reads — the crate
 # itself never opens SQLite directly, `nirdosha-contract-core::pack`

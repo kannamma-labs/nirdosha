@@ -585,8 +585,8 @@ fn generate_screens_cli(args: &[String]) -> ExitCode {
                 eprintln!("nirdosha: generated {file}");
             }
             eprintln!(
-                "nirdosha: {} screens emitted, {} entities, {} synthesized guard policies",
-                report.screens_emitted, report.entities, report.policies
+                "nirdosha: {} screens emitted, {} entities, {} synthesized guard policies, {} register-pair invariants checked",
+                report.screens_emitted, report.entities, report.policies, report.invariants_checked
             );
             for skipped in &report.screens_skipped {
                 eprintln!("nirdosha: skipped {skipped}");

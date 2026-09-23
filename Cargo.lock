@@ -307,6 +307,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.119",
+ "tempfile",
  "toml",
 ]
 
@@ -2070,6 +2071,7 @@ dependencies = [
  "nirdosha-contract-core",
  "proc-macro2",
  "quote",
+ "sha2 0.10.9",
  "syn 2.0.119",
  "toml",
 ]

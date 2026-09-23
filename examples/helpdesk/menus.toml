@@ -103,7 +103,7 @@ group = "collab"
 screen_id = "6.2"
 route = "/tickets/lookup"
 guard = { action = "read", resource = "ticket" }
-roles = ["Viewer", "Agent", "Admin"]
+roles = ["Viewer"]
 order = 52
 
 [[menu]]
