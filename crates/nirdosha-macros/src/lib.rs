@@ -51,6 +51,7 @@ mod login;
 mod settings_screen;
 mod static_embed;
 mod report_builder;
+mod tree_view;
 mod util;
 mod wizard;
 mod workflow;
@@ -153,6 +154,14 @@ pub fn static_embed(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn report_builder(input: TokenStream) -> TokenStream {
     report_builder::expand(input)
+}
+
+/// See `tree_view::expand`'s module doc — RTM's 5.6 archetype: a
+/// deterministic, cycle-safe parent/child tree over one GuardedTable's
+/// guarded snapshot. Guard-required by design — no unguarded path.
+#[proc_macro]
+pub fn tree_view(input: TokenStream) -> TokenStream {
+    tree_view::expand(input)
 }
 
 /// See `app_shell_from_toml::expand`'s module doc — generate the

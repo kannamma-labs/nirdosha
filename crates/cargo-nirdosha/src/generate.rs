@@ -469,6 +469,7 @@ fn plan_screen(screen: &ScreenDecl) -> Result<PlannedScreen, String> {
             | "workspace"
             | "static_embed"
             | "report_builder"
+            | "tree_view"
     );
     if !supported {
         return Err(format!(
@@ -488,6 +489,7 @@ fn plan_screen(screen: &ScreenDecl) -> Result<PlannedScreen, String> {
             | "approval_inbox"
             | "dashboard"
             | "report_builder"
+            | "tree_view"
     );
     if needs_data && screen.data_binding.is_none() {
         return Err(format!(
@@ -1094,6 +1096,40 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
                 "nirdosha_rt::report_builder! {{\n    mount: {mount},\n    entity: {struct_name},\n    table: {table},\n    path: {path:?},\n    title: {:?},\n    purpose: {purpose:?},\n    access: {access},\n    dimensions: [ {} ],\n}}\n",
                 plan.decl.name,
                 dimensions.join(", ")
+            ));
+            Ok(out)
+        }
+        "tree_view" => {
+            let entity = binding.and_then(|b| b.entities.first()).ok_or("tree_view needs an entity")?;
+            let decl = entities.get(entity).ok_or("entity missing from bridge plan")?;
+            let struct_name = decl.struct_name();
+            let table = decl.guard_table_fn();
+            let purpose = guard
+                .ok_or_else(|| format!("screen {}: tree_view reads a GuardedTable and needs data_binding.guard", plan.id))?
+                .purpose
+                .clone();
+            let id_field = params
+                .get("id_field")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("screen {}: tree_view needs parameters.id_field", plan.id))?;
+            let parent_field = params
+                .get("parent_field")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("screen {}: tree_view needs parameters.parent_field", plan.id))?;
+            let label_field = params
+                .get("label_field")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("screen {}: tree_view needs parameters.label_field", plan.id))?;
+            for field in [id_field, parent_field, label_field] {
+                if decl.type_of(field) != "String" {
+                    return Err(format!("screen {}: tree_view fields must be String-typed (`{field}` is `{}`)", plan.id, decl.type_of(field)));
+                }
+            }
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let mut out = String::new();
+            out.push_str(&format!(
+                "nirdosha_rt::tree_view! {{\n    mount: {mount},\n    entity: {struct_name},\n    table: {table},\n    path: {path:?},\n    title: {:?},\n    purpose: {purpose:?},\n    access: {access},\n    id_field: {id_field},\n    parent_field: {parent_field},\n    label_field: {label_field},\n}}\n",
+                plan.decl.name
             ));
             Ok(out)
         }

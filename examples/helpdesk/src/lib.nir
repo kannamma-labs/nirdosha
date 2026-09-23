@@ -17,3 +17,5 @@ pub mod m05_admin;
 pub mod m06_board;
 #[path = "screens/m07_help.nir"]
 pub mod m07_help;
+#[path = "screens/m08_relations.nir"]
+pub mod m08_relations;

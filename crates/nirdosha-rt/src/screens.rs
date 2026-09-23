@@ -236,6 +236,100 @@ pub fn static_page_html(title: &str, content: &str, sha256: &str) -> String {
     )
 }
 
+/// `tree_view!`'s render: nests self-referencing rows (id/parent/label
+/// by field name) into a deterministic, cycle-safe `<ul>` tree over the
+/// guard-decoded rows. Roots are rows whose parent is empty or not a
+/// visible id — orphans render at root level marked `(parent not
+/// visible)` rather than disappearing. Siblings sort by id; a parent
+/// loop renders one `(cycle)` marker; depth caps at 24 per branch.
+pub fn tree_view_html(title: &str, rows: &[serde_json::Value], id_field: &str, parent_field: &str, label_field: &str) -> String {
+    if rows.is_empty() {
+        return themed_page_shell(title, "", &format!("<p class=\"empty\">No {} yet.</p>", html_escape(title)));
+    }
+    let value_str = |row: &serde_json::Value, field: &str| -> String {
+        row.get(field).map(value_display).unwrap_or_default()
+    };
+    // children: parent key -> sorted (id, row)
+    let mut children: std::collections::BTreeMap<String, Vec<(String, &serde_json::Value)>> = std::collections::BTreeMap::new();
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in rows {
+        ids.insert(value_str(row, id_field));
+    }
+    for row in rows {
+        children
+            .entry(value_str(row, parent_field))
+            .or_default()
+            .push((value_str(row, id_field), row));
+    }
+    for siblings in children.values_mut() {
+        siblings.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    fn render_subtree(
+        children: &std::collections::BTreeMap<String, Vec<(String, &serde_json::Value)>>,
+        parent: &str,
+        depth: usize,
+        visited: &mut std::collections::HashSet<String>,
+        label_field: &str,
+        out: &mut String,
+    ) {
+        let Some(siblings) = children.get(parent) else { return };
+        for (id, row) in siblings {
+            let label = value_display(&row.get(label_field).cloned().unwrap_or(serde_json::Value::Null));
+            if !visited.insert(id.clone()) {
+                out.push_str("<li><span style=\"color:#999\">(cycle)</span></li>");
+                continue;
+            }
+            out.push_str(&format!("<li>{}", html_escape(&label)));
+            if depth >= 24 {
+                out.push_str(" <span style=\"color:#999\">(depth cap)</span>");
+            } else if children.contains_key(id) {
+                out.push_str("<ul>");
+                render_subtree(children, id, depth + 1, visited, label_field, out);
+                out.push_str("</ul>");
+            }
+            out.push_str("</li>");
+            visited.remove(id);
+        }
+    }
+
+    let mut body = String::new();
+    let mut total = 0usize;
+    // Roots: empty parent, parent not among the visible ids, or the
+    // conventional empty-string parent.
+    let mut roots: Vec<(String, &serde_json::Value)> = Vec::new();
+    for (parent_key, siblings) in children.iter() {
+        if parent_key.is_empty() || parent_key == "None" || !ids.contains(parent_key) {
+            total += siblings.len();
+            roots.extend(siblings.iter().cloned());
+        }
+    }
+    roots.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut visited = std::collections::HashSet::new();
+    let mut tree = String::from("<ul>");
+    render_subtree(&children, "", 0, &mut visited, label_field, &mut tree);
+    // Orphans (parent set but invisible) render under their parent key,
+    // marked — never silently re-rooted.
+    for (parent_key, siblings) in children.iter() {
+        if !parent_key.is_empty() && parent_key != "None" && !ids.contains(parent_key) {
+            for (id, row) in siblings {
+                let label = value_display(&row.get(label_field).cloned().unwrap_or(serde_json::Value::Null));
+                tree.push_str(&format!(
+                    "<li>{} <span style=\"color:#999\">(parent `{}` not visible)</span></li>",
+                    html_escape(&label),
+                    html_escape(parent_key)
+                ));
+                total += 1;
+                let _ = id;
+            }
+        }
+    }
+    tree.push_str("</ul>");
+    let _ = &roots;
+    let summary = format!("<p style=\"color:#666\">{total} visible row(s)</p>");
+    themed_page_shell(title, "", &format!("{summary}{tree}"))
+}
+
 /// `report_builder!`'s dimension picker: one `<select>` over the
 /// screen's declared dimensions plus the run button. Dimensions come
 /// from the invocation itself, so the form can never offer a dimension

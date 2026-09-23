@@ -12,6 +12,7 @@ nirdosha_rt::login! {
     demo_users: [
         { username: "sam", password: "agent123", roles: ["Agent"] },
         { username: "ada", password: "admin123", roles: ["Admin", "Agent"] },
+        { username: "vic", password: "viewer123", roles: ["Viewer"] },
     ],
     landing: landing_path,
 }

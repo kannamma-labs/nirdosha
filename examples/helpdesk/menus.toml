@@ -97,6 +97,16 @@ roles = ["Agent", "Admin"]
 order = 45
 
 [[menu]]
+id = "nav.relations"
+label_key = "nav.relations"
+group = "work"
+screen_id = "8.1"
+route = "/relations/tree"
+guard = { action = "read", resource = "relation" }
+roles = ["Agent", "Admin", "Viewer"]
+order = 35
+
+[[menu]]
 id = "nav.help"
 label_key = "nav.help"
 group = "collab"

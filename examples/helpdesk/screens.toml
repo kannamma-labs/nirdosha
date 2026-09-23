@@ -21,7 +21,7 @@
 schema = "nirdosha.screen-register/v2"
 register_id = "helpdesk"
 version = "1.0.0"
-total_screens = 10
+total_screens = 11
 canonical_order = "module_then_id"
 codegen_profile = "web-default"
 generator_version = "nirdosha-screen-codegen/1"
@@ -44,6 +44,7 @@ codegen = { template = "login", mount_symbol = "mount_login", route_path = "/log
 parameters.demo_users = [
     { username = "sam", password = "agent123", roles = ["Agent"] },
     { username = "ada", password = "admin123", roles = ["Admin", "Agent"] },
+    { username = "vic", password = "viewer123", roles = ["Viewer"] },
 ]
 notes = "mode: demo — fixture-grade auth, disclosed as such; production mode reads NIRDOSHA_LOGIN_USERS"
 
@@ -234,3 +235,25 @@ data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { tab
 policy = { purpose = "Operations", allowed_actions = ["aggregate"] }
 parameters = { access = 'requires role "Agent"', dimensions = ["status", "priority"] }
 notes = "aggregate policy helpdesk-7-2-aggregate; counts only, PII auto-masked in aggregates"
+
+# ------------------------------------------------------------ M8 Org (1)
+[[screen]]
+id = "8.1"
+name = "Related Parties Tree"
+module = "M8"
+archetype = "tree_view"
+combo = []
+roles = ["Agent:R", "Admin:R", "Viewer:R"]
+datasets = ["PG.relations"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m08_relations.nir"
+codegen = { template = "tree_view", mount_symbol = "mount_relation_tree", route_path = "/relations/tree", generated_files = ["src/screens/m08_relations.nir"] }
+data_binding = { entities = ["Relation"], primary_key = "relation_id", guard = { table = "relation_table", purpose = "Operations" }, fields = [
+    { name = "name", type = "String" },
+    { name = "parent_id", type = "String" },
+    { name = "customer_ref", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["read"] }
+parameters = { access = 'requires role "Agent"', id_field = "relation_id", parent_field = "parent_id", label_field = "name" }
+notes = "guard-decoded snapshot nested in-process; orphans render honestly; cycle-safe"

@@ -7,6 +7,7 @@
 nirdosha_rt::roles! {
     Agent = "Agent";
     Admin = "Admin";
+    Viewer = "Viewer";
 }
 
 // ---- guard policies, synthesized from each guarded screen's policy block ----
@@ -110,6 +111,15 @@ nirdosha_rt::guard_policy! {
     obligate audit(sampled)
 }
 
+nirdosha_rt::guard_policy! {
+    allow "helpdesk-8-1-read" for Agent, Admin, Viewer
+    when action == "read" && resource == "relation"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 20_000)
+    obligate audit(sampled)
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FeedPostRow {
     pub id: i64,
@@ -149,6 +159,49 @@ pub fn feed_post_store() -> &'static nirdosha_rt::prelude::SharedTable<i64, Feed
 
 pub fn feed_post_cell() -> &'static nirdosha_rt::prelude::SharedCell<Vec<FeedPostRow>> {
     static CELL: std::sync::OnceLock<nirdosha_rt::prelude::SharedCell<Vec<FeedPostRow>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| nirdosha_rt::prelude::SharedCell::new(Vec::new()))
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RelationRow {
+    pub id: i64,
+    pub relation_id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub parent_id: String,
+    pub customer_ref: String,
+}
+
+impl nirdosha_guard_screens::GuardedEntity for RelationRow {
+    const RESOURCE: &'static str = "relation";
+    fn row_id(&self) -> String {
+        self.relation_id.clone()
+    }
+}
+
+pub fn relation_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RelationRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RelationRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "helpdesk-demo",
+            std::env::temp_dir().join(format!("helpdesk-audit-relation-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            Vec::new(),
+        )
+    })
+}
+
+pub fn relation_store() -> &'static nirdosha_rt::prelude::SharedTable<i64, RelationRow> {
+    static STORE: std::sync::OnceLock<nirdosha_rt::prelude::SharedTable<i64, RelationRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(nirdosha_rt::prelude::SharedTable::new)
+}
+
+pub fn relation_cell() -> &'static nirdosha_rt::prelude::SharedCell<Vec<RelationRow>> {
+    static CELL: std::sync::OnceLock<nirdosha_rt::prelude::SharedCell<Vec<RelationRow>>> = std::sync::OnceLock::new();
     CELL.get_or_init(|| nirdosha_rt::prelude::SharedCell::new(Vec::new()))
 }
 
@@ -241,6 +294,7 @@ pub fn ticket_cell() -> &'static nirdosha_rt::prelude::SharedCell<Vec<TicketRow>
 pub const HUMAN_ROLES: &[&str] = &[
     "Agent",
     "Admin",
+    "Viewer",
 ];
 
 pub const DEMO_TENANT: &str = "default";

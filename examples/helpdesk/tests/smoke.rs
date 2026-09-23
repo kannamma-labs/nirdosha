@@ -29,6 +29,7 @@ fn router() -> Router {
     let router = helpdesk::m06_board::mount_ticket_board_move(router);
     let router = helpdesk::m07_help::mount_ticket_report(router);
     let router = helpdesk::m07_help::mount_getting_started(router);
+    let router = helpdesk::m08_relations::mount_relation_tree(router);
     helpdesk::m03_tickets::mount_tickets(router)
 }
 
@@ -183,4 +184,26 @@ fn anonymous_report_run_is_denied_by_the_guard() {
     let router = router();
     let resp = router.dispatch(&Request { method: "POST".into(), path: "/reports/tickets".into(), headers: HashMap::from([("content-type".into(), "application/x-www-form-urlencoded".into())]), body: "dimension=status".into() });
     assert_eq!(resp.status, 403, "no policy for anon = guard deny: {resp:?}");
+}
+
+#[test]
+fn relation_tree_nests_the_guard_decoded_rows() {
+    // Seed a parent/child chain the way the serve binary seeds
+    // singletons: system_write is the one legitimate non-screen write.
+    use helpdesk::bridge::{relation_table, RelationRow};
+    relation_table().system_write("default", &RelationRow { id: 0, relation_id: "rel-a".into(), parent_id: String::new(), customer_ref: "c-1".into(), tenant_id: "default".into(), name: "Acme Holdings".to_string() });
+    relation_table().system_write("default", &RelationRow { id: 0, relation_id: "rel-b".into(), parent_id: "rel-a".into(), customer_ref: "c-1".into(), tenant_id: "default".into(), name: "Acme Subsidiary".to_string() });
+    relation_table().system_write("default", &RelationRow { id: 0, relation_id: "rel-c".into(), parent_id: "rel-b".into(), customer_ref: "c-1".into(), tenant_id: "default".into(), name: "UBO Trust".to_string() });
+    let router = router();
+    let agent = login_as(&router, "sam", "agent123");
+    let resp = get_as(&router, "/relations/tree", &agent);
+    assert_eq!(resp.status, 200, "read policy helpdesk-8-1-read must allow Agent: {resp:?}");
+    for label in ["Acme Holdings", "Acme Subsidiary", "UBO Trust"] {
+        assert!(resp.body.contains(label), "tree must render `{label}`: {}", resp.body);
+    }
+    // Nested: the child <li> must come after the parent's nested <ul>.
+    let parent_pos = resp.body.find("Acme Holdings").expect("parent present");
+    let child_pos = resp.body.find("Acme Subsidiary").expect("child present");
+    let nested = resp.body[parent_pos..child_pos].contains("<ul>");
+    assert!(nested, "children must nest under the parent: {}", resp.body);
 }
