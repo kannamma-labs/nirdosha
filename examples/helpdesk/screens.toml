@@ -21,12 +21,20 @@
 schema = "nirdosha.screen-register/v2"
 register_id = "helpdesk"
 version = "1.0.0"
-total_screens = 12
+total_screens = 14
 canonical_order = "module_then_id"
 codegen_profile = "web-default"
 generator_version = "nirdosha-screen-codegen/1"
 default_timezone = "UTC"
 default_locale = "en"
+
+# App-wide approval chains, emitted as `nirdosha_rt::approval_chain!` into
+# bridge.nir and passed to every GuardedTable constructor. An inbox's
+# source `chain` must name one of these (verbatim string compare).
+[[approval_chain]]
+name = "ticket_close"
+quorum = 1
+approvers = ["Admin"]
 
 # ---------------------------------------------------------------- M1 Auth (2)
 [[screen]]
@@ -171,10 +179,55 @@ codegen = { template = "communication_feed", mount_symbol = "mount_team_feed", r
 data_binding = { entities = ["FeedPost"], primary_key = "post_id", guard = { table = "feed_post_table", purpose = "Operations" }, fields = [
     { name = "author", type = "String" },
     { name = "body", type = "String" },
+    { name = "ticket_id", type = "String" },
 ] }
 policy = { purpose = "Operations", allowed_actions = ["read", "create"] }
 parameters = { post_access = 'requires role "Agent"', read_access = 'requires role "Agent"', refresh_seconds = 5 }
 notes = "append-only via SharedCell; guard decides who reads and who posts"
+
+# -------------------------------------------------------------- M9 Workflows (2)
+[[screen]]
+id = "9.1"
+name = "Approval Inbox"
+module = "M9"
+archetype = "approval_inbox"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.tickets"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m09_workflows.nir"
+codegen = { template = "approval_inbox", mount_symbol = "mount_ticket_close_inbox", route_path = "/approvals", generated_files = ["src/screens/m09_workflows.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [
+    { name = "title", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["read"] }
+parameters = { access = 'requires role "Admin"', sources = [
+    { table = "ticket_table", chain = "ticket_close", detail_path = "/tickets/{id}" },
+] }
+notes = "guard-mode: every source declares purpose, the view route is get_with_auth, and the worklist read is a real guard evaluation per source"
+
+[[screen]]
+id = "9.2"
+name = "Ticket Workspace"
+module = "M9"
+archetype = "workspace"
+combo = []
+roles = ["Agent:R", "Admin:R"]
+datasets = ["PG.tickets", "PG.feed_posts"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m09_workflows.nir"
+codegen = { template = "workspace", mount_symbol = "mount_ticket_workspace", route_path = "/tickets/{id}/workspace", generated_files = ["src/screens/m09_workflows.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [
+    { name = "title", type = "String" },
+] }
+policy = { purpose = "Operations", allowed_actions = ["read"] }
+parameters.subject = { entity = "Ticket", label_field = "title" }
+parameters.panels = [
+    { need = "ticket_feed", title = "Ticket Feed", render = "table", source = { entity = "FeedPost", link_field = "ticket_id" } },
+]
+notes = "panels are generated guarded reads (entity + link_field), filtered in-process to the subject row; fail-whole-not-partial via assemble_context"
 
 # -------------------------------------------------------------- M6 Board (1)
 [[screen]]

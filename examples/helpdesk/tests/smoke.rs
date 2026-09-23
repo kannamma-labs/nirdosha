@@ -31,6 +31,8 @@ fn router() -> Router {
     let router = helpdesk::m07_help::mount_getting_started(router);
     let router = helpdesk::m08_relations::mount_relation_tree(router);
     let router = helpdesk::m06_board::mount_ticket_lookup(router);
+    let router = helpdesk::m09_workflows::mount_ticket_close_inbox(router);
+    let router = helpdesk::m09_workflows::mount_ticket_workspace(router);
     helpdesk::m03_tickets::mount_tickets(router)
 }
 
@@ -228,4 +230,41 @@ fn relation_tree_nests_the_guard_decoded_rows() {
     let child_pos = resp.body.find("Acme Subsidiary").expect("child present");
     let nested = resp.body[parent_pos..child_pos].contains("<ul>");
     assert!(nested, "children must nest under the parent: {}", resp.body);
+}
+#[test]
+fn approval_inbox_guard_mode_denies_anon_and_shows_the_worklist_to_admin() {
+    use helpdesk::bridge::ticket_table;
+    let router = router();
+    // No session: the *_with_auth route resolves an anonymous Auth, and
+    // guarded_list_pending_approvals denies the read (no policy matches
+    // role-less anon) at the data plane.
+    let resp = router.dispatch(&Request { method: "GET".into(), path: "/approvals".into(), headers: HashMap::new(), body: String::new() });
+    assert_eq!(resp.status, 403, "anon must be denied the worklist read by the guard: {resp:?}");
+    // Admin holds the inbox's own synthesized read record (helpdesk-9-1-read):
+    // the guard-mode view route is get_with_auth + a guarded worklist fetch.
+    let admin = login_as(&router, "ada", "admin123");
+    let resp = get_as(&router, "/approvals", &admin);
+    assert_eq!(resp.status, 200, "admin must read the guarded inbox: {resp:?}");
+    assert!(resp.body.contains("Nothing pending"), "no escalation has opened in the demo, so the worklist renders honestly empty: {}", resp.body);
+    let _ = &ticket_table;
+}
+
+#[test]
+fn workspace_panels_are_fail_whole_not_partial_per_subject() {
+    use helpdesk::bridge::{feed_post_table, FeedPostRow, ticket_table, TicketRow};
+    ticket_table().system_write("default", &TicketRow { id: 0, ticket_id: "ws-1".into(), tenant_id: "default".into(), title: "Workspace subject".to_string(), priority: "high".into(), status: "open".into(), body: "subject body".into(), internal_notes: None });
+    feed_post_table().system_write("default", &FeedPostRow { id: 0, post_id: "p-1".into(), tenant_id: "default".into(), author: "sam".into(), body: "related feed row".into(), ticket_id: "ws-1".into() });
+    let router = router();
+    // Agent: subject read (3-1) and panel read (5-2) both allowed — the
+    // generated panel fn filters the guarded snapshot to the subject row.
+    let agent = login_as(&router, "sam", "agent123");
+    let resp = get_as(&router, "/tickets/ws-1/workspace", &agent);
+    assert_eq!(resp.status, 200, "workspace must assemble for a viewer with both grants: {resp:?}");
+    assert!(resp.body.contains("related feed row"), "panel must show the subject's own feed rows: {}", resp.body);
+    // Viewer: subject read (6-2) is allowed but the feed_post panel read
+    // has no record — fail-whole-not-partial means the whole assembly is
+    // refused (422), never a partial workspace.
+    let viewer = login_as(&router, "vic", "viewer123");
+    let vresp = get_as(&router, "/tickets/ws-1/workspace", &viewer);
+    assert_eq!(vresp.status, 422, "a panel the guard denies must fail the whole workspace: {:?}", vresp);
 }

@@ -1112,6 +1112,27 @@ impl<D: StoreDriver, E: GuardedEntity> GuardedTable<D, E> {
         Ok(())
     }
 
+    /// The guard-gated form of [`Self::list_pending_approvals`] — the
+    /// `approval_inbox!` guard-mode read. Escalation metadata (chain,
+    /// proposer, deadlines, quorum counts) carries no entity fields, so
+    /// the mask pipeline has nothing to drop; the decision is exactly
+    /// one allow/deny evaluation of the `read` action under the caller's
+    /// purpose, the same evaluation `guarded_snapshot` runs before it
+    /// decodes rows. A viewer the guard would deny a plain read for
+    /// sees no worklist — the inbox cannot become a side door around a
+    /// read policy the entity's own data reads enforce.
+    pub fn guarded_list_pending_approvals(&self, auth: &Auth, purpose: &str) -> Result<Vec<PendingApprovalRow>, GuardScreenError> {
+        let request = EvalRequest { context: self.context(auth, Action::Read, purpose) };
+        let evaluation = { self.client.lock().expect("guard client lock poisoned").evaluate(&request) };
+        self.record_audit_decision(&request, &evaluation);
+        match evaluation.decision {
+            Decision::Allow => Ok(self.list_pending_approvals()),
+            Decision::Deny { reason } => Err(GuardScreenError::Denied(reason)),
+            Decision::Escalate { to } => Err(GuardScreenError::Escalated(format!("{to:?}"))),
+            Decision::Pending { .. } => Err(GuardScreenError::Store("approval-inbox read cannot be pending here".into())),
+        }
+    }
+
     /// This table's own pending/cooling/recently-resolved escalations --
     /// the real per-entity slice an `approval_inbox!` screen merges
     /// across the several `GuardedTable`s it names (case/rule-catalog/
@@ -1934,6 +1955,47 @@ mod tests {
         table.guarded_finalize_escalated_action(&lead_a, "Ops", Action::Update, "update", WriteAction::Update, "w-1", &pending.chain, &pending.escalation_id, &changed, |w| w.name = "closed".into(), 3_000).expect("finalize");
         let resolved = table.list_pending_approvals();
         assert_eq!(resolved[0].status, "approved");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// T-04/B10 guard mode: `guarded_list_pending_approvals` — the
+    /// `approval_inbox!` guard-gated read. A viewer with a matching
+    /// read policy sees the worklist; a role the guard would deny a
+    /// plain read for is denied here too — the inbox cannot become a
+    /// side door around a read policy the entity's own reads enforce.
+    #[test]
+    fn guarded_list_pending_approvals_respects_the_read_guard() {
+        let root = scratch_dir("guarded-list-pending");
+        let driver = MemStoreDriver::new();
+        let read_candidate = candidate("widget-read", PolicyEffect::Allow, &["ComplianceLead"], Action::Read, Some("Ops"), None, vec![]);
+        let write_candidate = candidate("widget-write", PolicyEffect::Allow, &["Ingest"], Action::Create, Some("Ops"), None, vec![]);
+        let mut close_candidate = candidate("widget-close-confirm", PolicyEffect::Allow, &["ComplianceLead"], Action::Update, Some("Ops"), None, vec![]);
+        close_candidate.escalation = Some(EscalateTarget::Approval { chain: "case_review".into() });
+        let table = GuardedTable::<_, Widget>::new(driver, vec![read_candidate, write_candidate, close_candidate], vec![], "test", root.join("audit.jsonl"), vec!["Ingest".into(), "ComplianceLead".into(), "Viewer".into()], "tenant-a", vec![case_review_chain_with_cooling()]);
+        table.guarded_insert(&Auth::login("svc", &["Ingest"]), "Ops", Widget { widget_id: "w-1".into(), tenant_id: "tenant-a".into(), name: "old".into(), secret_note: Some("s".into()) }).expect("seed");
+
+        let lead = Auth::login("lead", &["ComplianceLead"]);
+        let changed: HashSet<String> = ["name".into()].into();
+        let pending = match table.guarded_propose_escalated_update(&lead, "Ops", "w-1", &changed, |w| w.name = "closed".into(), 1_000).expect("propose") {
+            EscalatedWrite::Pending(p) => p,
+            EscalatedWrite::Committed(_) => panic!("must be pending"),
+        };
+        let _ = pending;
+
+        // ComplianceLead holds the read record for purpose Ops — the
+        // guarded worklist fetch is allowed.
+        let rows = table.guarded_list_pending_approvals(&lead, "Ops").expect("allowed read");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].proposer, "lead");
+
+        // A Viewer with no read record on widget/Ops is denied here too —
+        // exactly the decision guarded_snapshot would make before it
+        // decoded any entity rows.
+        let viewer = Auth::login("viewer", &["Viewer"]);
+        assert!(
+            matches!(table.guarded_list_pending_approvals(&viewer, "Ops"), Err(GuardScreenError::Denied(_))),
+            "a viewer the guard denies read for must be denied the worklist"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

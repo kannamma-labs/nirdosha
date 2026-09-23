@@ -24,7 +24,7 @@ nirdosha_rt::communication_feed! {
     entity: FeedPostRow,
     store: feed_post_cell,
     path: "/feed",
-    fields: [ author: String, body: String ],
+    fields: [ author: String, body: String, ticket_id: String ],
     post_access: requires role "Agent",
     read_access: requires role "Agent",
     refresh_seconds: 5,

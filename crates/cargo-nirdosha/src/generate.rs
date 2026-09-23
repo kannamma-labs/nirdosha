@@ -48,6 +48,22 @@ struct RegisterFile {
     metadata: Metadata,
     #[serde(default)]
     screen: Vec<ScreenDecl>,
+    /// App-wide approval chains (`nirdosha_rt::approval_chain!`), emitted
+    /// into bridge.nir and passed to every `GuardedTable` constructor.
+    /// An `approval_inbox` screen's source `chain` must resolve to one of
+    /// these (the escalation it lists can otherwise never open).
+    #[serde(default)]
+    approval_chain: Vec<ChainDecl>,
+}
+
+#[derive(Deserialize, Clone)]
+struct ChainDecl {
+    name: String,
+    quorum: i64,
+    approvers: Vec<String>,
+    /// Emit as `cooling(seconds = N)`; absent = no cooling period.
+    #[serde(default)]
+    cooling_seconds: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -388,7 +404,7 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
             Some((entity, row_id))
         })
         .collect();
-    let bridge = render_bridge(&register_id, &entities, &planned, &all_roles, &singletons)?;;
+    let bridge = render_bridge(&register_id, &register, &entities, &planned, &all_roles, &singletons)?;
     std::fs::write(src_dir.join("bridge.nir"), &bridge).map_err(|e| e.to_string())?;
     files.push("src/bridge.nir".into());
 
@@ -420,7 +436,7 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
             .strip_prefix("src/")
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| file.clone());
-        let body = render_screen_file(plans, &entities)?;
+        let body = render_screen_file(plans, &entities, &register)?;
         let path = src_dir.join(&rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -809,6 +825,7 @@ fn access_literal(value: Option<&str>, default: &str) -> String {
 
 fn render_bridge(
     register_id: &str,
+    register: &RegisterFile,
     entities: &BTreeMap<String, EntityDecl>,
     screens: &[PlannedScreen],
     all_roles: &[String],
@@ -835,6 +852,48 @@ fn render_bridge(
             out.push_str(&format!("    {role} = \"{role}\";\n"));
         }
         out.push_str("}\n\n");
+    }
+
+    // approval chains: `nirdosha_rt::approval_chain!` blocks, then the
+    // same registry-dump helper RTM's hand-written bridge carries, so
+    // every `GuardedTable` constructor below can pass the real chain set
+    // (the runtime's escalation/return machinery runs on it). Validated
+    // here so a typo'd approver role or a zero quorum is a generation
+    // error, not a runtime "chain has no registered definition".
+    let chains_declared = !register.approval_chain.is_empty();
+    if chains_declared {
+        out.push_str("// ---- approval chains ----\n\n");
+        for chain in &register.approval_chain {
+            if chain.quorum < 1 {
+                return Err(format!(
+                    "approval chain `{}`: quorum must be at least 1 (got {})",
+                    chain.name, chain.quorum
+                ));
+            }
+            let approvers_pascal: Vec<String> = chain.approvers.iter().map(|r| pascalize(r)).collect();
+            for approver in &approvers_pascal {
+                if !all_roles.iter().any(|r| pascalize(r) == *approver) {
+                    return Err(format!(
+                        "approval chain `{}` names approver role `{}` which no screen declares — approvers are exact string compares at the data plane",
+                        chain.name, approver
+                    ));
+                }
+            }
+            let cooling = chain
+                .cooling_seconds
+                .map(|n| format!("cooling(seconds = {n}); "))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "nirdosha_rt::approval_chain! {{\n    chain {} {{ quorum({}, of = [{}]); timeout(deny); {} }} }}\n\n",
+                chain.name,
+                chain.quorum,
+                approvers_pascal.join(", "),
+                cooling
+            ));
+        }
+        out.push_str(
+            "pub fn corpus_approval_chains() -> Vec<nirdosha_guard_core::approval_chain::ApprovalChainDefinition> {\n    nirdosha_guard_registry::dump()\n        .approval_chains\n        .iter()\n        .map(|c| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: c.name.clone(), quorum: c.quorum, approver_roles: c.approvers.to_vec(), cooling_period_ms: c.cooling_ms })\n        .collect()\n}\n\n",
+        );
     }
 
     // guard_policy! records: one per (guarded screen, allowed action).
@@ -915,6 +974,10 @@ fn render_bridge(
         }
     }
 
+    // Every table receives the registered chains (empty when none): the
+    // escalation/return runtime is a constructor input, not a global.
+    let approval_chains_arg = if chains_declared { "corpus_approval_chains()" } else { "Vec::new()" };
+
     // entities
     for decl in entities.values() {
         let struct_name = decl.struct_name();
@@ -956,7 +1019,7 @@ fn render_bridge(
             "    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, {struct_name}>> = std::sync::OnceLock::new();\n"
         ));
         out.push_str(&format!(
-            "    TABLE.get_or_init(|| {{\n        nirdosha_guard_screens::GuardedTable::new(\n            nirdosha_guard_mic::MemStoreDriver::new(),\n            nirdosha_guard_registry::candidates(),\n            nirdosha_guard_registry::dump().policies,\n            \"{register_id}-demo\",\n            std::env::temp_dir().join(format!(\"{register_id}-audit-{resource}-{{}}.jsonl\", std::process::id())),\n            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),\n            DEMO_TENANT,\n            Vec::new(),\n        )\n    }})\n}}\n\n"
+            "    TABLE.get_or_init(|| {{\n        nirdosha_guard_screens::GuardedTable::new(\n            nirdosha_guard_mic::MemStoreDriver::new(),\n            nirdosha_guard_registry::candidates(),\n            nirdosha_guard_registry::dump().policies,\n            \"{register_id}-demo\",\n            std::env::temp_dir().join(format!(\"{register_id}-audit-{resource}-{{}}.jsonl\", std::process::id())),\n            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),\n            DEMO_TENANT,\n            {approval_chains_arg},\n        )\n    }})\n}}\n\n"
         ));
 
         // unguarded keyed store (macros like wizard!/kanban_board! require one)
@@ -1050,14 +1113,18 @@ fn render_app_shell(title: &str, screens: &[PlannedScreen]) -> String {
 // per-module screen files
 // ---------------------------------------------------------------------------
 
-fn render_screen_file(plans: &[&PlannedScreen], entities: &BTreeMap<String, EntityDecl>) -> Result<String, String> {
+fn render_screen_file(
+    plans: &[&PlannedScreen],
+    entities: &BTreeMap<String, EntityDecl>,
+    register: &RegisterFile,
+) -> Result<String, String> {
     // Render every invocation FIRST, then import only the bridge idents
     // the rendered text actually references — no `#[allow(unused)]`, no
     // blanket import: the emitted import list is derived from the same
     // text that needs it.
     let mut body = String::new();
     for plan in plans {
-        body.push_str(&render_screen_invocation(plan, entities)?);
+        body.push_str(&render_screen_invocation(plan, entities, register)?);
         body.push('\n');
     }
     let mut out = String::new();
@@ -1094,7 +1161,11 @@ fn render_screen_file(plans: &[&PlannedScreen], entities: &BTreeMap<String, Enti
     Ok(out)
 }
 
-fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, EntityDecl>) -> Result<String, String> {
+fn render_screen_invocation(
+    plan: &PlannedScreen,
+    entities: &BTreeMap<String, EntityDecl>,
+    register: &RegisterFile,
+) -> Result<String, String> {
     let binding = plan.decl.data_binding.as_ref();
     // The guard comes from the ENTITY (declared on whichever screen owns
     // it), not from this screen's own binding: a kanban board reading a
@@ -1501,50 +1572,249 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
             Ok(out)
         }
         "approval_inbox" => {
-            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let sources = params
+                .get("sources")
+                .and_then(toml::Value::as_array)
+                .ok_or_else(|| format!("screen {}: approval_inbox needs parameters.sources", plan.id))?.as_slice()
+                .to_vec();
+            if sources.is_empty() {
+                return Err(format!("screen {}: approval_inbox needs at least one source", plan.id));
+            }
             let mut out = String::new();
             out.push_str(&format!(
-                "nirdosha_rt::approval_inbox! {{\n    mount: {mount},\n    path: {path:?},\n    access: {access},\n    sources: [\n"
+                "nirdosha_rt::approval_inbox! {{\n    mount: {mount},\n    path: {path:?},\n"
             ));
-            if let Some(sources) = params.get("sources").and_then(toml::Value::as_array) {
-                for source in sources {
-                    let table = source.get("table").and_then(toml::Value::as_str).unwrap_or("");
-                    let chain = source.get("chain").and_then(toml::Value::as_str).unwrap_or("");
-                    let resource = source.get("resource").and_then(toml::Value::as_str).unwrap_or("");
-                    let detail_path = source.get("detail_path").and_then(toml::Value::as_str).unwrap_or("");
-                    out.push_str(&format!(
-                        "        {{ table: {table}, chain: {chain:?}, resource: {resource:?}, detail_path: {detail_path:?} }},\n"
+            // Access stays vestigial route metadata in guard mode (the
+            // macro ignores it for routing when every source is guarded
+            // — and the generator only ever emits guard mode, because
+            // every entity a generated screen touches must be guarded).
+            if let Some(access_str) = params.get("access").and_then(toml::Value::as_str) {
+                if !access_str.is_empty() {
+                    out.push_str(&format!("    access: {access_str},\n"));
+                }
+            }
+            out.push_str("    sources: [\n");
+            for source in &sources {
+                let table = source
+                    .get("table")
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| format!("screen {}: approval_inbox source needs `table`", plan.id))?
+                    .to_string();
+                let chain = source
+                    .get("chain")
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| format!("screen {}: approval_inbox source needs `chain`", plan.id))?
+                    .to_string();
+                let detail_path = source
+                    .get("detail_path")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("/{id}")
+                    .to_string();
+                // Typo-proof the table: it must be some registered
+                // entity's generated GuardedTable constructor.
+                let decl = entities
+                    .values()
+                    .find(|d| d.guard_table_fn() == table)
+                    .ok_or_else(|| format!(
+                        "screen {}: approval_inbox source table `{table}` matches no entity declared in the register (expected `{name}_table` for a registered entity)",
+                        plan.id,
+                        name = entities
+                            .keys()
+                            .next()
+                            .map(|k| pascal_to_snake(k))
+                            .unwrap_or_default()
+                    ))?;
+                // The worklist read must be guard-gated: every entity a
+                // generated screen touches must be guarded, and the
+                // inbox's view evaluates that guard per source.
+                let purpose = decl
+                    .guard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        format!(
+                            "screen {}: approval_inbox source entity `{}` has no data_binding.guard anywhere in the register — the worklist read must be guard-gated",
+                            plan.id, decl.name
+                        )
+                    })?
+                    .purpose
+                    .clone();
+                // The return route's {resource} must name the entity the
+                // escalation really lives in — derived, not declared, so
+                // return routing cannot drift from the table.
+                let resource = decl.resource();
+                // The chain must be registered in the same register, or
+                // the escalations this inbox lists can never open. The
+                // chain name string is compared verbatim — it is the
+                // registry key both sides use.
+                if !register.approval_chain.iter().any(|c| c.name == chain) {
+                    return Err(format!(
+                        "screen {}: approval_inbox source chain `{chain}` is not declared in any [[approval_chain]] — the escalation it lists could never open",
+                        plan.id
                     ));
                 }
+                out.push_str(&format!(
+                    "        {{ table: {table}, chain: {chain:?}, resource: {resource:?}, detail_path: {detail_path:?}, purpose: {purpose:?} }},\n"
+                ));
             }
             out.push_str("    ],\n}\n");
             Ok(out)
         }
         "workspace" => {
-            let subject = params.get("subject").ok_or("workspace needs parameters.subject")?;
-            let subject_table = subject.get("table").and_then(toml::Value::as_str).unwrap_or("");
-            let subject_purpose = subject.get("purpose").and_then(toml::Value::as_str).unwrap_or("");
-            let label_fn = subject.get("label_fn").and_then(toml::Value::as_str).unwrap_or("");
-            let mut out = String::new();
-            out.push_str(&format!(
-                "nirdosha_rt::workspace! {{\n    mount: {mount},\n    path: {path:?},\n    subject: {{ table: {subject_table}, purpose: {subject_purpose:?}, label_fn: {label_fn} }},\n"
-            ));
-            if let Some(budget) = params.get("budget") {
-                let max_rows = budget.get("max_rows").and_then(toml::Value::as_integer).unwrap_or(500);
-                let max_ms = budget.get("max_execution_ms").and_then(toml::Value::as_integer).unwrap_or(2000);
-                out.push_str(&format!("    budget: {{ max_rows: {max_rows}, max_execution_ms: {max_ms} }},\n"));
+            let subject = params.get("subject").ok_or_else(|| format!("screen {}: workspace needs parameters.subject", plan.id))?.as_table().ok_or_else(|| format!("screen {}: workspace subject must be a [table]", plan.id))?.clone();
+            let subject_entity = subject
+                .get("entity")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!(
+                    "screen {}: workspace subject needs `entity` (the registered entity the workspace centers on; its guard purpose is derived, not re-declared)",
+                    plan.id
+                ))?
+                .to_string();
+            let decl = entities
+                .get(&subject_entity)
+                .ok_or_else(|| format!("screen {}: workspace subject entity `{subject_entity}` is not declared in the register", plan.id))?;
+            let purpose = guard
+                .ok_or_else(|| format!("screen {}: workspace reads a GuardedTable and needs data_binding.guard", plan.id))?
+                .purpose
+                .clone();
+            let subject_table = decl.guard_table_fn();
+            let struct_name = decl.struct_name();
+            let label_fn = format!("{}_workspace_label", pascal_to_snake(&decl.name));
+            let label_field = subject
+                .get("label_field")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(&decl.primary_key)
+                .to_string();
+            if !decl.has_field(&label_field) {
+                return Err(format!(
+                    "screen {}: workspace subject label_field `{label_field}` is not a declared field of `{}`",
+                    plan.id,
+                    decl.name
+                ));
             }
+
+            // Panel sources: the macro needs real
+            // `fn(&Auth, &str) -> Result<Vec<serde_json::Value>, String>`
+            // fns. The generator emits them for the inline-table form
+            // `{ entity, link_field }` — a real guarded read of the
+            // linked entity, filtered in-process to the subject row
+            // (masks, caps and audit come from the guard, not from this
+            // fn). A string `source` names a hand-written fn the
+            // generator cannot emit — refused with that name rather
+            // than emitted as a compile error later.
+            let panels = params
+                .get("panels")
+                .and_then(toml::Value::as_array)
+                .ok_or_else(|| format!("screen {}: workspace needs parameters.panels", plan.id))?.as_slice()
+                .to_vec();
+            if panels.is_empty() {
+                return Err(format!("screen {}: workspace needs at least one panel", plan.id));
+            }
+            let mut panel_fns = String::new();
+            let mut panel_invocations = Vec::new();
+            for panel in &panels {
+                let need = panel
+                    .get("need")
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| format!("screen {}: workspace panel needs `need`", plan.id))?
+                    .to_string();
+                let title = panel
+                    .get("title")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(&need)
+                    .to_string();
+                let render = panel
+                    .get("render")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("table")
+                    .to_string();
+                let source = panel
+                    .get("source")
+                    .ok_or_else(|| format!("screen {}: workspace panel `{need}` needs `source`", plan.id))?;
+                let source_invocation = match source.as_str() {
+                    Some(hand_written) => {
+                        return Err(format!(
+                            "screen {}: workspace panel `{need}` names hand-written fn `{hand_written}` — the generator cannot emit business-logic fns yet; declare the panel as source = {{ entity = \"X\", link_field = \"y\" }} (a real guarded read filtered to the subject row) or mark the screen blocked",
+                            plan.id
+                        ));
+                    }
+                    None => {
+                        let source_table = source.as_table().ok_or_else(|| {
+                            format!("screen {}: workspace panel `{need}` source must be a string or an {{ entity, link_field }} table", plan.id)
+                        })?.clone();
+                        let panel_entity = source_table
+                            .get("entity")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| format!("screen {}: workspace panel `{need}` source needs `entity`", plan.id))?
+                            .to_string();
+                        let link_field = source_table
+                            .get("link_field")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| format!("screen {}: workspace panel `{need}` source needs `link_field` (the field joining the panel's rows to the subject row)", plan.id))?
+                            .to_string();
+                        let panel_decl = entities
+                            .get(&panel_entity)
+                            .ok_or_else(|| format!(
+                                "screen {}: workspace panel `{need}` entity `{panel_entity}` is not declared in the register",
+                                plan.id
+                            ))?;
+                        let panel_purpose = panel_decl
+                            .guard
+                            .as_ref()
+                            .ok_or_else(|| {
+                                format!(
+                                    "screen {}: workspace panel `{need}` entity `{}` has no data_binding.guard — panel reads must be guard-gated",
+                                    plan.id, panel_decl.name
+                                )
+                            })?
+                            .purpose
+                            .clone();
+                        let link = panel_decl
+                            .field_decl(&link_field)
+                            .ok_or_else(|| format!(
+                                "screen {}: workspace panel `{need}` link_field `{link_field}` is not a declared field of `{}`",
+                                plan.id,
+                                panel_decl.name
+                            ))?;
+                        let link_name = link.name.clone();
+                        if link.ty != "String" {
+                            return Err(format!(
+                                "screen {}: workspace panel `{need}` link_field `{link_field}` must be String-typed (the subject id is a String) — got `{}`",
+                                plan.id, link.ty
+                            ));
+                        }
+                        let fn_name = format!("__panel_{}", pascal_to_snake(&need));
+                        let panel_table = panel_decl.guard_table_fn();
+                        let _panel_struct = panel_decl.struct_name();
+                        panel_fns.push_str(&format!(
+                            "pub fn {fn_name}(auth: &nirdosha_rt::Auth, subject_id: &str) -> Result<Vec<serde_json::Value>, String> {{\n    let rows = {panel_table}().guarded_snapshot(auth, \"{panel_purpose}\").map_err(|e| e.to_string())?;\n    let mut out: Vec<serde_json::Value> = Vec::new();\n    for row in rows {{\n        if row.{link_name} == *subject_id {{\n            out.push(serde_json::to_value(&row).map_err(|e| e.to_string())?);\n        }}\n    }}\n    Ok(out)\n}}\n\n",
+                        ));
+                        fn_name
+                    }
+                };
+                panel_invocations.push(format!(
+                    "        {{ need: {need:?}, title: {title:?}, render: {render:?}, source: {source_invocation} }},\n"
+                ));
+            }
+
+            let mut out = panel_fns;
+            // The subject header label: a generated fn over the entity's
+            // declared String field — real code, not a placeholder.
+            out.push_str(&format!(
+                "pub fn {label_fn}(row: &{struct_name}) -> Vec<(String, String)> {{\n    vec![\n        (\"{}\".to_string(), row.{label_field}.clone()),\n    ]\n}}\n\n",
+                decl.name
+            ));
+            out.push_str(&format!(
+                "nirdosha_rt::workspace! {{\n    mount: {mount},\n    path: {path:?},\n    subject: {{ table: {subject_table}, purpose: {purpose:?}, label_fn: {label_fn} }},\n"
+            ));
+            // The macro's clause grammar requires `budget:` in place;
+            // the register may override the defaults but never omit it.
+            let budget = params.get("budget");
+            let max_rows = budget.and_then(|b| b.get("max_rows")).and_then(toml::Value::as_integer).unwrap_or(500);
+            let max_ms = budget.and_then(|b| b.get("max_execution_ms")).and_then(toml::Value::as_integer).unwrap_or(2000);
+            out.push_str(&format!("    budget: {{ max_rows: {max_rows}, max_execution_ms: {max_ms} }},\n"));
             out.push_str("    panels: [\n");
-            if let Some(panels) = params.get("panels").and_then(toml::Value::as_array) {
-                for panel in panels {
-                    let need = panel.get("need").and_then(toml::Value::as_str).unwrap_or("");
-                    let title = panel.get("title").and_then(toml::Value::as_str).unwrap_or("");
-                    let render = panel.get("render").and_then(toml::Value::as_str).unwrap_or("table");
-                    let source = panel.get("source").and_then(toml::Value::as_str).unwrap_or("");
-                    out.push_str(&format!(
-                        "        {{ need: {need:?}, title: {title:?}, render: {render:?}, source: {source} }},\n"
-                    ));
-                }
+            for invocation in panel_invocations {
+                out.push_str(&invocation);
             }
             out.push_str("    ],\n}\n");
             Ok(out)
@@ -1821,5 +2091,190 @@ roles = ["Agent"]
         let (_dir, dir) = write_project(&screens, MENUS);
         let err = run(&dir).unwrap_err();
         assert!(err.contains("the screen itself declares masked"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod workflows_tests {
+    use super::*;
+
+    /// A register carrying `[[approval_chain]]` + an approval_inbox and a
+    /// workspace, both guarded. Ticket has a `title` field (label_field)
+    /// and a `status` field (panel link target).
+    const WF: &str = r#"
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "t"
+version = "1.0.0"
+total_screens = 3
+codegen_profile = "web-default"
+
+[[approval_chain]]
+name = "ticket_close"
+quorum = 1
+approvers = ["Agent"]
+
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login"
+roles = ["AllRoles:R"]
+stage = "built"
+codegen = { template = "login", mount_symbol = "mount_login", route_path = "/login", generated_files = ["src/app_shell.nir"] }
+parameters.demo_users = [ { username = "u", password = "p", roles = ["Agent"] } ]
+"#;
+
+    fn write_project(screens: &str, menus: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
+        std::fs::write(dir_path.join("screens.toml"), screens).unwrap();
+        std::fs::write(dir_path.join("menus.toml"), menus).unwrap();
+        (dir, dir_path)
+    }
+
+    fn wf_reg(tail: &str) -> String {
+        // One shared Ticket entity + the screen tail.
+        format!(
+            "{}\n\
+             [[screen]]\n\
+             id = \"2.1\"\n\
+             name = \"Tickets\"\n\
+             module = \"M2\"\n\
+             archetype = \"crud_screens\"\n\
+             roles = [\"Agent:R/W\"]\n\
+             stage = \"built\"\n\
+             codegen = {{ template = \"crud_screens\", mount_symbol = \"mount_tickets\", route_path = \"/tickets\", generated_files = [\"src/screens/m02.nir\"] }}\n\
+             data_binding = {{ entities = [\"Ticket\"], primary_key = \"ticket_id\", guard = {{ table = \"ticket_table\", purpose = \"Operations\" }}, fields = [ {{ name = \"title\", type = \"String\" }}, {{ name = \"status\", type = \"String\" }} ] }}\n\
+             policy = {{ purpose = \"Operations\", allowed_actions = [\"read\"] }}\n\
+             {tail}\n",
+            WF
+        )
+    }
+
+    fn run_str(screens: &str) -> String {
+        let (_d, dir) = write_project(screens, "[meta]\napp_title = \"t\"\n");
+        match run(&dir) {
+            Ok(_) => String::new(),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn approval_inbox_emits_guard_mode_sources() {
+        let screens = wf_reg("\
+             [[screen]]\n\
+             id = \"3.1\"\n\
+             name = \"Close Inbox\"\n\
+             module = \"M3\"\n\
+             archetype = \"approval_inbox\"\n\
+             roles = [\"Agent:R\"]\n\
+             stage = \"built\"\n\
+             codegen = { template = \"approval_inbox\", mount_symbol = \"mount_close_inbox\", route_path = \"/approvals\", generated_files = [\"src/screens/m03.nir\"] }\n\
+             data_binding = { entities = [\"Ticket\"], primary_key = \"ticket_id\", guard = { table = \"ticket_table\", purpose = \"Operations\" }, fields = [] }\n\
+             policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\n\
+             parameters.sources = [ { table = \"ticket_table\", chain = \"ticket_close\", detail_path = \"/tickets/{id}\" } ]\n");
+        let (_d, dir) = write_project(&screens, "[meta]\napp_title = \"t\"\n");
+        let out = run(&dir).expect("a guarded approval_inbox with a registered chain must generate");
+        let m03 = std::fs::read_to_string(dir.join("src/screens/m03.nir")).unwrap();
+        assert!(m03.contains("purpose: \"Operations\""), "per-source guard purpose must be derived from the entity: {m03}");
+        assert!(m03.contains("resource: \"ticket\""), "resource must be derived, not declared: {m03}");
+        assert!(m03.contains("chain: \"ticket_close\""), "chain must survive verbatim: {m03}");
+        assert!(out.screens_emitted == 3, "login + crud + inbox expected, got {}", out.screens_emitted);
+        // the app-wide chain reached bridge.nir
+        let bridge = std::fs::read_to_string(dir.join("src/bridge.nir")).unwrap();
+        assert!(bridge.contains("chain ticket_close"), "chain must be emitted: {bridge}");
+        assert!(bridge.contains("corpus_approval_chains()"), "constructor must receive the registry chain set: {bridge}");
+    }
+
+    #[test]
+    fn approval_inbox_refuses_a_source_whose_chain_is_not_registered() {
+        let screens = wf_reg("\
+             [[screen]]\n\
+             id = \"3.1\"\n\
+             name = \"Close Inbox\"\n\
+             module = \"M3\"\n\
+             archetype = \"approval_inbox\"\n\
+             roles = [\"Agent:R\"]\n\
+             stage = \"built\"\n\
+             codegen = { template = \"approval_inbox\", mount_symbol = \"mount_close_inbox\", route_path = \"/approvals\", generated_files = [\"src/screens/m03.nir\"] }\n\
+             data_binding = { entities = [\"Ticket\"], primary_key = \"ticket_id\", guard = { table = \"ticket_table\", purpose = \"Operations\" }, fields = [] }\n\
+             policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\n\
+             parameters.sources = [ { table = \"ticket_table\", chain = \"no_such_chain\", detail_path = \"/tickets/{id}\" } ]\n");
+        let err = run_str(&screens);
+        assert!(err.contains("no_such_chain"), "unregistered chain must be a generation error: {err}");
+    }
+
+    #[test]
+    fn approval_inbox_refuses_a_source_table_that_matches_no_entity() {
+        let screens = wf_reg("\
+             [[screen]]\n\
+             id = \"3.1\"\n\
+             name = \"Close Inbox\"\n\
+             module = \"M3\"\n\
+             archetype = \"approval_inbox\"\n\
+             roles = [\"Agent:R\"]\n\
+             stage = \"built\"\n\
+             codegen = { template = \"approval_inbox\", mount_symbol = \"mount_close_inbox\", route_path = \"/approvals\", generated_files = [\"src/screens/m03.nir\"] }\n\
+             data_binding = { entities = [\"Ticket\"], primary_key = \"ticket_id\", guard = { table = \"ticket_table\", purpose = \"Operations\" }, fields = [] }\n\
+             policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\n\
+             parameters.sources = [ { table = \"ticket_tbl\", chain = \"ticket_close\", detail_path = \"/tickets/{id}\" } ]\n");
+        let err = run_str(&screens);
+        assert!(err.contains("matches no entity"), "a typo'd table ident must be refused: {err}");
+    }
+
+    #[test]
+    fn workspace_emits_a_real_guarded_panel_fn() {
+        let screens = wf_reg("\
+             [[screen]]\n\
+             id = \"3.2\"\n\
+             name = \"Ticket WS\"\n\
+             module = \"M6\"\n\
+             archetype = \"workspace\"\n\
+             roles = [\"Agent:R\"]\n\
+             stage = \"built\"\n\
+             codegen = { template = \"workspace\", mount_symbol = \"mount_ticket_ws\", route_path = \"/tickets/{id}/workspace\", generated_files = [\"src/screens/m06.nir\"] }\n\
+             data_binding = { entities = [\"Ticket\"], primary_key = \"ticket_id\", guard = { table = \"ticket_table\", purpose = \"Operations\" }, fields = [ { name = \"title\", type = \"String\" } ] }\n\
+             policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\n\
+             parameters.subject = { entity = \"Ticket\", label_field = \"title\" }\n\
+             parameters.panels = [ { need = \"related\", title = \"Related\", render = \"table\", source = { entity = \"Ticket\", link_field = \"status\" } } ]\n");
+        let (_d, dir) = write_project(&screens, "[meta]\napp_title = \"t\"\n");
+        run(&dir).expect("a workspace with inline panel sources must generate");
+        let m06 = std::fs::read_to_string(dir.join("src/screens/m06.nir")).unwrap();
+        assert!(m06.contains("guarded_snapshot(auth, \"Operations\")"), "panel fn must be a real guarded read: {m06}");
+        assert!(m06.contains("row.status == *subject_id"), "panel fn must filter to the subject row: {m06}");
+        assert!(m06.contains("vec!["), "label_fn must return header pairs: {m06}");
+        assert!(m06.contains("Ticket\".to_string()"), "label must derive its name from the entity: {m06}");
+    }
+
+    #[test]
+    fn workspace_refuses_a_hand_written_panel_source() {
+        let screens = wf_reg("\
+             [[screen]]\n\
+             id = \"3.2\"\n\
+             name = \"Ticket WS\"\n\
+             module = \"M6\"\n\
+             archetype = \"workspace\"\n\
+             roles = [\"Agent:R\"]\n\
+             stage = \"built\"\n\
+             codegen = { template = \"workspace\", mount_symbol = \"mount_ticket_ws\", route_path = \"/tickets/{id}/workspace\", generated_files = [\"src/screens/m06.nir\"] }\n\
+             data_binding = { entities = [\"Ticket\"], primary_key = \"ticket_id\", guard = { table = \"ticket_table\", purpose = \"Operations\" }, fields = [ { name = \"title\", type = \"String\" } ] }\n\
+             policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\n\
+             parameters.subject = { entity = \"Ticket\", label_field = \"title\" }\n\
+             parameters.panels = [ { need = \"related\", title = \"Related\", render = \"table\", source = \"related_for_case\" } ]\n");
+        let err = run_str(&screens);
+        assert!(err.contains("cannot emit business-logic fns"), "a string-source panel the generator can't emit must be refused: {err}");
+    }
+
+    #[test]
+    fn approval_chain_refuses_a_zero_quorum() {
+        // Self-contained register: one login screen + one bad chain. The
+        // quorum check runs first, so a zero quorum is a named error even
+        // before approver resolution.
+        let one = "\n[metadata]\nschema = \"nirdosha.screen-register/v2\"\nregister_id = \"t\"\nversion = \"1.0.0\"\ntotal_screens = 1\ncodegen_profile = \"web-default\"\n\n[[approval_chain]]\nname = \"bad\"\nquorum = 0\napprovers = [\"Agent\"]\n\n[[screen]]\nid = \"1.1\"\nname = \"Login\"\nmodule = \"M1\"\narchetype = \"login\"\nroles = [\"AllRoles:R\"]\nstage = \"built\"\ncodegen = { template = \"login\", mount_symbol = \"mount_login\", route_path = \"/login\", generated_files = [\"src/app_shell.nir\"] }\n\n";
+
+        let one = "\n[metadata]\nschema = \"nirdosha.screen-register/v2\"\nregister_id = \"t\"\nversion = \"1.0.0\"\ntotal_screens = 1\ncodegen_profile = \"web-default\"\n\n[[approval_chain]]\nname = \"bad\"\nquorum = 0\napprovers = [\"Agent\"]\n\n[[screen]]\nid = \"1.1\"\nname = \"Login\"\nmodule = \"M1\"\narchetype = \"login\"\nroles = [\"Agent:R\"]\nstage = \"built\"\ncodegen = { template = \"login\", mount_symbol = \"mount_login\", route_path = \"/login\", generated_files = [\"src/app_shell.nir\"] }\n\n";
+        let err = run_str(one);
+        assert!(err.contains("quorum must be at least 1"), "{err}");
     }
 }

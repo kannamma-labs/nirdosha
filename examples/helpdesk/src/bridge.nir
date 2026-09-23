@@ -10,6 +10,19 @@ nirdosha_rt::roles! {
     Viewer = "Viewer";
 }
 
+// ---- approval chains ----
+
+nirdosha_rt::approval_chain! {
+    chain ticket_close { quorum(1, of = [Admin]); timeout(deny);  } }
+
+pub fn corpus_approval_chains() -> Vec<nirdosha_guard_core::approval_chain::ApprovalChainDefinition> {
+    nirdosha_guard_registry::dump()
+        .approval_chains
+        .iter()
+        .map(|c| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: c.name.clone(), quorum: c.quorum, approver_roles: c.approvers.to_vec(), cooling_period_ms: c.cooling_ms })
+        .collect()
+}
+
 // ---- guard policies, synthesized from each guarded screen's policy block ----
 
 nirdosha_rt::guard_policy! {
@@ -85,6 +98,24 @@ nirdosha_rt::guard_policy! {
 }
 
 nirdosha_rt::guard_policy! {
+    allow "helpdesk-9-1-read" for Admin
+    when action == "read" && resource == "ticket"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 20_000)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "helpdesk-9-2-read" for Agent, Admin
+    when action == "read" && resource == "ticket"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 20_000)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
     allow "helpdesk-6-1-read" for Agent, Admin
     when action == "read" && resource == "ticket"
     purpose(Operations)
@@ -137,6 +168,7 @@ pub struct FeedPostRow {
     pub tenant_id: String,
     pub author: String,
     pub body: String,
+    pub ticket_id: String,
 }
 
 impl nirdosha_guard_screens::GuardedEntity for FeedPostRow {
@@ -157,7 +189,7 @@ pub fn feed_post_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdos
             std::env::temp_dir().join(format!("helpdesk-audit-feedpost-{}.jsonl", std::process::id())),
             HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
             DEMO_TENANT,
-            Vec::new(),
+            corpus_approval_chains(),
         )
     })
 }
@@ -200,7 +232,7 @@ pub fn relation_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosh
             std::env::temp_dir().join(format!("helpdesk-audit-relation-{}.jsonl", std::process::id())),
             HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
             DEMO_TENANT,
-            Vec::new(),
+            corpus_approval_chains(),
         )
     })
 }
@@ -242,7 +274,7 @@ pub fn settings_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosh
             std::env::temp_dir().join(format!("helpdesk-audit-settings-{}.jsonl", std::process::id())),
             HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
             DEMO_TENANT,
-            Vec::new(),
+            corpus_approval_chains(),
         )
     })
 }
@@ -288,7 +320,7 @@ pub fn ticket_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_
             std::env::temp_dir().join(format!("helpdesk-audit-ticket-{}.jsonl", std::process::id())),
             HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
             DEMO_TENANT,
-            Vec::new(),
+            corpus_approval_chains(),
         )
     })
 }

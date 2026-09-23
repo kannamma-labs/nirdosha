@@ -11,12 +11,14 @@ fn main() {
     let router = helpdesk::m04_dashboards::mount_ops_dashboard(router);
     let router = helpdesk::m05_admin::mount_app_settings(router);
     let router = helpdesk::m05_admin::mount_team_feed(router);
+    let router = helpdesk::m09_workflows::mount_ticket_close_inbox(router);
     let router = helpdesk::m06_board::mount_ticket_board(router);
     let router = helpdesk::m06_board::mount_ticket_board_move(router);
     let router = helpdesk::m07_help::mount_getting_started(router);
     let router = helpdesk::m07_help::mount_ticket_report(router);
     let router = helpdesk::m08_relations::mount_relation_tree(router);
     let router = helpdesk::m03_tickets::mount_tickets(router);
+    let router = helpdesk::m09_workflows::mount_ticket_workspace(router);
     let router = helpdesk::m06_board::mount_ticket_lookup(router);
     println!("generated app — listening on http://localhost:8080/");
     router.serve(8080);
