@@ -1040,23 +1040,16 @@ pub fn window_config_table() -> &'static nirdosha_guard_screens::GuardedTable<ni
 // M16 Notifications & Collaboration — screens/m16_notifications.nir's row
 // type + table.
 //
-// **Real, disclosed corpus shape**: grepping every `.nir` file under
-// `src/` for `resource == "notification"` / `resource in [...]` finds
-// ZERO `guard_policy!` blocks -- notifications are purely a real
-// `obligate notify(channel(...))` SIDE EFFECT of an already-authorized
-// action on a DIFFERENT resource (`alert-raise`'s `channel("analyst-inbox")`,
-// `analyst-create-case`'s `channel("case-inbox")`, `qa-write-review`'s
-// `channel("qa-inbox")`), never a resource a subject reads/writes under
-// its own guard decision. So this table is written only via
-// `GuardedTable::system_write` (from `alert_table`/`case_table`/
-// `qa_review_table`'s own `with_notify_hook` wiring below -- the real
-// fix for the gap `nirdosha-guard-screens`'s own module doc comment used
-// to flag: `EvaluationResult.obligations` was real and computed, just
-// never consumed) and read only via `system_scan` -- the screen route
-// (`m16_notifications.nir`) gates who sees which channel by role
-// directly (`Auth::has_role`), the same honest "role-gated, not
-// policy-gated, because no policy exists to gate it" posture
-// `m10_screening.nir`'s `matcher!` catalog view already established.
+// `notification-read` (`90_ops_admin.nir`) now provides a real
+// `guard_policy!` read grant, so this table loads the corpus registry
+// and serves screen reads through `GuardedTable::guarded_snapshot`.
+// Notifications remain a real `obligate notify(channel(...))` SIDE EFFECT
+// of authorized actions on other resources (`alert-raise`'s
+// `channel("analyst-inbox")`, `analyst-create-case`'s
+// `channel("case-inbox")`, `qa-write-review`'s `channel("qa-inbox")`)
+// — writes continue through `GuardedTable::system_write` inside the
+// shared `notify_into_inbox` hook, which is the one legitimate
+// non-guarded write path for a side effect with no human submitter.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NotificationRow {
     pub id: i64,
@@ -1076,21 +1069,18 @@ impl GuardedEntity for NotificationRow {
 
 pub fn notification_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationRow> {
     static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationRow>> = std::sync::OnceLock::new();
-    // Constructed with NO candidates/records at all -- see this table's
-    // own doc comment: there is genuinely no `guard_policy!` to evaluate
-    // for `"notification"`, so wiring the usual `nirdosha_guard_registry`
-    // corpus in here would be theater, not enforcement.
     TABLE.get_or_init(|| {
-        nirdosha_guard_screens::GuardedTable::new(
+        let table = nirdosha_guard_screens::GuardedTable::new(
             nirdosha_guard_mic::MemStoreDriver::new(),
-            vec![],
-            vec![],
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
             "rtm-demo",
             std::env::temp_dir().join(format!("rtm-demo-audit-notification-{}.jsonl", std::process::id())),
             HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
             DEMO_TENANT,
-            vec![],
-        )
+            corpus_approval_chains(),
+        );
+        table
     })
 }
 

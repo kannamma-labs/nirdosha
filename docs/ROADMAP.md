@@ -109,6 +109,24 @@ A, Track B, Track C below) — but the specs themselves stay put.
   deterministic runner/verifier writes and decides the executable result. No
   agent certifies its own proposed tests; humans approve the declared claims,
   not every repeated execution.
+  The first generator seam is shipped as `cargo nirdosha ui-proof
+  --register <screens.toml> --output <path>`; it creates an explicitly
+  conservative inventory skeleton and never invents business transitions.
+
+- `[PARTIAL — CURRENT PHASE]` **Screen-register v2 schema.**
+  `docs/SCREEN_REGISTER_SCHEMA.json` and its companion guide define the
+  inventory contract for deterministic code generation: pinned codegen and
+  data bindings, policy/dependency/provenance metadata, renderer profiles,
+  determinism controls, and per-screen logging. Logging requires explicit
+  `domain` and `country` values. The checked-in RTM register remains v1 until
+  those fields are migrated and validated.
+
+- `[PARTIAL — CURRENT PHASE]` **Environment-bound guard data sources.**
+  `docs/GUARD_DATA_SOURCES_SCHEMA.json`, `docs/GUARD_DATA_SOURCES.md`, and
+  `deploy/guard-data-sources.toml.example` define the redacted manifest shape
+  for resolving logical stores from orchestrator-provided environment
+  variables. A guard-runtime loader still needs to be wired to resolve,
+  health-check, TLS-check, and register these sources at startup.
 
 - `[DONE]` **2026-09-18, Hi graph screen generation and preview.**
   Generate still makes one whole-program LLM request per attempt; it

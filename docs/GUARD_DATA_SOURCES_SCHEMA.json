@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nirdosha.dev/schema/guard-data-sources/v1",
+  "title": "Nirdosha Guard Data Sources v1",
+  "description": "Environment-bound logical data-source manifest for the guard runtime. It contains references to environment variables, never secret values.",
+  "type": "object",
+  "required": ["manifest", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "manifest": {"$ref": "#/$defs/manifest"},
+    "source": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}}
+  },
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "required": ["schema", "application", "generated_from_env", "environment_namespace"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "nirdosha.guard-data-sources/v1", "description": "Manifest schema identifier used by the guard loader."},
+        "application": {"type": "string", "minLength": 1, "description": "Application or deployment identity that owns these bindings."},
+        "generated_from_env": {"const": true, "description": "Proves that endpoint and credential values are resolved from the container environment, not committed to source."},
+        "environment_namespace": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Prefix used to namespace environment variables for this deployment."},
+        "generated_at": {"type": "string", "format": "date-time", "description": "Generation timestamp for diagnostics; it is not a trust timestamp."},
+        "environment_revision": {"type": "string", "description": "Deployment or orchestrator revision that supplied the environment."},
+        "manifest_hash": {"$ref": "#/$defs/hash", "description": "SHA-256 of the canonical manifest after removing this field; used to bind guard startup to exact configuration."}
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["id", "kind", "driver", "url_env", "access", "tls_required", "healthcheck"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_.-]*$", "description": "Logical source identifier referenced by datasets and guard policies, such as `PG`, `K`, or `IDP`."},
+        "kind": {"enum": ["rdbms", "refdata", "audit_chain", "graph", "mq", "sanctions", "object_storage", "catalog", "runtime", "identity", "gateway", "static", "external"], "description": "Logical data-store class; this is the policy and lineage vocabulary, not a network protocol."},
+        "driver": {"enum": ["postgres", "sqlite", "redis", "kafka", "s3", "filesystem", "http", "https", "memory", "custom"], "description": "Concrete access driver selected by the guard/runtime implementation."},
+        "url_env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Environment variable containing the endpoint or connection URL. The value is resolved at startup and is never written to this manifest."},
+        "credential_env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Optional environment variable containing a credential, token, or password; it must not be logged or persisted."},
+        "region_env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Optional environment variable containing an object-store or cloud region."},
+        "namespace": {"type": "string", "description": "Logical namespace, database, bucket, topic prefix, or filesystem root used within the endpoint."},
+        "access": {"enum": ["read", "write", "read_write", "append", "publish", "consume", "admin"], "description": "Maximum access mode the guard runtime may request from this source."},
+        "tls_required": {"type": "boolean", "description": "When true, startup rejects a resolved endpoint that is not TLS-protected where the driver supports TLS."},
+        "healthcheck": {"type": "string", "description": "Named non-destructive health-check operation the driver must perform before admitting the source."},
+        "connect_timeout_ms": {"type": "integer", "minimum": 1, "description": "Bounded connection/health-check timeout in milliseconds; it is not a solver determinism control."},
+        "pool_max": {"type": "integer", "minimum": 1, "description": "Maximum connection or client pool size for drivers that support pooling."},
+        "required": {"type": "boolean", "description": "Whether application startup fails closed when this source is absent or unhealthy."},
+        "lineage_label": {"type": "string", "description": "Stable label emitted in lineage and audit evidence without exposing the resolved URL."},
+        "metadata": {"type": "object", "additionalProperties": {"type": "string", "description": "Non-secret driver metadata used for diagnostics or capability negotiation."}, "description": "Additional non-secret metadata; secrets and resolved URLs are forbidden here."}
+      }
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Lowercase SHA-256 digest formatted as `sha256:<64 hex characters>`."
+    }
+  }
+}

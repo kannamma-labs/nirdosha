@@ -12,6 +12,47 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const SCHEMA: &str = "nirdosha.ui-proof/v1";
 
+/// Generate a conservative proof skeleton from a project's `screens.toml`.
+/// The register supplies identity, lifecycle stage, and role vocabulary; it
+/// cannot truthfully supply business transitions or rendered postconditions.
+/// The generated `observe` action therefore proves only that the inventory is
+/// structurally represented. Source contracts and browser traces must replace
+/// or extend it before a deployment claim is made.
+pub fn generate_from_screen_register(toml_source: &str) -> Result<UiProofSpec, String> {
+    let document: toml::Value = toml_source.parse().map_err(|e| format!("screens.toml is invalid: {e}"))?;
+    let entries = document
+        .get("screen")
+        .and_then(toml::Value::as_array)
+        .ok_or("screens.toml must contain [[screen]] entries")?;
+    let mut screens = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let id = entry.get("id").and_then(toml::Value::as_str).ok_or("screen entry missing id")?.to_string();
+        let state = entry.get("stage").and_then(toml::Value::as_str).filter(|s| !s.is_empty()).unwrap_or("unknown").to_string();
+        let roles: Vec<String> = entry
+            .get("roles")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(|role| role.split(':').next().unwrap_or(role).to_string())
+            .filter(|role| !role.is_empty())
+            .collect();
+        screens.push(ScreenSpec {
+            id,
+            initial_state: state.clone(),
+            states: vec![state.clone()],
+            actions: vec![ActionSpec {
+                id: "observe".into(),
+                from: state.clone(),
+                to: state,
+                roles: if roles.is_empty() { vec!["declared_role".into()] } else { roles },
+                ensures: vec!["screen_declared".into()],
+            }],
+        });
+    }
+    Ok(UiProofSpec { schema: SCHEMA.into(), screens })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiProofSpec {
     pub schema: String,
@@ -346,5 +387,16 @@ mod tests {
         let mut bad = trace;
         bad.events[0].role = "guest".into();
         assert!(!verify_trace(&spec(), &bad).passed);
+    }
+
+    #[test]
+    fn screen_register_generator_is_conservative_and_verifiable() {
+        let generated = generate_from_screen_register(
+            "[[screen]]\nid='1.1'\nstage='built'\nroles=['Analyst:R/W']\n",
+        )
+        .unwrap();
+        let proof = verify(&generated);
+        assert!(proof.passed, "{proof:?}");
+        assert_eq!(generated.screens[0].actions[0].ensures, vec!["screen_declared"]);
     }
 }

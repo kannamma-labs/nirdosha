@@ -2,6 +2,11 @@
 # screens.toml — RTM screen register (definitive, 152 screens)
 # Consumed by tests/verify_screen_inventory.rs
 #
+# This file is the historical v1 register. The deterministic v2 target shape
+# is documented in docs/SCREEN_REGISTER_SCHEMA.md and validated by
+# docs/SCREEN_REGISTER_SCHEMA.json. Migrate metadata and each screen's
+# codegen/logging/determinism blocks before declaring it v2.
+#
 # stage:    built     = rendered today (file must exist)
 #           emittable = all 3 ingredients present; screen not yet written
 #           interim   = partial version shippable now (crud/table), full fidelity blocked

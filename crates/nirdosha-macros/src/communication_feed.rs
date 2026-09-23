@@ -25,7 +25,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{bracketed, Ident, LitInt, LitStr, Token, Type};
+use syn::{braced, bracketed, Ident, LitInt, LitStr, Token, Type};
 
 enum Access {
     Public,
@@ -58,6 +58,25 @@ impl Parse for Access {
     }
 }
 
+struct GuardConfig {
+    table: Ident,
+    purpose: LitStr,
+}
+
+impl Parse for GuardConfig {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        expect_keyword(input, "table")?;
+        input.parse::<Token![:]>()?;
+        let table: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+        expect_keyword(input, "purpose")?;
+        input.parse::<Token![:]>()?;
+        let purpose: LitStr = input.parse()?;
+        let _ = input.parse::<Token![,]>();
+        Ok(GuardConfig { table, purpose })
+    }
+}
+
 struct FieldDef {
     name: Ident,
     ty: Type,
@@ -73,6 +92,7 @@ struct FeedInput {
     read_access: Access,
     refresh_seconds: Option<LitInt>,
     long_poll_seconds: Option<LitInt>,
+    guard: Option<GuardConfig>,
 }
 
 impl Parse for FeedInput {
@@ -128,24 +148,42 @@ impl Parse for FeedInput {
 
         let mut refresh_seconds = None;
         let mut long_poll_seconds = None;
-        if !input.is_empty() {
-            let mode: Ident = input.parse()?;
-            input.parse::<Token![:]>()?;
-            let seconds: LitInt = input.parse()?;
-            if mode == "refresh_seconds" {
-                refresh_seconds = Some(seconds);
-            } else if mode == "long_poll_seconds" {
-                if !(1..=30).contains(&seconds.base10_parse::<u64>()?) {
-                    return Err(syn::Error::new(seconds.span(), "long_poll_seconds must be between 1 and 30"));
+        if input.peek(Ident) {
+            let fork = input.fork();
+            let ahead: Ident = fork.parse()?;
+            if ahead == "refresh_seconds" || ahead == "long_poll_seconds" {
+                let mode: Ident = input.parse()?;
+                input.parse::<Token![:]>()?;
+                let seconds: LitInt = input.parse()?;
+                if mode == "refresh_seconds" {
+                    refresh_seconds = Some(seconds);
+                } else {
+                    if !(1..=30).contains(&seconds.base10_parse::<u64>()?) {
+                        return Err(syn::Error::new(seconds.span(), "long_poll_seconds must be between 1 and 30"));
+                    }
+                    long_poll_seconds = Some(seconds);
                 }
-                long_poll_seconds = Some(seconds);
-            } else {
-                return Err(syn::Error::new(mode.span(), "expected refresh_seconds or long_poll_seconds"));
+                if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
             }
-            if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
         }
 
-        Ok(FeedInput { mount, entity, store, path, fields, post_access, read_access, refresh_seconds, long_poll_seconds })
+        let mut guard = None;
+        while input.peek(Ident) {
+            let fork = input.fork();
+            let ahead: Ident = fork.parse()?;
+            if ahead == "guard" && guard.is_none() {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                let content;
+                braced!(content in input);
+                guard = Some(content.parse::<GuardConfig>()?);
+                let _ = input.parse::<Token![,]>();
+            } else {
+                break;
+            }
+        }
+
+        Ok(FeedInput { mount, entity, store, path, fields, post_access, read_access, refresh_seconds, long_poll_seconds, guard })
     }
 }
 
@@ -236,6 +274,122 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
         }
     };
 
+    // ---- optional data-plane guard ----
+    // When `guard:` is present, reads and writes go through
+    // `GuardedTable` instead of the bare `store`. The route still
+    // carries the declared role gate (so OpenAPI and the router agree
+    // on which roles may reach it), but the actual outbound data and
+    // mutation are evaluated by the guard corpus.
+    if let Some(guard) = &input.guard {
+        if matches!(input.read_access, Access::Public) {
+            return syn::Error::new(input.path.span(), "communication_feed! with `guard:` requires a role-gated `read_access`, not `public`").to_compile_error();
+        }
+        if matches!(input.post_access, Access::Public) {
+            return syn::Error::new(input.path.span(), "communication_feed! with `guard:` requires a role-gated `post_access`, not `public`").to_compile_error();
+        }
+
+        let table = &guard.table;
+        let purpose = &guard.purpose;
+
+        let submitted_fn = quote! {
+            fn __guarded_submitted_fields(values: &::std::collections::HashMap<String, String>) -> ::std::collections::HashSet<String> {
+                let exempt: &[&str] = <#entity as ::nirdosha_guard_screens::GuardedEntity>::create_field_policy_exempt();
+                [ #(#field_names),* ]
+                    .into_iter()
+                    .filter(|name: &&str| values.get(*name).is_some_and(|v| !v.is_empty()))
+                    .filter(|name: &&str| !exempt.contains(name))
+                    .map(|s: &str| s.to_string())
+                    .collect()
+            }
+        };
+
+        let guarded_post_fn = quote! {
+            fn __guarded_post(auth: &::nirdosha_rt::Auth, values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, nirdosha_guard_screens::GuardScreenError> {
+                let mut errors: Vec<String> = Vec::new();
+                #(
+                    let #field_idents = match <#field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#field_names).map(|s| s.as_str())) {
+                        Ok(v) => v,
+                        Err(e) => { errors.push(format!("{}: {}", #field_names, e)); Default::default() }
+                    };
+                )*
+                if !errors.is_empty() { return Err(nirdosha_guard_screens::GuardScreenError::FieldPolicyViolation(errors)); }
+                let mut entity = #entity { id: 0, #( #field_idents ),*, ..Default::default() };
+                entity.id = ::nirdosha_rt::screens::next_id();
+                let submitted = __guarded_submitted_fields(values);
+                #table().guarded_insert_checked(auth, #purpose, &submitted, entity)
+                    .map(|e| { #publish e })
+            }
+        };
+
+        let view_route = match &input.read_access {
+            Access::Public => unreachable!(),
+            Access::Role(role) => {
+                let role_ident = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
+                quote! {
+                    .get_gated::<crate::nirdosha_roles::#role_ident>(#path, #title, |_req, _params, auth| {
+                        #view_revision
+                        let messages: Vec<::serde_json::Value> = match #table().guarded_snapshot(auth, #purpose) {
+                            Ok(rows) => rows.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect(),
+                            Err(e) => return ::nirdosha_guard_screens::guard_error_response(e),
+                        };
+                        let html = ::nirdosha_rt::feed::feed_html(#title, #refresh, #path, &__fields(), &messages);
+                        #view_live
+                        ::nirdosha_rt::Response::html(200, html)
+                    })
+                }
+            }
+        };
+
+        let api_route = match &input.read_access {
+            Access::Public => unreachable!(),
+            Access::Role(role) => {
+                let role_ident = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
+                quote! {
+                    .get_gated::<crate::nirdosha_roles::#role_ident>(#api_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
+                        #wait
+                        let messages: Vec<::serde_json::Value> = match #table().guarded_snapshot(auth, #purpose) {
+                            Ok(rows) => rows.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect(),
+                            Err(e) => return ::nirdosha_guard_screens::guard_error_response(e),
+                        };
+                        #[allow(unused_mut)]
+                        let mut response = ::nirdosha_rt::Response::json(200, &::serde_json::Value::Array(messages));
+                        #revision_header
+                        response
+                    })
+                }
+            }
+        };
+
+        let post_route = match &input.post_access {
+            Access::Public => unreachable!(),
+            Access::Role(role) => {
+                let role_ident = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
+                quote! {
+                    .post_gated::<crate::nirdosha_roles::#role_ident>(#path, "Post a message", |req, _params, auth| {
+                        let values = req.form_or_json();
+                        match __guarded_post(auth, &values) {
+                            Ok(_) => ::nirdosha_rt::Response::redirect(#path),
+                            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                        }
+                    })
+                }
+            }
+        };
+
+        return quote! {
+            pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+                static __UPDATES: ::nirdosha_rt::feed::FeedUpdates = ::nirdosha_rt::feed::FeedUpdates::new();
+                #fields_fn
+                #submitted_fn
+                #guarded_post_fn
+                router
+                    #view_route
+                    #api_route
+                    #post_route
+            }
+        };
+    }
+
     let view_body = quote! {
         #view_revision
         let messages: Vec<::serde_json::Value> = #store().with(|store| store.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect());
@@ -318,6 +472,39 @@ mod tests {
             "mount: mount_feed, entity: Message, store: messages, path: \"/feed\", \
              fields: [body: String], post_access: public, read_access: public, {mode}"
         ))
+    }
+
+    #[test]
+    fn guard_clause_parses_and_requires_role_access() {
+        let ok = syn::parse_str::<FeedInput>(
+            "mount: mount_feed, entity: Message, store: messages, path: \"/feed\", \
+             fields: [body: String], post_access: requires role \"member\", \
+             read_access: requires role \"member\", \
+             guard: { table: message_table, purpose: \"Operations\" }"
+        );
+        assert!(ok.is_ok());
+        let guarded = ok.unwrap();
+        assert!(guarded.guard.is_some());
+
+        // `public` read or post combined with `guard:` is rejected at expansion time,
+        // but the grammar itself accepts the parse; we just confirm it parses.
+        let public_guard = syn::parse_str::<FeedInput>(
+            "mount: mount_feed, entity: Message, store: messages, path: \"/feed\", \
+             fields: [body: String], post_access: public, read_access: public, \
+             guard: { table: message_table, purpose: \"Operations\" }"
+        );
+        assert!(public_guard.is_ok(), "parse accepts; expansion rejects");
+    }
+
+    #[test]
+    fn guard_clause_requires_table_and_purpose() {
+        let bad = syn::parse_str::<FeedInput>(
+            "mount: mount_feed, entity: Message, store: messages, path: \"/feed\", \
+             fields: [body: String], post_access: requires role \"member\", \
+             read_access: requires role \"member\", \
+             guard: { table: message_table }"
+        );
+        assert!(bad.is_err(), "accepted guard without purpose");
     }
 
     #[test]

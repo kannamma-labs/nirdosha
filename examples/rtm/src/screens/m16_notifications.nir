@@ -6,12 +6,11 @@
 //! the `menus.toml` V5 route-guard invariant resolves. RTM live-demo plan
 //! Phase B batch 3.
 //!
-//! **Real, disclosed corpus shape**: notifications are still a pure
-//! obligation SIDE EFFECT of an already-authorized action on a different
-//! resource; the feed is role-gated by a fixed channel map, not
-//! `guard_policy!`-gated at runtime. The `notification-read` policy was
-//! added only so the menu route declaration points at a real policy
-//! record.
+//! Notifications are still a pure obligation SIDE EFFECT of an
+//! already-authorized action on a different resource. The read path now
+//! goes through `GuardedTable::guarded_snapshot` under the real
+//! `notification-read` policy (`90_ops_admin.nir`); the in-process
+//! channel-to-role filter remains as defense-in-depth.
 use crate::bridge::handover_table;
 use crate::bridge::notification_table;
 use crate::bridge::user_profile_table;
@@ -60,7 +59,7 @@ fn roles_for_channel(channel: &str) -> &'static [&'static str] {
 
 pub fn mount_notification_feed(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
     router.get_with_auth("/notifications", "Notifications", |_req, _params, auth| {
-        let rows = match notification_table().system_scan() {
+        let rows = match notification_table().guarded_snapshot(auth, "Operations") {
             Ok(rows) => rows,
             Err(e) => return nirdosha_guard_screens::guard_error_response(e),
         };

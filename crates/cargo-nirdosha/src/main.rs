@@ -53,6 +53,7 @@ fn main() -> ExitCode {
         "check-certificate" => check_certificate_cli(rest),
         "keygen" => keygen_cli(rest),
         "verify-certificate" => verify_certificate_cli(rest),
+        "ui-proof" => ui_proof_cli(rest),
         "verify" => {
             if rest.iter().any(|arg| arg == "--guard") {
                 return verify_guard_cli(rest);
@@ -538,7 +539,7 @@ fn usage() {
     eprintln!(
         "cargo-nirdosha — the Nirdosha compiler\n\
          \n\
-         usage: cargo nirdosha <build|check|run|test|doc|verify|bench> [cargo args] [--workspace] [--fast]\n\
+         usage: cargo nirdosha <build|check|run|test|doc|verify|bench|ui-proof> [args]\n\
          \n\
          Same source, two compilers:\n\
          - plain `cargo build`            compiles and runs Nirdosha code like any Rust program\n\
@@ -554,6 +555,46 @@ fn usage() {
          - `cargo nirdosha verify --sign key.pk8`  sign the certificate (add `--features fips` to build for a CMVP-validatable backend)\n\
          - `cargo nirdosha verify-certificate <path> --public-key <base64>`  check a signed certificate's signature"
     );
+}
+
+/// Generate the conservative `.nir/ui-proof.json` skeleton from a project's
+/// screen register. This is intentionally inventory-only: it does not invent
+/// business transitions or pretend that a declared screen was rendered.
+fn ui_proof_cli(args: &[String]) -> ExitCode {
+    let input = flag_value(args, "--register").or_else(|| args.first().filter(|a| !a.starts_with('-')).cloned());
+    let Some(input) = input else {
+        eprintln!("nirdosha: ui-proof requires --register <screens.toml> [--output <.nir/ui-proof.json>]");
+        return ExitCode::FAILURE;
+    };
+    let source = match std::fs::read_to_string(&input) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("nirdosha: cannot read {input}: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let spec = match nirdosha_contract_core::ui_assurance::generate_from_screen_register(&source) {
+        Ok(spec) => spec,
+        Err(error) => {
+            eprintln!("nirdosha: cannot generate UI proof: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let proof = nirdosha_contract_core::ui_assurance::verify(&spec);
+    let output = flag_value(args, "--output").unwrap_or_else(|| ".nir/ui-proof.json".into());
+    if let Some(parent) = Path::new(&output).parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!("nirdosha: cannot create {}: {error}", parent.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    if let Err(error) = std::fs::write(&output, serde_json::to_vec_pretty(&spec).expect("UI proof is serializable")) {
+        eprintln!("nirdosha: cannot write {output}: {error}");
+        return ExitCode::FAILURE;
+    }
+    eprintln!("nirdosha: generated conservative UI proof skeleton: {} screens, {} structural states, {} actions → {output}", proof.screens, proof.states, proof.actions);
+    eprintln!("nirdosha: this proves inventory structure only; add real transitions, postconditions, and browser traces before release");
+    ExitCode::SUCCESS
 }
 
 struct Location {

@@ -485,6 +485,29 @@ fn verify_file(path: &Path, strict: bool, out: &mut ScanSummary) {
         });
     }
 
+    // Option 1 data-plane guard: screen files must not read or write
+    // GuardedEntity rows through the unguarded `system_scan` /
+    // `raw_driver_seed` bypasses. Those paths are legitimate in bridge
+    // and test-fixture code, but a screen must go through the policy
+    // plane (`guarded_snapshot` / `guarded_get` / `guarded_search` /
+    // `guarded_insert_checked` / `guarded_update`).
+    let path_str = path.to_string_lossy();
+    let is_screen_file = path_str.contains("/src/screens/") || path_str.contains("\\src\\screens\\");
+    if is_screen_file {
+        for bypass in cc::scan::screen_guard_bypasses(&file) {
+            out.findings.push(Finding {
+                severity: Severity::Error,
+                file: path.to_path_buf(),
+                line: bypass.line,
+                function: None,
+                message: format!(
+                    "screen must use GuardedTable policy reads/writes: {} ({})",
+                    bypass.what, bypass.why
+                ),
+            });
+        }
+    }
+
     let mut fns = Vec::new();
     walk_items(&file.items, &mut fns);
     for f in fns {

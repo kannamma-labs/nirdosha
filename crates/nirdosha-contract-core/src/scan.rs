@@ -374,6 +374,47 @@ pub fn dialect_denies(file: &syn::File) -> Vec<DenyHit> {
     scanner.hits
 }
 
+// ---------------------------------------------------------------------------
+// Screen-file guard-bypass detection.
+// ---------------------------------------------------------------------------
+
+/// Unguarded `GuardedTable` data paths that screen files must not use.
+/// Screen data must flow through `guarded_snapshot` / `guarded_get` /
+/// `guarded_search` / `guarded_insert_checked` / `guarded_update` so the
+/// policy plane can enforce row-level access. `system_scan` and
+/// `raw_driver_seed` are legitimate only in bridge/test-fixture code.
+const GUARD_BYPASS_METHODS: &[(&str, &str)] = &[
+    ("system_scan", "screen read bypasses GuardedTable policy evaluation"),
+    ("system_write", "screen write bypasses GuardedTable policy evaluation"),
+    ("raw_driver_seed", "screen write bypasses GuardedTable policy evaluation"),
+];
+
+#[derive(Default)]
+struct GuardBypassScanner {
+    hits: Vec<DenyHit>,
+}
+
+impl<'ast> Visit<'ast> for GuardBypassScanner {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let name = call.method.to_string();
+        if let Some((_, why)) = GUARD_BYPASS_METHODS.iter().find(|(m, _)| *m == name) {
+            self.hits.push(DenyHit {
+                what: format!(".{name}(..)"),
+                why,
+                line: call.method.span().start().line as u32,
+            });
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+/// Unguarded `GuardedTable` accesses in a screen file.
+pub fn screen_guard_bypasses(file: &syn::File) -> Vec<DenyHit> {
+    let mut scanner = GuardBypassScanner::default();
+    scanner.visit_file(file);
+    scanner.hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,12 +497,45 @@ mod tests {
     }
 
     #[test]
-    fn allows_once_lock_and_managed_primitives() {
+    fn catches_guarded_table_system_scan_in_screen_files() {
         let file = syn::parse_file(
-            "use std::sync::OnceLock;\nstatic X: OnceLock<u64> = OnceLock::new();\nfn f() -> i64 { let t = nirdosha_rt::prelude::SharedTable::<i64, u64>::new(); t.len() }",
+            "fn feed() { let rows = notification_table().system_scan().unwrap(); }",
         )
         .unwrap();
-        let denies = dialect_denies(&file);
-        assert!(denies.is_empty(), "{denies:?}");
+        let hits = screen_guard_bypasses(&file);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].what.contains("system_scan"));
+    }
+
+    #[test]
+    fn catches_guarded_table_raw_driver_seed_in_screen_files() {
+        let file = syn::parse_file(
+            "fn seed() { table.raw_driver_seed(DEMO_TENANT, &row); }",
+        )
+        .unwrap();
+        let hits = screen_guard_bypasses(&file);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].what.contains("raw_driver_seed"));
+    }
+
+    #[test]
+    fn catches_guarded_table_system_write_in_screen_files() {
+        let file = syn::parse_file(
+            "fn write() { notification_table().system_write(DEMO_TENANT, &row); }",
+        )
+        .unwrap();
+        let hits = screen_guard_bypasses(&file);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].what.contains("system_write"));
+    }
+
+    #[test]
+    fn allows_guarded_table_policy_reads_in_screen_files() {
+        let file = syn::parse_file(
+            "fn feed(auth: &Auth) { let rows = notification_table().guarded_snapshot(auth, \"Operations\").unwrap(); }",
+        )
+        .unwrap();
+        let hits = screen_guard_bypasses(&file);
+        assert!(hits.is_empty(), "guarded_snapshot is allowed: {hits:?}");
     }
 }

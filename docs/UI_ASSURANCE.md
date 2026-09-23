@@ -27,6 +27,32 @@ Minimal example:
 }
 ```
 
+For an existing screen register, generate the conservative starting point with:
+
+```bash
+cargo nirdosha ui-proof \
+  --register examples/rtm/screens.toml \
+  --output examples/rtm/.nir/ui-proof.json
+```
+
+The generator creates one `observe` self-transition per registered screen,
+using the register's lifecycle stage and role vocabulary. This is deliberately
+an inventory proof, not fabricated business logic: maintainers must replace or
+extend those observations with real actions, postconditions, and browser trace
+evidence before treating the result as behavioral assurance.
+
+The authoring shape is defined by
+[`UI_PROOF_SPEC_SCHEMA.json`](UI_PROOF_SPEC_SCHEMA.json). TOML is parsed into
+the same object shape; the schema is JSON so standard schema validators can
+check it before Nirdosha merges it with `screens.toml`.
+
+Every string-valued field and string enum in the schema has a description. The
+description is authoring guidance for an LLM and consumption guidance for the
+runner—for example, it distinguishes a stable screen ID from a display name,
+and a Z3 formula from a human-readable invariant description. Structural
+constraints (patterns, enums, hashes, and cross-references) remain normative;
+descriptions explain semantics but do not weaken those constraints.
+
 An invalid declaration fails closed. If no declaration exists, the certificate
 reports `ui_assurance.status = "not_declared"`; it never upgrades missing UI
 evidence into a guarantee. The proof summary includes a canonical hash, the
