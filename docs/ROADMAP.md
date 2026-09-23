@@ -112,6 +112,25 @@ A, Track B, Track C below) — but the specs themselves stay put.
   The first generator seam is shipped as `cargo nirdosha ui-proof
   --register <screens.toml> --output <path>`; it creates an explicitly
   conservative inventory skeleton and never invents business transitions.
+  The second seam — the full code generator — shipped as
+  `cargo nirdosha generate-screens <project-dir>` (2026-09-23): it reads a
+  v2 `screens.toml` + `menus.toml` and emits the crate's whole `src/*.nir`
+  tree (bridge with `roles!`/entities/`GuardedTable` constructors/real
+  `guard_policy!` records synthesized from each guarded screen's own
+  `policy` block, app shell + login, per-module screen files, lib, serve
+  binary with literal-before-wildcard mount order). The guard is the
+  single data authority in every generated screen: any entity a generated
+  screen touches must be `data_binding.guard`ed somewhere in the register
+  (a generated app cannot contain an unguarded data screen), guard-mode
+  macros emit only `*_with_auth` routes (declared `access_*` become
+  vestigial OpenAPI metadata, not a second check), and unsupported
+  archetypes hard-error instead of silently skipping. End-to-end proof:
+  `examples/helpdesk/` — 8 screens → generated app → 8 passing smoke
+  tests (including Agent 403 on /settings with no policy, proving the
+  corpus decides). Remaining generator gaps: missing archetype macros
+  (graph_renderer, static_embed, rule_builder!, report_builder!,
+  whatif!, sankey!), business-logic fn generation, `codegen_profile`
+  selection, strict JSON-Schema validation of the registers.
 
 - `[PARTIAL — CURRENT PHASE]` **Screen-register v2 schema.**
   `docs/SCREEN_REGISTER_SCHEMA.json` and its companion guide define the

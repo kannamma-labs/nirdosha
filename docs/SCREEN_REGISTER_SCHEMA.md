@@ -239,3 +239,18 @@ The existing `cargo nirdosha ui-proof` command remains intentionally
 conservative: it generates a structural proof inventory from the register. It
 does not invent behavioral assertions or claim that browser automation has
 executed them.
+
+The full code generator (`cargo nirdosha generate-screens <project-dir>`,
+shipped 2026-09-23) goes further and emits the crate's whole `src/*.nir` tree
+from this register plus `menus.toml`. Its data rule is the guard-posture rule:
+**every entity a generated screen touches must have a `data_binding.guard`
+somewhere in the register** — the generator refuses an entity with none, so a
+generated app cannot contain an unguarded data screen. On guarded screens the
+generator emits only `*_with_auth` routes; the screen's declared `access_*`
+strings become vestigial route metadata (OpenAPI summaries), never a second
+authorization check — the synthesized `guard_policy!` corpus is the single
+authority for row visibility, field masking, required/forbidden write fields,
+caps, tenant scoping, and audit. Unsupported archetypes hard-error; mark such
+screens `stage = "blocked"` with `blocked_by = ["archetype:<name>"]`.
+`examples/helpdesk/` is the end-to-end proof: 8 screens → generated `.nir`
+tree → compiled crate → 8 passing guard-authority smoke tests.
