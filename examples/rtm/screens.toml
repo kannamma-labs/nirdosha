@@ -23,9 +23,16 @@
 # ============================================================================
 
 [metadata]
-source_inventory = "examples/rtm/screen.md"
+schema = "nirdosha.screen-register/v2"
+register_id = "rtm"
 version = "1.0.0"
+source_inventory = "examples/rtm/screen.md"
 total_screens = 152
+canonical_order = "module_then_id"
+codegen_profile = "rtm-web"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en-IN"
 # NOTE: previous counts (150 headline, 147 reconciliation) were undercounts.
 
 # ---------------------------------------------------------------- M1 Auth (6)
