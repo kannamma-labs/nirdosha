@@ -124,6 +124,31 @@ struct FieldDecl {
     name: String,
     #[serde(rename = "type")]
     ty: String,
+    /// `masked = true` (or the `sensitive` alias): the field is
+    /// forbidden by every policy synthesized from the screen that
+    /// declares it — dropped from reads (genuine absence; the struct
+    /// field must therefore be `Option<T>`) and refused on writes
+    /// (fail-closed allowed set).
+    #[serde(default)]
+    masked: bool,
+    #[serde(default)]
+    sensitive: bool,
+    /// `required = true`: the field must be submitted on **create**
+    /// policies synthesized from this screen (v1 scope: creates only —
+    /// applying `required` to updates would force every partial update
+    /// to resend the whole row).
+    #[serde(default)]
+    required: bool,
+}
+
+impl FieldDecl {
+    fn is_masked(&self) -> bool {
+        self.masked || self.sensitive
+    }
+
+    fn is_option(&self) -> bool {
+        self.ty.starts_with("Option<")
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -253,6 +278,17 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
                     guard: None,
                 });
             for f in &binding.fields {
+                // A masked field is dropped from reads (true key
+                // removal), so its struct slot must deserialize a
+                // missing key to `None` — plain `String` here would be
+                // a hard deserialize error for exactly the subjects the
+                // mask exists to protect. Refused at generation time.
+                if f.is_masked() && !f.is_option() {
+                    return Err(format!(
+                        "screen {} ({}): field `{}` is masked/sensitive, so its type must be `Option<...>` (the read mask removes the key; the row struct must tolerate its absence)",
+                        screen.id, screen.archetype, f.name
+                    ));
+                }
                 if !decl.fields.iter().any(|x| x.name == f.name) {
                     decl.fields.push(f.clone());
                 }
@@ -612,10 +648,52 @@ fn render_bridge(
                 screen.id
             ));
         }
+        // Field policy, synthesized from the screen's OWN declared
+        // field flags. No flags → no clause (exact back-compat: an
+        // unflagged register synthesizes exactly the policies it did
+        // before). With flags:
+        //   - masked/sensitive → `forbidden(...)`: dropped from reads
+        //     (genuine absence via Drop mask) and refused on writes
+        //     (fail-closed allowed set),
+        //   - everything else the screen declares → `allowed(...)`, so
+        //     a write is fail-closed to the screen's own field shape,
+        //   - required flags → `required(...)`, create actions only
+        //     (v1 scope; every partial update would otherwise have to
+        //     resend the whole row).
+        // Per-subject masking falls out of the per-screen subject set:
+        // two screens over the same table with different field flags
+        // synthesize different policies — each subject matches only the
+        // record(s) its roles are named in.
+        let screen_fields: Vec<&FieldDecl> = binding.fields.iter().collect();
+        let has_flags = screen_fields.iter().any(|f| f.is_masked() || f.required);
         for action in &policy.allowed_actions {
             let id = format!("{}-{}-{}", register_id, screen.id.replace('.', "-"), action);
+            // The required() sub-clause is create-scoped (v1): partial
+            // updates must not be forced to resend the whole row.
+            let action_clause = if has_flags {
+                let forbidden: Vec<String> = screen_fields.iter().filter(|f| f.is_masked()).map(|f| f.name.clone()).collect();
+                let allowed: Vec<String> = screen_fields.iter().filter(|f| !f.is_masked()).map(|f| f.name.clone()).collect();
+                let mut clause = String::from("field_policy {");
+                if !allowed.is_empty() {
+                    clause.push_str(&format!(" allowed({})", allowed.join(", ")));
+                }
+                if !forbidden.is_empty() {
+                    clause.push_str(&format!(" forbidden({})", forbidden.join(", ")));
+                }
+                if action == "create" {
+                    let required: Vec<String> = screen_fields.iter().filter(|f| f.required).map(|f| f.name.clone()).collect();
+                    if !required.is_empty() {
+                        clause.push_str(&format!(" required({})", required.join(", ")));
+                    }
+                }
+                clause.push_str(" }");
+                clause
+            } else {
+                String::new()
+            };
+            let clause_line = if action_clause.is_empty() { String::new() } else { format!("    {action_clause}\n") };
             out.push_str(&format!(
-                "nirdosha_rt::guard_policy! {{\n    allow \"{id}\" for {}\n    when action == \"{action}\" && resource == \"{resource}\"\n    purpose({purpose_pascal})\n    filter tenant_scope()\n    cap(row_cap = 200, max_scan_rows = 20_000)\n    obligate audit(sampled)\n}}\n\n",
+                "nirdosha_rt::guard_policy! {{\n    allow \"{id}\" for {}\n    when action == \"{action}\" && resource == \"{resource}\"\n    purpose({purpose_pascal})\n    filter tenant_scope()\n{clause_line}    cap(row_cap = 200, max_scan_rows = 20_000)\n    obligate audit(sampled)\n}}\n\n",
                 subjects.join(", ")
             ));
         }
@@ -630,7 +708,23 @@ fn render_bridge(
             "#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]\npub struct {struct_name} {{\n    pub id: i64,\n    pub {pk}: String,\n    pub tenant_id: String,\n"
         ));
         for f in &decl.fields {
-            out.push_str(&format!("    pub {}: {},\n", f.name, f.ty));
+            // The pk is emitted explicitly above; a screen that names it
+            // in its own data_binding.fields must not duplicate it.
+            if f.name == *pk {
+                continue;
+            }
+            if f.is_option() {
+                // Option fields: a dropped (masked) key deserializes to
+                // None, and the None is omitted again on re-serialize —
+                // true absence survives the round trip, the same
+                // convention RTM's bridge rows carry by hand.
+                out.push_str(&format!(
+                    "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub {}: {},\n",
+                    f.name, f.ty
+                ));
+            } else {
+                out.push_str(&format!("    pub {}: {},\n", f.name, f.ty));
+            }
         }
         out.push_str("}\n\n");
         out.push_str(&format!(
@@ -805,7 +899,17 @@ fn render_screen_invocation(plan: &PlannedScreen, entities: &BTreeMap<String, En
             let decl = entities.get(entity).ok_or("entity missing from bridge plan")?;
             let struct_name = decl.struct_name();
             let store = decl.store_fn();
-            let fields: Vec<String> = decl.fields.iter().map(|f| format!("{}: {}", f.name, f.ty)).collect();
+            // Displayed fields = this screen's OWN declared data_binding
+            // fields, minus masked ones (a forbidden field is dropped
+            // from every read this screen serves, so it must never be a
+            // column/search candidate — it could not be searched into
+            // existence). Screens that declare no fields of their own
+            // fall back to the entity-wide union.
+            let own_fields: Vec<FieldDecl> = binding
+                .map(|b| b.fields.iter().filter(|f| !f.is_masked()).cloned().collect())
+                .unwrap_or_default();
+            let displayed: &[FieldDecl] = if own_fields.is_empty() { &decl.fields } else { &own_fields };
+            let fields: Vec<String> = displayed.iter().map(|f| format!("{}: {}", f.name, f.ty)).collect();
             let mut out = String::new();
             out.push_str(&format!(
                 "nirdosha_rt::crud_screens! {{\n    mount: {mount},\n    entity: {struct_name},\n    store: {store},\n    path: {path:?},\n    fields: [ {} ],\n",

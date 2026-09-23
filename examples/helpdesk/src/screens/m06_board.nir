@@ -32,3 +32,16 @@ pub fn mount_ticket_board_move(router: nirdosha_rt::Router) -> nirdosha_rt::Rout
     })
 }
 
+nirdosha_rt::crud_screens! {
+    mount: mount_ticket_lookup,
+    entity: TicketRow,
+    store: ticket_store,
+    path: "/tickets/lookup",
+    fields: [ ticket_id: String, status: String ],
+    create: requires role "Viewer",
+    read: public,
+    update: requires role "Viewer",
+    delete: public,
+    guard: { table: ticket_table, purpose: "Operations", },
+}
+

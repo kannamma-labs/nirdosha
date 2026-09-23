@@ -103,6 +103,16 @@ nirdosha_rt::guard_policy! {
 }
 
 nirdosha_rt::guard_policy! {
+    allow "helpdesk-6-2-read" for Viewer
+    when action == "read" && resource == "ticket"
+    purpose(Operations)
+    filter tenant_scope()
+    field_policy { allowed(ticket_id, status) forbidden(internal_notes) }
+    cap(row_cap = 200, max_scan_rows = 20_000)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
     allow "helpdesk-7-2-aggregate" for Agent, Admin
     when action == "aggregate" && resource == "ticket"
     purpose(Operations)
@@ -256,6 +266,8 @@ pub struct TicketRow {
     pub priority: String,
     pub status: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_notes: Option<String>,
 }
 
 impl nirdosha_guard_screens::GuardedEntity for TicketRow {

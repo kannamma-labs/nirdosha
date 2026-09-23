@@ -132,6 +132,22 @@ Two archetypes with fully-specified parameters (shipped 2026-09-23):
   the screen's `policy.allowed_actions` must name `"aggregate"`. Counts only;
   dimensions must be `String`-typed fields of the entity; guard-required by
   design (no unguarded path exists).
+- **`tree_view`** — parent/child hierarchy (RTM's 5.6 archetype).
+  `parameters = { access, id_field, parent_field, label_field }`, all
+  `String`-typed; nests the guard-decoded snapshot in-process, cycle-safe,
+  orphans rendered honestly. Guard-required by design.
+
+Field flags in `data_binding.fields` are **security inputs** the generator
+synthesizes into the screen's `guard_policy!` records (shipped 2026-09-23):
+`masked = true` (alias `sensitive`) becomes `forbidden(...)` — dropped from
+reads as genuine absence (the field's type must be `Option<...>`, enforced at
+generation time) and refused on writes via the fail-closed allowed set;
+every other field the screen declares becomes `allowed(...)`; `required = true`
+becomes `required(...)` on **create** policies only (v1 scope). No flags → no
+clause, exactly the pre-synthesis shape. Because subjects come from each
+screen's own `roles`, two screens over the same table with different field
+flags synthesize different policies — per-subject masking with masks that
+follow the subject, not the route.
 
 ## Minimal v2 shape
 

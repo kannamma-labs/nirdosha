@@ -21,7 +21,7 @@
 schema = "nirdosha.screen-register/v2"
 register_id = "helpdesk"
 version = "1.0.0"
-total_screens = 11
+total_screens = 12
 canonical_order = "module_then_id"
 codegen_profile = "web-default"
 generator_version = "nirdosha-screen-codegen/1"
@@ -198,6 +198,27 @@ data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { tab
 policy = { purpose = "Operations", allowed_actions = ["read", "update"] }
 parameters = { title_field = "title", column_field = "status", columns = ["open", "in_progress", "done"], move_path = "/tickets/{id}/move/{to}", access = 'requires role "Agent"' }
 notes = "move route generated with guarded_update — status changes are policy-checked writes, not presentational drags"
+[[screen]]
+id = "6.2"
+name = "Ticket Status Lookup"
+module = "M6"
+archetype = "crud_screens"
+combo = []
+roles = ["Viewer:R"]
+datasets = ["PG.tickets"]
+blocked_by = []
+stage = "built"
+file = "examples/helpdesk/src/screens/m06_board.nir"
+codegen = { template = "crud_screens", mount_symbol = "mount_ticket_lookup", route_path = "/tickets/lookup", generated_files = ["src/screens/m06_board.nir"] }
+data_binding = { entities = ["Ticket"], primary_key = "ticket_id", guard = { table = "ticket_table", purpose = "Operations" }, fields = [
+    { name = "ticket_id", type = "String" },
+    { name = "status", type = "String" },
+    { name = "internal_notes", type = "Option<String>", masked = true },
+] }
+policy = { purpose = "Operations", allowed_actions = ["read"] }
+parameters = { access_create = 'requires role "Viewer"', access_update = 'requires role "Viewer"' }
+notes = "same table, different subject set: synthesizes helpdesk-6-2-read for Viewer with field_policy forbidden(internal_notes) — the guard's masks follow the subject, not the route"
+
 # ---------------------------------------------------------- M7 Help (2)
 [[screen]]
 id = "7.1"

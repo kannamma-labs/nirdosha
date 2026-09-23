@@ -17,6 +17,7 @@ fn main() {
     let router = helpdesk::m07_help::mount_ticket_report(router);
     let router = helpdesk::m08_relations::mount_relation_tree(router);
     let router = helpdesk::m03_tickets::mount_tickets(router);
+    let router = helpdesk::m06_board::mount_ticket_lookup(router);
     println!("generated app — listening on http://localhost:8080/");
     router.serve(8080);
 }

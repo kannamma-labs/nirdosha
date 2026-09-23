@@ -30,6 +30,7 @@ fn router() -> Router {
     let router = helpdesk::m07_help::mount_ticket_report(router);
     let router = helpdesk::m07_help::mount_getting_started(router);
     let router = helpdesk::m08_relations::mount_relation_tree(router);
+    let router = helpdesk::m06_board::mount_ticket_lookup(router);
     helpdesk::m03_tickets::mount_tickets(router)
 }
 
@@ -184,6 +185,27 @@ fn anonymous_report_run_is_denied_by_the_guard() {
     let router = router();
     let resp = router.dispatch(&Request { method: "POST".into(), path: "/reports/tickets".into(), headers: HashMap::from([("content-type".into(), "application/x-www-form-urlencoded".into())]), body: "dimension=status".into() });
     assert_eq!(resp.status, 403, "no policy for anon = guard deny: {resp:?}");
+}
+
+#[test]
+fn viewer_sees_tickets_without_the_masked_field_and_agent_still_does() {
+    // Seed one ticket carrying a real internal note.
+    use helpdesk::bridge::{ticket_table, TicketRow};
+    ticket_table().system_write("default", &TicketRow { id: 0, ticket_id: "t-9".into(), tenant_id: "default".into(), title: "Mask probe".to_string(), priority: "high".into(), status: "open".into(), body: "visible body".into(), internal_notes: Some("vip escalation path".into()) });
+    let router = router();
+    // Agent: no field_policy on helpdesk-3-1-read — sees everything.
+    let agent = login_as(&router, "sam", "agent123");
+    let resp = get_as(&router, "/api/tickets/t-9", &agent);
+    assert_eq!(resp.status, 200, "agent read must be allowed: {resp:?}");
+    assert!(resp.body.contains("vip escalation"), "Agent must see internal_notes: {}", resp.body);
+    // Viewer: helpdesk-6-2-read's forbidden(internal_notes) drops the
+    // key — genuine absence, not a placeholder.
+    let viewer = login_as(&router, "vic", "viewer123");
+    let resp = get_as(&router, "/api/tickets/lookup/t-9", &viewer);
+    assert_eq!(resp.status, 200, "viewer read must be allowed via 6.2's route: {resp:?}");
+    assert!(!resp.body.contains("vip escalation"), "masked field must be absent for Viewer: {}", resp.body);
+    assert!(!resp.body.contains("internal_notes"), "the key itself must be gone for Viewer: {}", resp.body);
+    assert!(resp.body.contains("open"), "Viewer must still see the declared fields: {}", resp.body);
 }
 
 #[test]
