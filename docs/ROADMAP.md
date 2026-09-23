@@ -131,10 +131,24 @@ A, Track B, Track C below) — but the specs themselves stay put.
   Agent still sees it — proving the corpus decides, per subject).
   Field-policy synthesis from `data_binding.fields` flags (masked →
   forbidden, required → create-scoped required, fail-closed allowed
-  set) is shipped. Remaining generator gaps: missing archetype macros
-  (sankey, graph_renderer, rule_builder!, whatif!), business-logic fn
-  generation, `codegen_profile` selection, strict JSON-Schema
-  validation of the registers.
+  set) is shipped. Register-pair validation is shipped (2026-09-23):
+  `menus.toml` is typed in the generator and cross-validated against
+  `screens.toml` before emission — screen-id existence (V1), role
+  subsets (V2), built-stage targets (V3), route agreement with
+  `codegen.route_path` + route uniqueness (V6-lite), guard resolution
+  against the synthesized policy surface (V5-lite), and landing
+  reachability (V8-lite) — with the invariant count in the generation
+  report; schemas: `docs/MENUS_SCHEMA.{json,md}`, per-archetype
+  parameter sub-schemas in `SCREEN_REGISTER_SCHEMA.json`
+  (`params_*` defs), and generator-enforced field-membership checks
+  (crud write lists vs declared/masked fields, kanban column/title,
+  tree_view id/parent/label, report dimensions — all typo-proofed,
+  10 harness tests in `generate.rs`). Remaining generator gaps:
+  missing archetype macros (sankey, graph_renderer, rule_builder!,
+  whatif!), business-logic fn generation, `codegen_profile` selection,
+  full JSON-Schema validation of the registers (the generator today
+  enforces the load-bearing parts of the schemas; strict
+  `jsonschema`-based validation is the follow-up).
 
 - `[PARTIAL — CURRENT PHASE]` **Screen-register v2 schema.**
   `docs/SCREEN_REGISTER_SCHEMA.json` and its companion guide define the

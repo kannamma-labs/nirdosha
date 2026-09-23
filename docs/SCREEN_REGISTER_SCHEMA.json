@@ -4,198 +4,1045 @@
   "title": "Nirdosha Screen Register v2",
   "description": "Inventory and deterministic code-generation contract. Behavioral UI proofs belong in UI-proof-specification.toml.",
   "type": "object",
-  "required": ["metadata", "screen"],
+  "required": [
+    "metadata",
+    "screen"
+  ],
   "additionalProperties": false,
   "properties": {
-    "metadata": {"$ref": "#/$defs/metadata"},
-    "screen": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/screen"}}
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "screen": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/screen"
+      }
+    }
   },
   "$defs": {
     "metadata": {
       "type": "object",
-      "required": ["schema", "register_id", "version", "total_screens", "canonical_order"],
+      "required": [
+        "schema",
+        "register_id",
+        "version",
+        "total_screens",
+        "canonical_order"
+      ],
       "additionalProperties": false,
       "properties": {
-        "schema": {"const": "nirdosha.screen-register/v2", "description": "Schema identifier. Consumers use this to select the v2 screen-register rules."},
-        "register_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "description": "Stable lowercase identifier for this screen register; use it in artifact names and fixture namespaces."},
-        "version": {"type": "string", "minLength": 1, "description": "Human-managed version of the register contents; increment when the inventory contract changes."},
-        "source_inventory": {"type": "string", "description": "Repository-relative path or HTTPS URL of the human-maintained inventory from which this register was derived."},
-        "source_inventory_hash": {"$ref": "#/$defs/hash", "description": "SHA-256 hash of the source inventory bytes, allowing consumers to detect source drift."},
-        "total_screens": {"type": "integer", "minimum": 1},
-        "canonical_order": {"enum": ["module_then_id", "id", "explicit_order"], "description": "Sorting rule consumers MUST apply before code generation and hashing."},
-        "codegen_profile": {"type": "string", "description": "Named generator profile selecting renderer defaults and supported templates."},
-        "generator_version": {"type": "string", "description": "Version of the screen generator expected to consume this register."},
-        "policy_register_hash": {"$ref": "#/$defs/hash", "description": "SHA-256 hash of the policy register used to resolve screen policy and logging policy IDs."},
-        "default_timezone": {"type": "string", "description": "IANA timezone used when a screen does not override timezone-sensitive rendering or fixtures."},
-        "default_locale": {"type": "string", "description": "BCP-47 locale used for deterministic labels, formatting, and locale-aware fixtures."},
-        "default_logging": {"$ref": "#/$defs/logging"}
+        "schema": {
+          "const": "nirdosha.screen-register/v2",
+          "description": "Schema identifier. Consumers use this to select the v2 screen-register rules."
+        },
+        "register_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "description": "Stable lowercase identifier for this screen register; use it in artifact names and fixture namespaces."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-managed version of the register contents; increment when the inventory contract changes."
+        },
+        "source_inventory": {
+          "type": "string",
+          "description": "Repository-relative path or HTTPS URL of the human-maintained inventory from which this register was derived."
+        },
+        "source_inventory_hash": {
+          "$ref": "#/$defs/hash",
+          "description": "SHA-256 hash of the source inventory bytes, allowing consumers to detect source drift."
+        },
+        "total_screens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "canonical_order": {
+          "enum": [
+            "module_then_id",
+            "id",
+            "explicit_order"
+          ],
+          "description": "Sorting rule consumers MUST apply before code generation and hashing."
+        },
+        "codegen_profile": {
+          "type": "string",
+          "description": "Named generator profile selecting renderer defaults and supported templates."
+        },
+        "generator_version": {
+          "type": "string",
+          "description": "Version of the screen generator expected to consume this register."
+        },
+        "policy_register_hash": {
+          "$ref": "#/$defs/hash",
+          "description": "SHA-256 hash of the policy register used to resolve screen policy and logging policy IDs."
+        },
+        "default_timezone": {
+          "type": "string",
+          "description": "IANA timezone used when a screen does not override timezone-sensitive rendering or fixtures."
+        },
+        "default_locale": {
+          "type": "string",
+          "description": "BCP-47 locale used for deterministic labels, formatting, and locale-aware fixtures."
+        },
+        "default_logging": {
+          "$ref": "#/$defs/logging"
+        }
       }
     },
     "screen": {
       "type": "object",
-      "required": ["id", "name", "module", "archetype", "stage", "codegen", "logging"],
+      "required": [
+        "id",
+        "name",
+        "module",
+        "archetype",
+        "stage",
+        "codegen",
+        "logging"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$", "description": "Stable screen identifier used by menus, tests, proof claims, and generated artifact names."},
-        "name": {"type": "string", "minLength": 1, "description": "Human-readable screen name; it is display metadata, not a stable identifier."},
-        "module": {"type": "string", "pattern": "^M[0-9]+$", "description": "Owning RTM/module namespace used for grouping, ownership, and canonical ordering."},
-        "archetype": {"type": "string", "minLength": 1, "description": "Declared UI archetype or macro family that the generator must instantiate."},
-        "combo": {"type": "array", "items": {"type": "string", "description": "Named archetype option or feature combination consumed by the selected template."}},
-        "roles": {"type": "array", "items": {"type": "string", "description": "Role and access declaration in the register's role syntax, for example `Analyst:R/W`."}},
-        "datasets": {"type": "array", "items": {"type": "string", "description": "Logical dataset/catalog identifiers read or written by this screen."}},
-        "blocked_by": {"type": "array", "items": {"type": "string", "description": "Typed blocker reference that prevents promotion of the declared stage."}},
-        "stage": {"enum": ["built", "emittable", "interim", "blocked", "delegated"], "description": "Current implementation stage; consumers use it to decide whether generation, promotion, or blocker reporting is allowed."},
-        "interim": {"type": "boolean"},
-        "file": {"type": "string", "description": "Repository-relative source file containing the implementation or mount for this screen."},
-        "notes": {"type": "string", "description": "Human context for maintainers; consumers MUST NOT use notes as executable configuration."},
-        "codegen": {"$ref": "#/$defs/codegen"},
-        "data_binding": {"$ref": "#/$defs/data_binding"},
-        "policy": {"$ref": "#/$defs/policy"},
-        "parameters": {"type": "object", "additionalProperties": true, "description": "Archetype-specific macro inputs consumed by the selected template, such as refresh_seconds, steps, or guard."},
-        "logging": {"$ref": "#/$defs/logging"},
-        "dependencies": {"type": "array", "items": {"$ref": "#/$defs/dependency"}},
-        "provenance": {"$ref": "#/$defs/provenance"},
-        "render_profile": {"$ref": "#/$defs/render_profile"},
-        "determinism": {"$ref": "#/$defs/determinism"}
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "description": "Stable screen identifier used by menus, tests, proof claims, and generated artifact names."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable screen name; it is display metadata, not a stable identifier."
+        },
+        "module": {
+          "type": "string",
+          "pattern": "^M[0-9]+$",
+          "description": "Owning RTM/module namespace used for grouping, ownership, and canonical ordering."
+        },
+        "archetype": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Declared UI archetype or macro family that the generator must instantiate."
+        },
+        "combo": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Named archetype option or feature combination consumed by the selected template."
+          }
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Role and access declaration in the register's role syntax, for example `Analyst:R/W`."
+          }
+        },
+        "datasets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Logical dataset/catalog identifiers read or written by this screen."
+          }
+        },
+        "blocked_by": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Typed blocker reference that prevents promotion of the declared stage."
+          }
+        },
+        "stage": {
+          "enum": [
+            "built",
+            "emittable",
+            "interim",
+            "blocked",
+            "delegated"
+          ],
+          "description": "Current implementation stage; consumers use it to decide whether generation, promotion, or blocker reporting is allowed."
+        },
+        "interim": {
+          "type": "boolean"
+        },
+        "file": {
+          "type": "string",
+          "description": "Repository-relative source file containing the implementation or mount for this screen."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Human context for maintainers; consumers MUST NOT use notes as executable configuration."
+        },
+        "codegen": {
+          "type": "object",
+          "required": [
+            "template",
+            "mount_symbol",
+            "route_path",
+            "generated_files"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "template": {
+              "type": "string",
+              "description": "Template id; must equal the screen's archetype for generated screens."
+            },
+            "mount_symbol": {
+              "type": "string",
+              "description": "The `pub fn` the generated serve.nir mounts."
+            },
+            "route_path": {
+              "type": "string",
+              "description": "Served route; \"\" for app_shell_from_toml (chrome only)."
+            },
+            "generated_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "data_binding": {
+          "$ref": "#/$defs/data_binding"
+        },
+        "policy": {
+          "$ref": "#/$defs/policy"
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Archetype-specific macro inputs. The generator type-checks the parameter sub-schema per archetype: unknown/missing/typo'd keys are generation errors (see SCREEN_REGISTER_SCHEMA.md).",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/params_crud_screens"
+            },
+            {
+              "$ref": "#/$defs/params_dashboard"
+            },
+            {
+              "$ref": "#/$defs/params_kanban"
+            },
+            {
+              "$ref": "#/$defs/params_feed"
+            },
+            {
+              "$ref": "#/$defs/params_settings"
+            },
+            {
+              "$ref": "#/$defs/params_wizard"
+            },
+            {
+              "$ref": "#/$defs/params_static_embed"
+            },
+            {
+              "$ref": "#/$defs/params_report"
+            },
+            {
+              "$ref": "#/$defs/params_tree"
+            },
+            {
+              "$ref": "#/$defs/params_login"
+            },
+            {
+              "$ref": "#/$defs/params_app_shell"
+            }
+          ]
+        },
+        "logging": {
+          "$ref": "#/$defs/logging"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependency"
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "render_profile": {
+          "$ref": "#/$defs/render_profile"
+        },
+        "determinism": {
+          "$ref": "#/$defs/determinism"
+        }
       }
     },
     "codegen": {
       "type": "object",
-      "required": ["template", "mount_symbol", "renderer", "artifact_namespace"],
+      "required": [
+        "template",
+        "mount_symbol",
+        "renderer",
+        "artifact_namespace"
+      ],
       "additionalProperties": false,
       "properties": {
-        "template": {"type": "string", "minLength": 1, "description": "Exact generator template key; consumers MUST resolve it rather than infer a template from the screen name."},
-        "mount_symbol": {"type": "string", "pattern": "^mount_[A-Za-z0-9_]+$", "description": "Exact generated mount function/symbol that connects the screen to its route."},
-        "renderer": {"enum": ["web", "tui", "mobile", "web_and_tui", "custom"], "description": "Target renderer(s) for which artifacts and selectors must be generated."},
-        "artifact_namespace": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$", "description": "Stable namespace prefix for generated files, selectors, fixture IDs, and evidence."},
-        "generated_files": {"type": "array", "items": {"type": "string", "description": "Repository-relative output path that the generator is expected to create or update."}},
-        "plugin_pack": {"type": "string", "description": "Exact plugin/template pack identifier required by this screen."},
-        "feature_flags": {"type": "array", "items": {"type": "string", "description": "Named generator feature flag; unknown flags MUST fail validation."}},
-        "route_path": {"type": "string", "description": "HTTP route path the screen mounts on, used for collision detection and OpenAPI generation."},
-        "route_owner": {"type": "string", "description": "Module or subsystem that owns route registration and collision resolution."},
-        "source_globs": {"type": "array", "items": {"type": "string", "description": "Repository glob patterns whose contents are inputs to generation and should be hashed."}}
+        "template": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact generator template key; consumers MUST resolve it rather than infer a template from the screen name."
+        },
+        "mount_symbol": {
+          "type": "string",
+          "pattern": "^mount_[A-Za-z0-9_]+$",
+          "description": "Exact generated mount function/symbol that connects the screen to its route."
+        },
+        "renderer": {
+          "enum": [
+            "web",
+            "tui",
+            "mobile",
+            "web_and_tui",
+            "custom"
+          ],
+          "description": "Target renderer(s) for which artifacts and selectors must be generated."
+        },
+        "artifact_namespace": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]*$",
+          "description": "Stable namespace prefix for generated files, selectors, fixture IDs, and evidence."
+        },
+        "generated_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Repository-relative output path that the generator is expected to create or update."
+          }
+        },
+        "plugin_pack": {
+          "type": "string",
+          "description": "Exact plugin/template pack identifier required by this screen."
+        },
+        "feature_flags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Named generator feature flag; unknown flags MUST fail validation."
+          }
+        },
+        "route_path": {
+          "type": "string",
+          "description": "HTTP route path the screen mounts on, used for collision detection and OpenAPI generation."
+        },
+        "route_owner": {
+          "type": "string",
+          "description": "Module or subsystem that owns route registration and collision resolution."
+        },
+        "source_globs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Repository glob patterns whose contents are inputs to generation and should be hashed."
+          }
+        }
       }
     },
     "data_binding": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "entities": {"type": "array", "items": {"type": "string", "description": "Logical domain entity names rendered or mutated by the screen."}},
-        "store": {"type": "string", "description": "Authoritative store identifier used for reads and writes."},
-        "read_model": {"type": "string", "description": "Read-model identifier used to shape deterministic query results."},
-        "schema_version": {"type": "string", "description": "Version of the bound data schema; changes require regeneration or an explicit migration."},
-        "primary_key": {"type": "string", "description": "Field name used to identify a bound record."},
-        "field_mapping_ref": {"type": "string", "description": "Reference to the canonical UI-field-to-entity-field mapping."},
-        "catalog_ref": {"type": "string", "description": "Catalog identifier containing authoritative metadata for this binding."},
-        "fields": {"type": "array", "items": {"$ref": "#/$defs/data_binding_field"}, "description": "Screen fields bound to the entity, in display order."},
-        "guard": {"$ref": "#/$defs/data_binding_guard", "description": "Optional data-plane guard binding; when present, generated reads/writes go through GuardedTable."}
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Logical domain entity names rendered or mutated by the screen."
+          }
+        },
+        "store": {
+          "type": "string",
+          "description": "Authoritative store identifier used for reads and writes."
+        },
+        "read_model": {
+          "type": "string",
+          "description": "Read-model identifier used to shape deterministic query results."
+        },
+        "schema_version": {
+          "type": "string",
+          "description": "Version of the bound data schema; changes require regeneration or an explicit migration."
+        },
+        "primary_key": {
+          "type": "string",
+          "description": "Field name used to identify a bound record."
+        },
+        "field_mapping_ref": {
+          "type": "string",
+          "description": "Reference to the canonical UI-field-to-entity-field mapping."
+        },
+        "catalog_ref": {
+          "type": "string",
+          "description": "Catalog identifier containing authoritative metadata for this binding."
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/data_binding_field"
+          },
+          "description": "Screen fields bound to the entity, in display order."
+        },
+        "guard": {
+          "$ref": "#/$defs/data_binding_guard",
+          "description": "Optional data-plane guard binding; when present, generated reads/writes go through GuardedTable."
+        }
       }
     },
     "data_binding_field": {
       "type": "object",
-      "required": ["name", "type"],
+      "required": [
+        "name",
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string", "description": "Field name as used by the screen and the generated macro invocation."},
-        "type": {"type": "string", "description": "Rust or domain type of the field, e.g. `String`, `i64`, `Option<Email>`."},
-        "sensitive": {"type": "boolean", "description": "Whether the field carries sensitive data that must be masked or redacted."},
-        "required": {"type": "boolean", "description": "Whether the field is required for create/update submissions."},
-        "masked": {"type": "boolean", "description": "Whether the field must be masked in the rendered UI by default."},
-        "display": {"type": "boolean", "description": "Whether the field appears in list/detail views."},
-        "editable": {"type": "boolean", "description": "Whether the field may be edited through the screen."}
+        "name": {
+          "type": "string",
+          "description": "Field name as used by the screen and the generated macro invocation."
+        },
+        "type": {
+          "type": "string",
+          "description": "Rust or domain type of the field, e.g. `String`, `i64`, `Option<Email>`."
+        },
+        "sensitive": {
+          "type": "boolean",
+          "description": "Whether the field carries sensitive data that must be masked or redacted."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the field is required for create/update submissions."
+        },
+        "masked": {
+          "type": "boolean",
+          "description": "Whether the field must be masked in the rendered UI by default."
+        },
+        "display": {
+          "type": "boolean",
+          "description": "Whether the field appears in list/detail views."
+        },
+        "editable": {
+          "type": "boolean",
+          "description": "Whether the field may be edited through the screen."
+        }
       }
     },
     "data_binding_guard": {
       "type": "object",
-      "required": ["table", "purpose"],
+      "required": [
+        "table",
+        "purpose"
+      ],
       "additionalProperties": false,
       "properties": {
-        "table": {"type": "string", "description": "Name of the function returning `&'static GuardedTable<_, Entity>` for this screen."},
-        "purpose": {"type": "string", "description": "Guard purpose string passed to every `GuardedTable` read/write call."},
-        "row_id": {"type": "string", "description": "Fixed row identifier for singleton screens (e.g. settings); omit for keyed entities."}
+        "table": {
+          "type": "string",
+          "description": "Name of the function returning `&'static GuardedTable<_, Entity>` for this screen."
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Guard purpose string passed to every `GuardedTable` read/write call."
+        },
+        "row_id": {
+          "type": "string",
+          "description": "Fixed row identifier for singleton screens (e.g. settings); omit for keyed entities."
+        }
       }
     },
     "policy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "policy_ids": {"type": "array", "items": {"type": "string", "description": "Stable policy IDs that must resolve before the screen can be generated or certified."}},
-        "purpose": {"type": "string", "description": "Business purpose explaining why the screen is allowed to access its data."},
-        "allowed_actions": {"type": "array", "items": {"enum": ["read", "create", "update", "delete", "export", "aggregate", "propose", "confirm"], "description": "Operation the generated screen may request; this is an allow-list, not a UI label."}},
-        "mask_profile": {"type": "string", "description": "Named redaction/masking profile for sensitive values rendered by the screen."},
-        "subject_scope": {"type": "string", "description": "Identity scope applied to records, such as `self`, `team`, `tenant`, or `global`."},
-        "segregation_class": {"type": "string", "description": "Separation-of-duties class used to prevent conflicting roles from being combined."}
+        "policy_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Stable policy IDs that must resolve before the screen can be generated or certified."
+          }
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Business purpose explaining why the screen is allowed to access its data."
+        },
+        "allowed_actions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "read",
+              "create",
+              "update",
+              "delete",
+              "export",
+              "aggregate",
+              "propose",
+              "confirm"
+            ],
+            "description": "Operation the generated screen may request; this is an allow-list, not a UI label."
+          }
+        },
+        "mask_profile": {
+          "type": "string",
+          "description": "Named redaction/masking profile for sensitive values rendered by the screen."
+        },
+        "subject_scope": {
+          "type": "string",
+          "description": "Identity scope applied to records, such as `self`, `team`, `tenant`, or `global`."
+        },
+        "segregation_class": {
+          "type": "string",
+          "description": "Separation-of-duties class used to prevent conflicting roles from being combined."
+        }
       }
     },
     "logging": {
       "type": "object",
-      "required": ["domain", "country", "entity", "event_class"],
+      "required": [
+        "domain",
+        "country",
+        "entity",
+        "event_class"
+      ],
       "additionalProperties": false,
       "properties": {
-        "domain": {"type": "string", "minLength": 1, "description": "Logging domain used to select the applicable logging policy, for example `payments` or `identity`."},
-        "country": {"type": "string", "pattern": "^(?:[A-Z]{2}|EU|\\*)$", "description": "Uppercase ISO-like country scope, `EU`, or `*` for global scope; consumers resolve it against the logging-policy register."},
-        "region": {"type": "string", "description": "Optional geographic region within the country scope."},
-        "subdomain": {"type": "string", "description": "Optional narrower logging namespace within the domain."},
-        "entity": {"type": "string", "minLength": 1, "description": "Domain entity named in emitted audit/log records."},
-        "event_class": {"enum": ["security", "audit", "transaction", "access", "operational", "api", "debug"], "description": "Controlled event category used for routing, review, and retention."},
-        "level": {"enum": ["debug", "info", "notice", "warn", "error", "fatal"], "description": "Minimum severity emitted by the generated screen instrumentation."},
-        "policy_id": {"type": "string", "description": "Logging-policy rule ID that authorizes this domain/country/entity/event combination."},
-        "retention_class": {"type": "string", "description": "Retention category resolved by the logging policy, such as a regulated seven-year class."},
-        "required_fields": {"type": "array", "items": {"type": "string", "description": "Field names that every emitted event must contain."}},
-        "redaction_profile": {"type": "string", "description": "Named redaction profile applied before an event leaves the UI boundary."}
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Logging domain used to select the applicable logging policy, for example `payments` or `identity`."
+        },
+        "country": {
+          "type": "string",
+          "pattern": "^(?:[A-Z]{2}|EU|\\*)$",
+          "description": "Uppercase ISO-like country scope, `EU`, or `*` for global scope; consumers resolve it against the logging-policy register."
+        },
+        "region": {
+          "type": "string",
+          "description": "Optional geographic region within the country scope."
+        },
+        "subdomain": {
+          "type": "string",
+          "description": "Optional narrower logging namespace within the domain."
+        },
+        "entity": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Domain entity named in emitted audit/log records."
+        },
+        "event_class": {
+          "enum": [
+            "security",
+            "audit",
+            "transaction",
+            "access",
+            "operational",
+            "api",
+            "debug"
+          ],
+          "description": "Controlled event category used for routing, review, and retention."
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "notice",
+            "warn",
+            "error",
+            "fatal"
+          ],
+          "description": "Minimum severity emitted by the generated screen instrumentation."
+        },
+        "policy_id": {
+          "type": "string",
+          "description": "Logging-policy rule ID that authorizes this domain/country/entity/event combination."
+        },
+        "retention_class": {
+          "type": "string",
+          "description": "Retention category resolved by the logging policy, such as a regulated seven-year class."
+        },
+        "required_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Field names that every emitted event must contain."
+          }
+        },
+        "redaction_profile": {
+          "type": "string",
+          "description": "Named redaction profile applied before an event leaves the UI boundary."
+        }
       }
     },
     "dependency": {
       "type": "object",
-      "required": ["kind", "name"],
+      "required": [
+        "kind",
+        "name"
+      ],
       "additionalProperties": false,
       "properties": {
-        "kind": {"enum": ["macro", "plugin", "dataset", "policy", "route", "source", "external"], "description": "Kind of input dependency being pinned."},
-        "name": {"type": "string", "description": "Canonical dependency name resolved by the generator."},
-        "version": {"type": "string", "description": "Dependency version or revision; omit only when the hash is the sole immutable locator."},
-        "hash": {"$ref": "#/$defs/hash"},
-        "required": {"type": "boolean"}
+        "kind": {
+          "enum": [
+            "macro",
+            "plugin",
+            "dataset",
+            "policy",
+            "route",
+            "source",
+            "external"
+          ],
+          "description": "Kind of input dependency being pinned."
+        },
+        "name": {
+          "type": "string",
+          "description": "Canonical dependency name resolved by the generator."
+        },
+        "version": {
+          "type": "string",
+          "description": "Dependency version or revision; omit only when the hash is the sole immutable locator."
+        },
+        "hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "required": {
+          "type": "boolean"
+        }
       }
     },
     "provenance": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "owner": {"type": "string", "description": "Team or service accountable for keeping this screen declaration correct."},
-        "reviewers": {"type": "array", "items": {"type": "string", "description": "Teams or identities required to review changes to this declaration."}},
-        "change_ticket": {"type": "string", "description": "Issue/change-request identifier explaining why the register entry changed."},
-        "source_hash": {"$ref": "#/$defs/hash"},
-        "last_verified_revision": {"type": "string", "description": "Source-control revision at which the declaration was last checked against implementation."}
+        "owner": {
+          "type": "string",
+          "description": "Team or service accountable for keeping this screen declaration correct."
+        },
+        "reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Teams or identities required to review changes to this declaration."
+          }
+        },
+        "change_ticket": {
+          "type": "string",
+          "description": "Issue/change-request identifier explaining why the register entry changed."
+        },
+        "source_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "last_verified_revision": {
+          "type": "string",
+          "description": "Source-control revision at which the declaration was last checked against implementation."
+        }
       }
     },
     "render_profile": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "theme": {"type": "string", "description": "Named design-system theme used by generated renderers."},
-        "density": {"enum": ["compact", "comfortable", "spacious"], "description": "Layout density selected for generated controls and tables."},
-        "responsive": {"type": "boolean"},
-        "accessibility_level": {"enum": ["A", "AA", "AAA"], "description": "Target WCAG conformance level for generated UI checks."},
-        "supports_streaming": {"type": "boolean"},
-        "supports_offline": {"type": "boolean"}
+        "theme": {
+          "type": "string",
+          "description": "Named design-system theme used by generated renderers."
+        },
+        "density": {
+          "enum": [
+            "compact",
+            "comfortable",
+            "spacious"
+          ],
+          "description": "Layout density selected for generated controls and tables."
+        },
+        "responsive": {
+          "type": "boolean"
+        },
+        "accessibility_level": {
+          "enum": [
+            "A",
+            "AA",
+            "AAA"
+          ],
+          "description": "Target WCAG conformance level for generated UI checks."
+        },
+        "supports_streaming": {
+          "type": "boolean"
+        },
+        "supports_offline": {
+          "type": "boolean"
+        }
       }
     },
     "determinism": {
       "type": "object",
-      "required": ["ordering_key", "seed", "fixture_namespace"],
+      "required": [
+        "ordering_key",
+        "seed",
+        "fixture_namespace"
+      ],
       "additionalProperties": false,
       "properties": {
-        "ordering_key": {"type": "string", "description": "Canonical field sequence used when sorting generated declarations and evidence."},
-        "seed": {"type": "integer", "minimum": 0},
-        "fixture_namespace": {"type": "string", "description": "Stable namespace for generated test data, browser traces, and proof artifacts."},
-        "stable_id": {"type": "string", "description": "Optional immutable identifier for this screen across renames and renderer changes."},
-        "allow_generated_names": {"type": "boolean"}
+        "ordering_key": {
+          "type": "string",
+          "description": "Canonical field sequence used when sorting generated declarations and evidence."
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fixture_namespace": {
+          "type": "string",
+          "description": "Stable namespace for generated test data, browser traces, and proof artifacts."
+        },
+        "stable_id": {
+          "type": "string",
+          "description": "Optional immutable identifier for this screen across renames and renderer changes."
+        },
+        "allow_generated_names": {
+          "type": "boolean"
+        }
       }
     },
     "hash": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "description": "Lowercase SHA-256 digest of the exact referenced bytes, formatted as `sha256:<64 hex characters>`."
+    },
+    "params_crud_screens": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "crud_screens archetype. Field lists must be subsets of data_binding.fields' non-masked names (masked = the guard forbids submitting them); required-flagged fields must appear in create_fields.",
+      "properties": {
+        "access": {
+          "type": "object",
+          "description": "Vestigial OpenAPI metadata only \u2014 never a second enforcement point."
+        },
+        "read_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "post_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "put_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "create_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Write shape for the create form; every entry must be a declared non-masked entity field."
+        },
+        "update_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Write shape for the update form; every entry must be a declared non-masked entity field."
+        },
+        "refresh_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sort_by": {
+          "type": "string",
+          "description": "Declared field the list view sorts by."
+        },
+        "countdown_field": {
+          "type": "string",
+          "description": "Declared numeric field rendered as a countdown."
+        }
+      }
+    },
+    "params_dashboard": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "dashboard archetype: widgets[] entries declare { fn, label } over guarded reads; widget fns must return metric-compatible values (i64/f64).",
+      "properties": {
+        "widgets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "fn",
+              "label"
+            ],
+            "properties": {
+              "fn": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "params_kanban": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "kanban_board archetype. column_field must be a declared field (the move handler writes through it); title_field must be declared.",
+      "required": [
+        "columns",
+        "move_path"
+      ],
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "column_field": {
+          "type": "string",
+          "description": "Declared field holding the column marker."
+        },
+        "title_field": {
+          "type": "string",
+          "description": "Declared field used as the card title."
+        },
+        "move_path": {
+          "type": "string",
+          "description": "POST route for moves; the generator registers it as a literal route."
+        }
+      }
+    },
+    "params_feed": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "communication_feed archetype. refresh_seconds must precede the guard clause in the invocation.",
+      "required": [
+        "post_access"
+      ],
+      "properties": {
+        "refresh_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "post_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vestigial OpenAPI metadata only."
+        }
+      }
+    },
+    "params_settings": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "settings_screen archetype: sections/fields of a JSON-blob-backed settings table; API mounted at /api{route_path}.",
+      "properties": {
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "read_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vestigial OpenAPI metadata only."
+        },
+        "post_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vestigial OpenAPI metadata only."
+        }
+      }
+    },
+    "params_wizard": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "wizard archetype: steps are literal GET/POST {path}/step/N routes; wizard state rides a dedicated cookie alongside the session.",
+      "required": [
+        "steps"
+      ],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "read_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vestigial OpenAPI metadata only."
+        },
+        "post_access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vestigial OpenAPI metadata only."
+        }
+      }
+    },
+    "params_static_embed": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "static_embed archetype: presentational only \u2014 no data_binding, no guard requirement, no menu guard reference. The pinned sha256 is verified at macro expansion (content edit without re-pin = build error).",
+      "required": [
+        "content_file",
+        "sha256",
+        "title"
+      ],
+      "properties": {
+        "content_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "access": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Vestigial OpenAPI metadata only."
+        }
+      }
+    },
+    "params_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "report_builder archetype (RTM 15.2): dimension picker over guarded_aggregate (Aggregate action); counts only; every dimension must be a declared String field of the entity.",
+      "required": [
+        "dimensions"
+      ],
+      "properties": {
+        "dimensions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_]+:String$"
+          }
+        }
+      }
+    },
+    "params_tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "tree_view archetype (RTM 5.6): deterministic parent/child tree over guarded_snapshot; id/parent/label fields must be declared String fields.",
+      "required": [
+        "id_field",
+        "parent_field",
+        "label_field"
+      ],
+      "properties": {
+        "id_field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label_field": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "params_login": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "login archetype: demo users are seeded by the generated bridge; roles[] here must be role names the register declares.",
+      "required": [
+        "demo_users"
+      ],
+      "properties": {
+        "demo_users": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "username",
+              "password",
+              "roles"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "username": {
+                "type": "string"
+              },
+              "password": {
+                "type": "string"
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "params_app_shell": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "app_shell_from_toml: no parameters \u2014 the shell macro re-reads menus.toml at compile time; the generator validates the register pair instead."
     }
   }
 }

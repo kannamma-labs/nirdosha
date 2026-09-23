@@ -115,9 +115,29 @@ table = "message_table"
 purpose = "Operations"
 ```
 
-The schema permits any key under `parameters` because different archetypes
-accept different clauses; generators should validate the key/value shape against
-the selected archetype.
+Per-archetype parameter sub-schemas are typed in
+[`SCREEN_REGISTER_SCHEMA.json`](`$defs/params_*`), and the generator enforces
+the load-bearing parts of them at generation time (see below for which parts
+the *generator* checks vs which the *macro* checks).
+
+The schema permits additional keys under `parameters` for archetypes whose
+macros accept macro-defined clauses; generators should validate the key/value
+shape against the selected archetype.
+
+### Generator-enforced parameter checks (2026-09-23)
+
+The generator refuses, as generation errors:
+
+- **crud `create_fields` / `update_fields`** naming a field the entity does
+  not declare (typo-proofing; the pk counts as declared), or naming a field
+  **masked on that screen** — the guard forbids submitting it, so the form
+  could never succeed;
+- **kanban `column_field` / `title_field`** naming undeclared fields — the
+  move handler writes through `column_field`;
+- **tree_view `id_field` / `parent_field` / `label_field`** naming undeclared
+  fields, or fields that are not `String`-typed;
+- **report_builder `dimensions`** naming undeclared fields, or dimensions
+  that are not `String`-typed.
 
 Two archetypes with fully-specified parameters (shipped 2026-09-23):
 
@@ -284,3 +304,17 @@ caps, tenant scoping, and audit. Unsupported archetypes hard-error; mark such
 screens `stage = "blocked"` with `blocked_by = ["archetype:<name>"]`.
 `examples/helpdesk/` is the end-to-end proof: 8 screens → generated `.nir`
 tree → compiled crate → 8 passing guard-authority smoke tests.
+
+## The register pair (screens.toml + menus.toml)
+
+`screens.toml` never stands alone for a **generated** app: the sibling
+`menus.toml` is validated against it by `cargo nirdosha generate-screens`
+before any code is emitted — menu `screen_id` references (V1), stage
+(V3), role subsets (V2), route agreement with `codegen.route_path`,
+route uniqueness (V6-lite), guard-resolution (V5-lite), and landing
+reachability (V8-lite). The menus-side schema and the full invariant
+table live in [`MENUS_SCHEMA.md`](MENUS_SCHEMA.md) /
+[`MENUS_SCHEMA.json`](MENUS_SCHEMA.json); a green run reports the count
+of checked invariants in the generation report. Violations are
+generation errors — a menu entry is a promise the generated app can
+keep, or the generator refuses to ship it.
