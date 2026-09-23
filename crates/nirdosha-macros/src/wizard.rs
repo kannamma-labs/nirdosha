@@ -64,6 +64,25 @@ impl Parse for Access {
     }
 }
 
+struct GuardConfig {
+    table: Ident,
+    purpose: LitStr,
+}
+
+impl Parse for GuardConfig {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        expect_keyword(input, "table")?;
+        input.parse::<Token![:]>()?;
+        let table: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+        expect_keyword(input, "purpose")?;
+        input.parse::<Token![:]>()?;
+        let purpose: LitStr = input.parse()?;
+        let _ = input.parse::<Token![,]>();
+        Ok(GuardConfig { table, purpose })
+    }
+}
+
 struct FieldDef {
     name: Ident,
     ty: Type,
@@ -116,6 +135,7 @@ struct WizardInput {
     path: LitStr,
     access: Access,
     steps: Vec<StepDef>,
+    guard: Option<GuardConfig>,
 }
 
 impl Parse for WizardInput {
@@ -161,6 +181,20 @@ impl Parse for WizardInput {
         }
         let _ = input.parse::<Token![,]>();
 
+        let mut guard = None;
+        if input.peek(Ident) {
+            let fork = input.fork();
+            let ahead: Ident = fork.parse()?;
+            if ahead == "guard" {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                let content;
+                braced!(content in input);
+                guard = Some(content.parse::<GuardConfig>()?);
+                let _ = input.parse::<Token![,]>();
+            }
+        }
+
         let mut seen: HashSet<String> = HashSet::new();
         for step in &steps {
             for f in &step.fields {
@@ -171,7 +205,7 @@ impl Parse for WizardInput {
             }
         }
 
-        Ok(WizardInput { mount, entity, store, path, access, steps })
+        Ok(WizardInput { mount, entity, store, path, access, steps, guard })
     }
 }
 
@@ -232,6 +266,176 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
             STATE.get_or_init(|| ::nirdosha_rt::prelude::SharedTable::new())
         }
     };
+
+    // ---- optional data-plane guard ----
+    // When `guard:` is present, the wizard's final create is routed
+    // through `GuardedTable::guarded_insert_checked` and the done page
+    // reads back through `GuardedTable::guarded_get`. In-progress step
+    // state stays in the ordinary `SharedTable` wizard cookie store.
+    if let Some(guard) = &input.guard {
+        if matches!(input.access, Access::Public) {
+            return syn::Error::new(input.path.span(), "wizard! with `guard:` requires a role-gated `access`, not `public`").to_compile_error();
+        }
+
+        let table = &guard.table;
+        let purpose = &guard.purpose;
+
+        let finalize_fn = quote! {
+            fn __finalize(auth: &::nirdosha_rt::Auth, values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<#entity, nirdosha_guard_screens::GuardScreenError> {
+                #(
+                    let #all_field_idents = <#all_field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#all_field_names).map(|s| s.as_str()))
+                        .expect("wizard state holds only canonical, already-validated values");
+                )*
+                let mut entity = #entity { id: 0, #( #all_field_idents ),*, ..Default::default() };
+                entity.id = ::nirdosha_rt::screens::next_id();
+                let submitted = __guarded_submitted_fields(values);
+                #table().guarded_insert_checked(auth, #purpose, &submitted, entity)
+            }
+
+            fn __guarded_submitted_fields(values: &::std::collections::HashMap<String, String>) -> ::std::collections::HashSet<String> {
+                let exempt: &[&str] = <#entity as ::nirdosha_guard_screens::GuardedEntity>::create_field_policy_exempt();
+                [ #(#all_field_names),* ]
+                    .into_iter()
+                    .filter(|name: &&str| values.get(*name).is_some_and(|v| !v.is_empty()))
+                    .filter(|name: &&str| !exempt.contains(name))
+                    .map(|s: &str| s.to_string())
+                    .collect()
+            }
+
+            fn __all_fields() -> Vec<::nirdosha_rt::screens::FieldSpec> {
+                vec![ #( ::nirdosha_rt::screens::FieldSpec { name: #all_field_names, input_type: #all_input_types } ),* ]
+            }
+
+            fn __wizard_state() -> &'static ::nirdosha_rt::prelude::SharedTable<String, ::std::collections::HashMap<String, String>> {
+                static STATE: ::std::sync::OnceLock<::nirdosha_rt::prelude::SharedTable<String, ::std::collections::HashMap<String, String>>> = ::std::sync::OnceLock::new();
+                STATE.get_or_init(|| ::nirdosha_rt::prelude::SharedTable::new())
+            }
+        };
+
+        let mut step_items = Vec::new();
+        let mut step_routes = Vec::new();
+
+        for (i, step) in input.steps.iter().enumerate() {
+            let step_no = i + 1;
+            let is_last = step_no == total_steps;
+            let step_path_str = format!("{}/step/{step_no}", path_str.trim_end_matches('/'));
+            let step_path = quote! { #step_path_str };
+            let step_title = step.name.value();
+            let step_field_names: Vec<String> = step.fields.iter().map(|f| f.name.to_string()).collect();
+            let step_field_types: Vec<&Type> = step.fields.iter().map(|f| &f.ty).collect();
+            let step_input_types: Vec<&'static str> = step.fields.iter().map(|f| input_type_for(&f.ty)).collect();
+
+            let fields_fn_name = quote::format_ident!("__fields_step_{step_no}");
+            let validate_fn_name = quote::format_ident!("__validate_step_{step_no}");
+
+            step_items.push(quote! {
+                fn #fields_fn_name() -> Vec<::nirdosha_rt::screens::FieldSpec> {
+                    vec![ #( ::nirdosha_rt::screens::FieldSpec { name: #step_field_names, input_type: #step_input_types } ),* ]
+                }
+
+                fn #validate_fn_name(values: &::std::collections::HashMap<String, String>) -> ::std::result::Result<::std::collections::HashMap<String, String>, Vec<String>> {
+                    let mut errors: Vec<String> = Vec::new();
+                    let mut canonical: ::std::collections::HashMap<String, String> = ::std::collections::HashMap::new();
+                    #(
+                        match <#step_field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#step_field_names).map(|s| s.as_str())) {
+                            Ok(v) => { canonical.insert(#step_field_names.to_string(), v.to_string()); }
+                            Err(e) => errors.push(format!("{}: {}", #step_field_names, e)),
+                        }
+                    )*
+                    if !errors.is_empty() { return Err(errors); }
+                    Ok(canonical)
+                }
+            });
+
+            let next_step_path_str = if is_last {
+                format!("{}/done", path_str.trim_end_matches('/'))
+            } else {
+                format!("{}/step/{}", path_str.trim_end_matches('/'), step_no + 1)
+            };
+
+            let get_body = quote! {
+                let existing: ::std::collections::HashMap<String, String> = req.cookie(#cookie_name)
+                    .and_then(|sid| __wizard_state().get(&sid))
+                    .unwrap_or_default();
+                ::nirdosha_rt::Response::html(200, ::nirdosha_rt::wizard::wizard_step_html(#step_title, #step_no, #total_steps, #step_path, &#fields_fn_name(), &existing, &[]))
+            };
+
+            let post_body_last = quote! {
+                let values = req.form_or_json();
+                match #validate_fn_name(&values) {
+                    Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::wizard::wizard_step_html(#step_title, #step_no, #total_steps, #step_path, &#fields_fn_name(), &values, &errors)),
+                    Ok(canonical) => {
+                        let sid = req.cookie(#cookie_name).unwrap_or_default();
+                        let mut merged = __wizard_state().get(&sid).unwrap_or_default();
+                        merged.extend(canonical);
+                        match __finalize(auth, &merged) {
+                            Ok(entity) => {
+                                __wizard_state().remove(&sid);
+                                let row_id = <#entity as ::nirdosha_guard_screens::GuardedEntity>::row_id(&entity);
+                                let mut resp = ::nirdosha_rt::Response::redirect(format!("{}/{}", #next_step_path_str, row_id));
+                                resp.extra_headers.push(("Set-Cookie".to_string(), format!("{}=; Path=/; Max-Age=0", #cookie_name)));
+                                resp
+                            }
+                            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                        }
+                    }
+                }
+            };
+
+            let post_body_middle = quote! {
+                let values = req.form_or_json();
+                match #validate_fn_name(&values) {
+                    Err(errors) => ::nirdosha_rt::Response::html(400, ::nirdosha_rt::wizard::wizard_step_html(#step_title, #step_no, #total_steps, #step_path, &#fields_fn_name(), &values, &errors)),
+                    Ok(canonical) => {
+                        let sid = req.cookie(#cookie_name).unwrap_or_else(::nirdosha_rt::wizard::generate_wizard_run_id);
+                        __wizard_state().upsert_with(sid.clone(), |entry| {
+                            entry.extend(canonical);
+                        });
+                        let mut resp = ::nirdosha_rt::Response::redirect(#next_step_path_str);
+                        resp.extra_headers.push(("Set-Cookie".to_string(), format!("{}={}; HttpOnly; Path=/", #cookie_name, sid)));
+                        resp
+                    }
+                }
+            };
+
+            step_routes.push(route_with_auth("get", &step_path, &format!("Wizard: {step_title}"), get_body.clone()));
+            if is_last {
+                step_routes.push(route_with_auth("post", &step_path, &format!("Wizard: {step_title} (submit)"), post_body_last.clone()));
+            } else {
+                step_routes.push(route_with_auth("post", &step_path, &format!("Wizard: {step_title} (submit)"), post_body_middle.clone()));
+            }
+        }
+
+        let done_path_str = format!("{}/done/{{id}}", path_str.trim_end_matches('/'));
+        let done_path = quote! { #done_path_str };
+        let done_route = route_with_auth("get", &done_path, "Wizard complete", quote! {
+            let Some(id) = params.get("id") else { return ::nirdosha_rt::Response::bad_request("id required") };
+            match #table().guarded_get(auth, #purpose, id) {
+                Ok(Some(entity)) => {
+                    let row = ::serde_json::to_value(&entity).unwrap();
+                    ::nirdosha_rt::Response::html(200, ::nirdosha_rt::wizard::wizard_done_html("Done", &__all_fields(), &row))
+                }
+                Ok(None) => ::nirdosha_rt::Response::not_found(),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        });
+
+        let first_step_path = format!("{}/step/1", path_str.trim_end_matches('/'));
+        let start_route = route_with_auth("get", &base_path, "Start wizard", quote! {
+            ::nirdosha_rt::Response::redirect(#first_step_path)
+        });
+
+        return quote! {
+            pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+                #finalize_fn
+                #( #step_items )*
+                router
+                    #start_route
+                    #( #step_routes )*
+                    #done_route
+            }
+        };
+    }
 
     let mut step_items = Vec::new();
     let mut step_routes = Vec::new();
@@ -384,5 +588,45 @@ fn route(method: &str, access: &Access, path: &TokenStream2, summary: &str, body
             let body = body_fn(Some(quote!(proof)));
             quote! { .#gated::<crate::nirdosha_roles::#role_ident>(#path, #summary, |req, params, proof| { #body }) }
         }
+    }
+}
+
+fn route_with_auth(method: &str, path: &TokenStream2, summary: &str, body: TokenStream2) -> TokenStream2 {
+    let plain = match method {
+        "get" => quote!(get_with_auth),
+        "post" => quote!(post_with_auth),
+        _ => unreachable!("internal: unknown HTTP method {method}"),
+    };
+    quote! { .#plain(#path, #summary, |req, params, auth| { #body }) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WizardInput;
+
+    #[test]
+    fn guard_clause_parses_and_requires_table_and_purpose() {
+        let ok = syn::parse_str::<WizardInput>(
+            "mount: mount_wizard, entity: Employee, store: employee_store, path: \"/onboarding\", \
+             access: requires role \"admin\", \
+             steps: [ \
+                 { name: \"Basics\", fields: [ name: String ] }, \
+                 { name: \"Compensation\", fields: [ salary: f64 ] } \
+             ], \
+             guard: { table: employee_table, purpose: \"HrOnboarding\" }"
+        );
+        assert!(ok.is_ok());
+        assert!(ok.unwrap().guard.is_some());
+
+        let bad = syn::parse_str::<WizardInput>(
+            "mount: mount_wizard, entity: Employee, store: employee_store, path: \"/onboarding\", \
+             access: requires role \"admin\", \
+             steps: [ \
+                 { name: \"Basics\", fields: [ name: String ] }, \
+                 { name: \"Compensation\", fields: [ salary: f64 ] } \
+             ], \
+             guard: { table: employee_table }"
+        );
+        assert!(bad.is_err(), "accepted guard without purpose");
     }
 }

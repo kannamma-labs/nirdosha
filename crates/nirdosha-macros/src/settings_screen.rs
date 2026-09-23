@@ -27,7 +27,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{bracketed, Ident, LitStr, Token, Type};
+use syn::{braced, bracketed, Ident, LitStr, Token, Type};
 
 enum Access {
     Public,
@@ -60,6 +60,39 @@ impl Parse for Access {
     }
 }
 
+struct GuardConfig {
+    table: Ident,
+    purpose: LitStr,
+    row_id: LitStr,
+}
+
+impl Parse for GuardConfig {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        expect_keyword(input, "table")?;
+        input.parse::<Token![:]>()?;
+        let table: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+        expect_keyword(input, "purpose")?;
+        input.parse::<Token![:]>()?;
+        let purpose: LitStr = input.parse()?;
+        let mut row_id = syn::LitStr::new("singleton", purpose.span());
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if input.peek(Ident) {
+                let fork = input.fork();
+                let ahead: Ident = fork.parse()?;
+                if ahead == "row_id" {
+                    input.parse::<Ident>()?;
+                    input.parse::<Token![:]>()?;
+                    row_id = input.parse()?;
+                    let _ = input.parse::<Token![,]>();
+                }
+            }
+        }
+        Ok(GuardConfig { table, purpose, row_id })
+    }
+}
+
 struct FieldDef {
     name: Ident,
     ty: Type,
@@ -72,6 +105,7 @@ struct SettingsInput {
     path: LitStr,
     fields: Vec<FieldDef>,
     access: Access,
+    guard: Option<GuardConfig>,
 }
 
 impl Parse for SettingsInput {
@@ -120,7 +154,21 @@ impl Parse for SettingsInput {
         let access: Access = input.parse()?;
         let _ = input.parse::<Token![,]>();
 
-        Ok(SettingsInput { mount, entity, store, path, fields, access })
+        let mut guard = None;
+        if input.peek(Ident) {
+            let fork = input.fork();
+            let ahead: Ident = fork.parse()?;
+            if ahead == "guard" {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                let content;
+                braced!(content in input);
+                guard = Some(content.parse::<GuardConfig>()?);
+                let _ = input.parse::<Token![,]>();
+            }
+        }
+
+        Ok(SettingsInput { mount, entity, store, path, fields, access, guard })
     }
 }
 
@@ -167,6 +215,123 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
             vec![ #( ::nirdosha_rt::screens::FieldSpec { name: #field_names, input_type: #input_types } ),* ]
         }
     };
+
+    // ---- optional data-plane guard ----
+    // When `guard:` is present, the singleton is stored in a
+    // `GuardedTable` keyed by `row_id` (default `"singleton"`). All
+    // reads and the single update go through the guard corpus; the
+    // declared `access` role gate is still enforced by the router.
+    if let Some(guard) = &input.guard {
+        if matches!(input.access, Access::Public) {
+            return syn::Error::new(input.path.span(), "settings_screen! with `guard:` requires a role-gated `access`, not `public`").to_compile_error();
+        }
+
+        let table = &guard.table;
+        let purpose = &guard.purpose;
+        let row_id = &guard.row_id;
+        let role_ident = match &input.access {
+            Access::Role(role) => role_ident(&role.value(), role.span()).expect("role name already validated at parse time"),
+            Access::Public => unreachable!(),
+        };
+
+        let changed_fields_fn = quote! {
+            fn __changed_fields() -> ::std::collections::HashSet<String> {
+                [ #(#field_names),* ].into_iter().map(|s: &str| s.to_string()).collect()
+            }
+        };
+
+        let view_route = quote! {
+            .get_gated::<crate::nirdosha_roles::#role_ident>(#path, #title, |_req, _params, auth| {
+                match #table().guarded_get(auth, #purpose, #row_id) {
+                    Ok(Some(entity)) => {
+                        let row = ::serde_json::to_value(&entity).unwrap();
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::settings_view_html(#title, #edit_path, &__fields(), &row, true))
+                    }
+                    Ok(None) => ::nirdosha_rt::Response::not_found(),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        };
+
+        let view_api_route = quote! {
+            .get_gated::<crate::nirdosha_roles::#role_ident>(#api_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
+                match #table().guarded_get(auth, #purpose, #row_id) {
+                    Ok(Some(entity)) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
+                    Ok(None) => ::nirdosha_rt::Response::not_found(),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        };
+
+        let edit_form_route = quote! {
+            .get_gated::<crate::nirdosha_roles::#role_ident>(#edit_path, "Edit form", |_req, _params, auth| {
+                match #table().guarded_get(auth, #purpose, #row_id) {
+                    Ok(Some(entity)) => {
+                        let row = ::serde_json::to_value(&entity).unwrap();
+                        let values = ::nirdosha_rt::screens::row_to_form_values(&__fields(), &row);
+                        ::nirdosha_rt::Response::html(200, ::nirdosha_rt::screens::form_html(#title, #edit_path, &__fields(), &values, &[]))
+                    }
+                    Ok(None) => ::nirdosha_rt::Response::not_found(),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        };
+
+        let update_html_route = quote! {
+            .post_gated::<crate::nirdosha_roles::#role_ident>(#edit_path, "Update", |req, _params, auth| {
+                let values = req.form_or_json();
+                let mut errors: Vec<String> = Vec::new();
+                #(
+                    let #field_idents = match <#field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#field_names).map(|s| s.as_str())) {
+                        Ok(v) => v,
+                        Err(e) => { errors.push(format!("{}: {}", #field_names, e)); Default::default() }
+                    };
+                )*
+                if !errors.is_empty() {
+                    return ::nirdosha_rt::Response::html(400, ::nirdosha_rt::screens::form_html(#title, #edit_path, &__fields(), &values, &errors));
+                }
+                let changed = __changed_fields();
+                match #table().guarded_update(auth, #purpose, #row_id, &changed, move |entity| { #( entity.#field_idents = #field_idents; )* }) {
+                    Ok(_) => ::nirdosha_rt::Response::redirect(#path),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        };
+
+        let update_api_route = quote! {
+            .put_gated::<crate::nirdosha_roles::#role_ident>(#api_path, "Update (JSON)", |req, _params, auth| {
+                let values = req.form_or_json();
+                let mut errors: Vec<String> = Vec::new();
+                #(
+                    let #field_idents = match <#field_types as ::nirdosha_rt::screens::ParseField>::parse_field(values.get(#field_names).map(|s| s.as_str())) {
+                        Ok(v) => v,
+                        Err(e) => { errors.push(format!("{}: {}", #field_names, e)); Default::default() }
+                    };
+                )*
+                if !errors.is_empty() {
+                    return ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors }));
+                }
+                let changed = __changed_fields();
+                match #table().guarded_update(auth, #purpose, #row_id, &changed, move |entity| { #( entity.#field_idents = #field_idents; )* }) {
+                    Ok(entity) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+                }
+            })
+        };
+
+        return quote! {
+            pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+                #fields_fn
+                #changed_fields_fn
+                router
+                    #view_route
+                    #view_api_route
+                    #edit_form_route
+                    #update_html_route
+                    #update_api_route
+            }
+        };
+    }
 
     let update_fn = quote! {
         #access_attr
@@ -270,5 +435,44 @@ fn route(method: &str, access: &Access, path: &TokenStream2, summary: &str, body
             let body = body_fn(Some(quote!(proof)));
             quote! { .#gated::<crate::nirdosha_roles::#role_ident>(#path, #summary, |req, params, proof| { #body }) }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsInput;
+
+    #[test]
+    fn guard_clause_parses_with_defaults() {
+        let parsed = syn::parse_str::<SettingsInput>(
+            "mount: mount_app_settings, entity: AppSettings, store: app_settings_store, path: \"/settings\", \
+             fields: [site_name: String], access: requires role \"admin\", \
+             guard: { table: app_settings_table, purpose: \"Administration\" }"
+        );
+        assert!(parsed.is_ok());
+        let input = parsed.unwrap();
+        assert!(input.guard.is_some());
+        assert_eq!(input.guard.unwrap().row_id.value(), "singleton");
+    }
+
+    #[test]
+    fn guard_clause_accepts_custom_row_id() {
+        let parsed = syn::parse_str::<SettingsInput>(
+            "mount: mount_app_settings, entity: AppSettings, store: app_settings_store, path: \"/settings\", \
+             fields: [site_name: String], access: requires role \"admin\", \
+             guard: { table: app_settings_table, purpose: \"Administration\", row_id: \"current\" }"
+        );
+        assert!(parsed.is_ok());
+        assert_eq!(parsed.unwrap().guard.unwrap().row_id.value(), "current");
+    }
+
+    #[test]
+    fn guard_clause_requires_table_and_purpose() {
+        let parsed = syn::parse_str::<SettingsInput>(
+            "mount: mount_app_settings, entity: AppSettings, store: app_settings_store, path: \"/settings\", \
+             fields: [site_name: String], access: requires role \"admin\", \
+             guard: { table: app_settings_table }"
+        );
+        assert!(parsed.is_err());
     }
 }

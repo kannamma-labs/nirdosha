@@ -10,11 +10,14 @@ The schema adds deterministic code-generation inputs that were not part of the
 behavioral proof specification:
 
 - `codegen`: template, renderer, mount symbol, artifact namespace, generated
-  files, plugin pack, feature flags, route ownership, and source globs.
+  files, plugin pack, feature flags, **route path**, route ownership, and source globs.
 - `data_binding`: entity/read-model/store names, schema version, primary key,
-  field mapping, and catalog references.
+  field mapping, catalog references, **bound field list**, and an optional **guard**
+  binding that forces generated reads/writes through `GuardedTable`.
 - `policy`: purpose, policy IDs, allowed actions, masking, subject scope, and
   segregation class.
+- `parameters`: **archetype-specific macro inputs** consumed by the selected
+  template, such as `refresh_seconds`, `steps`, or `guard`.
 - `dependencies`: pinned macro/plugin/dataset/policy/route/source inputs with
   optional versions and SHA-256 hashes.
 - `provenance`: owner, reviewers, change ticket, source hash, and the last
@@ -57,6 +60,65 @@ deliberately global policy. A consumer should still validate the value against
 the deployed logging-policy register. The schema validates shape; it does not
 authorize a domain or policy.
 
+## Data binding contract
+
+`data_binding.fields` is the ordered list of fields the screen actually binds
+from the entity. Each field carries its name, type, and behavioral flags:
+
+```toml
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+sensitive = false
+masked = false
+display = true
+editable = false
+
+[[screen.data_binding.fields]]
+name = "rationale"
+type = "String"
+required = true
+sensitive = true
+masked = true
+display = true
+editable = true
+```
+
+`data_binding.guard` is optional. When present, the generator MUST emit a macro
+invocation whose reads and writes go through the named `GuardedTable` under the
+given purpose. For singleton screens (e.g. `settings_screen!`) use `row_id` to
+name the fixed logical row; for keyed entities (e.g. `crud_screens!`,
+`wizard!`, `communication_feed!`) omit it.
+
+```toml
+[screen.data_binding.guard]
+table = "case_table"
+purpose = "Operations"
+
+# For a settings singleton only:
+# row_id = "current"
+```
+
+## Parameters
+
+`screen.parameters` holds archetype-specific inputs that the selected template
+passes through to the macro. Keys are macro-defined; values must be parseable by
+the target macro. Common examples:
+
+```toml
+[screen.parameters]
+refresh_seconds = 5
+
+[screen.parameters.guard]
+table = "message_table"
+purpose = "Operations"
+```
+
+The schema permits any key under `parameters` because different archetypes
+accept different clauses; generators should validate the key/value shape against
+the selected archetype.
+
 ## Minimal v2 shape
 
 ```toml
@@ -88,6 +150,7 @@ mount_symbol = "mount_login"
 renderer = "web"
 artifact_namespace = "rtm.m01.login"
 generated_files = ["src/screens/m01_auth.nir"]
+route_path = "/login"
 route_owner = "M1"
 
 [screen.data_binding]
@@ -96,6 +159,14 @@ store = "IDP.users_file"
 schema_version = "identity/v1"
 primary_key = "user_id"
 catalog_ref = "CATALOG.identity.login"
+
+[[screen.data_binding.fields]]
+name = "user_id"
+type = "String"
+required = true
+
+[screen.parameters]
+mode = "demo"
 
 [screen.policy]
 policy_ids = ["AUTH-LOGIN-01"]

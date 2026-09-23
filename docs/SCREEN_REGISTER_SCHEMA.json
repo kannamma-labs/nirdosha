@@ -51,6 +51,7 @@
         "codegen": {"$ref": "#/$defs/codegen"},
         "data_binding": {"$ref": "#/$defs/data_binding"},
         "policy": {"$ref": "#/$defs/policy"},
+        "parameters": {"type": "object", "additionalProperties": true, "description": "Archetype-specific macro inputs consumed by the selected template, such as refresh_seconds, steps, or guard."},
         "logging": {"$ref": "#/$defs/logging"},
         "dependencies": {"type": "array", "items": {"$ref": "#/$defs/dependency"}},
         "provenance": {"$ref": "#/$defs/provenance"},
@@ -70,6 +71,7 @@
         "generated_files": {"type": "array", "items": {"type": "string", "description": "Repository-relative output path that the generator is expected to create or update."}},
         "plugin_pack": {"type": "string", "description": "Exact plugin/template pack identifier required by this screen."},
         "feature_flags": {"type": "array", "items": {"type": "string", "description": "Named generator feature flag; unknown flags MUST fail validation."}},
+        "route_path": {"type": "string", "description": "HTTP route path the screen mounts on, used for collision detection and OpenAPI generation."},
         "route_owner": {"type": "string", "description": "Module or subsystem that owns route registration and collision resolution."},
         "source_globs": {"type": "array", "items": {"type": "string", "description": "Repository glob patterns whose contents are inputs to generation and should be hashed."}}
       }
@@ -84,7 +86,33 @@
         "schema_version": {"type": "string", "description": "Version of the bound data schema; changes require regeneration or an explicit migration."},
         "primary_key": {"type": "string", "description": "Field name used to identify a bound record."},
         "field_mapping_ref": {"type": "string", "description": "Reference to the canonical UI-field-to-entity-field mapping."},
-        "catalog_ref": {"type": "string", "description": "Catalog identifier containing authoritative metadata for this binding."}
+        "catalog_ref": {"type": "string", "description": "Catalog identifier containing authoritative metadata for this binding."},
+        "fields": {"type": "array", "items": {"$ref": "#/$defs/data_binding_field"}, "description": "Screen fields bound to the entity, in display order."},
+        "guard": {"$ref": "#/$defs/data_binding_guard", "description": "Optional data-plane guard binding; when present, generated reads/writes go through GuardedTable."}
+      }
+    },
+    "data_binding_field": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "description": "Field name as used by the screen and the generated macro invocation."},
+        "type": {"type": "string", "description": "Rust or domain type of the field, e.g. `String`, `i64`, `Option<Email>`."},
+        "sensitive": {"type": "boolean", "description": "Whether the field carries sensitive data that must be masked or redacted."},
+        "required": {"type": "boolean", "description": "Whether the field is required for create/update submissions."},
+        "masked": {"type": "boolean", "description": "Whether the field must be masked in the rendered UI by default."},
+        "display": {"type": "boolean", "description": "Whether the field appears in list/detail views."},
+        "editable": {"type": "boolean", "description": "Whether the field may be edited through the screen."}
+      }
+    },
+    "data_binding_guard": {
+      "type": "object",
+      "required": ["table", "purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "table": {"type": "string", "description": "Name of the function returning `&'static GuardedTable<_, Entity>` for this screen."},
+        "purpose": {"type": "string", "description": "Guard purpose string passed to every `GuardedTable` read/write call."},
+        "row_id": {"type": "string", "description": "Fixed row identifier for singleton screens (e.g. settings); omit for keyed entities."}
       }
     },
     "policy": {
