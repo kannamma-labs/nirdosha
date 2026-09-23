@@ -272,11 +272,11 @@ fn expand_parsed(input: WizardInput) -> TokenStream2 {
     // through `GuardedTable::guarded_insert_checked` and the done page
     // reads back through `GuardedTable::guarded_get`. In-progress step
     // state stays in the ordinary `SharedTable` wizard cookie store.
+    // Routes are emitted as `*_with_auth`: the guard is the SINGLE
+    // authority for who may complete the wizard and read the result —
+    // the declared `access` stays vestigial route metadata (OpenAPI
+    // docs), not a second check.
     if let Some(guard) = &input.guard {
-        if matches!(input.access, Access::Public) {
-            return syn::Error::new(input.path.span(), "wizard! with `guard:` requires a role-gated `access`, not `public`").to_compile_error();
-        }
-
         let table = &guard.table;
         let purpose = &guard.purpose;
 

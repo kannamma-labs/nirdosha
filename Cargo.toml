@@ -175,6 +175,11 @@ members = [
     # v2 dialect: AWCC Revenue Assurance companion demo, mirroring RTM's
     # structure with RA-specific roles, datasets, and screens.
     "examples/awcc-rev_assurance",
+    # v2 dialect: greenfield generator proof — the whole app is emitted
+    # by `cargo nirdosha generate-screens` from screens.toml + menus.toml
+    # (v2 register as source of truth; guard is the single data
+    # authority in every generated screen).
+    "examples/helpdesk",
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

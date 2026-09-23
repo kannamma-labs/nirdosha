@@ -54,6 +54,7 @@ fn main() -> ExitCode {
         "keygen" => keygen_cli(rest),
         "verify-certificate" => verify_certificate_cli(rest),
         "ui-proof" => ui_proof_cli(rest),
+        "generate-screens" => generate_screens_cli(rest),
         "verify" => {
             if rest.iter().any(|arg| arg == "--guard") {
                 return verify_guard_cli(rest);
@@ -553,13 +554,52 @@ fn usage() {
          - `cargo nirdosha check-certificate <path> --root <package> --require <guarantee>`\n\
          - `cargo nirdosha keygen [-o key.pk8]`   generate an Ed25519 keypair for `verify --sign`\n\
          - `cargo nirdosha verify --sign key.pk8`  sign the certificate (add `--features fips` to build for a CMVP-validatable backend)\n\
-         - `cargo nirdosha verify-certificate <path> --public-key <base64>`  check a signed certificate's signature"
+         - `cargo nirdosha verify-certificate <path> --public-key <base64>`  check a signed certificate's signature
+         - `cargo nirdosha generate-screens <project-dir>`  emit the crate's src/*.nir from screens.toml + menus.toml (v2 register as source of truth)"
     );
 }
 
 /// Generate the conservative `.nir/ui-proof.json` skeleton from a project's
 /// screen register. This is intentionally inventory-only: it does not invent
 /// business transitions or pretend that a declared screen was rendered.
+/// `cargo nirdosha generate-screens <project-dir>` — read the project's
+/// v2 `screens.toml` + `menus.toml` and emit the crate's `src/*.nir`
+/// tree. The screen register becomes a source of truth for code, not an
+/// inventory that drifts: every emitted screen is a real macro
+/// invocation wired to `GuardedTable`, `guard_policy!` records are
+/// synthesized from each guarded screen's own policy block, and the
+/// serve binary registers literal routes before `{id}` wildcards.
+fn generate_screens_cli(args: &[String]) -> ExitCode {
+    let input: Option<String> = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .cloned()
+        .or_else(|| std::env::var("CARGO_MANIFEST_DIR").ok());
+    let Some(project_dir) = input else {
+        eprintln!("nirdosha: generate-screens requires a project directory containing screens.toml + menus.toml");
+        return ExitCode::FAILURE;
+    };
+    match cargo_nirdosha::generate::run(Path::new(&project_dir)) {
+        Ok(report) => {
+            for file in &report.files {
+                eprintln!("nirdosha: generated {file}");
+            }
+            eprintln!(
+                "nirdosha: {} screens emitted, {} entities, {} synthesized guard policies",
+                report.screens_emitted, report.entities, report.policies
+            );
+            for skipped in &report.screens_skipped {
+                eprintln!("nirdosha: skipped {skipped}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("nirdosha: generate-screens refused: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn ui_proof_cli(args: &[String]) -> ExitCode {
     let input = flag_value(args, "--register").or_else(|| args.first().filter(|a| !a.starts_with('-')).cloned());
     let Some(input) = input else {

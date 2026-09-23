@@ -19,6 +19,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod generate;
+
 use nirdosha_contract_core as cc;
 use serde::Serialize;
 use syn::{Expr, ImplItem, Item, TraitItem};

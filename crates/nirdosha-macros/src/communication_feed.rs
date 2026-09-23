@@ -276,18 +276,14 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
 
     // ---- optional data-plane guard ----
     // When `guard:` is present, reads and writes go through
-    // `GuardedTable` instead of the bare `store`. The route still
-    // carries the declared role gate (so OpenAPI and the router agree
-    // on which roles may reach it), but the actual outbound data and
-    // mutation are evaluated by the guard corpus.
+    // `GuardedTable` instead of the bare `store`, and the guard is the
+    // SINGLE authority for who may read, which rows they see, which
+    // fields are masked, and whether a post is allowed. Routes are
+    // emitted as `*_with_auth` (an `Auth`, never a role-proof): the
+    // declared `read_access`/`post_access` stay vestigial route metadata
+    // (OpenAPI docs), not a second check — a role the corpus grants no
+    // read policy for is denied by the guard at the data plane.
     if let Some(guard) = &input.guard {
-        if matches!(input.read_access, Access::Public) {
-            return syn::Error::new(input.path.span(), "communication_feed! with `guard:` requires a role-gated `read_access`, not `public`").to_compile_error();
-        }
-        if matches!(input.post_access, Access::Public) {
-            return syn::Error::new(input.path.span(), "communication_feed! with `guard:` requires a role-gated `post_access`, not `public`").to_compile_error();
-        }
-
         let table = &guard.table;
         let purpose = &guard.purpose;
 
@@ -321,59 +317,41 @@ fn expand_parsed(input: FeedInput) -> TokenStream2 {
             }
         };
 
-        let view_route = match &input.read_access {
-            Access::Public => unreachable!(),
-            Access::Role(role) => {
-                let role_ident = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
-                quote! {
-                    .get_gated::<crate::nirdosha_roles::#role_ident>(#path, #title, |_req, _params, auth| {
-                        #view_revision
-                        let messages: Vec<::serde_json::Value> = match #table().guarded_snapshot(auth, #purpose) {
-                            Ok(rows) => rows.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect(),
-                            Err(e) => return ::nirdosha_guard_screens::guard_error_response(e),
-                        };
-                        let html = ::nirdosha_rt::feed::feed_html(#title, #refresh, #path, &__fields(), &messages);
-                        #view_live
-                        ::nirdosha_rt::Response::html(200, html)
-                    })
-                }
-            }
+        let view_route = quote! {
+            .get_with_auth(#path, #title, |_req, _params, auth| {
+                #view_revision
+                let messages: Vec<::serde_json::Value> = match #table().guarded_snapshot(auth, #purpose) {
+                    Ok(rows) => rows.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect(),
+                    Err(e) => return ::nirdosha_guard_screens::guard_error_response(e),
+                };
+                let html = ::nirdosha_rt::feed::feed_html(#title, #refresh, #path, &__fields(), &messages);
+                #view_live
+                ::nirdosha_rt::Response::html(200, html)
+            })
         };
 
-        let api_route = match &input.read_access {
-            Access::Public => unreachable!(),
-            Access::Role(role) => {
-                let role_ident = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
-                quote! {
-                    .get_gated::<crate::nirdosha_roles::#role_ident>(#api_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
-                        #wait
-                        let messages: Vec<::serde_json::Value> = match #table().guarded_snapshot(auth, #purpose) {
-                            Ok(rows) => rows.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect(),
-                            Err(e) => return ::nirdosha_guard_screens::guard_error_response(e),
-                        };
-                        #[allow(unused_mut)]
-                        let mut response = ::nirdosha_rt::Response::json(200, &::serde_json::Value::Array(messages));
-                        #revision_header
-                        response
-                    })
-                }
-            }
+        let api_route = quote! {
+            .get_with_auth(#api_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
+                #wait
+                let messages: Vec<::serde_json::Value> = match #table().guarded_snapshot(auth, #purpose) {
+                    Ok(rows) => rows.iter().map(|e| ::serde_json::to_value(e).unwrap()).collect(),
+                    Err(e) => return ::nirdosha_guard_screens::guard_error_response(e),
+                };
+                #[allow(unused_mut)]
+                let mut response = ::nirdosha_rt::Response::json(200, &::serde_json::Value::Array(messages));
+                #revision_header
+                response
+            })
         };
 
-        let post_route = match &input.post_access {
-            Access::Public => unreachable!(),
-            Access::Role(role) => {
-                let role_ident = role_ident(&role.value(), role.span()).expect("role name already validated at parse time");
-                quote! {
-                    .post_gated::<crate::nirdosha_roles::#role_ident>(#path, "Post a message", |req, _params, auth| {
-                        let values = req.form_or_json();
-                        match __guarded_post(auth, &values) {
-                            Ok(_) => ::nirdosha_rt::Response::redirect(#path),
-                            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
-                        }
-                    })
+        let post_route = quote! {
+            .post_with_auth(#path, "Post a message", |req, _params, auth| {
+                let values = req.form_or_json();
+                match __guarded_post(auth, &values) {
+                    Ok(_) => ::nirdosha_rt::Response::redirect(#path),
+                    Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
                 }
-            }
+            })
         };
 
         return quote! {
@@ -475,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_clause_parses_and_requires_role_access() {
+    fn guard_clause_parses_with_any_access_declaration() {
         let ok = syn::parse_str::<FeedInput>(
             "mount: mount_feed, entity: Message, store: messages, path: \"/feed\", \
              fields: [body: String], post_access: requires role \"member\", \
@@ -486,14 +464,15 @@ mod tests {
         let guarded = ok.unwrap();
         assert!(guarded.guard.is_some());
 
-        // `public` read or post combined with `guard:` is rejected at expansion time,
-        // but the grammar itself accepts the parse; we just confirm it parses.
+        // `public` read/post combined with `guard:` is fine: guard-mode
+        // routes are `*_with_auth` and the guard is the single authority,
+        // so the declared access stays vestigial route metadata.
         let public_guard = syn::parse_str::<FeedInput>(
             "mount: mount_feed, entity: Message, store: messages, path: \"/feed\", \
              fields: [body: String], post_access: public, read_access: public, \
              guard: { table: message_table, purpose: \"Operations\" }"
         );
-        assert!(public_guard.is_ok(), "parse accepts; expansion rejects");
+        assert!(public_guard.is_ok());
     }
 
     #[test]

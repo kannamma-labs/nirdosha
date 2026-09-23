@@ -218,21 +218,16 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
 
     // ---- optional data-plane guard ----
     // When `guard:` is present, the singleton is stored in a
-    // `GuardedTable` keyed by `row_id` (default `"singleton"`). All
-    // reads and the single update go through the guard corpus; the
-    // declared `access` role gate is still enforced by the router.
+    // `GuardedTable` keyed by `row_id` (default `"singleton"`), and the
+    // guard is the SINGLE authority for who may read it and whether the
+    // update is allowed. Routes are emitted as `*_with_auth` (an `Auth`,
+    // never a role-proof): the declared `access` stays vestigial route
+    // metadata (OpenAPI docs), not a second check — a role the corpus
+    // grants no policy for is denied by the guard at the data plane.
     if let Some(guard) = &input.guard {
-        if matches!(input.access, Access::Public) {
-            return syn::Error::new(input.path.span(), "settings_screen! with `guard:` requires a role-gated `access`, not `public`").to_compile_error();
-        }
-
         let table = &guard.table;
         let purpose = &guard.purpose;
         let row_id = &guard.row_id;
-        let role_ident = match &input.access {
-            Access::Role(role) => role_ident(&role.value(), role.span()).expect("role name already validated at parse time"),
-            Access::Public => unreachable!(),
-        };
 
         let changed_fields_fn = quote! {
             fn __changed_fields() -> ::std::collections::HashSet<String> {
@@ -241,7 +236,7 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
         };
 
         let view_route = quote! {
-            .get_gated::<crate::nirdosha_roles::#role_ident>(#path, #title, |_req, _params, auth| {
+            .get_with_auth(#path, #title, |_req, _params, auth| {
                 match #table().guarded_get(auth, #purpose, #row_id) {
                     Ok(Some(entity)) => {
                         let row = ::serde_json::to_value(&entity).unwrap();
@@ -254,7 +249,7 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
         };
 
         let view_api_route = quote! {
-            .get_gated::<crate::nirdosha_roles::#role_ident>(#api_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
+            .get_with_auth(#api_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
                 match #table().guarded_get(auth, #purpose, #row_id) {
                     Ok(Some(entity)) => ::nirdosha_rt::Response::json(200, &::serde_json::to_value(&entity).unwrap()),
                     Ok(None) => ::nirdosha_rt::Response::not_found(),
@@ -264,7 +259,7 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
         };
 
         let edit_form_route = quote! {
-            .get_gated::<crate::nirdosha_roles::#role_ident>(#edit_path, "Edit form", |_req, _params, auth| {
+            .get_with_auth(#edit_path, "Edit form", |_req, _params, auth| {
                 match #table().guarded_get(auth, #purpose, #row_id) {
                     Ok(Some(entity)) => {
                         let row = ::serde_json::to_value(&entity).unwrap();
@@ -278,7 +273,7 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
         };
 
         let update_html_route = quote! {
-            .post_gated::<crate::nirdosha_roles::#role_ident>(#edit_path, "Update", |req, _params, auth| {
+            .post_with_auth(#edit_path, "Update", |req, _params, auth| {
                 let values = req.form_or_json();
                 let mut errors: Vec<String> = Vec::new();
                 #(
@@ -299,7 +294,7 @@ fn expand_parsed(input: SettingsInput) -> TokenStream2 {
         };
 
         let update_api_route = quote! {
-            .put_gated::<crate::nirdosha_roles::#role_ident>(#api_path, "Update (JSON)", |req, _params, auth| {
+            .put_with_auth(#api_path, "Update (JSON)", |req, _params, auth| {
                 let values = req.form_or_json();
                 let mut errors: Vec<String> = Vec::new();
                 #(
