@@ -251,6 +251,24 @@ pub struct GenerateReport {
 /// `menus.toml`. Deterministic: the same register always produces the
 /// same output text.
 pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
+    let crate_name: String = {
+        let cargo_toml_path = project_dir.join("Cargo.toml");
+        match std::fs::read_to_string(&cargo_toml_path) {
+            Ok(cargo_src) => {
+                let cargo: toml::Value = cargo_src
+                    .parse()
+                    .map_err(|e| format!("{} is invalid: {e}", cargo_toml_path.display()))?;
+                cargo
+                    .get("package")
+                    .and_then(|p| p.get("name"))
+                    .and_then(toml::Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| "generated_app".to_string())
+            }
+            Err(_) => "generated_app".to_string(),
+        }
+    };
+
     let screens_path = project_dir.join("screens.toml");
     let menus_path = project_dir.join("menus.toml");
     let screens_src = std::fs::read_to_string(&screens_path)
@@ -296,10 +314,22 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
     // ---- collect entities + roles across all screens first ----
     let mut entities: BTreeMap<String, EntityDecl> = BTreeMap::new();
     let mut all_roles: Vec<String> = Vec::new();
+    let mut role_wires_by_marker: BTreeMap<String, String> = BTreeMap::new();
     for screen in &register.screen {
         for role in &screen.roles {
             let role = role.split(':').next().unwrap_or(role);
-            if !role.is_empty() && role != "AllRoles" && role != "AllHuman" && !all_roles.iter().any(|r| r == role) {
+            if role.is_empty() || role == "AllRoles" || role == "AllHuman" {
+                continue;
+            }
+            let marker = pascalize(role);
+            if let Some(existing) = role_wires_by_marker.get(&marker) {
+                if existing != role {
+                    return Err(format!(
+                        "role spellings `{existing}` and `{role}` both resolve to marker type `{marker}`; use one wire spelling consistently across screens and modules"
+                    ));
+                }
+            } else {
+                role_wires_by_marker.insert(marker, role.to_string());
                 all_roles.push(role.to_string());
             }
         }
@@ -427,11 +457,6 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
     }
     let mut modules: Vec<(String, String)> = Vec::new(); // (module name, file path rel to src)
     for (file, plans) in &by_file {
-        let stem = Path::new(file)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| format!("bad generated_files entry {file:?}"))?
-            .to_string();
         let rel = Path::new(file)
             .strip_prefix("src/")
             .map(|p| p.to_string_lossy().to_string())
@@ -443,7 +468,7 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
         }
         std::fs::write(&path, body).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         files.push(file.clone());
-        modules.push((stem, rel));
+        modules.push((module_name_from_path(&rel), rel));
     }
 
     // lib.nir
@@ -465,7 +490,7 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
     files.push("src/lib.nir".into());
 
     // serve.nir with literal-before-wildcard mount ordering.
-    let serve = render_serve(&register_id, &planned);
+    let serve = render_serve(&crate_name, &planned);
     std::fs::write(src_dir.join("bin/serve.nir"), serve).map_err(|e| e.to_string())?;
     files.push("src/bin/serve.nir".into());
 
@@ -527,7 +552,10 @@ impl EntityDecl {
     }
 
     fn guard_table_fn(&self) -> String {
-        format!("{}_table", pascal_to_snake(&self.name))
+        self.guard
+            .as_ref()
+            .map(|g| g.table.clone())
+            .unwrap_or_else(|| format!("{}_table", pascal_to_snake(&self.name)))
     }
 
     fn store_fn(&self) -> String {
@@ -799,6 +827,22 @@ fn pascal_to_snake(s: &str) -> String {
     out
 }
 
+fn module_name_from_path(rel: &str) -> String {
+    let stem = rel
+        .strip_suffix(".nir")
+        .or_else(|| rel.strip_suffix(".rs"))
+        .unwrap_or(rel);
+    stem.replace(|c: char| c == '/' || c == '-' || c == '.', "_")
+}
+
+fn rust_path_ident(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect::<String>()
+        .trim_start_matches(|c: char| c.is_ascii_digit() || c == '_')
+        .to_string()
+}
+
 fn pascalize(s: &str) -> String {
     s.split(|c: char| c == '_' || c == '-' || c == ' ')
         .filter(|p| !p.is_empty())
@@ -812,9 +856,50 @@ fn pascalize(s: &str) -> String {
         .collect()
 }
 
-fn access_literal(value: Option<&str>, default: &str) -> String {
+/// Register-level access vocabulary -> macro clause. The macros accept
+/// only `public` / `requires role "X"`; approval_inbox additionally accepts
+/// `or role "Y"...`. Registers may spell the coarse vocabulary
+/// `role` / `self_or_role`
+/// (mirroring `policy.subject_scope`); those synthesize the `requires
+/// role` clause from the screen's own declared roles. Any other value
+/// passes through verbatim — registers may already carry the full macro
+/// clause (banking/trading style).
+fn translate_access(value: &str, roles: &[String], supports_multiple_roles: bool) -> String {
     match value {
-        Some(v) if !v.is_empty() => v.to_string(),
+        "public" => "public".to_string(),
+        "role" | "self_or_role" => {
+            let names: Vec<&str> = roles
+                .iter()
+                .map(|r| r.split(':').next().unwrap_or(r))
+                .filter(|r| !r.is_empty() && *r != "AllRoles" && *r != "AllHuman")
+                .collect();
+            match names.first() {
+                None => "public".to_string(),
+                Some(first) => {
+                    let mut clause = format!("requires role {first:?}");
+                    if supports_multiple_roles {
+                        for r in &names[1..] {
+                            clause.push_str(&format!(" or role {r:?}"));
+                        }
+                    }
+                    clause
+                }
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+fn access_literal(value: Option<&str>, default: &str, roles: &[String]) -> String {
+    match value {
+        Some(v) if !v.is_empty() => translate_access(v, roles, false),
+        _ => default.to_string(),
+    }
+}
+
+fn multi_role_access_literal(value: Option<&str>, default: &str, roles: &[String]) -> String {
+    match value {
+        Some(v) if !v.is_empty() => translate_access(v, roles, true),
         _ => default.to_string(),
     }
 }
@@ -841,15 +926,16 @@ fn render_bridge(
     ));
 
     // roles!
-    // Wire name == the PascalCase ident string: guard_policy! subjects
-    // (`for Agent`) are stored as the ident's own string, demo_users
-    // login role strings must match verbatim, and `Auth::has_role` is
-    // an exact string compare — a snake_case wire name here would
-    // silently deny every policy.
+    // The marker ident follows role_ident's PascalCase convention while
+    // the wire value remains the register spelling used by Auth and the
+    // generated guard policies.
     if !all_roles.is_empty() {
         out.push_str("nirdosha_rt::roles! {\n");
         for role in all_roles {
-            out.push_str(&format!("    {role} = \"{role}\";\n"));
+            // Route gates canonicalize a snake_case wire role to a
+            // PascalCase marker type (`kyc_analyst` -> `KycAnalyst`).
+            // Keep the wire value unchanged for Auth and guard checks.
+            out.push_str(&format!("    {} = {role:?};\n", pascalize(role)));
         }
         out.push_str("}\n\n");
     }
@@ -1050,22 +1136,26 @@ fn render_bridge(
     // `system_write` is the one legitimate non-screen write path (same
     // posture as RTM's notify hook).
     if !singletons.is_empty() {
-        out.push_str("/// Boot-time seeding for singleton guarded rows. Idempotent per\n/// process: `std::sync::Once` (the guarded store lives for the process\n/// lifetime, and `system_write` refuses a duplicate create rather than\n/// upserting). Called from the generated `serve` main and from tests\n/// that build a router without running main.\npub fn seed_singletons() {\n    static ONCE: std::sync::Once = std::sync::Once::new();\n    ONCE.call_once(|| {\n");
-        for (entity, row_id) in singletons {
-            let Some(decl) = entities.get(entity.as_str()) else { continue };
-            let struct_name = decl.struct_name();
-            let pk = &decl.primary_key;
-            let mut fields_init = String::new();
-            for f in &decl.fields {
-                fields_init.push_str(&format!(", {}: Default::default()", f.name));
-            }
-            out.push_str(&format!(
-                "        {table_fn}().system_write(DEMO_TENANT, &{struct_name} {{ id: 0, {pk}: {row_id:?}.into(), tenant_id: DEMO_TENANT.into(){fields_init} }});\n",
-                table_fn = decl.guard_table_fn()
-            ));
-        }
-        out.push_str("    });\n}\n");
+        out.push_str("/// Boot-time seeding for singleton guarded rows. Idempotent per\n/// process: `std::sync::Once` (the guarded store lives for the process\n/// lifetime, and `system_write` refuses a duplicate create rather than\n/// upserting). Called from the generated `serve` main and from tests\n/// that build a router without running main.\n");
     }
+    out.push_str("pub fn seed_singletons() {\n    static ONCE: std::sync::Once = std::sync::Once::new();\n    ONCE.call_once(|| {\n");
+    for (entity, row_id) in singletons {
+        let Some(decl) = entities.get(entity.as_str()) else { continue };
+        let struct_name = decl.struct_name();
+        let pk = &decl.primary_key;
+        let mut fields_init = String::new();
+        for f in &decl.fields {
+            if f.name == *pk {
+                continue;
+            }
+            fields_init.push_str(&format!(", {}: Default::default()", f.name));
+        }
+        out.push_str(&format!(
+            "        {table_fn}().system_write(DEMO_TENANT, &{struct_name} {{ id: 0, {pk}: {row_id:?}.into(), tenant_id: DEMO_TENANT.into(){fields_init} }});\n",
+            table_fn = decl.guard_table_fn()
+        ));
+    }
+    out.push_str("    });\n}\n");
     Ok(out)
 }
 
@@ -1082,7 +1172,6 @@ fn render_app_shell(title: &str, screens: &[PlannedScreen]) -> String {
     for plan in screens.iter().filter(|p| p.archetype == "login") {
         let mount = &plan.mount;
         let path = &plan.route_path;
-        out.push_str(&format!("nirdosha_rt::login! {{\n    mount: {mount},\n    path: {path:?},\n    mode: demo,\n"));
         let users = plan
             .decl
             .parameters
@@ -1090,6 +1179,16 @@ fn render_app_shell(title: &str, screens: &[PlannedScreen]) -> String {
             .and_then(toml::Value::as_array)
             .cloned()
             .unwrap_or_default();
+        if users.is_empty() {
+            // No fixture users declared: emit production mode (env-var
+            // user list), never `mode: demo` with an empty table — the
+            // macro refuses that at compile time.
+            out.push_str(&format!(
+                "nirdosha_rt::login! {{\n    mount: {mount},\n    path: {path:?},\n    mode: production,\n    landing: landing_path,\n}}\n\n"
+            ));
+            continue;
+        }
+        out.push_str(&format!("nirdosha_rt::login! {{\n    mount: {mount},\n    path: {path:?},\n    mode: demo,\n"));
         out.push_str("    demo_users: [\n");
         for user in users {
             let username = user.get("username").and_then(toml::Value::as_str).unwrap_or_default();
@@ -1099,8 +1198,10 @@ fn render_app_shell(title: &str, screens: &[PlannedScreen]) -> String {
                 .and_then(toml::Value::as_array)
                 .map(|a| a.iter().filter_map(toml::Value::as_str).map(|s| format!("{s:?}")).collect())
                 .unwrap_or_default();
+            let avatar = user.get("avatar").and_then(toml::Value::as_str);
+            let avatar_clause = avatar.map(|a| format!(", avatar: {a:?}")).unwrap_or_default();
             out.push_str(&format!(
-                "        {{ username: {username:?}, password: {password:?}, roles: [{}] }},\n",
+                "        {{ username: {username:?}, password: {password:?}, roles: [{}]{avatar_clause} }},\n",
                 roles.join(", ")
             ));
         }
@@ -1204,7 +1305,7 @@ fn render_screen_invocation(
             ));
             for (key, default) in [("create", "public"), ("read", "public"), ("update", "public"), ("delete", "public")] {
                 let key = format!("access_{key}");
-                let access = access_literal(params.get(&key).and_then(toml::Value::as_str), default);
+                let access = access_literal(params.get(&key).and_then(toml::Value::as_str), default, &plan.decl.roles);
                 out.push_str(&format!("    {}: {},\n", key.strip_prefix("access_").unwrap_or(&key), access));
             }
             if let Some(refresh) = params.get("refresh_seconds").and_then(toml::Value::as_integer) {
@@ -1251,7 +1352,13 @@ fn render_screen_invocation(
                             }
                             typed.push(format!("{}: {}", name, decl.type_of(name)));
                         }
-                        out.push_str(&format!(" {}: [ {} ],", clause, typed.join(", ")));
+                        // An empty write list must omit the clause
+                        // entirely: `[  ]` is not parseable macro input,
+                        // and omitting create_fields/update_fields is the
+                        // macro's own read-only-by-construction shape.
+                        if !typed.is_empty() {
+                            out.push_str(&format!(" {}: [ {} ],", clause, typed.join(", ")));
+                        }
                     }
                 }
                 out.push_str(" },\n");
@@ -1318,8 +1425,8 @@ fn render_screen_invocation(
                 "nirdosha_rt::communication_feed! {{\n    mount: {mount},\n    entity: {struct_name},\n    store: {cell},\n    path: {path:?},\n    fields: [ {} ],\n",
                 fields.join(", ")
             ));
-            let post_access = access_literal(params.get("post_access").and_then(toml::Value::as_str), "public");
-            let read_access = access_literal(params.get("read_access").and_then(toml::Value::as_str), "public");
+            let post_access = access_literal(params.get("post_access").or_else(|| params.get("access")).and_then(toml::Value::as_str), "public", &plan.decl.roles);
+            let read_access = access_literal(params.get("read_access").or_else(|| params.get("access")).and_then(toml::Value::as_str), "public", &plan.decl.roles);
             out.push_str(&format!("    post_access: {post_access},\n    read_access: {read_access},\n"));
             // refresh/long-poll must precede the guard clause: the macro
             // parses the optional poll clause before the guard loop.
@@ -1344,7 +1451,7 @@ fn render_screen_invocation(
             let struct_name = decl.struct_name();
             let store = decl.store_fn();
             let fields: Vec<String> = decl.fields.iter().map(|f| format!("{}: {}", f.name, f.ty)).collect();
-            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public", &plan.decl.roles);
             let mut out = String::new();
             out.push_str(&format!(
                 "nirdosha_rt::settings_screen! {{\n    mount: {mount},\n    entity: {struct_name},\n    store: {store},\n    path: {path:?},\n    fields: [ {} ],\n    access: {access},\n",
@@ -1365,7 +1472,7 @@ fn render_screen_invocation(
             let decl = entities.get(entity).ok_or("entity missing from bridge plan")?;
             let struct_name = decl.struct_name();
             let store = decl.store_fn();
-            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public", &plan.decl.roles);
             let mut out = String::new();
             out.push_str(&format!(
                 "nirdosha_rt::wizard! {{\n    mount: {mount},\n    entity: {struct_name},\n    store: {store},\n    path: {path:?},\n    access: {access},\n    steps: [\n"
@@ -1407,7 +1514,7 @@ fn render_screen_invocation(
             let struct_name = decl.struct_name();
             let entity_name = entity.to_string();
             let store = decl.store_fn();
-            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public", &plan.decl.roles);
             let title_field = params.get("title_field").and_then(toml::Value::as_str).unwrap_or("title");
             let column_field = params
                 .get("column_field")
@@ -1481,7 +1588,7 @@ fn render_screen_invocation(
                 .get("sha256")
                 .and_then(toml::Value::as_str)
                 .ok_or_else(|| format!("screen {}: static_embed needs parameters.sha256 (pin the content file's SHA-256)", plan.id))?;
-            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public", &plan.decl.roles);
             let mut out = String::new();
             out.push_str(&format!(
                 "nirdosha_rt::static_embed! {{\n    mount: {mount},\n    path: {path:?},\n    title: {title:?},\n    content_file: {content_file:?},\n    sha256: {sha256:?},\n    access: {access},\n}}\n"
@@ -1521,7 +1628,7 @@ fn render_screen_invocation(
                     return Err(format!("screen {}: report_builder dimensions must be String-typed (got `{entry}`)", plan.id));
                 }
             }
-            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public", &plan.decl.roles);
             let mut out = String::new();
             out.push_str(&format!(
                 "nirdosha_rt::report_builder! {{\n    mount: {mount},\n    entity: {struct_name},\n    table: {table},\n    path: {path:?},\n    title: {:?},\n    purpose: {purpose:?},\n    access: {access},\n    dimensions: [ {} ],\n}}\n",
@@ -1563,7 +1670,7 @@ fn render_screen_invocation(
                     return Err(format!("screen {}: tree_view fields must be String-typed (`{field}` is `{}`)", plan.id, decl.type_of(field)));
                 }
             }
-            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public");
+            let access = access_literal(params.get("access").and_then(toml::Value::as_str), "public", &plan.decl.roles);
             let mut out = String::new();
             out.push_str(&format!(
                 "nirdosha_rt::tree_view! {{\n    mount: {mount},\n    entity: {struct_name},\n    table: {table},\n    path: {path:?},\n    title: {:?},\n    purpose: {purpose:?},\n    access: {access},\n    id_field: {id_field},\n    parent_field: {parent_field},\n    label_field: {label_field},\n}}\n",
@@ -1588,10 +1695,9 @@ fn render_screen_invocation(
             // macro ignores it for routing when every source is guarded
             // — and the generator only ever emits guard mode, because
             // every entity a generated screen touches must be guarded).
-            if let Some(access_str) = params.get("access").and_then(toml::Value::as_str) {
-                if !access_str.is_empty() {
-                    out.push_str(&format!("    access: {access_str},\n"));
-                }
+            let access = multi_role_access_literal(params.get("access").and_then(toml::Value::as_str), "", &plan.decl.roles);
+            if !access.is_empty() {
+                out.push_str(&format!("    access: {access},\n"));
             }
             out.push_str("    sources: [\n");
             for source in &sources {
@@ -1883,17 +1989,18 @@ fn render_widget_fn(widget: &toml::Value, entities: &BTreeMap<String, EntityDecl
 // serve.nir — boot wiring + mount order (literal before wildcard)
 // ---------------------------------------------------------------------------
 
-fn render_serve(register_id: &str, screens: &[PlannedScreen]) -> String {
+fn render_serve(crate_name: &str, screens: &[PlannedScreen]) -> String {
+    let crate_ident = rust_path_ident(crate_name);
     let mut out = String::new();
     out.push_str("//! Generated by `cargo nirdosha generate-screens` — boot wiring + mount order.\n");
     out.push_str("//! Literal-path mounts are registered before wildcard mounts: `Router::dispatch`\n");
     out.push_str("//! matches in registration order and a `/{id}` wildcard would otherwise swallow\n");
     out.push_str("//! the literal `new`/`board`/`edit` segments.\n\nfn main() {\n");
     out.push_str(&format!(
-        "    {register_id}::bridge::seed_singletons();\n"
+        "    {crate_ident}::bridge::seed_singletons();\n"
     ));
     out.push_str(&format!(
-        "    let router = {register_id}::app_shell::mount_app_shell(nirdosha_rt::Router::new(|_req| nirdosha_rt::Auth::login(\"anon\", &[])));\n"
+        "    let router = {crate_ident}::app_shell::mount_app_shell(nirdosha_rt::Router::new(|_req| nirdosha_rt::Auth::login(\"anon\", &[])));\n"
     ));
     // Literal routes must register before wildcards (`dispatch` matches
     // in registration order). crud_screens is the one archetype whose
@@ -1909,24 +2016,27 @@ fn render_serve(register_id: &str, screens: &[PlannedScreen]) -> String {
         let module = plan
             .output_file
             .as_deref()
-            .and_then(|f| Path::new(f).file_stem().and_then(|s| s.to_str()))
-            .unwrap_or("app_shell");
+            .map(|f| {
+                let without_src = f.strip_prefix("src/").unwrap_or(f);
+                module_name_from_path(without_src)
+            })
+            .unwrap_or_else(|| "app_shell".to_string());
         if plan.archetype == "app_shell_from_toml" {
             continue; // mounted above
         }
         if plan.archetype == "login" {
             out.push_str(&format!(
-                "    let router = {register_id}::app_shell::mount_login(router);\n"
+                "    let router = {crate_ident}::app_shell::mount_login(router);\n"
             ));
             continue;
         }
         out.push_str(&format!(
-            "    let router = {register_id}::{module}::{}(router);\n",
+            "    let router = {crate_ident}::{module}::{}(router);\n",
             plan.mount
         ));
         if plan.archetype == "kanban_board" {
             out.push_str(&format!(
-                "    let router = {register_id}::{module}::{}_move(router);\n",
+                "    let router = {crate_ident}::{module}::{}_move(router);\n",
                 plan.mount
             ));
         }
@@ -2003,6 +2113,50 @@ roles = ["Agent"]
         let report = run(&dir).expect("a consistent register pair must generate");
         assert_eq!(report.screens_emitted, 2);
         assert!(report.invariants_checked >= 4, "menu + landing invariants must be counted, got {}", report.invariants_checked);
+    }
+
+    #[test]
+    fn snake_case_roles_emit_canonical_marker_types_and_wire_names() {
+        let screens = SCREENS.replace("Agent:R/W", "kyc_analyst:R/W");
+        let menus = MENUS.replace("Agent", "kyc_analyst");
+        let (_dir, dir) = write_project(&screens, &menus);
+        run(&dir).expect("snake_case register roles must generate");
+        let bridge = std::fs::read_to_string(dir.join("src/bridge.nir")).unwrap();
+        assert!(
+            bridge.contains("KycAnalyst = \"kyc_analyst\";"),
+            "role marker and wire name must agree with role_ident(): {bridge}"
+        );
+    }
+
+    #[test]
+    fn coarse_access_and_empty_write_lists_emit_valid_macro_grammar() {
+        let screens = SCREENS.replace(
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }",
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }\nparameters.access_read = \"role\"\nparameters.create_fields = []\nparameters.update_fields = []",
+        );
+        let (_dir, dir) = write_project(&screens, MENUS);
+        run(&dir).expect("coarse access and read-only CRUD must generate");
+        let screen = std::fs::read_to_string(dir.join("src/screens/m02.nir")).unwrap();
+        assert!(!screen.contains("access: role"), "coarse access must never leak into macro syntax: {screen}");
+        assert!(
+            screen.contains("requires role \"Agent\""),
+            "single-role macro grammar must receive one concrete route role: {screen}"
+        );
+        assert!(!screen.contains(" or role "), "crud_screens only accepts one route role: {screen}");
+        assert!(!screen.contains("create_fields: [  ]"), "empty create fields must be omitted: {screen}");
+        assert!(!screen.contains("update_fields: [  ]"), "empty update fields must be omitted: {screen}");
+    }
+
+    #[test]
+    fn canonical_role_marker_collisions_are_refused_before_rustc() {
+        let screens = SCREENS.replace(
+            "roles = [\"Agent:R/W\"]",
+            "roles = [\"compliance_officer:R/W\", \"ComplianceOfficer:R\"]",
+        );
+        let menus = MENUS.replace("Agent", "compliance_officer");
+        let (_dir, dir) = write_project(&screens, &menus);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("both resolve to marker type `ComplianceOfficer`"), "{err}");
     }
 
     #[test]

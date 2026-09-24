@@ -260,7 +260,7 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
 
-            let unconditional = roles.iter().any(|r| r == "AllHuman" || r == "AllRoles");
+            let unconditional = roles.is_empty() || roles.iter().any(|r| r == "AllHuman" || r == "AllRoles");
             let roles = if unconditional { Vec::new() } else { roles };
 
             nav_entries.push(NavEntry {
@@ -339,13 +339,16 @@ fn expand_parsed(input: Input) -> Result<TokenStream2, TokenStream> {
     // named "cannot find type" compile error, not a runtime surprise.
     // ----------------------------------------------------------------
     let mut role_assertions: Vec<TokenStream2> = Vec::new();
+    // Dedupe on the CANONICAL ident, not the raw spelling: "compliance_officer"
+    // and "ComplianceOfficer" both canonicalize to `ComplianceOfficer`, and
+    // two aliases of that name are an E0428 redefinition.
     let mut seen_roles: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut assert_role = |name: &str| -> Result<(), TokenStream> {
-        if !seen_roles.insert(name.to_string()) {
-            return Ok(());
-        }
         let ident = nirdosha_contract_core::role::role_ident(name, menus_span)
             .map_err(|e| TokenStream::from(e.to_compile_error()))?;
+        if !seen_roles.insert(ident.to_string()) {
+            return Ok(());
+        }
         let alias = quote::format_ident!("__AssertRoleDeclared_{}", ident);
         role_assertions.push(quote! {
             #[allow(dead_code, non_camel_case_types)]

@@ -353,23 +353,79 @@ impl Response {
     }
 }
 
-fn login_page_html(action: &str, error: Option<&str>) -> String {
+fn login_page_html(
+    action: &str,
+    error: Option<&str>,
+    avatars: Option<&[(&'static str, &'static str, Option<&'static str>, Vec<&'static str>)]>,
+) -> String {
     let error_html = match error {
         Some(msg) => format!("<p class=\"errors\">{}</p>", html_escape(msg)),
         None => String::new(),
+    };
+    let body = match avatars {
+        Some(users) if !users.is_empty() => {
+            let mut grid = String::from("<div class=\"nir-avatar-grid\">");
+            for (username, password, avatar, roles) in users {
+                let img = match avatar {
+                    Some(url) => format!("<img src=\"{}\" alt=\"{}\">", html_escape(url), html_escape(username)),
+                    None => format!(
+                        "<span class=\"nir-avatar-placeholder\">{}</span>",
+                        html_escape(&username[..1.min(username.len())])
+                    ),
+                };
+                let role_text = if roles.is_empty() {
+                    String::new()
+                } else {
+                    format!("<span class=\"nir-avatar-role\">{}</span>", html_escape(&roles.join(", ")))
+                };
+                grid.push_str(&format!(
+                    "<form method=\"post\" action=\"{}\" class=\"nir-avatar-card\">\
+                     <input type=\"hidden\" name=\"username\" value=\"{}\">\
+                     <input type=\"hidden\" name=\"password\" value=\"{}\">\
+                     <button type=\"submit\">{}<span class=\"nir-avatar-label\">{}</span>{}</button>\
+                     </form>",
+                    html_escape(action),
+                    html_escape(username),
+                    html_escape(password),
+                    img,
+                    html_escape(username),
+                    role_text
+                ));
+            }
+            grid.push_str("</div>");
+            grid
+        }
+        _ => format!(
+            "<form method=\"post\" action=\"{}\">\
+             <p><label>Username</label><input type=\"text\" name=\"username\"></p>\
+             <p><label>Password</label><input type=\"password\" name=\"password\"></p>\
+             <p><button type=\"submit\">Log in</button></p>\
+             </form>",
+            html_escape(action)
+        ),
     };
     page_shell(
         "Log in",
         "",
         &format!(
-            "{error_html}<form method=\"post\" action=\"{action}\">\
-             <p><label>Username</label><input type=\"text\" name=\"username\"></p>\
-             <p><label>Password</label><input type=\"password\" name=\"password\"></p>\
-             <p><button type=\"submit\">Log in</button></p>\
-             </form>"
+            "{}{}{}",
+            error_html,
+            AVATAR_CSS,
+            body
         ),
     )
 }
+
+const AVATAR_CSS: &str = "\n<style>\n\
+.nir-avatar-grid { display: flex; flex-wrap: wrap; gap: 1.5rem; justify-content: center; padding: 1rem; }\n\
+.nir-avatar-card button { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; padding: 1rem; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; cursor: pointer; box-shadow: 0 2px 8px rgba(15,23,42,0.06); min-width: 130px; }\n\
+.nir-avatar-card button:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(15,23,42,0.10); }\n\
+.nir-avatar-card img { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; }\n\
+.nir-avatar-placeholder { width: 96px; height: 96px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #4f46e5; color: #fff; font-size: 2rem; font-weight: 600; }\n\
+.nir-avatar-label { font-size: 0.95rem; font-weight: 600; color: #0f172a; }\n\
+.nir-avatar-role { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; }\n\
+</style>\n";
+
 
 fn reason_phrase(status: u16) -> &'static str {
     match status {
@@ -500,6 +556,7 @@ struct LoginConfig {
     path: String,
     verify: Arc<dyn Fn(&str, &str) -> Option<Vec<String>> + Send + Sync>,
     landing: Option<Arc<dyn Fn(&Auth) -> &'static str + Send + Sync>>,
+    avatars: Option<Vec<(&'static str, &'static str, Option<&'static str>, Vec<&'static str>)>>,
 }
 
 /// A request → `Response` router with OpenAPI baked into `dispatch`
@@ -889,6 +946,7 @@ impl Router {
             path: path.to_string(),
             verify: Arc::new(verify),
             landing: None,
+            avatars: None,
         });
         self
     }
@@ -906,6 +964,43 @@ impl Router {
             path: path.to_string(),
             verify: Arc::new(verify),
             landing: Some(Arc::new(landing)),
+            avatars: None,
+        });
+        self
+    }
+
+    /// Avatar-based demo login: renders a grid of user avatars on the
+    /// login page. Clicking an avatar submits the matching
+    /// username/password and logs in as that user, simulating a true
+    /// login without exposing a password field.
+    pub fn with_login_avatars(
+        mut self,
+        path: &'static str,
+        verify: impl Fn(&str, &str) -> Option<Vec<String>> + Send + Sync + 'static,
+        avatars: Vec<(&'static str, &'static str, Option<&'static str>, Vec<&'static str>)>,
+    ) -> Self {
+        self.login = Some(LoginConfig {
+            path: path.to_string(),
+            verify: Arc::new(verify),
+            landing: None,
+            avatars: Some(avatars),
+        });
+        self
+    }
+
+    /// Avatar-based demo login with a landing-page redirect.
+    pub fn with_login_landing_avatars(
+        mut self,
+        path: &'static str,
+        verify: impl Fn(&str, &str) -> Option<Vec<String>> + Send + Sync + 'static,
+        landing: impl Fn(&Auth) -> &'static str + Send + Sync + 'static,
+        avatars: Vec<(&'static str, &'static str, Option<&'static str>, Vec<&'static str>)>,
+    ) -> Self {
+        self.login = Some(LoginConfig {
+            path: path.to_string(),
+            verify: Arc::new(verify),
+            landing: Some(Arc::new(landing)),
+            avatars: Some(avatars),
         });
         self
     }
@@ -1160,8 +1255,14 @@ impl Router {
         let path = req.path_without_query().to_string();
 
         if let Some(login) = &self.login {
+            // The root path should redirect anonymous visitors to the login
+            // surface so apps behave like a conventional sign-in-first UX.
+            if path == "/" && req.method == "GET" && session_auth(&self.sessions, req).is_none() {
+                let mut resp = Response::redirect(&login.path);
+                return self.with_nav_bar(req, resp);
+            }
             if path == login.path && req.method == "GET" {
-                return self.with_nav_bar(req, Response::html(200, login_page_html(&login.path, None)));
+                return self.with_nav_bar(req, Response::html(200, login_page_html(&login.path, None, login.avatars.as_deref())));
             }
             if path == login.path && req.method == "POST" {
                 let form = req.form_or_json();
@@ -1177,7 +1278,7 @@ impl Router {
                         resp.extra_headers.push(("Set-Cookie".to_string(), format!("{SESSION_COOKIE}={session_id}; {SESSION_COOKIE_ATTRS}")));
                         resp
                     }
-                    None => Response::html(401, login_page_html(&login.path, Some("invalid username or password"))),
+                    None => Response::html(401, login_page_html(&login.path, Some("invalid username or password"), login.avatars.as_deref())),
                 };
                 return self.with_nav_bar(req, resp);
             }
