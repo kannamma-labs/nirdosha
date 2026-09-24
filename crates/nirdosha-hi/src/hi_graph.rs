@@ -24,7 +24,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// `NIRDOSHA_HI_DISABLE=1` skips the auto-scaffold and auto-sync
 /// `hi` would otherwise run on startup -- same `NIRDOSHA_`-prefixed,
@@ -50,7 +50,10 @@ pub fn hi_dir(root: &Path) -> PathBuf {
 /// swap point as this crate's Ed25519 signing, not a separate plain
 /// `sha2` call left behind.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    nirdosha_audit::crypto_backend::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    nirdosha_audit::crypto_backend::sha256(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Creates `.nir/` and `.nir/content/` if absent, opens (or creates)
@@ -60,9 +63,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 pub fn open(root: &Path) -> Result<Connection, String> {
     let dir = hi_dir(root);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    std::fs::create_dir_all(dir.join("content")).map_err(|e| format!("creating {}: {e}", dir.join("content").display()))?;
+    std::fs::create_dir_all(dir.join("content"))
+        .map_err(|e| format!("creating {}: {e}", dir.join("content").display()))?;
     let db_path = dir.join("hi.db");
-    let conn = Connection::open(&db_path).map_err(|e| format!("opening {}: {e}", db_path.display()))?;
+    let conn =
+        Connection::open(&db_path).map_err(|e| format!("opening {}: {e}", db_path.display()))?;
     migrate(&conn)?;
     Ok(conn)
 }
@@ -170,14 +175,24 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn add_column_if_missing(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<(), String> {
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    sql_type: &str,
+) -> Result<(), String> {
     let exists: bool = conn
-        .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))
+        .prepare(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+        ))
         .and_then(|mut stmt| stmt.exists([column]))
         .map_err(|e| format!("checking whether {table}.{column} already exists: {e}"))?;
     if !exists {
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {sql_type}"), [])
-            .map_err(|e| format!("adding {table}.{column}: {e}"))?;
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {sql_type}"),
+            [],
+        )
+        .map_err(|e| format!("adding {table}.{column}: {e}"))?;
     }
     Ok(())
 }
@@ -245,7 +260,10 @@ impl ScreenFacts {
     /// upserts that file's own route nodes (same file-at-a-time rule
     /// the rest of `sync_file` follows).
     fn routes_owned_by(&self, fn_names: &HashSet<&str>) -> Vec<&RouteReg> {
-        self.routes.iter().filter(|r| fn_names.contains(r.mount_fn.as_str())).collect()
+        self.routes
+            .iter()
+            .filter(|r| fn_names.contains(r.mount_fn.as_str()))
+            .collect()
     }
 }
 
@@ -291,8 +309,10 @@ fn hash_tokens<T: quote::ToTokens>(item: &T) -> String {
 /// registers -- everything the whole-project navigation pass in `sync`
 /// needs, extracted here where the parse already happened.
 fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File, ScreenFacts), String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let file = syn::parse_file(&src).map_err(|e| format!("parse error in {}: {e}", path.display()))?;
+    let src =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let file =
+        syn::parse_file(&src).map_err(|e| format!("parse error in {}: {e}", path.display()))?;
 
     let mut units = Vec::with_capacity(file.items.len());
     let mut facts = ScreenFacts::default();
@@ -311,7 +331,13 @@ fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File, ScreenFa
             syn::Item::Struct(s) => (s.ident.to_string(), "struct", None, None, None),
             syn::Item::Enum(e) => (e.ident.to_string(), "enum", None, None, None),
             syn::Item::Macro(m) => {
-                let macro_name = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                let macro_name = m
+                    .mac
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
                 if macro_name == "approval_inbox" {
                     // The inbox's own mount identity (what
                     // `screen_name_from_macro` would return) pairs each
@@ -331,7 +357,9 @@ fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File, ScreenFa
                         facts.shell_tomls.push(lit);
                     }
                 }
-                let Some(name) = screen_name_from_macro(m) else { continue };
+                let Some(name) = screen_name_from_macro(m) else {
+                    continue;
+                };
                 let st = screen_type_from_macro(&macro_name).to_string();
                 let sp = screen_path_from_macro(&m.mac.tokens);
                 let sn = if macro_name == "app_shell" {
@@ -466,7 +494,9 @@ fn app_shell_nav_from_macro(tokens: &proc_macro2::TokenStream) -> Option<String>
         }
         Ok(None)
     };
-    syn::parse::Parser::parse2(parser, tokens.clone()).ok().flatten()
+    syn::parse::Parser::parse2(parser, tokens.clone())
+        .ok()
+        .flatten()
 }
 
 /// The GET route-registration methods a v2 `Router` offers that serve a
@@ -479,10 +509,15 @@ const SCREEN_ROUTE_METHODS: &[&str] = &["get", "get_gated", "get_gated_claim", "
 /// First (optionally second) positional string-literal argument of a
 /// call's argument list -- how a route registration's path (and its
 /// human title, when present) are read back without any macro context.
-fn positional_string_literals(args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>) -> Vec<String> {
+fn positional_string_literals(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+) -> Vec<String> {
     args.iter()
         .filter_map(|a| match a {
-            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(s.value()),
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) => Some(s.value()),
             _ => None,
         })
         .collect()
@@ -505,7 +540,11 @@ fn collect_screen_facts_from_fn(mount_fn: &str, f: &syn::ItemFn, facts: &mut Scr
                 let lits = positional_string_literals(&node.args);
                 if let Some(path) = lits.first().filter(|p| p.starts_with('/')) {
                     let title = lits.get(1).cloned();
-                    self.facts.routes.push(RouteReg { path: path.clone(), title, mount_fn: self.mount_fn.to_string() });
+                    self.facts.routes.push(RouteReg {
+                        path: path.clone(),
+                        title,
+                        mount_fn: self.mount_fn.to_string(),
+                    });
                     // The handler closure is among this call's args --
                     // walking it with `current_route` set attributes any
                     // static redirect inside it to THIS route, then
@@ -521,8 +560,18 @@ fn collect_screen_facts_from_fn(mount_fn: &str, f: &syn::ItemFn, facts: &mut Scr
         }
         fn visit_expr_call(&mut self, node: &syn::ExprCall) {
             if let syn::Expr::Path(p) = node.func.as_ref() {
-                if p.path.segments.last().map(|s| s.ident.to_string()).as_deref() == Some("redirect") {
-                    if let Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) = node.args.first() {
+                if p.path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .as_deref()
+                    == Some("redirect")
+                {
+                    if let Some(syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    })) = node.args.first()
+                    {
                         if let Some(route) = &self.current_route {
                             self.facts.redirects.push((route.clone(), s.value()));
                         }
@@ -533,7 +582,11 @@ fn collect_screen_facts_from_fn(mount_fn: &str, f: &syn::ItemFn, facts: &mut Scr
         }
     }
     syn::visit::Visit::visit_block(
-        &mut Collector { mount_fn, current_route: None, facts },
+        &mut Collector {
+            mount_fn,
+            current_route: None,
+            facts,
+        },
         &f.block,
     );
 }
@@ -578,8 +631,10 @@ fn string_values_after_key(tokens: &proc_macro2::TokenStream, key: &str) -> Vec<
     let mut out = Vec::new();
     let mut i = 0;
     while i + 2 < trees.len() {
-        let is_key = matches!(&trees[i], proc_macro2::TokenTree::Ident(id) if id.to_string() == key);
-        let is_colon = matches!(&trees[i + 1], proc_macro2::TokenTree::Punct(p) if p.as_char() == ':');
+        let is_key =
+            matches!(&trees[i], proc_macro2::TokenTree::Ident(id) if id.to_string() == key);
+        let is_colon =
+            matches!(&trees[i + 1], proc_macro2::TokenTree::Punct(p) if p.as_char() == ':');
         if is_key && is_colon {
             if let proc_macro2::TokenTree::Literal(l) = &trees[i + 2] {
                 let text = l.to_string();
@@ -623,7 +678,9 @@ fn literal_string_value(quoted: &str) -> String {
 
 pub(crate) fn screen_name_from_macro(item: &syn::ItemMacro) -> Option<String> {
     let macro_name = item.mac.path.segments.last()?.ident.to_string();
-    if !UI_MACROS.contains(&macro_name.as_str()) || item.mac.path.segments.first()?.ident != "nirdosha_rt" {
+    if !UI_MACROS.contains(&macro_name.as_str())
+        || item.mac.path.segments.first()?.ident != "nirdosha_rt"
+    {
         return None;
     }
     // `app_shell_from_toml!` takes the register path as its first
@@ -637,11 +694,19 @@ pub(crate) fn screen_name_from_macro(item: &syn::ItemMacro) -> Option<String> {
         let key: syn::Ident = input.parse()?;
         input.parse::<syn::Token![:]>()?;
         let mount: syn::Ident = input.parse()?;
-        if key != "mount" { return Err(input.error("expected mount")); }
-        while !input.is_empty() { let _: proc_macro2::TokenTree = input.parse()?; }
+        if key != "mount" {
+            return Err(input.error("expected mount"));
+        }
+        while !input.is_empty() {
+            let _: proc_macro2::TokenTree = input.parse()?;
+        }
         Ok(mount.to_string())
     };
-    syn::parse::Parser::parse2(parser, item.mac.tokens.clone()).ok()?.strip_prefix("mount_").filter(|name| !name.is_empty()).map(str::to_string)
+    syn::parse::Parser::parse2(parser, item.mac.tokens.clone())
+        .ok()?
+        .strip_prefix("mount_")
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 pub fn code_unit_node_id(kind: &str, qualified_name: &str) -> String {
@@ -681,8 +746,15 @@ impl SyncReport {
 /// deletes or rewrites an edge, a node's title, or the `.nir` source
 /// itself -- only ever adds a flag, per the RFC's "explicit vs.
 /// inferred knowledge stay separate" principle.
-fn sync_file(conn: &Connection, path: &Path, facts: &mut ScreenFacts) -> Result<SyncReport, String> {
-    let mut report = SyncReport { files_scanned: 1, ..Default::default() };
+fn sync_file(
+    conn: &Connection,
+    path: &Path,
+    facts: &mut ScreenFacts,
+) -> Result<SyncReport, String> {
+    let mut report = SyncReport {
+        files_scanned: 1,
+        ..Default::default()
+    };
     let (units, file, file_facts) = code_units_in_file(path)?;
     facts.merge(file_facts);
     report.units_seen = units.len();
@@ -700,7 +772,9 @@ fn sync_file(conn: &Connection, path: &Path, facts: &mut ScreenFacts) -> Result<
         // error out on that NULL rather than treating it as "no prior
         // hash," the same way a genuinely new node does.
         let prev_hash: Option<String> = conn
-            .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&id], |r| r.get::<_, Option<String>>(0))
+            .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get::<_, Option<String>>(0)
+            })
             .optional()
             .map_err(|e| format!("reading node {id}: {e}"))?
             .flatten();
@@ -735,7 +809,10 @@ fn sync_file(conn: &Connection, path: &Path, facts: &mut ScreenFacts) -> Result<
                              (src = ?1 AND kind = 'IMPLEMENTS')
                              OR (dst = ?1 AND kind = 'IMPLEMENTED_BY')
                          )",
-                        params![id, format!("CodeUnit content changed ({prev} -> {})", u.content_hash)],
+                        params![
+                            id,
+                            format!("CodeUnit content changed ({prev} -> {})", u.content_hash)
+                        ],
                     )
                     .map_err(|e| format!("flagging edges touching {id}: {e}"))?;
                 report.edges_flagged += flagged;
@@ -753,7 +830,11 @@ fn sync_file(conn: &Connection, path: &Path, facts: &mut ScreenFacts) -> Result<
     // priority downstream (the nav pass prefers non-page screens when
     // resolving paths), so this can only ever ADD surface the macro
     // catalog didn't capture -- exactly what it's for.
-    let fn_names: HashSet<&str> = units.iter().filter(|u| u.kind == "fn").map(|u| u.qualified_name.as_str()).collect();
+    let fn_names: HashSet<&str> = units
+        .iter()
+        .filter(|u| u.kind == "fn")
+        .map(|u| u.qualified_name.as_str())
+        .collect();
     for reg in facts.routes_owned_by(&fn_names) {
         let id = code_unit_node_id("screen", &reg.path);
         report.units_seen += 1;
@@ -823,8 +904,12 @@ fn sync_file(conn: &Connection, path: &Path, facts: &mut ScreenFacts) -> Result<
             }
             for kind in CALLABLE_KINDS {
                 let callee_id = code_unit_node_id(kind, name);
-                let exists: Option<String> =
-                    conn.query_row("SELECT id FROM nodes WHERE id = ?1", [&callee_id], |r| r.get(0)).optional().map_err(|e| format!("checking call target {callee_id}: {e}"))?;
+                let exists: Option<String> = conn
+                    .query_row("SELECT id FROM nodes WHERE id = ?1", [&callee_id], |r| {
+                        r.get(0)
+                    })
+                    .optional()
+                    .map_err(|e| format!("checking call target {callee_id}: {e}"))?;
                 if exists.is_some() {
                     add_relation(conn, &caller_id, &callee_id)?;
                 }
@@ -860,7 +945,9 @@ fn sync_file(conn: &Connection, path: &Path, facts: &mut ScreenFacts) -> Result<
 /// struct" question are genuinely different questions in real Rust
 /// (unlike the retired native `.nir`, which had no separate literal-
 /// construction expression form at all).
-pub(crate) fn collect_calls_and_constructs(block: &syn::Block) -> (HashSet<String>, HashSet<String>) {
+pub(crate) fn collect_calls_and_constructs(
+    block: &syn::Block,
+) -> (HashSet<String>, HashSet<String>) {
     struct Collector<'a> {
         called: &'a mut HashSet<String>,
         constructed: &'a mut HashSet<String>,
@@ -883,7 +970,13 @@ pub(crate) fn collect_calls_and_constructs(block: &syn::Block) -> (HashSet<Strin
     }
     let mut called = HashSet::new();
     let mut constructed = HashSet::new();
-    syn::visit::Visit::visit_block(&mut Collector { called: &mut called, constructed: &mut constructed }, block);
+    syn::visit::Visit::visit_block(
+        &mut Collector {
+            called: &mut called,
+            constructed: &mut constructed,
+        },
+        block,
+    );
     (called, constructed)
 }
 
@@ -959,7 +1052,11 @@ pub fn sync(conn: &Connection, root: &Path, files: &[String]) -> Result<SyncRepo
 /// failed: an unreadable/missing nav register degrades to "fewer
 /// edges", never a sync error, matching this module's own "never be
 /// the thing that breaks `hi`" posture.
-fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts) -> Result<usize, String> {
+fn derive_screen_navigation(
+    conn: &Connection,
+    root: &Path,
+    facts: &ScreenFacts,
+) -> Result<usize, String> {
     let mut stmt = conn
         .prepare("SELECT id, screen_type, screen_path FROM nodes WHERE kind = 'CodeUnit' AND screen_type IS NOT NULL")
         .map_err(|e| format!("listing screen nodes for the navigation pass: {e}"))?;
@@ -976,7 +1073,8 @@ fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts)
     // macro screen is the richer node (its own archetype, title,
     // confirmed state), the page node only exists because no macro
     // covered that route.
-    let mut path_to_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut path_to_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for pass in [true, false] {
         for (id, screen_type, screen_path) in &screens {
             let is_page = screen_type.as_deref() == Some("page");
@@ -1025,7 +1123,10 @@ fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts)
         let is_param = |s: &str| s.starts_with('{') && s.ends_with('}');
         let exact_shape = candidates_of(p_segs.len()).iter().find_map(|(path, id)| {
             let c = segs_of(path);
-            if c.iter().zip(p_segs.iter()).all(|(cseg, pseg)| cseg == pseg || (is_param(pseg) && is_param(cseg))) {
+            if c.iter()
+                .zip(p_segs.iter())
+                .all(|(cseg, pseg)| cseg == pseg || (is_param(pseg) && is_param(cseg)))
+            {
                 Some((*id).clone())
             } else {
                 None
@@ -1050,20 +1151,27 @@ fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts)
                 }
             }
         }
-        candidates_of(p_segs.len())
-            .iter()
-            .find_map(|(path, id)| {
-                let c = segs_of(path);
-                if c.iter().zip(p_segs.iter()).all(|(cseg, pseg)| cseg == pseg || is_param(pseg) || is_param(cseg)) {
-                    Some((*id).clone())
-                } else {
-                    None
-                }
-            })
+        candidates_of(p_segs.len()).iter().find_map(|(path, id)| {
+            let c = segs_of(path);
+            if c.iter()
+                .zip(p_segs.iter())
+                .all(|(cseg, pseg)| cseg == pseg || is_param(pseg) || is_param(cseg))
+            {
+                Some((*id).clone())
+            } else {
+                None
+            }
+        })
     };
 
-    let shell_id = screens.iter().find(|(_, t, _)| t.as_deref() == Some("shell")).map(|(id, _, _)| id.clone());
-    let login_id = screens.iter().find(|(_, t, _)| t.as_deref() == Some("login")).map(|(id, _, _)| id.clone());
+    let shell_id = screens
+        .iter()
+        .find(|(_, t, _)| t.as_deref() == Some("shell"))
+        .map(|(id, _, _)| id.clone());
+    let login_id = screens
+        .iter()
+        .find(|(_, t, _)| t.as_deref() == Some("login"))
+        .map(|(id, _, _)| id.clone());
 
     let mut edges: Vec<(String, String, String)> = Vec::new();
 
@@ -1085,7 +1193,9 @@ fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts)
                     let landing_src = login_id.clone().or_else(|| shell_id.clone());
                     if let Some(landing) = doc.get("landing").and_then(|v| v.as_table()) {
                         for (role, target) in landing {
-                            let Some(route) = target.as_str() else { continue };
+                            let Some(route) = target.as_str() else {
+                                continue;
+                            };
                             if let (Some(src), Some(dst)) = (landing_src.as_ref(), lookup(route)) {
                                 edges.push((src.clone(), dst, format!("landing: {role}")));
                             }
@@ -1097,8 +1207,12 @@ fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts)
                     if let Some(shell) = &shell_id {
                         if let Some(menus) = doc.get("menu").and_then(|v| v.as_array()) {
                             for menu in menus {
-                                let Some(route) = menu.get("route").and_then(|v| v.as_str()) else { continue };
-                                let Some(target) = lookup(route) else { continue };
+                                let Some(route) = menu.get("route").and_then(|v| v.as_str()) else {
+                                    continue;
+                                };
+                                let Some(target) = lookup(route) else {
+                                    continue;
+                                };
                                 if target == *shell {
                                     continue;
                                 }
@@ -1118,11 +1232,17 @@ fn derive_screen_navigation(conn: &Connection, root: &Path, facts: &ScreenFacts)
                     // problem (the macro already hard-errors at compile
                     // time); sync only notes it in the report stream
                     // through the missing edges, never a hard failure.
-                    eprintln!("hi: nav register {} did not parse as TOML, skipping its nav edges: {e}", toml_path.display());
+                    eprintln!(
+                        "hi: nav register {} did not parse as TOML, skipping its nav edges: {e}",
+                        toml_path.display()
+                    );
                 }
             },
             Err(e) => {
-                eprintln!("hi: nav register {} not readable, skipping its nav edges: {e}", toml_path.display());
+                eprintln!(
+                    "hi: nav register {} not readable, skipping its nav edges: {e}",
+                    toml_path.display()
+                );
             }
         }
     }
@@ -1188,16 +1308,33 @@ fn resolve_code_unit_id(conn: &Connection, target: &str) -> Result<String, Strin
     if let Some((kind, name)) = target.split_once(':') {
         if ["fn", "struct", "enum", "screen"].contains(&kind) {
             let id = code_unit_node_id(kind, name);
-            let exists: Option<String> = conn.query_row("SELECT id FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
-            return exists.ok_or_else(|| format!("no CodeUnit `{id}` in the hi graph -- run `nirdosha hi sync` first"));
+            let exists: Option<String> = conn
+                .query_row("SELECT id FROM nodes WHERE id = ?1", [&id], |r| r.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            return exists.ok_or_else(|| {
+                format!("no CodeUnit `{id}` in the hi graph -- run `nirdosha hi sync` first")
+            });
         }
     }
-    let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1").map_err(|e| e.to_string())?;
-    let ids: Vec<String> = stmt.query_map([target], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let mut stmt = conn
+        .prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt
+        .query_map([target], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
     match ids.len() {
-        0 => Err(format!("no CodeUnit named `{target}` in the hi graph -- run `nirdosha hi sync` first")),
+        0 => Err(format!(
+            "no CodeUnit named `{target}` in the hi graph -- run `nirdosha hi sync` first"
+        )),
         1 => Ok(ids.into_iter().next().expect("len checked above")),
-        _ => Err(format!("`{target}` is ambiguous ({} matches: {}) -- disambiguate with `kind:name`, e.g. `fn:{target}`", ids.len(), ids.join(", "))),
+        _ => Err(format!(
+            "`{target}` is ambiguous ({} matches: {}) -- disambiguate with `kind:name`, e.g. `fn:{target}`",
+            ids.len(),
+            ids.join(", ")
+        )),
     }
 }
 
@@ -1220,10 +1357,17 @@ pub fn link(conn: &Connection, requirement_id: &str, target: &str) -> Result<(),
 
     let code_id = resolve_code_unit_id(conn, target)?;
     let hash: String = conn
-        .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&code_id], |r| r.get(0))
+        .query_row(
+            "SELECT content_hash FROM nodes WHERE id = ?1",
+            [&code_id],
+            |r| r.get(0),
+        )
         .map_err(|e| format!("reading node {code_id}: {e}"))?;
 
-    for (src, dst, kind) in [(code_id.as_str(), req_node_id.as_str(), "IMPLEMENTS"), (req_node_id.as_str(), code_id.as_str(), "IMPLEMENTED_BY")] {
+    for (src, dst, kind) in [
+        (code_id.as_str(), req_node_id.as_str(), "IMPLEMENTS"),
+        (req_node_id.as_str(), code_id.as_str(), "IMPLEMENTED_BY"),
+    ] {
         conn.execute(
             "INSERT INTO edges (src, dst, kind, hash_at_link, flag, flag_reason)
              VALUES (?1, ?2, ?3, ?4, NULL, NULL)
@@ -1236,13 +1380,24 @@ pub fn link(conn: &Connection, requirement_id: &str, target: &str) -> Result<(),
 }
 
 fn resolve_any_node_id(conn: &Connection, target: &str) -> Result<String, String> {
-    if target.starts_with("requirement:") || target.starts_with("decision:") || target.starts_with("code:") {
-        let exists: Option<String> = conn.query_row("SELECT id FROM nodes WHERE id = ?1", [target], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+    if target.starts_with("requirement:")
+        || target.starts_with("decision:")
+        || target.starts_with("code:")
+    {
+        let exists: Option<String> = conn
+            .query_row("SELECT id FROM nodes WHERE id = ?1", [target], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
         return exists.ok_or_else(|| format!("no node `{target}` in the hi graph"));
     }
     for prefix in ["requirement:", "decision:"] {
         let id = format!("{prefix}{target}");
-        if conn.query_row("SELECT 1 FROM nodes WHERE id = ?1", [&id], |_| Ok(())).optional().map_err(|e| e.to_string())?.is_some() {
+        if conn
+            .query_row("SELECT 1 FROM nodes WHERE id = ?1", [&id], |_| Ok(()))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
             return Ok(id);
         }
     }
@@ -1307,8 +1462,11 @@ pub fn impact(conn: &Connection, target: &str) -> Result<ImpactReport, String> {
                  SELECT src, kind, flag, flag_reason FROM edges WHERE dst = ?1",
             )
             .map_err(|e| e.to_string())?;
-        let rows: Vec<(String, String, Option<String>, Option<String>)> =
-            stmt.query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = stmt
+            .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
 
         for (neighbor_id, edge_kind, flag, flag_reason) in rows {
             if !visited.insert(neighbor_id.clone()) {
@@ -1318,12 +1476,31 @@ pub fn impact(conn: &Connection, target: &str) -> Result<ImpactReport, String> {
                 partial = true;
                 break 'walk;
             }
-            let (kind, title, source_ref, line, col): (String, Option<String>, Option<String>, Option<i64>, Option<i64>) = conn
-                .query_row("SELECT kind, title, source_ref, line, col FROM nodes WHERE id = ?1", [&neighbor_id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-                })
+            let (kind, title, source_ref, line, col): (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+            ) = conn
+                .query_row(
+                    "SELECT kind, title, source_ref, line, col FROM nodes WHERE id = ?1",
+                    [&neighbor_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
                 .map_err(|e| format!("reading node {neighbor_id}: {e}"))?;
-            hits.push(ImpactHit { node_id: neighbor_id.clone(), kind, title, edge_kind, flag, flag_reason, depth: depth + 1, source_ref, line, col });
+            hits.push(ImpactHit {
+                node_id: neighbor_id.clone(),
+                kind,
+                title,
+                edge_kind,
+                flag,
+                flag_reason,
+                depth: depth + 1,
+                source_ref,
+                line,
+                col,
+            });
             queue.push_back((neighbor_id, depth + 1));
         }
     }
@@ -1339,13 +1516,19 @@ pub fn impact(conn: &Connection, target: &str) -> Result<ImpactReport, String> {
 /// deliberately explicit/opt-in, never run by `hi`'s auto-scaffold: no
 /// heuristic here can reliably tell a requirements doc from a README.
 pub fn ingest_document(conn: &Connection, path: &Path) -> Result<usize, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let doc_id = format!("document:{}", path.display());
     conn.execute(
         "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref)
          VALUES (?1, 'Document', ?2, NULL, ?3, ?4)
          ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash",
-        params![doc_id, path.file_name().and_then(|n| n.to_str()).unwrap_or(""), sha256_hex(text.as_bytes()), path.display().to_string()],
+        params![
+            doc_id,
+            path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            sha256_hex(text.as_bytes()),
+            path.display().to_string()
+        ],
     )
     .map_err(|e| format!("upserting document node {doc_id}: {e}"))?;
 
@@ -1357,11 +1540,17 @@ pub fn ingest_document(conn: &Connection, path: &Path) -> Result<usize, String> 
         }
         let chunk_id = sha256_hex(para.as_bytes());
         let inserted = conn
-            .execute("INSERT OR IGNORE INTO chunks (id, doc_id, content) VALUES (?1, ?2, ?3)", params![chunk_id, doc_id, para])
+            .execute(
+                "INSERT OR IGNORE INTO chunks (id, doc_id, content) VALUES (?1, ?2, ?3)",
+                params![chunk_id, doc_id, para],
+            )
             .map_err(|e| format!("inserting chunk {chunk_id}: {e}"))?;
         if inserted > 0 {
-            conn.execute("INSERT INTO chunks_fts (chunk_id, doc_id, content) VALUES (?1, ?2, ?3)", params![chunk_id, doc_id, para])
-                .map_err(|e| format!("indexing chunk {chunk_id}: {e}"))?;
+            conn.execute(
+                "INSERT INTO chunks_fts (chunk_id, doc_id, content) VALUES (?1, ?2, ?3)",
+                params![chunk_id, doc_id, para],
+            )
+            .map_err(|e| format!("indexing chunk {chunk_id}: {e}"))?;
             new_chunks += 1;
         }
     }
@@ -1399,7 +1588,12 @@ pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
 
     let mut doc_stmt = conn.prepare("SELECT doc_id, content FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2").map_err(|e| format!("preparing FTS query: {e}"))?;
     let doc_hits = doc_stmt
-        .query_map(params![query, DEFAULT_ASK_LIMIT], |r| Ok(AskHit { doc_id: r.get(0)?, content: r.get(1)? }))
+        .query_map(params![query, DEFAULT_ASK_LIMIT], |r| {
+            Ok(AskHit {
+                doc_id: r.get(0)?,
+                content: r.get(1)?,
+            })
+        })
         .map_err(|e| format!("running FTS query `{query}`: {e}"))?
         .filter_map(Result::ok);
     hits.extend(doc_hits);
@@ -1407,14 +1601,33 @@ pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
     // Words under 3 characters ("do", "a", "of", ...) are almost always
     // noise for a substring match this loose -- dropped rather than
     // matched against everything.
-    let terms: Vec<String> = query.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| w.len() >= 3).collect();
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| w.len() >= 3)
+        .collect();
     if !terms.is_empty() && hits.len() < DEFAULT_ASK_LIMIT as usize {
         let mut code_stmt = conn.prepare("SELECT id, title, driving_text, source_ref, line FROM nodes WHERE kind = 'CodeUnit'").map_err(|e| format!("preparing CodeUnit search: {e}"))?;
-        let rows: Vec<(String, Option<String>, Option<String>, Option<String>, Option<i64>)> =
-            code_stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(|e| format!("listing CodeUnit content: {e}"))?.filter_map(Result::ok).collect();
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        )> = code_stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(|e| format!("listing CodeUnit content: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
         for (id, title, driving_text, source_ref, line) in rows {
             let name = title.unwrap_or_default();
-            let haystack = format!("{name} {}", driving_text.as_deref().unwrap_or("")).to_lowercase();
+            let haystack =
+                format!("{name} {}", driving_text.as_deref().unwrap_or("")).to_lowercase();
             if !terms.iter().any(|t| haystack.contains(t.as_str())) {
                 continue;
             }
@@ -1426,7 +1639,10 @@ pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
                     _ => "(no description available yet)".to_string(),
                 },
             };
-            hits.push(AskHit { doc_id: id, content });
+            hits.push(AskHit {
+                doc_id: id,
+                content,
+            });
             if hits.len() >= DEFAULT_ASK_LIMIT as usize {
                 break;
             }
@@ -1478,14 +1694,23 @@ pub fn ask_tools_list() -> serde_json::Value {
 /// `hi_llm.rs`) so the actual query stays next to `ask` itself and
 /// this whole surface stays offline-testable without a real
 /// `LlmClient`.
-pub fn ask_tools_call(conn: &Connection, name: &str, arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub fn ask_tools_call(
+    conn: &Connection,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     match name {
         "search_project" => {
-            let query = arguments.get("query").and_then(|v| v.as_str()).ok_or_else(|| "missing required argument `query`".to_string())?;
+            let query = arguments
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing required argument `query`".to_string())?;
             let hits = ask(conn, query)?;
             Ok(serde_json::json!({ "hits": hits }))
         }
-        other => Err(format!("unknown tool `{other}` -- expected `search_project`")),
+        other => Err(format!(
+            "unknown tool `{other}` -- expected `search_project`"
+        )),
     }
 }
 
@@ -1516,27 +1741,49 @@ pub fn suggestion_context(conn: &Connection) -> Result<String, String> {
     let mut stmt = conn
         .prepare("SELECT id, title, status, attributes FROM nodes WHERE kind = 'CodeUnit' ORDER BY id LIMIT ?1")
         .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
-        stmt.query_map([PROJECT_CONTEXT_MAX_UNITS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map([PROJECT_CONTEXT_MAX_UNITS], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
     let mut out = String::new();
     for (id, title, status, attributes) in rows {
         let sub_kind = id.splitn(3, ':').nth(1).unwrap_or("fn");
         let name = title.unwrap_or_else(|| id.clone());
-        let exposed = if status.as_deref() == Some("exposed") { " [API-exposed]" } else { "" };
-        let attrs = attributes.filter(|a| !a.trim().is_empty()).map(|a| a.replace('\n', "; ")).unwrap_or_else(|| "(none)".to_string());
-        out.push_str(&format!("- {sub_kind} {name}{exposed} -- attributes: {attrs}\n"));
+        let exposed = if status.as_deref() == Some("exposed") {
+            " [API-exposed]"
+        } else {
+            ""
+        };
+        let attrs = attributes
+            .filter(|a| !a.trim().is_empty())
+            .map(|a| a.replace('\n', "; "))
+            .unwrap_or_else(|| "(none)".to_string());
+        out.push_str(&format!(
+            "- {sub_kind} {name}{exposed} -- attributes: {attrs}\n"
+        ));
     }
     Ok(out)
 }
 
 pub fn project_context(conn: &Connection) -> Result<String, String> {
     let mut stmt = conn.prepare("SELECT id, title, driving_text, source_ref FROM nodes WHERE kind = 'CodeUnit' ORDER BY id LIMIT ?1").map_err(|e| e.to_string())?;
-    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
-        stmt.query_map([PROJECT_CONTEXT_MAX_UNITS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map([PROJECT_CONTEXT_MAX_UNITS], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
     let mut out = String::new();
     for (id, title, driving_text, source_ref) in rows {
         let name = title.unwrap_or(id);
-        let desc = driving_text.filter(|d| !d.is_empty()).or(source_ref).unwrap_or_else(|| "(no description)".to_string());
+        let desc = driving_text
+            .filter(|d| !d.is_empty())
+            .or(source_ref)
+            .unwrap_or_else(|| "(no description)".to_string());
         out.push_str(&format!("- {name}: {desc}\n"));
     }
     Ok(out)
@@ -1552,7 +1799,10 @@ pub fn project_context(conn: &Connection) -> Result<String, String> {
 const CODE_UNIT_KINDS: &[&str] = &["fn", "struct", "enum", "screen"];
 
 fn require_node_exists(conn: &Connection, id: &str) -> Result<(), String> {
-    let exists: bool = conn.prepare("SELECT 1 FROM nodes WHERE id = ?1").and_then(|mut s| s.exists([id])).map_err(|e| e.to_string())?;
+    let exists: bool = conn
+        .prepare("SELECT 1 FROM nodes WHERE id = ?1")
+        .and_then(|mut s| s.exists([id]))
+        .map_err(|e| e.to_string())?;
     if exists {
         Ok(())
     } else {
@@ -1580,16 +1830,27 @@ fn require_node_exists(conn: &Connection, id: &str) -> Result<(), String> {
 /// version's id-first check is what keeps `/api/attach`'s existing
 /// real-id callers working unchanged.
 fn resolve_attach_target_id(conn: &Connection, id_or_title: &str) -> Result<String, String> {
-    let exists: bool = conn.prepare("SELECT 1 FROM nodes WHERE id = ?1").and_then(|mut s| s.exists([id_or_title])).map_err(|e| e.to_string())?;
+    let exists: bool = conn
+        .prepare("SELECT 1 FROM nodes WHERE id = ?1")
+        .and_then(|mut s| s.exists([id_or_title]))
+        .map_err(|e| e.to_string())?;
     if exists {
         return Ok(id_or_title.to_string());
     }
-    let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1").map_err(|e| e.to_string())?;
-    let ids: Vec<String> = stmt.query_map([id_or_title], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let mut stmt = conn
+        .prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt
+        .query_map([id_or_title], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
     match ids.as_slice() {
         [single] => Ok(single.clone()),
         [] => Err(format!("no node `{id_or_title}` in the hi graph")),
-        _ => Err(format!("`{id_or_title}` matches more than one unit -- use its full id")),
+        _ => Err(format!(
+            "`{id_or_title}` matches more than one unit -- use its full id"
+        )),
     }
 }
 
@@ -1602,9 +1863,17 @@ fn resolve_attach_target_id(conn: &Connection, id_or_title: &str) -> Result<Stri
 /// writes real code and an ordinary `sync` picks it up under the exact
 /// same id -- the same upsert `sync_file` already does, composing for
 /// free because both write paths key off `code_unit_node_id`.
-pub fn add_candidate(conn: &Connection, kind: &str, name: &str, driving_text: &str, created_by: &str) -> Result<String, String> {
+pub fn add_candidate(
+    conn: &Connection,
+    kind: &str,
+    name: &str,
+    driving_text: &str,
+    created_by: &str,
+) -> Result<String, String> {
     if !CODE_UNIT_KINDS.contains(&kind) {
-        return Err(format!("`{kind}` isn't a legal CodeUnit kind -- one of {CODE_UNIT_KINDS:?}"));
+        return Err(format!(
+            "`{kind}` isn't a legal CodeUnit kind -- one of {CODE_UNIT_KINDS:?}"
+        ));
     }
     let id = code_unit_node_id(kind, name);
     conn.execute(
@@ -1636,7 +1905,8 @@ pub fn add_relation(conn: &Connection, src: &str, dst: &str) -> Result<(), Strin
 /// reach the LLM again as something to compile.
 pub fn confirm_node(conn: &Connection, id: &str) -> Result<(), String> {
     require_node_exists(conn, id)?;
-    conn.execute("UPDATE nodes SET confirmed = 1 WHERE id = ?1", [id]).map_err(|e| format!("confirming {id}: {e}"))?;
+    conn.execute("UPDATE nodes SET confirmed = 1 WHERE id = ?1", [id])
+        .map_err(|e| format!("confirming {id}: {e}"))?;
     Ok(())
 }
 
@@ -1647,9 +1917,19 @@ pub fn confirm_node(conn: &Connection, id: &str) -> Result<(), String> {
 /// explicit, separate decision (rfcs/0014's own definition), not
 /// something a blanket confirm silently overrides.
 pub fn confirm_all(conn: &Connection) -> Result<Vec<String>, String> {
-    let mut stmt = conn.prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0").map_err(|e| e.to_string())?;
-    let ids: Vec<String> = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
-    conn.execute("UPDATE nodes SET confirmed = 1 WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0", []).map_err(|e| format!("confirming all: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    conn.execute(
+        "UPDATE nodes SET confirmed = 1 WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0",
+        [],
+    )
+    .map_err(|e| format!("confirming all: {e}"))?;
     Ok(ids)
 }
 
@@ -1659,16 +1939,22 @@ pub fn confirm_all(conn: &Connection) -> Result<Vec<String>, String> {
 pub fn delete_node(conn: &Connection, id: &str) -> Result<(), String> {
     require_node_exists(conn, id)?;
     if let Some(origin) = plugin_origin(conn, id)? {
-        return Err(format!("cannot delete `{id}`: it is a non-waivable invariant contributed by pack `{origin}` -- revoke the pack with `nirdosha plugin revoke {origin}` if you really want it removed"));
+        return Err(format!(
+            "cannot delete `{id}`: it is a non-waivable invariant contributed by pack `{origin}` -- revoke the pack with `nirdosha plugin revoke {origin}` if you really want it removed"
+        ));
     }
-    conn.execute("DELETE FROM edges WHERE src = ?1 OR dst = ?1", [id]).map_err(|e| format!("deleting edges touching {id}: {e}"))?;
-    conn.execute("DELETE FROM nodes WHERE id = ?1", [id]).map_err(|e| format!("deleting node {id}: {e}"))?;
+    conn.execute("DELETE FROM edges WHERE src = ?1 OR dst = ?1", [id])
+        .map_err(|e| format!("deleting edges touching {id}: {e}"))?;
+    conn.execute("DELETE FROM nodes WHERE id = ?1", [id])
+        .map_err(|e| format!("deleting node {id}: {e}"))?;
     Ok(())
 }
 
 fn plugin_origin(conn: &Connection, id: &str) -> Result<Option<String>, String> {
-    conn.query_row("SELECT plugin_origin FROM nodes WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))
-        .map_err(|e| format!("reading plugin_origin for {id}: {e}"))
+    conn.query_row("SELECT plugin_origin FROM nodes WHERE id = ?1", [id], |r| {
+        r.get::<_, Option<String>>(0)
+    })
+    .map_err(|e| format!("reading plugin_origin for {id}: {e}"))
 }
 
 /// Edits a candidate's driving text. If the unit had already locked (an
@@ -1680,7 +1966,11 @@ fn plugin_origin(conn: &Connection, id: &str) -> Result<Option<String>, String> 
 /// can publish again, same as any other unlocked unit.
 pub fn edit_driving_text(conn: &Connection, id: &str, text: &str) -> Result<(), String> {
     require_node_exists(conn, id)?;
-    conn.execute("UPDATE nodes SET driving_text = ?2, locked = 0 WHERE id = ?1", params![id, text]).map_err(|e| format!("editing {id}: {e}"))?;
+    conn.execute(
+        "UPDATE nodes SET driving_text = ?2, locked = 0 WHERE id = ?1",
+        params![id, text],
+    )
+    .map_err(|e| format!("editing {id}: {e}"))?;
     Ok(())
 }
 
@@ -1715,7 +2005,11 @@ pub fn edit_driving_text(conn: &Connection, id: &str, text: &str) -> Result<(), 
 /// free, not spuriously unlock every unit it touches on every restart.
 pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), String> {
     let id = &resolve_attach_target_id(conn, id)?;
-    let existing: Option<String> = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [id], |r| r.get(0)).map_err(|e| format!("reading {id}: {e}"))?;
+    let existing: Option<String> = conn
+        .query_row("SELECT attributes FROM nodes WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| format!("reading {id}: {e}"))?;
     if let Some(s) = &existing {
         if s.lines().any(|line| line == attr) {
             return Ok(());
@@ -1725,7 +2019,11 @@ pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), S
         Some(s) if !s.is_empty() => format!("{s}\n{attr}"),
         _ => attr.to_string(),
     };
-    conn.execute("UPDATE nodes SET attributes = ?2, locked = 0 WHERE id = ?1", params![id, merged]).map_err(|e| format!("attaching an attribute to {id}: {e}"))?;
+    conn.execute(
+        "UPDATE nodes SET attributes = ?2, locked = 0 WHERE id = ?1",
+        params![id, merged],
+    )
+    .map_err(|e| format!("attaching an attribute to {id}: {e}"))?;
     Ok(())
 }
 
@@ -1736,24 +2034,38 @@ pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), S
 pub fn waive_node(conn: &Connection, id: &str, reason: &str) -> Result<(), String> {
     require_node_exists(conn, id)?;
     if non_waivable(conn, id)? {
-        return Err(format!("cannot waive `{id}`: it is a non-waivable invariant contributed by pack `{}`", plugin_origin(conn, id)?.unwrap_or_default()));
+        return Err(format!(
+            "cannot waive `{id}`: it is a non-waivable invariant contributed by pack `{}`",
+            plugin_origin(conn, id)?.unwrap_or_default()
+        ));
     }
     if reason.trim().is_empty() {
         return Err("a waive reason is required".to_string());
     }
-    conn.execute("UPDATE nodes SET waived = 1, waive_reason = ?2 WHERE id = ?1", params![id, reason]).map_err(|e| format!("waiving {id}: {e}"))?;
+    conn.execute(
+        "UPDATE nodes SET waived = 1, waive_reason = ?2 WHERE id = ?1",
+        params![id, reason],
+    )
+    .map_err(|e| format!("waiving {id}: {e}"))?;
     Ok(())
 }
 
 fn non_waivable(conn: &Connection, id: &str) -> Result<bool, String> {
-    let flag: i64 = conn.query_row("SELECT non_waivable FROM nodes WHERE id = ?1", [id], |r| r.get(0))
+    let flag: i64 = conn
+        .query_row("SELECT non_waivable FROM nodes WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .map_err(|e| format!("reading non_waivable for {id}: {e}"))?;
     Ok(flag != 0)
 }
 
 pub fn unwaive_node(conn: &Connection, id: &str) -> Result<(), String> {
     require_node_exists(conn, id)?;
-    conn.execute("UPDATE nodes SET waived = 0, waive_reason = NULL WHERE id = ?1", [id]).map_err(|e| format!("unwaiving {id}: {e}"))?;
+    conn.execute(
+        "UPDATE nodes SET waived = 0, waive_reason = NULL WHERE id = ?1",
+        [id],
+    )
+    .map_err(|e| format!("unwaiving {id}: {e}"))?;
     Ok(())
 }
 
@@ -1784,26 +2096,50 @@ pub fn parse_code_unit_id(id: &str) -> Option<(String, String)> {
 /// eligible node. A node `hi sync` found in real code (no
 /// `driving_text` of its own) is never generatable, confirmed or not --
 /// there's nothing here for the LLM to write from.
-fn query_confirmed_units(conn: &Connection, where_extra: &str, target: Option<&str>) -> Result<Vec<CandidateUnit>, String> {
-    let sql = format!("SELECT id, title, driving_text, attributes FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 1 AND waived = 0 AND {where_extra} AND (?1 IS NULL OR id = ?1)");
+fn query_confirmed_units(
+    conn: &Connection,
+    where_extra: &str,
+    target: Option<&str>,
+) -> Result<Vec<CandidateUnit>, String> {
+    let sql = format!(
+        "SELECT id, title, driving_text, attributes FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 1 AND waived = 0 AND {where_extra} AND (?1 IS NULL OR id = ?1)"
+    );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
-        stmt.query_map(params![target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map(params![target], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
     let mut units = Vec::new();
     for (id, title, driving_text, attributes) in rows {
-        let Some((kind, name_from_id)) = parse_code_unit_id(&id) else { continue };
+        let Some((kind, name_from_id)) = parse_code_unit_id(&id) else {
+            continue;
+        };
         let driving_text = driving_text.unwrap_or_default();
         if driving_text.trim().is_empty() {
             continue;
         }
         let name = title.unwrap_or(name_from_id);
-        let attrs = attributes.map(|a| a.lines().map(str::to_string).collect()).unwrap_or_default();
-        units.push(CandidateUnit { id, kind, name, driving_text, attributes: attrs });
+        let attrs = attributes
+            .map(|a| a.lines().map(str::to_string).collect())
+            .unwrap_or_default();
+        units.push(CandidateUnit {
+            id,
+            kind,
+            name,
+            driving_text,
+            attributes: attrs,
+        });
     }
     Ok(units)
 }
 
-pub fn generatable_units(conn: &Connection, target: Option<&str>) -> Result<Vec<CandidateUnit>, String> {
+pub fn generatable_units(
+    conn: &Connection,
+    target: Option<&str>,
+) -> Result<Vec<CandidateUnit>, String> {
     query_confirmed_units(conn, "locked = 0", target)
 }
 
@@ -1814,7 +2150,10 @@ pub fn generatable_units(conn: &Connection, target: Option<&str>) -> Result<Vec<
 /// "v1 scope cut" doc comment: one file for the whole confirmed set,
 /// not incremental per-unit files), not just the newly-eligible subset
 /// `generatable_units` reports.
-pub fn confirmed_units(conn: &Connection, target: Option<&str>) -> Result<Vec<CandidateUnit>, String> {
+pub fn confirmed_units(
+    conn: &Connection,
+    target: Option<&str>,
+) -> Result<Vec<CandidateUnit>, String> {
     query_confirmed_units(conn, "1=1", target)
 }
 
@@ -1862,8 +2201,12 @@ pub fn confirmed_edges(conn: &Connection) -> Result<Vec<ConfirmedEdge>, String> 
         // Both endpoints must be code units with parsable ids -- an
         // edge into any other node kind has no declaration-side name
         // to print in a wiring list.
-        let Some((_, src)) = parse_code_unit_id(&src_id) else { continue };
-        let Some((_, dst)) = parse_code_unit_id(&dst_id) else { continue };
+        let Some((_, src)) = parse_code_unit_id(&src_id) else {
+            continue;
+        };
+        let Some((_, dst)) = parse_code_unit_id(&dst_id) else {
+            continue;
+        };
         out.push(ConfirmedEdge { src, dst, kind });
     }
     Ok(out)
@@ -1879,9 +2222,17 @@ pub fn confirmed_edges(conn: &Connection) -> Result<Vec<ConfirmedEdge>, String> 
 pub fn lock_units_after_sync(conn: &Connection, ids: &[String]) -> Result<Vec<String>, String> {
     let mut locked = Vec::new();
     for id in ids {
-        let hash: Option<String> = conn.query_row("SELECT content_hash FROM nodes WHERE id = ?1", [id], |r| r.get(0)).map_err(|e| format!("reading {id}: {e}"))?;
+        let hash: Option<String> = conn
+            .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .map_err(|e| format!("reading {id}: {e}"))?;
         if let Some(h) = hash {
-            conn.execute("UPDATE nodes SET locked = 1, last_materialized_hash = ?2 WHERE id = ?1", params![id, h]).map_err(|e| format!("locking {id}: {e}"))?;
+            conn.execute(
+                "UPDATE nodes SET locked = 1, last_materialized_hash = ?2 WHERE id = ?1",
+                params![id, h],
+            )
+            .map_err(|e| format!("locking {id}: {e}"))?;
             locked.push(id.clone());
         }
     }
@@ -1894,7 +2245,10 @@ mod tests {
 
     fn scratch_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("nirdosha_hi_graph_test_{name}_{}", std::process::id()));
+        path.push(format!(
+            "nirdosha_hi_graph_test_{name}_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -1920,7 +2274,11 @@ mod tests {
     #[test]
     fn sync_adds_then_leaves_unchanged_units_alone_on_repeat_sync() {
         let dir = scratch_dir("sync_repeat");
-        let file = write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\n");
+        let file = write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
         let conn = open(&dir).expect("open");
 
         let first = sync(&conn, &dir, &[]).expect("first sync");
@@ -1936,7 +2294,11 @@ mod tests {
     #[test]
     fn changed_code_flags_its_linked_requirement_as_possibly_stale() {
         let dir = scratch_dir("flag_stale");
-        write_nir(&dir, "a.nir", "fn transfer_funds(amount: i64) -> i64 { return amount }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn transfer_funds(amount: i64) -> i64 { return amount }\n",
+        );
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("initial sync");
 
@@ -1945,7 +2307,11 @@ mod tests {
         assert!(report.hits.iter().all(|h| h.flag.is_none()));
 
         // Edit the function body -- same qualified name, different AST.
-        write_nir(&dir, "a.nir", "fn transfer_funds(amount: i64) -> i64 { return amount + 1 }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn transfer_funds(amount: i64) -> i64 { return amount + 1 }\n",
+        );
         let resync = sync(&conn, &dir, &[]).expect("resync after edit");
         assert_eq!(resync.units_changed, 1);
         // Both directions of the IMPLEMENTS/IMPLEMENTED_BY pair get
@@ -1953,22 +2319,43 @@ mod tests {
         assert_eq!(resync.edges_flagged, 2);
 
         let report = impact(&conn, "R17").expect("impact after change");
-        assert!(report.hits.iter().any(|h| h.flag.as_deref() == Some("possibly_stale")), "expected a possibly_stale hit, got: {:?}", report.hits.iter().map(|h| &h.node_id).collect::<Vec<_>>());
+        assert!(
+            report
+                .hits
+                .iter()
+                .any(|h| h.flag.as_deref() == Some("possibly_stale")),
+            "expected a possibly_stale hit, got: {:?}",
+            report.hits.iter().map(|h| &h.node_id).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn impact_reaches_a_requirement_from_its_code_unit_and_back() {
         let dir = scratch_dir("bidirectional");
-        write_nir(&dir, "a.nir", "fn correct_entry(id: i64) -> i64 { return id }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn correct_entry(id: i64) -> i64 { return id }\n",
+        );
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("sync");
         link(&conn, "R55", "fn:correct_entry").expect("link");
 
         let from_code = impact(&conn, "fn:correct_entry").expect("impact from code");
-        assert!(from_code.hits.iter().any(|h| h.node_id == "requirement:R55"));
+        assert!(
+            from_code
+                .hits
+                .iter()
+                .any(|h| h.node_id == "requirement:R55")
+        );
 
         let from_req = impact(&conn, "R55").expect("impact from requirement");
-        assert!(from_req.hits.iter().any(|h| h.node_id == "code:fn:correct_entry"));
+        assert!(
+            from_req
+                .hits
+                .iter()
+                .any(|h| h.node_id == "code:fn:correct_entry")
+        );
     }
 
     #[test]
@@ -1976,7 +2363,10 @@ mod tests {
         let dir = scratch_dir("link_missing");
         let conn = open(&dir).expect("open");
         let err = link(&conn, "R1", "fn:nope").unwrap_err();
-        assert!(err.contains("hi sync"), "error should point at the fix, got: {err}");
+        assert!(
+            err.contains("hi sync"),
+            "error should point at the fix, got: {err}"
+        );
     }
 
     #[test]
@@ -1997,34 +2387,59 @@ mod tests {
     fn ask_finds_a_code_unit_by_name_even_when_the_question_is_natural_language() {
         let dir = scratch_dir("ask_code_unit");
         let conn = open(&dir).expect("open");
-        add_candidate(&conn, "fn", "tick", "advances the game clock by one frame", "llm-prompt-mode").expect("add_candidate");
+        add_candidate(
+            &conn,
+            "fn",
+            "tick",
+            "advances the game clock by one frame",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
 
         let hits = ask(&conn, "what does tick do ?").expect("ask");
-        assert!(hits.iter().any(|h| h.doc_id == "code:fn:tick"), "expected code:fn:tick among hits, got: {hits:?}");
+        assert!(
+            hits.iter().any(|h| h.doc_id == "code:fn:tick"),
+            "expected code:fn:tick among hits, got: {hits:?}"
+        );
     }
 
     #[test]
     fn ask_finds_a_synced_code_unit_with_no_driving_text_at_all() {
         let dir = scratch_dir("ask_synced_no_text");
-        write_nir(&dir, "a.nir", "fn transfer_funds(amount: i64) -> i64 { return amount }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn transfer_funds(amount: i64) -> i64 { return amount }\n",
+        );
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("sync");
 
         let hits = ask(&conn, "what does transfer_funds do").expect("ask");
-        let hit = hits.iter().find(|h| h.doc_id == "code:fn:transfer_funds").expect("expected a hit for transfer_funds");
-        assert!(hit.content.contains("a.nir"), "should point at the source file when there's no driving text, got: {}", hit.content);
+        let hit = hits
+            .iter()
+            .find(|h| h.doc_id == "code:fn:transfer_funds")
+            .expect("expected a hit for transfer_funds");
+        assert!(
+            hit.content.contains("a.nir"),
+            "should point at the source file when there's no driving text, got: {}",
+            hit.content
+        );
     }
 
     #[test]
     fn ask_ignores_short_common_words() {
         let dir = scratch_dir("ask_short_words");
         let conn = open(&dir).expect("open");
-        add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
 
         // "do" is 2 characters and should be dropped rather than
         // matching every CodeUnit's driving text indiscriminately.
         let hits = ask(&conn, "do").expect("ask");
-        assert!(hits.is_empty(), "a bare short word should match nothing, got: {hits:?}");
+        assert!(
+            hits.is_empty(),
+            "a bare short word should match nothing, got: {hits:?}"
+        );
     }
 
     #[test]
@@ -2050,16 +2465,34 @@ mod tests {
     #[test]
     fn code_units_in_file_extracts_fn_struct_and_enum_by_name() {
         let dir = scratch_dir("code_units_v2");
-        let path = write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n");
+        let path = write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n",
+        );
         let (units, _file, _facts) = code_units_in_file(&path).expect("code_units_in_file parse");
-        let actual: Vec<(&str, String)> = units.iter().map(|u| (u.kind, u.qualified_name.clone())).collect();
-        assert_eq!(actual, vec![("fn", "add".to_string()), ("struct", "Point".to_string()), ("enum", "Color".to_string())]);
+        let actual: Vec<(&str, String)> = units
+            .iter()
+            .map(|u| (u.kind, u.qualified_name.clone()))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("fn", "add".to_string()),
+                ("struct", "Point".to_string()),
+                ("enum", "Color".to_string())
+            ]
+        );
     }
 
     #[test]
     fn screen_macro_syncs_under_its_confirmed_identity() {
         let dir = scratch_dir("screen_macro_sync");
-        let path = write_nir(&dir, "a.nir", "nirdosha_rt::dashboard! { mount: mount_TaskListScreen, path: \"/tasks\", title: \"Tasks\", widgets {} }\n");
+        let path = write_nir(
+            &dir,
+            "a.nir",
+            "nirdosha_rt::dashboard! { mount: mount_TaskListScreen, path: \"/tasks\", title: \"Tasks\", widgets {} }\n",
+        );
         let (units, _, _) = code_units_in_file(&path).unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].kind, "screen");
@@ -2068,19 +2501,30 @@ mod tests {
         let id = add_candidate(&conn, "screen", "TaskListScreen", "list tasks", "test").unwrap();
         confirm_node(&conn, &id).unwrap();
         sync(&conn, &dir, &[path.display().to_string()]).unwrap();
-        assert_eq!(lock_units_after_sync(&conn, &[id.clone()]).unwrap(), vec![id]);
+        assert_eq!(
+            lock_units_after_sync(&conn, &[id.clone()]).unwrap(),
+            vec![id]
+        );
     }
 
     #[test]
     fn code_unit_span_is_captured_and_surfaced_through_impact() {
         let dir = scratch_dir("span_capture");
-        write_nir(&dir, "a.nir", "fn first() -> i64 { return 1 }\nfn second() -> i64 { return 2 }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn first() -> i64 { return 1 }\nfn second() -> i64 { return 2 }\n",
+        );
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("sync");
         link(&conn, "R1", "fn:second").expect("link");
 
         let report = impact(&conn, "R1").expect("impact");
-        let hit = report.hits.iter().find(|h| h.node_id == "code:fn:second").expect("second should be reachable");
+        let hit = report
+            .hits
+            .iter()
+            .find(|h| h.node_id == "code:fn:second")
+            .expect("second should be reachable");
         assert_eq!(hit.line, Some(2), "fn second is declared on line 2");
         assert!(hit.source_ref.as_deref().unwrap_or("").ends_with("a.nir"));
     }
@@ -2116,8 +2560,14 @@ mod tests {
 
         let report = impact(&conn, "fn:main").expect("impact");
         let hit_ids: Vec<&str> = report.hits.iter().map(|h| h.node_id.as_str()).collect();
-        assert!(hit_ids.contains(&"code:fn:helper"), "main calls helper -- expected it in impact, got {hit_ids:?}");
-        assert!(hit_ids.contains(&"code:struct:Account"), "main constructs Account -- expected it in impact, got {hit_ids:?}");
+        assert!(
+            hit_ids.contains(&"code:fn:helper"),
+            "main calls helper -- expected it in impact, got {hit_ids:?}"
+        );
+        assert!(
+            hit_ids.contains(&"code:struct:Account"),
+            "main constructs Account -- expected it in impact, got {hit_ids:?}"
+        );
     }
 
     /// rfcs/0014's 2026-09-14 amendment, step 5 -- and its v2 reality
@@ -2143,19 +2593,49 @@ mod tests {
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("sync");
 
-        let exposed_status: Option<String> = conn.query_row("SELECT status FROM nodes WHERE id = 'code:fn:public_action'", [], |r| r.get(0)).expect("read status");
-        assert_eq!(exposed_status, None, "v2 sync cannot see exposure -- nothing may be stamped 'exposed' speculatively");
-        let internal_status: Option<String> = conn.query_row("SELECT status FROM nodes WHERE id = 'code:fn:internal_helper'", [], |r| r.get(0)).expect("read status");
-        assert_eq!(internal_status, None, "an internal helper must NOT be marked exposed itself");
+        let exposed_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM nodes WHERE id = 'code:fn:public_action'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read status");
+        assert_eq!(
+            exposed_status, None,
+            "v2 sync cannot see exposure -- nothing may be stamped 'exposed' speculatively"
+        );
+        let internal_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM nodes WHERE id = 'code:fn:internal_helper'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read status");
+        assert_eq!(
+            internal_status, None,
+            "an internal helper must NOT be marked exposed itself"
+        );
     }
 
     #[test]
     fn a_candidate_is_unconfirmed_and_ungeneratable_until_confirmed() {
         let dir = scratch_dir("candidate_confirm");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "transfer_funds", "moves money between two accounts", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "transfer_funds",
+            "moves money between two accounts",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         assert_eq!(id, "code:fn:transfer_funds");
-        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "an unconfirmed candidate must not be generatable");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "an unconfirmed candidate must not be generatable"
+        );
 
         confirm_node(&conn, &id).expect("confirm_node");
         let units = generatable_units(&conn, None).expect("generatable_units");
@@ -2168,19 +2648,45 @@ mod tests {
     fn confirm_all_confirms_every_unconfirmed_candidate_but_not_a_waived_one() {
         let dir = scratch_dir("confirm_all");
         let conn = open(&dir).expect("open");
-        let a = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add a");
-        let b = add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add b");
-        let c = add_candidate(&conn, "fn", "risky", "does something risky", "llm-prompt-mode").expect("add c");
+        let a = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add a");
+        let b = add_candidate(
+            &conn,
+            "fn",
+            "subtract",
+            "subtracts two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add b");
+        let c = add_candidate(
+            &conn,
+            "fn",
+            "risky",
+            "does something risky",
+            "llm-prompt-mode",
+        )
+        .expect("add c");
         confirm_node(&conn, &a).expect("pre-confirm a"); // already confirmed -- confirm_all must not choke on it
         waive_node(&conn, &c, "not needed").expect("waive c");
 
         let confirmed = confirm_all(&conn).expect("confirm_all");
-        assert_eq!(confirmed, vec![b.clone()], "only the genuinely unconfirmed, non-waived candidate should be reported");
+        assert_eq!(
+            confirmed,
+            vec![b.clone()],
+            "only the genuinely unconfirmed, non-waived candidate should be reported"
+        );
 
-        let generatable: Vec<String> = generatable_units(&conn, None).expect("generatable_units").into_iter().map(|u| u.id).collect();
+        let generatable: Vec<String> = generatable_units(&conn, None)
+            .expect("generatable_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
         assert!(generatable.contains(&a));
         assert!(generatable.contains(&b));
-        assert!(!generatable.contains(&c), "a waived node must stay out of scope even after confirm_all");
+        assert!(
+            !generatable.contains(&c),
+            "a waived node must stay out of scope even after confirm_all"
+        );
     }
 
     #[test]
@@ -2188,93 +2694,186 @@ mod tests {
         let dir = scratch_dir("candidate_bad_kind");
         let conn = open(&dir).expect("open");
         let err = add_candidate(&conn, "trait", "Foo", "text", "llm-prompt-mode").unwrap_err();
-        assert!(err.contains("trait"), "error should name the bad kind, got: {err}");
+        assert!(
+            err.contains("trait"),
+            "error should name the bad kind, got: {err}"
+        );
     }
 
     #[test]
     fn re_adding_a_candidate_refines_text_without_resetting_review_state() {
         let dir = scratch_dir("candidate_refine");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
         confirm_node(&conn, &id).expect("confirm");
 
-        add_candidate(&conn, "fn", "add", "adds two i64 numbers and returns the sum", "llm-prompt-mode").expect("re-add");
+        add_candidate(
+            &conn,
+            "fn",
+            "add",
+            "adds two i64 numbers and returns the sum",
+            "llm-prompt-mode",
+        )
+        .expect("re-add");
         let units = generatable_units(&conn, None).expect("generatable_units");
-        assert_eq!(units.len(), 1, "confirming must survive a refined re-population of the same candidate");
-        assert_eq!(units[0].driving_text, "adds two i64 numbers and returns the sum");
+        assert_eq!(
+            units.len(),
+            1,
+            "confirming must survive a refined re-population of the same candidate"
+        );
+        assert_eq!(
+            units[0].driving_text,
+            "adds two i64 numbers and returns the sum"
+        );
     }
 
     #[test]
     fn waiving_requires_a_reason_and_removes_a_unit_from_the_generatable_set() {
         let dir = scratch_dir("candidate_waive");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "risky", "does something risky", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "risky",
+            "does something risky",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         confirm_node(&conn, &id).expect("confirm");
 
         let err = waive_node(&conn, &id, "").unwrap_err();
         assert!(err.contains("reason"));
 
         waive_node(&conn, &id, "not needed for this publish").expect("waive");
-        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty());
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty()
+        );
 
         unwaive_node(&conn, &id).expect("unwaive");
-        assert_eq!(generatable_units(&conn, None).expect("generatable_units").len(), 1);
+        assert_eq!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn editing_a_locked_unit_unlocks_it() {
         let dir = scratch_dir("candidate_edit_unlocks");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
         confirm_node(&conn, &id).expect("confirm");
         // Simulate a successful Generate pass without a real compiler run.
-        write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
         sync(&conn, &dir, &[]).expect("sync");
         lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
-        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "a locked unit isn't generatable");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "a locked unit isn't generatable"
+        );
 
         edit_driving_text(&conn, &id, "adds two numbers, but faster").expect("edit");
         let units = generatable_units(&conn, None).expect("generatable_units");
-        assert_eq!(units.len(), 1, "editing a locked unit's text must unlock it for regeneration");
+        assert_eq!(
+            units.len(),
+            1,
+            "editing a locked unit's text must unlock it for regeneration"
+        );
     }
 
     #[test]
     fn confirmed_units_includes_locked_ones_but_generatable_units_does_not() {
         let dir = scratch_dir("candidate_confirmed_vs_generatable");
         let conn = open(&dir).expect("open");
-        let locked_id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
-        let fresh_id = add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add_candidate");
+        let locked_id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        let fresh_id = add_candidate(
+            &conn,
+            "fn",
+            "subtract",
+            "subtracts two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         confirm_node(&conn, &locked_id).expect("confirm");
         confirm_node(&conn, &fresh_id).expect("confirm");
-        write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
         sync(&conn, &dir, &[]).expect("sync");
         lock_units_after_sync(&conn, &[locked_id.clone()]).expect("lock");
 
-        let confirmed: Vec<String> = confirmed_units(&conn, None).expect("confirmed_units").into_iter().map(|u| u.id).collect();
-        assert_eq!(confirmed.len(), 2, "confirmed_units must include the already-locked unit too");
+        let confirmed: Vec<String> = confirmed_units(&conn, None)
+            .expect("confirmed_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
+        assert_eq!(
+            confirmed.len(),
+            2,
+            "confirmed_units must include the already-locked unit too"
+        );
         assert!(confirmed.contains(&locked_id));
         assert!(confirmed.contains(&fresh_id));
 
-        let generatable: Vec<String> = generatable_units(&conn, None).expect("generatable_units").into_iter().map(|u| u.id).collect();
-        assert_eq!(generatable, vec![fresh_id], "generatable_units must exclude the already-locked unit");
+        let generatable: Vec<String> = generatable_units(&conn, None)
+            .expect("generatable_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
+        assert_eq!(
+            generatable,
+            vec![fresh_id],
+            "generatable_units must exclude the already-locked unit"
+        );
     }
 
     #[test]
     fn locking_only_covers_units_the_generated_program_actually_declared() {
         let dir = scratch_dir("candidate_partial_lock");
         let conn = open(&dir).expect("open");
-        let declared = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
-        let omitted = add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add_candidate");
+        let declared = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        let omitted = add_candidate(
+            &conn,
+            "fn",
+            "subtract",
+            "subtracts two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         confirm_node(&conn, &declared).expect("confirm");
         confirm_node(&conn, &omitted).expect("confirm");
 
         // The LLM's generated program only actually declared `add`.
-        write_nir(&dir, "a.nir", "fn add(a: i64, b: i64) -> i64 { return a + b }\n");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
         sync(&conn, &dir, &[]).expect("sync");
-        let locked = lock_units_after_sync(&conn, &[declared.clone(), omitted.clone()]).expect("lock");
+        let locked =
+            lock_units_after_sync(&conn, &[declared.clone(), omitted.clone()]).expect("lock");
 
         assert_eq!(locked, vec![declared]);
-        let still_generatable: Vec<String> = generatable_units(&conn, None).expect("generatable_units").into_iter().map(|u| u.id).collect();
+        let still_generatable: Vec<String> = generatable_units(&conn, None)
+            .expect("generatable_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
         assert_eq!(still_generatable, vec![omitted]);
     }
 
@@ -2282,11 +2881,16 @@ mod tests {
     fn attach_attribute_appends_rather_than_overwrites() {
         let dir = scratch_dir("candidate_attach");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
         attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 1");
         attach_attribute(&conn, &id, "nfr(latency_ms: 200)").expect("attach 2");
 
-        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
         assert_eq!(attrs, "requires(role: admin)\nnfr(latency_ms: 200)");
     }
 
@@ -2300,18 +2904,29 @@ mod tests {
         // copies of its `PROOF DEMAND` line in the Generate prompt.
         let dir = scratch_dir("candidate_attach_dedupe");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
         attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 1");
         attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 2, same line again");
-        attach_attribute(&conn, &id, "nfr(latency_ms: 200)").expect("attach 3, a genuinely new line");
-        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 4, same line a third time");
+        attach_attribute(&conn, &id, "nfr(latency_ms: 200)")
+            .expect("attach 3, a genuinely new line");
+        attach_attribute(&conn, &id, "requires(role: admin)")
+            .expect("attach 4, same line a third time");
 
-        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
-        assert_eq!(attrs, "requires(role: admin)\nnfr(latency_ms: 200)", "re-attaching an identical line must not duplicate it, got:\n{attrs}");
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
+        assert_eq!(
+            attrs, "requires(role: admin)\nnfr(latency_ms: 200)",
+            "re-attaching an identical line must not duplicate it, got:\n{attrs}"
+        );
     }
 
     #[test]
-    fn attach_attribute_resolves_a_bare_title_since_suggestion_context_never_shows_the_llm_a_real_id() {
+    fn attach_attribute_resolves_a_bare_title_since_suggestion_context_never_shows_the_llm_a_real_id()
+     {
         // github #49 regression: `suggestion_context` sends the LLM only
         // a unit's bare title (e.g. `apply_interest`), never its real
         // `code:fn:apply_interest` id -- so an accepted suggestion's
@@ -2320,11 +2935,23 @@ mod tests {
         // `apply_interest` in the hi graph" even though the unit existed.
         let dir = scratch_dir("attach_by_bare_title");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
 
-        attach_attribute(&conn, "apply_interest", "requires(role: FinanceDirector)").expect("attach by bare title should resolve to the real id");
+        attach_attribute(&conn, "apply_interest", "requires(role: FinanceDirector)")
+            .expect("attach by bare title should resolve to the real id");
 
-        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
         assert_eq!(attrs, "requires(role: FinanceDirector)");
     }
 
@@ -2336,11 +2963,16 @@ mod tests {
         // their behavior.
         let dir = scratch_dir("attach_by_real_id");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
 
         attach_attribute(&conn, &id, "requires(role: admin)").expect("attach by real id");
 
-        let attrs: String = conn.query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| r.get(0)).expect("read attributes");
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
         assert_eq!(attrs, "requires(role: admin)");
     }
 
@@ -2353,17 +2985,33 @@ mod tests {
         // same way editing a locked unit's driving text already does.
         let dir = scratch_dir("attach_unlocks_locked");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         confirm_node(&conn, &id).expect("confirm");
         write_nir(&dir, "a.nir", "fn apply_interest() {}\n");
         sync(&conn, &dir, &[]).expect("sync");
         lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
-        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "sanity: starts locked");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "sanity: starts locked"
+        );
 
         attach_attribute(&conn, &id, "requires(role: FinanceDirector)").expect("attach");
 
         let units = generatable_units(&conn, None).expect("generatable_units");
-        assert_eq!(units.len(), 1, "a genuine attribute change must unlock the unit for regeneration");
+        assert_eq!(
+            units.len(),
+            1,
+            "a genuine attribute change must unlock the unit for regeneration"
+        );
     }
 
     #[test]
@@ -2375,37 +3023,86 @@ mod tests {
         // unlock every unit it touches on every restart.
         let dir = scratch_dir("attach_dedupe_does_not_unlock");
         let conn = open(&dir).expect("open");
-        let id = add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         confirm_node(&conn, &id).expect("confirm");
         write_nir(&dir, "a.nir", "fn apply_interest() {}\n");
         sync(&conn, &dir, &[]).expect("sync");
-        attach_attribute(&conn, &id, "requires(role: FinanceDirector)").expect("attach 1, a real change");
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)")
+            .expect("attach 1, a real change");
         lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
-        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "sanity: starts locked");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "sanity: starts locked"
+        );
 
-        attach_attribute(&conn, &id, "requires(role: FinanceDirector)").expect("attach 2, an identical re-attach");
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)")
+            .expect("attach 2, an identical re-attach");
 
-        assert!(generatable_units(&conn, None).expect("generatable_units").is_empty(), "re-attaching an identical line must not unlock the unit");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "re-attaching an identical line must not unlock the unit"
+        );
     }
 
     #[test]
     fn attach_attribute_rejects_a_title_shared_by_more_than_one_unit_rather_than_guessing() {
         let dir = scratch_dir("attach_ambiguous_title");
         let conn = open(&dir).expect("open");
-        add_candidate(&conn, "fn", "process", "processes a payment", "llm-prompt-mode").expect("add_candidate fn");
-        add_candidate(&conn, "struct", "process", "a process record", "llm-prompt-mode").expect("add_candidate struct");
+        add_candidate(
+            &conn,
+            "fn",
+            "process",
+            "processes a payment",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate fn");
+        add_candidate(
+            &conn,
+            "struct",
+            "process",
+            "a process record",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate struct");
 
-        let err = attach_attribute(&conn, "process", "requires(role: admin)").expect_err("an ambiguous bare title must error, not guess");
-        assert!(err.contains("more than one unit"), "expected an ambiguity error, got: {err}");
+        let err = attach_attribute(&conn, "process", "requires(role: admin)")
+            .expect_err("an ambiguous bare title must error, not guess");
+        assert!(
+            err.contains("more than one unit"),
+            "expected an ambiguity error, got: {err}"
+        );
     }
 
     #[test]
     fn ask_tools_call_search_project_wraps_ask_and_returns_real_hits() {
         let dir = scratch_dir("ask_tools_search");
         let conn = open(&dir).expect("open");
-        add_candidate(&conn, "fn", "apply_interest", "applies interest to an account", "llm-prompt-mode").expect("add_candidate");
+        add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
 
-        let result = ask_tools_call(&conn, "search_project", &serde_json::json!({ "query": "interest" })).expect("search_project");
+        let result = ask_tools_call(
+            &conn,
+            "search_project",
+            &serde_json::json!({ "query": "interest" }),
+        )
+        .expect("search_project");
         let hits = result["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["doc_id"], "code:fn:apply_interest");
@@ -2415,16 +3112,24 @@ mod tests {
     fn ask_tools_call_search_project_requires_a_query_argument() {
         let dir = scratch_dir("ask_tools_missing_query");
         let conn = open(&dir).expect("open");
-        let err = ask_tools_call(&conn, "search_project", &serde_json::json!({})).expect_err("missing `query` must error, not panic");
-        assert!(err.contains("query"), "expected a `query`-shaped error, got: {err}");
+        let err = ask_tools_call(&conn, "search_project", &serde_json::json!({}))
+            .expect_err("missing `query` must error, not panic");
+        assert!(
+            err.contains("query"),
+            "expected a `query`-shaped error, got: {err}"
+        );
     }
 
     #[test]
     fn ask_tools_call_rejects_an_unknown_tool_name() {
         let dir = scratch_dir("ask_tools_unknown");
         let conn = open(&dir).expect("open");
-        let err = ask_tools_call(&conn, "delete_everything", &serde_json::json!({})).expect_err("an unknown tool name must error, not silently no-op");
-        assert!(err.contains("unknown tool"), "expected an unknown-tool error, got: {err}");
+        let err = ask_tools_call(&conn, "delete_everything", &serde_json::json!({}))
+            .expect_err("an unknown tool name must error, not silently no-op");
+        assert!(
+            err.contains("unknown tool"),
+            "expected an unknown-tool error, got: {err}"
+        );
     }
 
     #[test]
@@ -2447,12 +3152,23 @@ mod tests {
         );
         let conn = open(&dir).expect("open");
         sync(&conn, &dir, &[]).expect("sync");
-        attach_attribute(&conn, "code:fn:internal_helper", "requires(role: admin)").expect("attach");
-        conn.execute("UPDATE nodes SET status = 'exposed' WHERE id = 'code:fn:public_action'", []).expect("stamp status");
+        attach_attribute(&conn, "code:fn:internal_helper", "requires(role: admin)")
+            .expect("attach");
+        conn.execute(
+            "UPDATE nodes SET status = 'exposed' WHERE id = 'code:fn:public_action'",
+            [],
+        )
+        .expect("stamp status");
 
         let context = suggestion_context(&conn).expect("suggestion_context");
-        assert!(context.contains("fn public_action [API-exposed] -- attributes: (none)"), "got: {context}");
-        assert!(context.contains("fn internal_helper -- attributes: requires(role: admin)"), "got: {context}");
+        assert!(
+            context.contains("fn public_action [API-exposed] -- attributes: (none)"),
+            "got: {context}"
+        );
+        assert!(
+            context.contains("fn internal_helper -- attributes: requires(role: admin)"),
+            "got: {context}"
+        );
     }
 
     #[test]
@@ -2466,10 +3182,19 @@ mod tests {
         delete_node(&conn, &a).expect("delete");
         let err = confirm_node(&conn, &a).unwrap_err();
         assert!(err.contains("no node"));
-        let edge_count: i64 = conn.query_row("SELECT COUNT(*) FROM edges WHERE src = ?1 OR dst = ?1", [&a], |r| r.get(0)).expect("count edges");
-        assert_eq!(edge_count, 0, "deleting a node must also delete edges touching it");
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE src = ?1 OR dst = ?1",
+                [&a],
+                |r| r.get(0),
+            )
+            .expect("count edges");
+        assert_eq!(
+            edge_count, 0,
+            "deleting a node must also delete edges touching it"
+        );
     }
-#[test]
+    #[test]
     fn confirmed_edges_returns_only_both_endpoints_confirmed_pairs_in_name_form() {
         // 2026-09-11 (a)-RCA regression: the decompose step stores
         // `depends_on` edges via `add_relation`, and Generate mode
@@ -2478,16 +3203,41 @@ mod tests {
         // unconfirmed component.
         let dir = scratch_dir("confirmed_edges");
         let conn = open(&dir).expect("open");
-        let src_id = add_candidate(&conn, "fn", "authorize_payment_cents", "checks balance and limits", "llm-prompt-mode").expect("add_candidate");
-        let dst_id = add_candidate(&conn, "fn", "channel_daily_limit_cents", "the per-channel cap", "llm-prompt-mode").expect("add_candidate");
-        let unconfirmed_id = add_candidate(&conn, "enum", "PaymentChannel", "the channels", "llm-prompt-mode").expect("add_candidate");
+        let src_id = add_candidate(
+            &conn,
+            "fn",
+            "authorize_payment_cents",
+            "checks balance and limits",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        let dst_id = add_candidate(
+            &conn,
+            "fn",
+            "channel_daily_limit_cents",
+            "the per-channel cap",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        let unconfirmed_id = add_candidate(
+            &conn,
+            "enum",
+            "PaymentChannel",
+            "the channels",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         confirm_node(&conn, &src_id).expect("confirm src");
         confirm_node(&conn, &dst_id).expect("confirm dst");
         add_relation(&conn, &src_id, &dst_id).expect("the confirmed edge");
         add_relation(&conn, &src_id, &unconfirmed_id).expect("the edge into an unconfirmed node");
 
         let edges = confirmed_edges(&conn).expect("confirmed_edges");
-        assert_eq!(edges.len(), 1, "only the both-endpoints-confirmed edge survives, got: {edges:?}");
+        assert_eq!(
+            edges.len(),
+            1,
+            "only the both-endpoints-confirmed edge survives, got: {edges:?}"
+        );
         assert_eq!(edges[0].src, "authorize_payment_cents");
         assert_eq!(edges[0].dst, "channel_daily_limit_cents");
         assert_eq!(edges[0].kind, "RELATES_TO");
@@ -2499,7 +3249,10 @@ mod tests {
         let conn = open(&dir).expect("open");
         crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
         let ids = crate::hi_plugin::installed_pack_ids(&conn).expect("list");
-        assert!(ids.contains(&"banking-v0".to_string()), "banking-v0 must be installed by default, got: {ids:?}");
+        assert!(
+            ids.contains(&"banking-v0".to_string()),
+            "banking-v0 must be installed by default, got: {ids:?}"
+        );
         let units = confirmed_units(&conn, None).expect("confirmed_units");
         let names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
         assert!(names.contains(&"charge_cents".to_string()));
@@ -2507,7 +3260,10 @@ mod tests {
         assert!(names.contains(&"net_change_cents".to_string()));
         // Pack nodes are confirmed and locked.
         let generatable = generatable_units(&conn, None).expect("generatable");
-        assert!(generatable.is_empty(), "pack invariants are locked, never generatable");
+        assert!(
+            generatable.is_empty(),
+            "pack invariants are locked, never generatable"
+        );
     }
 
     #[test]
@@ -2518,11 +3274,17 @@ mod tests {
         let id = code_unit_node_id("fn", "charge_cents");
 
         let waive_err = waive_node(&conn, &id, "not needed").unwrap_err();
-        assert!(waive_err.contains("non-waivable"), "waive must refuse a pack invariant: {waive_err}");
+        assert!(
+            waive_err.contains("non-waivable"),
+            "waive must refuse a pack invariant: {waive_err}"
+        );
         assert!(waive_err.contains("banking-v0"));
 
         let delete_err = delete_node(&conn, &id).unwrap_err();
-        assert!(delete_err.contains("non-waivable"), "delete must refuse a pack invariant: {delete_err}");
+        assert!(
+            delete_err.contains("non-waivable"),
+            "delete must refuse a pack invariant: {delete_err}"
+        );
         assert!(delete_err.contains("banking-v0"));
     }
 
@@ -2536,9 +3298,15 @@ mod tests {
 
         crate::hi_plugin::revoke_pack(&conn, &dir, "banking-v0").expect("revoke");
         let after = confirmed_units(&conn, None).expect("confirmed_units");
-        assert!(!after.iter().any(|u| u.name == "charge_cents"), "revoking the pack must delete its nodes");
+        assert!(
+            !after.iter().any(|u| u.name == "charge_cents"),
+            "revoking the pack must delete its nodes"
+        );
         let ids = crate::hi_plugin::installed_pack_ids(&conn).expect("list");
-        assert!(!ids.contains(&"banking-v0".to_string()), "revoked pack must not be listed as active");
+        assert!(
+            !ids.contains(&"banking-v0".to_string()),
+            "revoked pack must not be listed as active"
+        );
     }
 
     #[test]
@@ -2548,9 +3316,18 @@ mod tests {
         crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
         let units = confirmed_units(&conn, None).expect("confirmed_units");
         let prompt = crate::hi_llm::units_prompt(&units, &[]);
-        assert!(prompt.contains("DOMAIN LAW"), "pack units must render in a dedicated section, got:\n{prompt}");
-        assert!(prompt.contains("charge_cents_conservation"), "the demand text must appear, got:\n{prompt}");
-        assert!(prompt.contains("MUST carry a separate top-level `validate charge_cents`"), "exact validate target must be named, got:\n{prompt}");
+        assert!(
+            prompt.contains("DOMAIN LAW"),
+            "pack units must render in a dedicated section, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("charge_cents_conservation"),
+            "the demand text must appear, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("MUST carry a separate top-level `validate charge_cents`"),
+            "exact validate target must be named, got:\n{prompt}"
+        );
     }
 
     // ---- RFC 0022 §2's reverse-engineering pass: hand-registered GET
@@ -2622,18 +3399,27 @@ mod tests {
         assert_eq!(src, "code:screen:app_shell");
         // The shell came from app_shell_from_toml! -- a screen node of
         // type shell, name app_shell (the generated mount_app_shell).
-        let st: String = conn.query_row("SELECT screen_type FROM nodes WHERE id = 'code:screen:app_shell'", [], |r| r.get(0)).expect("shell node");
+        let st: String = conn
+            .query_row(
+                "SELECT screen_type FROM nodes WHERE id = 'code:screen:app_shell'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("shell node");
         assert_eq!(st, "shell");
         // Regeneration is wholesale: a second sync with the menu entry
         // removed must drop the edge, not accumulate a ghost.
-        std::fs::write(
-            dir.join("menus.toml"),
-            "[landing]\nAnalyst = \"/my-day\"\n",
-        )
-        .expect("rewrite menus.toml");
+        std::fs::write(dir.join("menus.toml"), "[landing]\nAnalyst = \"/my-day\"\n")
+            .expect("rewrite menus.toml");
         let again = sync(&conn, &dir, &[]).expect("resync");
         assert_eq!(again.nav_edges, 1, "only the landing edge remains");
-        let menu_edges: i64 = conn.query_row("SELECT COUNT(*) FROM edges WHERE kind = 'NAVIGATES_TO' AND label = 'nav.day'", [], |r| r.get(0)).expect("count");
+        let menu_edges: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE kind = 'NAVIGATES_TO' AND label = 'nav.day'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
         assert_eq!(menu_edges, 0, "the removed menu entry must not linger");
     }
 
@@ -2682,7 +3468,10 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("count");
-        assert_eq!(dynamic, 0, "the dynamic format! redirect must be skipped, not guessed");
+        assert_eq!(
+            dynamic, 0,
+            "the dynamic format! redirect must be skipped, not guessed"
+        );
         // detail: /four-eyes -> /cases/{id} via template match.
         let detail: Option<String> = conn
             .query_row(

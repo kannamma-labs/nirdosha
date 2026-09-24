@@ -44,32 +44,54 @@ static CURRENT: Mutex<Option<PreviewState>> = Mutex::new(None);
 /// spawned binary's own bind failure (surfaced through [`restart`]'s
 /// `Err`) is the honest fallback if it's ever actually lost.
 pub fn pick_free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("finding a free local port for the preview server: {e}"))?;
-    listener.local_addr().map(|addr| addr.port()).map_err(|e| format!("reading the bound preview port back: {e}"))
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("finding a free local port for the preview server: {e}"))?;
+    listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|e| format!("reading the bound preview port back: {e}"))
 }
 
 /// Replaces the current v2 preview process, then waits until the new
 /// binary listens on the literal port in its `main().serve(port)` call.
 /// A process that exits or never binds returns an error to the UI.
 pub fn restart(binary_path: &Path, port: u16, path: &str) -> Result<(), String> {
-    let mut guard = CURRENT.lock().map_err(|_| "preview process lock was poisoned by an earlier panic".to_string())?;
+    let mut guard = CURRENT
+        .lock()
+        .map_err(|_| "preview process lock was poisoned by an earlier panic".to_string())?;
     // The new server may use the same literal port as the old one.
     *guard = None;
-    let mut child = Command::new(binary_path).spawn().map_err(|e| format!("starting the preview server ({}): {e}", binary_path.display()))?;
+    let mut child = Command::new(binary_path).spawn().map_err(|e| {
+        format!(
+            "starting the preview server ({}): {e}",
+            binary_path.display()
+        )
+    })?;
     let address = (std::net::Ipv4Addr::LOCALHOST, port);
     for _ in 0..40 {
-        if let Some(status) = child.try_wait().map_err(|e| format!("checking preview process: {e}"))? {
-            return Err(format!("preview server exited before listening on port {port} ({status})"));
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("checking preview process: {e}"))?
+        {
+            return Err(format!(
+                "preview server exited before listening on port {port} ({status})"
+            ));
         }
         if TcpStream::connect(address).is_ok() {
-            *guard = Some(PreviewState { child, port, path: path.to_string() });
+            *guard = Some(PreviewState {
+                child,
+                port,
+                path: path.to_string(),
+            });
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let _ = child.kill();
     let _ = child.wait();
-    Err(format!("preview server did not listen on port {port} within 2 seconds"))
+    Err(format!(
+        "preview server did not listen on port {port} within 2 seconds"
+    ))
 }
 
 /// The currently running preview's port, if any -- `hi_api`'s own
@@ -77,14 +99,24 @@ pub fn restart(binary_path: &Path, port: u16, path: &str) -> Result<(), String> 
 /// a Start/Rebuild to know when the iframe has something to point at.
 pub fn status() -> Option<u16> {
     let mut guard = CURRENT.lock().ok()?;
-    let exited = guard.as_mut().and_then(|state| state.child.try_wait().ok()).flatten().is_some();
-    if exited { *guard = None; }
+    let exited = guard
+        .as_mut()
+        .and_then(|state| state.child.try_wait().ok())
+        .flatten()
+        .is_some();
+    if exited {
+        *guard = None;
+    }
     guard.as_ref().map(|state| state.port)
 }
 
 pub fn path() -> Option<String> {
     status()?;
-    CURRENT.lock().ok()?.as_ref().map(|state| state.path.clone())
+    CURRENT
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|state| state.path.clone())
 }
 
 /// Stops the current preview process, if any -- `hi_api`'s own
@@ -119,7 +151,8 @@ mod tests {
 
     #[test]
     fn pick_free_port_returns_a_nonzero_port() {
-        let port = pick_free_port().expect("the OS should always hand back a free ephemeral port in a test sandbox");
+        let port = pick_free_port()
+            .expect("the OS should always hand back a free ephemeral port in a test sandbox");
         assert_ne!(port, 0);
     }
 

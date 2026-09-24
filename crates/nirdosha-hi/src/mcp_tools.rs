@@ -66,7 +66,10 @@ Known kinds, and the shape their JSON object takes (every example below is real,
 The registry is extensible: a signed plugin may declare `nirdosha:plugin:<name>:...` kinds later (not shipped yet)."#;
 
 fn require_str_arg<'a>(arguments: &'a serde_json::Value, name: &str) -> Result<&'a str, String> {
-    arguments.get(name).and_then(|v| v.as_str()).ok_or_else(|| format!("Missing required parameter '{name}'"))
+    arguments
+        .get(name)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("Missing required parameter '{name}'"))
 }
 
 /// `verify_code` -- v2 (`docs/nirdosha-v2-comment-layer.md`): runs
@@ -112,7 +115,10 @@ pub fn get_grammar(_arguments: &serde_json::Value) -> Result<serde_json::Value, 
 /// doesn't break; it has no effect yet.
 pub fn fix(arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
     let source = require_str_arg(arguments, "source")?;
-    let apply = arguments.get("apply").and_then(|v| v.as_bool()).unwrap_or(false);
+    let apply = arguments
+        .get("apply")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let verdict = crate::v2_verify::verify_v2_source(source)?;
     let mut before = serde_json::to_value(&verdict).expect("V2Verdict always serializes");
     before["verdict"] = json!(verdict.verdict());
@@ -166,7 +172,9 @@ pub fn certify_code(arguments: &serde_json::Value) -> Result<serde_json::Value, 
 /// claim that can drift stale, same discipline the native
 /// `capabilities.rs` documents for why that drift is a real,
 /// previously-observed failure mode.
-pub fn get_nirdosha_constructs(_arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub fn get_nirdosha_constructs(
+    _arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let constructs: Vec<serde_json::Value> = crate::v2_capabilities::run_v2_capability_checks()
         .into_iter()
         .map(|r| json!({ "name": r.name, "supported": r.passed, "example": r.source, "diagnostic": r.diagnostic }))
@@ -361,7 +369,10 @@ pub fn tools_list() -> serde_json::Value {
 /// tool-execution errors (`isError: true` in a successful result) --
 /// see `tool_ok`'s doc comment for why every path that reaches a
 /// handler at all comes back `isError: false`.
-pub fn tools_call(params: &serde_json::Value, log: &mut McpCallLog) -> Result<serde_json::Value, (i64, String)> {
+pub fn tools_call(
+    params: &serde_json::Value,
+    log: &mut McpCallLog,
+) -> Result<serde_json::Value, (i64, String)> {
     let call_id = log.next_call_id();
     let started = std::time::Instant::now();
     // A missing `name` keeps the exact protocol error the wire path
@@ -369,7 +380,13 @@ pub fn tools_call(params: &serde_json::Value, log: &mut McpCallLog) -> Result<se
     // logged first so even a malformed call leaves a record.
     let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
         let message = "Missing required parameter 'name'".to_string();
-        log.record_call(call_id, "", params, &Err(message.clone()), started.elapsed().as_millis());
+        log.record_call(
+            call_id,
+            "",
+            params,
+            &Err(message.clone()),
+            started.elapsed().as_millis(),
+        );
         return Err((-32602, message));
     };
     let empty = json!({});
@@ -388,9 +405,7 @@ pub fn tools_call(params: &serde_json::Value, log: &mut McpCallLog) -> Result<se
     let latency_ms = started.elapsed().as_millis();
     log.record_call(call_id, name, arguments, &outcome, latency_ms);
 
-    outcome
-        .map(tool_ok)
-        .map_err(|message| (-32602, message))
+    outcome.map(tool_ok).map_err(|message| (-32602, message))
 }
 
 /// The one call log both MCP surfaces share -- newline-delimited JSON
@@ -420,9 +435,22 @@ impl McpCallLog {
     /// -- a broken log must never break verification -- only the
     /// record of what happened is lost.
     pub fn new(surface: &'static str) -> Self {
-        let path = std::env::temp_dir().join(format!("nirdosha_mcp_{surface}_{}.ndjson", std::process::id()));
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
-        Self { surface, session: format!("{surface}-{}", std::process::id()), next_id: 0, file, path }
+        let path = std::env::temp_dir().join(format!(
+            "nirdosha_mcp_{surface}_{}.ndjson",
+            std::process::id()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
+        Self {
+            surface,
+            session: format!("{surface}-{}", std::process::id()),
+            next_id: 0,
+            file,
+            path,
+        }
     }
 
     /// The disclosed path the caller should print at startup.
@@ -461,9 +489,10 @@ impl McpCallLog {
         // the log -- byte length + SHA-256 are enough to correlate the
         // record with the caller's own copy of what it sent (and with
         // a certificate's `source_hash`, below).
-        let source_meta = arguments.get("source").and_then(|v| v.as_str()).map(|s| {
-            json!({ "bytes": s.len(), "sha256": sha256_hex(s.as_bytes()) })
-        });
+        let source_meta = arguments
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(|s| json!({ "bytes": s.len(), "sha256": sha256_hex(s.as_bytes()) }));
         let apply = arguments.get("apply").and_then(|v| v.as_bool());
 
         let mut record = json!({
@@ -565,7 +594,6 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,15 +603,35 @@ mod tests {
     #[test]
     fn tools_list_advertises_all_seven_tools() {
         let list = tools_list();
-        let names: Vec<&str> = list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["verify_code", "get_grammar", "fix", "describe", "certify_code", "get_nirdosha_constructs", "get_ui_conventions"]);
+        let names: Vec<&str> = list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "verify_code",
+                "get_grammar",
+                "fix",
+                "describe",
+                "certify_code",
+                "get_nirdosha_constructs",
+                "get_ui_conventions"
+            ]
+        );
     }
 
     #[test]
     fn tools_call_unknown_tool_is_a_protocol_error_and_is_logged() {
         let mut log = McpCallLog::new("unit-test-a");
         log.log_session_start(json!({ "purpose": "unit test" }));
-        let err = tools_call(&json!({ "name": "no_such_tool", "arguments": {} }), &mut log).unwrap_err();
+        let err = tools_call(
+            &json!({ "name": "no_such_tool", "arguments": {} }),
+            &mut log,
+        )
+        .unwrap_err();
         assert_eq!(err.0, -32602);
         assert!(err.1.contains("Unknown tool: no_such_tool"));
 
@@ -597,7 +645,12 @@ mod tests {
         assert_eq!(record["tool"], "no_such_tool");
         assert_eq!(record["call_id"], 1);
         assert_eq!(record["outcome"], "error");
-        assert!(record["error"].as_str().unwrap().contains("Unknown tool: no_such_tool"));
+        assert!(
+            record["error"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown tool: no_such_tool")
+        );
         assert!(record["ts"].as_str().unwrap().ends_with('Z'));
         let _ = std::fs::remove_file(log.path());
     }
@@ -605,12 +658,14 @@ mod tests {
     #[test]
     fn missing_required_argument_is_a_protocol_error_and_is_logged() {
         let mut log = McpCallLog::new("unit-test-b");
-        let err = tools_call(&json!({ "name": "verify_code", "arguments": {} }), &mut log).unwrap_err();
+        let err =
+            tools_call(&json!({ "name": "verify_code", "arguments": {} }), &mut log).unwrap_err();
         assert_eq!(err.0, -32602);
         assert!(err.1.contains("Missing required parameter 'source'"));
 
         let contents = std::fs::read_to_string(log.path()).unwrap();
-        let record: serde_json::Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(record["tool"], "verify_code");
         assert_eq!(record["outcome"], "error");
         let _ = std::fs::remove_file(log.path());
@@ -635,7 +690,14 @@ mod tests {
             let _ = tools_call(&json!({ "name": tool, "arguments": {} }), &mut log);
         }
         let contents = std::fs::read_to_string(log.path()).unwrap();
-        let ids: Vec<u64> = contents.lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["call_id"].as_u64().unwrap()).collect();
+        let ids: Vec<u64> = contents
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["call_id"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
         assert_eq!(ids, [1, 2]);
         let _ = std::fs::remove_file(log.path());
     }

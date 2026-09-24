@@ -24,7 +24,12 @@ fn tracked_paths(root: &Path) -> Vec<std::path::PathBuf> {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| format!("failed to invoke git {args:?} in {}: {e}", root.display()))
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to invoke git {args:?} in {}: {e}", root.display()))
 }
 
 fn git_ok(output: &std::process::Output) -> bool {
@@ -59,12 +64,19 @@ pub fn ensure_repo(root: &Path) -> Result<(), String> {
     if !root.join(".git").exists() {
         let output = run_git(root, &["init"])?;
         if !git_ok(&output) {
-            return Err(format!("git init failed in {}: {}", root.display(), stderr_of(&output)));
+            return Err(format!(
+                "git init failed in {}: {}",
+                root.display(),
+                stderr_of(&output)
+            ));
         }
     }
     let gitignore_path = root.join(".gitignore");
     let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
-    let missing: Vec<&&str> = DEFAULT_GITIGNORE_LINES.iter().filter(|line| !existing.lines().any(|l| l.trim() == **line)).collect();
+    let missing: Vec<&&str> = DEFAULT_GITIGNORE_LINES
+        .iter()
+        .filter(|line| !existing.lines().any(|l| l.trim() == **line))
+        .collect();
     if !missing.is_empty() {
         let mut updated = existing;
         if !updated.is_empty() && !updated.ends_with('\n') {
@@ -74,7 +86,8 @@ pub fn ensure_repo(root: &Path) -> Result<(), String> {
             updated.push_str(line);
             updated.push('\n');
         }
-        std::fs::write(&gitignore_path, updated).map_err(|e| format!("writing {}: {e}", gitignore_path.display()))?;
+        std::fs::write(&gitignore_path, updated)
+            .map_err(|e| format!("writing {}: {e}", gitignore_path.display()))?;
     }
     Ok(())
 }
@@ -91,7 +104,10 @@ pub fn commit_revision(root: &Path, message: &str) -> Result<Option<String>, Str
     // did not match any files"), so a fresh repo whose `.nir/` hasn't
     // been created yet must take the same silent no-op path an empty
     // diff takes -- not an error.
-    let paths: Vec<std::path::PathBuf> = tracked_paths(root).into_iter().filter(|p| p.exists()).collect();
+    let paths: Vec<std::path::PathBuf> = tracked_paths(root)
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
     if paths.is_empty() {
         return Ok(None);
     }
@@ -100,7 +116,11 @@ pub fn commit_revision(root: &Path, message: &str) -> Result<Option<String>, Str
     add_args.extend(path_strs.iter().map(|s| s.as_str()));
     let add_output = run_git(root, &add_args)?;
     if !git_ok(&add_output) {
-        return Err(format!("git add failed in {}: {}", root.display(), stderr_of(&add_output)));
+        return Err(format!(
+            "git add failed in {}: {}",
+            root.display(),
+            stderr_of(&add_output)
+        ));
     }
 
     let diff_check = run_git(root, &["diff", "--cached", "--quiet"])?;
@@ -110,13 +130,25 @@ pub fn commit_revision(root: &Path, message: &str) -> Result<Option<String>, Str
 
     let commit_output = run_git(root, &["commit", "-m", message])?;
     if !git_ok(&commit_output) {
-        return Err(format!("git commit failed in {}: {}", root.display(), stderr_of(&commit_output)));
+        return Err(format!(
+            "git commit failed in {}: {}",
+            root.display(),
+            stderr_of(&commit_output)
+        ));
     }
     let rev_output = run_git(root, &["rev-parse", "HEAD"])?;
     if !git_ok(&rev_output) {
-        return Err(format!("git rev-parse HEAD failed in {}: {}", root.display(), stderr_of(&rev_output)));
+        return Err(format!(
+            "git rev-parse HEAD failed in {}: {}",
+            root.display(),
+            stderr_of(&rev_output)
+        ));
     }
-    Ok(Some(String::from_utf8_lossy(&rev_output.stdout).trim().to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(&rev_output.stdout)
+            .trim()
+            .to_string(),
+    ))
 }
 
 #[derive(serde::Serialize)]
@@ -156,7 +188,11 @@ pub fn log(root: &Path, limit: usize) -> Result<Vec<RevisionEntry>, String> {
             let hash = parts.next()?.to_string();
             let message = parts.next()?.to_string();
             let timestamp = parts.next()?.to_string();
-            Some(RevisionEntry { hash, message, timestamp })
+            Some(RevisionEntry {
+                hash,
+                message,
+                timestamp,
+            })
         })
         .collect())
 }
@@ -173,7 +209,11 @@ pub fn diff(root: &Path, rev: &str) -> Result<String, String> {
     args.extend(path_strs.iter().map(|s| s.as_str()));
     let output = run_git(root, &args)?;
     if !git_ok(&output) {
-        return Err(format!("git show {rev} failed in {}: {}", root.display(), stderr_of(&output)));
+        return Err(format!(
+            "git show {rev} failed in {}: {}",
+            root.display(),
+            stderr_of(&output)
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -184,7 +224,10 @@ mod tests {
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("nirdosha_hi_revision_test_{name}_{}", std::process::id()));
+        path.push(format!(
+            "nirdosha_hi_revision_test_{name}_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -215,7 +258,9 @@ mod tests {
         std::fs::create_dir_all(dir.join(".nir/generated")).expect("mkdir");
         std::fs::write(dir.join(".nir/generated/hi_build.nir"), "fn main() {}\n").expect("write");
 
-        let hash = commit_revision(&dir, "generate: 1 unit(s)").expect("commit must succeed").expect("something was staged");
+        let hash = commit_revision(&dir, "generate: 1 unit(s)")
+            .expect("commit must succeed")
+            .expect("something was staged");
         assert_eq!(hash.len(), 40, "a full git SHA-1 hash");
 
         let entries = log(&dir, 10).expect("log must succeed");

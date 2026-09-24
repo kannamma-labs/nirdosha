@@ -139,8 +139,12 @@ fn cache_path() -> PathBuf {
     if let Ok(p) = std::env::var("NIRDOSHA_HINT_CACHE_PATH") {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
-    PathBuf::from(home).join(".nirdosha").join("self_repair_hint_cache.json")
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    PathBuf::from(home)
+        .join(".nirdosha")
+        .join("self_repair_hint_cache.json")
 }
 
 fn log_path(cache: &std::path::Path) -> PathBuf {
@@ -166,7 +170,10 @@ impl HintCache {
             Ok(text) => match serde_json::from_str::<HashMap<String, String>>(&text) {
                 Ok(map) => map,
                 Err(e) => {
-                    on_log(&format!("hint cache at {} is not valid JSON ({e}) -- starting empty", path.display()));
+                    on_log(&format!(
+                        "hint cache at {} is not valid JSON ({e}) -- starting empty",
+                        path.display()
+                    ));
                     HashMap::new()
                 }
             },
@@ -198,7 +205,9 @@ impl HintCache {
                 return;
             }
         }
-        let Ok(json) = serde_json::to_string_pretty(&self.entries) else { return };
+        let Ok(json) = serde_json::to_string_pretty(&self.entries) else {
+            return;
+        };
         let tmp = self.path.with_extension("json.tmp");
         if std::fs::write(&tmp, &json).is_err() {
             return;
@@ -216,7 +225,11 @@ impl HintCache {
         // codebase already had a log for. Was a flat, non-chained JSONL
         // append before this session; see `audit_chain.rs`'s own module
         // doc for why this call site, not a bigger rewrite.
-        nirdosha_audit::audit_chain::append_entry(&log_path(&self.path), serde_json::json!({ "pattern": pattern, "hint": hint }), now_unix());
+        nirdosha_audit::audit_chain::append_entry(
+            &log_path(&self.path),
+            serde_json::json!({ "pattern": pattern, "hint": hint }),
+            now_unix(),
+        );
     }
 }
 
@@ -247,7 +260,10 @@ pub fn shared(on_log: &mut dyn FnMut(&str)) -> &'static Mutex<HintCache> {
 }
 
 fn now_unix() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// A lesson learned from a REAL, observed runtime incident (an
@@ -301,7 +317,10 @@ impl RuntimeLessons {
     /// than blocking anything that reads from it.
     pub fn load() -> Self {
         let path = runtime_lessons_path();
-        let entries = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok()).unwrap_or_default();
+        let entries = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok())
+            .unwrap_or_default();
         RuntimeLessons { path, entries }
     }
 
@@ -318,13 +337,16 @@ impl RuntimeLessons {
     /// function or per anomaly), so a fresh `--teach` for the same kind
     /// is meant to replace, not accumulate.
     pub fn record(&mut self, incident_kind: &str, hint: &str) {
-        self.entries.insert(incident_kind.to_string(), hint.to_string());
+        self.entries
+            .insert(incident_kind.to_string(), hint.to_string());
         if let Some(parent) = self.path.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 return;
             }
         }
-        let Ok(json) = serde_json::to_string_pretty(&self.entries) else { return };
+        let Ok(json) = serde_json::to_string_pretty(&self.entries) else {
+            return;
+        };
         let tmp = self.path.with_extension("json.tmp");
         if std::fs::write(&tmp, &json).is_err() {
             return;
@@ -337,7 +359,13 @@ impl RuntimeLessons {
         // (`record_success`'s own identical trail, just above), arguably
         // more so: it's an explicit override with no automatic "proof"
         // step behind it at all.
-        nirdosha_audit::audit_chain::append_entry(&self.path.with_file_name("self_repair_runtime_lessons_audit.jsonl"), serde_json::json!({ "incident_kind": incident_kind, "hint": hint }), now_unix());
+        nirdosha_audit::audit_chain::append_entry(
+            &self
+                .path
+                .with_file_name("self_repair_runtime_lessons_audit.jsonl"),
+            serde_json::json!({ "incident_kind": incident_kind, "hint": hint }),
+            now_unix(),
+        );
     }
 }
 
@@ -377,16 +405,28 @@ mod tests {
 
     #[test]
     fn normalize_pattern_strips_line_col_prefix() {
-        assert_eq!(normalize_pattern("16:58: expected `RoleView`, found `str`"), "expected `RoleView`, found `str`");
-        assert_eq!(normalize_pattern("145:33: expected `fn() -> i64`, found `Result(fn() -> i64, str)`"), "expected `fn() -> i64`, found `Result(fn() -> i64, str)`");
+        assert_eq!(
+            normalize_pattern("16:58: expected `RoleView`, found `str`"),
+            "expected `RoleView`, found `str`"
+        );
+        assert_eq!(
+            normalize_pattern("145:33: expected `fn() -> i64`, found `Result(fn() -> i64, str)`"),
+            "expected `fn() -> i64`, found `Result(fn() -> i64, str)`"
+        );
     }
 
     #[test]
     fn normalize_pattern_leaves_prefix_free_messages_alone() {
-        assert_eq!(normalize_pattern("codegen doesn't support `print` on a Vector argument"), "codegen doesn't support `print` on a Vector argument");
+        assert_eq!(
+            normalize_pattern("codegen doesn't support `print` on a Vector argument"),
+            "codegen doesn't support `print` on a Vector argument"
+        );
         // A leading word that merely contains digits/colons in an
         // unrelated shape must not be mistaken for a location prefix.
-        assert_eq!(normalize_pattern("unknown variable `RequestStatus`"), "unknown variable `RequestStatus`");
+        assert_eq!(
+            normalize_pattern("unknown variable `RequestStatus`"),
+            "unknown variable `RequestStatus`"
+        );
     }
 
     /// Issue #64: a lex/parse error's raw text is `"lex error in <path>
@@ -401,10 +441,17 @@ mod tests {
     /// their embedded path, now normalize identically.
     #[test]
     fn normalize_pattern_strips_a_lex_error_prefix_regardless_of_the_embedded_scratch_path() {
-        let a = normalize_pattern("lex error in /tmp/nirdosha_hi_generate_check_2739298_3.nir at 28:69: unexpected character `?`");
-        let b = normalize_pattern("lex error in /tmp/nirdosha_hi_generate_check_9911205_0.nir at 3:1: unexpected character `?`");
+        let a = normalize_pattern(
+            "lex error in /tmp/nirdosha_hi_generate_check_2739298_3.nir at 28:69: unexpected character `?`",
+        );
+        let b = normalize_pattern(
+            "lex error in /tmp/nirdosha_hi_generate_check_9911205_0.nir at 3:1: unexpected character `?`",
+        );
         assert_eq!(a, "unexpected character `?`", "got: {a}");
-        assert_eq!(a, b, "the same underlying mistake at two different scratch paths must normalize to one cache key");
+        assert_eq!(
+            a, b,
+            "the same underlying mistake at two different scratch paths must normalize to one cache key"
+        );
     }
 
     /// Same shape for `parse error in <path> at ...`, not just `lex
@@ -413,9 +460,16 @@ mod tests {
     /// error-mapping closure builds both from the same `&e`).
     #[test]
     fn normalize_pattern_strips_a_parse_error_prefix_regardless_of_the_embedded_scratch_path() {
-        let a = normalize_pattern("parse error in /tmp/nirdosha_hi_generate_check_111_1.nir at 154:19: expected an expression, found the reserved keyword `return`");
-        let b = normalize_pattern("parse error in /tmp/nirdosha_hi_generate_check_222_7.nir at 9:4: expected an expression, found the reserved keyword `return`");
-        assert_eq!(a, "expected an expression, found the reserved keyword `return`", "got: {a}");
+        let a = normalize_pattern(
+            "parse error in /tmp/nirdosha_hi_generate_check_111_1.nir at 154:19: expected an expression, found the reserved keyword `return`",
+        );
+        let b = normalize_pattern(
+            "parse error in /tmp/nirdosha_hi_generate_check_222_7.nir at 9:4: expected an expression, found the reserved keyword `return`",
+        );
+        assert_eq!(
+            a, "expected an expression, found the reserved keyword `return`",
+            "got: {a}"
+        );
         assert_eq!(a, b);
     }
 
@@ -426,7 +480,9 @@ mod tests {
     /// reasoning for the identical raw text.
     #[test]
     fn normalize_pattern_uses_the_first_at_marker_not_a_later_one() {
-        let got = normalize_pattern("lex error in /tmp/x_1.nir at 5:2: unexpected token, expected the keyword at line 9");
+        let got = normalize_pattern(
+            "lex error in /tmp/x_1.nir at 5:2: unexpected token, expected the keyword at line 9",
+        );
         assert_eq!(got, "unexpected token, expected the keyword at line 9");
     }
 
@@ -444,9 +500,15 @@ mod tests {
         let mut log = |_: &str| {};
         let mut cache = HintCache::load(&mut log);
         assert_eq!(cache.lookup("expected `RoleView`, found `str`"), None);
-        cache.record_success("expected `RoleView`, found `str`", "use check_role, not a string literal");
+        cache.record_success(
+            "expected `RoleView`, found `str`",
+            "use check_role, not a string literal",
+        );
         let reloaded = HintCache::load(&mut log);
-        assert_eq!(reloaded.lookup("expected `RoleView`, found `str`"), Some("use check_role, not a string literal"));
+        assert_eq!(
+            reloaded.lookup("expected `RoleView`, found `str`"),
+            Some("use check_role, not a string literal")
+        );
         unsafe { std::env::remove_var("NIRDOSHA_HINT_CACHE_PATH") };
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -454,7 +516,8 @@ mod tests {
     #[test]
     fn runtime_lessons_record_then_lookup_round_trips_through_disk() {
         let _guard = lock_env_for_test();
-        let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nir_runtime_lessons_test_{}", std::process::id()));
         let path = dir.join("runtime_lessons.json");
         // SAFETY (test-only): same single-test-scoped env var discipline
         // `record_success_then_lookup_round_trips_through_disk` above
@@ -462,9 +525,15 @@ mod tests {
         unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &path) };
         let mut lessons = RuntimeLessons::load();
         assert_eq!(lessons.lookup("transact_isolation_anomaly"), None);
-        lessons.record("transact_isolation_anomaly", "add a serializing guard around this transact's commit slot");
+        lessons.record(
+            "transact_isolation_anomaly",
+            "add a serializing guard around this transact's commit slot",
+        );
         let reloaded = RuntimeLessons::load();
-        assert_eq!(reloaded.lookup("transact_isolation_anomaly"), Some("add a serializing guard around this transact's commit slot"));
+        assert_eq!(
+            reloaded.lookup("transact_isolation_anomaly"),
+            Some("add a serializing guard around this transact's commit slot")
+        );
         unsafe { std::env::remove_var("NIRDOSHA_RUNTIME_LESSONS_PATH") };
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -472,13 +541,20 @@ mod tests {
     #[test]
     fn runtime_lessons_record_overwrites_the_same_incident_kind() {
         let _guard = lock_env_for_test();
-        let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_overwrite_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "nir_runtime_lessons_overwrite_test_{}",
+            std::process::id()
+        ));
         let path = dir.join("runtime_lessons.json");
         unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &path) };
         let mut lessons = RuntimeLessons::load();
         lessons.record("nfr_drift", "first lesson");
         lessons.record("nfr_drift", "second, updated lesson");
-        assert_eq!(lessons.lookup("nfr_drift"), Some("second, updated lesson"), "a fresh --teach for the same incident kind must replace, not accumulate");
+        assert_eq!(
+            lessons.lookup("nfr_drift"),
+            Some("second, updated lesson"),
+            "a fresh --teach for the same incident kind must replace, not accumulate"
+        );
         unsafe { std::env::remove_var("NIRDOSHA_RUNTIME_LESSONS_PATH") };
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -486,8 +562,16 @@ mod tests {
     #[test]
     fn runtime_lessons_load_is_never_fails_on_a_missing_or_corrupt_file() {
         let _guard = lock_env_for_test();
-        let dir = std::env::temp_dir().join(format!("nir_runtime_lessons_missing_test_{}", std::process::id()));
-        unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", dir.join("does_not_exist.json")) };
+        let dir = std::env::temp_dir().join(format!(
+            "nir_runtime_lessons_missing_test_{}",
+            std::process::id()
+        ));
+        unsafe {
+            std::env::set_var(
+                "NIRDOSHA_RUNTIME_LESSONS_PATH",
+                dir.join("does_not_exist.json"),
+            )
+        };
         let missing = RuntimeLessons::load();
         assert_eq!(missing.lookup("anything"), None);
 
@@ -496,7 +580,11 @@ mod tests {
         std::fs::write(&corrupt_path, "not valid json at all").unwrap();
         unsafe { std::env::set_var("NIRDOSHA_RUNTIME_LESSONS_PATH", &corrupt_path) };
         let corrupt = RuntimeLessons::load();
-        assert_eq!(corrupt.lookup("anything"), None, "a corrupt file must resolve to an empty store, not a panic");
+        assert_eq!(
+            corrupt.lookup("anything"),
+            None,
+            "a corrupt file must resolve to an empty store, not a panic"
+        );
 
         unsafe { std::env::remove_var("NIRDOSHA_RUNTIME_LESSONS_PATH") };
         let _ = std::fs::remove_dir_all(&dir);

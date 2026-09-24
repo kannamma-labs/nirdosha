@@ -33,8 +33,13 @@ pub struct ServerHandle {
 /// this increment's "prove the pipeline" scope, not the full session
 /// lifecycle RFC 0014 describes (still an open question there).
 pub fn serve(root: &Path) -> Result<ServerHandle, String> {
-    let server = Server::http("127.0.0.1:0").map_err(|e| format!("binding local hi server: {e}"))?;
-    let port = server.server_addr().to_ip().map(|a| a.port()).ok_or_else(|| "local hi server has no bound IP address".to_string())?;
+    let server =
+        Server::http("127.0.0.1:0").map_err(|e| format!("binding local hi server: {e}"))?;
+    let port = server
+        .server_addr()
+        .to_ip()
+        .map(|a| a.port())
+        .ok_or_else(|| "local hi server has no bound IP address".to_string())?;
     let root: PathBuf = root.to_path_buf();
     // The one legitimate Origin a browser window pointed at this exact
     // server can ever present -- see `has_foreign_browser_origin`'s own
@@ -73,31 +78,50 @@ pub fn serve(root: &Path) -> Result<ServerHandle, String> {
 /// origin allowlist, the standard defense), rather than by accident
 /// disabling the one browser surface this fallback exists to serve.
 fn has_foreign_browser_origin(request: &tiny_http::Request, expected_origin: &str) -> bool {
-    request
-        .headers()
-        .iter()
-        .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Origin") && !h.value.as_str().eq_ignore_ascii_case(expected_origin))
+    request.headers().iter().any(|h| {
+        h.field.as_str().as_str().eq_ignore_ascii_case("Origin")
+            && !h.value.as_str().eq_ignore_ascii_case(expected_origin)
+    })
 }
 
-fn respond(root: &Path, expected_origin: &str, request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
+fn respond(
+    root: &Path,
+    expected_origin: &str,
+    request: &mut tiny_http::Request,
+) -> Response<Cursor<Vec<u8>>> {
     if has_foreign_browser_origin(request, expected_origin) {
-        return to_tiny_http(ApiResponse::error(403, "this local API does not accept requests from another origin"));
+        return to_tiny_http(ApiResponse::error(
+            403,
+            "this local API does not accept requests from another origin",
+        ));
     }
-    let (path, query) = request.url().split_once('?').map(|(p, q)| (p.to_string(), q.to_string())).unwrap_or_else(|| (request.url().to_string(), String::new()));
+    let (path, query) = request
+        .url()
+        .split_once('?')
+        .map(|(p, q)| (p.to_string(), q.to_string()))
+        .unwrap_or_else(|| (request.url().to_string(), String::new()));
     let method = request.method().as_str().to_string();
     let mut body = Vec::new();
     if let Err(e) = request.as_reader().read_to_end(&mut body) {
-        return to_tiny_http(ApiResponse::error(400, &format!("reading request body: {e}")));
+        return to_tiny_http(ApiResponse::error(
+            400,
+            &format!("reading request body: {e}"),
+        ));
     }
     to_tiny_http(hi_api::handle(root, &method, &path, &query, &body))
 }
 
 fn to_tiny_http(resp: ApiResponse) -> Response<Cursor<Vec<u8>>> {
-    let content_type = Header::from_bytes(&b"Content-Type"[..], resp.content_type.as_bytes()).expect("static header is always valid");
+    let content_type = Header::from_bytes(&b"Content-Type"[..], resp.content_type.as_bytes())
+        .expect("static header is always valid");
     // Same "never cache a live, local, single-viewer response" reason
     // `hi_window.rs`'s own transport sets this -- see its doc comment.
-    let cache_control = Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).expect("static header is always valid");
-    Response::from_data(resp.body).with_status_code(tiny_http::StatusCode(resp.status)).with_header(content_type).with_header(cache_control)
+    let cache_control = Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+        .expect("static header is always valid");
+    Response::from_data(resp.body)
+        .with_status_code(tiny_http::StatusCode(resp.status))
+        .with_header(content_type)
+        .with_header(cache_control)
 }
 
 #[cfg(test)]
@@ -106,7 +130,10 @@ mod tests {
 
     fn scratch_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("nirdosha_hi_server_test_{name}_{}", std::process::id()));
+        path.push(format!(
+            "nirdosha_hi_server_test_{name}_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -118,16 +145,26 @@ mod tests {
     #[test]
     fn serve_answers_api_nodes_over_a_real_http_request() {
         let dir = scratch_dir("nodes_http");
-        std::fs::write(dir.join("a.nir"), "fn add(a: i64, b: i64) -> i64 { return a + b }\n").unwrap();
+        std::fs::write(
+            dir.join("a.nir"),
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        )
+        .unwrap();
         let conn = crate::hi_graph::open(&dir).expect("open");
         crate::hi_graph::sync(&conn, &dir, &[]).expect("sync");
         drop(conn); // release the file lock before the server thread opens its own connection
 
         let handle = serve(&dir).expect("serve");
         let url = format!("http://127.0.0.1:{}/api/nodes", handle.port);
-        let body = reqwest::blocking::get(&url).expect("request should succeed").text().expect("response body");
+        let body = reqwest::blocking::get(&url)
+            .expect("request should succeed")
+            .text()
+            .expect("response body");
         let nodes: Vec<serde_json::Value> = serde_json::from_str(&body).expect("valid JSON array");
-        assert!(nodes.iter().any(|n| n["id"] == "code:fn:add"), "expected code:fn:add in {body}");
+        assert!(
+            nodes.iter().any(|n| n["id"] == "code:fn:add"),
+            "expected code:fn:add in {body}"
+        );
     }
 
     #[test]
@@ -136,14 +173,21 @@ mod tests {
         let conn = crate::hi_graph::open(&dir).expect("open");
         drop(conn);
         let handle = serve(&dir).expect("serve");
-        let body = reqwest::blocking::get(format!("http://127.0.0.1:{}/", handle.port)).expect("request should succeed").text().expect("response body");
+        let body = reqwest::blocking::get(format!("http://127.0.0.1:{}/", handle.port))
+            .expect("request should succeed")
+            .text()
+            .expect("response body");
         assert!(body.contains("Nirdosha Hi"));
     }
 
     #[test]
     fn serve_answers_api_impact_for_a_linked_requirement() {
         let dir = scratch_dir("impact_http");
-        std::fs::write(dir.join("a.nir"), "fn transfer_funds(amount: i64) -> i64 { return amount }\n").unwrap();
+        std::fs::write(
+            dir.join("a.nir"),
+            "fn transfer_funds(amount: i64) -> i64 { return amount }\n",
+        )
+        .unwrap();
         let conn = crate::hi_graph::open(&dir).expect("open");
         crate::hi_graph::sync(&conn, &dir, &[]).expect("sync");
         crate::hi_graph::link(&conn, "R17", "fn:transfer_funds").expect("link");
@@ -151,9 +195,15 @@ mod tests {
 
         let handle = serve(&dir).expect("serve");
         let url = format!("http://127.0.0.1:{}/api/impact?target=R17", handle.port);
-        let body = reqwest::blocking::get(&url).expect("request should succeed").text().expect("response body");
+        let body = reqwest::blocking::get(&url)
+            .expect("request should succeed")
+            .text()
+            .expect("response body");
         let report: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-        assert!(body.contains("code:fn:transfer_funds"), "expected the linked CodeUnit in {report}");
+        assert!(
+            body.contains("code:fn:transfer_funds"),
+            "expected the linked CodeUnit in {report}"
+        );
     }
 
     /// The RFC's own hardening requirement for this fallback mode: a
@@ -202,7 +252,8 @@ mod tests {
         let conn = crate::hi_graph::open(&dir).expect("open");
         drop(conn);
         let handle = serve(&dir).expect("serve");
-        let resp = reqwest::blocking::get(format!("http://127.0.0.1:{}/api/impact", handle.port)).expect("request should succeed");
+        let resp = reqwest::blocking::get(format!("http://127.0.0.1:{}/api/impact", handle.port))
+            .expect("request should succeed");
         assert_eq!(resp.status().as_u16(), 400);
     }
 }
