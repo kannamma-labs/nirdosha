@@ -1,0 +1,34 @@
+[
+  {
+    "id": "banking",
+    "name": "Retail Banking Platform",
+    "description": "Accounts, transfers, loans, cards, FX, and compliance modules for a retail bank.",
+    "domain": "banking",
+    "default_country": "IN",
+    "root_manifest": "banking/banking.toml"
+  },
+  {
+    "id": "kyc",
+    "name": "KYC / Identity Verification Platform",
+    "description": "KYC case lifecycle, identity capture, risk scoring, approval workflow, re-KYC, audit, plus optional third-party vendor modules for document/OCR verification, sanctions/PEP data, government-ID integration and fuzzy screening match.",
+    "domain": "kyc",
+    "default_country": "IN",
+    "root_manifest": "kyc/kyc.toml"
+  },
+  {
+    "id": "fintech",
+    "name": "Fintech Payments Hub",
+    "description": "Merchants, payment gateways, PSPs, wallets, payouts, fraud monitoring, transaction monitoring, AI/ML, invoicing, subscriptions, reconciliation, chargebacks, sanctions and reporting for a payment platform.",
+    "domain": "fintech",
+    "default_country": "US",
+    "root_manifest": "fintech/fintech.toml"
+  },
+  {
+    "id": "trading",
+    "name": "Trading Platform",
+    "description": "Instruments, orders, positions, risk, market data, back-office and AI/ML modules for a brokerage or trading firm.",
+    "domain": "trading",
+    "default_country": "US",
+    "root_manifest": "trading/trading.toml"
+  }
+]

@@ -1,0 +1,39 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-market-data"
+version = "1.0.0"
+module = "M6"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "6.1"
+name = "Market Data"
+module = "M6"
+archetype = "dashboard"
+roles = ["Trader", "RiskManager"]
+stage = "blocked"
+blocked_by = ["primitive:market_data_feed", "primitive:price_cache"]
+codegen = { template = "dashboard", mount_symbol = "mount_market_data", route_path = "/market-data", generated_files = ["src/screens/m06_market_data.nir"] }
+data_binding = { entities = ["MarketDataSnapshot"], primary_key = "snapshot_id", guard = { table = "market_data_snapshot", purpose = "MarketDataRead" }, fields = [
+    { name = "snapshot_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "bid", type = "String" },
+    { name = "ask", type = "String" },
+    { name = "last_trade", type = "String" },
+    { name = "timestamp", type = "String" }
+] }
+policy = { purpose = "MarketDataRead", allowed_actions = ["read", "aggregate"] }
+[screen.parameters]
+title = "Market Data"
+refresh_seconds = 5
+widgets = [
+    { kind = "Metric", label = "Bid-ask spread", fn = "spread", source = { table = "market_data_snapshot", purpose = "MarketDataRead", action = "aggregate" }, target = 1, alert_below = false },
+    { kind = "Chart", label = "Last trades", fn = "last_trades", source = { table = "market_data_snapshot", purpose = "MarketDataRead", action = "aggregate" } }
+]
+file = "src/screens/m06_market_data.nir"
+notes = "BLOCKED: market-data feed and price-cache primitives not yet available."

@@ -1991,9 +1991,11 @@ dependencies = [
  "serde",
  "serde_jcs",
  "serde_json",
+ "sha2 0.10.9",
  "syn 2.0.119",
  "tiny_http",
  "toml",
+ "walkdir",
 ]
 
 [[package]]

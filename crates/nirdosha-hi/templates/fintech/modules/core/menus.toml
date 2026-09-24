@@ -1,0 +1,40 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Core"
+
+[landing]
+PlatformAdmin = "/"
+MerchantAdmin = "/merchants"
+Operator = "/"
+ComplianceOfficer = "/audit"
+Customer = "/wallets"
+
+[[group]]
+id = "overview"
+label_key = "nav.group.overview"
+order = 10
+
+[[group]]
+id = "compliance"
+label_key = "nav.group.compliance"
+order = 80
+
+[[menu]]
+id = "nav.dashboard"
+label_key = "nav.dashboard"
+group = "overview"
+screen_id = "1.1"
+route = "/"
+roles = ["PlatformAdmin", "Operator"]
+order = 10
+
+[[menu]]
+id = "nav.audit"
+label_key = "nav.audit"
+group = "compliance"
+screen_id = "1.2"
+route = "/audit"
+guard = { action = "read", resource = "auditentry" }
+roles = ["ComplianceOfficer", "PlatformAdmin"]
+order = 10

@@ -1,0 +1,46 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "kyc-government-id"
+version = "1.0.0"
+module = "government_id"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "1.1"
+name = "Government ID Integrations"
+module = "M1"
+archetype = "settings_screen"
+combo = []
+roles = ["OnboardingOfficer:R/W", "compliance_officer:R/W"]
+datasets = ["PG.government_id_config"]
+stage = "built"
+codegen = { template = "settings_screen", mount_symbol = "mount_government_id_integrations", route_path = "/vendors/government-id", generated_files = ["src/screens/m12_government_id.nir"] }
+data_binding = { entities = ["GovernmentIdConfig"], primary_key = "config_id", guard = { table = "government_id_config", purpose = "VendorConfig", row_id = "singleton" }, fields = [
+    { name = "config_id", type = "String", required = true },
+    { name = "default_integration", type = "String" },
+    { name = "client_id_masked", type = "Option<String>", masked = true },
+    { name = "enabled", type = "String" }
+] }
+policy = { purpose = "VendorConfig", allowed_actions = ["read", "update"] }
+parameters = { access = 'requires role "compliance_officer"', vendors = ["Aadhaar", "DigiLocker", "eID"] }
+file = "src/screens/m12_government_id.nir"
+notes = "Configure national government-ID integrations. Jurisdiction drives available providers."
+
+[[screen]]
+id = "1.2"
+name = "Government ID Gateway"
+module = "M1"
+archetype = "static_embed"
+combo = []
+roles = ["OnboardingOfficer:R", "compliance_officer:R"]
+datasets = ["STATIC.government_id_gateway"]
+stage = "blocked"
+blocked_by = ["plugin:government_id_api"]
+codegen = { template = "static_embed", mount_symbol = "mount_government_id_gateway", route_path = "/engines/government-id", generated_files = ["src/screens/m12_government_id.nir"] }
+parameters = { title = "Government ID Gateway", content_file = "files/government-id-gateway.md", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }
+notes = "BLOCKED: needs national infrastructure API plugin (Aadhaar / DigiLocker / eID)."

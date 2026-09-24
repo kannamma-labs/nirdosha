@@ -1,0 +1,32 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Merchants"
+
+[landing]
+MerchantAdmin = "/merchants"
+
+[[group]]
+id = "merchants"
+label_key = "nav.group.merchants"
+order = 20
+
+[[menu]]
+id = "nav.merchants"
+label_key = "nav.merchants"
+group = "merchants"
+screen_id = "2.1"
+route = "/merchants"
+guard = { action = "read", resource = "merchant" }
+roles = ["PlatformAdmin", "MerchantAdmin"]
+order = 10
+
+[[menu]]
+id = "nav.merchant_onboard"
+label_key = "nav.merchant_onboard"
+group = "merchants"
+screen_id = "2.2"
+route = "/merchants/onboard"
+guard = { action = "create", resource = "merchant" }
+roles = ["PlatformAdmin"]
+order = 20

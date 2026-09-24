@@ -166,6 +166,44 @@
   #preview-controls button.secondary { background:transparent; border:1px solid #3a3a52; color:#a9a9bd; }
   #preview-frame { flex:1; min-height:0; width:100%; border:none; background:#fff; }
 
+  /* ---- composer rail: certified project templates + module picker.
+     Same right-hand-strip shape as the other rails, medium width so
+     the template cards and module lists are readable. */
+  #composer-rail { position:absolute; top:64px; right:0; bottom:200px; width:380px; background:#15151f; border-left:1px solid #26263a; z-index:6; display:none; flex-direction:column; box-sizing:border-box; overflow-y:auto; }
+  #composer-rail.open { display:flex; }
+  #composer-body { padding:12px 14px; display:flex; flex-direction:column; gap:12px; }
+  #composer-body .empty { font-size:12px; color:#78768e; line-height:1.5; }
+  .tmpl-card { background:#0b0b12; border:1px solid #26263a; border-radius:8px; padding:12px 14px; cursor:pointer; transition:border-color 0.15s; }
+  .tmpl-card:hover { border-color:#564cbe; }
+  .tmpl-card.active { border-color:#564cbe; background:#1a1633; }
+  .tmpl-card .name { font-weight:bold; font-size:13px; color:#e8e8f0; margin-bottom:4px; }
+  .tmpl-card .meta { font-size:10.5px; color:#78768e; margin-bottom:6px; }
+  .tmpl-card .desc { font-size:11.5px; color:#a9a9bd; line-height:1.5; }
+  .tmpl-card .trust { font-size:10px; color:#3ddc84; margin-top:6px; }
+  .tmpl-card .trust.tofu { color:#dba829; }
+  .tmpl-card .trust.unsigned { color:#78768e; }
+  .module-list { display:flex; flex-direction:column; gap:6px; }
+  .module-row { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:10px; background:#0b0b12; border:1px solid #26263a; border-radius:6px; }
+  .module-row.required { border-color:#564cbe; }
+  .module-row.disabled { opacity:0.45; }
+  .module-info { display:flex; flex-direction:column; gap:3px; min-width:0; }
+  .module-row label { display:flex; align-items:center; gap:8px; font-size:12px; color:#e8e8f0; cursor:pointer; }
+  .module-row input[type="checkbox"] { accent-color:#564cbe; flex-shrink:0; }
+  .mod-desc { font-size:10.5px; color:#a9a9bd; line-height:1.35; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:260px; }
+  .module-badges { display:flex; flex-direction:column; align-items:flex-end; gap:4px; flex-shrink:0; }
+  .module-row .mod-tag { font-size:9.5px; text-transform:uppercase; letter-spacing:0.05em; padding:2px 6px; border-radius:4px; }
+  .mod-tag.required { background:rgba(86,76,190,0.25); color:#a9a3f0; }
+  .mod-tag.default { background:#1e2330; color:#6a9fff; }
+  .mod-tag.optional { background:#1e1e1e; color:#78768e; }
+  .mod-vendor { font-size:9.5px; color:#a9a9bd; text-align:right; }
+  #composer-actions { display:flex; gap:8px; padding-top:6px; }
+  #composer-actions button { flex:1; background:#564cbe; color:#fff; border:none; border-radius:4px; padding:8px; font:12px ui-monospace, monospace; font-weight:bold; cursor:pointer; }
+  #composer-actions button.secondary { background:#0b0b12; border:1px solid #3a3a52; color:#a9a9bd; }
+  #composer-actions button:disabled { opacity:0.5; cursor:default; }
+  #composer-status { font-size:11px; line-height:1.5; min-height:0; white-space:pre-wrap; word-break:break-word; }
+  #composer-status.ok { color:#3ddc84; }
+  #composer-status.err { color:#e0566b; }
+
   /* ---- reusable small chip, shared by the attribute list and the
      governing-rules panel: `provable`/`unverified` per
      agent-skills/nirdosha/hi_enhance_phase_ux.md's Option A. */
@@ -300,6 +338,36 @@
   #prompt-screen-submit { align-self:center; background:#564cbe; color:#fff; border:none; border-radius:6px; padding:10px 26px; font:14px ui-monospace, monospace; font-weight:bold; cursor:pointer; }
   #prompt-screen-submit:disabled { opacity:0.5; cursor:default; }
   #prompt-screen-status { text-align:center; font-size:13px; color:#a9a9bd; min-height:18px; }
+  #prompt-screen-or { display:flex; align-items:center; gap:10px; color:#78768e; font-size:12px; margin:-4px 0; }
+  #prompt-screen-or::before, #prompt-screen-or::after { content:""; flex:1; height:1px; background:#26263a; }
+  #prompt-templates { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px; }
+  .pt-card { background:#15151f; border:1px solid #26263a; border-radius:8px; padding:12px; cursor:pointer; transition:border-color 0.15s; }
+  .pt-card:hover { border-color:#564cbe; }
+  .pt-card.active { border-color:#564cbe; background:#1a1633; }
+  .pt-card .pt-name { font-weight:bold; font-size:13px; color:#e8e8f0; margin-bottom:4px; }
+  .pt-card .pt-domain { font-size:10px; color:#78768e; text-transform:uppercase; letter-spacing:0.05em; }
+  .pt-card .pt-desc { font-size:11px; color:#a9a9bd; line-height:1.4; margin-top:6px; }
+  #prompt-template-options { display:none; flex-direction:column; gap:10px; }
+  #prompt-template-options.open { display:flex; }
+  .pt-opt { display:flex; flex-direction:column; gap:4px; }
+  .pt-opt label { font-size:11px; color:#78768e; text-transform:uppercase; letter-spacing:0.04em; }
+  #prompt-country { background:#0b0b12; border:1px solid #3a3a52; border-radius:4px; color:#e8e8f0; font:12px ui-monospace, monospace; padding:6px 8px; }
+  #prompt-country:focus { outline:none; border-color:#564cbe; }
+  #prompt-modules { display:flex; flex-direction:column; gap:6px; }
+  .pt-mod { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 9px; background:#0b0b12; border:1px solid #26263a; border-radius:5px; font-size:12px; }
+  .pt-mod.required { border-color:#564cbe; }
+  .pt-mod label { display:flex; align-items:center; gap:6px; color:#e8e8f0; cursor:pointer; }
+  .pt-mod input[type="checkbox"] { accent-color:#564cbe; }
+  .pt-mod-tag { font-size:9px; text-transform:uppercase; padding:1px 5px; border-radius:3px; }
+  .pt-mod-tag.required { background:rgba(86,76,190,0.25); color:#a9a3f0; }
+  .pt-mod-tag.default { background:#1e2330; color:#6a9fff; }
+  .pt-mod-tag.optional { background:#1e1e1e; color:#78768e; }
+  .pt-mod-vendor { font-size:9px; color:#a9a9bd; text-align:right; }
+  .pt-mod-info { display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .pt-mod-desc { font-size:10px; color:#a9a9bd; line-height:1.3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:240px; }
+  .pt-mod-badges { display:flex; flex-direction:column; align-items:flex-end; gap:3px; flex-shrink:0; }
+  #prompt-template-submit { align-self:center; background:#564cbe; color:#fff; border:none; border-radius:6px; padding:10px 26px; font:14px ui-monospace, monospace; font-weight:bold; cursor:pointer; }
+  #prompt-template-submit:disabled { opacity:0.5; cursor:default; }
 </style>
 </head>
 <body>
@@ -325,8 +393,24 @@
 <div id="prompt-screen">
   <div id="prompt-screen-inner">
     <div id="prompt-screen-title">What do you want to build?</div>
-    <textarea id="prompt-screen-input" rows="4" placeholder="Describe the program you want -- e.g. &quot;a tetris game&quot;, or &quot;a task tracker with due dates and a completed filter&quot;. Ctrl+Enter to submit."></textarea>
+    <textarea id="prompt-screen-input" rows="3" placeholder="Describe the program you want -- e.g. &quot;a tetris game&quot;, or &quot;a task tracker with due dates and a completed filter&quot;. Ctrl+Enter to submit."></textarea>
     <button id="prompt-screen-submit" type="button">Populate the graph</button>
+    <div id="prompt-screen-or"><span>or start from a certified template</span></div>
+    <div id="prompt-templates"></div>
+    <div id="prompt-template-options">
+      <div class="pt-opt">
+        <label for="prompt-country">Country / jurisdiction</label>
+        <select id="prompt-country">
+          <option value="US">US 🇺🇸</option>
+          <option value="GB">GB 🇬🇧</option>
+          <option value="EU">EU 🇪🇺</option>
+          <option value="IN">IN 🇮🇳</option>
+          <option value="SG">SG 🇸🇬</option>
+        </select>
+      </div>
+      <div id="prompt-modules" class="pt-opt"></div>
+    </div>
+    <button id="prompt-template-submit" type="button" disabled>Compose project from template</button>
     <div id="prompt-screen-status"></div>
   </div>
 </div>
@@ -343,6 +427,7 @@
     <button id="new-screen-toggle" type="button" title="Describe a new screen">+ Screen</button>
     <button id="governing-toggle" type="button" title="What's enforced, and what sealed packs lock down">Rules</button>
     <button id="suggest-toggle" type="button" title="AI-suggested gaps in the confirmed graph -- drafts only, nothing here is ever applied without you clicking Accept">Suggest</button>
+    <button id="composer-toggle" type="button" title="Compose a new project from a certified template and selected modules">Templates</button>
     <button id="preview-toggle" type="button" title="Run the real compiled app locally and preview it as a chosen role">Preview</button>
     <button id="ask-toggle" type="button">Ask</button>
   </div>
@@ -466,6 +551,13 @@
   </div>
 </div>
 
+<div id="composer-rail">
+  <div class="ask-head"><span>Composer &middot; certified templates + module picker</span><button type="button" id="composer-close" class="rail-close" title="close">✕</button></div>
+  <div id="composer-body">
+    <div class="empty">Loading templates…</div>
+  </div>
+</div>
+
 <div id="console">
   <div id="transcript"></div>
   <div id="inputbar">
@@ -499,6 +591,16 @@
     Requirement: '#ff6b6b',
     default: '#e8e8f0',
   };
+
+  function escapeHtml(text) {
+    if (text == null) return '';
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
 
   function subKind(node) {
     if (node.kind === 'CodeUnit') {
@@ -1696,7 +1798,16 @@
   }
 
   function postForm(path, params) {
-    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: encodeForm(params) }).then(r => r.json().then(body => ({ status: r.status, body })));
+    console.log('[hi] POST', path, params);
+    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: encodeForm(params) })
+      .then(r => {
+        console.log('[hi] response', path, r.status);
+        return r.json().then(body => ({ status: r.status, body }));
+      })
+      .catch(err => {
+        console.error('[hi] fetch failed', path, err);
+        throw err;
+      });
   }
 
   // Busy state disables the input while a `:prompt`/`:generate`/
@@ -1964,7 +2075,7 @@
   // report, 2026-09-14: the open rail rendered overlapping the header
   // instead of below it, with the header's own right-side action
   // buttons left inaccessible underneath the rail's higher z-index.
-  const ZOOM_TARGETS = '#header, #console, #panel, #legend, #prompt-screen, #ask-rail, #new-screen-rail, #governing-panel, #suggest-rail, #preview-rail';
+  const ZOOM_TARGETS = '#header, #console, #panel, #legend, #prompt-screen, #ask-rail, #new-screen-rail, #governing-panel, #suggest-rail, #preview-rail, #composer-rail';
   let uiZoom = 1;
   const ZOOM_MIN = 0.6, ZOOM_MAX = 2.2, ZOOM_STEP = 0.1;
   function applyZoom() {
@@ -2467,6 +2578,123 @@
         submitPromptScreen();
       }
     });
+    initPromptTemplates();
+  }
+
+  let promptTemplates = null;
+  let selectedPromptTemplate = null;
+  let selectedPromptModules = new Set();
+
+  async function initPromptTemplates() {
+    document.getElementById('prompt-template-submit').addEventListener('click', submitPromptTemplate);
+    try {
+      const res = await fetch('/api/templates');
+      if (res.status !== 200) throw new Error('status ' + res.status);
+      const data = await res.json();
+      promptTemplates = data.templates || [];
+    } catch (err) {
+      document.getElementById('prompt-templates').innerHTML = `<div style="color:#e0566b;font-size:12px;">Could not load templates: ${escapeHtml(err.message)}</div>`;
+      return;
+    }
+    renderPromptTemplates();
+  }
+
+  function renderPromptTemplates() {
+    const container = document.getElementById('prompt-templates');
+    container.replaceChildren();
+    promptTemplates.forEach(tmpl => {
+      const card = document.createElement('div');
+      card.className = 'pt-card' + (selectedPromptTemplate === tmpl.id ? ' active' : '');
+      card.innerHTML = `
+        <div class="pt-name">${escapeHtml(tmpl.name)}</div>
+        <div class="pt-domain">${escapeHtml(tmpl.domain)} · ${escapeHtml(tmpl.default_country)}</div>
+        <div class="pt-desc">${escapeHtml(tmpl.description)}</div>
+      `;
+      card.addEventListener('click', () => {
+        selectedPromptTemplate = tmpl.id;
+        selectedPromptModules.clear();
+        renderPromptTemplates();
+        renderPromptTemplateOptions();
+      });
+      container.appendChild(card);
+    });
+    renderPromptTemplateOptions();
+  }
+
+  function renderPromptTemplateOptions() {
+    const opts = document.getElementById('prompt-template-options');
+    const submit = document.getElementById('prompt-template-submit');
+    const tmpl = promptTemplates.find(t => t.id === selectedPromptTemplate);
+    if (!tmpl) {
+      opts.classList.remove('open');
+      submit.disabled = true;
+      return;
+    }
+    opts.classList.add('open');
+    submit.disabled = false;
+
+    const modContainer = document.getElementById('prompt-modules');
+    modContainer.replaceChildren();
+    const title = document.createElement('div');
+    title.className = 'pt-opt';
+    title.innerHTML = '<label>Modules</label>';
+    modContainer.appendChild(title);
+    tmpl.modules.forEach(mod => {
+      const checked = mod.required || mod.default || selectedPromptModules.has(mod.id);
+      const row = document.createElement('div');
+      row.className = 'pt-mod' + (mod.required ? ' required' : '');
+      const vendorTag = mod.integration ? `<span class="pt-mod-vendor" title="${escapeHtml(mod.vendors ? mod.vendors.join(', ') : '')}">${escapeHtml(mod.integration)}${mod.vendors && mod.vendors.length ? ' · ' + escapeHtml(mod.vendors.slice(0, 3).join(', ')) + (mod.vendors.length > 3 ? '…' : '') : ''}</span>` : '';
+      row.innerHTML = `
+        <div class="pt-mod-info">
+          <label><input type="checkbox" ${checked ? 'checked' : ''} ${mod.required ? 'disabled' : ''}> ${escapeHtml(mod.id)}</label>
+          ${mod.description ? `<div class="pt-mod-desc" title="${escapeHtml(mod.description)}">${escapeHtml(mod.description)}</div>` : ''}
+        </div>
+        <div class="pt-mod-badges">
+          <span class="pt-mod-tag ${mod.required ? 'required' : (mod.default ? 'default' : 'optional')}">${mod.required ? 'required' : (mod.default ? 'default' : 'optional')}</span>
+          ${vendorTag}
+        </div>
+      `;
+      const cb = row.querySelector('input');
+      cb.addEventListener('change', () => {
+        if (cb.checked) selectedPromptModules.add(mod.id);
+        else selectedPromptModules.delete(mod.id);
+      });
+      modContainer.appendChild(row);
+    });
+  }
+
+  function submitPromptTemplate() {
+    const submit = document.getElementById('prompt-template-submit');
+    if (submit.disabled) return;
+    const tmpl = promptTemplates.find(t => t.id === selectedPromptTemplate);
+    if (!tmpl) return;
+    const selected = new Set();
+    tmpl.modules.forEach(mod => {
+      if (mod.required || mod.default || selectedPromptModules.has(mod.id)) selected.add(mod.id);
+    });
+    if (selected.size === 0) {
+      setPromptStatus('Select at least one module.');
+      return;
+    }
+    submit.disabled = true;
+    setPromptStatus('Composing project…');
+    const country = document.getElementById('prompt-country').value;
+    postForm('/api/compose', { template: tmpl.id, modules: Array.from(selected).join(','), country })
+      .then(({ status, body }) => {
+        submit.disabled = false;
+        if (status !== 200) {
+          setPromptStatus(body.error || ('compose failed: ' + status));
+          return;
+        }
+        setPromptStatus(`Composed ${body.app_name}: ${body.total_screens} screens (${body.blocked_screens} blocked). Opening composer rail for build…`);
+        document.getElementById('prompt-screen').classList.remove('visible');
+        document.getElementById('composer-rail').classList.add('open');
+      })
+      .catch(err => { submit.disabled = false; setPromptStatus('network error: ' + err.message); });
+  }
+
+  function setPromptStatus(text) {
+    document.getElementById('prompt-screen-status').textContent = text;
   }
 
   // rfcs/0014's 2026-09-14 amendment: Ask as a rail present on every
@@ -2688,6 +2916,175 @@
     });
   }
 
+  // ---- composer rail: certified project templates + module picker ----
+  let composerState = { templates: null, selectedTemplate: null, selectedModules: new Set(), busy: false };
+
+  async function composerFetchTemplates() {
+    try {
+      const res = await fetch('/api/templates');
+      if (res.status !== 200) throw new Error('status ' + res.status);
+      const data = await res.json();
+      composerState.templates = data.templates || [];
+      composerRender();
+    } catch (err) {
+      const body = document.getElementById('composer-body');
+      body.innerHTML = `<div class="empty" style="color:#e0566b;">Could not load templates: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function composerRender() {
+    const body = document.getElementById('composer-body');
+    body.replaceChildren();
+    if (!composerState.templates || composerState.templates.length === 0) {
+      body.innerHTML = '<div class="empty">No certified templates available yet.</div>';
+      return;
+    }
+
+    const title = document.createElement('div');
+    title.className = 'composer-section-title';
+    title.textContent = 'Choose a project template';
+    body.appendChild(title);
+
+    composerState.templates.forEach(tmpl => {
+      const card = document.createElement('div');
+      card.className = 'tmpl-card' + (composerState.selectedTemplate === tmpl.id ? ' active' : '');
+      card.dataset.id = tmpl.id;
+      card.innerHTML = `
+        <div class="name">${escapeHtml(tmpl.name)}</div>
+        <div class="meta">${escapeHtml(tmpl.domain)} · ${escapeHtml(tmpl.default_country)}</div>
+        <div class="desc">${escapeHtml(tmpl.description)}</div>
+        <div class="trust tofu">🔒 hash-pinned · signature envelope absent (tamper-evident, not tamper-proof)</div>
+      `;
+      card.addEventListener('click', () => {
+        composerState.selectedTemplate = tmpl.id;
+        composerState.selectedModules.clear();
+        composerRender();
+      });
+      body.appendChild(card);
+    });
+
+    if (composerState.selectedTemplate) {
+      const tmpl = composerState.templates.find(t => t.id === composerState.selectedTemplate);
+      if (tmpl && tmpl.modules && tmpl.modules.length) {
+        const modTitle = document.createElement('div');
+        modTitle.className = 'composer-section-title';
+        modTitle.textContent = 'Modules for ' + escapeHtml(tmpl.name);
+        body.appendChild(modTitle);
+
+        const list = document.createElement('div');
+        list.className = 'module-list';
+        tmpl.modules.forEach(mod => {
+          const row = document.createElement('div');
+          row.className = 'module-row' + (mod.required ? ' required' : '');
+          const checked = mod.required || composerState.selectedModules.has(mod.id);
+          const disabled = mod.required;
+          const vendorTag = mod.integration ? `<span class="mod-vendor" title="${escapeHtml(mod.vendors ? mod.vendors.join(', ') : '')}">${escapeHtml(mod.integration)}${mod.vendors && mod.vendors.length ? ' · ' + escapeHtml(mod.vendors.slice(0, 3).join(', ')) + (mod.vendors.length > 3 ? '…' : '') : ''}</span>` : '';
+          row.innerHTML = `
+            <div class="module-info">
+              <label><input type="checkbox" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}> ${escapeHtml(mod.id)}</label>
+              ${mod.description ? `<div class="mod-desc" title="${escapeHtml(mod.description)}">${escapeHtml(mod.description)}</div>` : ''}
+            </div>
+            <div class="module-badges">
+              <span class="mod-tag ${mod.required ? 'required' : (mod.default ? 'default' : 'optional')}">${mod.required ? 'required' : (mod.default ? 'default' : 'optional')}</span>
+              ${vendorTag}
+            </div>
+          `;
+          const cb = row.querySelector('input');
+          cb.addEventListener('change', () => {
+            if (cb.checked) composerState.selectedModules.add(mod.id);
+            else composerState.selectedModules.delete(mod.id);
+          });
+          list.appendChild(row);
+        });
+        body.appendChild(list);
+
+        const actions = document.createElement('div');
+        actions.id = 'composer-actions';
+        actions.innerHTML = `
+          <button type="button" id="composer-compose-btn">Compose project</button>
+          <button type="button" id="composer-build-btn" class="secondary">Compose + build</button>
+        `;
+        body.appendChild(actions);
+        document.getElementById('composer-compose-btn').addEventListener('click', () => composerRun(false));
+        document.getElementById('composer-build-btn').addEventListener('click', () => composerRun(true));
+      }
+    }
+
+    const status = document.createElement('div');
+    status.id = 'composer-status';
+    body.appendChild(status);
+  }
+
+  function composerRun(alsoBuild) {
+    if (composerState.busy) return;
+    const tmpl = composerState.templates.find(t => t.id === composerState.selectedTemplate);
+    if (!tmpl) return;
+    // Start from defaults plus user toggles, but always include required modules.
+    const selected = new Set();
+    tmpl.modules.forEach(mod => {
+      if (mod.required || mod.default || composerState.selectedModules.has(mod.id)) {
+        selected.add(mod.id);
+      }
+    });
+    if (selected.size === 0) {
+      setComposerStatus('err', 'Select at least one module.');
+      return;
+    }
+    composerState.busy = true;
+    setComposerStatus('', 'Composing…');
+    const composeBtn = document.getElementById('composer-compose-btn');
+    const buildBtn = document.getElementById('composer-build-btn');
+    if (composeBtn) composeBtn.disabled = true;
+    if (buildBtn) buildBtn.disabled = true;
+
+    postForm('/api/compose', { template: tmpl.id, modules: Array.from(selected).join(','), country: tmpl.default_country })
+      .then(({ status, body }) => {
+        if (status !== 200) {
+          setComposerStatus('err', body.error || ('compose failed: ' + status));
+          return;
+        }
+        setComposerStatus('ok', `Composed ${body.app_name}: ${body.total_screens} screens (${body.blocked_screens} blocked by missing primitives).`);
+        if (alsoBuild) {
+          setComposerStatus('', 'Composed. Building…');
+          return postForm('/api/composed/build', { app_name: body.app_name })
+            .then(({ status: s2, body: b2 }) => {
+              if (s2 !== 200) {
+                setComposerStatus('err', b2.error || ('build failed: ' + s2));
+                return;
+              }
+              setComposerStatus('ok', `Build succeeded. Project: ${b2.project_dir}`);
+            });
+        }
+      })
+      .catch(err => setComposerStatus('err', 'network error: ' + err.message))
+      .finally(() => {
+        composerState.busy = false;
+        if (composeBtn) composeBtn.disabled = false;
+        if (buildBtn) buildBtn.disabled = false;
+      });
+  }
+
+  function setComposerStatus(kind, text) {
+    const el = document.getElementById('composer-status');
+    el.className = kind ? kind : '';
+    el.textContent = text;
+  }
+
+  function initComposerRail() {
+    const rail = document.getElementById('composer-rail');
+    document.getElementById('composer-toggle').addEventListener('click', () => {
+      document.getElementById('ask-rail').classList.remove('open');
+      document.getElementById('new-screen-rail').classList.remove('open');
+      document.getElementById('governing-panel').classList.remove('open');
+      document.getElementById('suggest-rail').classList.remove('open');
+      document.getElementById('preview-rail').classList.remove('open');
+      document.getElementById('panel').style.display = 'none';
+      rail.classList.toggle('open');
+      if (rail.classList.contains('open') && !composerState.templates) composerFetchTemplates();
+    });
+    document.getElementById('composer-close').addEventListener('click', () => rail.classList.remove('open'));
+  }
+
   // github #49: proactive AI suggestions over the confirmed graph.
   // `/api/suggest` (`hi_api::handle_suggest`) is read-only -- this rail
   // is the ONLY place any of it can be written anywhere, and only ever
@@ -2884,6 +3281,7 @@
   initAskRail();
   initGoverningPanel();
   initNewScreenRail();
+  initComposerRail();
   initSuggestRail();
   initPreviewRail();
 

@@ -1,0 +1,46 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "kyc-sanctions-pep"
+version = "1.0.0"
+module = "sanctions_pep"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "1.1"
+name = "Sanctions / PEP Providers"
+module = "M1"
+archetype = "settings_screen"
+combo = []
+roles = ["compliance_officer:R/W"]
+datasets = ["PG.sanctions_config"]
+stage = "built"
+codegen = { template = "settings_screen", mount_symbol = "mount_sanctions_providers", route_path = "/vendors/sanctions", generated_files = ["src/screens/m11_sanctions_pep.nir"] }
+data_binding = { entities = ["SanctionsConfig"], primary_key = "config_id", guard = { table = "sanctions_config", purpose = "VendorConfig", row_id = "singleton" }, fields = [
+    { name = "config_id", type = "String", required = true },
+    { name = "default_provider", type = "String" },
+    { name = "api_key_masked", type = "Option<String>", masked = true },
+    { name = "enabled", type = "String" }
+] }
+policy = { purpose = "VendorConfig", allowed_actions = ["read", "update"] }
+parameters = { access = 'requires role "compliance_officer"', vendors = ["Refinitiv World-Check", "ComplyAdvantage", "Dow Jones"] }
+file = "src/screens/m11_sanctions_pep.nir"
+notes = "Configure external sanctions, PEP and adverse-media data provider."
+
+[[screen]]
+id = "1.2"
+name = "Sanctions / PEP / Adverse Media Engine"
+module = "M1"
+archetype = "static_embed"
+combo = []
+roles = ["compliance_officer:R"]
+datasets = ["STATIC.sanctions_pep_engine"]
+stage = "blocked"
+blocked_by = ["plugin:sanctions_pep_api"]
+codegen = { template = "static_embed", mount_symbol = "mount_sanctions_pep_engine", route_path = "/engines/sanctions", generated_files = ["src/screens/m11_sanctions_pep.nir"] }
+parameters = { title = "Sanctions / PEP / Adverse Media Engine", content_file = "files/sanctions-pep-engine.md", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }
+notes = "BLOCKED: needs external watchlist API plugin (Refinitiv World-Check / ComplyAdvantage / Dow Jones)."

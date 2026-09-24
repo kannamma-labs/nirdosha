@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading Compliance"
+
+[[group]]
+id = "compliance"
+label_key = "nav.group.compliance"
+order = 90
+
+[[menu]]
+id = "nav.surveillance"
+label_key = "nav.surveillance"
+group = "compliance"
+screen_id = "8.1"
+route = "/surveillance"
+guard = { action = "read", resource = "order" }
+roles = ["ComplianceOfficer"]
+order = 10

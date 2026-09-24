@@ -1,0 +1,39 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Transfers"
+
+[[group]]
+id = "payments"
+label_key = "nav.group.payments"
+order = 30
+
+[[menu]]
+id = "nav.transfers"
+label_key = "nav.transfers"
+group = "payments"
+screen_id = "3.1"
+route = "/transfers"
+guard = { action = "read", resource = "transferrequest" }
+roles = ["Customer"]
+order = 10
+
+[[menu]]
+id = "nav.transfer_pending"
+label_key = "nav.transfer_pending"
+group = "payments"
+screen_id = "3.2"
+route = "/transfers/pending"
+guard = { action = "read", resource = "transferrequest" }
+roles = ["Customer", "BranchManager"]
+order = 20
+
+[[menu]]
+id = "nav.transfer_limits"
+label_key = "nav.transfer_limits"
+group = "payments"
+screen_id = "3.3"
+route = "/transfers/limits"
+guard = { action = "aggregate", resource = "transferrequest" }
+roles = ["Customer"]
+order = 30

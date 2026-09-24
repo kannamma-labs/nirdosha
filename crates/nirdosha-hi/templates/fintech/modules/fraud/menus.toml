@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Fraud"
+
+[[group]]
+id = "fraud"
+label_key = "nav.group.fraud"
+order = 70
+
+[[menu]]
+id = "nav.fraud"
+label_key = "nav.fraud"
+group = "fraud"
+screen_id = "7.1"
+route = "/fraud"
+guard = { action = "read", resource = "fraudalert" }
+roles = ["PlatformAdmin", "RiskAnalyst"]
+order = 10

@@ -1,0 +1,3412 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "kyc"
+version = "1.0.0"
+source_inventory = "examples/kyc/screen.md"
+total_screens = 32
+module = "kyc-core"
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en-IN"
+
+# App-wide approval chains consumed by approval_inbox sources.
+[[approval_chain]]
+name = "document_review"
+quorum = 1
+approvers = ["kyc_analyst", "kyc_senior_analyst"]
+
+[[approval_chain]]
+name = "screening_hit_review"
+quorum = 2
+approvers = ["kyc_senior_analyst", "kyc_mlro"]
+
+[[approval_chain]]
+name = "case_review"
+quorum = 1
+approvers = ["kyc_analyst", "kyc_senior_analyst"]
+
+[[approval_chain]]
+name = "case_escalation"
+quorum = 1
+approvers = ["kyc_mlro"]
+
+# ─────────────────────────────────────────────────────────────────────
+# M01 — Auth & Shell
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M01"
+archetype = "login"
+stage = "built"
+roles = ["AllRoles:R"]
+datasets = ["KYC.identity_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "auth/login"
+mount_symbol = "mount_login"
+renderer = "web"
+artifact_namespace = "kyc.m01.login"
+generated_files = ["src/screens/m01_auth.nir"]
+route_path = "/login"
+route_owner = "M01"
+
+[screen.parameters]
+mode = "sso"
+demo_users = [
+    { username = "alice", password = "pass123", roles = ["Customer"] },
+    { username = "bob",   password = "pass123", roles = ["Customer", "LoanOfficer"] },
+    { username = "carol", password = "pass123", roles = ["BranchManager"] },
+    { username = "dave",  password = "pass123", roles = ["TreasuryHead"] },
+    { username = "eve",   password = "pass123", roles = ["ComplianceOfficer"] },
+]
+notes = "demo auth; production mode needs OIDC/JWKS wiring"
+    
+
+[screen.policy]
+policy_ids = ["KYC-AUTH-01"]
+purpose = "authenticate_user"
+allowed_actions = ["read", "propose", "confirm"]
+subject_scope = "self"
+segregation_class = "identity-boundary"
+
+[screen.logging]
+domain = "identity"
+country = "*"
+entity = "LoginSession"
+event_class = "access"
+level = "notice"
+policy_id = "LOG-IDENTITY-01"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "identity-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-AUTH-01"
+version = "1"
+hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+required = true
+
+[screen.provenance]
+owner = "identity-platform"
+reviewers = ["security", "compliance"]
+change_ticket = "KYC-1001"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m01.login"
+stable_id = "screen:1.1"
+allow_generated_names = false
+
+# ── 1.2 App Shell ────────────────────────────────────────────────────
+
+[[screen]]
+id = "1.2"
+name = "App Shell"
+module = "M01"
+archetype = "app_shell_from_toml"
+stage = "built"
+roles = ["AllRoles:R"]
+datasets = []
+blocked_by = []
+
+[screen.codegen]
+template = "shell/app_shell"
+mount_symbol = "mount_app_shell"
+renderer = "web"
+artifact_namespace = "kyc.m01.shell"
+generated_files = ["src/screens/m01_shell.nir"]
+route_path = "/"
+route_owner = "M01"
+
+[screen.parameters]
+shell_variant = "sidebar"
+chrome = "kyc-default"
+
+[screen.policy]
+policy_ids = ["KYC-SHELL-01"]
+purpose = "render_shell"
+allowed_actions = ["read"]
+subject_scope = "authenticated"
+segregation_class = "ui-only"
+
+[screen.logging]
+domain = "platform"
+country = "*"
+entity = "AppShell"
+event_class = "access"
+level = "info"
+policy_id = "LOG-PLATFORM-01"
+required_fields = ["screen_id", "actor_id"]
+redaction_profile = "none"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-SHELL-01"
+version = "1"
+hash = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+required = true
+
+[screen.provenance]
+owner = "ui-platform"
+reviewers = ["security"]
+change_ticket = "KYC-1001"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "compact"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m01.shell"
+stable_id = "screen:1.2"
+allow_generated_names = false
+
+# ── 1.3 KYC Dashboard ────────────────────────────────────────────────
+
+[[screen]]
+id = "1.3"
+name = "KYC Dashboard"
+module = "M01"
+archetype = "workspace"
+stage = "built"
+roles = ["kyc_analyst:R", "kyc_senior_analyst:R", "kyc_mlro:R", "compliance_officer:R", "relationship_manager:R", "auditor:R", "platform_admin:R"]
+datasets = ["KYC.case_store", "KYC.monitoring_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "workspace/dashboard"
+mount_symbol = "mount_kyc_dashboard"
+renderer = "web"
+artifact_namespace = "kyc.m01.dashboard"
+generated_files = ["src/screens/m01_dashboard.nir"]
+route_path = "/dashboard"
+route_owner = "M01"
+
+[screen.data_binding]
+entities = ["KYCCase", "PeriodicReview"]
+store = "KYC.case_store"
+schema_version = "case/v1"
+primary_key = "case_id"
+catalog_ref = "CATALOG.kyc.dashboard"
+
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "status"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "risk_rating"
+type = "String"
+required = false
+
+[screen.data_binding.guard]
+table = "kyc_case_table"
+purpose = "Operations"
+
+[screen.parameters.subject]
+entity = "KYCCase"
+label_field = "case_id"
+
+[[screen.parameters.panels]]
+need = "open_cases"
+title = "Open cases"
+render = "count"
+source = { entity = "KYCCase", link_field = "case_id" }
+
+[[screen.parameters.panels]]
+need = "due_reviews"
+title = "Reviews due this week"
+render = "list"
+source = { entity = "PeriodicReview", link_field = "review_id" }
+
+[screen.policy]
+policy_ids = ["KYC-DASH-01"]
+purpose = "view_kyc_dashboard"
+allowed_actions = ["read"]
+subject_scope = "role"
+segregation_class = "operations"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "KYCCase"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-01"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "kyc-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-DASH-01"
+version = "1"
+hash = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+required = true
+
+[screen.provenance]
+owner = "kyc-platform"
+reviewers = ["compliance", "ui-platform"]
+change_ticket = "KYC-1002"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m01.dashboard"
+stable_id = "screen:1.3"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M02 — Customer Registry
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "2.1"
+name = "Customer List"
+module = "M02"
+archetype = "crud_screens"
+stage = "built"
+roles = ["kyc_analyst:R", "kyc_senior_analyst:R", "compliance_officer:R", "relationship_manager:R", "auditor:R"]
+datasets = ["KYC.customer_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/list"
+mount_symbol = "mount_customer_list"
+renderer = "web"
+artifact_namespace = "kyc.m02.customer_list"
+generated_files = ["src/screens/m02_customer_list.nir"]
+route_path = "/customers"
+route_owner = "M02"
+
+[screen.data_binding]
+entities = ["Customer"]
+store = "KYC.customer_store"
+schema_version = "customer/v2"
+primary_key = "customer_id"
+catalog_ref = "CATALOG.kyc.customer"
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "legal_name"
+type = "String"
+required = true
+display = true
+
+[[screen.data_binding.fields]]
+name = "customer_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "risk_rating"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "tax_id"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+display = true
+editable = false
+
+[screen.data_binding.guard]
+table = "customer_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+create_fields = ["legal_name", "customer_type"]
+update_fields = ["legal_name", "customer_type"]
+
+[screen.policy]
+policy_ids = ["KYC-CUST-01"]
+purpose = "manage_customers"
+allowed_actions = ["read", "create", "update"]
+subject_scope = "role"
+segregation_class = "customer-data"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Customer"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-02"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "pii-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CUST-01"
+version = "2"
+hash = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+required = true
+
+[screen.provenance]
+owner = "kyc-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1003"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m02.customer_list"
+stable_id = "screen:2.1"
+allow_generated_names = false
+
+# ── 2.2 Customer Detail ─────────────────────────────────────────────
+
+[[screen]]
+id = "2.2"
+name = "Customer Detail"
+module = "M02"
+archetype = "workspace"
+stage = "built"
+roles = ["kyc_analyst:R", "kyc_senior_analyst:R", "compliance_officer:R", "relationship_manager:R", "auditor:R"]
+datasets = ["KYC.customer_store", "KYC.identity_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "workspace/detail"
+mount_symbol = "mount_customer_detail"
+renderer = "web"
+artifact_namespace = "kyc.m02.customer_detail"
+generated_files = ["src/screens/m02_customer_detail.nir"]
+route_path = "/customers/{id}"
+route_owner = "M02"
+
+[screen.data_binding]
+entities = ["Customer", "CustomerIdentity"]
+store = "KYC.customer_store"
+schema_version = "customer/v2"
+primary_key = "customer_id"
+catalog_ref = "CATALOG.kyc.customer_detail"
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "legal_name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "date_of_birth"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+display = true
+editable = false
+
+[[screen.data_binding.fields]]
+name = "nationality"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "residential_address"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+display = true
+editable = true
+
+[screen.data_binding.guard]
+table = "customer_table"
+purpose = "Operations"
+
+[screen.parameters.subject]
+entity = "Customer"
+label_field = "legal_name"
+
+[[screen.parameters.panels]]
+need = "documents"
+title = "Documents"
+render = "list"
+source = { entity = "Document", link_field = "customer_id" }
+
+[screen.policy]
+policy_ids = ["KYC-CUST-02"]
+purpose = "view_customer"
+allowed_actions = ["read", "update"]
+subject_scope = "role"
+segregation_class = "customer-data"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Customer"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-02"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "pii-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CUST-02"
+version = "2"
+hash = "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+required = true
+
+[screen.provenance]
+owner = "kyc-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1003"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m02.customer_detail"
+stable_id = "screen:2.2"
+allow_generated_names = false
+
+# ── 2.3 New Customer ─────────────────────────────────────────────────
+
+[[screen]]
+id = "2.3"
+name = "New Customer"
+module = "M02"
+archetype = "wizard"
+stage = "built"
+roles = ["kyc_analyst:RW", "relationship_manager:RW"]
+datasets = ["KYC.customer_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "wizard/create"
+mount_symbol = "mount_new_customer"
+renderer = "web"
+artifact_namespace = "kyc.m02.new_customer"
+generated_files = ["src/screens/m02_new_customer.nir"]
+route_path = "/customers/new"
+route_owner = "M02"
+
+[screen.data_binding]
+entities = ["Customer"]
+store = "KYC.customer_store"
+schema_version = "customer/v2"
+primary_key = "customer_id"
+catalog_ref = "CATALOG.kyc.customer_new"
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "legal_name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "tax_id"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+editable = true
+
+[screen.data_binding.guard]
+table = "customer_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+steps = ["identity", "contact", "tax", "review"]
+
+[screen.policy]
+policy_ids = ["KYC-CUST-03"]
+purpose = "create_customer"
+allowed_actions = ["read", "create"]
+subject_scope = "role"
+segregation_class = "customer-data"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Customer"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-02"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "pii-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CUST-03"
+version = "1"
+hash = "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+required = true
+
+[screen.provenance]
+owner = "kyc-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1003"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m02.new_customer"
+stable_id = "screen:2.3"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M03 — Onboarding
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "3.1"
+name = "Onboarding Wizard"
+module = "M03"
+archetype = "wizard"
+stage = "built"
+roles = ["customer:RW", "relationship_manager:RW", "kyc_analyst:RW"]
+datasets = ["KYC.customer_store", "KYC.document_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "wizard/onboarding"
+mount_symbol = "mount_onboarding_wizard"
+renderer = "web"
+artifact_namespace = "kyc.m03.onboarding_wizard"
+generated_files = ["src/screens/m03_onboarding_wizard.nir"]
+route_path = "/onboarding/new"
+route_owner = "M03"
+
+[screen.data_binding]
+entities = ["Customer", "Document"]
+store = "KYC.customer_store"
+schema_version = "customer/v2"
+primary_key = "customer_id"
+catalog_ref = "CATALOG.kyc.onboarding"
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "legal_name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "consent_given"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "customer_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "self_or_role"
+steps = ["consent", "identity", "address", "documents", "review"]
+
+[screen.policy]
+policy_ids = ["KYC-ONB-01"]
+purpose = "onboard_customer"
+allowed_actions = ["read", "create", "update", "propose"]
+subject_scope = "self_or_role"
+segregation_class = "customer-data"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Customer"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-03"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "pii-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-ONB-01"
+version = "1"
+hash = "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+required = true
+
+[screen.provenance]
+owner = "onboarding-platform"
+reviewers = ["compliance", "security"]
+change_ticket = "KYC-1004"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m03.onboarding_wizard"
+stable_id = "screen:3.1"
+allow_generated_names = false
+
+# ── 3.2 Onboarding Checklist ─────────────────────────────────────────
+
+[[screen]]
+id = "3.2"
+name = "Onboarding Checklist"
+module = "M03"
+archetype = "workspace"
+stage = "built"
+roles = ["kyc_analyst:RW", "relationship_manager:RW", "compliance_officer:R"]
+datasets = ["KYC.customer_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "workspace/checklist"
+mount_symbol = "mount_onboarding_checklist"
+renderer = "web"
+artifact_namespace = "kyc.m03.onboarding_checklist"
+generated_files = ["src/screens/m03_onboarding_checklist.nir"]
+route_path = "/onboarding/{id}/checklist"
+route_owner = "M03"
+
+[screen.data_binding]
+entities = ["Customer"]
+store = "KYC.customer_store"
+schema_version = "customer/v2"
+primary_key = "customer_id"
+catalog_ref = "CATALOG.kyc.onboarding_checklist"
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "checklist_state"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "customer_table"
+purpose = "Operations"
+
+[screen.parameters.subject]
+entity = "Customer"
+label_field = "customer_id"
+
+[[screen.parameters.panels]]
+need = "steps"
+title = "Checklist steps"
+render = "list"
+source = { entity = "ChecklistTemplate", link_field = "template_id" }
+
+[screen.policy]
+policy_ids = ["KYC-ONB-02"]
+purpose = "review_onboarding"
+allowed_actions = ["read", "update"]
+subject_scope = "role"
+segregation_class = "operations"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Customer"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-03"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "kyc-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-ONB-02"
+version = "1"
+hash = "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+required = true
+
+[screen.provenance]
+owner = "onboarding-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1004"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m03.onboarding_checklist"
+stable_id = "screen:3.2"
+allow_generated_names = false
+
+# ── 3.3 Onboarding Pipeline ──────────────────────────────────────────
+
+[[screen]]
+id = "3.3"
+name = "Onboarding Pipeline"
+module = "M03"
+archetype = "kanban_board"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW"]
+datasets = ["KYC.customer_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "kanban/pipeline"
+mount_symbol = "mount_onboarding_pipeline"
+renderer = "web"
+artifact_namespace = "kyc.m03.onboarding_pipeline"
+generated_files = ["src/screens/m03_onboarding_pipeline.nir"]
+route_path = "/onboarding/pipeline"
+route_owner = "M03"
+
+[screen.data_binding]
+entities = ["Customer"]
+store = "KYC.customer_store"
+schema_version = "customer/v2"
+primary_key = "customer_id"
+catalog_ref = "CATALOG.kyc.onboarding_pipeline"
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "onboarding_stage"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "legal_name"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "customer_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+column_field = "onboarding_stage"
+title_field = "legal_name"
+move_path = "/onboarding/pipeline/{id}/move/{to}"
+
+[screen.policy]
+policy_ids = ["KYC-ONB-03"]
+purpose = "manage_onboarding_pipeline"
+allowed_actions = ["read", "update"]
+subject_scope = "role"
+segregation_class = "operations"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Customer"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-03"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "kyc-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-ONB-03"
+version = "1"
+hash = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+required = true
+
+[screen.provenance]
+owner = "onboarding-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1004"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "compact"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m03.onboarding_pipeline"
+stable_id = "screen:3.3"
+allow_generated_names = false
+
+
+# ─────────────────────────────────────────────────────────────────────
+# M04 — Identity & Documents
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "4.1"
+name = "Document Upload"
+module = "M04"
+archetype = "crud_screens"
+stage = "built"
+roles = ["customer:RW", "relationship_manager:RW", "kyc_analyst:RW"]
+datasets = ["KYC.document_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/upload"
+mount_symbol = "mount_document_upload"
+renderer = "web"
+artifact_namespace = "kyc.m04.document_upload"
+generated_files = ["src/screens/m04_document_upload.nir"]
+route_path = "/documents/upload"
+route_owner = "M04"
+
+[screen.data_binding]
+entities = ["Document"]
+store = "KYC.document_store"
+schema_version = "document/v1"
+primary_key = "document_id"
+catalog_ref = "CATALOG.kyc.document"
+
+[[screen.data_binding.fields]]
+name = "document_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "document_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "content_sha256"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "issued_country"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "document_number"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+editable = true
+
+[screen.data_binding.guard]
+table = "document_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "self_or_role"
+create_fields = ["customer_id", "document_type", "content_sha256", "issued_country"]
+update_fields = ["document_type", "issued_country"]
+
+[screen.policy]
+policy_ids = ["KYC-DOC-01"]
+purpose = "manage_documents"
+allowed_actions = ["read", "create", "update"]
+subject_scope = "self_or_role"
+segregation_class = "document-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Document"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-04"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "document-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-DOC-01"
+version = "1"
+hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+required = true
+
+[screen.provenance]
+owner = "identity-platform"
+reviewers = ["security", "compliance"]
+change_ticket = "KYC-1005"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = true
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m04.document_upload"
+stable_id = "screen:4.1"
+allow_generated_names = false
+
+# ── 4.2 Document Review Queue ────────────────────────────────────────
+
+[[screen]]
+id = "4.2"
+name = "Document Review Queue"
+module = "M04"
+archetype = "approval_inbox"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW"]
+datasets = ["KYC.document_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "approval/document_review"
+mount_symbol = "mount_document_review_queue"
+renderer = "web"
+artifact_namespace = "kyc.m04.document_review"
+generated_files = ["src/screens/m04_document_review.nir"]
+route_path = "/documents/review"
+route_owner = "M04"
+
+[screen.data_binding]
+entities = ["Document"]
+store = "KYC.document_store"
+schema_version = "document/v1"
+primary_key = "document_id"
+catalog_ref = "CATALOG.kyc.document_review"
+
+[[screen.data_binding.fields]]
+name = "document_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "document_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "review_status"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "document_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+
+[[screen.parameters.sources]]
+table = "document_table"
+chain = "document_review"
+detail_path = "/documents/{id}"
+
+[screen.policy]
+policy_ids = ["KYC-DOC-02"]
+purpose = "review_documents"
+allowed_actions = ["read", "confirm", "reject"]
+subject_scope = "role"
+segregation_class = "document-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "Document"
+event_class = "access"
+level = "notice"
+policy_id = "LOG-KYC-04"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "document-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-DOC-02"
+version = "1"
+hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+required = true
+
+[screen.provenance]
+owner = "identity-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1005"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m04.document_review"
+stable_id = "screen:4.2"
+allow_generated_names = false
+
+# ── 4.3 Verification Run Detail ──────────────────────────────────────
+
+[[screen]]
+id = "4.3"
+name = "Verification Run Detail"
+module = "M04"
+archetype = "workspace"
+stage = "built"
+roles = ["kyc_analyst:R", "kyc_senior_analyst:R", "auditor:R"]
+datasets = ["KYC.document_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "workspace/verification"
+mount_symbol = "mount_verification_detail"
+renderer = "web"
+artifact_namespace = "kyc.m04.verification_detail"
+generated_files = ["src/screens/m04_verification_detail.nir"]
+route_path = "/verifications/{id}"
+route_owner = "M04"
+
+[screen.data_binding]
+entities = ["VerificationRun", "Document"]
+store = "KYC.document_store"
+schema_version = "document/v1"
+primary_key = "run_id"
+catalog_ref = "CATALOG.kyc.verification"
+
+[[screen.data_binding.fields]]
+name = "run_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "verdict"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "confidence"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "match_score"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+
+[screen.data_binding.guard]
+table = "verification_run_table"
+purpose = "Operations"
+
+[screen.parameters.subject]
+entity = "VerificationRun"
+label_field = "run_id"
+
+[[screen.parameters.panels]]
+need = "signals"
+title = "Signals"
+render = "list"
+source = { entity = "Document", link_field = "customer_id" }
+
+[screen.policy]
+policy_ids = ["KYC-VER-01"]
+purpose = "view_verification"
+allowed_actions = ["read"]
+subject_scope = "role"
+segregation_class = "document-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "VerificationRun"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-04"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "document-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-VER-01"
+version = "1"
+hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+required = true
+
+[screen.provenance]
+owner = "identity-platform"
+reviewers = ["compliance", "security"]
+change_ticket = "KYC-1005"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m04.verification_detail"
+stable_id = "screen:4.3"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M05 — Screening
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "5.1"
+name = "Screening Runs"
+module = "M05"
+archetype = "crud_screens"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "compliance_officer:RW"]
+datasets = ["KYC.screening_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/screening"
+mount_symbol = "mount_screening_runs"
+renderer = "web"
+artifact_namespace = "kyc.m05.screening_runs"
+generated_files = ["src/screens/m05_screening_runs.nir"]
+route_path = "/screening/runs"
+route_owner = "M05"
+
+[screen.data_binding]
+entities = ["ScreeningRun"]
+store = "KYC.screening_store"
+schema_version = "screening/v1"
+primary_key = "run_id"
+catalog_ref = "CATALOG.kyc.screening_run"
+
+[[screen.data_binding.fields]]
+name = "run_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "run_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "hit_count"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "run_at"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "screening_run_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+create_fields = ["customer_id", "run_type"]
+update_fields = []
+
+[screen.policy]
+policy_ids = ["KYC-SCR-01"]
+purpose = "run_screening"
+allowed_actions = ["read", "create"]
+subject_scope = "role"
+segregation_class = "screening-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "ScreeningRun"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-05"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "screening-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-SCR-01"
+version = "1"
+hash = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+required = true
+
+[screen.provenance]
+owner = "screening-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1006"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m05.screening_runs"
+stable_id = "screen:5.1"
+allow_generated_names = false
+
+# ── 5.2 Screening Hit Review ─────────────────────────────────────────
+
+[[screen]]
+id = "5.2"
+name = "Screening Hit Review"
+module = "M05"
+archetype = "approval_inbox"
+stage = "built"
+roles = ["kyc_senior_analyst:RW", "kyc_mlro:RW", "compliance_officer:RW"]
+datasets = ["KYC.screening_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "approval/screening_hit"
+mount_symbol = "mount_screening_hit_review"
+renderer = "web"
+artifact_namespace = "kyc.m05.screening_hit_review"
+generated_files = ["src/screens/m05_screening_hit_review.nir"]
+route_path = "/screening/hits"
+route_owner = "M05"
+
+[screen.data_binding]
+entities = ["ScreeningHit"]
+store = "KYC.screening_store"
+schema_version = "screening/v1"
+primary_key = "hit_id"
+catalog_ref = "CATALOG.kyc.screening_hit"
+
+[[screen.data_binding.fields]]
+name = "hit_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "hit_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "resolution"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "matched_name"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+
+[screen.data_binding.guard]
+table = "screening_hit_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+
+[[screen.parameters.sources]]
+table = "screening_hit_table"
+chain = "screening_hit_review"
+detail_path = "/screening/hits/{id}"
+
+[screen.policy]
+policy_ids = ["KYC-SCR-02"]
+purpose = "adjudicate_screening_hit"
+allowed_actions = ["read", "confirm", "reject", "propose"]
+subject_scope = "role"
+segregation_class = "screening-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "ScreeningHit"
+event_class = "access"
+level = "notice"
+policy_id = "LOG-KYC-05"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "screening-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-SCR-02"
+version = "1"
+hash = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+required = true
+
+[screen.provenance]
+owner = "screening-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1006"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m05.screening_hit_review"
+stable_id = "screen:5.2"
+allow_generated_names = false
+
+# ── 5.3 Watchlist Management ─────────────────────────────────────────
+
+[[screen]]
+id = "5.3"
+name = "Watchlist Management"
+module = "M05"
+archetype = "crud_screens"
+stage = "built"
+roles = ["compliance_officer:RW", "platform_admin:RW"]
+datasets = ["KYC.screening_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/watchlist"
+mount_symbol = "mount_watchlist_management"
+renderer = "web"
+artifact_namespace = "kyc.m05.watchlist"
+generated_files = ["src/screens/m05_watchlist.nir"]
+route_path = "/screening/watchlists"
+route_owner = "M05"
+
+[screen.data_binding]
+entities = ["WatchlistEntry"]
+store = "KYC.screening_store"
+schema_version = "screening/v1"
+primary_key = "entry_id"
+catalog_ref = "CATALOG.kyc.watchlist"
+
+[[screen.data_binding.fields]]
+name = "entry_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "list_name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "subject_name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "reason"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "source_ref"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "watchlist_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+create_fields = ["list_name", "subject_name", "reason", "source_ref"]
+update_fields = ["list_name", "subject_name", "reason"]
+
+[screen.policy]
+policy_ids = ["KYC-SCR-03"]
+purpose = "manage_watchlists"
+allowed_actions = ["read", "create", "update", "delete"]
+subject_scope = "role"
+segregation_class = "screening-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "WatchlistEntry"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-05"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "screening-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-SCR-03"
+version = "1"
+hash = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+required = true
+
+[screen.provenance]
+owner = "screening-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1006"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m05.watchlist"
+stable_id = "screen:5.3"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M06 — Risk & EDD
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "6.1"
+name = "Risk Assessment"
+module = "M06"
+archetype = "workspace"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "compliance_officer:R"]
+datasets = ["KYC.risk_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "workspace/risk"
+mount_symbol = "mount_risk_assessment"
+renderer = "web"
+artifact_namespace = "kyc.m06.risk_assessment"
+generated_files = ["src/screens/m06_risk_assessment.nir"]
+route_path = "/risk/{customer_id}"
+route_owner = "M06"
+
+[screen.data_binding]
+entities = ["RiskAssessment", "RiskRule"]
+store = "KYC.risk_store"
+schema_version = "risk/v1"
+primary_key = "assessment_id"
+catalog_ref = "CATALOG.kyc.risk"
+
+[[screen.data_binding.fields]]
+name = "assessment_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "rating"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "score"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "rationale"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+
+[screen.data_binding.guard]
+table = "risk_assessment_table"
+purpose = "Compliance"
+
+[screen.parameters.subject]
+entity = "RiskAssessment"
+label_field = "assessment_id"
+
+[[screen.parameters.panels]]
+need = "rules"
+title = "Applied rules"
+render = "list"
+source = { entity = "RiskRule", link_field = "rule_id" }
+
+[screen.policy]
+policy_ids = ["KYC-RISK-01"]
+purpose = "assess_risk"
+allowed_actions = ["read", "update", "aggregate"]
+subject_scope = "role"
+segregation_class = "risk-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "RiskAssessment"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-06"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "risk-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-RISK-01"
+version = "1"
+hash = "sha256:1010101010101010101010101010101010101010101010101010101010101010"
+required = true
+
+[screen.provenance]
+owner = "risk-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1007"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m06.risk_assessment"
+stable_id = "screen:6.1"
+allow_generated_names = false
+
+# ── 6.2 EDD Questionnaire ────────────────────────────────────────────
+
+[[screen]]
+id = "6.2"
+name = "EDD Questionnaire"
+module = "M06"
+archetype = "wizard"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "relationship_manager:RW"]
+datasets = ["KYC.risk_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "wizard/edd"
+mount_symbol = "mount_edd_questionnaire"
+renderer = "web"
+artifact_namespace = "kyc.m06.edd"
+generated_files = ["src/screens/m06_edd.nir"]
+route_path = "/edd/{customer_id}"
+route_owner = "M06"
+
+[screen.data_binding]
+entities = ["EDDQuestionnaire", "EDDResponse"]
+store = "KYC.risk_store"
+schema_version = "risk/v1"
+primary_key = "questionnaire_id"
+catalog_ref = "CATALOG.kyc.edd"
+
+[[screen.data_binding.fields]]
+name = "questionnaire_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "source_of_funds"
+type = "Option<String>"
+required = true
+sensitive = true
+masked = true
+editable = true
+
+[[screen.data_binding.fields]]
+name = "source_of_wealth"
+type = "Option<String>"
+required = true
+sensitive = true
+masked = true
+editable = true
+
+[[screen.data_binding.fields]]
+name = "pep_declaration"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "edd_questionnaire_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+steps = ["source_of_funds", "source_of_wealth", "pep", "adverse_media", "attestation"]
+
+[screen.policy]
+policy_ids = ["KYC-EDD-01"]
+purpose = "conduct_edd"
+allowed_actions = ["read", "create", "update", "propose"]
+subject_scope = "role"
+segregation_class = "risk-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "EDDQuestionnaire"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-06"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "risk-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-EDD-01"
+version = "1"
+hash = "sha256:2020202020202020202020202020202020202020202020202020202020202020"
+required = true
+
+[screen.provenance]
+owner = "risk-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1007"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m06.edd"
+stable_id = "screen:6.2"
+allow_generated_names = false
+
+# ── 6.3 Risk Rules ───────────────────────────────────────────────────
+
+[[screen]]
+id = "6.3"
+name = "Risk Rules"
+module = "M06"
+archetype = "settings_screen"
+stage = "built"
+roles = ["platform_admin:RW", "compliance_officer:RW"]
+datasets = ["KYC.risk_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "settings/risk_rules"
+mount_symbol = "mount_risk_rules"
+renderer = "web"
+artifact_namespace = "kyc.m06.risk_rules"
+generated_files = ["src/screens/m06_risk_rules.nir"]
+route_path = "/risk/rules"
+route_owner = "M06"
+
+[screen.data_binding]
+entities = ["RiskRule"]
+store = "KYC.risk_store"
+schema_version = "risk/v1"
+primary_key = "rule_id"
+catalog_ref = "CATALOG.kyc.risk_rules"
+
+[[screen.data_binding.fields]]
+name = "rule_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "rule_name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "severity"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "expression"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "risk_rule_table"
+purpose = "Compliance"
+row_id = "current"
+
+[screen.parameters]
+access = "role"
+
+[screen.policy]
+policy_ids = ["KYC-RISK-02"]
+purpose = "configure_risk_rules"
+allowed_actions = ["read", "update"]
+subject_scope = "role"
+segregation_class = "risk-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "RiskRule"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-06"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "risk-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-RISK-02"
+version = "1"
+hash = "sha256:3030303030303030303030303030303030303030303030303030303030303030"
+required = true
+
+[screen.provenance]
+owner = "risk-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1007"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m06.risk_rules"
+stable_id = "screen:6.3"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M07 — Corporate & UBO
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "7.1"
+name = "Corporate Entities"
+module = "M07"
+archetype = "crud_screens"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "compliance_officer:RW", "auditor:R"]
+datasets = ["KYC.corporate_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/corporate"
+mount_symbol = "mount_corporate_entities"
+renderer = "web"
+artifact_namespace = "kyc.m07.corporate_entities"
+generated_files = ["src/screens/m07_corporate_entities.nir"]
+route_path = "/corporate/entities"
+route_owner = "M07"
+
+[screen.data_binding]
+entities = ["CorporateEntity", "OwnershipLink"]
+store = "KYC.corporate_store"
+schema_version = "corporate/v1"
+primary_key = "entity_id"
+catalog_ref = "CATALOG.kyc.corporate"
+
+[[screen.data_binding.fields]]
+name = "entity_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "legal_name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "registration_number"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "jurisdiction"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "entity_type"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "corporate_entity_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+create_fields = ["legal_name", "registration_number", "jurisdiction", "entity_type"]
+update_fields = ["legal_name", "jurisdiction", "entity_type"]
+
+[screen.policy]
+policy_ids = ["KYC-UBO-01"]
+purpose = "manage_corporate_entities"
+allowed_actions = ["read", "create", "update"]
+subject_scope = "role"
+segregation_class = "corporate-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "CorporateEntity"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-07"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "corporate-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-UBO-01"
+version = "1"
+hash = "sha256:4040404040404040404040404040404040404040404040404040404040404040"
+required = true
+
+[screen.provenance]
+owner = "corporate-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1008"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m07.corporate_entities"
+stable_id = "screen:7.1"
+allow_generated_names = false
+
+# ── 7.2 UBO Tree ─────────────────────────────────────────────────────
+
+[[screen]]
+id = "7.2"
+name = "UBO Tree"
+module = "M07"
+archetype = "tree_view"
+stage = "built"
+roles = ["kyc_analyst:R", "kyc_senior_analyst:R", "compliance_officer:R", "auditor:R"]
+datasets = ["KYC.corporate_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "tree/ubo"
+mount_symbol = "mount_ubo_tree"
+renderer = "web"
+artifact_namespace = "kyc.m07.ubo_tree"
+generated_files = ["src/screens/m07_ubo_tree.nir"]
+route_path = "/corporate/entities/{id}/ubo"
+route_owner = "M07"
+
+[screen.data_binding]
+entities = ["UBORecord"]
+store = "KYC.corporate_store"
+schema_version = "corporate/v1"
+primary_key = "ubo_id"
+catalog_ref = "CATALOG.kyc.ubo"
+
+[[screen.data_binding.fields]]
+name = "ubo_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "parent_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "label"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "ownership_pct"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "is_controller"
+type = "String"
+required = false
+
+[screen.data_binding.guard]
+table = "ubo_record_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+id_field = "ubo_id"
+parent_field = "parent_id"
+label_field = "label"
+
+[screen.policy]
+policy_ids = ["KYC-UBO-02"]
+purpose = "discover_ubo"
+allowed_actions = ["read"]
+subject_scope = "role"
+segregation_class = "corporate-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "UBORecord"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-07"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "corporate-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-UBO-02"
+version = "1"
+hash = "sha256:5050505050505050505050505050505050505050505050505050505050505050"
+required = true
+
+[screen.provenance]
+owner = "corporate-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1008"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m07.ubo_tree"
+stable_id = "screen:7.2"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M08 — Case Management
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "8.1"
+name = "Review Queue"
+module = "M08"
+archetype = "approval_inbox"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "kyc_mlro:RW"]
+datasets = ["KYC.case_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "approval/review_queue"
+mount_symbol = "mount_review_queue"
+renderer = "web"
+artifact_namespace = "kyc.m08.review_queue"
+generated_files = ["src/screens/m08_review_queue.nir"]
+route_path = "/cases/queue"
+route_owner = "M08"
+
+[screen.data_binding]
+entities = ["ReviewTask"]
+store = "KYC.case_store"
+schema_version = "case/v1"
+primary_key = "task_id"
+catalog_ref = "CATALOG.kyc.review_queue"
+
+[[screen.data_binding.fields]]
+name = "task_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "assignee_role"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "task_status"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "priority"
+type = "String"
+required = false
+
+[screen.data_binding.guard]
+table = "review_task_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+
+[[screen.parameters.sources]]
+table = "review_task_table"
+chain = "case_review"
+detail_path = "/cases/{id}"
+
+[screen.policy]
+policy_ids = ["KYC-CASE-01"]
+purpose = "work_review_queue"
+allowed_actions = ["read", "confirm", "reject"]
+subject_scope = "role"
+segregation_class = "case-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "ReviewTask"
+event_class = "access"
+level = "notice"
+policy_id = "LOG-KYC-08"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "case-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CASE-01"
+version = "1"
+hash = "sha256:6060606060606060606060606060606060606060606060606060606060606060"
+required = true
+
+[screen.provenance]
+owner = "case-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1009"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m08.review_queue"
+stable_id = "screen:8.1"
+allow_generated_names = false
+
+# ── 8.2 Case Detail ──────────────────────────────────────────────────
+
+[[screen]]
+id = "8.2"
+name = "Case Detail"
+module = "M08"
+archetype = "workspace"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "kyc_mlro:RW", "compliance_officer:R", "auditor:R"]
+datasets = ["KYC.case_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "workspace/case"
+mount_symbol = "mount_case_detail"
+renderer = "web"
+artifact_namespace = "kyc.m08.case_detail"
+generated_files = ["src/screens/m08_case_detail.nir"]
+route_path = "/cases/{id}"
+route_owner = "M08"
+
+[screen.data_binding]
+entities = ["KYCCase", "CaseNote"]
+store = "KYC.case_store"
+schema_version = "case/v1"
+primary_key = "case_id"
+catalog_ref = "CATALOG.kyc.case_detail"
+
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "status"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "risk_rating"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "decision_rationale"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+editable = true
+
+[screen.data_binding.guard]
+table = "kyc_case_table"
+purpose = "Operations"
+
+[screen.parameters.subject]
+entity = "KYCCase"
+label_field = "case_id"
+
+[[screen.parameters.panels]]
+need = "notes"
+title = "Case notes"
+render = "list"
+source = { entity = "CaseNote", link_field = "case_id" }
+
+[[screen.parameters.panels]]
+need = "tasks"
+title = "Open tasks"
+render = "list"
+source = { entity = "ReviewTask", link_field = "case_id" }
+
+[screen.policy]
+policy_ids = ["KYC-CASE-02"]
+purpose = "manage_case"
+allowed_actions = ["read", "update", "confirm", "reject"]
+subject_scope = "role"
+segregation_class = "case-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "KYCCase"
+event_class = "access"
+level = "notice"
+policy_id = "LOG-KYC-08"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "case-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CASE-02"
+version = "1"
+hash = "sha256:7070707070707070707070707070707070707070707070707070707070707070"
+required = true
+
+[screen.provenance]
+owner = "case-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1009"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m08.case_detail"
+stable_id = "screen:8.2"
+allow_generated_names = false
+
+# ── 8.3 Case Pipeline ────────────────────────────────────────────────
+
+[[screen]]
+id = "8.3"
+name = "Case Pipeline"
+module = "M08"
+archetype = "kanban_board"
+stage = "built"
+roles = ["kyc_senior_analyst:RW", "kyc_mlro:RW"]
+datasets = ["KYC.case_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "kanban/cases"
+mount_symbol = "mount_case_pipeline"
+renderer = "web"
+artifact_namespace = "kyc.m08.case_pipeline"
+generated_files = ["src/screens/m08_case_pipeline.nir"]
+route_path = "/cases/pipeline"
+route_owner = "M08"
+
+[screen.data_binding]
+entities = ["KYCCase"]
+store = "KYC.case_store"
+schema_version = "case/v1"
+primary_key = "case_id"
+catalog_ref = "CATALOG.kyc.case_pipeline"
+
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "status"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "risk_rating"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "sla_due_at"
+type = "String"
+required = false
+
+[screen.data_binding.guard]
+table = "kyc_case_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+column_field = "status"
+title_field = "case_id"
+move_path = "/cases/pipeline/{id}/move/{to}"
+
+[screen.policy]
+policy_ids = ["KYC-CASE-03"]
+purpose = "manage_case_pipeline"
+allowed_actions = ["read", "update"]
+subject_scope = "role"
+segregation_class = "case-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "KYCCase"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-08"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "case-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CASE-03"
+version = "1"
+hash = "sha256:8080808080808080808080808080808080808080808080808080808080808080"
+required = true
+
+[screen.provenance]
+owner = "case-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1009"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "compact"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m08.case_pipeline"
+stable_id = "screen:8.3"
+allow_generated_names = false
+
+# ── 8.4 Case Notes ───────────────────────────────────────────────────
+
+[[screen]]
+id = "8.4"
+name = "Case Notes"
+module = "M08"
+archetype = "communication_feed"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "kyc_mlro:RW"]
+datasets = ["KYC.case_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "feed/case_notes"
+mount_symbol = "mount_case_notes"
+renderer = "web"
+artifact_namespace = "kyc.m08.case_notes"
+generated_files = ["src/screens/m08_case_notes.nir"]
+route_path = "/cases/{id}/notes"
+route_owner = "M08"
+
+[screen.data_binding]
+entities = ["CaseNote"]
+store = "KYC.case_store"
+schema_version = "case/v1"
+primary_key = "note_id"
+catalog_ref = "CATALOG.kyc.case_notes"
+
+[[screen.data_binding.fields]]
+name = "note_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "author_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "body"
+type = "Option<String>"
+required = true
+sensitive = true
+masked = true
+editable = true
+
+[[screen.data_binding.fields]]
+name = "created_at"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "case_note_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+refresh_seconds = 5
+
+[[screen.parameters.guard]]
+table = "case_note_table"
+purpose = "Operations"
+
+[screen.policy]
+policy_ids = ["KYC-CASE-04"]
+purpose = "annotate_case"
+allowed_actions = ["read", "create"]
+subject_scope = "role"
+segregation_class = "case-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "CaseNote"
+event_class = "transaction"
+level = "info"
+policy_id = "LOG-KYC-08"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "case-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CASE-04"
+version = "1"
+hash = "sha256:9090909090909090909090909090909090909090909090909090909090909090"
+required = true
+
+[screen.provenance]
+owner = "case-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1009"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = true
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m08.case_notes"
+stable_id = "screen:8.4"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M09 — Ongoing Monitoring
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "9.1"
+name = "Periodic Reviews"
+module = "M09"
+archetype = "crud_screens"
+stage = "built"
+roles = ["kyc_analyst:RW", "kyc_senior_analyst:RW", "compliance_officer:RW"]
+datasets = ["KYC.monitoring_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/periodic_reviews"
+mount_symbol = "mount_periodic_reviews"
+renderer = "web"
+artifact_namespace = "kyc.m09.periodic_reviews"
+generated_files = ["src/screens/m09_periodic_reviews.nir"]
+route_path = "/monitoring/reviews"
+route_owner = "M09"
+
+[screen.data_binding]
+entities = ["PeriodicReview"]
+store = "KYC.monitoring_store"
+schema_version = "monitoring/v1"
+primary_key = "review_id"
+catalog_ref = "CATALOG.kyc.periodic_review"
+
+[[screen.data_binding.fields]]
+name = "review_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "due_at"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "review_status"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "cadence"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "periodic_review_table"
+purpose = "Operations"
+
+[screen.parameters]
+access = "role"
+create_fields = ["customer_id", "due_at", "cadence"]
+update_fields = ["due_at", "review_status", "cadence"]
+
+[screen.policy]
+policy_ids = ["KYC-MON-01"]
+purpose = "manage_periodic_reviews"
+allowed_actions = ["read", "create", "update"]
+subject_scope = "role"
+segregation_class = "monitoring-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "PeriodicReview"
+event_class = "transaction"
+level = "info"
+policy_id = "LOG-KYC-09"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "kyc-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-MON-01"
+version = "1"
+hash = "sha256:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+required = true
+
+[screen.provenance]
+owner = "monitoring-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1010"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m09.periodic_reviews"
+stable_id = "screen:9.1"
+allow_generated_names = false
+
+# ── 9.2 Monitoring Report ────────────────────────────────────────────
+
+[[screen]]
+id = "9.2"
+name = "Monitoring Report"
+module = "M09"
+archetype = "report_builder"
+stage = "built"
+roles = ["kyc_mlro:R", "compliance_officer:R", "auditor:R"]
+datasets = ["KYC.monitoring_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "report/monitoring"
+mount_symbol = "mount_monitoring_report"
+renderer = "web"
+artifact_namespace = "kyc.m09.monitoring_report"
+generated_files = ["src/screens/m09_monitoring_report.nir"]
+route_path = "/monitoring/report"
+route_owner = "M09"
+
+[screen.data_binding]
+entities = ["PeriodicReview"]
+store = "KYC.monitoring_store"
+schema_version = "monitoring/v1"
+primary_key = "review_id"
+catalog_ref = "CATALOG.kyc.monitoring_report"
+
+[[screen.data_binding.fields]]
+name = "review_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "cadence"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "review_status"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "periodic_review_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+dimensions = ["cadence", "review_status"]
+
+[screen.policy]
+policy_ids = ["KYC-MON-02"]
+purpose = "report_monitoring"
+allowed_actions = ["read", "aggregate"]
+subject_scope = "role"
+segregation_class = "monitoring-boundary"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "PeriodicReview"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-09"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "kyc-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-MON-02"
+version = "1"
+hash = "sha256:b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+required = true
+
+[screen.provenance]
+owner = "monitoring-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1010"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m09.monitoring_report"
+stable_id = "screen:9.2"
+allow_generated_names = false
+
+
+# ─────────────────────────────────────────────────────────────────────
+# M10 — Reporting & Audit
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "10.1"
+name = "KYC Status Report"
+module = "M10"
+archetype = "report_builder"
+stage = "built"
+roles = ["kyc_senior_analyst:R", "kyc_mlro:R", "compliance_officer:R", "auditor:R"]
+datasets = ["KYC.case_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "report/kyc_status"
+mount_symbol = "mount_kyc_status_report"
+renderer = "web"
+artifact_namespace = "kyc.m10.kyc_status"
+generated_files = ["src/screens/m10_kyc_status.nir"]
+route_path = "/reports/kyc-status"
+route_owner = "M10"
+
+[screen.data_binding]
+entities = ["KYCCase"]
+store = "KYC.case_store"
+schema_version = "case/v1"
+primary_key = "case_id"
+catalog_ref = "CATALOG.kyc.status_report"
+
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "status"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "risk_rating"
+type = "String"
+required = false
+
+[screen.data_binding.guard]
+table = "kyc_case_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+dimensions = ["status", "risk_rating"]
+
+[screen.policy]
+policy_ids = ["KYC-REP-01"]
+purpose = "report_kyc_status"
+allowed_actions = ["read", "aggregate"]
+subject_scope = "role"
+segregation_class = "reporting"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "KYCCase"
+event_class = "access"
+level = "info"
+policy_id = "LOG-KYC-10"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "report-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-REP-01"
+version = "1"
+hash = "sha256:c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+required = true
+
+[screen.provenance]
+owner = "reporting-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1011"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m10.kyc_status"
+stable_id = "screen:10.1"
+allow_generated_names = false
+
+# ── 10.2 Audit Log ───────────────────────────────────────────────────
+
+[[screen]]
+id = "10.2"
+name = "Audit Log"
+module = "M10"
+archetype = "crud_screens"
+stage = "built"
+roles = ["auditor:R", "compliance_officer:R", "kyc_mlro:R"]
+datasets = ["KYC.audit_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/audit"
+mount_symbol = "mount_audit_log"
+renderer = "web"
+artifact_namespace = "kyc.m10.audit_log"
+generated_files = ["src/screens/m10_audit_log.nir"]
+route_path = "/audit/log"
+route_owner = "M10"
+
+[screen.data_binding]
+entities = ["AuditEntry"]
+store = "KYC.audit_store"
+schema_version = "audit/v1"
+primary_key = "entry_id"
+catalog_ref = "CATALOG.kyc.audit"
+
+[[screen.data_binding.fields]]
+name = "entry_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "actor_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "action"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "resource"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "occurred_at"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "detail"
+type = "Option<String>"
+required = false
+sensitive = true
+masked = true
+
+[screen.data_binding.guard]
+table = "audit_entry_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+create_fields = []
+update_fields = []
+
+[screen.policy]
+policy_ids = ["KYC-AUD-01"]
+purpose = "read_audit_log"
+allowed_actions = ["read"]
+subject_scope = "role"
+segregation_class = "audit-boundary"
+
+[screen.logging]
+domain = "audit"
+country = "*"
+entity = "AuditEntry"
+event_class = "access"
+level = "notice"
+policy_id = "LOG-KYC-10"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "audit-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-AUD-01"
+version = "1"
+hash = "sha256:d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+required = true
+
+[screen.provenance]
+owner = "audit-platform"
+reviewers = ["compliance", "security"]
+change_ticket = "KYC-1011"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "compact"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m10.audit_log"
+stable_id = "screen:10.2"
+allow_generated_names = false
+
+# ── 10.3 SAR Filing ──────────────────────────────────────────────────
+
+[[screen]]
+id = "10.3"
+name = "SAR Filing"
+module = "M10"
+archetype = "crud_screens"
+stage = "built"
+roles = ["kyc_mlro:RW", "compliance_officer:RW"]
+datasets = ["KYC.audit_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/sar"
+mount_symbol = "mount_sar_filing"
+renderer = "web"
+artifact_namespace = "kyc.m10.sar_filing"
+generated_files = ["src/screens/m10_sar_filing.nir"]
+route_path = "/reports/sar"
+route_owner = "M10"
+
+[screen.data_binding]
+entities = ["SARFiling"]
+store = "KYC.audit_store"
+schema_version = "audit/v1"
+primary_key = "filing_id"
+catalog_ref = "CATALOG.kyc.sar"
+
+[[screen.data_binding.fields]]
+name = "filing_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "filing_status"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "submitted_at"
+type = "String"
+required = false
+
+[[screen.data_binding.fields]]
+name = "narrative"
+type = "Option<String>"
+required = true
+sensitive = true
+masked = true
+editable = true
+
+[screen.data_binding.guard]
+table = "sar_filing_table"
+purpose = "Compliance"
+
+[screen.parameters]
+access = "role"
+create_fields = ["case_id", "filing_status"]
+update_fields = ["filing_status", "submitted_at"]
+
+[screen.policy]
+policy_ids = ["KYC-SAR-01"]
+purpose = "file_sar"
+allowed_actions = ["read", "create", "update"]
+subject_scope = "role"
+segregation_class = "reporting"
+
+[screen.logging]
+domain = "kyc"
+country = "*"
+entity = "SARFiling"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-10"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "report-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-SAR-01"
+version = "1"
+hash = "sha256:e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+required = true
+
+[screen.provenance]
+owner = "reporting-platform"
+reviewers = ["compliance", "mlro"]
+change_ticket = "KYC-1011"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m10.sar_filing"
+stable_id = "screen:10.3"
+allow_generated_names = false
+
+# ─────────────────────────────────────────────────────────────────────
+# M11 — Configuration
+# ─────────────────────────────────────────────────────────────────────
+
+[[screen]]
+id = "11.1"
+name = "Checklists"
+module = "M11"
+archetype = "crud_screens"
+stage = "built"
+roles = ["platform_admin:RW", "compliance_officer:RW"]
+datasets = ["KYC.config_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/checklists"
+mount_symbol = "mount_checklists"
+renderer = "web"
+artifact_namespace = "kyc.m11.checklists"
+generated_files = ["src/screens/m11_checklists.nir"]
+route_path = "/config/checklists"
+route_owner = "M11"
+
+[screen.data_binding]
+entities = ["ChecklistTemplate"]
+store = "KYC.config_store"
+schema_version = "config/v1"
+primary_key = "template_id"
+catalog_ref = "CATALOG.kyc.checklists"
+
+[[screen.data_binding.fields]]
+name = "template_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "name"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "applies_to"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "steps"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "checklist_template_table"
+purpose = "Administration"
+
+[screen.parameters]
+access = "role"
+create_fields = ["name", "applies_to", "steps"]
+update_fields = ["name", "applies_to", "steps"]
+
+[screen.policy]
+policy_ids = ["KYC-CFG-01"]
+purpose = "manage_checklists"
+allowed_actions = ["read", "create", "update", "delete"]
+subject_scope = "role"
+segregation_class = "configuration"
+
+[screen.logging]
+domain = "platform"
+country = "*"
+entity = "ChecklistTemplate"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-11"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "none"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CFG-01"
+version = "1"
+hash = "sha256:f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+required = true
+
+[screen.provenance]
+owner = "config-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1012"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m11.checklists"
+stable_id = "screen:11.1"
+allow_generated_names = false
+
+# ── 11.2 Role Matrix ─────────────────────────────────────────────────
+
+[[screen]]
+id = "11.2"
+name = "Role Matrix"
+module = "M11"
+archetype = "settings_screen"
+stage = "built"
+roles = ["platform_admin:RW"]
+datasets = ["KYC.config_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "settings/roles"
+mount_symbol = "mount_role_matrix"
+renderer = "web"
+artifact_namespace = "kyc.m11.role_matrix"
+generated_files = ["src/screens/m11_role_matrix.nir"]
+route_path = "/config/roles"
+route_owner = "M11"
+
+[screen.data_binding]
+entities = ["ChecklistTemplate"]
+store = "KYC.config_store"
+schema_version = "config/v1"
+primary_key = "template_id"
+catalog_ref = "CATALOG.kyc.roles"
+
+[[screen.data_binding.fields]]
+name = "template_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "applies_to"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "checklist_template_table"
+purpose = "Administration"
+row_id = "current"
+
+[screen.parameters]
+access = "role"
+
+[screen.policy]
+policy_ids = ["KYC-CFG-02"]
+purpose = "manage_roles"
+allowed_actions = ["read", "update"]
+subject_scope = "role"
+segregation_class = "configuration"
+
+[screen.logging]
+domain = "platform"
+country = "*"
+entity = "RoleMatrix"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-11"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "none"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CFG-02"
+version = "1"
+hash = "sha256:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+required = true
+
+[screen.provenance]
+owner = "config-platform"
+reviewers = ["security", "compliance"]
+change_ticket = "KYC-1012"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m11.role_matrix"
+stable_id = "screen:11.2"
+allow_generated_names = false
+
+# ── 11.3 Document Requirements ───────────────────────────────────────
+
+[[screen]]
+id = "11.3"
+name = "Document Requirements"
+module = "M11"
+archetype = "crud_screens"
+stage = "built"
+roles = ["platform_admin:RW", "compliance_officer:RW"]
+datasets = ["KYC.config_store"]
+blocked_by = []
+
+[screen.codegen]
+template = "crud/document_requirements"
+mount_symbol = "mount_document_requirements"
+renderer = "web"
+artifact_namespace = "kyc.m11.document_requirements"
+generated_files = ["src/screens/m11_document_requirements.nir"]
+route_path = "/config/document-requirements"
+route_owner = "M11"
+
+[screen.data_binding]
+entities = ["DocumentRequirement", "DocumentType"]
+store = "KYC.config_store"
+schema_version = "config/v1"
+primary_key = "requirement_id"
+catalog_ref = "CATALOG.kyc.document_requirements"
+
+[[screen.data_binding.fields]]
+name = "requirement_id"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "document_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "customer_type"
+type = "String"
+required = true
+
+[[screen.data_binding.fields]]
+name = "is_mandatory"
+type = "String"
+required = true
+
+[screen.data_binding.guard]
+table = "document_requirement_table"
+purpose = "Administration"
+
+[screen.parameters]
+access = "role"
+create_fields = ["document_type", "customer_type", "is_mandatory"]
+update_fields = ["document_type", "customer_type", "is_mandatory"]
+
+[screen.policy]
+policy_ids = ["KYC-CFG-03"]
+purpose = "manage_document_requirements"
+allowed_actions = ["read", "create", "update", "delete"]
+subject_scope = "role"
+segregation_class = "configuration"
+
+[screen.logging]
+domain = "platform"
+country = "*"
+entity = "DocumentRequirement"
+event_class = "transaction"
+level = "notice"
+policy_id = "LOG-KYC-11"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "none"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "KYC-CFG-03"
+version = "1"
+hash = "sha256:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+required = true
+
+[screen.provenance]
+owner = "config-platform"
+reviewers = ["compliance"]
+change_ticket = "KYC-1012"
+last_verified_revision = "git:aaaaaaa"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "kyc.m11.document_requirements"
+stable_id = "screen:11.3"
+allow_generated_names = false

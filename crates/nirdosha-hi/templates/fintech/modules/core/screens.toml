@@ -1,0 +1,79 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-core"
+version = "1.0.0"
+module = "M1"
+total_screens = 3
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+# ------------------------------------------------------------------ M1 Auth
+[[screen]]
+id = "0.1"
+name = "Login"
+module = "M1"
+archetype = "login"
+combo = []
+roles = ["AllRoles:R"]
+datasets = []
+blocked_by = []
+stage = "built"
+codegen = { template = "login", mount_symbol = "mount_login", route_path = "/login", generated_files = ["src/app_shell.nir"] }
+parameters.demo_users = [
+    { username = "platform", password = "pass123", roles = ["PlatformAdmin"], avatar = "https://i.pravatar.cc/150?u=platform" },
+    { username = "merchant", password = "pass123", roles = ["MerchantAdmin"], avatar = "https://i.pravatar.cc/150?u=merchant" },
+    { username = "operator", password = "pass123", roles = ["Operator"], avatar = "https://i.pravatar.cc/150?u=operator" },
+    { username = "compliance", password = "pass123", roles = ["ComplianceOfficer"], avatar = "https://i.pravatar.cc/150?u=compliance" },
+]
+notes = "demo auth; production mode needs OIDC/JWKS wiring"
+
+# ------------------------------------------------------------------ M1 Dashboard
+[[screen]]
+id = "1.1"
+name = "Dashboard"
+module = "M1"
+archetype = "dashboard"
+roles = ["PlatformAdmin", "MerchantAdmin", "Operator"]
+datasets = ["payments", "merchants", "settlements"]
+stage = "built"
+codegen = { template = "dashboard", mount_symbol = "mount_dashboard", route_path = "/", generated_files = ["src/screens/m01_dashboard.nir"] }
+data_binding = { entities = ["Payment"], primary_key = "payment_id", guard = { table = "payment", purpose = "DashboardRead" }, fields = [
+    { name = "payment_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "status", type = "String" },
+    { name = "created_at", type = "String" }
+] }
+policy = { purpose = "DashboardRead", allowed_actions = ["read", "aggregate"] }
+[screen.parameters]
+title = "Payments Dashboard"
+refresh_seconds = 60
+widgets = [
+    { kind = "Metric", label = "Volume today", fn = "daily_volume", source = { table = "payment", purpose = "DashboardRead", action = "aggregate" }, target = 100000000, alert_below = false },
+    { kind = "Metric", label = "Success rate", fn = "success_rate", source = { table = "payment", purpose = "DashboardRead", action = "aggregate" }, target = 99, alert_below = true }
+]
+file = "src/screens/m01_dashboard.nir"
+notes = "Aggregated payment volume, success rate, and alerts."
+
+[[screen]]
+id = "1.2"
+name = "Audit Log"
+module = "M1"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "ComplianceOfficer"]
+datasets = ["audit"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_audit", route_path = "/audit", generated_files = ["src/screens/m01_audit.nir"] }
+data_binding = { entities = ["AuditEntry"], primary_key = "entry_id", guard = { table = "audit", purpose = "AuditRead" }, fields = [
+    { name = "entry_id", type = "String" },
+    { name = "event_type", type = "String" },
+    { name = "actor", type = "String" },
+    { name = "resource", type = "String" },
+    { name = "timestamp", type = "String" }
+] }
+policy = { purpose = "AuditRead", allowed_actions = ["read", "aggregate"] }
+file = "src/screens/m01_audit.nir"
+notes = "Immutable audit trail of payment operations."

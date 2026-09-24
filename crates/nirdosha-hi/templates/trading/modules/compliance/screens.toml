@@ -1,0 +1,35 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-compliance"
+version = "1.0.0"
+module = "M8"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "8.1"
+name = "Trade Surveillance"
+module = "M8"
+archetype = "report_builder"
+roles = ["ComplianceOfficer"]
+stage = "blocked"
+blocked_by = ["primitive:trade_surveillance", "primitive:alert_generation"]
+codegen = { template = "report", mount_symbol = "mount_surveillance", route_path = "/surveillance", generated_files = ["src/screens/m08_compliance.nir"] }
+data_binding = { entities = ["Order"], primary_key = "order_id", guard = { table = "order", purpose = "ComplianceRead" }, fields = [
+    { name = "order_id", type = "String" },
+    { name = "account_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "side", type = "String" },
+    { name = "quantity", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "ComplianceRead", allowed_actions = ["read"] }
+[screen.parameters]
+dimensions = ["side", "status"]
+access = "role_gated"
+file = "src/screens/m08_compliance.nir"
+notes = "BLOCKED: trade-surveillance + alert-generation primitives not yet available."

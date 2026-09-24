@@ -1,0 +1,22 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading Instruments"
+
+[landing]
+Trader = "/instruments"
+
+[[group]]
+id = "instruments"
+label_key = "nav.group.instruments"
+order = 20
+
+[[menu]]
+id = "nav.instruments"
+label_key = "nav.instruments"
+group = "instruments"
+screen_id = "2.1"
+route = "/instruments"
+guard = { action = "read", resource = "instrument" }
+roles = ["Trader", "RiskManager", "Operations"]
+order = 10

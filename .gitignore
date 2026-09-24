@@ -57,3 +57,4 @@ scratch/
 migrations/*.sql
 .playwright-cli/
 
+crates/nirdosha-hi/.nir/

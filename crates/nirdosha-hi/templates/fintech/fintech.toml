@@ -1,0 +1,71 @@
+[template]
+schema = "nirdosha.template/v1"
+app_title = "Fintech Payments Hub"
+app_name = "fintech-payments"
+org_name = "Nirdosha Fintech"
+environment_name = "local"
+default_country = "US"
+
+# Modules that make up a fintech / payment-platform app.
+[modules]
+core = { required = true, default = true }
+merchants = { required = true, default = true }
+payment_gateways = { required = false, default = true }
+psp = { required = false, default = false }
+wallets = { required = false, default = true }
+payouts = { required = false, default = false }
+fraud = { required = false, default = true }
+transaction_monitoring = { required = false, default = false }
+ai_ml = { required = false, default = false }
+invoicing = { required = false, default = false }
+subscriptions = { required = false, default = false }
+reconciliation = { required = false, default = false }
+chargebacks = { required = false, default = false }
+sanctions = { required = false, default = false }
+reporting = { required = false, default = false }
+
+# Entities reused across modules. The owner module is the source of truth
+# for the canonical shape; other modules may reference them.
+[shared_entities]
+Merchant.owner = "merchants"
+Merchant.pk = "merchant_id"
+PaymentMethod.owner = "core"
+PaymentMethod.pk = "method_id"
+Customer.owner = "core"
+Customer.pk = "customer_id"
+AuditEntry.owner = "core"
+AuditEntry.pk = "entry_id"
+
+# Country-specific configuration used by certified primitives.
+[country.US]
+currency = "USD"
+decimal_places = 2
+transfer_daily_limit_cents = "2500000"
+large_transfer_threshold_cents = "100000"
+loan_max_principal_cents = "0"
+
+[country.GB]
+currency = "GBP"
+decimal_places = 2
+transfer_daily_limit_cents = "2000000"
+large_transfer_threshold_cents = "80000"
+loan_max_principal_cents = "0"
+
+[country.EU]
+currency = "EUR"
+decimal_places = 2
+transfer_daily_limit_cents = "2200000"
+large_transfer_threshold_cents = "90000"
+loan_max_principal_cents = "0"
+
+[country.IN]
+currency = "INR"
+decimal_places = 2
+transfer_daily_limit_cents = "5000000"
+large_transfer_threshold_cents = "200000"
+loan_max_principal_cents = "0"
+
+[logging]
+domain = "payments"
+country = "US"
+event_class = "audit"

@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Reporting"
+
+[[group]]
+id = "reporting"
+label_key = "nav.group.reporting"
+order = 90
+
+[[menu]]
+id = "nav.reports"
+label_key = "nav.reports"
+group = "reporting"
+screen_id = "8.1"
+route = "/reports"
+guard = { action = "read", resource = "report" }
+roles = ["PlatformAdmin", "MerchantAdmin", "RiskAnalyst"]
+order = 10

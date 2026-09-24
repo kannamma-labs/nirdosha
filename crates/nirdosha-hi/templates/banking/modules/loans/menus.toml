@@ -1,0 +1,29 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Loans"
+
+[[group]]
+id = "loans"
+label_key = "nav.group.loans"
+order = 40
+
+[[menu]]
+id = "nav.loans"
+label_key = "nav.loans"
+group = "loans"
+screen_id = "4.1"
+route = "/loans"
+guard = { action = "read", resource = "loanaccount" }
+roles = ["Customer", "LoanOfficer", "BranchManager"]
+order = 10
+
+[[menu]]
+id = "nav.loan_disbursement"
+label_key = "nav.loan_disbursement"
+group = "loans"
+screen_id = "4.2"
+route = "/loans/disbursement"
+guard = { action = "read", resource = "loanaccount" }
+roles = ["LoanOfficer", "BranchManager"]
+order = 20

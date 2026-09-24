@@ -1,0 +1,71 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-orders"
+version = "1.0.0"
+module = "M3"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "3.1"
+name = "Orders"
+module = "M3"
+archetype = "crud_screens"
+roles = ["Trader", "RiskManager", "Operations"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_orders", route_path = "/orders", generated_files = ["src/screens/m03_orders.nir"] }
+data_binding = { entities = ["Order"], primary_key = "order_id", guard = { table = "order", purpose = "OrderOps" }, fields = [
+    { name = "order_id", type = "String" },
+    { name = "account_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "side", type = "String" },
+    { name = "quantity", type = "String" },
+    { name = "price", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "OrderOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m03_orders.nir"
+notes = "Order book and order history."
+
+[[screen]]
+id = "3.2"
+name = "New Order"
+module = "M3"
+archetype = "wizard"
+roles = ["Trader"]
+stage = "blocked"
+blocked_by = ["primitive:order_validate", "primitive:margin_check", "primitive:market_data_snapshot"]
+codegen = { template = "wizard", mount_symbol = "mount_new_order", route_path = "/orders/new", generated_files = ["src/screens/m03_orders.nir"] }
+data_binding = { entities = ["Order"], primary_key = "order_id", guard = { table = "order", purpose = "OrderOps" }, fields = [
+    { name = "order_id", type = "String" },
+    { name = "account_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "side", type = "String" },
+    { name = "quantity", type = "String" },
+    { name = "price", type = "String" }
+] }
+policy = { purpose = "OrderOps", allowed_actions = ["create"] }
+[screen.parameters]
+access = "role_gated"
+[[screen.parameters.steps]]
+name = "Instrument"
+[[screen.parameters.steps.fields]]
+name = "instrument_id"
+type = "String"
+[[screen.parameters.steps.fields]]
+name = "side"
+type = "String"
+[[screen.parameters.steps]]
+name = "Quantity"
+[[screen.parameters.steps.fields]]
+name = "quantity"
+type = "String"
+[[screen.parameters.steps.fields]]
+name = "price"
+type = "String"
+file = "src/screens/m03_orders.nir"
+notes = "BLOCKED: order validation, margin check and market-data primitives not yet available."

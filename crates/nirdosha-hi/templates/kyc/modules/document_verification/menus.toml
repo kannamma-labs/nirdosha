@@ -1,0 +1,20 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Document Verification"
+
+[landing]
+
+[[group]]
+id = "verification"
+label_key = "nav.group.verification"
+order = 30
+
+[[menu]]
+id = "nav.document_verification_providers"
+label_key = "Document Verification Providers"
+group = "verification"
+screen_id = "1.1"
+route = "/vendors/document-verification"
+roles = ["OnboardingOfficer", "compliance_officer"]
+order = 10

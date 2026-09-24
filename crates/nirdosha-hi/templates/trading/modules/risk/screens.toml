@@ -1,0 +1,31 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-risk"
+version = "1.0.0"
+module = "M5"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "5.1"
+name = "Risk Limits"
+module = "M5"
+archetype = "crud_screens"
+roles = ["RiskManager", "Operations"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_risk", route_path = "/risk", generated_files = ["src/screens/m05_risk.nir"] }
+data_binding = { entities = ["RiskLimit"], primary_key = "limit_id", guard = { table = "risk_limit", purpose = "RiskOps" }, fields = [
+    { name = "limit_id", type = "String" },
+    { name = "account_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "limit_type", type = "String" },
+    { name = "max_exposure", type = "String" },
+    { name = "currency", type = "String" }
+] }
+policy = { purpose = "RiskOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m05_risk.nir"
+notes = "Risk limits and exposure management."

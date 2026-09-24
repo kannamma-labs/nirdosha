@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Subscriptions"
+
+[[group]]
+id = "subscriptions"
+label_key = "nav.group.subscriptions"
+order = 110
+
+[[menu]]
+id = "nav.subscriptions"
+label_key = "nav.subscriptions"
+group = "subscriptions"
+screen_id = "12.1"
+route = "/subscriptions"
+guard = { action = "read", resource = "subscription" }
+roles = ["PlatformAdmin", "MerchantAdmin"]
+order = 10

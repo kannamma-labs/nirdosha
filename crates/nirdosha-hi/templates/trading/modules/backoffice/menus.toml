@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading Back Office"
+
+[[group]]
+id = "backoffice"
+label_key = "nav.group.backoffice"
+order = 70
+
+[[menu]]
+id = "nav.settlements"
+label_key = "nav.settlements"
+group = "backoffice"
+screen_id = "7.1"
+route = "/settlements"
+guard = { action = "read", resource = "settlement" }
+roles = ["Operations"]
+order = 10

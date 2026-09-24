@@ -1,4 +1,6 @@
+pub mod graph_transport;
 pub mod hi_api;
+pub mod hi_composer;
 pub mod hi_graph;
 pub mod hi_llm;
 pub mod hi_plugin;
@@ -9,4 +11,3 @@ pub mod hint_cache;
 pub mod mcp_tools;
 pub mod v2_capabilities;
 pub mod v2_verify;
-pub mod graph_transport;

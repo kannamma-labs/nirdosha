@@ -1,0 +1,183 @@
+# ── Meta ─────────────────────────────────────────────────────────────
+
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Nirdosha KYC"
+
+# Landing per role. Other modules may override or append.
+[landing]
+kyc_analyst = "/dashboard"
+kyc_senior_analyst = "/dashboard"
+kyc_mlro = "/dashboard"
+compliance_officer = "/dashboard"
+relationship_manager = "/customers"
+auditor = "/audit/log"
+platform_admin = "/config/checklists"
+customer = "/onboarding/new"
+
+# ── Groups ───────────────────────────────────────────────────────────
+
+[[group]]
+id = "overview"
+label_key = "Overview"
+order = 10
+
+[[group]]
+id = "customers"
+label_key = "Customers"
+order = 20
+
+[[group]]
+id = "onboarding"
+label_key = "Onboarding"
+order = 30
+
+[[group]]
+id = "identity"
+label_key = "Identity & Documents"
+order = 40
+
+[[group]]
+id = "screening"
+label_key = "Screening"
+order = 50
+
+[[group]]
+id = "risk"
+label_key = "Risk & EDD"
+order = 60
+
+[[group]]
+id = "corporate"
+label_key = "Corporate & UBO"
+order = 70
+
+[[group]]
+id = "cases"
+label_key = "Case Management"
+order = 80
+
+[[group]]
+id = "monitoring"
+label_key = "Ongoing Monitoring"
+order = 90
+
+[[group]]
+id = "reporting"
+label_key = "Reporting & Audit"
+order = 100
+
+[[group]]
+id = "config"
+label_key = "Configuration"
+order = 110
+
+# ── Menus ────────────────────────────────────────────────────────────
+
+[[menu]]
+id = "dashboard"
+label_key = "Dashboard"
+group = "overview"
+screen_id = "1.3"
+route = "/dashboard"
+order = 10
+roles = ["kyc_analyst", "kyc_senior_analyst", "kyc_mlro", "compliance_officer", "relationship_manager", "auditor", "platform_admin"]
+
+[[menu]]
+id = "customer_list"
+label_key = "Customers"
+group = "customers"
+screen_id = "2.1"
+route = "/customers"
+order = 10
+roles = ["kyc_analyst", "kyc_senior_analyst", "compliance_officer", "relationship_manager", "auditor"]
+
+[[menu]]
+id = "customer_new"
+label_key = "New Customer"
+group = "customers"
+screen_id = "2.3"
+route = "/customers/new"
+order = 20
+roles = ["kyc_analyst", "relationship_manager"]
+
+[[menu]]
+id = "onboarding_wizard"
+label_key = "Start Onboarding"
+group = "onboarding"
+screen_id = "3.1"
+route = "/onboarding/new"
+order = 10
+roles = ["customer", "relationship_manager", "kyc_analyst"]
+
+[[menu]]
+id = "onboarding_pipeline"
+label_key = "Pipeline"
+group = "onboarding"
+screen_id = "3.3"
+route = "/onboarding/pipeline"
+order = 20
+roles = ["kyc_analyst", "kyc_senior_analyst"]
+
+[[menu]]
+id = "document_upload"
+label_key = "Upload Document"
+group = "identity"
+screen_id = "4.1"
+route = "/documents/upload"
+order = 10
+roles = ["customer", "relationship_manager", "kyc_analyst"]
+
+[[menu]]
+id = "document_review"
+label_key = "Document Review"
+group = "identity"
+screen_id = "4.2"
+route = "/documents/review"
+order = 20
+roles = ["kyc_analyst", "kyc_senior_analyst"]
+
+[[menu]]
+id = "screening_runs"
+label_key = "Screening Runs"
+group = "screening"
+screen_id = "5.1"
+route = "/screening/runs"
+order = 10
+roles = ["kyc_analyst", "kyc_senior_analyst", "compliance_officer"]
+
+[[menu]]
+id = "screening_hits"
+label_key = "Hit Review"
+group = "screening"
+screen_id = "5.2"
+route = "/screening/hits"
+order = 20
+roles = ["kyc_senior_analyst", "kyc_mlro", "compliance_officer"]
+
+[[menu]]
+id = "watchlists"
+label_key = "Watchlists"
+group = "screening"
+screen_id = "5.3"
+route = "/screening/watchlists"
+order = 30
+roles = ["compliance_officer", "platform_admin"]
+
+[[menu]]
+id = "risk_rules"
+label_key = "Risk Rules"
+group = "risk"
+screen_id = "6.3"
+route = "/risk/rules"
+order = 10
+roles = ["platform_admin", "compliance_officer"]
+
+[[menu]]
+id = "corporate_entities"
+label_key = "Corporate Entities"
+group = "corporate"
+screen_id = "7.1"
+route = "/corporate/entities"
+order = 10

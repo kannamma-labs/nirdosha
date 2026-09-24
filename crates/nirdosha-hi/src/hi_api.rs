@@ -12,8 +12,8 @@
 
 use std::path::Path;
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -78,23 +78,41 @@ pub struct ApiResponse {
 
 impl ApiResponse {
     fn html(body: &str) -> Self {
-        ApiResponse { status: 200, content_type: "text/html; charset=utf-8", body: body.as_bytes().to_vec() }
+        ApiResponse {
+            status: 200,
+            content_type: "text/html; charset=utf-8",
+            body: body.as_bytes().to_vec(),
+        }
     }
 
     fn javascript(body: &str) -> Self {
-        ApiResponse { status: 200, content_type: "application/javascript; charset=utf-8", body: body.as_bytes().to_vec() }
+        ApiResponse {
+            status: 200,
+            content_type: "application/javascript; charset=utf-8",
+            body: body.as_bytes().to_vec(),
+        }
     }
 
     fn json<T: Serialize>(value: &T) -> Self {
         match serde_json::to_vec(value) {
-            Ok(body) => ApiResponse { status: 200, content_type: "application/json", body },
+            Ok(body) => ApiResponse {
+                status: 200,
+                content_type: "application/json",
+                body,
+            },
             Err(e) => ApiResponse::error(500, &format!("serializing response: {e}")),
         }
     }
 
     pub fn error(status: u16, message: &str) -> Self {
-        let body = serde_json::json!({ "error": message }).to_string().into_bytes();
-        ApiResponse { status, content_type: "application/json", body }
+        let body = serde_json::json!({ "error": message })
+            .to_string()
+            .into_bytes();
+        ApiResponse {
+            status,
+            content_type: "application/json",
+            body,
+        }
     }
 }
 
@@ -109,7 +127,23 @@ impl ApiResponse {
 /// POST) -- the two checks together are this transport's real CSRF
 /// defense now that there's no embedded-webview transport left with no
 /// network origin to attack at all.
-const MUTATING_PATHS: &[&str] = &["/api/prompt", "/api/confirm", "/api/delete", "/api/edit", "/api/attach", "/api/waive", "/api/unwaive", "/api/packs/install", "/api/generate", "/api/publish", "/api/preview/start", "/api/preview/stop", "/api/screen-register/add"];
+const MUTATING_PATHS: &[&str] = &[
+    "/api/prompt",
+    "/api/confirm",
+    "/api/delete",
+    "/api/edit",
+    "/api/attach",
+    "/api/waive",
+    "/api/unwaive",
+    "/api/packs/install",
+    "/api/generate",
+    "/api/publish",
+    "/api/preview/start",
+    "/api/preview/stop",
+    "/api/screen-register/add",
+    "/api/compose",
+    "/api/composed/build",
+];
 
 /// Routes one request against a fresh connection opened on `root`.
 /// `path` excludes the query string; `query` is the raw, still
@@ -131,7 +165,11 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
     // a connection so a DB problem can never take the page/script down
     // with it (the page's own fetches to /api/* report that separately).
     match path {
-        "/" => return ApiResponse::html(&BUILD_MODE_HTML.replace("__NIRDOSHA_LOGO__", &logo_data_uri())),
+        "/" => {
+            return ApiResponse::html(
+                &BUILD_MODE_HTML.replace("__NIRDOSHA_LOGO__", &logo_data_uri()),
+            );
+        }
         "/assets/three.min.js" => return ApiResponse::javascript(THREE_JS),
         "/assets/3d-force-graph.min.js" => return ApiResponse::javascript(FORCE_GRAPH_JS),
         _ => {}
@@ -171,6 +209,9 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         },
         "/api/git" => handle_git(root, query),
         "/api/suggest" => handle_suggest(&conn),
+        "/api/templates" => handle_templates(),
+        "/api/compose" => handle_compose(root, body),
+        "/api/composed/build" => handle_composed_build(root, body),
         "/api/packs" => handle_packs_list(&conn),
         "/api/prompt" => handle_prompt(root, &conn, body),
         "/api/confirm" => handle_confirm(&conn, body),
@@ -190,7 +231,9 @@ pub fn handle(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -
         "/api/preview/status" => {
             let port = crate::hi_preview::status();
             let path = crate::hi_preview::path();
-            ApiResponse::json(&serde_json::json!({ "running": port.is_some(), "port": port, "path": path }))
+            ApiResponse::json(
+                &serde_json::json!({ "running": port.is_some(), "port": port, "path": path }),
+            )
         }
         _ => ApiResponse::error(404, "not found"),
     }
@@ -231,8 +274,16 @@ fn handle_packs_list(conn: &Connection) -> ApiResponse {
         .into_iter()
         .map(|(id, description, _bytes)| {
             let is_installed = installed.contains(&id.to_string());
-            let signer_identity = if is_installed { crate::hi_plugin::pack_signer_identity(conn, id).unwrap_or(None) } else { None };
-            let trust_indicator = if signer_identity.is_some() { "signed" } else { "unsigned" };
+            let signer_identity = if is_installed {
+                crate::hi_plugin::pack_signer_identity(conn, id).unwrap_or(None)
+            } else {
+                None
+            };
+            let trust_indicator = if signer_identity.is_some() {
+                "signed"
+            } else {
+                "unsigned"
+            };
             serde_json::json!({
                 "id": id,
                 "description": description,
@@ -254,10 +305,21 @@ fn handle_pack_install(root: &Path, conn: &Connection, body: &[u8]) -> ApiRespon
     let Some(pack_id) = body_param(body, "pack_id") else {
         return ApiResponse::error(400, "missing required field `pack_id`");
     };
-    let Some((_, _, bytes)) = crate::hi_plugin::known_installable_packs().into_iter().find(|(id, _, _)| *id == pack_id) else {
-        return ApiResponse::error(400, &format!("`{pack_id}` is not one of the packs this UI can install"));
+    let Some((_, _, bytes)) = crate::hi_plugin::known_installable_packs()
+        .into_iter()
+        .find(|(id, _, _)| *id == pack_id)
+    else {
+        return ApiResponse::error(
+            400,
+            &format!("`{pack_id}` is not one of the packs this UI can install"),
+        );
     };
-    match crate::hi_plugin::install_pack_from_bytes(conn, root, bytes.as_bytes(), &format!("hi UI install: {pack_id}")) {
+    match crate::hi_plugin::install_pack_from_bytes(
+        conn,
+        root,
+        bytes.as_bytes(),
+        &format!("hi UI install: {pack_id}"),
+    ) {
         Ok(id) => ApiResponse::json(&serde_json::json!({ "ok": true, "pack_id": id })),
         Err(e) => ApiResponse::error(500, &e),
     }
@@ -294,9 +356,18 @@ fn handle_screen_register_get(root: &Path) -> ApiResponse {
     };
     let doc: toml::Value = match text.parse() {
         Ok(d) => d,
-        Err(e) => return ApiResponse::error(500, &format!("{} did not parse as TOML: {e}", path.display())),
+        Err(e) => {
+            return ApiResponse::error(
+                500,
+                &format!("{} did not parse as TOML: {e}", path.display()),
+            );
+        }
     };
-    let screens = doc.get("screen").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let screens = doc
+        .get("screen")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut modules: Vec<String> = Vec::new();
     let mut archetypes: Vec<String> = Vec::new();
     let mut stages: Vec<String> = Vec::new();
@@ -346,7 +417,9 @@ fn handle_screen_register_get(root: &Path) -> ApiResponse {
     // register's own numbering, extended, never a renumbering of it.
     let mut next_ids = serde_json::Map::new();
     for m in &modules {
-        let Some(serial) = m.strip_prefix('M') else { continue };
+        let Some(serial) = m.strip_prefix('M') else {
+            continue;
+        };
         if serial.is_empty() || !serial.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
@@ -357,7 +430,10 @@ fn handle_screen_register_get(root: &Path) -> ApiResponse {
             .filter_map(|seq| seq.parse::<u64>().ok())
             .max()
             .unwrap_or(0);
-        next_ids.insert(m.clone(), serde_json::json!(format!("{prefix}{}", max_seq + 1)));
+        next_ids.insert(
+            m.clone(),
+            serde_json::json!(format!("{prefix}{}", max_seq + 1)),
+        );
     }
     ApiResponse::json(&serde_json::json!({
         "exists": true,
@@ -384,7 +460,10 @@ fn handle_screen_register_get(root: &Path) -> ApiResponse {
 /// validates.
 fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
     let Some(path) = screen_register_path(root) else {
-        return ApiResponse::error(400, "no screens.toml / screen.toml in this project -- a register entry needs a register");
+        return ApiResponse::error(
+            400,
+            "no screens.toml / screen.toml in this project -- a register entry needs a register",
+        );
     };
     let Some(name) = body_param(body, "name").filter(|s| !s.trim().is_empty()) else {
         return ApiResponse::error(400, "missing required body param `name`");
@@ -410,38 +489,95 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
     };
     let doc: toml::Value = match text.parse() {
         Ok(d) => d,
-        Err(e) => return ApiResponse::error(500, &format!("{} did not parse as TOML: {e}", path.display())),
+        Err(e) => {
+            return ApiResponse::error(
+                500,
+                &format!("{} did not parse as TOML: {e}", path.display()),
+            );
+        }
     };
-    let screens = doc.get("screen").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let existing_ids: Vec<String> = screens.iter().filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(str::to_string)).collect();
-    let modules: Vec<String> = screens.iter().filter_map(|s| s.get("module").and_then(|v| v.as_str()).map(str::to_string)).collect();
-    let archetypes: Vec<String> = screens.iter().filter_map(|s| s.get("archetype").and_then(|v| v.as_str()).map(str::to_string)).collect();
-    let files: Vec<String> = screens.iter().filter_map(|s| s.get("file").and_then(|v| v.as_str()).map(str::to_string)).collect();
-    let stage_vocab: Vec<String> = screens.iter().filter_map(|s| s.get("stage").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let screens = doc
+        .get("screen")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let existing_ids: Vec<String> = screens
+        .iter()
+        .filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    let modules: Vec<String> = screens
+        .iter()
+        .filter_map(|s| s.get("module").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    let archetypes: Vec<String> = screens
+        .iter()
+        .filter_map(|s| {
+            s.get("archetype")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    let files: Vec<String> = screens
+        .iter()
+        .filter_map(|s| s.get("file").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    let stage_vocab: Vec<String> = screens
+        .iter()
+        .filter_map(|s| s.get("stage").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
 
     // Validation -- every check appends to a per-field map so the form
     // can mark exactly what's wrong, in one round trip.
     let mut fields = serde_json::Map::new();
     let name_ok = name.len() <= 120;
     if !name_ok {
-        fields.insert("name".into(), serde_json::json!("keep the name under 120 characters"));
+        fields.insert(
+            "name".into(),
+            serde_json::json!("keep the name under 120 characters"),
+        );
     }
     let id_parts: Vec<&str> = id.split('.').collect();
-    let id_shape_ok = id_parts.len() == 2 && id_parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let id_shape_ok = id_parts.len() == 2
+        && id_parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
     if !id_shape_ok {
-        fields.insert("id".to_string(), serde_json::json!("use the register's <module-serial>.<seq> shape, e.g. 4.14"));
+        fields.insert(
+            "id".to_string(),
+            serde_json::json!("use the register's <module-serial>.<seq> shape, e.g. 4.14"),
+        );
     } else if existing_ids.iter().any(|existing| existing == &id) {
-        fields.insert("id".to_string(), serde_json::json!(format!("screen {id} already exists in the register")));
+        fields.insert(
+            "id".to_string(),
+            serde_json::json!(format!("screen {id} already exists in the register")),
+        );
     }
     if !modules.iter().any(|m| m == &module) {
-        fields.insert("module".to_string(), serde_json::json!(format!("unknown module '{module}' -- pick one the register already uses")));
+        fields.insert(
+            "module".to_string(),
+            serde_json::json!(format!(
+                "unknown module '{module}' -- pick one the register already uses"
+            )),
+        );
     }
     if !archetypes.iter().any(|a| a == &archetype) {
-        fields.insert("archetype".to_string(), serde_json::json!(format!("unknown archetype '{archetype}' -- pick one the register uses")));
+        fields.insert(
+            "archetype".to_string(),
+            serde_json::json!(format!(
+                "unknown archetype '{archetype}' -- pick one the register uses"
+            )),
+        );
     }
-    let roles: Vec<String> = roles_in.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let roles: Vec<String> = roles_in
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     if roles.is_empty() {
-        fields.insert("roles".to_string(), serde_json::json!("pick at least one role"));
+        fields.insert(
+            "roles".to_string(),
+            serde_json::json!("pick at least one role"),
+        );
     } else {
         let mut bad = Vec::new();
         for r in &roles {
@@ -454,42 +590,77 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
             }
         }
         if !bad.is_empty() {
-            fields.insert("roles".to_string(), serde_json::json!(format!("roles must be `Name:R`, `Name:R/W` or `Name:W` -- got {}", bad.join(", "))));
+            fields.insert(
+                "roles".to_string(),
+                serde_json::json!(format!(
+                    "roles must be `Name:R`, `Name:R/W` or `Name:W` -- got {}",
+                    bad.join(", ")
+                )),
+            );
         }
     }
     let route = route.trim().to_string();
     if !route.is_empty() {
         let chars_ok = route.starts_with('/')
             && !route.contains("//")
-            && route
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '-' | '{' | '}' | '_'));
-        let params_ok = route.split('/').filter(|s| s.starts_with('{')).all(|s| s.ends_with('}'));
+            && route.chars().all(|c| {
+                c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, '/' | '-' | '{' | '}' | '_')
+            });
+        let params_ok = route
+            .split('/')
+            .filter(|s| s.starts_with('{'))
+            .all(|s| s.ends_with('}'));
         if !chars_ok || !params_ok {
-            fields.insert("path".to_string(), serde_json::json!("routes are kebab-case with {param} placeholders, e.g. /holds/{id}"));
+            fields.insert(
+                "path".to_string(),
+                serde_json::json!(
+                    "routes are kebab-case with {param} placeholders, e.g. /holds/{id}"
+                ),
+            );
         }
     }
     let file = file.trim().to_string();
     if !file.is_empty() && !files.iter().any(|f| f == &file) {
-        fields.insert("file".to_string(), serde_json::json!("the file must be one the register already tracks"));
+        fields.insert(
+            "file".to_string(),
+            serde_json::json!("the file must be one the register already tracks"),
+        );
     }
     let stage = if stage_in.trim().is_empty() {
         // The register's own convention: a declared-but-unwritten screen
         // is `emittable`, unless something blocks it.
-        if blocked_by_in.trim().is_empty() { "emittable".to_string() } else { "blocked".to_string() }
+        if blocked_by_in.trim().is_empty() {
+            "emittable".to_string()
+        } else {
+            "blocked".to_string()
+        }
     } else {
         let s = stage_in.trim().to_string();
         if !stage_vocab.iter().any(|st| st == &s) {
-            fields.insert("stage".to_string(), serde_json::json!(format!("unknown stage '{s}'")));
+            fields.insert(
+                "stage".to_string(),
+                serde_json::json!(format!("unknown stage '{s}'")),
+            );
         }
         s
     };
-    let split_list = |raw: &str| -> Vec<String> { raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect() };
+    let split_list = |raw: &str| -> Vec<String> {
+        raw.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
     let datasets = split_list(&datasets_in);
     let blocked_by = split_list(&blocked_by_in);
     if !fields.is_empty() {
         let body = serde_json::json!({ "error": "invalid screen entry", "fields": fields });
-        return ApiResponse { status: 400, content_type: "application/json", body: serde_json::to_vec(&body).unwrap_or_default() };
+        return ApiResponse {
+            status: 400,
+            content_type: "application/json",
+            body: serde_json::to_vec(&body).unwrap_or_default(),
+        };
     }
 
     // The graph half: a reviewable candidate node (unconfirmed, driving
@@ -501,7 +672,10 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
     // every artifact (file and graph) untouched.
     let graph_name: String = {
         let mut out = String::new();
-        for part in name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|p| !p.is_empty()) {
+        for part in name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|p| !p.is_empty())
+        {
             let mut chars = part.chars();
             match chars.next() {
                 Some(first) => {
@@ -511,11 +685,19 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
                 None => {}
             }
         }
-        if out.is_empty() { "NewScreen".to_string() } else { out }
+        if out.is_empty() {
+            "NewScreen".to_string()
+        } else {
+            out
+        }
     };
     let node_id = crate::hi_graph::code_unit_node_id("screen", &graph_name);
     let synced: Option<String> = conn
-        .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&node_id], |r| r.get::<_, Option<String>>(0))
+        .query_row(
+            "SELECT content_hash FROM nodes WHERE id = ?1",
+            [&node_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .optional()
         .map_err(|e| format!("checking node {node_id}: {e}"))
         .unwrap_or(None)
@@ -524,7 +706,11 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
         let body = serde_json::json!({
             "error": format!("the graph already has a synced code unit named `{graph_name}` -- tweak the name so the candidate is a distinct node"),
         });
-        return ApiResponse { status: 400, content_type: "application/json", body: serde_json::to_vec(&body).unwrap_or_default() };
+        return ApiResponse {
+            status: 400,
+            content_type: "application/json",
+            body: serde_json::to_vec(&body).unwrap_or_default(),
+        };
     }
 
     // The register entry, escaped for TOML (values are single-line;
@@ -534,7 +720,14 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
         s.replace('\\', "\\\\").replace('"', "\\\"")
     }
     fn toml_str_array(items: &[String]) -> String {
-        format!("[{}]", items.iter().map(|i| format!("\"{}\"", toml_escape(i))).collect::<Vec<_>>().join(", "))
+        format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|i| format!("\"{}\"", toml_escape(i)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
     let mut block = String::new();
     block.push_str("\n[[screen]]\n");
@@ -580,7 +773,11 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
     }
     let mut driving = format!(
         "Screen {id} ({module}) -- {name}. Archetype: {archetype}. Stage: {}.",
-        if stage.is_empty() { "emittable" } else { &stage }
+        if stage.is_empty() {
+            "emittable"
+        } else {
+            &stage
+        }
     );
     if !roles.is_empty() {
         driving.push_str(&format!(" Roles: {}.", roles.join(", ")));
@@ -594,7 +791,13 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
     if !notes.trim().is_empty() {
         driving.push_str(&format!(" Notes: {}.", notes.trim()));
     }
-    let node = match crate::hi_graph::add_candidate(conn, "screen", &graph_name, &driving, "screen-register-form") {
+    let node = match crate::hi_graph::add_candidate(
+        conn,
+        "screen",
+        &graph_name,
+        &driving,
+        "screen-register-form",
+    ) {
         Ok(n) => n,
         Err(e) => return ApiResponse::error(500, &e),
     };
@@ -608,7 +811,9 @@ fn handle_screen_register_add(root: &Path, conn: &Connection, body: &[u8]) -> Ap
 }
 
 fn body_param(body: &[u8], key: &str) -> Option<String> {
-    std::str::from_utf8(body).ok().and_then(|s| query_param(s, key))
+    std::str::from_utf8(body)
+        .ok()
+        .and_then(|s| query_param(s, key))
 }
 
 fn ok_response() -> ApiResponse {
@@ -655,7 +860,9 @@ fn handle_ask(conn: &Connection, q: &str) -> ApiResponse {
     };
     match crate::hi_llm::answer_question(&client, q, &context, conn) {
         Ok(answer) => ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": answer })),
-        Err(e) => ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": null, "error": e })),
+        Err(e) => {
+            ApiResponse::json(&serde_json::json!({ "hits": hits, "answer": null, "error": e }))
+        }
     }
 }
 
@@ -678,7 +885,10 @@ fn handle_git(root: &Path, query: &str) -> ApiResponse {
             Ok(entries) => ApiResponse::json(&serde_json::json!({ "ok": true, "log": entries })),
             Err(e) => ApiResponse::error(500, &e),
         },
-        Some(other) => ApiResponse::error(400, &format!("unknown ?op={other} -- expected `log` (default) or `diff`")),
+        Some(other) => ApiResponse::error(
+            400,
+            &format!("unknown ?op={other} -- expected `log` (default) or `diff`"),
+        ),
     }
 }
 
@@ -707,6 +917,63 @@ fn handle_suggest(conn: &Connection) -> ApiResponse {
     }
 }
 
+fn handle_templates() -> ApiResponse {
+    match crate::hi_composer::describe_templates() {
+        Ok(templates) => ApiResponse::json(&serde_json::json!({ "templates": templates })),
+        Err(e) => ApiResponse::error(500, &e),
+    }
+}
+
+fn handle_compose(root: &Path, body: &[u8]) -> ApiResponse {
+    let Some(template_id) = body_param(body, "template") else {
+        return ApiResponse::error(400, "missing required body param `template`");
+    };
+    let modules_raw = body_param(body, "modules").unwrap_or_default();
+    let modules: Vec<String> = modules_raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let country = body_param(body, "country");
+    match crate::hi_composer::compose_project(root, &template_id, &modules, country.as_deref()) {
+        Ok(project) => ApiResponse::json(&serde_json::json!({
+            "ok": true,
+            "path": project.path.display().to_string(),
+            "app_name": project.app_name,
+            "app_title": project.app_title,
+            "modules": project.modules,
+            "total_screens": project.total_screens,
+            "blocked_screens": project.blocked_screens,
+        })),
+        Err(e) => ApiResponse::error(500, &e),
+    }
+}
+
+fn handle_composed_build(root: &Path, body: &[u8]) -> ApiResponse {
+    let Some(app_name) = body_param(body, "app_name") else {
+        return ApiResponse::error(400, "missing required body param `app_name`");
+    };
+    let project_dir = root.join(".nir").join("composed").join(&app_name);
+    if !project_dir.is_dir() {
+        return ApiResponse::error(
+            400,
+            &format!("composed project {} does not exist", project_dir.display()),
+        );
+    }
+    let mut log: Vec<String> = Vec::new();
+    match crate::hi_composer::generate_screens(&project_dir) {
+        Ok(out) => log.push(format!("generate-screens: {out}")),
+        Err(e) => return ApiResponse::error(500, &format!("generate-screens failed: {e}")),
+    }
+    match crate::hi_composer::build_project(&project_dir) {
+        Ok(out) => log.push(format!("cargo build: {out}")),
+        Err(e) => return ApiResponse::error(500, &format!("cargo build failed: {e}")),
+    }
+    ApiResponse::json(
+        &serde_json::json!({ "ok": true, "project_dir": project_dir.display().to_string(), "log": log }),
+    )
+}
+
 /// Prompt mode's own write path (rfcs/0014's "1. Prompt mode"): calls
 /// the LLM once (`hi_llm::populate_candidates`), then turns every
 /// candidate it proposed into a real `hi_graph::add_candidate` node --
@@ -732,12 +999,22 @@ fn handle_prompt(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
     };
     let mut ids = Vec::with_capacity(candidates.len());
     for c in &candidates {
-        match crate::hi_graph::add_candidate(conn, &c.kind, &c.name, &c.driving_text, "llm-prompt-mode") {
+        match crate::hi_graph::add_candidate(
+            conn,
+            &c.kind,
+            &c.name,
+            &c.driving_text,
+            "llm-prompt-mode",
+        ) {
             Ok(id) => ids.push(id),
             Err(e) => return ApiResponse::error(500, &e),
         }
     }
-    let name_to_id: std::collections::HashMap<&str, &str> = candidates.iter().zip(ids.iter()).map(|(c, id)| (c.name.as_str(), id.as_str())).collect();
+    let name_to_id: std::collections::HashMap<&str, &str> = candidates
+        .iter()
+        .zip(ids.iter())
+        .map(|(c, id)| (c.name.as_str(), id.as_str()))
+        .collect();
     let mut edges_added = 0u32;
     for c in &candidates {
         for dep in &c.depends_on {
@@ -749,7 +1026,9 @@ fn handle_prompt(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
             }
         }
     }
-    ApiResponse::json(&serde_json::json!({ "ok": true, "nodes_added": ids.len(), "edges_added": edges_added, "nodes": ids }))
+    ApiResponse::json(
+        &serde_json::json!({ "ok": true, "nodes_added": ids.len(), "edges_added": edges_added, "nodes": ids }),
+    )
 }
 
 /// `node` omitted (no body, or a body with no `node` param) means
@@ -839,7 +1118,10 @@ fn handle_generate(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
         Err(e) => return ApiResponse::error(500, &e),
     };
     if units.is_empty() {
-        return ApiResponse::error(400, "nothing confirmed to generate -- `:confirm <node>` at least one candidate first");
+        return ApiResponse::error(
+            400,
+            "nothing confirmed to generate -- `:confirm <node>` at least one candidate first",
+        );
     }
     // The relational half of the confirmed graph: the decompose step
     // stored `depends_on` edges at prompt time, and until 2026-09-11
@@ -854,17 +1136,30 @@ fn handle_generate(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
         Err(e) => return ApiResponse::error(500, &e),
     };
     let mut log_lines: Vec<String> = Vec::new();
-    let path = match crate::hi_llm::generate_program(conn, root, &client, &units, &edges, &mut |line| log_lines.push(line.to_string())) {
-        Ok(p) => p,
-        Err(e) => return ApiResponse::json(&serde_json::json!({ "ok": false, "error": e, "log": log_lines })),
-    };
+    let path =
+        match crate::hi_llm::generate_program(conn, root, &client, &units, &edges, &mut |line| {
+            log_lines.push(line.to_string())
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                return ApiResponse::json(
+                    &serde_json::json!({ "ok": false, "error": e, "log": log_lines }),
+                );
+            }
+        };
     if let Err(e) = crate::hi_graph::sync(conn, root, &[path.display().to_string()]) {
-        return ApiResponse::json(&serde_json::json!({ "ok": false, "error": format!("generated {} but sync failed: {e}", path.display()), "log": log_lines }));
+        return ApiResponse::json(
+            &serde_json::json!({ "ok": false, "error": format!("generated {} but sync failed: {e}", path.display()), "log": log_lines }),
+        );
     }
     let ids: Vec<String> = units.iter().map(|u| u.id.clone()).collect();
     let locked = match crate::hi_graph::lock_units_after_sync(conn, &ids) {
         Ok(l) => l,
-        Err(e) => return ApiResponse::json(&serde_json::json!({ "ok": false, "error": e, "log": log_lines })),
+        Err(e) => {
+            return ApiResponse::json(
+                &serde_json::json!({ "ok": false, "error": e, "log": log_lines }),
+            );
+        }
     };
     let not_declared: Vec<&String> = ids.iter().filter(|id| !locked.contains(id)).collect();
     // Best-effort: a git problem (no git binary, a detached HEAD, ...)
@@ -872,14 +1167,21 @@ fn handle_generate(root: &Path, conn: &Connection, body: &[u8]) -> ApiResponse {
     // successful generate from being reported as one -- same "must
     // never be the thing that crashes" posture `hi_graph.rs` already
     // holds itself to for `sync`.
-    let revision = match crate::hi_revision::commit_revision(root, &format!("generate: {} unit(s)", ids.len())) {
+    let revision = match crate::hi_revision::commit_revision(
+        root,
+        &format!("generate: {} unit(s)", ids.len()),
+    ) {
         Ok(hash) => hash,
         Err(e) => {
-            log_lines.push(format!("warning: could not commit this generate to git: {e}"));
+            log_lines.push(format!(
+                "warning: could not commit this generate to git: {e}"
+            ));
             None
         }
     };
-    ApiResponse::json(&serde_json::json!({ "ok": true, "path": path.display().to_string(), "locked": locked, "not_declared": not_declared, "revision": revision, "log": log_lines }))
+    ApiResponse::json(
+        &serde_json::json!({ "ok": true, "path": path.display().to_string(), "locked": locked, "not_declared": not_declared, "revision": revision, "log": log_lines }),
+    )
 }
 
 /// The env var that opts a deployment into real Ed25519 signing of the
@@ -916,22 +1218,37 @@ fn handle_publish(root: &Path, _conn: &Connection) -> ApiResponse {
         let publish = crate::v2_verify::publish_project(root, &source_path)?;
         let signing_key_path = std::env::var(PUBLISH_SIGNING_KEY_VAR).ok();
         let signed = if let Some(key_path) = &signing_key_path {
-            let cert_bytes = std::fs::read(&publish.certificate_path).map_err(|e| format!("reading {} to sign it: {e}", publish.certificate_path.display()))?;
-            let (public_key, signature) = nirdosha_audit::signing::sign_bytes(&cert_bytes, key_path)?;
+            let cert_bytes = std::fs::read(&publish.certificate_path).map_err(|e| {
+                format!(
+                    "reading {} to sign it: {e}",
+                    publish.certificate_path.display()
+                )
+            })?;
+            let (public_key, signature) =
+                nirdosha_audit::signing::sign_bytes(&cert_bytes, key_path)?;
             // Preserve the exact certificate emitted by publish_project,
             // including its UI assurance proof. Reconstructing the payload
             // from only the source/verdict here would silently discard that
             // evidence before signing it.
-            let certificate: serde_json::Value = serde_json::from_slice(&cert_bytes)
-                .map_err(|e| format!("parsing {} before signing it: {e}", publish.certificate_path.display()))?;
+            let certificate: serde_json::Value =
+                serde_json::from_slice(&cert_bytes).map_err(|e| {
+                    format!(
+                        "parsing {} before signing it: {e}",
+                        publish.certificate_path.display()
+                    )
+                })?;
             let signed_envelope = serde_json::json!({
                 "certificate": certificate,
                 "signature_algorithm": "ed25519",
                 "public_key": public_key,
                 "signature": signature,
             });
-            std::fs::write(&publish.certificate_path, serde_json::to_string_pretty(&signed_envelope).expect("this JSON value always serializes"))
-                .map_err(|e| format!("writing {}: {e}", publish.certificate_path.display()))?;
+            std::fs::write(
+                &publish.certificate_path,
+                serde_json::to_string_pretty(&signed_envelope)
+                    .expect("this JSON value always serializes"),
+            )
+            .map_err(|e| format!("writing {}: {e}", publish.certificate_path.display()))?;
             true
         } else {
             false
@@ -940,8 +1257,15 @@ fn handle_publish(root: &Path, _conn: &Connection) -> ApiResponse {
     })();
     match result {
         Ok((out_path, cert_path, signed)) => {
-            let revision = crate::hi_revision::commit_revision(root, &format!("publish: {}", out_path.display())).ok().flatten();
-            ApiResponse::json(&serde_json::json!({ "ok": true, "binary": out_path.display().to_string(), "certificate": cert_path.display().to_string(), "signed": signed, "revision": revision }))
+            let revision = crate::hi_revision::commit_revision(
+                root,
+                &format!("publish: {}", out_path.display()),
+            )
+            .ok()
+            .flatten();
+            ApiResponse::json(
+                &serde_json::json!({ "ok": true, "binary": out_path.display().to_string(), "certificate": cert_path.display().to_string(), "signed": signed, "revision": revision }),
+            )
         }
         Err(e) => ApiResponse::json(&serde_json::json!({ "ok": false, "error": e })),
     }
@@ -952,13 +1276,67 @@ fn handle_publish(root: &Path, _conn: &Connection) -> ApiResponse {
 /// build_project`) and run it via `hi_preview::restart` -- "preview"
 /// here means "run the real thing," not a mockup. Authentication comes
 /// from the generated app; the preview API reports its first UI route.
+///
+/// If the graph-based generate path has not been run but a composed
+/// project from the Templates rail exists under `.nir/composed/`, we
+/// preview the newest composed binary instead so the two generation
+/// paths share the same Preview rail.
 fn handle_preview_start(root: &Path, _conn: &Connection) -> ApiResponse {
     let source_path = crate::hi_llm::generated_source_path(root);
-    if !source_path.exists() {
-        return ApiResponse::error(400, "nothing generated yet -- run :generate first");
+    if source_path.exists() {
+        match crate::v2_verify::preview_start(root, &source_path) {
+            Ok((port, path)) => {
+                return ApiResponse::json(&serde_json::json!({ "ok": true, "port": port, "path": path }));
+            }
+            Err(e) => {
+                return ApiResponse::json(&serde_json::json!({ "ok": false, "error": e }));
+            }
+        }
     }
-    match crate::v2_verify::preview_start(root, &source_path) {
-        Ok((port, path)) => ApiResponse::json(&serde_json::json!({ "ok": true, "port": port, "path": path })),
+
+    // Fallback: preview the most recent composed project from the Templates rail.
+    let composed_dir = root.join(".nir").join("composed");
+    let mut latest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    if composed_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&composed_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let binary = path
+                    .join("target")
+                    .join("debug")
+                    .join(format!("{}_serve", path.file_name().unwrap_or_default().to_string_lossy().replace('-', "_")));
+                let Ok(meta) = std::fs::metadata(&binary) else { continue };
+                let Ok(modified) = meta.modified() else { continue };
+                if latest.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+                    latest = Some((modified, binary));
+                }
+            }
+        }
+    }
+
+    let Some((_, binary_path)) = latest else {
+        return ApiResponse::error(400, "nothing generated yet -- run :generate or compose a project from Templates first");
+    };
+
+    // Discover the landing route from the composed app's menus.toml.
+    let serve_source = std::fs::read_to_string(root.join(".nir").join("generated").join("hi_build.nir"))
+        .ok()
+        .or_else(|| {
+            // No graph-generated source; use the first route in the composed serve.nir.
+            std::fs::read_to_string(binary_path.parent().unwrap_or(root).parent().unwrap_or(root).join("src").join("bin").join("serve.nir")).ok()
+        });
+    let path = serve_source
+        .as_deref()
+        .and_then(crate::v2_verify::discover_preview_path)
+        .unwrap_or_else(|| "/".to_string());
+
+    // Composed serve binaries always listen on 8080 (hardcoded by the generator).
+    let port: u16 = 8080;
+    match crate::hi_preview::restart(&binary_path, port, &path) {
+        Ok(()) => ApiResponse::json(&serde_json::json!({ "ok": true, "port": port, "path": path })),
         Err(e) => ApiResponse::json(&serde_json::json!({ "ok": false, "error": e })),
     }
 }
@@ -1104,9 +1482,19 @@ struct EdgeRow {
 }
 
 fn list_edges(conn: &Connection) -> Result<Vec<EdgeRow>, String> {
-    let mut stmt = conn.prepare("SELECT src, dst, kind, flag, flag_reason FROM edges LIMIT ?1").map_err(|e| format!("preparing edge listing: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT src, dst, kind, flag, flag_reason FROM edges LIMIT ?1")
+        .map_err(|e| format!("preparing edge listing: {e}"))?;
     let rows = stmt
-        .query_map([MAX_ROWS], |r| Ok(EdgeRow { src: r.get(0)?, dst: r.get(1)?, kind: r.get(2)?, flag: r.get(3)?, flag_reason: r.get(4)? }))
+        .query_map([MAX_ROWS], |r| {
+            Ok(EdgeRow {
+                src: r.get(0)?,
+                dst: r.get(1)?,
+                kind: r.get(2)?,
+                flag: r.get(3)?,
+                flag_reason: r.get(4)?,
+            })
+        })
         .map_err(|e| format!("listing edges: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("reading edge row: {e}"))?;
@@ -1182,7 +1570,12 @@ fn list_screens(conn: &Connection) -> Result<ScreenMap, String> {
         .map_err(|e| format!("preparing nav edge listing: {e}"))?;
     let derived: Vec<NavigationRow> = nav_stmt
         .query_map([MAX_ROWS], |r| {
-            Ok(NavigationRow { source_id: r.get(0)?, target_id: r.get(1)?, label: r.get(2)?, inferred: false })
+            Ok(NavigationRow {
+                source_id: r.get(0)?,
+                target_id: r.get(1)?,
+                label: r.get(2)?,
+                inferred: false,
+            })
         })
         .map_err(|e| format!("listing nav edges: {e}"))?
         .collect::<Result<Vec<_>, _>>()
@@ -1263,7 +1656,8 @@ fn list_screens(conn: &Connection) -> Result<ScreenMap, String> {
         // the synthetic shell link -- a screen reached by a real menu
         // entry must not also carry a fake "app shell" edge implying
         // the shell links to it directly.
-        let reached: std::collections::HashSet<String> = navigations.iter().map(|n| n.target_id.clone()).collect();
+        let reached: std::collections::HashSet<String> =
+            navigations.iter().map(|n| n.target_id.clone()).collect();
         if let Some(shell) = &shell_id {
             for screen in &rows {
                 if screen.id != *shell && !reached.contains(&screen.id) {
@@ -1278,7 +1672,10 @@ fn list_screens(conn: &Connection) -> Result<ScreenMap, String> {
         }
     }
 
-    Ok(ScreenMap { screens: rows, navigations })
+    Ok(ScreenMap {
+        screens: rows,
+        navigations,
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -1295,7 +1692,10 @@ mod tests {
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("nirdosha_hi_api_test_{name}_{}", std::process::id()));
+        path.push(format!(
+            "nirdosha_hi_api_test_{name}_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -1319,8 +1719,18 @@ mod tests {
         let conn = crate::hi_graph::open(&dir).expect("open");
         for (id, title, st, path) in [
             ("code:screen:app_shell", "Shell", "shell", None::<String>),
-            ("code:screen:my_day", "My Day", "dashboard", Some("/my-day".to_string())),
-            ("code:screen:orph", "Orphan", "page", Some("/orphan".to_string())),
+            (
+                "code:screen:my_day",
+                "My Day",
+                "dashboard",
+                Some("/my-day".to_string()),
+            ),
+            (
+                "code:screen:orph",
+                "Orphan",
+                "page",
+                Some("/orphan".to_string()),
+            ),
         ] {
             conn.execute(
                 "INSERT INTO nodes (id, kind, title, screen_type, screen_path) VALUES (?1, 'CodeUnit', ?2, ?3, ?4)",
@@ -1348,18 +1758,28 @@ mod tests {
             .iter()
             .filter(|n| n.inferred && n.target_id == "code:screen:orph")
             .collect();
-        assert_eq!(orphan_fallback.len(), 1, "orphan screen gets the synthetic shell edge");
+        assert_eq!(
+            orphan_fallback.len(),
+            1,
+            "orphan screen gets the synthetic shell edge"
+        );
         let myday_fallback: Vec<_> = map
             .navigations
             .iter()
             .filter(|n| n.inferred && n.target_id == "code:screen:my_day")
             .collect();
-        assert!(myday_fallback.is_empty(), "a screen reached by a real edge must not also get a synthetic one");
+        assert!(
+            myday_fallback.is_empty(),
+            "a screen reached by a real edge must not also get a synthetic one"
+        );
     }
 
     #[test]
     fn query_param_finds_the_named_key_among_several() {
-        assert_eq!(query_param("a=1&b=hello+world&c=3", "b"), Some("hello world".to_string()));
+        assert_eq!(
+            query_param("a=1&b=hello+world&c=3", "b"),
+            Some("hello world".to_string())
+        );
         assert_eq!(query_param("a=1", "missing"), None);
         assert_eq!(query_param("", "a"), None);
     }
@@ -1371,15 +1791,38 @@ mod tests {
         assert_eq!(resp.status, 200);
         let body = String::from_utf8_lossy(&resp.body);
         assert!(body.contains("Nirdosha Hi"));
-        assert!(body.contains("/assets/3d-force-graph.min.js"), "page should load the vendored graph library");
-        assert!(body.contains("/assets/three.min.js"), "page should load the vendored THREE global");
+        assert!(
+            body.contains("/assets/3d-force-graph.min.js"),
+            "page should load the vendored graph library"
+        );
+        assert!(
+            body.contains("/assets/three.min.js"),
+            "page should load the vendored THREE global"
+        );
         let three_idx = body.find("/assets/three.min.js").expect("checked above");
-        let force_graph_idx = body.find("/assets/3d-force-graph.min.js").expect("checked above");
-        assert!(three_idx < force_graph_idx, "three.min.js must load BEFORE 3d-force-graph.min.js -- that bundle picks its internal-vs-page-supplied THREE once, at its own script-execution time (github #57)");
-        assert!(!body.contains("__NIRDOSHA_LOGO__"), "the logo placeholder must be substituted, not leaked verbatim");
-        assert!(body.contains("data:image/png;base64,"), "the brand logo should be inlined as a data: URI");
-        assert!(body.contains("id=\"console-input\""), "build mode should have a bottom text-entry console, matching hi's own front ends");
-        assert!(body.contains("id=\"splash\""), "build mode should open with the same logo splash hi's other front ends show");
+        let force_graph_idx = body
+            .find("/assets/3d-force-graph.min.js")
+            .expect("checked above");
+        assert!(
+            three_idx < force_graph_idx,
+            "three.min.js must load BEFORE 3d-force-graph.min.js -- that bundle picks its internal-vs-page-supplied THREE once, at its own script-execution time (github #57)"
+        );
+        assert!(
+            !body.contains("__NIRDOSHA_LOGO__"),
+            "the logo placeholder must be substituted, not leaked verbatim"
+        );
+        assert!(
+            body.contains("data:image/png;base64,"),
+            "the brand logo should be inlined as a data: URI"
+        );
+        assert!(
+            body.contains("id=\"console-input\""),
+            "build mode should have a bottom text-entry console, matching hi's own front ends"
+        );
+        assert!(
+            body.contains("id=\"splash\""),
+            "build mode should open with the same logo splash hi's other front ends show"
+        );
     }
 
     /// The static-asset routes are served without ever opening
@@ -1388,7 +1831,10 @@ mod tests {
     #[test]
     fn handle_serves_the_vendored_graph_library_without_touching_the_db() {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("nirdosha_hi_api_test_unscaffolded_{}", std::process::id()));
+        dir.push(format!(
+            "nirdosha_hi_api_test_unscaffolded_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1399,26 +1845,47 @@ mod tests {
 
         let three_resp = handle(&dir, "GET", "/assets/three.min.js", "", b"");
         assert_eq!(three_resp.status, 200);
-        assert_eq!(three_resp.content_type, "application/javascript; charset=utf-8");
+        assert_eq!(
+            three_resp.content_type,
+            "application/javascript; charset=utf-8"
+        );
         let three_body = String::from_utf8_lossy(&three_resp.body);
-        assert!(three_body.contains("var THREE="), "must assign a classic global THREE, not just export an ES module");
-        assert!(three_body.contains("REVISION"), "sanity: this is really three.js, not an empty/placeholder file");
+        assert!(
+            three_body.contains("var THREE="),
+            "must assign a classic global THREE, not just export an ES module"
+        );
+        assert!(
+            three_body.contains("REVISION"),
+            "sanity: this is really three.js, not an empty/placeholder file"
+        );
 
-        assert!(!dir.join(".nir").exists(), "static assets must not scaffold .nir/");
+        assert!(
+            !dir.join(".nir").exists(),
+            "static assets must not scaffold .nir/"
+        );
     }
 
     #[test]
     fn handle_lists_nodes_after_a_sync() {
         let dir = scratch_dir("nodes");
-        std::fs::write(dir.join("a.nir"), "fn add(a: i64, b: i64) -> i64 { return a + b }\n").unwrap();
+        std::fs::write(
+            dir.join("a.nir"),
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        )
+        .unwrap();
         let conn = crate::hi_graph::open(&dir).expect("open");
         crate::hi_graph::sync(&conn, &dir, &[]).expect("sync");
         drop(conn);
 
         let resp = handle(&dir, "GET", "/api/nodes", "", b"");
         assert_eq!(resp.status, 200);
-        let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
-        assert!(nodes.iter().any(|n| n["id"] == "code:fn:add"), "expected code:fn:add in {resp:?}", resp = String::from_utf8_lossy(&resp.body));
+        let nodes: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.body).expect("valid JSON array");
+        assert!(
+            nodes.iter().any(|n| n["id"] == "code:fn:add"),
+            "expected code:fn:add in {resp:?}",
+            resp = String::from_utf8_lossy(&resp.body)
+        );
         // An ordinary, non-plugin node reports the RFC 0016 provenance
         // fields as absent/false, not merely omitted -- the build-mode
         // UI's "governing rules" panel (RFC 0014's 2026-09-14 amendment)
@@ -1443,11 +1910,15 @@ mod tests {
 
         let resp = handle(&dir, "GET", "/api/nodes", "", b"");
         assert_eq!(resp.status, 200);
-        let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
+        let nodes: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.body).expect("valid JSON array");
         let sealed = nodes.iter().find(|n| n["plugin_origin"] != serde_json::Value::Null).unwrap_or_else(|| {
             panic!("expected at least one plugin-sourced node after ensure_default_packs, got {resp:?}", resp = String::from_utf8_lossy(&resp.body))
         });
-        assert_eq!(sealed["non_waivable"], true, "a plugin-sourced node must report non_waivable: true, got {sealed:?}");
+        assert_eq!(
+            sealed["non_waivable"], true,
+            "a plugin-sourced node must report non_waivable: true, got {sealed:?}"
+        );
     }
 
     /// RFC 0014's 2026-09-14 amendment, step 4: the Governing Rules
@@ -1462,16 +1933,36 @@ mod tests {
 
         let resp = handle(&dir, "GET", "/api/packs", "", b"");
         assert_eq!(resp.status, 200);
-        let packs: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
-        let banking = packs.iter().find(|p| p["id"] == "banking-v0").expect("banking-v0 should be a known pack");
-        assert_eq!(banking["installed"], true, "ensure_default_packs already installed it: {banking:?}");
-        let fapi = packs.iter().find(|p| p["id"] == "fapi-2.0").expect("fapi-2.0 should be a known pack");
-        assert_eq!(fapi["installed"], false, "fapi-2.0 is never auto-installed: {fapi:?}");
+        let packs: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.body).expect("valid JSON array");
+        let banking = packs
+            .iter()
+            .find(|p| p["id"] == "banking-v0")
+            .expect("banking-v0 should be a known pack");
+        assert_eq!(
+            banking["installed"], true,
+            "ensure_default_packs already installed it: {banking:?}"
+        );
+        let fapi = packs
+            .iter()
+            .find(|p| p["id"] == "fapi-2.0")
+            .expect("fapi-2.0 should be a known pack");
+        assert_eq!(
+            fapi["installed"], false,
+            "fapi-2.0 is never auto-installed: {fapi:?}"
+        );
         // `ensure_default_packs` installs banking-v0 as a plain 5a
         // unsigned install -- the real trust-indicator wiring must say
         // so honestly, not claim a signer that was never recorded.
-        assert_eq!(banking["signer_identity"], serde_json::Value::Null, "an unsigned 5a install must not claim a signer: {banking:?}");
-        assert_eq!(banking["trust_indicator"], "unsigned", "an unsigned 5a install's trust indicator must say so: {banking:?}");
+        assert_eq!(
+            banking["signer_identity"],
+            serde_json::Value::Null,
+            "an unsigned 5a install must not claim a signer: {banking:?}"
+        );
+        assert_eq!(
+            banking["trust_indicator"], "unsigned",
+            "an unsigned 5a install's trust indicator must say so: {banking:?}"
+        );
         // A pack never installed at all has nothing to report either --
         // same "not applicable" shape as an unsigned one, not an error.
         assert_eq!(fapi["signer_identity"], serde_json::Value::Null, "{fapi:?}");
@@ -1484,16 +1975,33 @@ mod tests {
         crate::hi_graph::open(&dir).expect("open"); // scaffold only, no default packs
 
         let resp = handle(&dir, "POST", "/api/packs/install", "", b"pack_id=fapi-2.0");
-        assert_eq!(resp.status, 200, "install should succeed: {}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "install should succeed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
         let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
         assert_eq!(body["pack_id"], "fapi-2.0");
 
         let conn = crate::hi_graph::open(&dir).expect("reopen");
         let installed = crate::hi_plugin::installed_pack_ids(&conn).expect("list installed packs");
-        assert!(installed.contains(&"fapi-2.0".to_string()), "expected fapi-2.0 among installed packs: {installed:?}");
+        assert!(
+            installed.contains(&"fapi-2.0".to_string()),
+            "expected fapi-2.0 among installed packs: {installed:?}"
+        );
 
-        let refused = handle(&dir, "POST", "/api/packs/install", "", b"pack_id=not-a-real-pack");
-        assert_eq!(refused.status, 400, "an unknown pack id must be refused, not silently accepted");
+        let refused = handle(
+            &dir,
+            "POST",
+            "/api/packs/install",
+            "",
+            b"pack_id=not-a-real-pack",
+        );
+        assert_eq!(
+            refused.status, 400,
+            "an unknown pack id must be refused, not silently accepted"
+        );
     }
 
     #[test]
@@ -1530,38 +2038,114 @@ mod tests {
     fn confirm_delete_edit_attach_waive_round_trip_over_http() {
         let dir = scratch_dir("build_mode_round_trip");
         let conn = crate::hi_graph::open(&dir).expect("open");
-        let id = crate::hi_graph::add_candidate(&conn, "fn", "transfer_funds", "moves money", "llm-prompt-mode").expect("add_candidate");
+        let id = crate::hi_graph::add_candidate(
+            &conn,
+            "fn",
+            "transfer_funds",
+            "moves money",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         drop(conn);
 
-        let resp = handle(&dir, "POST", "/api/confirm", "", format!("node={id}").as_bytes());
-        assert_eq!(resp.status, 200, "confirm should succeed: {}", String::from_utf8_lossy(&resp.body));
+        let resp = handle(
+            &dir,
+            "POST",
+            "/api/confirm",
+            "",
+            format!("node={id}").as_bytes(),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "confirm should succeed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
-        let resp = handle(&dir, "POST", "/api/attach", "", format!("node={id}&attr=requires(role%3A+admin)").as_bytes());
-        assert_eq!(resp.status, 200, "attach should succeed: {}", String::from_utf8_lossy(&resp.body));
+        let resp = handle(
+            &dir,
+            "POST",
+            "/api/attach",
+            "",
+            format!("node={id}&attr=requires(role%3A+admin)").as_bytes(),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "attach should succeed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
-        let resp = handle(&dir, "POST", "/api/edit", "", format!("node={id}&text=moves+money+between+two+accounts").as_bytes());
-        assert_eq!(resp.status, 200, "edit should succeed: {}", String::from_utf8_lossy(&resp.body));
+        let resp = handle(
+            &dir,
+            "POST",
+            "/api/edit",
+            "",
+            format!("node={id}&text=moves+money+between+two+accounts").as_bytes(),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "edit should succeed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
         let resp = handle(&dir, "GET", "/api/nodes", "", b"");
-        let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
-        let node = nodes.iter().find(|n| n["id"] == id).expect("node should be listed");
+        let nodes: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.body).expect("valid JSON array");
+        let node = nodes
+            .iter()
+            .find(|n| n["id"] == id)
+            .expect("node should be listed");
         assert_eq!(node["confirmed"], 1);
         assert_eq!(node["driving_text"], "moves money between two accounts");
         assert_eq!(node["attributes"], "requires(role: admin)");
 
         let resp = handle(&dir, "POST", "/api/waive", "", b"");
-        assert_eq!(resp.status, 400, "waive with no node/reason should be rejected: {}", String::from_utf8_lossy(&resp.body));
-        let resp = handle(&dir, "POST", "/api/waive", "", format!("node={id}&reason=not+needed").as_bytes());
-        assert_eq!(resp.status, 200, "waive should succeed: {}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            400,
+            "waive with no node/reason should be rejected: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let resp = handle(
+            &dir,
+            "POST",
+            "/api/waive",
+            "",
+            format!("node={id}&reason=not+needed").as_bytes(),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "waive should succeed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
-        let resp = handle(&dir, "POST", "/api/unwaive", "", format!("node={id}").as_bytes());
+        let resp = handle(
+            &dir,
+            "POST",
+            "/api/unwaive",
+            "",
+            format!("node={id}").as_bytes(),
+        );
         assert_eq!(resp.status, 200);
 
-        let resp = handle(&dir, "POST", "/api/delete", "", format!("node={id}").as_bytes());
+        let resp = handle(
+            &dir,
+            "POST",
+            "/api/delete",
+            "",
+            format!("node={id}").as_bytes(),
+        );
         assert_eq!(resp.status, 200);
         let resp = handle(&dir, "GET", "/api/nodes", "", b"");
-        let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
-        assert!(!nodes.iter().any(|n| n["id"] == id), "deleted node should no longer be listed");
+        let nodes: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.body).expect("valid JSON array");
+        assert!(
+            !nodes.iter().any(|n| n["id"] == id),
+            "deleted node should no longer be listed"
+        );
     }
 
     #[test]
@@ -1602,14 +2186,34 @@ mod tests {
         let resp = handle(&dir, "POST", "/api/publish", "", b"");
         let body = String::from_utf8_lossy(&resp.body);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
-        assert_eq!(json["ok"], serde_json::json!(true), "a valid v2 program must publish: {body}");
-        assert_eq!(json["signed"], serde_json::json!(false), "no signing key configured in this test");
+        assert_eq!(
+            json["ok"],
+            serde_json::json!(true),
+            "a valid v2 program must publish: {body}"
+        );
+        assert_eq!(
+            json["signed"],
+            serde_json::json!(false),
+            "no signing key configured in this test"
+        );
 
-        let binary_path = json["binary"].as_str().expect("binary path in the response");
-        assert!(std::path::Path::new(binary_path).exists(), "the published binary must actually exist on disk");
-        let cert_path = json["certificate"].as_str().expect("certificate path in the response");
-        let cert: serde_json::Value = serde_json::from_slice(&std::fs::read(cert_path).expect("read certificate")).expect("valid JSON");
-        assert_eq!(cert["certificate_version"], serde_json::json!("nirdosha.certificate/v2-source-scan"));
+        let binary_path = json["binary"]
+            .as_str()
+            .expect("binary path in the response");
+        assert!(
+            std::path::Path::new(binary_path).exists(),
+            "the published binary must actually exist on disk"
+        );
+        let cert_path = json["certificate"]
+            .as_str()
+            .expect("certificate path in the response");
+        let cert: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(cert_path).expect("read certificate"))
+                .expect("valid JSON");
+        assert_eq!(
+            cert["certificate_version"],
+            serde_json::json!("nirdosha.certificate/v2-source-scan")
+        );
         assert_eq!(cert["builds"], serde_json::json!(true));
     }
 
@@ -1624,27 +2228,59 @@ mod tests {
         let resp = handle(&dir, "POST", "/api/publish", "", b"");
         let body = String::from_utf8_lossy(&resp.body);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
-        assert_eq!(json["ok"], serde_json::json!(false), "a source that doesn't build must refuse to publish: {body}");
+        assert_eq!(
+            json["ok"],
+            serde_json::json!(false),
+            "a source that doesn't build must refuse to publish: {body}"
+        );
     }
 
     #[test]
     fn confirm_with_no_node_param_confirms_everything() {
         let dir = scratch_dir("confirm_all_http");
         let conn = crate::hi_graph::open(&dir).expect("open");
-        let a = crate::hi_graph::add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode").expect("add a");
-        let b = crate::hi_graph::add_candidate(&conn, "fn", "subtract", "subtracts two numbers", "llm-prompt-mode").expect("add b");
+        let a = crate::hi_graph::add_candidate(
+            &conn,
+            "fn",
+            "add",
+            "adds two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add a");
+        let b = crate::hi_graph::add_candidate(
+            &conn,
+            "fn",
+            "subtract",
+            "subtracts two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add b");
         drop(conn);
 
         let resp = handle(&dir, "POST", "/api/confirm", "", b"");
-        assert_eq!(resp.status, 200, "bulk confirm should succeed: {}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "bulk confirm should succeed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
         let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
-        let confirmed: Vec<String> = body["confirmed"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let confirmed: Vec<String> = body["confirmed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
         assert!(confirmed.contains(&a));
         assert!(confirmed.contains(&b));
 
         let resp = handle(&dir, "GET", "/api/nodes", "", b"");
-        let nodes: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).expect("valid JSON array");
-        assert!(nodes.iter().all(|n| n["confirmed"] == 1), "every candidate should now be confirmed");
+        let nodes: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.body).expect("valid JSON array");
+        assert!(
+            nodes.iter().all(|n| n["confirmed"] == 1),
+            "every candidate should now be confirmed"
+        );
     }
 
     #[test]
@@ -1659,14 +2295,24 @@ mod tests {
         // real, grounded answer the way it used to.
         let dir = scratch_dir("ask_local_hit");
         let conn = crate::hi_graph::open(&dir).expect("open");
-        crate::hi_graph::add_candidate(&conn, "fn", "tick", "advances the game clock", "llm-prompt-mode").expect("add_candidate");
+        crate::hi_graph::add_candidate(
+            &conn,
+            "fn",
+            "tick",
+            "advances the game clock",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
         drop(conn);
 
         let resp = handle(&dir, "GET", "/api/ask", "q=tick", b"");
         assert_eq!(resp.status, 200);
         let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
         assert_eq!(body["hits"].as_array().unwrap().len(), 1);
-        assert!(body["answer"].is_null(), "no LLM is configured in this test process, so answer must stay null");
+        assert!(
+            body["answer"].is_null(),
+            "no LLM is configured in this test process, so answer must stay null"
+        );
     }
 
     #[test]
@@ -1675,7 +2321,12 @@ mod tests {
         crate::hi_graph::open(&dir).expect("open");
 
         let resp = handle(&dir, "GET", "/api/ask", "q=this+project+about", b"");
-        assert_eq!(resp.status, 200, "an unconfigured LLM must degrade, not error: {}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "an unconfigured LLM must degrade, not error: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
         let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
         assert!(body["hits"].as_array().unwrap().is_empty());
         assert!(body["answer"].is_null());
@@ -1690,7 +2341,12 @@ mod tests {
         crate::hi_graph::open(&dir).expect("open");
 
         let resp = handle(&dir, "GET", "/api/suggest", "", b"");
-        assert_eq!(resp.status, 200, "an unconfigured LLM must degrade, not error: {}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "an unconfigured LLM must degrade, not error: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
         let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("valid JSON");
         assert!(body["suggestions"].as_array().unwrap().is_empty());
     }
@@ -1716,7 +2372,9 @@ mod tests {
         // assertions below turn out, so this test never leaves a real
         // child process (and a bound TCP port) behind for the rest of
         // the test binary's run.
-        let _g = crate::hi_preview::PREVIEW_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::hi_preview::PREVIEW_TESTS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch_dir("preview_start_real_server");
         crate::hi_graph::open(&dir).expect("open");
         let out_path = crate::hi_llm::generated_source_path(&dir);
@@ -1727,15 +2385,23 @@ mod tests {
             let resp = handle(&dir, "POST", "/api/preview/start", "", b"");
             let body = String::from_utf8_lossy(&resp.body).into_owned();
             let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON: {body}");
-            assert_eq!(json["ok"], serde_json::json!(true), "a servable program must start a preview: {body}");
-            let port = json["port"].as_u64().expect("a successful start reports a port");
+            assert_eq!(
+                json["ok"],
+                serde_json::json!(true),
+                "a servable program must start a preview: {body}"
+            );
+            let port = json["port"]
+                .as_u64()
+                .expect("a successful start reports a port");
             assert_ne!(port, 0);
             assert_eq!(json["path"], "/tasks");
-            let page = reqwest::blocking::get(format!("http://127.0.0.1:{port}/tasks")).expect("preview screen responds");
+            let page = reqwest::blocking::get(format!("http://127.0.0.1:{port}/tasks"))
+                .expect("preview screen responds");
             assert_eq!(page.status(), 200);
 
             let status_resp = handle(&dir, "GET", "/api/preview/status", "", b"");
-            let status: serde_json::Value = serde_json::from_slice(&status_resp.body).expect("valid JSON");
+            let status: serde_json::Value =
+                serde_json::from_slice(&status_resp.body).expect("valid JSON");
             assert_eq!(status["running"], serde_json::json!(true));
             assert_eq!(status["port"].as_u64(), Some(port));
             assert_eq!(status["path"], "/tasks");
@@ -1744,8 +2410,13 @@ mod tests {
         let stop_resp = handle(&dir, "POST", "/api/preview/stop", "", b"");
         assert_eq!(stop_resp.status, 200);
         let status_resp = handle(&dir, "GET", "/api/preview/status", "", b"");
-        let status: serde_json::Value = serde_json::from_slice(&status_resp.body).expect("valid JSON");
-        assert_eq!(status["running"], serde_json::json!(false), "stop must actually tear the preview down");
+        let status: serde_json::Value =
+            serde_json::from_slice(&status_resp.body).expect("valid JSON");
+        assert_eq!(
+            status["running"],
+            serde_json::json!(false),
+            "stop must actually tear the preview down"
+        );
 
         result.expect("assertions inside the guarded block");
     }
@@ -1779,7 +2450,12 @@ mod tests {
         assert_eq!(data["metadata"]["total_screens"], 3);
         assert_eq!(data["modules"], serde_json::json!(["M4", "M7"]));
         assert_eq!(data["archetypes"][0], "communication_feed!");
-        assert!(data["roles"].as_array().unwrap().contains(&serde_json::json!("OpsAnalyst")));
+        assert!(
+            data["roles"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("OpsAnalyst"))
+        );
         assert_eq!(data["next_ids"]["M4"], "4.14");
         assert_eq!(data["next_ids"]["M7"], "7.2");
     }
@@ -1816,11 +2492,17 @@ mod tests {
         assert_eq!(data["screen_id"], "4.14");
 
         let register = std::fs::read_to_string(dir.join("screens.toml")).unwrap();
-        assert!(register.contains("total_screens = 2"), "count bumped: {register}");
+        assert!(
+            register.contains("total_screens = 2"),
+            "count bumped: {register}"
+        );
         assert!(register.contains("[[screen]]\nid = \"4.14\""));
         assert!(register.contains("name = \"Payment Hold Detail\""));
         assert!(register.contains("roles = [\"OpsAnalyst:R\", \"Admin:R/W\"]"));
-        assert!(register.contains("stage = \"emittable\""), "empty stage defaults to emittable");
+        assert!(
+            register.contains("stage = \"emittable\""),
+            "empty stage defaults to emittable"
+        );
 
         let candidate: Option<(String, Option<String>)> = conn
             .query_row(
@@ -1845,23 +2527,56 @@ mod tests {
         let register = "[metadata]\ntotal_screens = 1\n\n[[screen]]\nid = \"4.1\"\nname = \"Hold List\"\nmodule = \"M4\"\narchetype = \"crud_screens!\"\ncombo = []\nroles = [\"OpsAnalyst:R\"]\nstage = \"built\"\n";
         std::fs::write(dir.join("screens.toml"), register).unwrap();
 
-        let dup = handle_screen_register_add(&dir, &conn, b"name=Another&id=4.1&module=M4&archetype=crud_screens%21&roles=OpsAnalyst%3AR");
+        let dup = handle_screen_register_add(
+            &dir,
+            &conn,
+            b"name=Another&id=4.1&module=M4&archetype=crud_screens%21&roles=OpsAnalyst%3AR",
+        );
         assert_eq!(dup.status, 400);
         let data: serde_json::Value = serde_json::from_slice(&dup.body).unwrap();
-        assert!(data["fields"]["id"].as_str().unwrap().contains("already exists"));
+        assert!(
+            data["fields"]["id"]
+                .as_str()
+                .unwrap()
+                .contains("already exists")
+        );
 
         let bad_stage = handle_screen_register_add(&dir, &conn, b"name=Another&id=4.2&module=M4&archetype=crud_screens%21&stage=shipped&roles=OpsAnalyst%3AR");
         assert_eq!(bad_stage.status, 400);
         let data: serde_json::Value = serde_json::from_slice(&bad_stage.body).unwrap();
-        assert!(data["fields"]["stage"].as_str().unwrap().contains("unknown stage"));
+        assert!(
+            data["fields"]["stage"]
+                .as_str()
+                .unwrap()
+                .contains("unknown stage")
+        );
 
-        let no_roles = handle_screen_register_add(&dir, &conn, b"name=Another&id=4.2&module=M4&archetype=crud_screens%21&roles=");
+        let no_roles = handle_screen_register_add(
+            &dir,
+            &conn,
+            b"name=Another&id=4.2&module=M4&archetype=crud_screens%21&roles=",
+        );
         assert_eq!(no_roles.status, 400);
         let data: serde_json::Value = serde_json::from_slice(&no_roles.body).unwrap();
-        assert!(data["fields"]["roles"].as_str().unwrap().contains("at least one role"));
+        assert!(
+            data["fields"]["roles"]
+                .as_str()
+                .unwrap()
+                .contains("at least one role")
+        );
 
-        assert_eq!(std::fs::read_to_string(dir.join("screens.toml")).unwrap(), register, "register untouched on every rejection");
-        let count: i64 = conn.query_row("SELECT count(*) FROM nodes WHERE id LIKE 'code:screen:%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("screens.toml")).unwrap(),
+            register,
+            "register untouched on every rejection"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM nodes WHERE id LIKE 'code:screen:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0, "no candidate recorded for a rejected entry");
     }
 
@@ -1887,43 +2602,98 @@ mod tests {
         let resp = handle_screen_register_add(&dir, &conn, b"name=Payment+Hold+Detail&id=4.14&module=M4&archetype=crud_screens%21&roles=OpsAnalyst%3AR");
         assert_eq!(resp.status, 400, "{}", String::from_utf8_lossy(&resp.body));
         let text = String::from_utf8_lossy(&resp.body);
-        assert!(text.contains("synced code unit"), "error names the collision: {text}");
+        assert!(
+            text.contains("synced code unit"),
+            "error names the collision: {text}"
+        );
         let register = std::fs::read_to_string(dir.join("screens.toml")).unwrap();
-        assert!(!register.contains("4.14"), "register untouched on collision: {register}");
+        assert!(
+            !register.contains("4.14"),
+            "register untouched on collision: {register}"
+        );
     }
 }
 
-fn typed_graph_route(root: &Path, method: &str, path: &str, query: &str, body: &[u8]) -> ApiResponse {
+fn typed_graph_route(
+    root: &Path,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: &[u8],
+) -> ApiResponse {
     let result = (|| -> nirdosha_graph::Result<serde_json::Value> {
-        let options=crate::graph_transport::Options::parse(std::iter::empty())?;
-        let access=if method == "POST" { nirdosha_graph::store::Access::reviewer("local") } else { nirdosha_graph::store::Access::read("local") };
-        let graph=nirdosha_graph::Graph::open(root,&options.state,access)?;
+        let options = crate::graph_transport::Options::parse(std::iter::empty())?;
+        let access = if method == "POST" {
+            nirdosha_graph::store::Access::reviewer("local")
+        } else {
+            nirdosha_graph::store::Access::read("local")
+        };
+        let graph = nirdosha_graph::Graph::open(root, &options.state, access)?;
         match path {
             "/api/graph/head" => Ok(serde_json::json!({"graph":graph.version()?})),
             "/api/graph/page" => {
-                let mut args=serde_json::json!({});
-                for key in ["snapshot","cursor","filter_hash","view","entity_type","kind"] {
-                    if let Some(value)=query_param(query,key) { args[key]=value.into(); }
+                let mut args = serde_json::json!({});
+                for key in [
+                    "snapshot",
+                    "cursor",
+                    "filter_hash",
+                    "view",
+                    "entity_type",
+                    "kind",
+                ] {
+                    if let Some(value) = query_param(query, key) {
+                        args[key] = value.into();
+                    }
                 }
                 graph.page(&args)
-            },
+            }
             "/api/graph/call" => {
-                let text=std::str::from_utf8(body).map_err(|_|nirdosha_graph::Error::new("SCHEMA_INVALID","Expected UTF-8 JSON"))?;
-                let request=nirdosha_graph::hash::parse(text)?;
-                nirdosha_graph::mcp::execute(&graph,request["name"].as_str().unwrap_or(""),&request["arguments"])
-            },
-            "/api/nodes"|"/api/edges" => {
-                let kind=if path.ends_with("nodes") { "node" } else { "edge" };
-                let collection=if kind=="node" { "nodes" } else { "edges" };
-                let mut args=serde_json::json!({"entity_type":kind});let mut out=vec![];
-                loop { let page=graph.page(&args)?;out.extend(page[collection].as_array().unwrap().clone());
-                    if page["next_cursor"].is_null() { break; }
-                    args["cursor"]=page["next_cursor"].clone();args["filter_hash"]=page["filter_hash"].clone();
+                let text = std::str::from_utf8(body).map_err(|_| {
+                    nirdosha_graph::Error::new("SCHEMA_INVALID", "Expected UTF-8 JSON")
+                })?;
+                let request = nirdosha_graph::hash::parse(text)?;
+                nirdosha_graph::mcp::execute(
+                    &graph,
+                    request["name"].as_str().unwrap_or(""),
+                    &request["arguments"],
+                )
+            }
+            "/api/nodes" | "/api/edges" => {
+                let kind = if path.ends_with("nodes") {
+                    "node"
+                } else {
+                    "edge"
+                };
+                let collection = if kind == "node" { "nodes" } else { "edges" };
+                let mut args = serde_json::json!({"entity_type":kind});
+                let mut out = vec![];
+                loop {
+                    let page = graph.page(&args)?;
+                    out.extend(page[collection].as_array().unwrap().clone());
+                    if page["next_cursor"].is_null() {
+                        break;
+                    }
+                    args["cursor"] = page["next_cursor"].clone();
+                    args["filter_hash"] = page["filter_hash"].clone();
                 }
                 Ok(serde_json::json!(out))
-            },
-            _=>Err(nirdosha_graph::Error::new("UNSUPPORTED_TARGET","This legacy action is unavailable on a typed graph; use the graph MCP tools")),
+            }
+            _ => Err(nirdosha_graph::Error::new(
+                "UNSUPPORTED_TARGET",
+                "This legacy action is unavailable on a typed graph; use the graph MCP tools",
+            )),
         }
     })();
-    match result { Ok(value)=>ApiResponse::json(&value),Err(e)=>ApiResponse { status:if e.code=="PROJECT_NOT_INITIALIZED"||e.code=="MIGRATION_REQUIRED" {404}else{400},content_type:"application/json",body:e.envelope().to_string().into_bytes() } }
+    match result {
+        Ok(value) => ApiResponse::json(&value),
+        Err(e) => ApiResponse {
+            status: if e.code == "PROJECT_NOT_INITIALIZED" || e.code == "MIGRATION_REQUIRED" {
+                404
+            } else {
+                400
+            },
+            content_type: "application/json",
+            body: e.envelope().to_string().into_bytes(),
+        },
+    }
 }

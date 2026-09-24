@@ -1,0 +1,43 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-payment-gateways"
+version = "1.0.0"
+module = "M3"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "3.1"
+name = "Payment Gateways"
+module = "M3"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "MerchantAdmin"]
+datasets = ["gateways"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_gateways", route_path = "/gateways", generated_files = ["src/screens/m03_gateways.nir"] }
+data_binding = { entities = ["PaymentGateway"], primary_key = "gateway_id", guard = { table = "gateway", purpose = "GatewayOps" }, fields = [
+    { name = "gateway_id", type = "String" },
+    { name = "provider", type = "String" },
+    { name = "region", type = "String" },
+    { name = "status", type = "String" },
+    { name = "fee_basis_points", type = "String" }
+] }
+policy = { purpose = "GatewayOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m03_gateways.nir"
+notes = "Configure Stripe, Adyen, Braintree, and custom PSP integrations."
+
+[[screen]]
+id = "3.2"
+name = "Gateway Routing Rules"
+module = "M3"
+archetype = "rule_builder"
+roles = ["PlatformAdmin"]
+stage = "blocked"
+blocked_by = ["primitive:gateway_routing", "primitive:smart_retry"]
+codegen = { template = "rule_builder", mount_symbol = "mount_routing_rules", route_path = "/gateways/routing", generated_files = ["src/screens/m03_gateways.nir"] }
+file = "src/screens/m03_gateways.nir"
+notes = "BLOCKED: rule builder archetype + smart-routing primitive not yet available."

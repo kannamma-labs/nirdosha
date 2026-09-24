@@ -1,0 +1,57 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-txn-monitoring"
+version = "1.0.0"
+module = "M9"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "9.1"
+name = "Transaction Monitor"
+module = "M9"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "RiskAnalyst", "Operator"]
+datasets = ["transactions"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_txn_monitor", route_path = "/transactions", generated_files = ["src/screens/m09_txn_monitor.nir"] }
+data_binding = { entities = ["Transaction"], primary_key = "transaction_id", guard = { table = "transaction", purpose = "TxnRead" }, fields = [
+    { name = "transaction_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "risk_score", type = "String" },
+    { name = "monitored_at", type = "String" }
+] }
+policy = { purpose = "TxnRead", allowed_actions = ["read", "aggregate", "update"] }
+file = "src/screens/m09_txn_monitor.nir"
+notes = "Real-time transaction stream with risk score and monitoring status."
+
+[[screen]]
+id = "9.2"
+name = "Monitoring Rules"
+module = "M9"
+archetype = "report_builder"
+roles = ["PlatformAdmin", "RiskAnalyst"]
+stage = "blocked"
+blocked_by = ["primitive:rule_engine", "primitive:velocity_check", "primitive:amount_threshold"]
+codegen = { template = "report", mount_symbol = "mount_monitoring_rules", route_path = "/transactions/rules", generated_files = ["src/screens/m09_txn_monitor.nir"] }
+data_binding = { entities = ["Transaction"], primary_key = "transaction_id", guard = { table = "transaction", purpose = "TxnRead" }, fields = [
+    { name = "transaction_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "risk_score", type = "String" }
+] }
+policy = { purpose = "TxnRead", allowed_actions = ["read"] }
+[screen.parameters]
+dimensions = ["currency", "status"]
+access = "role_gated"
+file = "src/screens/m09_txn_monitor.nir"
+notes = "BLOCKED: rule-engine + velocity/threshold primitives not yet available."

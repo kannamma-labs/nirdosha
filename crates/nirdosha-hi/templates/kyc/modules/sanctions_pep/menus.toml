@@ -1,0 +1,20 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Sanctions & PEP"
+
+[landing]
+
+[[group]]
+id = "screening"
+label_key = "nav.group.screening"
+order = 35
+
+[[menu]]
+id = "nav.sanctions_providers"
+label_key = "Sanctions / PEP Providers"
+group = "screening"
+screen_id = "1.1"
+route = "/vendors/sanctions"
+roles = ["compliance_officer"]
+order = 10

@@ -1,0 +1,77 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-ai-ml"
+version = "1.0.0"
+module = "M9"
+total_screens = 3
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "9.1"
+name = "Alpha Models"
+module = "M9"
+archetype = "crud_screens"
+roles = ["Trader", "Quant"]
+stage = "blocked"
+blocked_by = ["primitive:alpha_model", "primitive:backtest_engine"]
+codegen = { template = "crud_screens", mount_symbol = "mount_alpha_models", route_path = "/ai/alphas", generated_files = ["src/screens/m09_ai_ml.nir"] }
+data_binding = { entities = ["AlphaModel"], primary_key = "model_id", guard = { table = "alpha_model", purpose = "MlOps" }, fields = [
+    { name = "model_id", type = "String" },
+    { name = "name", type = "String" },
+    { name = "instrument_universe", type = "String" },
+    { name = "signal_frequency", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "MlOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m09_ai_ml.nir"
+notes = "BLOCKED: alpha-model + backtest primitives not yet available."
+
+[[screen]]
+id = "9.2"
+name = "Signals"
+module = "M9"
+archetype = "crud_screens"
+roles = ["Trader", "Quant"]
+stage = "blocked"
+blocked_by = ["primitive:signal_generate", "primitive:signal_store"]
+codegen = { template = "crud_screens", mount_symbol = "mount_signals", route_path = "/ai/signals", generated_files = ["src/screens/m09_ai_ml.nir"] }
+data_binding = { entities = ["Signal"], primary_key = "signal_id", guard = { table = "signal", purpose = "MlRead" }, fields = [
+    { name = "signal_id", type = "String" },
+    { name = "model_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "direction", type = "String" },
+    { name = "strength", type = "String" },
+    { name = "generated_at", type = "String" }
+] }
+policy = { purpose = "MlRead", allowed_actions = ["read"] }
+file = "src/screens/m09_ai_ml.nir"
+notes = "BLOCKED: signal-generation primitives not yet available."
+
+[[screen]]
+id = "9.3"
+name = "Model Performance"
+module = "M9"
+archetype = "dashboard"
+roles = ["Trader", "Quant", "RiskManager"]
+stage = "blocked"
+blocked_by = ["primitive:model_metrics", "primitive:sharpe_calc"]
+codegen = { template = "dashboard", mount_symbol = "mount_model_performance", route_path = "/ai/performance", generated_files = ["src/screens/m09_ai_ml.nir"] }
+data_binding = { entities = ["AlphaModel"], primary_key = "model_id", guard = { table = "alpha_model", purpose = "MlRead" }, fields = [
+    { name = "model_id", type = "String" },
+    { name = "name", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "MlRead", allowed_actions = ["read", "aggregate"] }
+[screen.parameters]
+title = "Model Performance"
+refresh_seconds = 300
+widgets = [
+    { kind = "Metric", label = "Sharpe", fn = "sharpe_ratio", source = { table = "alpha_model", purpose = "MlRead", action = "aggregate" }, target = 1, alert_below = true },
+    { kind = "Metric", label = "Max drawdown", fn = "max_drawdown", source = { table = "alpha_model", purpose = "MlRead", action = "aggregate" }, target = 10, alert_below = false }
+]
+file = "src/screens/m09_ai_ml.nir"
+notes = "BLOCKED: model-metrics + Sharpe/max-drawdown primitives not yet available."

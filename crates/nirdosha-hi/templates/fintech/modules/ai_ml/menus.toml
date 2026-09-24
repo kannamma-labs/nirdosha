@@ -1,0 +1,49 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech AI/ML"
+
+[[group]]
+id = "ai_ml"
+label_key = "nav.group.ai_ml"
+order = 95
+
+[[menu]]
+id = "nav.models"
+label_key = "nav.models"
+group = "ai_ml"
+screen_id = "10.1"
+route = "/ai/models"
+guard = { action = "read", resource = "mlmodel" }
+roles = ["PlatformAdmin", "ML Engineer"]
+order = 10
+
+[[menu]]
+id = "nav.features"
+label_key = "nav.features"
+group = "ai_ml"
+screen_id = "10.2"
+route = "/ai/features"
+guard = { action = "read", resource = "feature" }
+roles = ["PlatformAdmin", "ML Engineer"]
+order = 20
+
+[[menu]]
+id = "nav.performance"
+label_key = "nav.performance"
+group = "ai_ml"
+screen_id = "10.3"
+route = "/ai/performance"
+guard = { action = "read", resource = "mlmodel" }
+roles = ["PlatformAdmin", "ML Engineer", "RiskAnalyst"]
+order = 30
+
+[[menu]]
+id = "nav.inferences"
+label_key = "nav.inferences"
+group = "ai_ml"
+screen_id = "10.4"
+route = "/ai/inferences"
+guard = { action = "read", resource = "inference" }
+roles = ["PlatformAdmin", "ML Engineer", "RiskAnalyst"]
+order = 40

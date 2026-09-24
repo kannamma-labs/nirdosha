@@ -1,0 +1,29 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Transaction Monitoring"
+
+[[group]]
+id = "monitoring"
+label_key = "nav.group.monitoring"
+order = 55
+
+[[menu]]
+id = "nav.transactions"
+label_key = "nav.transactions"
+group = "monitoring"
+screen_id = "9.1"
+route = "/transactions"
+guard = { action = "read", resource = "transaction" }
+roles = ["PlatformAdmin", "RiskAnalyst", "Operator"]
+order = 10
+
+[[menu]]
+id = "nav.monitoring_rules"
+label_key = "nav.monitoring_rules"
+group = "monitoring"
+screen_id = "9.2"
+route = "/transactions/rules"
+guard = { action = "read", resource = "transaction" }
+roles = ["PlatformAdmin", "RiskAnalyst"]
+order = 20

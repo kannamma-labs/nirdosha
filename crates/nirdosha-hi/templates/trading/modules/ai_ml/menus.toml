@@ -1,0 +1,39 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading AI/ML"
+
+[[group]]
+id = "ai_ml"
+label_key = "nav.group.ai_ml"
+order = 100
+
+[[menu]]
+id = "nav.alphas"
+label_key = "nav.alphas"
+group = "ai_ml"
+screen_id = "9.1"
+route = "/ai/alphas"
+guard = { action = "read", resource = "alphamodel" }
+roles = ["Trader", "Quant"]
+order = 10
+
+[[menu]]
+id = "nav.signals"
+label_key = "nav.signals"
+group = "ai_ml"
+screen_id = "9.2"
+route = "/ai/signals"
+guard = { action = "read", resource = "signal" }
+roles = ["Trader", "Quant"]
+order = 20
+
+[[menu]]
+id = "nav.ai_performance"
+label_key = "nav.ai_performance"
+group = "ai_ml"
+screen_id = "9.3"
+route = "/ai/performance"
+guard = { action = "read", resource = "alphamodel" }
+roles = ["Trader", "Quant", "RiskManager"]
+order = 30

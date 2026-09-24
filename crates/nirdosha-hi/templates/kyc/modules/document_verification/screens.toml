@@ -1,0 +1,46 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "kyc-document-verification"
+version = "1.0.0"
+module = "document_verification"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "1.1"
+name = "Document Verification Providers"
+module = "M1"
+archetype = "settings_screen"
+combo = []
+roles = ["OnboardingOfficer:R/W", "compliance_officer:R/W"]
+datasets = ["PG.document_verification_config"]
+stage = "built"
+codegen = { template = "settings_screen", mount_symbol = "mount_document_verification_providers", route_path = "/vendors/document-verification", generated_files = ["src/screens/m10_document_verification.nir"] }
+data_binding = { entities = ["DocumentVerificationConfig"], primary_key = "config_id", guard = { table = "document_verification_config", purpose = "VendorConfig", row_id = "singleton" }, fields = [
+    { name = "config_id", type = "String", required = true },
+    { name = "default_vendor", type = "String" },
+    { name = "api_key_masked", type = "Option<String>", masked = true },
+    { name = "enabled", type = "String" }
+] }
+policy = { purpose = "VendorConfig", allowed_actions = ["read", "update"] }
+parameters = { access = 'requires role "compliance_officer"', vendors = ["Onfido", "Jumio", "Trulioo", "HyperVerge", "IDfy", "Sumsub"] }
+file = "src/screens/m10_document_verification.nir"
+notes = "Select and configure the document/OCR/liveness vendor. The actual API calls are abstracted behind a primitive."
+
+[[screen]]
+id = "1.2"
+name = "OCR & Liveness Engine"
+module = "M1"
+archetype = "static_embed"
+combo = []
+roles = ["OnboardingOfficer:R", "compliance_officer:R"]
+datasets = ["STATIC.ocr_liveness_engine"]
+stage = "blocked"
+blocked_by = ["plugin:document_verification_api"]
+codegen = { template = "static_embed", mount_symbol = "mount_ocr_liveness_engine", route_path = "/engines/ocr-liveness", generated_files = ["src/screens/m10_document_verification.nir"] }
+parameters = { title = "OCR & Liveness Engine", content_file = "files/ocr-liveness-engine.md", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }
+notes = "BLOCKED: needs document verification API plugin (Onfido/Jumio/Trulioo/HyperVerge/IDfy/Sumsub)."

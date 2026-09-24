@@ -1,0 +1,34 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-reporting"
+version = "1.0.0"
+module = "M8"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "8.1"
+name = "Reports"
+module = "M8"
+archetype = "report_builder"
+roles = ["PlatformAdmin", "MerchantAdmin", "RiskAnalyst"]
+datasets = ["reports"]
+stage = "blocked"
+blocked_by = ["primitive:aggregations", "primitive:report_export"]
+codegen = { template = "report", mount_symbol = "mount_reports", route_path = "/reports", generated_files = ["src/screens/m08_reports.nir"] }
+data_binding = { entities = ["Payment"], primary_key = "payment_id", guard = { table = "payment", purpose = "ReportRead" }, fields = [
+    { name = "payment_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "created_at", type = "String" }
+] }
+[screen.parameters]
+dimensions = ["currency", "status"]
+access = "role_gated"
+file = "src/screens/m08_reports.nir"
+notes = "BLOCKED: aggregation/export primitives not yet available."

@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Sanctions"
+
+[[group]]
+id = "sanctions"
+label_key = "nav.group.sanctions"
+order = 135
+
+[[menu]]
+id = "nav.sanctions"
+label_key = "nav.sanctions"
+group = "sanctions"
+screen_id = "15.1"
+route = "/sanctions"
+guard = { action = "read", resource = "sanctionshit" }
+roles = ["PlatformAdmin", "ComplianceOfficer"]
+order = 10

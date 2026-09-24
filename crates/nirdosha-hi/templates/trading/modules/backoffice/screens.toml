@@ -1,0 +1,33 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-backoffice"
+version = "1.0.0"
+module = "M7"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "7.1"
+name = "Settlements"
+module = "M7"
+archetype = "crud_screens"
+roles = ["Operations"]
+stage = "blocked"
+blocked_by = ["primitive:settlement_calc", "primitive:ledger_post"]
+codegen = { template = "crud_screens", mount_symbol = "mount_settlements", route_path = "/settlements", generated_files = ["src/screens/m07_backoffice.nir"] }
+data_binding = { entities = ["Settlement"], primary_key = "settlement_id", guard = { table = "settlement", purpose = "SettlementOps" }, fields = [
+    { name = "settlement_id", type = "String" },
+    { name = "order_id", type = "String" },
+    { name = "account_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "settled_at", type = "String" }
+] }
+policy = { purpose = "SettlementOps", allowed_actions = ["read", "update"] }
+file = "src/screens/m07_backoffice.nir"
+notes = "BLOCKED: settlement calculation and ledger-posting primitives not yet available."

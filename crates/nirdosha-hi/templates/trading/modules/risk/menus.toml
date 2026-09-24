@@ -1,0 +1,22 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading Risk"
+
+[landing]
+RiskManager = "/risk"
+
+[[group]]
+id = "risk"
+label_key = "nav.group.risk"
+order = 50
+
+[[menu]]
+id = "nav.risk"
+label_key = "nav.risk"
+group = "risk"
+screen_id = "5.1"
+route = "/risk"
+guard = { action = "read", resource = "risklimit" }
+roles = ["RiskManager", "Operations"]
+order = 10
