@@ -13,13 +13,12 @@ nirdosha_rt::wizard! {
     entity: CustomerRow,
     store: customer_store,
     path: "/onboarding/new",
-    access: requires role "customer" or role "relationship_manager" or role "kyc_analyst",
+    access: requires role "customer",
     steps: [
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
+        { name: "Consent", fields: [ consent_given: String ] },
+        { name: "Identity", fields: [ customer_id: String ] },
+        { name: "Address", fields: [ legal_name: String ] },
+        { name: "Review", fields: [ customer_type: String ] },
     ],
     guard: { table: customer_table, purpose: "Operations" },
 }

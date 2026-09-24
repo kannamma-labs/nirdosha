@@ -13,13 +13,11 @@ nirdosha_rt::wizard! {
     entity: EDDQuestionnaireRow,
     store: e_d_d_questionnaire_store,
     path: "/edd/{customer_id}",
-    access: requires role "kyc_analyst" or role "kyc_senior_analyst" or role "relationship_manager",
+    access: requires role "kyc_analyst",
     steps: [
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
+        { name: "Case", fields: [ questionnaire_id: String ] },
+        { name: "Customer", fields: [ customer_id: String ] },
+        { name: "PEP", fields: [ pep_declaration: String ] },
     ],
     guard: { table: edd_questionnaire_table, purpose: "Compliance" },
 }

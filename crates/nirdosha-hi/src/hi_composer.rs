@@ -999,13 +999,27 @@ fn run_cargo_nirdosha(subcommand: &str, project_dir: &Path) -> Result<String, St
 
 /// Run `cargo nirdosha generate-screens` on the composed project.
 pub fn generate_screens(project_dir: &Path) -> Result<String, String> {
-    run_cargo_nirdosha("generate-screens", project_dir)
+    // The generator is already a library dependency. Calling it in-process
+    // avoids accidentally selecting an older target/debug/cargo-nirdosha
+    // binary after generator source changed in the same build.
+    let report = cargo_nirdosha::generate::run(project_dir)?;
+    Ok(format!(
+        "{} screens emitted, {} entities, {} policies, {} invariants checked",
+        report.screens_emitted,
+        report.entities,
+        report.policies,
+        report.invariants_checked
+    ))
 }
 
 /// Build the composed project with cargo.
 pub fn build_project(project_dir: &Path) -> Result<String, String> {
     let output = Command::new("cargo")
         .args(["build", "--quiet"])
+        // Composed projects are frequently created under /tmp. A shared
+        // target avoids rebuilding the full guard/runtime dependency graph
+        // into every disposable project (and exhausting /tmp).
+        .env("CARGO_TARGET_DIR", workspace_root().join("target"))
         .current_dir(project_dir)
         .output()
         .map_err(|e| format!("failed to invoke `cargo build`: {e}"))?;
@@ -1397,6 +1411,49 @@ mod tests {
         assert!(result.path.join("menus.toml").is_file());
         assert!(result.path.join("Cargo.toml").is_file());
         assert!(result.total_screens > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compose_kyc_all_modules_generates_and_builds() {
+        let dir = std::env::temp_dir().join(format!(
+            "nir_hi_compose_kyc_all_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let modules = [
+            "core",
+            "document_verification",
+            "sanctions_pep",
+            "government_id",
+            "screening_match",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let result = compose_project(&dir, "kyc", &modules, Some("IN"))
+            .expect("all KYC modules must compose without canonical role collisions");
+        generate_screens(&result.path).expect("the composed KYC register must generate");
+        let bridge = std::fs::read_to_string(result.path.join("src/bridge.nir")).unwrap();
+        assert_eq!(bridge.matches("ComplianceOfficer =").count(), 1, "{bridge}");
+        fn assert_access_grammar(dir: &Path) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    assert_access_grammar(&path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("nir") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    assert!(
+                        !source.contains(" or role ") || source.contains("approval_inbox!"),
+                        "unsupported multi-role access emitted in {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert_access_grammar(&result.path.join("src"));
+        build_project(&result.path).expect("the generated all-module KYC crate must build");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

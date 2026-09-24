@@ -31,9 +31,21 @@
 //! - **The guard stays at the data plane.** A screen with
 //!   `data_binding.guard` is emitted with `guard: { table, purpose }`
 //!   clauses and a real `guard_policy!` record set synthesized from the
-//!   screen's own `policy` block (roles × allowed_actions × purpose) —
-//!   so generated screens are policy-evaluated from boot, not merely
-//!   role-gated.
+//!   screen's own `policy` block (roles × allowed_actions) — so
+//!   generated screens are policy-evaluated from boot, not merely
+//!   role-gated. The synthesized policy's `purpose(...)` always comes
+//!   from `data_binding.guard.purpose`, never from `policy.purpose`:
+//!   `guard.purpose` is the value actually threaded into the emitted
+//!   `GuardedTable::guarded_*` call, so it is the only value the
+//!   evaluator can ever match against at runtime. `policy.purpose`, if
+//!   present, must agree with it exactly (checked below) — it exists so
+//!   the register can restate the purpose next to the rest of the
+//!   policy metadata (`allowed_actions`, `subject_scope`,
+//!   `segregation_class`), not as a second, independently-settable
+//!   source of truth. Two free-text fields for one guard tag, left
+//!   unvalidated, is exactly how this drifted before: a screen could
+//!   compile clean and still deny every request at runtime with no
+//!   signal at generate time.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -995,7 +1007,23 @@ fn render_bridge(
             ));
         };
         let resource = entity.to_lowercase();
-        let purpose_pascal = policy.purpose.clone().unwrap_or_else(|| pascalize(&guard.purpose));
+        // `guard.purpose` is authoritative: it's the exact string the
+        // generated macro passes to `GuardedTable::guarded_*` at
+        // runtime, so it's the only value the evaluator's purpose match
+        // can ever see. `policy.purpose`, when set, is restated
+        // metadata and must agree — silently preferring it here (as a
+        // prior version of this generator did) let a screen's declared
+        // roles look policy-evaluated while every real request denied
+        // by default, with nothing catching it before runtime.
+        let purpose_pascal = pascalize(&guard.purpose);
+        if let Some(policy_purpose) = &policy.purpose {
+            if pascalize(policy_purpose) != purpose_pascal {
+                return Err(format!(
+                    "screen {}: data_binding.guard.purpose ({:?}) and policy.purpose ({:?}) disagree — guard.purpose is what the generated code actually passes to GuardedTable at runtime, so the synthesized guard_policy! must use it too; a mismatch here means every guarded action on this screen would deny by default at runtime. Set policy.purpose to match guard.purpose, or remove policy.purpose and let it default.",
+                    screen.id, guard.purpose, policy_purpose
+                ));
+            }
+        }
         let subjects: Vec<String> = screen
             .decl
             .roles
@@ -1479,18 +1507,27 @@ fn render_screen_invocation(
             ));
             if let Some(steps) = params.get("steps").and_then(toml::Value::as_array) {
                 for step in steps {
-                    let name = step.get("name").and_then(toml::Value::as_str).unwrap_or("");
+                    let name = step
+                        .get("title")
+                        .or_else(|| step.get("name"))
+                        .or_else(|| step.get("id"))
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("");
                     let fields: Vec<String> = step
                         .get("fields")
                         .and_then(toml::Value::as_array)
                         .map(|a| {
                             a.iter()
                                 .map(|f| {
-                                    format!(
-                                        "{}: {}",
-                                        f.get("name").and_then(toml::Value::as_str).unwrap_or(""),
-                                        f.get("type").and_then(toml::Value::as_str).unwrap_or("String")
-                                    )
+                                    if let Some(field) = f.as_str() {
+                                        format!("{}: {}", field, decl.type_of(field))
+                                    } else {
+                                        format!(
+                                            "{}: {}",
+                                            f.get("name").and_then(toml::Value::as_str).unwrap_or(""),
+                                            f.get("type").and_then(toml::Value::as_str).unwrap_or("String")
+                                        )
+                                    }
                                 })
                                 .collect()
                         })
@@ -1538,8 +1575,20 @@ fn render_screen_invocation(
             let columns: Vec<String> = params
                 .get("columns")
                 .and_then(toml::Value::as_array)
-                .map(|a| a.iter().filter_map(toml::Value::as_str).map(|s| format!("{s:?}")).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|column| {
+                            column
+                                .as_str()
+                                .or_else(|| column.get("name").and_then(toml::Value::as_str))
+                        })
+                        .map(|s| format!("{s:?}"))
+                        .collect()
+                })
                 .unwrap_or_default();
+            if columns.is_empty() {
+                return Err(format!("screen {}: kanban_board needs at least one parameters.columns entry", plan.id));
+            }
             let move_path = params
                 .get("move_path")
                 .and_then(toml::Value::as_str)
@@ -2201,6 +2250,22 @@ roles = ["Agent"]
         let (_dir, dir) = write_project(SCREENS, &menus);
         let err = run(&dir).unwrap_err();
         assert!(err.contains("(V5-lite)"), "{err}");
+    }
+
+    #[test]
+    fn guard_purpose_disagreeing_with_policy_purpose_is_refused() {
+        // guard.purpose is what the generated macro actually passes to
+        // GuardedTable at runtime; a differing policy.purpose would
+        // synthesize a guard_policy! that never matches it, denying
+        // every guarded action by default with no signal until runtime.
+        let screens = SCREENS.replace(
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }",
+            "policy = { purpose = \"manage_tickets\", allowed_actions = [\"read\"] }",
+        );
+        let (_dir, dir) = write_project(&screens, MENUS);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("guard.purpose") && err.contains("policy.purpose"), "{err}");
+        assert!(err.contains("\"Operations\"") && err.contains("\"manage_tickets\""), "{err}");
     }
 
     #[test]

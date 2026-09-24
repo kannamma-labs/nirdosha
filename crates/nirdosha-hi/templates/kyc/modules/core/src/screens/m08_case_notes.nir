@@ -14,8 +14,8 @@ nirdosha_rt::communication_feed! {
     store: case_note_cell,
     path: "/cases/{id}/notes",
     fields: [ note_id: String, case_id: String, author_id: String, body: Option<String>, created_at: String ],
-    post_access: requires role "kyc_analyst" or role "kyc_senior_analyst" or role "kyc_mlro",
-    read_access: requires role "kyc_analyst" or role "kyc_senior_analyst" or role "kyc_mlro",
+    post_access: requires role "kyc_analyst",
+    read_access: requires role "kyc_analyst",
     refresh_seconds: 5,
     guard: { table: case_note_table, purpose: "Operations" },
 }

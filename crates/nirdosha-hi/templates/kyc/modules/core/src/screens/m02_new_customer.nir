@@ -13,12 +13,11 @@ nirdosha_rt::wizard! {
     entity: CustomerRow,
     store: customer_store,
     path: "/customers/new",
-    access: requires role "kyc_analyst" or role "relationship_manager",
+    access: requires role "kyc_analyst",
     steps: [
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
-        { name: "", fields: [  ] },
+        { name: "Identity", fields: [ customer_id: String ] },
+        { name: "Contact", fields: [ legal_name: String ] },
+        { name: "Review", fields: [ customer_type: String ] },
     ],
     guard: { table: customer_table, purpose: "Operations" },
 }

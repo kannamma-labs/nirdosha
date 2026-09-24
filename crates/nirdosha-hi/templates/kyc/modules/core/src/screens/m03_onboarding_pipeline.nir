@@ -13,10 +13,10 @@ nirdosha_rt::kanban_board! {
     entity: CustomerRow,
     store: customer_store,
     path: "/onboarding/pipeline",
-    access: requires role "kyc_analyst" or role "kyc_senior_analyst",
+    access: requires role "kyc_analyst",
     title_field: legal_name,
     column_field: onboarding_stage,
-    columns: [  ],
+    columns: [ "new", "in_review", "approved" ],
     move_path: "/onboarding/pipeline/{id}/move/{to}",
 }
 

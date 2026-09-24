@@ -15,7 +15,7 @@ nirdosha_rt::tree_view! {
     path: "/corporate/entities/{id}/ubo",
     title: "UBO Tree",
     purpose: "Compliance",
-    access: requires role "kyc_analyst" or role "kyc_senior_analyst" or role "compliance_officer" or role "auditor",
+    access: requires role "kyc_analyst",
     id_field: ubo_id,
     parent_field: parent_id,
     label_field: label,

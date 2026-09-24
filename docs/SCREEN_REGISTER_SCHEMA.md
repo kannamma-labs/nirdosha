@@ -14,8 +14,9 @@ behavioral proof specification:
 - `data_binding`: entity/read-model/store names, schema version, primary key,
   field mapping, catalog references, **bound field list**, and an optional **guard**
   binding that forces generated reads/writes through `GuardedTable`.
-- `policy`: purpose, policy IDs, allowed actions, masking, subject scope, and
-  segregation class.
+- `policy`: policy IDs, allowed actions, masking, subject scope, segregation
+  class, and (for guarded screens) a `purpose` that must restate
+  `data_binding.guard.purpose` verbatim — see the data binding contract below.
 - `parameters`: **archetype-specific macro inputs** consumed by the selected
   template, such as `refresh_seconds`, `steps`, or `guard`.
 - `dependencies`: pinned macro/plugin/dataset/policy/route/source inputs with
@@ -99,6 +100,20 @@ purpose = "Operations"
 # For a settings singleton only:
 # row_id = "current"
 ```
+
+`guard.purpose` is authoritative for the guard tag: it is the exact string the
+generator threads into every `GuardedTable::guarded_*` call it emits for the
+screen, so it is the only value the runtime evaluator can ever match a policy
+against. The generator synthesizes each screen's `guard_policy!` records'
+`purpose(...)` clause from `guard.purpose`, never from `policy.purpose` (see
+below). If `[screen.policy].purpose` is also set, it must be the same value —
+the generator refuses to generate otherwise, naming the screen and both
+values. Do not set `guard.purpose` and `policy.purpose` to different strings
+expecting the difference to mean anything: nothing reads `policy.purpose` for
+guard evaluation, so a screen with disagreeing values would compile clean and
+then deny every guarded action at runtime with no signal beforehand — the
+validation exists specifically to turn that failure mode into a generate-time
+error instead.
 
 ## Parameters
 

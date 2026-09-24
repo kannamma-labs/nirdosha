@@ -13,10 +13,10 @@ nirdosha_rt::kanban_board! {
     entity: KYCCaseRow,
     store: k_y_c_case_store,
     path: "/cases/pipeline",
-    access: requires role "kyc_senior_analyst" or role "kyc_mlro",
+    access: requires role "kyc_senior_analyst",
     title_field: case_id,
     column_field: status,
-    columns: [  ],
+    columns: [ "open", "in_review", "escalated", "closed" ],
     move_path: "/cases/pipeline/{id}/move/{to}",
 }
 

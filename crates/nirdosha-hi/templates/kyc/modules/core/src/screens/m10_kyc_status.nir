@@ -15,7 +15,7 @@ nirdosha_rt::report_builder! {
     path: "/reports/kyc-status",
     title: "KYC Status Report",
     purpose: "Operations",
-    access: requires role "kyc_senior_analyst" or role "kyc_mlro" or role "compliance_officer" or role "auditor",
+    access: requires role "kyc_senior_analyst",
     dimensions: [ status: String, risk_rating: String ],
 }
 

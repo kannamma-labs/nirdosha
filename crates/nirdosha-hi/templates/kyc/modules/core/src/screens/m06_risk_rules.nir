@@ -14,7 +14,7 @@ nirdosha_rt::settings_screen! {
     store: risk_rule_store,
     path: "/risk/rules",
     fields: [ rule_id: String, rule_name: String, severity: String, expression: String ],
-    access: requires role "platform_admin" or role "compliance_officer",
+    access: requires role "platform_admin",
     guard: { table: risk_rule_table, purpose: "Compliance", row_id: "current" },
 }
 

@@ -15,7 +15,7 @@ nirdosha_rt::report_builder! {
     path: "/monitoring/report",
     title: "Monitoring Report",
     purpose: "Operations",
-    access: requires role "kyc_mlro" or role "compliance_officer" or role "auditor",
+    access: requires role "kyc_mlro",
     dimensions: [ cadence: String, review_status: String ],
 }
 
