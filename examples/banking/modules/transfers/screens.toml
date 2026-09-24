@@ -1,0 +1,82 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "banking-transfers"
+version = "1.0.0"
+module = "transfers"
+total_screens = 3
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+
+# Reuses the global chain for large transfers; composer merges chains.
+[[approval_chain]]
+name = "large_transfer"
+quorum = 1
+approvers = ["BranchManager"]
+
+# ------------------------------------------------------------------ M3 Transfers
+[[screen]]
+id = "3.1"
+name = "Fund Transfer"
+module = "M3"
+archetype = "crud_screens"
+combo = []
+roles = ["Customer:R/W"]
+datasets = ["PG.transfers"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_transfers", route_path = "/transfers", generated_files = ["src/screens/m03_transfers.nir"] }
+data_binding = { entities = ["TransferRequest"], primary_key = "transfer_id", guard = { table = "transfer_request_table", purpose = "Payments" }, fields = [
+    { name = "transfer_id", type = "String" },
+    { name = "debit_account", type = "String" },
+    { name = "credit_account", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+] }
+policy = { purpose = "Payments", allowed_actions = ["read", "create"] }
+parameters = { access_create = 'requires role "Customer"', access_read = 'requires role "Customer"' }
+notes = "This only creates a transfer request. Execution is a certified primitive, not a CRUD update."
+
+[[screen]]
+id = "3.2"
+name = "Transfer Approval Inbox"
+module = "M3"
+archetype = "approval_inbox"
+combo = []
+roles = ["Customer:R", "BranchManager:R"]
+datasets = ["PG.transfers", "PG.accounts"]
+stage = "blocked"
+blocked_by = ["primitive:transfer_execute", "primitive:ledger_post"]
+codegen = { template = "approval_inbox", mount_symbol = "mount_transfer_approval", route_path = "/transfers/pending", generated_files = ["src/screens/m03_transfers.nir"] }
+data_binding = { entities = ["TransferRequest"], primary_key = "transfer_id", guard = { table = "transfer_request_table", purpose = "Payments" }, fields = [
+    { name = "transfer_id", type = "String" },
+] }
+policy = { purpose = "Payments", allowed_actions = ["read"] }
+parameters = { access = 'requires role "Customer"', sources = [
+    { table = "transfer_request_table", chain = "large_transfer", detail_path = "/transfers/{id}" },
+] }
+notes = "BLOCKED: after approval the primitive must debit/credit accounts + write audit + idempotency check"
+
+[[screen]]
+id = "3.3"
+name = "Transfer Limits Dashboard"
+module = "M3"
+archetype = "dashboard"
+combo = []
+roles = ["Customer:R", "BranchManager:R"]
+datasets = ["PG.transfers", "PG.accounts"]
+stage = "blocked"
+blocked_by = ["primitive:daily_transfer_usage"]
+codegen = { template = "dashboard", mount_symbol = "mount_transfer_limits", route_path = "/transfers/limits", generated_files = ["src/screens/m03_transfers.nir"] }
+data_binding = { entities = ["TransferRequest"], primary_key = "transfer_id", guard = { table = "transfer_request_table", purpose = "Payments" }, fields = [
+    { name = "transfer_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "status", type = "String" },
+] }
+policy = { purpose = "Payments", allowed_actions = ["read", "aggregate"] }
+parameters = { title = "Transfer Limits", refresh_seconds = 60, widgets = [
+    { kind = "Metric", label = "Used today", fn = "daily_transfer_used", source = { table = "transfer_request_table", purpose = "Payments", action = "aggregate" }, target = 5000000, alert_below = false },
+    { kind = "Metric", label = "Remaining today", fn = "daily_transfer_remaining", source = { table = "transfer_request_table", purpose = "Payments", action = "aggregate" }, target = 0, alert_below = true },
+] }
+notes = "BLOCKED: daily usage is computed by a primitive that reads requests for today and applies country limit"

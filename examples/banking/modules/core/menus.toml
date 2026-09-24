@@ -1,0 +1,52 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Core Banking"
+
+# Landing per role. Other modules may override or append.
+[landing]
+Customer = "/accounts"
+LoanOfficer = "/loans"
+BranchManager = "/admin/holidays"
+ComplianceOfficer = "/compliance/audit"
+TreasuryHead = "/admin/products"
+
+[[group]]
+id = "admin"
+label_key = "nav.group.admin"
+order = 90
+
+[[group]]
+id = "compliance"
+label_key = "nav.group.compliance"
+order = 80
+
+[[menu]]
+id = "nav.holidays"
+label_key = "nav.holidays"
+group = "admin"
+screen_id = "8.1"
+route = "/admin/holidays"
+guard = { action = "read", resource = "holiday" }
+roles = ["BranchManager"]
+order = 10
+
+[[menu]]
+id = "nav.products"
+label_key = "nav.products"
+group = "admin"
+screen_id = "8.2"
+route = "/admin/products"
+guard = { action = "read", resource = "productconfig" }
+roles = ["TreasuryHead"]
+order = 20
+
+[[menu]]
+id = "nav.audit"
+label_key = "nav.audit"
+group = "compliance"
+screen_id = "7.1"
+route = "/compliance/audit"
+guard = { action = "aggregate", resource = "auditentry" }
+roles = ["ComplianceOfficer", "BranchManager"]
+order = 10

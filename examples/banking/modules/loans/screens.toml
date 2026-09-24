@@ -1,0 +1,79 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "banking-loans"
+version = "1.0.0"
+module = "loans"
+total_screens = 3
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+
+# Loan disbursement needs dual approval.
+[[approval_chain]]
+name = "loan_disbursement"
+quorum = 2
+approvers = ["LoanOfficer", "BranchManager"]
+
+# ------------------------------------------------------------------ M4 Loans
+[[screen]]
+id = "4.1"
+name = "Loan Accounts"
+module = "M4"
+archetype = "crud_screens"
+combo = []
+roles = ["LoanOfficer:R/W", "BranchManager:R", "Customer:R"]
+datasets = ["PG.loans"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_loans", route_path = "/loans", generated_files = ["src/screens/m04_loans.nir"] }
+data_binding = { entities = ["LoanAccount"], primary_key = "loan_id", guard = { table = "loan_table", purpose = "Lending" }, fields = [
+    { name = "loan_id", type = "String" },
+    { name = "customer_id", type = "String" },
+    { name = "principal_cents", type = "String" },
+    { name = "interest_rate_bps", type = "String" },
+    { name = "term_months", type = "String" },
+    { name = "status", type = "String" },
+] }
+policy = { purpose = "Lending", allowed_actions = ["read", "create"] }
+
+[[screen]]
+id = "4.2"
+name = "Loan Disbursement"
+module = "M4"
+archetype = "approval_inbox"
+combo = []
+roles = ["LoanOfficer:R", "BranchManager:R"]
+datasets = ["PG.loans", "PG.accounts"]
+stage = "blocked"
+blocked_by = ["primitive:loan_disburse", "primitive:emi_schedule"]
+codegen = { template = "approval_inbox", mount_symbol = "mount_loan_disbursement", route_path = "/loans/disbursement", generated_files = ["src/screens/m04_loans.nir"] }
+data_binding = { entities = ["LoanAccount"], primary_key = "loan_id", guard = { table = "loan_table", purpose = "Lending" }, fields = [
+    { name = "loan_id", type = "String" },
+] }
+policy = { purpose = "Lending", allowed_actions = ["read"] }
+parameters = { access = 'requires role "LoanOfficer"', sources = [
+    { table = "loan_table", chain = "loan_disbursement", detail_path = "/loans/{id}" },
+] }
+notes = "BLOCKED: disbursement creates a customer account + posts principal + generates EMI schedule"
+
+[[screen]]
+id = "4.3"
+name = "EMI Schedule"
+module = "M4"
+archetype = "tree_view"
+combo = []
+roles = ["Customer:R", "LoanOfficer:R"]
+datasets = ["PG.loan_emi"]
+stage = "blocked"
+blocked_by = ["primitive:emi_schedule"]
+codegen = { template = "tree_view", mount_symbol = "mount_emi_schedule", route_path = "/loans/{id}/emi", generated_files = ["src/screens/m04_loans.nir"] }
+data_binding = { entities = ["LoanEmi"], primary_key = "emi_id", guard = { table = "loan_emi_table", purpose = "Lending" }, fields = [
+    { name = "emi_id", type = "String" },
+    { name = "loan_id", type = "String" },
+    { name = "due_date", type = "String" },
+    { name = "principal_cents", type = "String" },
+    { name = "interest_cents", type = "String" },
+] }
+policy = { purpose = "Lending", allowed_actions = ["read"] }
+parameters = { access = 'requires role "Customer"', id_field = "emi_id", parent_field = "loan_id", label_field = "due_date" }
+notes = "BLOCKED: tree_view can render EMI rows, but the rows are computed by a primitive, not stored by CRUD"
