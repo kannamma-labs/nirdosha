@@ -88,7 +88,8 @@ fn scratch_dir() -> PathBuf {
 fn ensure_scratch_package() -> Result<PathBuf, String> {
     let dir = scratch_dir();
     let src = dir.join("src");
-    std::fs::create_dir_all(&src).map_err(|e| format!("failed to create v2 scratch package: {e}"))?;
+    std::fs::create_dir_all(&src)
+        .map_err(|e| format!("failed to create v2 scratch package: {e}"))?;
 
     let manifest = format!(
         "[workspace]\n\n\
@@ -104,17 +105,21 @@ fn ensure_scratch_package() -> Result<PathBuf, String> {
          [[bin]]\n\
          name = \"candidate\"\n\
          path = \"src/candidate.nir\"\n",
-        nirdosha_rt_path().to_str().expect("nirdosha-rt path is valid UTF-8")
+        nirdosha_rt_path()
+            .to_str()
+            .expect("nirdosha-rt path is valid UTF-8")
     );
     let manifest_path = dir.join("Cargo.toml");
     // Only rewrite when the content actually changed, so an unrelated
     // Cargo.toml touch never invalidates the incremental build cache.
     if std::fs::read_to_string(&manifest_path).ok().as_deref() != Some(manifest.as_str()) {
-        std::fs::write(&manifest_path, &manifest).map_err(|e| format!("failed to write v2 scratch Cargo.toml: {e}"))?;
+        std::fs::write(&manifest_path, &manifest)
+            .map_err(|e| format!("failed to write v2 scratch Cargo.toml: {e}"))?;
     }
     let candidate = src.join("candidate.nir");
     if !candidate.exists() {
-        std::fs::write(&candidate, "fn main() {}\n").map_err(|e| format!("failed to seed v2 scratch candidate: {e}"))?;
+        std::fs::write(&candidate, "fn main() {}\n")
+            .map_err(|e| format!("failed to seed v2 scratch candidate: {e}"))?;
     }
     Ok(dir)
 }
@@ -142,16 +147,26 @@ fn build_and_scan(dir: &Path, candidate_path: &Path, release: bool) -> Result<V2
         .output()
         .map_err(|e| format!("failed to invoke cargo on the v2 candidate: {e}"))?;
     let builds = output.status.success();
-    let build_diagnostic = if builds { None } else { Some(String::from_utf8_lossy(&output.stderr).into_owned()) };
+    let build_diagnostic = if builds {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&output.stderr).into_owned())
+    };
 
-    let summary = cargo_nirdosha::verify_sources("candidate", dir, &[candidate_path.to_path_buf()], false);
+    let summary =
+        cargo_nirdosha::verify_sources("candidate", dir, &[candidate_path.to_path_buf()], false);
     let violations = summary
         .violations()
         .into_iter()
         .map(|f| format!("{}:{} {}", f.file.display(), f.line, f.message))
         .collect();
 
-    Ok(V2Verdict { builds, build_diagnostic, contracts_found: summary.contracts.len(), violations })
+    Ok(V2Verdict {
+        builds,
+        build_diagnostic,
+        contracts_found: summary.contracts.len(),
+        violations,
+    })
 }
 
 /// Verify a v2 (Rust + comment-layer) source string against both
@@ -161,7 +176,8 @@ pub fn verify_v2_source(source: &str) -> Result<V2Verdict, String> {
     let _guard = SCRATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = ensure_scratch_package()?;
     let candidate_path = dir.join("src/candidate.nir");
-    std::fs::write(&candidate_path, source).map_err(|e| format!("failed to stage v2 candidate: {e}"))?;
+    std::fs::write(&candidate_path, source)
+        .map_err(|e| format!("failed to stage v2 candidate: {e}"))?;
     build_and_scan(&dir, &candidate_path, false)
 }
 
@@ -177,7 +193,8 @@ fn project_build_dir(root: &Path) -> PathBuf {
 fn ensure_project_build_package(root: &Path) -> Result<PathBuf, String> {
     let dir = project_build_dir(root);
     let src = dir.join("src");
-    std::fs::create_dir_all(&src).map_err(|e| format!("failed to create v2 project build package: {e}"))?;
+    std::fs::create_dir_all(&src)
+        .map_err(|e| format!("failed to create v2 project build package: {e}"))?;
 
     let manifest = format!(
         "[workspace]\n\n\
@@ -193,11 +210,14 @@ fn ensure_project_build_package(root: &Path) -> Result<PathBuf, String> {
          [[bin]]\n\
          name = \"candidate\"\n\
          path = \"src/candidate.nir\"\n",
-        nirdosha_rt_path().to_str().expect("nirdosha-rt path is valid UTF-8")
+        nirdosha_rt_path()
+            .to_str()
+            .expect("nirdosha-rt path is valid UTF-8")
     );
     let manifest_path = dir.join("Cargo.toml");
     if std::fs::read_to_string(&manifest_path).ok().as_deref() != Some(manifest.as_str()) {
-        std::fs::write(&manifest_path, &manifest).map_err(|e| format!("failed to write v2 project build Cargo.toml: {e}"))?;
+        std::fs::write(&manifest_path, &manifest)
+            .map_err(|e| format!("failed to write v2 project build Cargo.toml: {e}"))?;
     }
     Ok(dir)
 }
@@ -217,14 +237,27 @@ static PROJECT_BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// actually build" question `:publish`/`:preview` both start from.
 /// Returns the verdict alongside the built binary's path (valid only
 /// when `verdict.passed()`).
-pub fn build_project(root: &Path, generated_source_path: &Path) -> Result<(V2Verdict, PathBuf), String> {
+pub fn build_project(
+    root: &Path,
+    generated_source_path: &Path,
+) -> Result<(V2Verdict, PathBuf), String> {
     let _guard = PROJECT_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let source = std::fs::read_to_string(generated_source_path).map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
+    let source = std::fs::read_to_string(generated_source_path)
+        .map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
     let dir = ensure_project_build_package(root)?;
     let candidate_path = dir.join("src/candidate.nir");
-    std::fs::write(&candidate_path, &source).map_err(|e| format!("failed to stage {}'s generated source for build: {e}", root.display()))?;
+    std::fs::write(&candidate_path, &source).map_err(|e| {
+        format!(
+            "failed to stage {}'s generated source for build: {e}",
+            root.display()
+        )
+    })?;
     let verdict = build_and_scan(&dir, &candidate_path, true)?;
-    let binary_name = if cfg!(windows) { "candidate.exe" } else { "candidate" };
+    let binary_name = if cfg!(windows) {
+        "candidate.exe"
+    } else {
+        "candidate"
+    };
     let binary_path = dir.join("target").join("release").join(binary_name);
     Ok((verdict, binary_path))
 }
@@ -241,15 +274,23 @@ pub struct PublishResult {
 /// A malformed declaration is an error (publish must fail closed); absence is
 /// represented as `None` so existing non-UI projects remain publishable while
 /// their certificate honestly says that no UI proof was supplied.
-pub fn ui_assurance(root: &Path) -> Result<Option<nirdosha_contract_core::ui_assurance::UiProof>, String> {
+pub fn ui_assurance(
+    root: &Path,
+) -> Result<Option<nirdosha_contract_core::ui_assurance::UiProof>, String> {
     let path = root.join(".nir").join("ui-proof.json");
-    if !path.exists() { return Ok(None); }
+    if !path.exists() {
+        return Ok(None);
+    }
     let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let spec: nirdosha_contract_core::ui_assurance::UiProofSpec = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    let spec: nirdosha_contract_core::ui_assurance::UiProofSpec =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     let proof = nirdosha_contract_core::ui_assurance::verify(&spec);
     if !proof.passed {
-        return Err(format!("UI proof rejected for {}: {}", path.display(), proof.counterexamples.join("; ")));
+        return Err(format!(
+            "UI proof rejected for {}: {}",
+            path.display(),
+            proof.counterexamples.join("; ")
+        ));
     }
     Ok(Some(proof))
 }
@@ -269,19 +310,38 @@ pub fn publish_project(root: &Path, generated_source_path: &Path) -> Result<Publ
             "publish refused -- the v2 candidate does not pass its own check (builds: {}, violations: {:?}){}",
             verdict.builds,
             verdict.violations,
-            verdict.build_diagnostic.as_deref().map(|d| format!("\n{d}")).unwrap_or_default()
+            verdict
+                .build_diagnostic
+                .as_deref()
+                .map(|d| format!("\n{d}"))
+                .unwrap_or_default()
         ));
     }
     let ui_proof = ui_assurance(root)?;
     let out_path = root.join(".nir").join("generated").join("hi_build");
-    std::fs::copy(&binary_path, &out_path).map_err(|e| format!("copying {} to {}: {e}", binary_path.display(), out_path.display()))?;
+    std::fs::copy(&binary_path, &out_path).map_err(|e| {
+        format!(
+            "copying {} to {}: {e}",
+            binary_path.display(),
+            out_path.display()
+        )
+    })?;
 
-    let source = std::fs::read_to_string(generated_source_path).map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
+    let source = std::fs::read_to_string(generated_source_path)
+        .map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
     let certificate = certificate_json_with_ui(&source, &verdict, ui_proof.as_ref());
     let cert_path = out_path.with_extension("certificate.json");
-    std::fs::write(&cert_path, serde_json::to_string_pretty(&certificate).expect("this JSON value always serializes")).map_err(|e| format!("writing {}: {e}", cert_path.display()))?;
+    std::fs::write(
+        &cert_path,
+        serde_json::to_string_pretty(&certificate).expect("this JSON value always serializes"),
+    )
+    .map_err(|e| format!("writing {}: {e}", cert_path.display()))?;
 
-    Ok(PublishResult { binary_path: out_path, certificate_path: cert_path, verdict })
+    Ok(PublishResult {
+        binary_path: out_path,
+        certificate_path: cert_path,
+        verdict,
+    })
 }
 
 /// The `nirdosha.certificate/v2-source-scan` shape -- shared by
@@ -296,7 +356,11 @@ pub fn certificate_json(source: &str, verdict: &V2Verdict) -> serde_json::Value 
 /// declares `.nir/ui-proof.json`. The distinction between `proved` and
 /// `not_declared` is intentional: a certificate never upgrades missing UI
 /// evidence into a guarantee.
-pub fn certificate_json_with_ui(source: &str, verdict: &V2Verdict, ui_proof: Option<&nirdosha_contract_core::ui_assurance::UiProof>) -> serde_json::Value {
+pub fn certificate_json_with_ui(
+    source: &str,
+    verdict: &V2Verdict,
+    ui_proof: Option<&nirdosha_contract_core::ui_assurance::UiProof>,
+) -> serde_json::Value {
     serde_json::json!({
         "certificate_version": "nirdosha.certificate/v2-source-scan",
         "source_hash": crate::hi_graph::sha256_hex(source.as_bytes()),
@@ -322,7 +386,11 @@ fn discover_serve_port(source: &str) -> Option<u16> {
     impl<'ast> syn::visit::Visit<'ast> for Finder {
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             if self.0.is_none() && node.method == "serve" {
-                if let Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(n), .. })) = node.args.first() {
+                if let Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(n),
+                    ..
+                })) = node.args.first()
+                {
                     self.0 = n.base10_parse::<u16>().ok();
                 }
             }
@@ -341,19 +409,36 @@ fn discover_serve_port(source: &str) -> Option<u16> {
 /// The first route a generated UI macro mounts is the preview landing
 /// page. UI macros encode their route as a top-level `path: "..."`
 /// entry; nested field/action paths do not count.
-fn discover_preview_path(source: &str) -> Option<String> {
+pub(crate) fn discover_preview_path(source: &str) -> Option<String> {
     let file = syn::parse_file(source).ok()?;
     for item in &file.items {
-        let syn::Item::Macro(item) = item else { continue };
-        if crate::hi_graph::screen_name_from_macro(item).is_none() { continue; }
+        let syn::Item::Macro(item) = item else {
+            continue;
+        };
+        if crate::hi_graph::screen_name_from_macro(item).is_none() {
+            continue;
+        }
         let mut tokens = item.mac.tokens.clone().into_iter();
         while let Some(token) = tokens.next() {
-            let proc_macro2::TokenTree::Ident(key) = token else { continue };
-            if key != "path" { continue; }
-            if !matches!(tokens.next(), Some(proc_macro2::TokenTree::Punct(colon)) if colon.as_char() == ':') { continue; }
-            let Some(proc_macro2::TokenTree::Literal(value)) = tokens.next() else { continue };
-            let path = syn::parse2::<syn::LitStr>(proc_macro2::TokenTree::Literal(value).into()).ok()?.value();
-            if path.starts_with('/') && path != "/" { return Some(path); }
+            let proc_macro2::TokenTree::Ident(key) = token else {
+                continue;
+            };
+            if key != "path" {
+                continue;
+            }
+            if !matches!(tokens.next(), Some(proc_macro2::TokenTree::Punct(colon)) if colon.as_char() == ':')
+            {
+                continue;
+            }
+            let Some(proc_macro2::TokenTree::Literal(value)) = tokens.next() else {
+                continue;
+            };
+            let path = syn::parse2::<syn::LitStr>(proc_macro2::TokenTree::Literal(value).into())
+                .ok()?
+                .value();
+            if path.starts_with('/') && path != "/" {
+                return Some(path);
+            }
         }
     }
     None
@@ -361,13 +446,22 @@ fn discover_preview_path(source: &str) -> Option<String> {
 
 #[cfg(test)]
 mod preview_port_tests {
-    use super::{discover_serve_port, discover_preview_path};
+    use super::{discover_preview_path, discover_serve_port};
 
     #[test]
     fn preview_only_accepts_a_literal_serve_in_main() {
-        assert_eq!(discover_serve_port("fn main() { println!(\"done\"); }"), None);
-        assert_eq!(discover_serve_port("fn unused() { router.serve(8080); } fn main() {}"), None);
-        assert_eq!(discover_serve_port("fn main() { router.serve(8096); }"), Some(8096));
+        assert_eq!(
+            discover_serve_port("fn main() { println!(\"done\"); }"),
+            None
+        );
+        assert_eq!(
+            discover_serve_port("fn unused() { router.serve(8080); } fn main() {}"),
+            None
+        );
+        assert_eq!(
+            discover_serve_port("fn main() { router.serve(8096); }"),
+            Some(8096)
+        );
     }
 
     #[test]
@@ -381,7 +475,8 @@ mod preview_port_tests {
 /// Builds `root`'s generated source for real and, if it passes, starts
 /// (or restarts) it on the literal port named by `main`'s `.serve(N)`.
 pub fn preview_start(root: &Path, generated_source_path: &Path) -> Result<(u16, String), String> {
-    let source = std::fs::read_to_string(generated_source_path).map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
+    let source = std::fs::read_to_string(generated_source_path)
+        .map_err(|e| format!("reading {}: {e}", generated_source_path.display()))?;
     let port = discover_serve_port(&source).ok_or("preview requires main() to call .serve(<literal port>); the generated program exits without starting an HTTP server")?;
     let path = discover_preview_path(&source).unwrap_or_else(|| "/".to_string());
     let (verdict, binary_path) = build_project(root, generated_source_path)?;
@@ -390,7 +485,11 @@ pub fn preview_start(root: &Path, generated_source_path: &Path) -> Result<(u16, 
             "preview refused -- the v2 candidate does not pass its own check (builds: {}, violations: {:?}){}",
             verdict.builds,
             verdict.violations,
-            verdict.build_diagnostic.as_deref().map(|d| format!("\n{d}")).unwrap_or_default()
+            verdict
+                .build_diagnostic
+                .as_deref()
+                .map(|d| format!("\n{d}"))
+                .unwrap_or_default()
         ));
     }
     crate::hi_preview::restart(&binary_path, port, &path)?;
@@ -421,13 +520,19 @@ pub fn describe_v2_source(source: &str) -> Result<serde_json::Value, String> {
                 declarations.extend(nirdosha_doc_comments(&f.attrs, &f.sig.ident.to_string()));
             }
             syn::Item::Struct(s) => {
-                let fields: Vec<String> = s.fields.iter().filter_map(|f| f.ident.as_ref().map(|i| i.to_string())).collect();
+                let fields: Vec<String> = s
+                    .fields
+                    .iter()
+                    .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+                    .collect();
                 structs.push(serde_json::json!({ "name": s.ident.to_string(), "fields": fields }));
                 declarations.extend(nirdosha_doc_comments(&s.attrs, &s.ident.to_string()));
             }
             syn::Item::Enum(e) => {
-                let variants: Vec<String> = e.variants.iter().map(|v| v.ident.to_string()).collect();
-                enums.push(serde_json::json!({ "name": e.ident.to_string(), "variants": variants }));
+                let variants: Vec<String> =
+                    e.variants.iter().map(|v| v.ident.to_string()).collect();
+                enums
+                    .push(serde_json::json!({ "name": e.ident.to_string(), "variants": variants }));
                 declarations.extend(nirdosha_doc_comments(&e.attrs, &e.ident.to_string()));
             }
             _ => {}
@@ -453,13 +558,23 @@ fn nirdosha_doc_comments(attrs: &[syn::Attribute], owner: &str) -> Vec<serde_jso
         if !attr.path().is_ident("doc") {
             continue;
         }
-        let syn::Meta::NameValue(nv) = &attr.meta else { continue };
-        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value else { continue };
+        let syn::Meta::NameValue(nv) = &attr.meta else {
+            continue;
+        };
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) = &nv.value
+        else {
+            continue;
+        };
         let text = s.value();
         let trimmed = text.trim();
         if let Some(rest) = trimmed.strip_prefix("nirdosha:") {
             if let Some((kind, payload)) = rest.split_once(char::is_whitespace) {
-                out.push(serde_json::json!({ "owner": owner, "kind": kind, "payload": payload.trim() }));
+                out.push(
+                    serde_json::json!({ "owner": owner, "kind": kind, "payload": payload.trim() }),
+                );
             }
         }
     }

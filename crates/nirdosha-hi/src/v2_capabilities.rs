@@ -7,7 +7,7 @@
 //! `get_nirdosha_constructs` teaches the v2 shape of exactly the
 //! constructs an agent already expects to find there.
 
-use crate::v2_verify::{verify_v2_source, V2Verdict};
+use crate::v2_verify::{V2Verdict, verify_v2_source};
 
 pub struct V2Capability {
     pub name: &'static str,
@@ -68,7 +68,11 @@ fn verdict_diagnostic(name: &str, verdict: &Result<V2Verdict, String>) -> (bool,
         Ok(v) => {
             let mut msg = String::new();
             if !v.builds {
-                msg.push_str(v.build_diagnostic.as_deref().unwrap_or("cargo build failed"));
+                msg.push_str(
+                    v.build_diagnostic
+                        .as_deref()
+                        .unwrap_or("cargo build failed"),
+                );
             }
             if !v.violations.is_empty() {
                 if !msg.is_empty() {
@@ -90,7 +94,12 @@ pub fn run_v2_capability_checks() -> Vec<V2CapabilityResult> {
         .map(|cap| {
             let verdict = verify_v2_source(cap.source);
             let (passed, diagnostic) = verdict_diagnostic(cap.name, &verdict);
-            V2CapabilityResult { name: cap.name, passed, diagnostic, source: cap.source }
+            V2CapabilityResult {
+                name: cap.name,
+                passed,
+                diagnostic,
+                source: cap.source,
+            }
         })
         .collect()
 }

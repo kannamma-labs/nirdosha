@@ -1,0 +1,3154 @@
+{
+  "schema": "nirdosha.ui-proof/v1",
+  "screens": [
+    {
+      "id": "1.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1.2",
+      "initial_state": "delegated",
+      "states": [
+        "delegated"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "delegated",
+          "to": "delegated",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1.3",
+      "initial_state": "delegated",
+      "states": [
+        "delegated"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "delegated",
+          "to": "delegated",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1.4",
+      "initial_state": "delegated",
+      "states": [
+        "delegated"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "delegated",
+          "to": "delegated",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1.5",
+      "initial_state": "delegated",
+      "states": [
+        "delegated"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "delegated",
+          "to": "delegated",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1.6",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Mlro",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "OpsAnalyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.6",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Mlro",
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.7",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "QaReviewer",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "QaReviewer",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead",
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.6",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.7",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.8",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.9",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.10",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "QaReviewer",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.3",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.6",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.7",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.8",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.9",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.10",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.11",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.12",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.13",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "4.14",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "OpsAnalyst",
+            "QaReviewer",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.2",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.3",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "QaReviewer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.4",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "PolicyEngineer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.6",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.7",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.8",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.9",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5.10",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "OpsAnalyst",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "OpsAnalyst",
+            "QaReviewer",
+            "Auditor",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.4",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.6",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.7",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.8",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "OpsAnalyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "7.1",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "Analyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "7.2",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "7.3",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "7.4",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "7.5",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.1",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "PolicyEngineer",
+            "Admin",
+            "ComplianceLead",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.2",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "PolicyEngineer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.3",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "PolicyEngineer",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.4",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "PolicyEngineer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.5",
+      "initial_state": "interim",
+      "states": [
+        "interim"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "interim",
+          "to": "interim",
+          "roles": [
+            "PolicyEngineer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.6",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "PolicyEngineer",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.7",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "PolicyEngineer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.8",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.9",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "PolicyEngineer",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.10",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "PolicyEngineer",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.11",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "PolicyEngineer",
+            "ComplianceLead",
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8.12",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "PolicyEngineer",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9.1",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "PolicyEngineer",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "PolicyEngineer",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "PolicyEngineer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "PolicyEngineer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "PolicyEngineer",
+            "Mlro",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "9.6",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10.3",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10.4",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead",
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10.5",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "10.6",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "11.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "OpsAnalyst",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "11.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "OpsAnalyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "11.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "11.4",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "11.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "Mlro",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.5",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.6",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Mlro",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.7",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Mlro",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.8",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Mlro",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.9",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.10",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Mlro",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "12.11",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Mlro",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "13.1",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "PolicyEngineer",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "13.2",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Admin",
+            "ComplianceLead",
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "13.3",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "13.4",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "13.5",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "14.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "QaReviewer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "14.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "QaReviewer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "14.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "QaReviewer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "14.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead",
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "14.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "ComplianceLead",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "15.1",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "ComplianceLead",
+            "Mlro",
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "15.2",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "ComplianceLead",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "15.3",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "15.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Mlro",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "15.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "16.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "16.2",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "McpCopilot"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "16.3",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Analyst",
+            "ComplianceLead",
+            "OpsAnalyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "16.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "16.5",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "17.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "17.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "17.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "17.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.2",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.3",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.5",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Admin",
+            "ComplianceLead",
+            "Analyst"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.6",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.7",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.8",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.9",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin",
+            "ComplianceLead"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18.10",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.1",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.2",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.3",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.4",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.5",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.6",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.7",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "19.8",
+      "initial_state": "emittable",
+      "states": [
+        "emittable"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "emittable",
+          "to": "emittable",
+          "roles": [
+            "Admin"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "20.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Auditor",
+            "Admin",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "20.2",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Auditor",
+            "Mlro"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "20.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Mlro",
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "21.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "Auditor"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "21.2",
+      "initial_state": "blocked",
+      "states": [
+        "blocked"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "blocked",
+          "to": "blocked",
+          "roles": [
+            "RegulatorViewer"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "21.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "CsAgent"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "21.4",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "RmUser"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "22.1",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "22.2",
+      "initial_state": "unknown",
+      "states": [
+        "unknown"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "unknown",
+          "to": "unknown",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "22.3",
+      "initial_state": "built",
+      "states": [
+        "built"
+      ],
+      "actions": [
+        {
+          "id": "observe",
+          "from": "built",
+          "to": "built",
+          "roles": [
+            "AllRoles"
+          ],
+          "ensures": [
+            "screen_declared"
+          ]
+        }
+      ]
+    }
+  ]
+}
