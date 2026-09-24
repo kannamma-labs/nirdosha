@@ -31,18 +31,43 @@
     "group": {
       "type": "array",
       "description": "Nav group ordering blocks. Chrome only — the app-shell macro owns ordering; the generator validates entries, not groups.",
-      "items": { "type": "object", "additionalProperties": true }
+      "items": {
+        "type": "object",
+        "required": ["id", "label"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable group heading. This is the text rendered in the web nav; label_key is no longer used."
+          },
+          "label_key": {
+            "type": "string",
+            "description": "Deprecated token kept for provenance. The macro ignores it; label is the rendered text."
+          },
+          "order": { "type": "integer" }
+        }
+      }
     },
     "menu": {
       "type": "array",
       "description": "Nav entries. Each entry is a promise: the generated app serves the referenced screen at the stated route, for the stated roles, gated by a policy the generator synthesizes.",
       "items": {
         "type": "object",
-        "required": ["id"],
+        "required": ["id", "label"],
         "additionalProperties": true,
         "properties": {
           "id": { "type": "string", "minLength": 1 },
-          "label_key": { "type": "string" },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable link text. This is the text rendered in the web nav; label_key is no longer used."
+          },
+          "label_key": {
+            "type": "string",
+            "description": "Deprecated token kept for provenance. The macro ignores it; label is the rendered text."
+          },
           "group": { "type": "string" },
           "screen_id": {
             "type": "string",

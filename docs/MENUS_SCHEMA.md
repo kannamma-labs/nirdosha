@@ -10,6 +10,33 @@ The two files are validated **against each other** by
 a build-time error, not a dead link or a runtime deny — a menu entry is a
 promise the generated app can keep, or the generator refuses to ship it.
 
+## Field quick reference
+
+### `[[group]]`
+
+| field | required | description |
+|-------|----------|-------------|
+| `id` | yes | Stable group identifier. The composer may module-prefix it to avoid collisions. |
+| `label` | **yes** | Human-readable group heading rendered in the web nav. |
+| `label_key` | no | Deprecated token kept for provenance; ignored by the macro. |
+| `order` | no | Relative sort order within the nav bar. |
+
+### `[[menu]]`
+
+| field | required | description |
+|-------|----------|-------------|
+| `id` | yes | Stable menu identifier. |
+| `label` | **yes** | Human-readable link text rendered in the web nav. |
+| `label_key` | no | Deprecated token kept for provenance; ignored by the macro. |
+| `group` | no | `id` of the `[[group]]` this entry belongs under. |
+| `screen_id` | yes* | Target screen in `screens.toml`. |
+| `route` | yes* | URL path the generated app serves for that screen. |
+| `guard` | no | Synthesized policy reference (`action`, `resource`). |
+| `roles` | no | Roles that may see this entry. Empty/`AllHuman`/`AllRoles` means unconditional for any authenticated user. |
+| `order` | no | Sort order within the group. |
+
+\* Required in practice; the generator treats a missing `screen_id` or `route` as an error after V1/V6-lite checks.
+
 ## Invariants (checked per `cargo nirdosha generate-screens` run)
 
 | # | Invariant | Error behavior |
@@ -30,7 +57,8 @@ just that it passed.
 
 - **Group ordering** (`[[group]]` blocks) — chrome; the app-shell macro owns
   ordering at compile time.
-- **`label_key` spelling** — display strings, not behavior.
+- **`label_key` spelling** — display strings are carried by the required `label`
+  field; `label_key` is ignored by the macro and is only retained for provenance.
 - Anything the shell macro re-reads at compile time beyond entries
   (`chrome`, `shell_variant`, ...) — unknown keys are passed through.
 

@@ -103,8 +103,9 @@ purpose = "Operations"
 ## Parameters
 
 `screen.parameters` holds archetype-specific inputs that the selected template
-passes through to the macro. Keys are macro-defined; values must be parseable by
-the target macro. Common examples:
+uses to produce the target macro invocation. Keys are macro-defined. Most values
+pass through and must be parseable by the target macro; `access` is the notable
+register-to-macro translation boundary. Common examples:
 
 ```toml
 [screen.parameters]
@@ -123,6 +124,20 @@ the *generator* checks vs which the *macro* checks).
 The schema permits additional keys under `parameters` for archetypes whose
 macros accept macro-defined clauses; generators should validate the key/value
 shape against the selected archetype.
+
+For archetypes with an `access` parameter, the register may use `public`,
+`role`, or `self_or_role`. The generator emits `public` unchanged and expands
+`role`/`self_or_role` to `requires role "..."` using the first concrete screen
+role (dropping capability suffixes such as `:R`/`:RW`). Generated data screens
+authorize the complete role set through their guard policies; the macro access
+clause is vestigial route metadata. `approval_inbox!`, whose grammar explicitly
+supports role alternatives, receives the complete `or role` list. Macro source
+must never contain bare `access: role` or `access: self_or_role`. A register may
+also provide an already-expanded single-role macro clause for compatibility.
+Empty CRUD
+`create_fields` or `update_fields` arrays mean that operation has no generated
+form fields; the generator omits that macro clause because an empty typed field
+list is not valid macro input.
 
 ### Generator-enforced parameter checks (2026-09-23)
 
