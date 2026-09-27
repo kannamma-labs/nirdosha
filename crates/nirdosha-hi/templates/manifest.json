@@ -5,7 +5,7 @@
       "files": [
         {
           "path": "banking/README.md",
-          "sha256": "818d8beed02b48932db33afca6399580e11328bd4ae4ede9f293247d7f498d3c"
+          "sha256": "87f918151eb69abf0c0303590db6e10ffc4e4e3115ca16865b21924de1a9d010"
         },
         {
           "path": "banking/ROUGH_EDGES.md",
@@ -69,7 +69,15 @@
         },
         {
           "path": "banking/modules/transfers/screens.toml",
-          "sha256": "706fbb9da8d939c2ff5b96b0e6f017e9a2e895455ce4e858d27c9eaf5f2aae6d"
+          "sha256": "48f7f7260e247a64e250d810283b82e3f79dc7d558ebce9c6969a7754910bcd0"
+        },
+        {
+          "path": "banking/policy-bundle.toml",
+          "sha256": "2b40c962fd8564507147a5c3ec68dbc48723f4ca0814b6027535a1c9544f429c"
+        },
+        {
+          "path": "banking/policy-services.toml",
+          "sha256": "4116e56d094d7d56dfef09aef7e64897ccb572bfbfbf974281022b17083f0b9b"
         }
       ]
     },
@@ -231,7 +239,7 @@
         },
         {
           "path": "kyc/modules/core/screens.toml",
-          "sha256": "40129de90cccc265cd5cc2e6bc458f16d90de89d7460453c77c148c60677afd4"
+          "sha256": "a026c715a63aa888b9446a36ce3e14d010c4092a77c2c4bb9efc7e1a9a65ee03"
         },
         {
           "path": "kyc/modules/core/src/app_shell.nir",
@@ -263,7 +271,7 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m02_new_customer.nir",
-          "sha256": "c314947261280b2bd074a31e3eabb798d08d36ae5cd69b331af58d2f08227ec0"
+          "sha256": "ebce5a53255bb090a5bf0411ee1e750d130adcb078a4cc1bca4a9baa3e93e11d"
         },
         {
           "path": "kyc/modules/core/src/screens/m03_onboarding_checklist.nir",
@@ -271,11 +279,11 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m03_onboarding_pipeline.nir",
-          "sha256": "513bc8ff66362fffd27478a49c8f027ee8c955dde1d10d7c45e7879d2c956932"
+          "sha256": "ff06f35696e8f5b9e752cb886dbf5b55ff58fe5cb03366b185dcc12f7e8be007"
         },
         {
           "path": "kyc/modules/core/src/screens/m03_onboarding_wizard.nir",
-          "sha256": "e3dccb087ba2ab533e6588d57e5097c81619c3697cd1bf8c37a7f12d74d3b9c3"
+          "sha256": "e5f764f9efc6603d41cb247daaf32311af06c58ecccd94580eeb628b41ef5dd8"
         },
         {
           "path": "kyc/modules/core/src/screens/m04_document_review.nir",
@@ -303,7 +311,7 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m06_edd.nir",
-          "sha256": "b8f28bda1142cf1446962619cb6751ea5b1fc3d197c5c1391294bd6f65ccc8c1"
+          "sha256": "38d0a6b608b26e54828752e655c6c9be8596868b0902235de1741ee7deb52c30"
         },
         {
           "path": "kyc/modules/core/src/screens/m06_risk_assessment.nir",
@@ -311,7 +319,7 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m06_risk_rules.nir",
-          "sha256": "122a50cb369f279fda35760803deb9d2b04b07b81e1382d4eeaa9a7dff848cf0"
+          "sha256": "229fe24dd7696cca6a9891eb43a00526781e31042896b6b629a8f2f82bfa25a5"
         },
         {
           "path": "kyc/modules/core/src/screens/m07_corporate_entities.nir",
@@ -319,7 +327,7 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m07_ubo_tree.nir",
-          "sha256": "9bd23eac4ef10669fb27549ea15d682238ab5a76864ae88ef0731c417624d137"
+          "sha256": "f6d3e35d681c937a0ddb7f908fabfef7567a97b21222522c1a43764bea36a14c"
         },
         {
           "path": "kyc/modules/core/src/screens/m08_case_detail.nir",
@@ -327,11 +335,11 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m08_case_notes.nir",
-          "sha256": "8adb7e170486f20b4329c07c65f8bee9726954fa98507768cd9f883e07748ec1"
+          "sha256": "faaf861f96c94b5cf0e7203a5fe289d297bfada115ecc71d3d42fee538c3de30"
         },
         {
           "path": "kyc/modules/core/src/screens/m08_case_pipeline.nir",
-          "sha256": "d1418bea55ebb31f209c94d3eaec616b6d6579e6ad9943383468e326640e0204"
+          "sha256": "133f5c77bfacbe0f0c1cdac469139fe3fbce624f94e40bd3dfe5e12d3147cb78"
         },
         {
           "path": "kyc/modules/core/src/screens/m08_review_queue.nir",
@@ -339,7 +347,7 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m09_monitoring_report.nir",
-          "sha256": "6da006019a139bdc831be42cec13731cead2073f77e4f2435a9f48177eba6686"
+          "sha256": "466463b2409c17ebb0ebf7294d207083fbccddd8a3f133fe50f4ad028d0404bf"
         },
         {
           "path": "kyc/modules/core/src/screens/m09_periodic_reviews.nir",
@@ -351,7 +359,7 @@
         },
         {
           "path": "kyc/modules/core/src/screens/m10_kyc_status.nir",
-          "sha256": "1e0dd0b0d75bc55dbd9b81d9633e3b4815db1f7ff72fc5c2312c75404643d586"
+          "sha256": "279de9818931a363f1a80f42334cb2db7e66ad892214d2c4b8b24f63bdc7cfc6"
         },
         {
           "path": "kyc/modules/core/src/screens/m10_sar_filing.nir",

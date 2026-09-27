@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nirdosha.dev/schema/service-catalog/v1",
+  "title": "Nirdosha Domain Service Catalog v1",
+  "description": "RFC 0029 §7.1 translation boundary: a versioned, domain-authority-approved catalog of services a screen.service reference may select. The catalog, not the screen and not an LLM, is the source of the security-critical meaning -- a screen may only select an entry and supply its allowed_parameters; it cannot invent an effect, broaden an authority, or select a gateway. Loaded by crates/cargo-nirdosha/src/service_catalog.rs.",
+  "type": "object",
+  "required": [
+    "service"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "service": {
+      "type": "object",
+      "description": "One entry per service name. The TOML table key ([service.<name>]) is the service name a screen.service.name references; it must match ^[a-z][a-z0-9_]*$ and is unique by construction (a duplicate TOML key is a parse error, not a silently-merged entry).",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/service_entry"
+      }
+    }
+  },
+  "$defs": {
+    "service_entry": {
+      "type": "object",
+      "required": [
+        "resource",
+        "effect",
+        "policy_kind",
+        "gateway",
+        "failure_posture"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The already-admitted canonical resource identity this service acts on (e.g. TransferRequest, Account). Never inferred from screen data_binding.entities -- the two are cross-checked, not derived from one another."
+        },
+        "effect": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$",
+          "description": "The typed effect this service authorizes, dotted domain.action form (e.g. transfer.request, funds.reserve). This is the RFC 0029 effect_closure entry the compiled AdmissionReportV1 carries; a screen may never name an effect the catalog entry doesn't declare here."
+        },
+        "policy_kind": {
+          "type": "string",
+          "enum": [
+            "Authorization",
+            "DataPolicy",
+            "NumericInvariant",
+            "StateInvariant"
+          ],
+          "description": "RFC 0029 §8 policy kind. Restricted to the four kinds with published formal operational semantics/proof obligations/evidence schema (§8.1-§8.4) as of the Phase 0 exit gate; the remaining ten kinds are formal-artifact backlog and are rejected here, not silently downgraded."
+        },
+        "gateway": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the enforcement gateway that executes this effect once admitted. Must be a member of crates/cargo-nirdosha/src/service_catalog.rs's KNOWN_GATEWAYS allow-list; an unregistered gateway name is a catalog load error, not a deferred codegen failure."
+        },
+        "required_facts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Fact identifiers (PIP-supplied, e.g. subject_identity, fresh_balance, daily_limit) the admission adapter must resolve into Fact nodes before the effect can be admitted. An unresolved required fact is an admission failure or Indeterminate, per failure_posture -- never a silently-skipped check."
+        },
+        "allowed_parameters": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The exhaustive set of parameter keys a screen.service.parameters table may set for this entry. A screen supplying any other key is rejected at generation time (undeclared parameter), not passed through."
+        },
+        "failure_posture": {
+          "type": "string",
+          "enum": [
+            "FailClosed"
+          ],
+          "description": "v1 scope: only FailClosed is supported -- an Indeterminate or Unsupported admission result always blocks generation. A fail-open posture is not representable in this schema version."
+        }
+      }
+    }
+  }
+}

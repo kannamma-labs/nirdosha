@@ -36,6 +36,7 @@ data_binding = { entities = ["TransferRequest"], primary_key = "transfer_id", gu
 ] }
 policy = { purpose = "Payments", allowed_actions = ["read", "create"] }
 parameters = { access_create = 'requires role "Customer"', access_read = 'requires role "Customer"' }
+service = { name = "transfer_create", version = "1", parameters = { eligible_roles = ["Customer"], jurisdiction = "IN" } }
 notes = "This only creates a transfer request. Execution is a certified primitive, not a CRUD update."
 
 [[screen]]
@@ -56,7 +57,8 @@ policy = { purpose = "Payments", allowed_actions = ["read"] }
 parameters = { access = 'requires role "Customer"', sources = [
     { table = "transfer_request_table", chain = "large_transfer", detail_path = "/transfers/{id}" },
 ] }
-notes = "BLOCKED: after approval the primitive must debit/credit accounts + write audit + idempotency check"
+service = { name = "funds_reserve", version = "1", parameters = { jurisdiction = "IN" } }
+notes = "BLOCKED: after approval the primitive must debit/credit accounts + write audit + idempotency check. The funds_reserve service reference above documents the intended RFC 0029 binding; it does not generate a route while this screen stays blocked."
 
 [[screen]]
 id = "3.3"

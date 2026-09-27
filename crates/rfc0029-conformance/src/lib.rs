@@ -619,6 +619,48 @@ pub fn evaluate_admission(fixture: &Fixture) -> Result<ComputedAdmission, Error>
     Ok(admission("accepted", None, "not_evaluated", None))
 }
 
+/// Wraps a caller-built `Input` graph in a synthetic `Fixture` so a
+/// production caller (a generator's admission gate, not a conformance
+/// test) can reuse `evaluate_admission`/`compile_from_fixture` without
+/// fabricating an `expected` block that stands in for a test oracle it
+/// has no use for. Every evaluator in this crate reads only
+/// `fixture.input` (plus `fixture_id`/`profile_id`, both supplied by the
+/// caller here) — `expected` is never consulted by computation, only by
+/// conformance tests comparing against it, so the placeholder below is
+/// inert by construction, not a guess standing in for real data.
+pub(crate) fn synthetic_fixture(input: &Input, fixture_id: &str, profile_id: &str) -> Fixture {
+    Fixture {
+        schema_version: SCHEMA_VERSION.into(),
+        fixture_id: fixture_id.into(),
+        profile_id: profile_id.into(),
+        input: input.clone(),
+        expected: Expected {
+            graph_id: None,
+            normalized_graph: NormalizedGraph::NotAsserted,
+            provenance: TriState::Bool(false),
+            model_level: ModelLevel::None,
+            model_authorized: TriState::Bool(false),
+            final_authority: None,
+            admission: AdmissionResult { status: "not_evaluated".into(), diagnostic: None },
+            review: ReviewResult { status: "not_evaluated".into(), detail: None },
+            capability: CapabilityResult { status: "not_evaluated".into(), effect_class: None },
+            invalidation: String::new(),
+            extensions: BTreeMap::new(),
+        },
+    }
+}
+
+/// Production entry point for `evaluate_admission`: takes the `Input` graph
+/// directly, for callers (e.g. a screen generator's admission gate) that
+/// have no test oracle to declare. See [`synthetic_fixture`].
+pub fn evaluate_admission_input(
+    input: &Input,
+    fixture_id: &str,
+    profile_id: &str,
+) -> Result<ComputedAdmission, Error> {
+    evaluate_admission(&synthetic_fixture(input, fixture_id, profile_id))
+}
+
 fn admission(
     status: &str,
     diagnostic: Option<AdmissionDiagnostic>,

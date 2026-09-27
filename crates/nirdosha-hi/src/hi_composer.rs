@@ -195,6 +195,14 @@ pub struct ScreenDecl {
     pub notes: String,
     #[serde(default)]
     pub file: String,
+    /// RFC 0029 §7.1 service-catalog reference. Opaque to the composer —
+    /// it round-trips this through `serialize_register` unchanged; only
+    /// `cargo-nirdosha`'s generator (`service_catalog`/`policy_adapter`)
+    /// interprets it. Must not be silently dropped: a screen this crate
+    /// doesn't know about the shape of is still a screen whose admission
+    /// binding downstream generation depends on.
+    #[serde(default)]
+    pub service: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -931,6 +939,19 @@ pub fn compose_project(
         template_dir.join("ROUGH_EDGES.md"),
         out_dir.join("ROUGH_EDGES.md"),
     );
+    // RFC 0029 §7.1 service catalog: best-effort like README/ROUGH_EDGES
+    // above -- not every template has one yet. If a composed screen
+    // declares [screen.service] but this file is absent, `cargo-nirdosha
+    // generate-screens` refuses generation (fail-closed) rather than
+    // silently treating the reference as unauthorized.
+    let _ = std::fs::copy(
+        template_dir.join("policy-services.toml"),
+        out_dir.join("policy-services.toml"),
+    );
+    let _ = std::fs::copy(
+        template_dir.join("policy-bundle.toml"),
+        out_dir.join("policy-bundle.toml"),
+    );
 
     // Write a minimal Cargo.toml and placeholder files so
     // `cargo nirdosha generate-screens` has a project to work on.
@@ -1052,6 +1073,11 @@ fn write_cargo_project_stub(
          nirdosha-guard-mic = {{ path = \"{}\" }}\n\
          nirdosha-guard-core = {{ path = \"{}\" }}\n\
          nirdosha-guard-screens = {{ path = \"{}\" }}\n\
+         # RFC 0029 §7.1 runtime capability + effect gateway -- only screens\n\
+         # with a [screen.service] reference actually call into this, but\n\
+         # every composed project takes the dependency unconditionally, the\n\
+         # same way the guard-* deps above are never conditional either.\n\
+         nirdosha-guard-rfc0029 = {{ path = \"{}\" }}\n\
          serde = {{ version = \"1\", features = [\"derive\"] }}\n\
          serde_json = \"1\"\n",
         repo_relative_path("crates/nirdosha-rt"),
@@ -1060,6 +1086,7 @@ fn write_cargo_project_stub(
         repo_relative_path("crates/nirdosha-guard-mic"),
         repo_relative_path("crates/nirdosha-guard-core"),
         repo_relative_path("crates/nirdosha-guard-screens"),
+        repo_relative_path("crates/nirdosha-guard-rfc0029"),
     );
 
     let cargo_toml = format!(
@@ -1277,6 +1304,17 @@ fn serialize_register(r: &ModuleRegister) -> String {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ));
+            }
+        }
+        // RFC 0029 §7.1: a screen's service-catalog reference must
+        // survive composition verbatim -- cargo-nirdosha's generator is
+        // the only thing that interprets it, but the composer still
+        // owns writing it back out, the same way it does for `policy`
+        // and `parameters` below.
+        if let Some(toml::Value::Table(tbl)) = &screen.service {
+            out.push_str("[screen.service]\n");
+            for (k, v) in tbl.iter() {
+                out.push_str(&format!("{} = {}\n", k, serialize_value(v)));
             }
         }
         // Emit parameters under [screen.parameters] using inline
@@ -1505,6 +1543,61 @@ mod tests {
         assert!(result.path.join("menus.toml").is_file());
         assert!(result.path.join("Cargo.toml").is_file());
         assert!(result.total_screens > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compose_banking_transfers_admits_transfer_create_end_to_end() {
+        // RFC 0029 §7.1: proves the real banking template (not a synthetic
+        // fixture) round-trips [screen.service] through composition,
+        // copies policy-services.toml, and that cargo-nirdosha admits and
+        // generates transfer_create's route with an evidence report.
+        let dir = std::env::temp_dir().join(format!(
+            "nir_hi_compose_banking_transfers_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = compose_project(
+            &dir,
+            "banking",
+            &["core".to_string(), "accounts".to_string(), "transfers".to_string()],
+            None,
+        )
+        .expect("banking+transfers compose should succeed");
+
+        assert!(
+            result.path.join("policy-services.toml").is_file(),
+            "the catalog must be copied into the composed project"
+        );
+        let screens_text = std::fs::read_to_string(result.path.join("screens.toml")).unwrap();
+        assert!(
+            screens_text.contains("[screen.service]") && screens_text.contains("transfer_create"),
+            "the transfer_create service reference must survive composition: {screens_text}"
+        );
+
+        generate_screens(&result.path).expect("transfer_create must be admitted and generated");
+
+        assert!(result.path.join("policy-bundle.toml").is_file(), "the governed bundle must be copied into the composed project");
+
+        let cargo_toml = std::fs::read_to_string(result.path.join("Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains("nirdosha-guard-rfc0029"), "{cargo_toml}");
+
+        build_project(&result.path).expect(
+            "the composed project must actually compile with the new capability_gate macro clause and nirdosha-guard-rfc0029 dependency wired in",
+        );
+
+        let admission_dir = result.path.join(".nir/admission");
+        let admitted = std::fs::read_dir(&admission_dir)
+            .expect("admission dir must exist")
+            .any(|e| {
+                let path = e.unwrap().path();
+                std::fs::read_to_string(&path)
+                    .map(|s| s.contains("transfer_create") && s.contains("\"overall\": \"accepted\""))
+                    .unwrap_or(false)
+            });
+        assert!(admitted, "no accepted transfer_create admission report found under {}", admission_dir.display());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

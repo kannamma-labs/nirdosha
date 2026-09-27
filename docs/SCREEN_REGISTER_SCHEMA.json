@@ -474,7 +474,7 @@
         },
         "purpose": {
           "type": "string",
-          "description": "Business purpose explaining why the screen is allowed to access its data."
+          "description": "Business purpose explaining why the screen is allowed to access its data. For a guarded screen (data_binding.guard set), this must equal data_binding.guard.purpose verbatim -- the generator synthesizes the guard_policy! purpose clause from guard.purpose, not from this field, and refuses to generate if the two disagree."
         },
         "allowed_actions": {
           "type": "array",

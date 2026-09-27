@@ -115,6 +115,12 @@ struct ScreenDecl {
     policy: Option<Policy>,
     #[serde(default = "empty_table")]
     parameters: toml::Value,
+    /// RFC 0029 §7.1 service-catalog reference. Present only on screens
+    /// that select an admitted domain service; `run()` resolves it
+    /// against the loaded `ServiceCatalog` and runs admission before this
+    /// screen's files are allowed to be emitted.
+    #[serde(default)]
+    service: Option<crate::service_catalog::ServiceRef>,
 }
 
 fn empty_table() -> toml::Value {
@@ -429,6 +435,15 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
     // build-time error here, not a dead link or a silent deny at runtime.
     let invariants = validate_menus(&menus, &register, &planned, &entities)?;
 
+    // ---- RFC 0029 §7.1 service-catalog admission (fail closed) ----
+    // Every planned (non-blocked) screen with a `[screen.service]`
+    // reference must be admitted before any of its files are emitted. A
+    // blocked screen's service reference (e.g. funds_reserve on the
+    // still-blocked transfer-approval screen) is skipped here entirely —
+    // it documents an intended future binding but is never lowered to IR
+    // or admitted, since it will not generate a route either way.
+    let admission_reports = run_service_admission(project_dir, &planned)?;
+
     // ---- emit ----
     let src_dir = project_dir.join("src");
     std::fs::create_dir_all(src_dir.join("screens")).map_err(|e| e.to_string())?;
@@ -473,7 +488,7 @@ pub fn run(project_dir: &Path) -> Result<GenerateReport, String> {
             .strip_prefix("src/")
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| file.clone());
-        let body = render_screen_file(plans, &entities, &register)?;
+        let body = render_screen_file(plans, &entities, &register, &admission_reports, project_dir)?;
         let path = src_dir.join(&rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -752,6 +767,192 @@ fn validate_menus(
     }
 
     Ok(checks)
+}
+
+/// RFC 0029 §7.1 service-catalog admission gate. Runs after planning
+/// (blocked screens already excluded) and before any file for a serviced
+/// screen is emitted. Returns the admitted report per screen id, which
+/// `render_screen_invocation` embeds as an auditable header comment.
+fn run_service_admission(
+    project_dir: &Path,
+    planned: &[PlannedScreen],
+) -> Result<BTreeMap<String, rfc0029_conformance::pilot::report::AdmissionReportV1>, String> {
+    use rfc0029_conformance::pilot::report::compile_from_input;
+    use rfc0029_conformance::pilot::report::OverallVerdict;
+
+    let mut reports = BTreeMap::new();
+    let serviced: Vec<&PlannedScreen> = planned.iter().filter(|p| p.decl.service.is_some()).collect();
+    if serviced.is_empty() {
+        return Ok(reports);
+    }
+
+    let catalog_path = project_dir.join("policy-services.toml");
+    let catalog_src = std::fs::read_to_string(&catalog_path).map_err(|e| {
+        format!(
+            "{} screen(s) declare [screen.service] but {} could not be read: {e}",
+            serviced.len(),
+            catalog_path.display()
+        )
+    })?;
+    let catalog = crate::service_catalog::parse(&catalog_src)
+        .map_err(|e| format!("{}: {e}", catalog_path.display()))?;
+
+    let bundle = crate::service_catalog::load_bundle(project_dir)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("system clock error: {e}"))?
+        .as_millis() as u64;
+    if !bundle.is_active(now_ms) {
+        return Err(format!(
+            "policy bundle {} is not within its effective_from ({}) / expires_at ({}) window as of this build",
+            bundle.bundle_hash, bundle.effective_from, bundle.expires_at
+        ));
+    }
+
+    let admission_dir = project_dir.join(".nir").join("admission");
+    std::fs::create_dir_all(&admission_dir).map_err(|e| e.to_string())?;
+
+    for plan in serviced {
+        let service = plan.decl.service.as_ref().expect("filtered above");
+        let entry = catalog.get(&service.name).ok_or_else(|| {
+            format!(
+                "screen {}: service `{}` is not declared in {}",
+                plan.id,
+                service.name,
+                catalog_path.display()
+            )
+        })?;
+        let screen_resource = plan
+            .decl
+            .data_binding
+            .as_ref()
+            .and_then(|b| b.entities.first())
+            .map(String::as_str);
+        let input = crate::policy_adapter::build_input(
+            &plan.id,
+            &service.name,
+            &service.version,
+            &service.parameters,
+            entry,
+            screen_resource,
+            &plan.decl.roles,
+        )
+        .map_err(|e| format!("screen {}: {e}", plan.id))?;
+
+        let policy_id = format!("policy:service-catalog:{}:v{}", service.name, service.version);
+        let mut report = compile_from_input(&input, &policy_id);
+        // Replace the adapter's symbolic placeholder with the real,
+        // computed governed-bundle hash -- the report's bundle_hash must
+        // name the actual bundle admission ran under, not a stand-in.
+        report.bundle_hash = bundle.bundle_hash.clone();
+
+        if !matches!(report.overall, OverallVerdict::Accepted) {
+            return Err(format!(
+                "screen {}: RFC 0029 admission for service `{}` did not accept ({:?}); generation refused (fail-closed)",
+                plan.id, service.name, report.overall
+            ));
+        }
+
+        let report_path = admission_dir.join(format!("{}.json", sanitize_screen_id(&plan.id)));
+        let report_json =
+            serde_json::to_string_pretty(&report).map_err(|e| format!("serializing admission report: {e}"))?;
+        std::fs::write(&report_path, &report_json)
+            .map_err(|e| format!("writing {}: {e}", report_path.display()))?;
+        println!(
+            "  admitted screen {} -> service `{}`: {} (bundle_hash {})",
+            plan.id,
+            service.name,
+            report_path.display(),
+            report.bundle_hash
+        );
+
+        reports.insert(plan.id.clone(), report);
+    }
+
+    Ok(reports)
+}
+
+fn sanitize_screen_id(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+/// Like `sanitize_screen_id`, but safe to splice into a Rust identifier
+/// (`.`/`-` become `_`, not kept) — callers still prefix with a
+/// letter-leading string, since a screen id like `2.1` sanitizes to a
+/// leading digit on its own.
+fn ident_safe_screen_id(id: &str) -> String {
+    id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
+
+/// RFC 0029 §7.1: emits the runtime capability-gate wrapper function (and
+/// its per-project singletons) for one serviced screen, keyed off the
+/// catalog entry's own declared `gateway` — the catalog, not this
+/// generator, decides which gateway a service binds to. Only
+/// `transfer_request_gateway_v1` has real runtime wiring today;
+/// `funds_reserve_gateway_v1` or any other declared-but-unwired gateway
+/// fails generation rather than silently falling back to the unguarded
+/// insert path this whole mechanism exists to close off. Returns
+/// `(gate_fn_ident, code_to_emit_above_the_macro_invocation)`.
+fn render_capability_gate(
+    screen_id: &str,
+    entity_struct_name: &str,
+    entry: &crate::service_catalog::ServiceEntry,
+    output_file: Option<&str>,
+) -> Result<(String, String), String> {
+    let output_file = output_file
+        .ok_or_else(|| format!("screen {screen_id} has no codegen.generated_files entry"))?;
+    let depth = Path::new(output_file).parent().map(|p| p.components().count()).unwrap_or(0);
+    let bundle_include_path = format!("{}policy-bundle.toml", "../".repeat(depth));
+
+    if entry.gateway != "transfer_request_gateway_v1" {
+        return Err(format!(
+            "screen {screen_id}: service catalog names gateway `{}`, which has no runtime capability-gate wiring in this generator yet (only transfer_request_gateway_v1 is wired) — refusing to generate a live create route for it rather than silently falling back to an unguarded insert",
+            entry.gateway
+        ));
+    }
+
+    let suffix = ident_safe_screen_id(screen_id);
+    let gate_fn = format!("rfc0029_capability_gate_{suffix}");
+    let bundle_const = format!("RFC0029_BUNDLE_TOML_{suffix}");
+    let issuer_static = format!("RFC0029_ISSUER_{suffix}");
+    let gateway_static = format!("RFC0029_GATEWAY_{suffix}");
+
+    let mut code = String::new();
+    code.push_str(&format!(
+        "// RFC 0029 §7.1 runtime capability gate for gateway `{}` (screen {screen_id}).\n\
+         // See nirdosha-guard-rfc0029's own module doc comment for this crate's disclosed\n\
+         // scope (no cryptographic capability signature; in-process, non-durable replay\n\
+         // defense) before treating this as a stronger guarantee than it is.\n",
+        entry.gateway
+    ));
+    code.push_str(&format!("static {bundle_const}: &str = include_str!({bundle_include_path:?});\n"));
+    code.push_str(&format!(
+        "static {issuer_static}: ::std::sync::LazyLock<::nirdosha_guard_rfc0029::CapabilityIssuer> = ::std::sync::LazyLock::new(|| {{\n"
+    ));
+    code.push_str(&format!(
+        "    let bundle = ::nirdosha_guard_rfc0029::PolicyBundle::from_toml_str({bundle_const})\n        .expect(\"policy-bundle.toml was already validated at generation time\");\n"
+    ));
+    code.push_str("    ::nirdosha_guard_rfc0029::CapabilityIssuer::new(bundle, 300_000)\n});\n");
+    code.push_str(&format!(
+        "static {gateway_static}: ::std::sync::LazyLock<::nirdosha_guard_rfc0029::TransferRequestGatewayV1> = ::std::sync::LazyLock::new(|| {{\n    ::nirdosha_guard_rfc0029::TransferRequestGatewayV1::new(\".nir-evidence/transfer_request_gateway_v1.jsonl\", &{issuer_static})\n}});\n"
+    ));
+    code.push_str(&format!(
+        "fn {gate_fn}(\n    auth: &::nirdosha_rt::Auth,\n    execute: impl FnOnce() -> Result<{entity_struct_name}, ::nirdosha_guard_screens::GuardScreenError>,\n) -> Result<{entity_struct_name}, ::nirdosha_guard_screens::GuardScreenError> {{\n"
+    ));
+    code.push_str(
+        "    let now_ms = ::std::time::SystemTime::now()\n        .duration_since(::std::time::UNIX_EPOCH)\n        .expect(\"clock before unix epoch\")\n        .as_millis() as u64;\n",
+    );
+    code.push_str(&format!(
+        "    let capability = {issuer_static}\n        .mint(auth, {:?}, {:?}, now_ms)\n        .map_err(|e| ::nirdosha_guard_screens::GuardScreenError::Denied(e.to_string()))?;\n",
+        entry.resource, entry.effect
+    ));
+    code.push_str(&format!(
+        "    {gateway_static}\n        .consume_and_execute(&capability, now_ms, || execute().map_err(|e| e.to_string()))\n        .map_err(|e| ::nirdosha_guard_screens::GuardScreenError::Denied(e.to_string()))\n}}\n"
+    ));
+
+    Ok((gate_fn, code))
 }
 
 fn plan_screen(screen: &ScreenDecl) -> Result<PlannedScreen, String> {
@@ -1246,6 +1447,8 @@ fn render_screen_file(
     plans: &[&PlannedScreen],
     entities: &BTreeMap<String, EntityDecl>,
     register: &RegisterFile,
+    admission_reports: &BTreeMap<String, rfc0029_conformance::pilot::report::AdmissionReportV1>,
+    project_dir: &Path,
 ) -> Result<String, String> {
     // Render every invocation FIRST, then import only the bridge idents
     // the rendered text actually references — no `#[allow(unused)]`, no
@@ -1253,7 +1456,7 @@ fn render_screen_file(
     // text that needs it.
     let mut body = String::new();
     for plan in plans {
-        body.push_str(&render_screen_invocation(plan, entities, register)?);
+        body.push_str(&render_screen_invocation(plan, entities, register, admission_reports, project_dir)?);
         body.push('\n');
     }
     let mut out = String::new();
@@ -1294,6 +1497,8 @@ fn render_screen_invocation(
     plan: &PlannedScreen,
     entities: &BTreeMap<String, EntityDecl>,
     register: &RegisterFile,
+    admission_reports: &BTreeMap<String, rfc0029_conformance::pilot::report::AdmissionReportV1>,
+    project_dir: &Path,
 ) -> Result<String, String> {
     let binding = plan.decl.data_binding.as_ref();
     // The guard comes from the ENTITY (declared on whichever screen owns
@@ -1315,6 +1520,51 @@ fn render_screen_invocation(
             let decl = entities.get(entity).ok_or("entity missing from bridge plan")?;
             let struct_name = decl.struct_name();
             let store = decl.store_fn();
+            let mut service_header = String::new();
+            let mut capability_gate_ident: Option<String> = None;
+            if let Some(service) = &plan.decl.service {
+                // RFC 0029 §7.1: this screen was only allowed to reach
+                // codegen because `run_service_admission` already admitted
+                // it against the service catalog (see generate::run). This
+                // header makes that binding auditable in the generated
+                // source itself, rather than only in the `.nir/admission/`
+                // report file on disk.
+                let report = admission_reports.get(&plan.id).ok_or_else(|| {
+                    format!(
+                        "screen {}: declares service `{}` but has no admitted report — this is a generator bug (admission must run before emit)",
+                        plan.id, service.name
+                    )
+                })?;
+                service_header.push_str(&format!(
+                    "// RFC 0029 §7.1 service binding: `{}` v{} (policy {}, bundle_hash {}).\n// Admitted {:?}; evidence: .nir/admission/{}.json — this create path only exists\n// because that admission accepted. It never mutates storage directly; it\n// calls the same guard_policy!-protected store below the catalog names.\n",
+                    service.name,
+                    service.version,
+                    report.policy_id,
+                    report.bundle_hash,
+                    report.overall,
+                    sanitize_screen_id(&plan.id),
+                ));
+
+                // The generation-time gate above proves the wiring was
+                // authorized once, at build time. It says nothing about
+                // what happens per live request -- this emits the runtime
+                // capability-gate wrapper (`nirdosha-guard-rfc0029`) so the
+                // create path this screen owns must mint and consume a
+                // real, short-lived, single-use capability before it may
+                // touch the guarded store at all.
+                let catalog_path = project_dir.join("policy-services.toml");
+                let catalog_src = std::fs::read_to_string(&catalog_path)
+                    .map_err(|e| format!("screen {}: cannot re-read {}: {e}", plan.id, catalog_path.display()))?;
+                let catalog = crate::service_catalog::parse(&catalog_src)
+                    .map_err(|e| format!("screen {}: {}: {e}", plan.id, catalog_path.display()))?;
+                let entry = catalog.get(&service.name).ok_or_else(|| {
+                    format!("screen {}: service `{}` vanished from the catalog between admission and emit", plan.id, service.name)
+                })?;
+                let (gate_ident, gate_code) =
+                    render_capability_gate(&plan.id, &struct_name, entry, plan.output_file.as_deref())?;
+                service_header.push_str(&gate_code);
+                capability_gate_ident = Some(gate_ident);
+            }
             // Displayed fields = this screen's OWN declared data_binding
             // fields, minus masked ones (a forbidden field is dropped
             // from every read this screen serves, so it must never be a
@@ -1327,6 +1577,7 @@ fn render_screen_invocation(
             let displayed: &[FieldDecl] = if own_fields.is_empty() { &decl.fields } else { &own_fields };
             let fields: Vec<String> = displayed.iter().map(|f| format!("{}: {}", f.name, f.ty)).collect();
             let mut out = String::new();
+            out.push_str(&service_header);
             out.push_str(&format!(
                 "nirdosha_rt::crud_screens! {{\n    mount: {mount},\n    entity: {struct_name},\n    store: {store},\n    path: {path:?},\n    fields: [ {} ],\n",
                 fields.join(", ")
@@ -1350,6 +1601,9 @@ fn render_screen_invocation(
                     "    guard: {{ table: {}, purpose: {:?},",
                     guard.table, guard.purpose
                 ));
+                if let Some(gate_ident) = &capability_gate_ident {
+                    out.push_str(&format!(" capability_gate: {gate_ident},"));
+                }
                 // create_fields/update_fields are guard-clause keys: the
                 // macro's trailing-clause loop only knows guard/
                 // refresh_seconds/sort_by/countdown_field, and the guard
@@ -2310,6 +2564,287 @@ roles = ["Agent"]
         let (_dir, dir) = write_project(&screens, MENUS);
         let err = run(&dir).unwrap_err();
         assert!(err.contains("the screen itself declares masked"), "{err}");
+    }
+
+    // ---- RFC 0029 §7.1 service-catalog admission (end-to-end) ----
+    //
+    // "Replay" and "stale/expired capability" are runtime concerns a
+    // static screens.toml can't exercise (there is no live fact/capability
+    // at generation time to go stale or replay) — those are covered where
+    // they actually apply: `rfc0029-conformance`'s own pilot tests
+    // (`identical_retry_replays_without_double_reservation`,
+    // `stale_fact_is_denied`) and, at the admission-engine boundary, by
+    // `capability_effect_mismatch_is_rejected_by_the_admission_engine`
+    // below. Everything a static screen declaration *can* get wrong —
+    // unknown service, wrong role, wrong resource, undeclared parameter,
+    // unregistered gateway, an unresolvable fact — is covered here as a
+    // real fail-closed generation error, not a mock.
+
+    const CATALOG: &str = r#"
+[service.demo_service]
+resource = "Ticket"
+effect = "ticket.write"
+policy_kind = "Authorization"
+gateway = "transfer_request_gateway_v1"
+required_facts = ["subject_identity"]
+allowed_parameters = ["note"]
+failure_posture = "FailClosed"
+"#;
+
+    /// A wide, always-valid governance window so these tests never expire
+    /// no matter when they run.
+    const BUNDLE: &str = r#"
+[bundle]
+authority_id = "test-authority"
+policy_owner = "test-owner"
+jurisdiction = "IN"
+approved_by = "test-authority"
+signed_by = "test-authority"
+effective_from = "2020-01-01T00:00:00Z"
+expires_at = "2099-01-01T00:00:00Z"
+"#;
+
+    fn serviced_screens(service_line: &str) -> String {
+        SCREENS.replace(
+            "policy = { purpose = \"Operations\", allowed_actions = [\"read\"] }",
+            &format!(
+                "policy = {{ purpose = \"Operations\", allowed_actions = [\"read\"] }}\n{service_line}"
+            ),
+        )
+    }
+
+    fn write_serviced_project(
+        screens: &str,
+        menus: &str,
+        catalog: Option<&str>,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let (dir, path) = write_project(screens, menus);
+        if let Some(catalog) = catalog {
+            std::fs::write(path.join("policy-services.toml"), catalog).unwrap();
+            std::fs::write(path.join("policy-bundle.toml"), BUNDLE).unwrap();
+        }
+        (dir, path)
+    }
+
+    #[test]
+    fn admitted_service_generates_a_report_evidence_file_and_header_comment() {
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, Some(CATALOG));
+        run(&dir).expect("an admitted service must generate");
+
+        let report_path = dir.join(".nir/admission/2.1.json");
+        let report = std::fs::read_to_string(&report_path)
+            .unwrap_or_else(|e| panic!("evidence report must be written to {}: {e}", report_path.display()));
+        assert!(report.contains("\"overall\": \"accepted\""), "{report}");
+        assert!(report.contains("policy:service-catalog:demo_service:v1"), "{report}");
+        assert!(
+            report.contains("\"bundle_hash\": \"sha256:"),
+            "the report's bundle_hash must be the real, computed governed-bundle hash, not the adapter's symbolic placeholder: {report}"
+        );
+
+        let screen_src = std::fs::read_to_string(dir.join("src/screens/m02.nir")).unwrap();
+        assert!(
+            screen_src.contains("RFC 0029 §7.1 service binding: `demo_service` v1"),
+            "{screen_src}"
+        );
+        assert!(screen_src.contains(".nir/admission/2.1.json"), "{screen_src}");
+
+        // Runtime capability-gate wiring (not just the generation-time report).
+        assert!(screen_src.contains("include_str!(\"../../policy-bundle.toml\")"), "{screen_src}");
+        assert!(screen_src.contains("nirdosha_guard_rfc0029::CapabilityIssuer"), "{screen_src}");
+        assert!(screen_src.contains("nirdosha_guard_rfc0029::TransferRequestGatewayV1"), "{screen_src}");
+        assert!(screen_src.contains("capability_gate: rfc0029_capability_gate_2_1"), "{screen_src}");
+        assert!(screen_src.contains("mint(auth, \"Ticket\", \"ticket.write\", now_ms)"), "{screen_src}");
+    }
+
+    #[test]
+    fn bundle_outside_its_validity_window_is_refused() {
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let bundle = BUNDLE.replace("expires_at = \"2099-01-01T00:00:00Z\"", "expires_at = \"2020-06-01T00:00:00Z\"");
+        let (dir, path) = write_project(&screens, MENUS);
+        std::fs::write(path.join("policy-services.toml"), CATALOG).unwrap();
+        std::fs::write(path.join("policy-bundle.toml"), &bundle).unwrap();
+        let err = run(&path).unwrap_err();
+        assert!(err.contains("is not within its effective_from"), "{err}");
+        drop(dir);
+    }
+
+    #[test]
+    fn missing_bundle_file_is_refused_when_a_screen_declares_service() {
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let (dir, path) = write_project(&screens, MENUS);
+        std::fs::write(path.join("policy-services.toml"), CATALOG).unwrap();
+        // No policy-bundle.toml written at all.
+        let err = run(&path).unwrap_err();
+        assert!(err.contains("policy-bundle.toml"), "{err}");
+        drop(dir);
+    }
+
+    #[test]
+    fn unwired_gateway_is_refused_at_emit_time() {
+        let catalog = CATALOG.replace("transfer_request_gateway_v1", "funds_reserve_gateway_v1");
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, Some(&catalog));
+        let err = run(&dir).unwrap_err();
+        assert!(
+            err.contains("has no runtime capability-gate wiring in this generator yet"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unknown_service_name_is_refused() {
+        let screens = serviced_screens(
+            "service = { name = \"no_such_service\", version = \"1\", parameters = {} }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, Some(CATALOG));
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("service `no_such_service` is not declared"), "{err}");
+    }
+
+    #[test]
+    fn undeclared_parameter_is_refused() {
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\", extra = \"y\" } }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, Some(CATALOG));
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("parameter `extra` is not in this entry's allowed_parameters"), "{err}");
+    }
+
+    #[test]
+    fn wrong_resource_is_refused() {
+        let catalog = CATALOG.replace("resource = \"Ticket\"", "resource = \"SomethingElse\"");
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, Some(&catalog));
+        let err = run(&dir).unwrap_err();
+        assert!(
+            err.contains("does not match service `demo_service`'s declared resource `SomethingElse`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn wrong_role_with_no_subject_is_refused() {
+        // A screen with no role to bind `subject_identity` to would also
+        // trip the unrelated menu-role invariant (V2) before reaching
+        // admission if run through the full screens.toml pipeline, so
+        // this exercises the adapter directly — the same function
+        // `run_service_admission` calls.
+        let entry = crate::service_catalog::ServiceEntry {
+            resource: "Ticket".into(),
+            effect: "ticket.write".into(),
+            policy_kind: crate::service_catalog::PolicyKind::Authorization,
+            gateway: "transfer_request_gateway_v1".into(),
+            required_facts: vec!["subject_identity".into()],
+            allowed_parameters: vec!["note".into()],
+            failure_posture: crate::service_catalog::FailurePosture::FailClosed,
+        };
+        let params = toml::Value::Table(toml::map::Map::new());
+        let err = crate::policy_adapter::build_input(
+            "2.1", "demo_service", "1", &params, &entry, Some("Ticket"), &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("declares no role/eligible_roles to bind it to"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unregistered_gateway_is_refused_at_catalog_load() {
+        let catalog = CATALOG.replace("transfer_request_gateway_v1", "made_up_gateway");
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, Some(&catalog));
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("not in this generator's known-gateway list"), "{err}");
+    }
+
+    #[test]
+    fn missing_catalog_file_is_refused_when_a_screen_declares_service() {
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, None);
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("could not be read"), "{err}");
+    }
+
+    #[test]
+    fn unresolvable_required_fact_is_refused() {
+        let catalog = CATALOG.replace("required_facts = [\"subject_identity\"]", "required_facts = [\"fresh_balance\"]");
+        let screens = serviced_screens(
+            "service = { name = \"demo_service\", version = \"1\", parameters = { note = \"x\" } }",
+        );
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, Some(&catalog));
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("has no static resolver for"), "{err}");
+    }
+
+    #[test]
+    fn a_blocked_screens_service_annotation_is_never_admitted() {
+        // Mirrors screen 3.2's funds_reserve annotation in the real
+        // banking template: a documented future binding on a blocked
+        // screen must not be lowered to IR or run through admission at
+        // all (it will never generate a route either way).
+        let screens = serviced_screens(
+            "service = { name = \"no_such_service\", version = \"1\", parameters = {} }",
+        )
+        .replace("stage = \"built\"\ncodegen = { template = \"crud_screens\"", "stage = \"blocked\"\nblocked_by = [\"primitive:x\"]\ncodegen = { template = \"crud_screens\"");
+        let (_dir, dir) = write_serviced_project(&screens, MENUS, None);
+        // No catalog file exists at all; if the blocked screen's service
+        // reference were (wrongly) admitted, this would fail on the
+        // missing catalog rather than on the menu now pointing at a
+        // dropped screen.
+        let err = run(&dir).unwrap_err();
+        assert!(err.contains("(V3)"), "blocked screen must be refused by the menu invariant, not by catalog loading: {err}");
+    }
+
+    #[test]
+    fn capability_effect_mismatch_is_rejected_by_the_admission_engine() {
+        // Exercises the production entry point
+        // (`evaluate_admission_input`) directly against the frozen
+        // admission engine's own `CapabilityEffectMismatch` diagnostic —
+        // the closest static analogue to "expired/mismatched capability":
+        // a Capability node's granted effect_class no longer matches the
+        // Effect node the caller is trying to exercise.
+        use std::collections::BTreeMap;
+        let mut capability_attrs = BTreeMap::new();
+        capability_attrs.insert("effect_class".to_string(), serde_json::json!("ticket.write"));
+        let mut effect_attrs = BTreeMap::new();
+        effect_attrs.insert("effect_id".to_string(), serde_json::json!("ticket.delete"));
+        let input = rfc0029_conformance::Input {
+            bundle: rfc0029_conformance::Bundle { id: "b".into(), version: 1, hash: "h".into() },
+            nodes: vec![
+                rfc0029_conformance::Node {
+                    id: "capability".into(),
+                    kind: rfc0029_conformance::NodeKind::Capability,
+                    attributes: capability_attrs,
+                },
+                rfc0029_conformance::Node {
+                    id: "effect".into(),
+                    kind: rfc0029_conformance::NodeKind::Effect,
+                    attributes: effect_attrs,
+                },
+            ],
+            edges: vec![],
+            catalog_entries: vec![],
+            parameters: BTreeMap::new(),
+        };
+        let result = rfc0029_conformance::evaluate_admission_input(&input, "test", "test").unwrap();
+        assert_eq!(result.status, "rejected");
     }
 }
 

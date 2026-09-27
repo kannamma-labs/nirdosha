@@ -52,6 +52,13 @@ members = [
     "crates/nirdosha-guard-registry",
     "crates/nirdosha-guard-mic",
     "crates/nirdosha-guard-verify",
+    # RFC 0029 §7.1 runtime capability + effect gateway for the
+    # service-catalog vertical slice (transfer_create) -- deliberately
+    # separate from crates/rfc0029-conformance, which documents itself as
+    # having no real gateway and being unable to authorize a production
+    # effect. Depended on by generated apps whose screens.toml declares a
+    # [screen.service] reference.
+    "crates/nirdosha-guard-rfc0029",
     # RTM live-demo plan, Phase 0: bridges GuardClient/StoreDriver into
     # nirdosha-rt's screen-archetype macros (crud_screens! and friends) --
     # see the crate's own doc comment for exactly which evaluator gaps

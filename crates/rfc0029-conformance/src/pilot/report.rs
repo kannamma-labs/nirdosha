@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::funds_reserve::{AccountFact, ReservationReceipt, ReservationStatus};
 use crate::{
     compute_influence, evaluate_admission, evaluate_fact_provenance, evaluate_review,
-    ComputedFactProvenance, ComputedReview, Fixture, TriState,
+    synthetic_fixture, ComputedFactProvenance, ComputedReview, Fixture, Input, TriState,
 };
 
 pub const SCHEMA_VERSION: &str = "rfc0029.admission-report.v1";
@@ -486,6 +486,18 @@ pub fn compile_from_fixture(fixture: &Fixture) -> AdmissionReportV1 {
         ),
         overall,
     }
+}
+
+/// Production sibling of [`compile_from_fixture`]: compiles an
+/// `AdmissionReportV1` directly from a caller-built `Input` graph (e.g. a
+/// screen generator's catalog-to-IR adapter), under the given `policy_id`,
+/// with no fabricated test oracle. See [`crate::synthetic_fixture`] and
+/// [`crate::evaluate_admission_input`].
+pub fn compile_from_input(input: &Input, policy_id: &str) -> AdmissionReportV1 {
+    let fixture = synthetic_fixture(input, policy_id, "profile:rfc0029:generator/v1");
+    let mut report = compile_from_fixture(&fixture);
+    report.policy_id = policy_id.to_string();
+    report
 }
 
 /// RFC 0029 §36.5/§26 distributed finality: `INV_PRECOMMIT`,

@@ -142,6 +142,16 @@ struct GuardConfig {
     /// `create_fields` is opt-in per screen, not a default every guarded
     /// screen gets.
     create_fields: Option<Vec<FieldDef>>,
+    /// RFC 0029 §7.1: when present, names a function in the same module
+    /// with signature `fn(&nirdosha_rt::Auth, impl FnOnce() -> Result<Entity,
+    /// nirdosha_guard_screens::GuardScreenError>) -> Result<Entity,
+    /// nirdosha_guard_screens::GuardScreenError>` that the guarded create
+    /// routes call to wrap `GuardedTable::guarded_insert_checked` instead
+    /// of invoking it directly -- the only additive grammar change this
+    /// macro has for the RFC 0029 service-catalog vertical slice. Absent
+    /// (every screen before this one, and every screen in every other
+    /// template): output is byte-for-byte unchanged.
+    capability_gate: Option<Ident>,
 }
 
 impl Parse for GuardConfig {
@@ -157,9 +167,20 @@ impl Parse for GuardConfig {
 
         let mut update_fields = None;
         let mut create_fields = None;
+        let mut capability_gate = None;
         while input.peek(Ident) {
             let fork = input.fork();
             let ahead: Ident = fork.parse()?;
+            if ahead == "capability_gate" {
+                if capability_gate.is_some() {
+                    break;
+                }
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                capability_gate = Some(input.parse::<Ident>()?);
+                let _ = input.parse::<Token![,]>();
+                continue;
+            }
             let target = if ahead == "update_fields" {
                 &mut update_fields
             } else if ahead == "create_fields" {
@@ -185,7 +206,7 @@ impl Parse for GuardConfig {
             let _ = input.parse::<Token![,]>();
         }
 
-        Ok(GuardConfig { table, purpose, update_fields, create_fields })
+        Ok(GuardConfig { table, purpose, update_fields, create_fields, capability_gate })
     }
 }
 
@@ -802,6 +823,11 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         } else {
             let table = &guard.table;
             let purpose = &guard.purpose;
+            let insert_call = if let Some(gate) = &guard.capability_gate {
+                quote! { #gate(auth, || #table().guarded_insert_checked(auth, #purpose, &submitted, entity)) }
+            } else {
+                quote! { #table().guarded_insert_checked(auth, #purpose, &submitted, entity) }
+            };
             quote! {
                 .post_with_auth(#path, "Create", |req, _params, auth| {
                     let values = req.form_or_json();
@@ -811,7 +837,7 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
                     };
                     let row_id = ::nirdosha_guard_screens::GuardedEntity::row_id(&entity);
                     let submitted = __guarded_submitted_create_fields(&values);
-                    match #table().guarded_insert_checked(auth, #purpose, &submitted, entity) {
+                    match #insert_call {
                         Ok(_entity) => ::nirdosha_rt::Response::redirect(format!("{}/{}", #path, row_id)),
                         Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
                     }
@@ -836,6 +862,11 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
         } else {
             let table = &guard.table;
             let purpose = &guard.purpose;
+            let insert_call = if let Some(gate) = &guard.capability_gate {
+                quote! { #gate(auth, || #table().guarded_insert_checked(auth, #purpose, &submitted, entity)) }
+            } else {
+                quote! { #table().guarded_insert_checked(auth, #purpose, &submitted, entity) }
+            };
             quote! {
                 .post_with_auth(#api_path, "Create (JSON)", |req, _params, auth| {
                     let values = req.form_or_json();
@@ -844,7 +875,7 @@ fn expand_parsed(input: CrudScreensInput) -> TokenStream2 {
                         Err(errors) => return ::nirdosha_rt::Response::json(400, &::serde_json::json!({ "errors": errors })),
                     };
                     let submitted = __guarded_submitted_create_fields(&values);
-                    match #table().guarded_insert_checked(auth, #purpose, &submitted, entity) {
+                    match #insert_call {
                         Ok(entity) => ::nirdosha_rt::Response::json(201, &::serde_json::to_value(&entity).unwrap()),
                         Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
                     }

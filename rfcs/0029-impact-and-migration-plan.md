@@ -318,11 +318,30 @@ changes in one patch.
 | `crates/nirdosha-audit` | Integrity primitives and signed evidence support, without overstating unsigned hash chains |
 | `crates/nirdosha-guard-mcp` | Agent-tool PEP and delegated effect gateway |
 | Store/provider crates | Concrete gateway atomicity, isolation, idempotency, authority, and evidence conformance |
-| `nirdosha-hi` | Policy authoring/visualization assistance; never independent policy authority |
+| `nirdosha-hi` | Policy authoring/visualization assistance through versioned domain service catalogs; lowers selected catalog entries and validated parameters to RFC 0029 IR, but is never an independent policy authority |
 
 Before selecting a new crate boundary, implementation must inventory existing
 types to avoid creating a second policy model beside `nirdosha-contract-core`
 or a second guard IR beside `nirdosha-guard-core`.
+
+### 7.1 Template and screen integration rule
+
+Template manifests, `screens.toml`, screen guards, and generated `.nir` files
+are authoring and presentation inputs. They are not themselves the canonical
+policy model. A template may reference a versioned service-catalog entry such
+as `transfer.create` or `funds.reserve` and provide declared parameters such
+as jurisdiction, eligible role, or a limit. The RFC 0029 compiler must resolve
+that reference to a typed resource/effect/policy binding, admit it, and emit
+the report and capability/gateway binding before the corresponding route or
+effect code is considered generated.
+
+The generator must fail closed when a screen names an unknown service, an
+undeclared effect, an incomplete fact/evidence requirement, or a gateway that
+cannot meet the catalog entry's enforcement class. A route guard generated from
+screen metadata alone is UI protection; it is not proof of RFC 0029 effect
+enforcement. This preserves one-way ownership: templates select approved
+services, while the catalog and canonical admission layer define their
+security semantics.
 
 ## 8. Migration sequence
 

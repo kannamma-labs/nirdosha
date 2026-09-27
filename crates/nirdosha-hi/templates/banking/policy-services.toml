@@ -1,0 +1,27 @@
+# RFC 0029 §7.1 domain service catalog for the banking template.
+# Schema: docs/SERVICE_CATALOG_SCHEMA.json
+# Loaded/validated by crates/cargo-nirdosha/src/service_catalog.rs.
+#
+# A screen may only reference one of these entries by name via
+# [screen.service]; it supplies just the declared allowed_parameters. The
+# catalog -- not the screen, not an LLM -- is the source of the
+# security-critical meaning (resource, effect, policy kind, gateway,
+# required facts, failure posture).
+
+[service.transfer_create]
+resource = "TransferRequest"
+effect = "transfer.request"
+policy_kind = "Authorization"
+gateway = "transfer_request_gateway_v1"
+required_facts = ["subject_identity"]
+allowed_parameters = ["eligible_roles", "jurisdiction"]
+failure_posture = "FailClosed"
+
+[service.funds_reserve]
+resource = "Account"
+effect = "funds.reserve"
+policy_kind = "NumericInvariant"
+gateway = "funds_reserve_gateway_v1"
+required_facts = ["fresh_balance", "daily_limit"]
+allowed_parameters = ["jurisdiction"]
+failure_posture = "FailClosed"

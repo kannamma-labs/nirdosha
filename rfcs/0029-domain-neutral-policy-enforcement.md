@@ -259,6 +259,43 @@ for building this surface and for translating an accepted submission from it
 into the formal representation admission requires; a module without one is
 not admission-complete for domain-authority-authored policy kinds.
 
+### 7.1 Service catalogs are the translation boundary
+
+An authoring surface may accept a bounded human-readable request, including a
+screen or module description, but it must not translate unconstrained English
+directly into executable policy. The supported pattern is a versioned domain
+**service catalog** maintained by the module owner and approved by the domain
+authority. A catalog entry names the already-admitted resource, effect,
+policy kind, enforcement gateway, required facts/evidence, review mode,
+failure posture, and the parameters that an author may configure.
+
+An authoring request selects a catalog entry and supplies only those declared
+parameters. The compiler then performs this lowering:
+
+```text
+human-readable request or screen intent
+  -> catalog entry + validated parameters
+  -> typed policy draft
+  -> canonical RFC 0029 IR
+  -> admission and AdmissionReportV1
+  -> generated route/capability/gateway binding
+```
+
+The catalog, not the screen and not an LLM, is the source of the
+security-critical meaning. A screen action such as `transfer.create` may be
+mapped to a pre-reviewed service, while `funds.reserve`, `funds.release`,
+and `transfer.approve` remain distinct effects with distinct authorities,
+evidence, and gateways. UI visibility or a role label never grants an effect
+by implication.
+
+Natural-language assistance may propose a catalog entry or fill a declared
+parameter, but it must surface missing or ambiguous values for confirmation.
+It cannot invent an effect, broaden an authority, select a gateway, or turn an
+opaque predicate into a Static claim. An unresolved parameter is an admission
+failure or `Indeterminate`, according to the declared failure rule. A module
+without a complete catalog-to-IR mapping is an authoring convenience only and
+is not an RFC 0029 enforcement frontend.
+
 ## 8. Policy kinds
 
 The first standard kinds are:

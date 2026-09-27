@@ -302,7 +302,9 @@ dependencies = [
  "nirdosha-audit",
  "nirdosha-contract-core",
  "nirdosha-guard-registry",
+ "nirdosha-guard-rfc0029",
  "nirdosha-guard-verify",
+ "rfc0029-conformance",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1918,6 +1920,18 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nirdosha-guard-rfc0029"
+version = "0.1.0"
+dependencies = [
+ "nirdosha-audit",
+ "nirdosha-rt",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "toml",
 ]
 
 [[package]]

@@ -44,6 +44,14 @@ combined project:
 
 ## What is built vs. blocked
 
+The template's screen policies and `blocked_by` entries are authoring inputs,
+not the RFC 0029 policy model. Once RFC 0029 integration is enabled, each
+screen action must reference a versioned domain service-catalog entry (for
+example `transfer.create` or `funds.reserve`). The catalog entry supplies the
+typed effect, required evidence, failure posture, and enforcement gateway;
+the composer must admit that entry before generating an effect route. A UI
+role or `allowed_actions` value by itself never authorizes a financial effect.
+
 | Module | Built screens (generator today) | Blocked / needs primitive |
 |---|---|---|
 | core | Login, shell, audit report, holidays, product config | Customer entity, real OIDC |

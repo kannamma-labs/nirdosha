@@ -20,6 +20,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub mod generate;
+pub mod policy_adapter;
+pub mod service_catalog;
 
 use nirdosha_contract_core as cc;
 use serde::Serialize;
