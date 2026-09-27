@@ -4,6 +4,10 @@ resolver = "2"
 # exclusion keeps Cargo from auto-enrolling the path dependency as a member.
 exclude = ["crates/runtime-kernels", "crates/compiled-serve"]
 members = [
+    # RFC 0029 candidate canonical IR/JCS conformance boundary. This crate is
+    # deliberately isolated from live gateways until the Phase 0 schema and
+    # evaluator gates pass.
+    "crates/rfc0029-conformance",
     # `crates/compiler` (the original interpreted `.nir` language) was
     # deleted 2026-09-20 -- deprecated in favor of the v2 Rust dialect
     # below (docs/ROADMAP.md's 2026-09-17 note; see

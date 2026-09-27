@@ -1,0 +1,134 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": null,
+      "status": "not_evaluated"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_evaluated"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "g-shadow-1",
+    "invalidation": "not_evaluated",
+    "model_authorized": false,
+    "model_level": "None",
+    "normalized_graph": {
+      "sha256": "sha256:45819c2a1fed6dfdd5857860d8232959c0ec53413d1db93be8685b446dc2b940",
+      "status": "asserted",
+      "value": {
+        "edges": [
+          "m-ObserveOnly-e"
+        ],
+        "nodes": [
+          "m:ModelInvocation",
+          "e:Evidence"
+        ],
+        "observe_certificate": "cert-shadow-current"
+      }
+    },
+    "provenance": false,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "EQ4B",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [
+      {
+        "catalog": "observe_certificate",
+        "name": "cert-shadow-current",
+        "value": {
+          "allowed_channels": [
+            {
+              "direction": "one-way",
+              "source": "decision-copy-tap",
+              "target": "isolated-shadow-sink"
+            }
+          ],
+          "boundary": {
+            "components": [
+              "decision-copy-tap",
+              "isolated-shadow-sink"
+            ],
+            "protected_targets": [
+              "all-fixture-protected-targets"
+            ]
+          },
+          "dependency_graph_hash": "symbolic:shadow-dependency-graph-v1",
+          "enforcement": {
+            "attestation": "symbolic:fixture-sandbox-attestation-v1",
+            "mechanism_id": "fixture-one-way-sandbox",
+            "version": 1
+          },
+          "forbidden_return_classes": [
+            "data",
+            "control",
+            "configuration",
+            "scheduling_priority",
+            "shared_mutable_state",
+            "credential_or_capability"
+          ],
+          "invalidation": [
+            "topology-change",
+            "policy-change",
+            "credential-change",
+            "shared-resource-change"
+          ],
+          "model_sink": "isolated-shadow-sink",
+          "shared_resources": [],
+          "unmodeled_channel_behavior": "Indeterminate",
+          "valid_from": "2026-09-27T00:00:00Z",
+          "valid_until": "2026-09-28T00:00:00Z"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "DataFlow",
+        "source": "node:EQ4B:m",
+        "target": "node:EQ4B:t"
+      },
+      {
+        "kind": "ObserveOnly",
+        "source": "node:EQ4B:t",
+        "target": "node:EQ4B:e"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "evidence_type": "evidence:EQ4B:e"
+        },
+        "id": "node:EQ4B:e",
+        "kind": "Evidence"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:EQ4B:v1",
+          "receipt_id": "receipt:EQ4B:m:v1"
+        },
+        "id": "node:EQ4B:m",
+        "kind": "ModelInvocation"
+      },
+      {
+        "attributes": {
+          "transform_id": "transform:EQ4B:t",
+          "version": 1
+        },
+        "id": "node:EQ4B:t",
+        "kind": "Transform"
+      }
+    ],
+    "parameters": {}
+  },
+  "profile_id": "profile:rfc0029:banking:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

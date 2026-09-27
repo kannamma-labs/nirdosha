@@ -46,6 +46,13 @@ this list.
 | [0027 implementation plan](./0027-implementation-plan.md) | File-level implementation plan for RFC 0027 — per-crate change list, new files, phase gates, verification commands — draft |
 | [0027.a](./0027.a-cluster-native-dataflow.md) | Cluster-native amendment to RFC 0027 — identical-process scaling over a partitioned durable log, provider-backed consumer groups, partition-scoped state, and fleet attestation; external Kafka-compatible provider recommended first, self-contained Raft+SWIM later — draft |
 | [0028](./0028-mobile-client-codegen.md) | Generated native mobile clients (Kotlin/Android, Swift/iOS) from `.nir` screen macros — a shared `nirdosha-screen-ir` crate reusing the macros' own grammar, JSON-login content negotiation, and a `cargo nirdosha emit-mobile` codegen subcommand; supersedes `docs/MOBILE.md`'s dead Track D plan — draft, nothing built |
+| [0029](./0029-domain-neutral-policy-enforcement.md) | Domain-neutral policy admission, enforcement, effect coverage, obligations, provenance, and evidence — reviewed proposal with explicit platform tiers and guarantee boundaries; nothing in this RFC is claimed shipped |
+| [0029.a](./0029.a-model-assurance-port.md) | Model Assurance Port, model-influence overlay, and controlling influence/human-review semantics |
+| [0029 readiness](./0029-phase0-readiness-and-domain-matrix.md) | Authoritative status, representation matrix, field ledger, convergence controls, and Phase 0 gates |
+| [0029 domain profiles](./0029-domain-profiles.md) | Consolidated banking, healthcare, KYC, manufacturing, and insurance profiles |
+| [0029 canonical conformance](./0029-canonical-ir-and-conformance-vectors.md) | Canonical schema, fixture contract, executable JSON/JCS vectors, hashes, and implementation status |
+| [0029 implementation](./0029-impact-and-migration-plan.md) | Responsibility, migration, pilot, integration, and completion plan |
+| [0029 historical evidence](./evidence/0029/README.md) | Non-normative tabletops and the independent influence/review FAIL→PASS audit trail |
 
 A decision made in the course of implementing something, not designed
 up front, goes in [`docs/adr/`](../docs/adr/README.md) instead — a

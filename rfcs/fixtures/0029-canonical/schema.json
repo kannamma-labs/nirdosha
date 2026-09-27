@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nirdosha.dev/schemas/rfc0029/influence-review-fixture-v1.json",
+  "title": "RFC 0029 influence and human-review conformance fixture v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fixture_id", "profile_id", "input", "expected"],
+  "properties": {
+    "schema_version": {"const": "rfc0029.influence-review.fixture.v1"},
+    "fixture_id": {"$ref": "#/$defs/id"},
+    "profile_id": {"$ref": "#/$defs/id"},
+    "input": {"$ref": "#/$defs/input"},
+    "expected": {"$ref": "#/$defs/expected"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_.:-]+$"},
+    "stringArray": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "attributes"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["Fact", "ModelInvocation", "Transform", "Rule", "CandidateSet", "Presentation", "Review", "AuthorityAssertion", "Decision", "Obligation", "Capability", "Effect", "Evidence"]},
+        "attributes": {"type": "object"}
+      }
+    },
+    "edge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "kind", "target"],
+      "properties": {
+        "source": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["DataFlow", "RuleFlow", "CandidateGenerate", "CandidateSuppress", "Eligibility", "Rank", "Attention", "Default", "Recommend", "DraftArtifact", "DraftReason", "ModelApproval", "ModelTrigger", "HumanInput", "AssertFact", "AssertDecision", "Authorize", "Require", "Satisfy", "Issue", "Record", "ObserveOnly"]},
+        "target": {"$ref": "#/$defs/id"}
+      }
+    },
+    "catalogEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["catalog", "name", "value"],
+      "properties": {
+        "catalog": {"enum": ["authority", "predicate_definition", "review_contract", "observe_certificate"]},
+        "name": {"$ref": "#/$defs/id"},
+        "value": {"type": "object"}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bundle", "nodes", "edges", "catalog_entries", "parameters"],
+      "properties": {
+        "bundle": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "version", "hash"],
+          "properties": {"id": {"$ref": "#/$defs/id"}, "version": {"type": "integer", "minimum": 1}, "hash": {"type": "string", "minLength": 1}}
+        },
+        "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}, "uniqueItems": true},
+        "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}, "uniqueItems": true},
+        "catalog_entries": {"type": "array", "items": {"$ref": "#/$defs/catalogEntry"}, "uniqueItems": true},
+        "parameters": {"type": "object"}
+      }
+    },
+    "triState": {"enum": [true, false, "unknown"]},
+    "expected": {
+      "type": "object", "additionalProperties": false,
+      "required": ["graph_id", "normalized_graph", "provenance", "model_level", "model_authorized", "final_authority", "admission", "review", "capability", "invalidation", "extensions"],
+      "properties": {
+        "graph_id": {"type": ["string", "null"]},
+        "normalized_graph": {
+          "oneOf": [
+            {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "not_asserted"}}},
+            {"type": "object", "additionalProperties": false, "required": ["status", "value", "sha256"], "properties": {"status": {"const": "asserted"}, "value": {"type": "object"}, "sha256": {"pattern": "^sha256:[0-9a-f]{64}$"}}}
+          ]
+        },
+        "provenance": {"$ref": "#/$defs/triState"},
+        "model_level": {"enum": ["None", "Observe", "Classify", "Prioritize", "Recommend", "Draft", "Approve", "ExecuteReversible", "ExecuteCompensatable", "ExecuteIrreversible", "Unknown", "not_evaluated"]},
+        "model_authorized": {"$ref": "#/$defs/triState"},
+        "final_authority": {"type": ["string", "null"]},
+        "admission": {"type": "object", "additionalProperties": false, "required": ["status", "diagnostic"], "properties": {"status": {"enum": ["accepted", "rejected", "indeterminate", "not_evaluated"]}, "diagnostic": {"type": ["string", "null"]}}},
+        "review": {"type": "object", "additionalProperties": false, "required": ["status", "detail"], "properties": {"status": {"enum": ["pass", "fail", "indeterminate", "not_required", "not_evaluated"]}, "detail": {"type": ["string", "null"]}}},
+        "capability": {"type": "object", "additionalProperties": false, "required": ["status", "effect_class"], "properties": {"status": {"enum": ["issued", "not_issued", "not_evaluated"]}, "effect_class": {"type": ["string", "null"]}}},
+        "invalidation": {"enum": ["Abort", "ReevaluateAtomically", "Reconcile", "SuspendDownstream", "Compensate", "ImpactReview", "Notify", "GovernedReopen", "none", "not_evaluated"]},
+        "extensions": {"type": "object"}
+      }
+    }
+  }
+}

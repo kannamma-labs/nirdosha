@@ -1,0 +1,596 @@
+{
+  "fixture_ids": [
+    "EQ1A",
+    "EQ1B",
+    "EQ2A",
+    "EQ2B",
+    "EQ3A",
+    "EQ3B",
+    "EQ4A",
+    "EQ4B",
+    "B1",
+    "B2_STALE",
+    "B3",
+    "K1",
+    "K1_STRUCTURAL_ONLY",
+    "K3",
+    "K4",
+    "K5",
+    "H1",
+    "H1_ORDER_REUSE",
+    "H2",
+    "H3",
+    "H4",
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "I1",
+    "I2",
+    "I3",
+    "I3_PAYMENT_REUSE",
+    "I4",
+    "R1_ACK",
+    "R2_ACK_FOR_APPROVAL",
+    "R3_NOT_ACCESSED",
+    "R4_CONFLICT",
+    "R5_PASS",
+    "R6_STALE",
+    "R7_CAPACITY",
+    "R8_MONITOR_MISSING",
+    "R9_EVALUATION_MISSING",
+    "INV_PRECOMMIT",
+    "INV_EXTERNAL_UNKNOWN",
+    "L1",
+    "L2",
+    "L3",
+    "L4",
+    "L5",
+    "L6",
+    "L7",
+    "L8",
+    "L9",
+    "L10",
+    "L11",
+    "L12",
+    "L13",
+    "L14"
+  ],
+  "canon": {
+    "EQ1A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "c4e4323a1975b2f90fed3f483a521c4ef858cc513443b907372a2465fe5a7ea1",
+      "our_sha": "c4e4323a1975b2f90fed3f483a521c4ef858cc513443b907372a2465fe5a7ea1"
+    },
+    "EQ1B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "36e212e8e4aa3ba5ee0d828afa2e63c648af5c04abcc5d3f1c7a39470cf5b1c4",
+      "our_sha": "36e212e8e4aa3ba5ee0d828afa2e63c648af5c04abcc5d3f1c7a39470cf5b1c4"
+    },
+    "EQ2A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "73fdb406729770df18f9bb249019e082765779d8e948bb4006cfc38e3931deeb",
+      "our_sha": "73fdb406729770df18f9bb249019e082765779d8e948bb4006cfc38e3931deeb"
+    },
+    "EQ2B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "9b757194041995a5d103814371f843fe97e5fbadb506da5597131cb14381c007",
+      "our_sha": "9b757194041995a5d103814371f843fe97e5fbadb506da5597131cb14381c007"
+    },
+    "EQ3A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "eb43c8f6266f66df2acfdff663defff8bf0c90dd24f0e88e8199bccd62f90d48",
+      "our_sha": "eb43c8f6266f66df2acfdff663defff8bf0c90dd24f0e88e8199bccd62f90d48"
+    },
+    "EQ3B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "ed3da80f6514d9b6cf901be60d2516a899c689cad092b6e035d39eff3bb44d7c",
+      "our_sha": "ed3da80f6514d9b6cf901be60d2516a899c689cad092b6e035d39eff3bb44d7c"
+    },
+    "EQ4A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "b2558723630177893a19d655cc6f6638a0305c553c1672bc1e47d6d689933d1e",
+      "our_sha": "b2558723630177893a19d655cc6f6638a0305c553c1672bc1e47d6d689933d1e"
+    },
+    "EQ4B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "1d0e172931374366d7db89e77c967370412c2be3e8c55001f267c41d9f6b5d65",
+      "our_sha": "1d0e172931374366d7db89e77c967370412c2be3e8c55001f267c41d9f6b5d65"
+    },
+    "B1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "a51a103265a9c9c0f947ee5f60ee6ea88cab651abe1fb6b6af351f1a9570bea3",
+      "our_sha": "a51a103265a9c9c0f947ee5f60ee6ea88cab651abe1fb6b6af351f1a9570bea3"
+    },
+    "B2_STALE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "e542336b4899bac855140c102e16c0038f25fd2f993e6b0608fc1017006fc9dd",
+      "our_sha": "e542336b4899bac855140c102e16c0038f25fd2f993e6b0608fc1017006fc9dd"
+    },
+    "B3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "313fe1235dca47ab662d3cc1f88ae67bac1e25c350417d9b81ef7a4693f8387a",
+      "our_sha": "313fe1235dca47ab662d3cc1f88ae67bac1e25c350417d9b81ef7a4693f8387a"
+    },
+    "K1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "8fbcbcf742695f208dcbbf44b37f3f5e064135b596142c33d3318700f978f9f6",
+      "our_sha": "8fbcbcf742695f208dcbbf44b37f3f5e064135b596142c33d3318700f978f9f6"
+    },
+    "K1_STRUCTURAL_ONLY": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "e731c0848625bc2853dd524f7181661a45cf3028258780905923488718fc9dac",
+      "our_sha": "e731c0848625bc2853dd524f7181661a45cf3028258780905923488718fc9dac"
+    },
+    "K3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "7b67e7c3e93e563966032ea0754643714050e9d199f0336ffd61960e4f9af604",
+      "our_sha": "7b67e7c3e93e563966032ea0754643714050e9d199f0336ffd61960e4f9af604"
+    },
+    "K4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d36107d271a05a8fa767d544218011a7a240fe5228e74ef759dd5992d6b5362f",
+      "our_sha": "d36107d271a05a8fa767d544218011a7a240fe5228e74ef759dd5992d6b5362f"
+    },
+    "K5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "5b7d0e3ad5188c94333fdf59bf4179048e59b711e9acf57c7300708419c287cd",
+      "our_sha": "5b7d0e3ad5188c94333fdf59bf4179048e59b711e9acf57c7300708419c287cd"
+    },
+    "H1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "ea28e0284e206ad69dbd669aafdc4e06985328b581ba2fa73a005b18ea1e83ca",
+      "our_sha": "ea28e0284e206ad69dbd669aafdc4e06985328b581ba2fa73a005b18ea1e83ca"
+    },
+    "H1_ORDER_REUSE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "e21890182186008ffa30586d40517dccb11e9830707ce51ca4c245f097a52637",
+      "our_sha": "e21890182186008ffa30586d40517dccb11e9830707ce51ca4c245f097a52637"
+    },
+    "H2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f9af299bbe8b278efdea29747812374ec455099c4aa063998a1d07cf91a82bdd",
+      "our_sha": "f9af299bbe8b278efdea29747812374ec455099c4aa063998a1d07cf91a82bdd"
+    },
+    "H3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "831301bd4beef28193b37d81f8b819ffe7e06f60b5fc66ca12cd54929eb2e42f",
+      "our_sha": "831301bd4beef28193b37d81f8b819ffe7e06f60b5fc66ca12cd54929eb2e42f"
+    },
+    "H4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "112342fa024e8aff456cc98bcde5d218508b09accc33afd549c96b5d774119cb",
+      "our_sha": "112342fa024e8aff456cc98bcde5d218508b09accc33afd549c96b5d774119cb"
+    },
+    "M1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "60e37ebc4ecbf87866e7ccc59cfd94ff9b17fc253f471fa30f3452598021f52e",
+      "our_sha": "60e37ebc4ecbf87866e7ccc59cfd94ff9b17fc253f471fa30f3452598021f52e"
+    },
+    "M2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d44b49303636514130775c2b7e284504451f0bae57133bd324a759336d3e4af2",
+      "our_sha": "d44b49303636514130775c2b7e284504451f0bae57133bd324a759336d3e4af2"
+    },
+    "M3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "347a9c3233467d622278a9bfda01257ddb87a51807ff2555cae5228db58e764d",
+      "our_sha": "347a9c3233467d622278a9bfda01257ddb87a51807ff2555cae5228db58e764d"
+    },
+    "M4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "5c83380a4726b410a0cbb22fade33fddf56e0198a7230314103f38d2672872cb",
+      "our_sha": "5c83380a4726b410a0cbb22fade33fddf56e0198a7230314103f38d2672872cb"
+    },
+    "M5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "158345c72985813df269078f483fd1957ce326cb2874ed08c36ab487b52bd91f",
+      "our_sha": "158345c72985813df269078f483fd1957ce326cb2874ed08c36ab487b52bd91f"
+    },
+    "I1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "145bd759d778ed2bc12d04acc7b01ce43d84f31bc72274155aa964224b07092d",
+      "our_sha": "145bd759d778ed2bc12d04acc7b01ce43d84f31bc72274155aa964224b07092d"
+    },
+    "I2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "fd2d5f65f56250831f4b635a7f731d9374fc2636fa1252b084a46107f8ed566a",
+      "our_sha": "fd2d5f65f56250831f4b635a7f731d9374fc2636fa1252b084a46107f8ed566a"
+    },
+    "I3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "c9cc4b5c9ab51212c5bd5955a139d90178f1f2c295e5e0cd98659991029c8522",
+      "our_sha": "c9cc4b5c9ab51212c5bd5955a139d90178f1f2c295e5e0cd98659991029c8522"
+    },
+    "I3_PAYMENT_REUSE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "4e82a5b644fcee6559e39c33df09a391200203fd7fd288f17cb64452634ec433",
+      "our_sha": "4e82a5b644fcee6559e39c33df09a391200203fd7fd288f17cb64452634ec433"
+    },
+    "I4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "698eb9e751ca42e7feeb5826e63bc932f364d98deb9a208fc8db88ceeb6bfa96",
+      "our_sha": "698eb9e751ca42e7feeb5826e63bc932f364d98deb9a208fc8db88ceeb6bfa96"
+    },
+    "R1_ACK": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "754f1b1dce87acfd3aac1a284776f24e8160424da224a121de1c61b51179ffb3",
+      "our_sha": "754f1b1dce87acfd3aac1a284776f24e8160424da224a121de1c61b51179ffb3"
+    },
+    "R2_ACK_FOR_APPROVAL": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "95fd708c199e97d8f8e7529bcd631555770af7b19dc96f5f816ee14c70d3f2cb",
+      "our_sha": "95fd708c199e97d8f8e7529bcd631555770af7b19dc96f5f816ee14c70d3f2cb"
+    },
+    "R3_NOT_ACCESSED": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "aff1fcf3242476685e83e20a2977b558a9b657f9222ba96107538134f1b6c9e2",
+      "our_sha": "aff1fcf3242476685e83e20a2977b558a9b657f9222ba96107538134f1b6c9e2"
+    },
+    "R4_CONFLICT": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "8a52b3a017dce2c3048ad0eeb5006bf80dc18f9259202168dee528e5c437321a",
+      "our_sha": "8a52b3a017dce2c3048ad0eeb5006bf80dc18f9259202168dee528e5c437321a"
+    },
+    "R5_PASS": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "8d381c95d5bf3ea17708db221fcd91c84844600d6fa3e6934022a231660c5a9b",
+      "our_sha": "8d381c95d5bf3ea17708db221fcd91c84844600d6fa3e6934022a231660c5a9b"
+    },
+    "R6_STALE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "07fad5d988cfb099d57942332836c26349916537b2ab8c0679ed211e37f08134",
+      "our_sha": "07fad5d988cfb099d57942332836c26349916537b2ab8c0679ed211e37f08134"
+    },
+    "R7_CAPACITY": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "91ff71e5635e7d65e742d7c633823a4052dfcacb5801b0a046cf927c4b55a293",
+      "our_sha": "91ff71e5635e7d65e742d7c633823a4052dfcacb5801b0a046cf927c4b55a293"
+    },
+    "R8_MONITOR_MISSING": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "7078ef795de907e50994f7966bc362ddf8dc2302ecc95c7b971f2006a8bfdcfa",
+      "our_sha": "7078ef795de907e50994f7966bc362ddf8dc2302ecc95c7b971f2006a8bfdcfa"
+    },
+    "R9_EVALUATION_MISSING": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f81ea42ec1bf48ecf578bfc4e682e8baa68aa8bebb55f5be5c5aa8fea7cfe571",
+      "our_sha": "f81ea42ec1bf48ecf578bfc4e682e8baa68aa8bebb55f5be5c5aa8fea7cfe571"
+    },
+    "INV_PRECOMMIT": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "70154391397d5f6ed664e29ca56b35706573a3e2853abcf8891ddcc22d1e076a",
+      "our_sha": "70154391397d5f6ed664e29ca56b35706573a3e2853abcf8891ddcc22d1e076a"
+    },
+    "INV_EXTERNAL_UNKNOWN": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "9c237044106aec7df4a303cb239c69907713380d8fee86a61575052c3959da90",
+      "our_sha": "9c237044106aec7df4a303cb239c69907713380d8fee86a61575052c3959da90"
+    },
+    "L1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "65a91ae83da76abf62d634ecffb0370c604567e4af0c76e3d247ebf8b967250f",
+      "our_sha": "65a91ae83da76abf62d634ecffb0370c604567e4af0c76e3d247ebf8b967250f"
+    },
+    "L2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d41dc618348e45de7923364f1a88c160ff7e8309bea6171efbe3a711307514bc",
+      "our_sha": "d41dc618348e45de7923364f1a88c160ff7e8309bea6171efbe3a711307514bc"
+    },
+    "L3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "6a7e660634dc9a51312d5b731a14c2edb6cbca55dde78b74dd475701cc27b34f",
+      "our_sha": "6a7e660634dc9a51312d5b731a14c2edb6cbca55dde78b74dd475701cc27b34f"
+    },
+    "L4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "c500215047d0d5eb5e164a9f656cd50ba9d1b27128370a42764bd08ce4c2a12c",
+      "our_sha": "c500215047d0d5eb5e164a9f656cd50ba9d1b27128370a42764bd08ce4c2a12c"
+    },
+    "L5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "67126ce2363e2da03a30bd370dea873d42fc5a2a92344c1db156c133b59154e9",
+      "our_sha": "67126ce2363e2da03a30bd370dea873d42fc5a2a92344c1db156c133b59154e9"
+    },
+    "L6": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d86b51b92b7355c1772a7da006ac5f279754b44f2552e250dfff108e984af4c3",
+      "our_sha": "d86b51b92b7355c1772a7da006ac5f279754b44f2552e250dfff108e984af4c3"
+    },
+    "L7": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "50e3595c30c1509dcdf0511a6b20dc39af8fb7b18f1bb5a7a140589301aa4c69",
+      "our_sha": "50e3595c30c1509dcdf0511a6b20dc39af8fb7b18f1bb5a7a140589301aa4c69"
+    },
+    "L8": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "920b70d6fbad57037c5162047fb0059a29d4047fdf1bbfaa690fa61c21bae39c",
+      "our_sha": "920b70d6fbad57037c5162047fb0059a29d4047fdf1bbfaa690fa61c21bae39c"
+    },
+    "L9": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f10799451c42b906f7c02f23f721bfb455a35bb44c35c3c9e6ebeeaff4968ca3",
+      "our_sha": "f10799451c42b906f7c02f23f721bfb455a35bb44c35c3c9e6ebeeaff4968ca3"
+    },
+    "L10": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "3c842127d08951056f73be7a0b7d6b8be1f2a0d65443248b2ffc0570bd799bef",
+      "our_sha": "3c842127d08951056f73be7a0b7d6b8be1f2a0d65443248b2ffc0570bd799bef"
+    },
+    "L11": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "189d2a9b168dc18f7bfe3bf5b73e16cde6c4f7ae465af7e9f94751a768223ef7",
+      "our_sha": "189d2a9b168dc18f7bfe3bf5b73e16cde6c4f7ae465af7e9f94751a768223ef7"
+    },
+    "L12": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "189e474ee6bee08fc5a20e16428db29041757d93c362ec925df6b29cd6f295f8",
+      "our_sha": "189e474ee6bee08fc5a20e16428db29041757d93c362ec925df6b29cd6f295f8"
+    },
+    "L13": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "357f601e2f23a94abc1175047168673f13b4c45f2e0fcee61ed8a74949498a5e",
+      "our_sha": "357f601e2f23a94abc1175047168673f13b4c45f2e0fcee61ed8a74949498a5e"
+    },
+    "L14": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d616e8ee04b3927cf11787ce6b78dd30e58370bc1d939fe5c08b414f211f29cc",
+      "our_sha": "d616e8ee04b3927cf11787ce6b78dd30e58370bc1d939fe5c08b414f211f29cc"
+    }
+  },
+  "semantic_diffs": [
+    {
+      "fixture_id": "EQ3A",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "EQ3B",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B3",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K5",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H2",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M1",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M5",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I1",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "R6_STALE",
+      "field": "review.detail",
+      "ours": "ReviewPredicateMissing",
+      "oracle": "ReviewPredicateFailedClosed"
+    },
+    {
+      "fixture_id": "L3",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L5",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L8",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L9",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L10",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L11",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L12",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L13",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L14",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    }
+  ],
+  "fixtures_fully_agreed": [
+    "EQ1A",
+    "EQ1B",
+    "EQ2A",
+    "EQ2B",
+    "EQ4A",
+    "EQ4B",
+    "B1",
+    "B2_STALE",
+    "K1",
+    "K1_STRUCTURAL_ONLY",
+    "K3",
+    "H1",
+    "H1_ORDER_REUSE",
+    "H3",
+    "M2",
+    "M3",
+    "I2",
+    "I3",
+    "I3_PAYMENT_REUSE",
+    "R1_ACK",
+    "R2_ACK_FOR_APPROVAL",
+    "R3_NOT_ACCESSED",
+    "R4_CONFLICT",
+    "R5_PASS",
+    "R7_CAPACITY",
+    "R8_MONITOR_MISSING",
+    "R9_EVALUATION_MISSING",
+    "INV_PRECOMMIT",
+    "INV_EXTERNAL_UNKNOWN",
+    "L1",
+    "L2",
+    "L4",
+    "L6",
+    "L7"
+  ],
+  "fixtures_with_disagreement": [
+    "EQ3A",
+    "EQ3B",
+    "B3",
+    "K4",
+    "K5",
+    "H2",
+    "H4",
+    "M1",
+    "M4",
+    "M5",
+    "I1",
+    "I4",
+    "R6_STALE",
+    "L3",
+    "L5",
+    "L8",
+    "L9",
+    "L10",
+    "L11",
+    "L12",
+    "L13",
+    "L14"
+  ],
+  "semantic_fields_checked": 463,
+  "semantic_fields_agreed": 441,
+  "hash_agree": 56,
+  "bytes_agree": 56
+}

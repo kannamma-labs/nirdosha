@@ -3,6 +3,149 @@
 The single tracking file for what's done, what's pending, and when —
 across the whole project, in one place.
 
+## Domain-neutral policy enforcement proposal
+
+- `[PROPOSED — NOT IMPLEMENTED]` **2026-09-26, RFC 0029: typed,
+  domain-neutral policy admission and enforcement.**
+  [The reviewed design](../rfcs/0029-domain-neutral-policy-enforcement.md)
+  defines a canonical policy IR, formal admission boundary, platform tiers,
+  per-decision enforcement strength, PDP/PIP/PEP and effect gateways,
+  transactional/workflow obligations, fact provenance, coverage and bypass
+  classification, signed lifecycle, and evidence/replay profiles. It composes
+  RFCs 0016/0017/0023/0026 rather than replacing them. No new runtime,
+  compiler, policy language, gateway, or certificate behavior described by
+  RFC 0029 is implemented merely by landing the document; Phases 0–4 are all
+  pending. Its companion
+  [responsibility impact and migration plan](../rfcs/0029-impact-and-migration-plan.md)
+  records the required amendments to existing RFCs, retained subsystem
+  ownership, likely implementation surfaces, migration stages, and completion
+  criteria; those amendments and implementation stages are also pending. A
+  [banking and healthcare tabletop](../rfcs/evidence/0029/tabletops/banking-healthcare.md)
+  found twelve cross-domain blockers (resource/effect identity closure,
+  decision-capability binding, evidence finality, distributed finality,
+  fail-operational safety posture, multi-authority disagreement, transition
+  revalidation, aggregate consistency, monitor health, policy-plane
+  confidentiality, and jurisdiction applicability among them). RFC 0029 now
+  includes all twelve as normative cross-domain hardening requirements in
+  §36 and threads them through admission, gateways, evidence, formal
+  prerequisites, delivery phases, and checklists. The tabletop must still be
+  rerun against those amended semantics before Phase 0 is frozen. The
+  [Phase 0 readiness matrix](../rfcs/0029-phase0-readiness-and-domain-matrix.md)
+  resolves the apparent status conflict: the MAP core's later conceptual
+  freeze does not close this universal-policy F1–F12 gate. It defines five
+  domain profiles plus a per-decision
+  [model-influence overlay](../rfcs/0029.a-model-assurance-port.md#model-influence-overlay), avoiding
+  binary “AI/non-AI domain” profiles while retaining exact authority and
+  assurance requirements. It also defines unambiguous representation
+  classifications, the concrete banking/healthcare rerun cases, and Phase 0
+  entry/exit criteria. All five candidate profiles and the overlay now exist,
+  but an
+  [independent influence/review semantics audit](../rfcs/evidence/0029/influence-review/fail-report.md)
+  failed with eight blocking findings and reopened the material-influence and
+  meaningful-review ambiguities. Revision 1 subsequently corrected R1–R8 and
+  a [focused independent re-review](../rfcs/evidence/0029/influence-review/pass-report.md)
+  passed the schema-independent A1/A2 gate. A candidate
+  [canonical fixture package](../rfcs/0029-canonical-ir-and-conformance-vectors.md)
+  now expands all 37 reviewed cases into schema-valid readable JSON and exact
+  RFC 8785 bytes with a checked SHA-256 manifest. This is not yet final
+  production IR. The isolated `rfc0029-conformance` crate now independently
+  parses and re-encodes all 37 vectors, reproduces every JCS hash, rejects
+  malformed/downgraded graphs, and computes matching influence results for all
+  26 graph-bearing cases. It now also rejects nested duplicate JSON names and
+  computes all nine review fixtures from closed, authority/version/commitment/
+  validity-bound predicate records. It also computes all 16 asserted admission
+  outcomes and 11 graph-based capability outcomes using explicit per-effect
+  limits, mandatory denies and exact capability/effect binding. Closed schemas
+  for remaining attribute/profile payloads, dependency invalidation and
+  complete normalizer results remain pending, as do
+  schema-backed domain matrices and the remaining Phase 0 gates. A separate
+  [AI-first KYC tabletop](../rfcs/evidence/0029/tabletops/ai-first-kyc.md) rejects a
+  claimed fully autonomous KYC guarantee under the current design and finds
+  eight additional AI-inference gaps (artifact/runtime identity, calibrated
+  uncertainty and abstention, subgroup assurance, adversarial resilience,
+  explanation/appeal, meaningful review, model-data lifecycle, and drift/
+  feedback control). Risk-based automation with qualified escalation is only
+  conditionally admissible after those gaps receive formal semantics.
+  [RFC 0029.a](../rfcs/0029.a-model-assurance-port.md) now proposes the
+  provider-neutral Model Assurance Port for those gaps: canonical immutable
+  model/deployment identity, sequenced signed status, per-inference receipts,
+  incident/change envelopes, evidence independence, promise evaluation,
+  derived lifecycle state, policy-triggered degrade/suspend/revoke, human
+  review and appeal, continuous monitoring, and impact discovery. All phases
+  A–E are pending; the existing `model_artifact!`, ONNX load/score driver, and
+  RTM dashboards do not implement this protocol.
+  A [medical AI tabletop](../rfcs/evidence/0029/tabletops/medical-ai.md) applies the
+  port to emergency sepsis prediction. Advisory use is only conditionally
+  admissible; autonomous diagnosis/treatment is rejected. The exercise finds
+  eight medical-profile requirements still needing formalization: intended
+  use/regulatory binding, clinical measurement semantics, autonomy/effect
+  tiers, clinical utility and harm endpoints, label/adjudication and
+  intervention feedback, workflow capacity/human factors, local validation/
+  transportability, and post-market safety/recall. The medical profile and
+  all associated rerun gates are pending.
+  A subsequent
+  [manufacturing and insurance tabletop](../rfcs/evidence/0029/tabletops/cross-domain-expansion.md)
+  tests both AI-first and non-AI processes: lockout/interlocks, predictive
+  maintenance/vision inspection, claim adjudication/payout, and AI damage/
+  fraud/risk assistance. It conditionally admits bounded advisory/reversible
+  automation and rejects hazardous autonomous actuation or opaque unattended
+  adverse decisions. Its six generic findings are now normative RFC 0029.a
+  contracts: semantic inputs, effect/autonomy tiers, outcome/harm,
+  label/adjudication, human-system capacity, and deployment validation/
+  surveillance. The
+  [unified conformance rerun](../rfcs/evidence/0029/tabletops/unified-conformance-rerun.md)
+  applies that vocabulary to KYC, medical, manufacturing, and insurance. No
+  seventh generic contract was required: bounded KYC, advisory medical,
+  advisory/reversible manufacturing, and assistive/bounded insurance AI are
+  architecturally admissible subject to profiles; autonomous KYC correctness,
+  autonomous treatment, hazardous machine actuation, and opaque unattended
+  adverse insurance actions remain rejected. **Update (2026-09-27):** the
+  [convergence plan](../rfcs/0029-phase0-readiness-and-domain-matrix.md#convergence-and-independent-validation-plan)'s
+  two independent gates have both closed. An independent reviewer with no
+  prior involvement found no seventh generic contract needed for
+  logistics/customs — a domain absent from the original C1–C6 design loop —
+  after actively trying six hard cases beyond the tabletop's own table
+  ([report](../rfcs/evidence/0029/out-of-sample-review/review-report.md)).
+  A separate independent review of banking/healthcare F1–F12 against RFC
+  0029's current §36 text found 11 of 12 items PASS with one gap (F8); RFC
+  0029 was corrected for that and four related findings, and a second,
+  independent re-reviewer confirmed all five corrections resolve cleanly
+  ([review](../rfcs/evidence/0029/f1-f12-review/review-report.md),
+  [re-review](../rfcs/evidence/0029/f1-f12-review/rereview-report.md)). C1–C6
+  is accordingly promoted from `Candidate baseline` to **`Validated core`**
+  — precisely for the "does this need a new universal primitive" question,
+  not as a claim that Phase 0 is complete. **Update (2026-09-27):
+  `Frozen version` is now declared, but core-only** — the canonical IR,
+  validator semantics (including a new closed-table edge-kind validator),
+  the result taxonomy (closed `AdmissionDiagnostic`/`ReviewFinding` enums,
+  replacing free-form strings), compatibility/version rules, and the
+  51-fixture conformance corpus, together with a permanent CI differential
+  gate (`.github/workflows/rfc0029-differential.yml`) that re-runs a
+  second, from-scratch Ruby implementation on every relevant change rather
+  than asserting agreement once. Getting there required fixing five real
+  defects found along the way, most of them by the tooling built specifically
+  to find them: the symbolic YAML's "lossless" claim was false (an
+  authority-ceiling table existed only in the excluded generator); a
+  pre-existing typo in fixture `M4`'s authority reference; `L8`–`L13` used
+  an edge shape RFC 0029.a's own closed table forbids, not once but
+  **twice** (`ModelInvocation` cannot structurally produce a `Fact`, and
+  separately `Eligibility` cannot source from `Fact` either — both
+  corrected); and the Ruby implementation itself had never implemented the
+  `FactProvenanceMissing` diagnostic, caught only once a new fixture (`L14`)
+  exercised it. The temporal-separation gap (no fixture showed a real
+  elapsed-time gap between an authority's assertion and its later,
+  possibly-revoked consumption) is closed as a **stateful falsification
+  pilot** (`src/pilot/assertion_lifecycle.rs`, a full t0→t3 revocation
+  sequence), not as an extension of the static fixture corpus — and its
+  success without needing any new primitive is itself further evidence for
+  the out-of-sample gate's PASS. Full account in the
+  [readiness matrix §8–§9](../rfcs/0029-phase0-readiness-and-domain-matrix.md#9-frozen-version--core-only-2026-09-27).
+  **This freeze explicitly excludes** `AdmissionReportV1` beyond the
+  `funds.reserve` pilot's scope and all five domain profiles' executable
+  conformance matrices — those remain `Candidate baseline`, to be built
+  *against* this now-frozen core, not shape it. See the convergence plan's
+  §6, §8 and §9 for the complete accounting.
+
 **Why the other planning/spec docs (`docs/Nirdosha_Unified_Plan.md`,
 `docs/goal.md`, `docs/TRANSACT.md`, `docs/SANDBOXING.md`, `docs/PROTOLANG_PORT.md`,
 `docs/nirdosha_row11_amendment.md`, `docs/nirdosha_row12_functions_identity.md`,

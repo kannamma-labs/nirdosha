@@ -1,0 +1,80 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": null,
+      "status": "accepted"
+    },
+    "capability": {
+      "effect_class": "clinical.alert",
+      "status": "issued"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "health-alert",
+    "invalidation": "not_evaluated",
+    "model_authorized": true,
+    "model_level": "Recommend",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "H1",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "Authorize",
+        "source": "node:H1:d",
+        "target": "node:H1:c"
+      },
+      {
+        "kind": "Recommend",
+        "source": "node:H1:m",
+        "target": "node:H1:d"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "effect_class": "clinical.alert"
+        },
+        "id": "node:H1:c",
+        "kind": "Capability"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:H1:d"
+        },
+        "id": "node:H1:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:H1:v1",
+          "receipt_id": "receipt:H1:m:v1"
+        },
+        "id": "node:H1:m",
+        "kind": "ModelInvocation"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "clinical.alert",
+        "maximum_model_level": "Recommend"
+      },
+      "declared_binding": "Recommend"
+    }
+  },
+  "profile_id": "profile:rfc0029:healthcare:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

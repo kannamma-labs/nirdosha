@@ -1,0 +1,115 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": null,
+      "status": "accepted"
+    },
+    "capability": {
+      "effect_class": "cargo.release",
+      "status": "issued"
+    },
+    "extensions": {},
+    "final_authority": "customs-authority",
+    "graph_id": "logistics-no-model",
+    "invalidation": "not_evaluated",
+    "model_authorized": false,
+    "model_level": "None",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": false,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "L1",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [
+      {
+        "catalog": "authority",
+        "name": "customs-authority",
+        "value": {
+          "id": "authority:customs-authority",
+          "version": 1
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "Authorize",
+        "source": "node:L1:d",
+        "target": "node:L1:c"
+      },
+      {
+        "kind": "DataFlow",
+        "source": "node:L1:f",
+        "target": "node:L1:r"
+      },
+      {
+        "kind": "Issue",
+        "source": "node:L1:c",
+        "target": "node:L1:x"
+      },
+      {
+        "kind": "RuleFlow",
+        "source": "node:L1:r",
+        "target": "node:L1:d"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "effect_class": "cargo.release"
+        },
+        "id": "node:L1:c",
+        "kind": "Capability"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:L1:d"
+        },
+        "id": "node:L1:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "effect_id": "cargo.release",
+          "reversibility_class": "Irreversible"
+        },
+        "id": "node:L1:x",
+        "kind": "Effect"
+      },
+      {
+        "attributes": {
+          "authority_class": "profile_authority",
+          "type_id": "fact:L1:f",
+          "version": 1
+        },
+        "id": "node:L1:f",
+        "kind": "Fact"
+      },
+      {
+        "attributes": {
+          "bundle_hash": "symbolic:bundle-rfc0029-fixtures-v1",
+          "rule_id": "rule:L1:r"
+        },
+        "id": "node:L1:r",
+        "kind": "Rule"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "cargo.release",
+        "maximum_model_level": "Recommend"
+      }
+    }
+  },
+  "profile_id": "profile:rfc0029:logistics:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

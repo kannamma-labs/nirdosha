@@ -1,0 +1,585 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": null,
+      "status": "not_evaluated"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_evaluated"
+    },
+    "extensions": {},
+    "final_authority": "clinician",
+    "graph_id": "g-draft-human-1",
+    "invalidation": "not_evaluated",
+    "model_authorized": false,
+    "model_level": "Draft",
+    "normalized_graph": {
+      "sha256": "sha256:ee9b068a186e2282b7ff5bab3c0a6c1a19e774b2169f02fb434de352504b70ef",
+      "status": "asserted",
+      "value": {
+        "assertion": {
+          "contract": "rc-independent-pass",
+          "covered_input_origins": [
+            "m",
+            "v"
+          ],
+          "covered_model_paths": [
+            "m"
+          ],
+          "covered_targets": [
+            "d"
+          ]
+        },
+        "edges": [
+          "m-DraftArtifact-v",
+          "v-HumanInput-a",
+          "a-AssertDecision-d"
+        ],
+        "nodes": [
+          "m:ModelInvocation",
+          "v:Review",
+          "a:AuthorityAssertion",
+          "d:Decision"
+        ]
+      }
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "pass"
+    }
+  },
+  "fixture_id": "EQ3A",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [
+      {
+        "catalog": "authority",
+        "name": "clinician",
+        "value": {
+          "id": "authority:clinician",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "acknowledged",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.acknowledged == true",
+          "id": "predicate:acknowledged",
+          "input_schema": [
+            "review.acknowledged:bool"
+          ],
+          "kind": "ExplicitAction",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "authenticated",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "subject.authenticated == true",
+          "id": "predicate:authenticated",
+          "input_schema": [
+            "subject.authenticated:bool"
+          ],
+          "kind": "Qualification",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "authority",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "reviewer.authorized == true",
+          "id": "predicate:authority",
+          "input_schema": [
+            "reviewer.authorized:bool"
+          ],
+          "kind": "Authority",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "capacity",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.capacity_healthy == true",
+          "id": "predicate:capacity",
+          "input_schema": [
+            "review.capacity_healthy:bool"
+          ],
+          "kind": "CapacityHealthy",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "escalation",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.escalation_available == true",
+          "id": "predicate:escalation",
+          "input_schema": [
+            "review.escalation_available:bool"
+          ],
+          "kind": "EscalationAvailable",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "evidence_accessed",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "evidence.accessed == true",
+          "id": "predicate:evidence-accessed",
+          "input_schema": [
+            "evidence.accessed:bool"
+          ],
+          "kind": "EvidenceAccessed",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "evidence_available",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "evidence.available == true",
+          "id": "predicate:evidence-available",
+          "input_schema": [
+            "evidence.available:bool"
+          ],
+          "kind": "EvidenceAvailable",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "explicit_action",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.explicit_action == true",
+          "id": "predicate:explicit-action",
+          "input_schema": [
+            "review.explicit_action:bool"
+          ],
+          "kind": "ExplicitAction",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "independence",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "reviewer.independent == true",
+          "id": "predicate:independence",
+          "input_schema": [
+            "reviewer.independent:bool"
+          ],
+          "kind": "Independence",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "independent_choice",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.independent_choice == true",
+          "id": "predicate:independent-choice",
+          "input_schema": [
+            "review.independent_choice:bool"
+          ],
+          "kind": "IndependentOutcomeChoice",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "limitations_visible",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "model.limitations_visible == true",
+          "id": "predicate:limitations-visible",
+          "input_schema": [
+            "model.limitations_visible:bool"
+          ],
+          "kind": "LimitationVisible",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "override",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.override_available == true",
+          "id": "predicate:override",
+          "input_schema": [
+            "review.override_available:bool"
+          ],
+          "kind": "OverrideAvailable",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "qualification",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "reviewer.qualified == true",
+          "id": "predicate:qualification",
+          "input_schema": [
+            "reviewer.qualified:bool"
+          ],
+          "kind": "Qualification",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "reason_bound",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.reason_bound == true",
+          "id": "predicate:reason-bound",
+          "input_schema": [
+            "review.reason_bound:bool"
+          ],
+          "kind": "ReasonBound",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "sampling",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.sampling_assigned == true",
+          "id": "predicate:sampling",
+          "input_schema": [
+            "review.sampling_assigned:bool"
+          ],
+          "kind": "SamplingAssigned",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "review_contract",
+        "name": "rc-independent-pass",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "evaluation_fixture": "R5_PASS",
+          "id": "review-contract:independent-pass",
+          "mode": "IndependentDecision",
+          "predicates": [
+            "authenticated",
+            "acknowledged",
+            "qualification",
+            "authority",
+            "independence",
+            "evidence_available",
+            "evidence_accessed",
+            "limitations_visible",
+            "explicit_action",
+            "reason_bound",
+            "override",
+            "escalation",
+            "capacity",
+            "independent_choice",
+            "sampling"
+          ],
+          "version": 1
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "AssertDecision",
+        "source": "node:EQ3A:a",
+        "target": "node:EQ3A:d"
+      },
+      {
+        "kind": "DraftArtifact",
+        "source": "node:EQ3A:m",
+        "target": "node:EQ3A:v"
+      },
+      {
+        "kind": "HumanInput",
+        "source": "node:EQ3A:v",
+        "target": "node:EQ3A:a"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "contract": "rc-independent-pass",
+          "covered_input_origins": [
+            "m",
+            "v"
+          ],
+          "covered_model_paths": [
+            "m"
+          ],
+          "covered_targets": [
+            "d"
+          ],
+          "id": "a"
+        },
+        "id": "node:EQ3A:a",
+        "kind": "AuthorityAssertion"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:EQ3A:d"
+        },
+        "id": "node:EQ3A:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:EQ3A:v1",
+          "receipt_id": "receipt:EQ3A:m:v1"
+        },
+        "id": "node:EQ3A:m",
+        "kind": "ModelInvocation"
+      },
+      {
+        "attributes": {
+          "review_contract": "rc-independent-pass"
+        },
+        "id": "node:EQ3A:v",
+        "kind": "Review"
+      }
+    ],
+    "parameters": {
+      "evaluations": [
+        {
+          "definition_id": "predicate:authenticated",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:authenticated:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:authenticated:inputs",
+          "predicate": "authenticated",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:acknowledged",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:acknowledged:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:acknowledged:inputs",
+          "predicate": "acknowledged",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:qualification",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:qualification:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:qualification:inputs",
+          "predicate": "qualification",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:authority",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:authority:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:authority:inputs",
+          "predicate": "authority",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:independence",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:independence:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:independence:inputs",
+          "predicate": "independence",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:evidence-available",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:evidence_available:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:evidence_available:inputs",
+          "predicate": "evidence_available",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:evidence-accessed",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:evidence_accessed:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:evidence_accessed:inputs",
+          "predicate": "evidence_accessed",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:limitations-visible",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:limitations_visible:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:limitations_visible:inputs",
+          "predicate": "limitations_visible",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:explicit-action",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:explicit_action:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:explicit_action:inputs",
+          "predicate": "explicit_action",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:reason-bound",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:reason_bound:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:reason_bound:inputs",
+          "predicate": "reason_bound",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:override",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:override:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:override:inputs",
+          "predicate": "override",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:escalation",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:escalation:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:escalation:inputs",
+          "predicate": "escalation",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:capacity",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:capacity:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:capacity:inputs",
+          "predicate": "capacity",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:independent-choice",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:independent_choice:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:independent_choice:inputs",
+          "predicate": "independent_choice",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:sampling",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:EQ3A:sampling:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:EQ3A:sampling:inputs",
+          "predicate": "sampling",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        }
+      ],
+      "review_contract": "rc-independent-pass"
+    }
+  },
+  "profile_id": "profile:rfc0029:healthcare:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

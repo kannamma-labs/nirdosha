@@ -1,0 +1,77 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": null,
+      "status": "accepted"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_evaluated"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "kyc-eligibility",
+    "invalidation": "not_evaluated",
+    "model_authorized": true,
+    "model_level": "Classify",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "K1",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "DataFlow",
+        "source": "node:K1:m",
+        "target": "node:K1:t"
+      },
+      {
+        "kind": "Eligibility",
+        "source": "node:K1:t",
+        "target": "node:K1:d"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "decision_class": "decision:K1:d"
+        },
+        "id": "node:K1:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:K1:v1",
+          "receipt_id": "receipt:K1:m:v1"
+        },
+        "id": "node:K1:m",
+        "kind": "ModelInvocation"
+      },
+      {
+        "attributes": {
+          "transform_id": "transform:K1:t",
+          "version": 1
+        },
+        "id": "node:K1:t",
+        "kind": "Transform"
+      }
+    ],
+    "parameters": {
+      "declared_binding": "Classify"
+    }
+  },
+  "profile_id": "profile:rfc0029:kyc:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}
