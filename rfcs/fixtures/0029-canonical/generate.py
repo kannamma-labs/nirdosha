@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sys
 
+import jsonschema
 import yaml
 
 ROOT = Path(__file__).resolve().parent
@@ -17,6 +18,7 @@ SOURCE = ROOT.parent / "0029-influence-review-symbolic.yaml"
 VECTOR_DIR = ROOT / "vectors"
 JCS_DIR = ROOT / "jcs"
 MANIFEST = ROOT / "manifest.json"
+SCHEMA_PATH = ROOT / "schema.json"
 SCHEMA_VERSION = "rfc0029.influence-review.fixture.v1"
 
 
@@ -248,8 +250,14 @@ def main():
     args = parser.parse_args()
     doc = load_yaml()
     vectors = {f["id"]: make_vector(doc, f) for f in doc["fixtures"]}
+    schema = json.loads(SCHEMA_PATH.read_text())
+    validator = jsonschema.Draft202012Validator(schema)
     entries = []
     for fid, vector in sorted(vectors.items()):
+        errors = list(validator.iter_errors(vector))
+        if errors:
+            detail = "; ".join(f"{'/'.join(str(p) for p in e.path)}: {e.message}" for e in errors[:5])
+            raise SystemExit(f"{fid} does not conform to schema.json ({len(errors)} error(s)): {detail}")
         data = canonical_bytes(vector)
         entries.append({"fixture_id": fid, "json_path": f"vectors/{fid}.json", "jcs_path": f"jcs/{fid}.jcs.json", "sha256": "sha256:" + hashlib.sha256(data).hexdigest(), "bytes": len(data)})
         path = VECTOR_DIR / f"{fid}.json"
@@ -268,7 +276,7 @@ def main():
     if args.check:
         if not MANIFEST.exists() or MANIFEST.read_text() != rendered: raise SystemExit(f"stale generated manifest: {MANIFEST}")
     else: MANIFEST.write_text(rendered)
-    print(f"validated {len(entries)} canonical vectors")
+    print(f"validated {len(entries)} canonical vectors against schema.json")
 
 
 if __name__ == "__main__": main()

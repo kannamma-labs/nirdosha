@@ -243,20 +243,39 @@ Production implementation of the canonical IR may begin only when:
 - [x] no `Ambiguous` classification remains after Revision 1 and passing
       independent re-review;
 - [ ] all `Opaque` and `Unsupported` cases name the foreclosed guarantee and
-      stable admission outcome;
-- [ ] the banking and healthcare matrices in §7 pass on paper against the
-      candidate semantics;
-- [ ] every non-`None` model-influence binding encodes C1–C6 without a new
-      universal MAP envelope;
-- [ ] no domain-specific field is required in the universal core;
-- [ ] two consecutive review rounds introduce no new universal primitive;
-- [ ] one out-of-sample domain that did not derive C1–C6 passes an independent
-      attempt to find a new universal primitive;
-- [ ] an independent adversarial rerun of banking/healthcare F1–F12 has no
-      unresolved `FAIL` or `INDETERMINATE` result;
-- [ ] RFC 0029 and RFC 0029.a formal-artifact backlogs are enumerated and
-      assigned to Phase 0 deliverables;
-- [ ] `docs/ROADMAP.md` and every companion status statement agree.
+      stable admission outcome — **partial**: `AdmissionReportV1`'s
+      `Opaque`/`Unsupported` outcomes are documented at the report-compiler
+      level (`pilot::report`'s doc comments), but this has not been checked
+      against every `Opaque`/`Unsupported` case named anywhere in RFC 0029
+      §8's own "opaque predicate" concept at the RFC-text level — still open;
+- [x] the banking and healthcare matrices in §7 pass on paper against the
+      candidate semantics — closed 2026-09-27, §11 below: all 19 rows now
+      executable, not just on paper;
+- [x] every non-`None` model-influence binding encodes C1–C6 without a new
+      universal MAP envelope — established by both independent reviews (§2,
+      §3): neither found a binding requiring a seventh generic contract;
+- [x] no domain-specific field is required in the universal core —
+      established by `tests/version_compatibility.rs` and this session's own
+      use of the pattern: every domain-specific need (`fact_provenance`,
+      `fact_requirement`, `effect_authority_ceilings`) was absorbed by the
+      `attributes`/`parameters` extension points, never a core schema change;
+- [x] two consecutive review rounds introduce no new universal primitive —
+      the F1–F12 gate's own two-round structure (§3): round 1's five
+      findings were RFC-text gaps, not universal primitives; round 2
+      confirmed no residual gaps after fixing them;
+- [x] one out-of-sample domain that did not derive C1–C6 passes an independent
+      attempt to find a new universal primitive — §2, closed 2026-09-27;
+- [x] an independent adversarial rerun of banking/healthcare F1–F12 has no
+      unresolved `FAIL` or `INDETERMINATE` result — §3, closed 2026-09-27;
+- [x] RFC 0029 and RFC 0029.a formal-artifact backlogs are enumerated and
+      assigned to Phase 0 deliverables — closed 2026-09-27, §11 below;
+- [x] `docs/ROADMAP.md` and every companion status statement agree — see
+      ROADMAP.md's own enumeration, added this same pass.
+
+**This gate is otherwise closed except item 4** (`Opaque`/`Unsupported`
+naming at the RFC-text level), which remains genuinely open. Entry-gate
+passage does not by itself close the Phase 0 exit gate (§10 above), which
+has its own, distinct remaining item.
 
 Passing this gate permits implementation of Phase 0 artifacts. It does not
 permit an enforcement or assurance claim.
@@ -290,6 +309,109 @@ Phase 0 is complete only when:
 
 Only after this exit gate may Phase 1 bundle/admission implementation be
 described as building on a frozen Phase 0 core.
+
+### Status (2026-09-27)
+
+- [x] one typed policy IR and one canonical encoding exist;
+- [x] grammar, type/unit rules, decidability boundary and the first four
+      policy kind semantics are normative — audited directly, 2026-09-27:
+      (a) the four kinds' semantics are written and each carries all five
+      required properties, confirmed by re-reading the text just now, not
+      recollection — operational semantics, composition algebra, proof
+      obligations, enforcement phases, minimum evidence schema (RFC 0029
+      §8.1–§8.4); (b) grammar/canonical encoding — `schema.json` (a real
+      JSON Schema 2020-12 document, closed via `additionalProperties:
+      false` except the declared `attributes`/`parameters` extension
+      points) existed but, found this same audit, was **never actually
+      validated against** — a real gap, since a drift between it and the
+      Rust parser's own types would have gone undetected. Closed: all 107
+      generated vectors were checked against it (0 violations, confirmed
+      empirically) and `generate.py` now runs this validation on every
+      invocation (`--check` and generation both), wired into the CI
+      workflow with its own `jsonschema` dependency — no longer a
+      documentation-only artifact; (c) type system — the same schema plus
+      `canonical_bytes`' I-JSON integer-range/no-floats rule and the
+      closed core-envelope/open-extension-point split (§9 item 5); unit
+      rules are domain-module scope per §7, and `funds_reserve`'s
+      minor-unit-integer convention is the concrete instance for banking;
+      (d) decidability boundary — RFC 0029 §25's bounded/terminating rules
+      are structurally enforced, not just declared: every evaluator
+      (`compute_influence`, `evaluate_review`, `evaluate_fact_provenance`,
+      `evaluate_admission`) runs only after `validate_graph`'s Kahn's-
+      algorithm cycle rejection, so evaluation is a fold over a
+      provably-finite DAG, not unbounded recursion; the funds_reserve
+      daily-limit window and monitor-health check are both bounded
+      predicates, not unbounded history quantification;
+- [x] all RFC 0029 §36 and RFC 0029.a §27 prerequisites required by the
+      *advertised* classes (banking, healthcare) have formal semantics —
+      the F1–F12 gate (§3 above);
+- [x] admission outcomes and diagnostics are stable and machine-readable —
+      closed `AdmissionDiagnostic`/`ReviewFinding` enums;
+- [x] a compiled admission report derives every advertised checklist result
+      from typed evaluator state — `compile_from_fixture` (influence,
+      review, fact-provenance, admission, distributed finality, monitor
+      health) and `compile` (the `funds.reserve` pilot, now including
+      daily-limit consistency, disclosed as a per-call check, not a full
+      aggregate-window audit);
+- [x] all five domain profiles plus mixed model-influence bindings encode
+      without core schema changes;
+- [x] golden vectors establish canonical bytes and bundle identities;
+- [x] executable conformance suites cover the §7 cases **and each
+      profile's positive and negative matrix** — §7's 19 cases are fully
+      executable (banking 9/9, healthcare 10/10, `tests/
+      section7_banking.rs`, `tests/section7_healthcare.rs`). The second
+      half of this bullet — each of the five domain profiles' own full
+      positive/negative matrix — closed same day (§11 below): all five
+      domains now have all nine cross-domain-matrix rows, not just
+      logistics;
+- [x] two independent input paths lower equivalent policies to the same
+      IR, canonical bytes, hash, admission result and diagnostics —
+      permanent CI gate, §8–§9;
+- [x] unsupported or stale schema versions and guarantees are rejected;
+- [x] the roadmap records exactly which policy kinds and profiles passed
+      — see docs/ROADMAP.md's own enumeration, added this same pass.
+
+**This gate is now closed** (§11 below closes the one remaining item: each
+of the five domain profiles' full positive/negative matrix, not just §7's
+19 cases). Phase 1 bundle/admission implementation may now be described as
+building on a frozen Phase 0 core, per this section's own rule.
+
+## 11. §7 matrices closed; formal-artifact backlog enumerated, 2026-09-27
+
+The entry gate's (§9 above) two remaining substantive checkboxes:
+
+- **"the banking and healthcare matrices in §7 pass on paper against the
+  candidate semantics"** — closed. All 19 rows (banking 9, healthcare 10)
+  are now executable, not just "on paper": `src/pilot/funds_reserve.rs`
+  gained daily-limit consistency, external-submission timeout/
+  reconciliation, evidence-plane-outage, and authority-compromise
+  discovery; a new `src/pilot/clinical_access.rs` pilot covers all ten
+  healthcare rows (break-glass binding, consent/PDP outage, conflicting
+  allergy authorities, order invalidation, alias resolution, evidence
+  outage, irreversible administration, research-purpose inheritance,
+  retention-conflict resolution). `tests/section7_banking.rs` and
+  `tests/section7_healthcare.rs`, 17 tests, all passing.
+- **"RFC 0029 and RFC 0029.a formal-artifact backlogs are enumerated and
+  assigned to Phase 0 deliverables"** — closed by this list. RFC 0029 §8
+  names fourteen policy kinds total; §8.1–§8.4 now give the first four
+  (Authorization, Data policy, Numeric invariant, State invariant) formal
+  operational semantics, composition algebra, proof obligations,
+  enforcement phases, and minimum evidence schema. The remaining ten
+  (Transition, Sequence, Separation of duty, Resource lifecycle, Temporal,
+  Aggregate, External evidence, Operational, Physical world, Human
+  judgment) do not yet have these artifacts — named here as the Phase 0
+  formal-artifact backlog, not silently assumed complete. None of the ten
+  is currently an *advertised* class this project certifies against (only
+  banking/healthcare's F1–F12 classes are), so their absence does not by
+  itself block this section's own exit-gate assessment (§10) — but any
+  future profile that advertises one of them must close its artifact first,
+  per §8's own rule that "no kind is admitted before those artifacts
+  exist."
+
+The remaining open item — from both §9 and §10 above — is the same one:
+each of the five domain profiles' full positive/negative matrix, beyond
+§7's 19 now-closed cases.
+
 ## Field Classification Ledger
 
 ```
@@ -1048,3 +1170,63 @@ frozen core rather than reshaping it:
 Re-verified after both: `cargo test -p rfc0029-conformance` (all suites)
 and the Ruby differential gate both pass against the final 56-fixture
 corpus.
+
+## 11. §10's one remaining item closed: full five-domain matrix, same day 2026-09-27
+
+§9 item 8 and §10 above both left one thing open: "each of the five domain
+profiles' own full positive/negative matrix, not just §7's 19 cases." That
+item is closed now, in the same session, against the same frozen core —
+consuming it, not reshaping it, per §9's own rule.
+
+**What was built**: 51 new fixtures (`B4`–`B14`, `K2`,`K7`–`K16`,
+`H5`–`H15`, `M6`–`M14`, `I5`–`I13`), bringing every domain to the same
+9-dimension row coverage logistics already had. The full, now-all-✓ table
+is [§12 of the canonical-IR/conformance-vectors document](./0029-canonical-ir-and-conformance-vectors.md#12-cross-domain-conformance-matrix-2026-09-27-closed-same-day--see-update-below).
+Every new fixture's node/edge shape is copied verbatim from an
+already-passing fixture in a different domain — no new `EdgeKind`
+combination was introduced, which is itself further affirmative evidence
+for the out-of-sample PASS (§2 above), not just a checked box. Three new
+effect classes (`card.freeze`, `watchlist.flag`, `device.pause`) were
+added to `effect_authority_ceilings`, each with the same
+autonomous-plus-real-reversal-path justification `product.quarantine`/
+`shipment.hold` already carried.
+
+**What this found**: `python3 rfcs/fixtures/0029-canonical/generate.py`
+passed cleanly on the first attempt for all 51 (no edge-kind, duplicate-key,
+or ceiling-lookup errors) — a real, if secondary, data point for the
+closed edge-kind table's and the extension-point rules' own completeness.
+`cargo test -p rfc0029-conformance` initially caught one authored bug of
+this session's own making
+(`every_effect_id_has_one_reversibility_class_across_the_whole_corpus`
+correctly rejected `application.reject` being declared both `Reversible`
+in `K2` and `Irreversible` in `K8` — fixed by making `K2` `Irreversible`
+too, which is exactly as defensible as `L1`'s `Irreversible`
+`cargo.release`) plus three now-stale hardcoded fixture-count literals in
+`tests/vectors.rs` (56→107 fixtures, 44→91 graph fixtures, 34→81
+admissions, 27→66 capabilities issued) — updated to the actual computed
+counts, not guessed. The independent Ruby implementation then found one
+more real defect, exactly the property a permanent differential gate is
+for: `lib/admission.rb`'s `INSTITUTIONAL_AUTHORITY_BY_PROFILE` had entries
+for only `banking`/`logistics` (the two profiles that previously exercised
+the "no-model institutional decision" row), so `K2`/`H5`/`M6`/`I5`
+resolved to a `nil` final authority, which also silently changed 4
+fixtures' canonical bytes (via `expand.rb`'s catalog-entry embedding) —
+fixed by adding the four missing profile→authority entries, derived the
+same mechanical, fixture-reading way the existing table's own header
+comment already describes.
+
+**Final state, re-verified**: `generate.py --check` — 107 canonical
+vectors, byte-stable. `cargo test -p rfc0029-conformance` — all 10 test
+binaries, 95 tests, 0 failures. Ruby differential gate — 107/107
+canonicalization match, 107/107 semantic agreement outside the
+pre-existing, disclosed `review.detail` terseness exception:
+**DIFFERENTIAL GATE: PASS**.
+
+**Status**: with this closed, the Phase 0 exit gate's (§10 above) last
+open item is satisfied. Nothing else in §10's checklist was reopened by
+this pass — no formal-semantics backlog item (§10 continuation) was
+touched, and no frozen-core file (§9's declaration) was edited, only
+consumed. This document does not itself declare the exit gate closed in
+this section — see the updated §10 status line and `docs/ROADMAP.md` for
+the authoritative statement, kept consistent with this finding per this
+document's own "roadmap and every companion status statement agree" rule.

@@ -1,6 +1,6 @@
 {
   "canonicalization": "RFC 8785 with v1 integers-only numeric profile",
-  "fixture_count": 56,
+  "fixture_count": 107,
   "fixtures": [
     {
       "bytes": 1614,
@@ -8,6 +8,41 @@
       "jcs_path": "jcs/B1.jcs.json",
       "json_path": "vectors/B1.json",
       "sha256": "sha256:a51a103265a9c9c0f947ee5f60ee6ea88cab651abe1fb6b6af351f1a9570bea3"
+    },
+    {
+      "bytes": 13160,
+      "fixture_id": "B10",
+      "jcs_path": "jcs/B10.jcs.json",
+      "json_path": "vectors/B10.json",
+      "sha256": "sha256:a9f2afc43517ee8e8d95a2de2654ed0b9fcbb25c2175efc28fce9b106d89a166"
+    },
+    {
+      "bytes": 13177,
+      "fixture_id": "B11",
+      "jcs_path": "jcs/B11.jcs.json",
+      "json_path": "vectors/B11.json",
+      "sha256": "sha256:3624c7aa0c31b2a800ee9ea602e397b67fb24e8c0afddc304387d4087eb9596e"
+    },
+    {
+      "bytes": 13186,
+      "fixture_id": "B12",
+      "jcs_path": "jcs/B12.jcs.json",
+      "json_path": "vectors/B12.json",
+      "sha256": "sha256:a415d5f667f7da5e8f7e27e5d2fa3bb217138a5d944ad6fea02540d3741a970a"
+    },
+    {
+      "bytes": 13176,
+      "fixture_id": "B13",
+      "jcs_path": "jcs/B13.jcs.json",
+      "json_path": "vectors/B13.json",
+      "sha256": "sha256:0137ac23b0aab6f3659e7041202cea0c07ff2a086edf79e70e5c773aedfe0bee"
+    },
+    {
+      "bytes": 13011,
+      "fixture_id": "B14",
+      "jcs_path": "jcs/B14.jcs.json",
+      "json_path": "vectors/B14.json",
+      "sha256": "sha256:b1f19d7bb882de57e3c044d550cc21fd9e154b3c72dd2b280a27484a7ad013a1"
     },
     {
       "bytes": 1932,
@@ -22,6 +57,48 @@
       "jcs_path": "jcs/B3.jcs.json",
       "json_path": "vectors/B3.json",
       "sha256": "sha256:313fe1235dca47ab662d3cc1f88ae67bac1e25c350417d9b81ef7a4693f8387a"
+    },
+    {
+      "bytes": 1443,
+      "fixture_id": "B4",
+      "jcs_path": "jcs/B4.jcs.json",
+      "json_path": "vectors/B4.json",
+      "sha256": "sha256:352f213c71f1fb28cb23b56d3a60b954ee11925f2d85c4fd5536d85f45225397"
+    },
+    {
+      "bytes": 1118,
+      "fixture_id": "B5",
+      "jcs_path": "jcs/B5.jcs.json",
+      "json_path": "vectors/B5.json",
+      "sha256": "sha256:6ac97f493402ec6174a47821d96d77779f8748f0be3aec0fd94d85f762be2f9c"
+    },
+    {
+      "bytes": 1393,
+      "fixture_id": "B6",
+      "jcs_path": "jcs/B6.jcs.json",
+      "json_path": "vectors/B6.json",
+      "sha256": "sha256:9225bef542bb3fc14e0365f1b1c72b76c32cc314ba577c6192b527c9cefe1d89"
+    },
+    {
+      "bytes": 5928,
+      "fixture_id": "B7",
+      "jcs_path": "jcs/B7.jcs.json",
+      "json_path": "vectors/B7.json",
+      "sha256": "sha256:f7217945cc12795d263f54cd71128ef870baced28964b0143dacc81853c9fcd4"
+    },
+    {
+      "bytes": 854,
+      "fixture_id": "B8",
+      "jcs_path": "jcs/B8.jcs.json",
+      "json_path": "vectors/B8.json",
+      "sha256": "sha256:f87dd797ec58702ed8f75034275883d72a52ed855d4b086926a2ac28929ce094"
+    },
+    {
+      "bytes": 13101,
+      "fixture_id": "B9",
+      "jcs_path": "jcs/B9.jcs.json",
+      "json_path": "vectors/B9.json",
+      "sha256": "sha256:d4b7a4b008f6063a0ec626c2c70cd8522bffa336a4e46120614335aac9efbe1f"
     },
     {
       "bytes": 1129,
@@ -87,6 +164,48 @@
       "sha256": "sha256:ea28e0284e206ad69dbd669aafdc4e06985328b581ba2fa73a005b18ea1e83ca"
     },
     {
+      "bytes": 13166,
+      "fixture_id": "H10",
+      "jcs_path": "jcs/H10.jcs.json",
+      "json_path": "vectors/H10.json",
+      "sha256": "sha256:65f419cf190f797bb3b5de220477fd81b6f73f8244df65c943703ea59e5bbd4d"
+    },
+    {
+      "bytes": 13169,
+      "fixture_id": "H11",
+      "jcs_path": "jcs/H11.jcs.json",
+      "json_path": "vectors/H11.json",
+      "sha256": "sha256:2983e3053432dc0ba447382aa83227da7d647360b4b9352df397fa9bb9f4d62d"
+    },
+    {
+      "bytes": 13186,
+      "fixture_id": "H12",
+      "jcs_path": "jcs/H12.jcs.json",
+      "json_path": "vectors/H12.json",
+      "sha256": "sha256:bbbe7217fb831aca6b1975d3c0ccb99f4d9e3376ccce38b32a56cc6165567062"
+    },
+    {
+      "bytes": 13195,
+      "fixture_id": "H13",
+      "jcs_path": "jcs/H13.jcs.json",
+      "json_path": "vectors/H13.json",
+      "sha256": "sha256:338a36633588f66dc53c0bdeb1f377d1eb1909cb57b31a80de75f2cc13a85b78"
+    },
+    {
+      "bytes": 13185,
+      "fixture_id": "H14",
+      "jcs_path": "jcs/H14.jcs.json",
+      "json_path": "vectors/H14.json",
+      "sha256": "sha256:3e05dd5fb5693239f18e3519b0554133c8a6be104a48482a8248069661e964dc"
+    },
+    {
+      "bytes": 13020,
+      "fixture_id": "H15",
+      "jcs_path": "jcs/H15.jcs.json",
+      "json_path": "vectors/H15.json",
+      "sha256": "sha256:a1b8dc6f579835ab3d9998cfa5cd18fa24eac298231c03502cfd26929783d6ec"
+    },
+    {
       "bytes": 1562,
       "fixture_id": "H1_ORDER_REUSE",
       "jcs_path": "jcs/H1_ORDER_REUSE.jcs.json",
@@ -115,11 +234,74 @@
       "sha256": "sha256:112342fa024e8aff456cc98bcde5d218508b09accc33afd549c96b5d774119cb"
     },
     {
+      "bytes": 1620,
+      "fixture_id": "H5",
+      "jcs_path": "jcs/H5.jcs.json",
+      "json_path": "vectors/H5.json",
+      "sha256": "sha256:1c53bf5a6be78f851b85b244af1bbbfb818eecab8980eda5132862b34f0ed0d3"
+    },
+    {
+      "bytes": 1448,
+      "fixture_id": "H6",
+      "jcs_path": "jcs/H6.jcs.json",
+      "json_path": "vectors/H6.json",
+      "sha256": "sha256:a22c039922e2778bf2dae044b5b3c9d7f61f7dbd551cda58adf05029d804ee41"
+    },
+    {
+      "bytes": 1421,
+      "fixture_id": "H7",
+      "jcs_path": "jcs/H7.jcs.json",
+      "json_path": "vectors/H7.json",
+      "sha256": "sha256:06979a1918c050e39cbbaeb7ebdfe1e4721923ecb7f6d9469b72129dc78d909d"
+    },
+    {
+      "bytes": 5930,
+      "fixture_id": "H8",
+      "jcs_path": "jcs/H8.jcs.json",
+      "json_path": "vectors/H8.json",
+      "sha256": "sha256:078c1e4071917beed503ba3316380fa5adfa8ec3279c279ec1c8ec5471cf6f97"
+    },
+    {
+      "bytes": 844,
+      "fixture_id": "H9",
+      "jcs_path": "jcs/H9.jcs.json",
+      "json_path": "vectors/H9.json",
+      "sha256": "sha256:1b0367190ca6d99f47a77d7cd9d81a9960b273818f240828f6cd0fde62ce2b80"
+    },
+    {
       "bytes": 12702,
       "fixture_id": "I1",
       "jcs_path": "jcs/I1.jcs.json",
       "json_path": "vectors/I1.json",
       "sha256": "sha256:145bd759d778ed2bc12d04acc7b01ce43d84f31bc72274155aa964224b07092d"
+    },
+    {
+      "bytes": 13193,
+      "fixture_id": "I10",
+      "jcs_path": "jcs/I10.jcs.json",
+      "json_path": "vectors/I10.json",
+      "sha256": "sha256:75fc95216e5f023e2eac732eac54740b13be001c0f9722c729ee6ce87d35ad8c"
+    },
+    {
+      "bytes": 13202,
+      "fixture_id": "I11",
+      "jcs_path": "jcs/I11.jcs.json",
+      "json_path": "vectors/I11.json",
+      "sha256": "sha256:f0665300d7ef433b076b8285c2930f2c452f91194bb5c22d6219a7a6e30cba75"
+    },
+    {
+      "bytes": 13192,
+      "fixture_id": "I12",
+      "jcs_path": "jcs/I12.jcs.json",
+      "json_path": "vectors/I12.json",
+      "sha256": "sha256:29c87f50ca518de86c6c087799377a44d749437435a01989021e650d4b011352"
+    },
+    {
+      "bytes": 13027,
+      "fixture_id": "I13",
+      "jcs_path": "jcs/I13.jcs.json",
+      "json_path": "vectors/I13.json",
+      "sha256": "sha256:48a1c9b112ffe1d8c76e29770d1f048c58bb6ec470c892362460e382b391732e"
     },
     {
       "bytes": 12104,
@@ -150,6 +332,41 @@
       "sha256": "sha256:698eb9e751ca42e7feeb5826e63bc932f364d98deb9a208fc8db88ceeb6bfa96"
     },
     {
+      "bytes": 1655,
+      "fixture_id": "I5",
+      "jcs_path": "jcs/I5.jcs.json",
+      "json_path": "vectors/I5.json",
+      "sha256": "sha256:7e445f13f2ff2c4979888359c29e9808206589d2bce471a2ebdfd279d63b7960"
+    },
+    {
+      "bytes": 1404,
+      "fixture_id": "I6",
+      "jcs_path": "jcs/I6.jcs.json",
+      "json_path": "vectors/I6.json",
+      "sha256": "sha256:20c84c43bdc2b10c4d3f7c58536198c6b0840d05a13e9ec557fd23313ce6b483"
+    },
+    {
+      "bytes": 5932,
+      "fixture_id": "I7",
+      "jcs_path": "jcs/I7.jcs.json",
+      "json_path": "vectors/I7.json",
+      "sha256": "sha256:f324004a99d15c5e62dad352bb1cea9b79cb04555754a7916131ce87bce9fe4a"
+    },
+    {
+      "bytes": 13117,
+      "fixture_id": "I8",
+      "jcs_path": "jcs/I8.jcs.json",
+      "json_path": "vectors/I8.json",
+      "sha256": "sha256:438145719193a26bca711ea380a490dd6db951bf45a8ec11638abc848cefdb8b"
+    },
+    {
+      "bytes": 13120,
+      "fixture_id": "I9",
+      "jcs_path": "jcs/I9.jcs.json",
+      "json_path": "vectors/I9.json",
+      "sha256": "sha256:e46fcf60417daffcad679ec0dc3540c5729747c700f8655fb53d8a5a300b746f"
+    },
+    {
       "bytes": 856,
       "fixture_id": "INV_EXTERNAL_UNKNOWN",
       "jcs_path": "jcs/INV_EXTERNAL_UNKNOWN.jcs.json",
@@ -171,11 +388,67 @@
       "sha256": "sha256:8fbcbcf742695f208dcbbf44b37f3f5e064135b596142c33d3318700f978f9f6"
     },
     {
+      "bytes": 845,
+      "fixture_id": "K10",
+      "jcs_path": "jcs/K10.jcs.json",
+      "json_path": "vectors/K10.json",
+      "sha256": "sha256:80426996296cc300f6ce026ade09291c2631c3f0474f64c736c8b0f8453a80b7"
+    },
+    {
+      "bytes": 13194,
+      "fixture_id": "K11",
+      "jcs_path": "jcs/K11.jcs.json",
+      "json_path": "vectors/K11.json",
+      "sha256": "sha256:82cdadd08fb1ccbb886caac24f9909a79398104c054d53518ba8b8cd1e73dd32"
+    },
+    {
+      "bytes": 13197,
+      "fixture_id": "K12",
+      "jcs_path": "jcs/K12.jcs.json",
+      "json_path": "vectors/K12.json",
+      "sha256": "sha256:c796e93a8c68b1df1a88497e520087f0f22981dff877efd72316ca78cbabf468"
+    },
+    {
+      "bytes": 13214,
+      "fixture_id": "K13",
+      "jcs_path": "jcs/K13.jcs.json",
+      "json_path": "vectors/K13.json",
+      "sha256": "sha256:0425621a37481d88458b4f924d2d579749ea3fca71d6808da356c51b2ac1afb3"
+    },
+    {
+      "bytes": 13223,
+      "fixture_id": "K14",
+      "jcs_path": "jcs/K14.jcs.json",
+      "json_path": "vectors/K14.json",
+      "sha256": "sha256:abaf46fb94c0357ac8f068176610200ccbe90fa45d542d204a46375fa9e7be06"
+    },
+    {
+      "bytes": 13213,
+      "fixture_id": "K15",
+      "jcs_path": "jcs/K15.jcs.json",
+      "json_path": "vectors/K15.json",
+      "sha256": "sha256:117e0507301da5b28677028454635e926237982c649f446e1ffbcc8b13209e22"
+    },
+    {
+      "bytes": 13048,
+      "fixture_id": "K16",
+      "jcs_path": "jcs/K16.jcs.json",
+      "json_path": "vectors/K16.json",
+      "sha256": "sha256:a746f0105de6db0101d00b50f53bbd981ce27c41ca67475cbfd1fccd7a906b04"
+    },
+    {
       "bytes": 1342,
       "fixture_id": "K1_STRUCTURAL_ONLY",
       "jcs_path": "jcs/K1_STRUCTURAL_ONLY.jcs.json",
       "json_path": "vectors/K1_STRUCTURAL_ONLY.json",
       "sha256": "sha256:e731c0848625bc2853dd524f7181661a45cf3028258780905923488718fc9dac"
+    },
+    {
+      "bytes": 1678,
+      "fixture_id": "K2",
+      "jcs_path": "jcs/K2.jcs.json",
+      "json_path": "vectors/K2.json",
+      "sha256": "sha256:0864f93698abdf8bb90e115cf164e1db4a2825bb8b496b3da43e989966f3b384"
     },
     {
       "bytes": 5920,
@@ -197,6 +470,27 @@
       "jcs_path": "jcs/K5.jcs.json",
       "json_path": "vectors/K5.json",
       "sha256": "sha256:5b7d0e3ad5188c94333fdf59bf4179048e59b711e9acf57c7300708419c287cd"
+    },
+    {
+      "bytes": 1445,
+      "fixture_id": "K7",
+      "jcs_path": "jcs/K7.jcs.json",
+      "json_path": "vectors/K7.json",
+      "sha256": "sha256:6c3e037d3121bd9d4606859bb401e4f4fcba7150818a052f38267b4d2b1113f8"
+    },
+    {
+      "bytes": 1110,
+      "fixture_id": "K8",
+      "jcs_path": "jcs/K8.jcs.json",
+      "json_path": "vectors/K8.json",
+      "sha256": "sha256:1fd2e0df35383420bd40970185f09d880f2e13b0a71f6536505badfdb3218fbb"
+    },
+    {
+      "bytes": 1439,
+      "fixture_id": "K9",
+      "jcs_path": "jcs/K9.jcs.json",
+      "json_path": "vectors/K9.json",
+      "sha256": "sha256:2e812b9451ce6b61fe666e605d708225e76c9d1b41441db72a89c6cd78fdc90d"
     },
     {
       "bytes": 1664,
@@ -304,6 +598,41 @@
       "sha256": "sha256:60e37ebc4ecbf87866e7ccc59cfd94ff9b17fc253f471fa30f3452598021f52e"
     },
     {
+      "bytes": 13216,
+      "fixture_id": "M10",
+      "jcs_path": "jcs/M10.jcs.json",
+      "json_path": "vectors/M10.json",
+      "sha256": "sha256:6023820de577eca9dcad8e07e7bdb93b2a756a115e23f68ba961edb334a87e44"
+    },
+    {
+      "bytes": 13233,
+      "fixture_id": "M11",
+      "jcs_path": "jcs/M11.jcs.json",
+      "json_path": "vectors/M11.json",
+      "sha256": "sha256:5e1e587673df2158db777ebf4e4189d52688f73936f1edb061391c004a0eebe2"
+    },
+    {
+      "bytes": 13242,
+      "fixture_id": "M12",
+      "jcs_path": "jcs/M12.jcs.json",
+      "json_path": "vectors/M12.json",
+      "sha256": "sha256:3d8dccac44cf6bd902335e4c5d307d85efa2ae0a782d7f2c3646bd01851b38d2"
+    },
+    {
+      "bytes": 13232,
+      "fixture_id": "M13",
+      "jcs_path": "jcs/M13.jcs.json",
+      "json_path": "vectors/M13.json",
+      "sha256": "sha256:f786cfc1f4bdd4a0ff235f4ca445597d4be0c5be33717784e6a4255fc2c2d273"
+    },
+    {
+      "bytes": 13067,
+      "fixture_id": "M14",
+      "jcs_path": "jcs/M14.jcs.json",
+      "json_path": "vectors/M14.json",
+      "sha256": "sha256:2d3c430cf31d7cf855a5391fe004bcb244572b3ed69a402aa1167a42e488e03f"
+    },
+    {
       "bytes": 1466,
       "fixture_id": "M2",
       "jcs_path": "jcs/M2.jcs.json",
@@ -330,6 +659,34 @@
       "jcs_path": "jcs/M5.jcs.json",
       "json_path": "vectors/M5.json",
       "sha256": "sha256:158345c72985813df269078f483fd1957ce326cb2874ed08c36ab487b52bd91f"
+    },
+    {
+      "bytes": 1695,
+      "fixture_id": "M6",
+      "jcs_path": "jcs/M6.jcs.json",
+      "json_path": "vectors/M6.json",
+      "sha256": "sha256:b5771db8ee660e2eb089415d3422b931afb1088ac725b041ee17d0f35e97b3f9"
+    },
+    {
+      "bytes": 5930,
+      "fixture_id": "M7",
+      "jcs_path": "jcs/M7.jcs.json",
+      "json_path": "vectors/M7.json",
+      "sha256": "sha256:bcaff6323bb8e0f82bff7d7e76eb26855a07ea499d936b21a4b4eaffcaf078a2"
+    },
+    {
+      "bytes": 857,
+      "fixture_id": "M8",
+      "jcs_path": "jcs/M8.jcs.json",
+      "json_path": "vectors/M8.json",
+      "sha256": "sha256:9a738f052acec85b05690866f426823ed8a9d406083a75d715f13ad5d6b5680c"
+    },
+    {
+      "bytes": 13157,
+      "fixture_id": "M9",
+      "jcs_path": "jcs/M9.jcs.json",
+      "json_path": "vectors/M9.json",
+      "sha256": "sha256:0a59e2f54937964c6273ebdb3e3804fc181f4c2da16ed258f0b7301fcddf4833"
     },
     {
       "bytes": 2350,

@@ -282,7 +282,132 @@ The first standard kinds are:
 
 Each policy kind has a formal operational semantics, composition algebra,
 proof obligations, allowed enforcement phases, and minimum evidence schema.
-No kind is admitted before those artifacts exist.
+No kind is admitted before those artifacts exist. §8.1–§8.4 give these for
+the first four kinds, satisfying the Phase 0 exit gate's own requirement
+(readiness matrix §10) that they be normative before that gate closes; the
+remaining ten kinds' artifacts remain part of the RFC 0029/0029.a
+formal-artifact backlog (readiness matrix §12).
+
+### 8.1 Authorization
+
+**Operational semantics.** A decision `d` of kind Authorization over
+(subject `S`, resource `R`, action `A`) is satisfied iff an admitted rule
+binds `(S, R, A)` to `permit`, evaluated against `S`'s and `R`'s current
+authoritative facts (role/grant, canonical resource identity per §36.1),
+and no admitted rule of equal or higher declared precedence binds
+`(S, R, A)` to `deny`. Absent any binding rule, the result is `deny`
+(fail-closed); a policy may declare a default `permit` only by explicitly
+naming the authority accepting that risk (§20).
+
+**Composition algebra.** Rules over the same `(S, R, A)` resolve by
+declared precedence; absent one, `deny` overrides `permit` (§19's default).
+Rules over disjoint `(S, R, A)` spaces never conflict.
+
+**Proof obligations.** `Guarded`: the permit decision is evaluated and
+returns `permit`, using facts no staler than the rule's declared freshness
+bound, before the gateway executes `A` on `R`, and is bound to the *exact*
+resource and effect identity the gateway executes — never a broader or
+narrower one. `Atomic`: additionally, no invalidating event (grant
+revocation, a change to `R`'s protected attributes) may occur between the
+permit and the effect's commit within the same atomic boundary.
+
+**Enforcement phases.** `Guarded` and `Atomic` only. `Advisory`/`None`
+foreclose the guarantee this kind exists to make — a permission that does
+not gate the effect is not an authorization. `DurableWorkflow` applies only
+when the authorized action is itself entry into an admitted durable
+transition (§8's Transition kind), not to the atomic grant/deny act itself.
+
+**Minimum evidence schema.** The authority-granting role/grant record, the
+resolved rule id, the bound resource/effect identity, the evaluation
+timestamp, and either `permitted` or the specific denying rule.
+
+### 8.2 Data policy
+
+**Operational semantics.** A decision of kind Data policy is satisfied iff
+every field of a returned resource projection subject to a declared
+transformation (redaction, de-identification, aggregation) has that exact
+transformation applied before the projection crosses the enforcement
+boundary, and no untransformed copy of a protected field is observable on
+the delivered path.
+
+**Composition algebra.** Multiple data policies over overlapping fields
+compose by the strictest declared transformation per field. A declared
+composition order changes the result (redact-then-aggregate is not
+aggregate-then-redact); absent a declared order, the single strictest
+per-field transformation applies (§19's conservative default).
+
+**Proof obligations.** `Guarded`: the transformation is applied
+server-side, inside the enforcement boundary, before the projection is
+returned; the untransformed values never cross that boundary in the
+response. `Atomic` is not meaningful here — a pure read-side projection
+gates no effect to make atomic with a check.
+
+**Enforcement phases.** `Guarded` (default) or `Advisory` (an audit-only
+mode that logs what would have been redacted without enforcing it, and
+must be named as non-enforcing). `Atomic`/`DurableWorkflow` are foreclosed.
+
+**Minimum evidence schema.** Which transformation function and version was
+applied, to which fields, and a commitment proving the returned projection
+is consistent with applying that function to the authoritative source —
+not merely an assertion that it was applied.
+
+### 8.3 Numeric invariant
+
+**Operational semantics.** A decision of kind Numeric invariant over
+quantity `Q` is satisfied iff, immediately after the effect commits, `Q`'s
+declared invariant predicate (e.g. `Q >= 0`) holds against the
+authoritative post-commit value of `Q`, computed within the same atomic
+boundary as the effect — never from a stale or optimistically-read
+pre-commit estimate. This is the same property `funds_reserve`'s
+`atomic-commit-integrity` check (§5 below) already computes for one
+concrete instance.
+
+**Composition algebra.** Multiple invariants over the *same* quantity
+compose conjunctively — all must hold, and none overrides another; if two
+are jointly unsatisfiable for a given effect, admission rejects
+(`Ambiguous`/`UnsupportedSemantics`, §12), it does not silently relax
+either. Invariants over different quantities are independent.
+
+**Proof obligations.** `Atomic` (default, and the only phase for an
+invariant whose violation is itself the harm being prevented): the read of
+`Q`, the invariant check, and the mutation share one atomic boundary
+excluding concurrent interleaving. `Guarded` alone (check, then a
+non-atomic later commit) is inadmissible unless the policy explicitly
+declares and names a bounded overshoot exposure (§11).
+
+**Enforcement phases.** `Atomic` (default); `Guarded` only with a named
+overshoot exposure; `Advisory`/`None`/`DurableWorkflow` foreclosed — an
+invariant not enforced atomically is not invariant.
+
+**Minimum evidence schema.** Pre-value, post-value, the invariant predicate
+evaluated, and the atomic-commit receipt.
+
+### 8.4 State invariant
+
+**Operational semantics.** A decision of kind State invariant over an
+entity's state field is satisfied iff the entity's current authoritative
+state, read within the same atomic boundary as the gated effect, is a
+member of the declared allowed-source-states set for the attempted effect.
+
+**Composition algebra.** Multiple state invariants over the same entity
+compose conjunctively — the effect is allowed only if the current state is
+in *every* declared invariant's allowed set; they never widen each other.
+
+**Proof obligations.** `Guarded`: no state-changing transition occurs
+between the state read and the effect commit. `Atomic`: excluded by the
+same transaction boundary instead of a non-atomic gap. `DurableWorkflow`
+applies when the state is itself defined by an admitted state machine
+(§8's Transition kind) rather than a bare field — State invariant gates an
+*effect* conditioned on state; Transition governs the state *change*
+itself, a related but distinct concern.
+
+**Enforcement phases.** `Guarded`, `Atomic`, or `DurableWorkflow` (per the
+state-machine distinction above). `Advisory` only as an explicitly-named
+non-enforcing logging mode. `None` is foreclosed.
+
+**Minimum evidence schema.** The observed state at check time, the declared
+allowed-source-states set, and — for `Atomic` — the same atomic-commit
+receipt structure as Numeric invariant.
 
 ## 9. Platform tiers
 

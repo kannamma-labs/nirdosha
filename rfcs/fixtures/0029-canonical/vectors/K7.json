@@ -1,0 +1,97 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": null,
+      "status": "accepted"
+    },
+    "capability": {
+      "effect_class": "watchlist.flag",
+      "status": "issued"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "kyc-autonomous-flag",
+    "invalidation": "not_evaluated",
+    "model_authorized": true,
+    "model_level": "ExecuteReversible",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "K7",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "Authorize",
+        "source": "node:K7:d",
+        "target": "node:K7:c"
+      },
+      {
+        "kind": "Issue",
+        "source": "node:K7:c",
+        "target": "node:K7:x"
+      },
+      {
+        "kind": "ModelApproval",
+        "source": "node:K7:m",
+        "target": "node:K7:d"
+      },
+      {
+        "kind": "ModelTrigger",
+        "source": "node:K7:d",
+        "target": "node:K7:x"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "effect_class": "watchlist.flag"
+        },
+        "id": "node:K7:c",
+        "kind": "Capability"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:K7:d"
+        },
+        "id": "node:K7:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "effect_id": "watchlist.flag",
+          "reversibility_class": "Reversible"
+        },
+        "id": "node:K7:x",
+        "kind": "Effect"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:K7:v1",
+          "receipt_id": "receipt:K7:m:v1"
+        },
+        "id": "node:K7:m",
+        "kind": "ModelInvocation"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "watchlist.flag",
+        "maximum_model_level": "ExecuteReversible"
+      }
+    }
+  },
+  "profile_id": "profile:rfc0029:kyc:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

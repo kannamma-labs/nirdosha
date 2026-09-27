@@ -144,7 +144,60 @@ across the whole project, in one place.
   `funds.reserve` pilot's scope and all five domain profiles' executable
   conformance matrices — those remain `Candidate baseline`, to be built
   *against* this now-frozen core, not shape it. See the convergence plan's
-  §6, §8 and §9 for the complete accounting.
+  §6, §8 and §9 for the complete accounting. **(Superseded same day — both
+  items below are now closed; this sentence is kept as the historical
+  record of what §9's freeze itself declared, not as the current state.)**
+  **Update (2026-09-27): Phase 0 exit-gate work.** Formal operational
+  semantics, composition algebra, proof obligations, enforcement phases,
+  and evidence schema now exist for the first four of RFC 0029 §8's
+  fourteen policy kinds — Authorization, Data policy, Numeric invariant,
+  State invariant (RFC 0029 §8.1–§8.4). The remaining ten (Transition,
+  Sequence, Separation of duty, Resource lifecycle, Temporal, Aggregate,
+  External evidence, Operational, Physical world, Human judgment) are an
+  enumerated backlog (readiness matrix §11), not yet built, and not
+  currently required by any class this project advertises. The readiness
+  matrix §7 banking/healthcare matrices (19 rows total) are now fully
+  executable — `funds_reserve` gained daily-limit consistency, external-
+  submission timeout/reconciliation, evidence-plane-outage, and authority-
+  compromise discovery; a new `clinical_access` pilot covers all ten
+  healthcare rows. `AdmissionReportV1` now also reports on distributed
+  finality (`INV_PRECOMMIT`/`INV_EXTERNAL_UNKNOWN`/`L7`) and monitor health
+  (`R8_MONITOR_MISSING`) instead of a blanket `Unsupported`.
+  **Update (2026-09-27, same day): the one remaining exit-gate item —
+  each of the five domain profiles' own full positive/negative matrix — is
+  now closed too.** 51 new fixtures bring banking, KYC, healthcare,
+  manufacturing and insurance to the same nine-row coverage logistics
+  already had (no-model decision, autonomous reversible effect,
+  human-reviewed assertion, exceeds-ceiling rejection, mandatory-deny,
+  self-certification rejection, invalidation/reconcile, and all six
+  fact-provenance-negative cases) — see
+  [canonical-IR §12](../rfcs/0029-canonical-ir-and-conformance-vectors.md#12-cross-domain-conformance-matrix-2026-09-27-closed-same-day--see-update-below)
+  for the full table. This found one more real defect in the independent
+  Ruby implementation (`INSTITUTIONAL_AUTHORITY_BY_PROFILE` only covered
+  banking/logistics), fixed the same mechanical way prior findings were.
+  Re-verified: 107 canonical fixtures, `cargo test -p rfc0029-conformance`
+  all green (95 tests), Ruby differential gate PASS (107/107
+  canonicalization, semantics agree outside the pre-existing disclosed
+  `review.detail` exception). **Phase 0's exit gate is now fully closed** —
+  see [readiness matrix §10](../rfcs/0029-phase0-readiness-and-domain-matrix.md#10-phase-0-exit-gate)
+  and [§11](../rfcs/0029-phase0-readiness-and-domain-matrix.md#11-10s-one-remaining-item-closed-full-five-domain-matrix-same-day-2026-09-27).
+  Phase 1 (bundle/admission implementation) may now be described as
+  building on a frozen Phase 0 core. This does not promote anything beyond
+  Phase 0: the formal-semantics backlog (10 of 14 policy kinds, readiness
+  matrix §11 of the earlier section) remains open and unaffected, and
+  nothing here claims `Validated core` or `Frozen version` status for
+  anything beyond what §9's freeze already declared.
+  **Update (2026-09-27, same day): grammar/type/decidability re-audited
+  per an explicit checklist, one real gap found and closed.** `schema.json`
+  (the candidate IR's formal JSON Schema) existed but was never actually
+  validated against — a real, if narrow, enforcement gap, since the schema
+  and the Rust parser's own types could have silently drifted apart with
+  nothing to notice. All 107 generated vectors were checked against it
+  (0 violations found), and `generate.py` now runs this validation on
+  every invocation, wired into the CI workflow. The first-four
+  policy-kind semantics (§8.1–§8.4) were independently re-read end to end
+  and confirmed to carry all five required properties each. Full account:
+  [readiness matrix §10 status](../rfcs/0029-phase0-readiness-and-domain-matrix.md#status-2026-09-27).
 
 **Why the other planning/spec docs (`docs/Nirdosha_Unified_Plan.md`,
 `docs/goal.md`, `docs/TRANSACT.md`, `docs/SANDBOXING.md`, `docs/PROTOLANG_PORT.md`,

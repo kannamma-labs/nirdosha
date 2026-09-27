@@ -1,0 +1,68 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": "InfluenceLevelExceedsProfile",
+      "status": "rejected"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_issued"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "kyc-autonomous-exceeds",
+    "invalidation": "not_evaluated",
+    "model_authorized": true,
+    "model_level": "ExecuteIrreversible",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "K8",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "ModelTrigger",
+        "source": "node:K8:m",
+        "target": "node:K8:x"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "effect_id": "application.reject",
+          "reversibility_class": "Irreversible"
+        },
+        "id": "node:K8:x",
+        "kind": "Effect"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:K8:v1",
+          "receipt_id": "receipt:K8:m:v1"
+        },
+        "id": "node:K8:m",
+        "kind": "ModelInvocation"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "application.reject",
+        "maximum_model_level": "Recommend"
+      }
+    }
+  },
+  "profile_id": "profile:rfc0029:kyc:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

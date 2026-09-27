@@ -34,8 +34,8 @@ fn all_vectors_round_trip_to_independent_jcs_and_hashes() {
     let manifest: Manifest =
         serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest.schema_version, SCHEMA_VERSION);
-    assert_eq!(manifest.fixture_count, 56);
-    assert_eq!(manifest.fixtures.len(), 56);
+    assert_eq!(manifest.fixture_count, 107);
+    assert_eq!(manifest.fixtures.len(), 107);
     for entry in manifest.fixtures {
         let readable = fs::read(root.join(&entry.json_path)).unwrap();
         let fixture = parse(&readable).unwrap_or_else(|e| panic!("{}: {e}", entry.fixture_id));
@@ -88,7 +88,7 @@ fn influence_is_computed_from_inputs_for_every_graph_fixture() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 44);
+    assert_eq!(checked, 91);
 }
 
 #[test]
@@ -300,8 +300,8 @@ fn admission_and_capability_results_are_computed_from_inputs() {
             capabilities += 1;
         }
     }
-    assert_eq!(admissions, 34);
-    assert_eq!(capabilities, 27);
+    assert_eq!(admissions, 81);
+    assert_eq!(capabilities, 66);
 }
 
 #[test]

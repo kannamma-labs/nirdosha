@@ -542,49 +542,55 @@ declared on this basis in the readiness matrix §9, core-only — the domain
 matrices below (§12) and `AdmissionReportV1`'s generalization remain
 explicitly outside it.
 
-## 12. Cross-domain conformance matrix (2026-09-27)
+## 12. Cross-domain conformance matrix (2026-09-27, closed same day — see update below)
 
 Per-domain coverage against the dimensions the logistics out-of-sample
-tabletop (§8) exercises, as of this date — built honestly, not claimed
-complete. A ✓ means a fixture in that cell exists and passes; a — means it
-does not exist yet. This table is itself evidence for or against a claim,
-not decoration: reading it should tell you exactly what has and has not
-been checked for each domain, without needing to open five separate
-sections above to find out.
+tabletop (§8) exercises. A ✓ means a fixture in that cell exists and
+passes. This table is itself evidence for or against a claim, not
+decoration: reading it should tell you exactly what has and has not been
+checked for each domain, without needing to open five separate sections
+above to find out.
 
 | Dimension | Banking | KYC | Healthcare | Manufacturing | Insurance | Logistics |
 | --- | --- | --- | --- | --- | --- | --- |
-| No-model, institutional decision | `B1` ✓ | — | — | — | — | `L1` ✓ |
-| Autonomous model-triggered reversible effect | — | — | — | `M2` ✓ | `I3` ✓ (Approve, bounded) | `L2` ✓ |
+| No-model, institutional decision | `B1` ✓ | `K2` ✓ | `H5` ✓ | `M6` ✓ | `I5` ✓ | `L1` ✓ |
+| Autonomous model-triggered reversible effect | `B4` ✓ | `K7` ✓ | `H6` ✓ | `M2` ✓ | `I3` ✓ (Approve, bounded) | `L2` ✓ |
 | Human-reviewed, independent assertion | `B3` ✓ | `K4` ✓ | `H2` ✓ | `M1` ✓ | `I1` ✓ | `L3` ✓ |
-| Autonomous effect exceeds profile ceiling (rejected) | — | — | `H1_ORDER_REUSE` ✓ | `M3` ✓ | `I3_PAYMENT_REUSE` ✓ | `L4` ✓ |
-| Mandatory-fact deny overrides human approval | — | — | — | `M4` ✓ | — | `L5` ✓ |
-| Self-certification rejected | — | `K3` ✓ | — | — | — | `L6` ✓ |
-| Dependency invalidation / reconcile | — | — | — | — | `INV_PRECOMMIT`/`INV_EXTERNAL_UNKNOWN` ✓ | `L7` ✓ |
+| Autonomous effect exceeds profile ceiling (rejected) | `B5` ✓ | `K8` ✓ | `H1_ORDER_REUSE` ✓ | `M3` ✓ | `I3_PAYMENT_REUSE` ✓ | `L4` ✓ |
+| Mandatory-fact deny overrides human approval | `B6` ✓ | `K9` ✓ | `H7` ✓ | `M4` ✓ | `I6` ✓ | `L5` ✓ |
+| Self-certification rejected | `B7` ✓ | `K3` ✓ | `H8` ✓ | `M7` ✓ | `I7` ✓ | `L6` ✓ |
+| Dependency invalidation / reconcile | `B8` ✓ | `K10` ✓ | `H9` ✓ | `M8` ✓ | `INV_PRECOMMIT`/`INV_EXTERNAL_UNKNOWN` ✓ | `L7` ✓ |
 | Fact-provenance lineage (positive case) | `B3` ✓ | `K5` ✓ | `H4` ✓ | `M5` ✓ | `I4` ✓ | `L8` ✓ |
-| Fact-provenance lineage (stale/revoked/wrong-model/wrong-deployment/unauthorized/missing) | — | — | — | — | — | `L9`–`L14` ✓ (all six) |
+| Fact-provenance lineage (stale/revoked/wrong-model/wrong-deployment/unauthorized/missing) | `B9`–`B14` ✓ (all six) | `K11`–`K16` ✓ (all six) | `H10`–`H15` ✓ (all six) | `M9`–`M14` ✓ (all six) | `I8`–`I13` ✓ (all six) | `L9`–`L14` ✓ (all six) |
 
-**What this closes**: every domain now has at least a human-reviewed case
-and a fact-provenance-lineage positive case, proving the frozen core's
-evaluators (`compute_influence`, `evaluate_review`, `evaluate_fact_provenance`,
-`evaluate_admission`) generalize across all five domain profiles this
-project tracks, not just logistics — and building these five fixtures
-found two more real, genuine defects (documented in the independent-
-implementation report §9–§10): a second `L8`–`L13` edge-kind violation, and
-a missing `"banking"` entry in the Ruby implementation's derived
-reviewer-authority table, which also surfaced a real cross-domain modeling
-fact (banking has no human-reviewer authority distinct from its
-institutional one).
+**Update, same day**: every cell above is now ✓. The 51 fixtures that closed
+the remaining dashes (`K2`, `B4`/`K7`/`H6`, `B5`/`K8`, `B6`/`K9`/`H7`/`I6`,
+`B7`/`H8`/`M7`/`I7`, `B8`/`K10`/`H9`/`M8`, `H5`/`M6`/`I5`, and thirty
+`{B,K,H,M,I}9`–`{B,K,H,M,I}14`-range fact-provenance-negative fixtures)
+each reuse the exact node/edge shape of an already-passing fixture from a
+different domain (`B1`/`L1`, `M2`/`L2`, `M3`/`L4`, `M4`/`L5`, `K3`/`L6`,
+`L7`, `L9`–`L14`) with only ids, `profile`, `effect_class` and `final_authority`
+swapped — no new `EdgeKind` combination was introduced, and
+`generate.py --check` passed on the first attempt for all 51. Three new
+effect classes (`card.freeze`, `watchlist.flag`, `device.pause`) were added
+to `effect_authority_ceilings`, each justified the same way
+`product.quarantine`/`shipment.hold` already were: an autonomous,
+model-triggerable effect with a real reversal path.
 
-**What this does not close**: the dashes above are real gaps, not omissions
-by accident. Banking has no autonomous-reversible-effect, exceeds-ceiling,
-mandatory-deny, self-certification, or invalidation fixture. KYC has no
-no-model, autonomous-reversible, exceeds-ceiling, mandatory-deny, or
-invalidation fixture. Healthcare and manufacturing are each missing three
-to four dimensions; insurance is missing two. Only logistics has full
-row coverage, because it was the domain the out-of-sample review actually
-adversarially tested end to end — the other five were extended exactly as
-far as proving the frozen core generalizes required, per this step's own
-instruction to have the matrices consume the frozen core rather than
-reshape it, not as far as logistics' own adversarial depth. Closing every
-remaining cell is future work, not claimed here.
+This *did* surface one more real, genuine defect, exactly as the
+differential gate is supposed to: the independent Ruby implementation's
+`INSTITUTIONAL_AUTHORITY_BY_PROFILE` table (`lib/admission.rb`) only had
+entries for `banking`/`logistics` — the two profiles that exercised the
+"no-model institutional decision" row before this pass. Adding `K2`/`H5`/
+`M6`/`I5` (the same row for kyc/healthcare/manufacturing/insurance)
+immediately produced 4 canonicalization mismatches and 4
+`final_authority` disagreements, because Ruby's `expand.rb` embeds the
+authority catalog entry keyed off its own computed `final_authority` —
+when that came back `nil`, the emitted vector omitted the catalog entry
+entirely, changing its canonical bytes. Fixed by adding the four missing
+profile→authority entries, derived the same mechanical way as the existing
+table's own derivation comment describes (read off each new fixture's own
+`expected.final_authority`, not designed independently). Re-run after the
+fix: **107/107 canonicalization match, 107/107 semantic agreement outside
+the pre-existing, disclosed `review.detail` terseness exception** — the
+differential gate reports PASS.

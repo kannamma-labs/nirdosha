@@ -45,9 +45,18 @@ module Admission
   # Profile -> the institutional authority behind a Decision/Capability
   # reached with no ModelInvocation and no AuthorityAssertion at all (a pure
   # fact/rule-driven decision), per B1 (banking) and L1 (logistics).
+  # Added 2026-09-27 (kyc/healthcare/manufacturing/insurance) when the
+  # five-domain positive/negative matrix first exercised this pattern outside
+  # banking/logistics -- same mechanical derivation as REVIEWER_AUTHORITY_BY_PROFILE
+  # above: the only authority_catalog entry consistent with each new
+  # no-model fixture's (K2/H5/M6/I5) own profile.
   INSTITUTIONAL_AUTHORITY_BY_PROFILE = {
     "banking" => "bank",
     "logistics" => "customs-authority",
+    "kyc" => "compliance-reviewer",
+    "healthcare" => "clinician",
+    "manufacturing" => "maintenance-supervisor",
+    "insurance" => "adjuster",
   }.freeze
 
   Result = Struct.new(:provenance, :model_level, :model_authorized, :final_authority,

@@ -5,5 +5,6 @@
 //! gateway and is not wired to any store, network, or live effect path.
 
 pub mod assertion_lifecycle;
+pub mod clinical_access;
 pub mod funds_reserve;
 pub mod report;

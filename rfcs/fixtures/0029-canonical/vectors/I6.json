@@ -1,0 +1,102 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": "MandatoryDeny",
+      "status": "rejected"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_evaluated"
+    },
+    "extensions": {},
+    "final_authority": "adjuster",
+    "graph_id": "insurance-fraud-deny",
+    "invalidation": "not_evaluated",
+    "model_authorized": false,
+    "model_level": "None",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": false,
+    "review": {
+      "detail": null,
+      "status": "pass"
+    }
+  },
+  "fixture_id": "I6",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [
+      {
+        "catalog": "authority",
+        "name": "adjuster",
+        "value": {
+          "id": "authority:adjuster",
+          "version": 1
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "AssertDecision",
+        "source": "node:I6:a",
+        "target": "node:I6:d"
+      },
+      {
+        "kind": "DataFlow",
+        "source": "node:I6:f",
+        "target": "node:I6:d"
+      },
+      {
+        "kind": "HumanInput",
+        "source": "node:I6:v",
+        "target": "node:I6:a"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "id": "a"
+        },
+        "id": "node:I6:a",
+        "kind": "AuthorityAssertion"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:I6:d"
+        },
+        "id": "node:I6:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "authority_class": "profile_authority",
+          "type_id": "fact:I6:f",
+          "version": 1
+        },
+        "id": "node:I6:f",
+        "kind": "Fact"
+      },
+      {
+        "attributes": {
+          "review_contract": null
+        },
+        "id": "node:I6:v",
+        "kind": "Review"
+      }
+    ],
+    "parameters": {
+      "mandatory_fact": {
+        "id": "fraud-hold-active",
+        "rule": "deny-settlement",
+        "value": true
+      }
+    }
+  },
+  "profile_id": "profile:rfc0029:insurance:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

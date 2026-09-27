@@ -3,11 +3,14 @@ name: rfc0029-differential
 # Permanent differential conformance gate for RFC 0029 / RFC 0029.a: on every
 # change to the symbolic fixture source, the canonical generator/schema, the
 # Rust conformance crate, or the independent Ruby implementation, this job
-# regenerates the canonical corpus, runs the Rust test suite, and runs the
-# second, independently-built Ruby implementation against the same 50
-# fixtures -- failing the build on any canonicalization mismatch or any
-# semantic disagreement outside the one disclosed, tracked exception
-# (rfcs/evidence/0029/independent-implementation/report.md §3/§4/§8).
+# regenerates the canonical corpus (validating every vector against
+# schema.json, the normative grammar), runs the Rust test suite, and runs the
+# second, independently-built Ruby implementation against the same fixture
+# corpus -- failing the build on any schema violation, canonicalization
+# mismatch, or semantic disagreement outside the one disclosed, tracked
+# exception (rfcs/evidence/0029/independent-implementation/report.md
+# §3/§4/§8). Fixture count grows over time; see manifest.json for the
+# current total rather than trusting a number in this comment.
 #
 # This does not replace `build.yml`'s workspace-wide `cargo test`, which
 # already runs crates/rfc0029-conformance's own suite; this job's purpose is
@@ -45,9 +48,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - name: Install fixture generator's one dependency
-        run: pip install pyyaml
-      - name: Regenerate canonical fixtures and check byte-for-byte stability
+      - name: Install fixture generator's dependencies
+        run: pip install pyyaml jsonschema
+      - name: Regenerate canonical fixtures, validate against schema.json, and check byte-for-byte stability
         run: python3 rfcs/fixtures/0029-canonical/generate.py --check
 
       - uses: dtolnay/rust-toolchain@stable

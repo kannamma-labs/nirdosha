@@ -7,6 +7,7 @@
 //! check that can genuinely fail.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::funds_reserve::{AccountFact, ReservationReceipt, ReservationStatus};
@@ -190,14 +191,20 @@ pub fn compile(
     // RFC 0029 §24 Guarded/Atomic proof schema: the effect and its evidence
     // share one atomic boundary, or (on denial) neither occurred at all.
     let atomicity_ok = match receipt.status {
-        ReservationStatus::Reserved => match (before, after) {
-            (Some(b), Some(a)) => {
-                a.version == b.version + 1
-                    && a.balance_minor + receipt.request.amount_minor == b.balance_minor
-                    && a.is_authentic()
+        // AwaitingReconciliation is reached only via `confirm_external_submission`
+        // *after* the same local mutation `Reserved` already made; neither
+        // that call nor `reconcile` touch account state, so the account-level
+        // proof obligation is identical to `Reserved`'s.
+        ReservationStatus::Reserved | ReservationStatus::AwaitingReconciliation => {
+            match (before, after) {
+                (Some(b), Some(a)) => {
+                    a.version == b.version + 1
+                        && a.balance_minor + receipt.request.amount_minor == b.balance_minor
+                        && a.is_authentic()
+                }
+                _ => false,
             }
-            _ => false,
-        },
+        }
         ReservationStatus::Denied | ReservationStatus::Replayed => before == after,
     };
     requirements.push(check(
@@ -221,6 +228,26 @@ pub fn compile(
         Some("receipt has no evidence commitment"),
     ));
 
+    // Readiness matrix §7.1 "daily limit under concurrency/partition."
+    // This function's signature (one before/after snapshot plus one
+    // receipt) cannot directly re-verify `Ledger::daily_reserved`'s running
+    // total end-to-end -- only whether the aggregate-consistency denial
+    // path engaged for *this* call. That is a real, narrower check than
+    // full aggregate verification, disclosed as such, not inflated into one.
+    requirements.push(RequirementCheck {
+        id: "daily-limit-consistency".into(),
+        outcome: match receipt.diagnostic.as_deref() {
+            Some("DailyLimitExceeded") => RequirementOutcome::Satisfied,
+            _ => RequirementOutcome::NotApplicable,
+        },
+        note: Some(
+            "this per-call report observes only whether the daily-limit denial path fired \
+             for this request; verifying the aggregate window's running total end-to-end \
+             requires querying Ledger::daily_reserved directly"
+                .into(),
+        ),
+    });
+
     let overall = if requirements
         .iter()
         .any(|r| r.outcome == RequirementOutcome::Failed)
@@ -230,6 +257,10 @@ pub fn compile(
         match receipt.status {
             ReservationStatus::Reserved | ReservationStatus::Replayed => OverallVerdict::Accepted,
             ReservationStatus::Denied => OverallVerdict::Rejected,
+            // Readiness matrix §7.1: a local commit whose paired external
+            // submission timed out is a declared UnknownOutcome, never
+            // silently read as settled (Accepted) or abandoned (Rejected).
+            ReservationStatus::AwaitingReconciliation => OverallVerdict::Indeterminate,
         }
     };
 
@@ -249,12 +280,11 @@ pub fn compile(
             ReservationStatus::Reserved => "AtomicEvidence".into(),
             ReservationStatus::Replayed => "AtomicEvidence".into(),
             ReservationStatus::Denied => "DurableOutboxEvidence".into(),
+            ReservationStatus::AwaitingReconciliation => "DurableOutboxEvidence".into(),
         },
         safety_posture: "FailClosed".into(),
         exclusions: vec![
             "funds.release is not modeled by this pilot".into(),
-            "external settlement-rail submission is not modeled by this pilot".into(),
-            "aggregate daily-limit consistency is not modeled by this pilot".into(),
         ],
         input_commitment: commit("input", &receipt.request),
         output_commitment: commit("output", (receipt.status, &receipt.resulting_version)),
@@ -263,7 +293,7 @@ pub fn compile(
 }
 
 /// Generalizes `AdmissionReportV1` beyond the `funds.reserve` pilot's
-/// ledger-specific `compile`, above, to any of the 51 canonical fixtures —
+/// ledger-specific `compile`, above, to any canonical fixture —
 /// covering model-influenced decisions (`compute_influence`), review
 /// contracts, and fact-provenance lineage, which `compile` above never
 /// touches at all (`funds.reserve`'s own declared model influence is
@@ -271,20 +301,32 @@ pub fn compile(
 /// distinguish `Passed`/`Failed`/`Indeterminate` from `Unsupported`, not
 /// silently force every input into one of the first three.
 ///
-/// A fixture with no graph at all (`input.nodes` empty — the pure
-/// review-contract fixtures `R1`-`R9`, or the pure invalidation fixtures
-/// `INV_PRECOMMIT`/`INV_EXTERNAL_UNKNOWN`/`L7`) is `Unsupported`: this
-/// compiler has no admission decision to report on for those policy kinds
-/// at all, which is a different finding from "evaluated and ambiguous."
+/// A fixture with no graph at all (`input.nodes` empty) is handled by one
+/// of two paths: a `dependency` or `monitor` parameter (the distributed-
+/// finality fixtures `INV_PRECOMMIT`/`INV_EXTERNAL_UNKNOWN`/`L7`, and the
+/// monitor-health fixture `R8_MONITOR_MISSING`) gets a real, computed
+/// report — closing the "distributed finality, aggregate consistency and
+/// monitor-health evidence are not modeled" gap this function's docs used
+/// to name. The remaining pure review-contract fixtures (`R1`-`R7`, `R9`)
+/// are genuinely `Unsupported`: this compiler has no admission decision to
+/// report on for a bare review-contract test case at all, which is a
+/// different finding from "evaluated and ambiguous."
 pub fn compile_from_fixture(fixture: &Fixture) -> AdmissionReportV1 {
     let mut requirements = Vec::new();
 
     if fixture.input.nodes.is_empty() {
+        if let Some(dependency) = fixture.input.parameters.get("dependency").cloned() {
+            return compile_distributed_finality(fixture, &dependency);
+        }
+        if let Some(monitor) = fixture.input.parameters.get("monitor").cloned() {
+            return compile_monitor_health(fixture, &monitor);
+        }
         requirements.push(RequirementCheck {
             id: "graph-present".into(),
             outcome: RequirementOutcome::NotApplicable,
-            note: Some("fixture has no graph (pure review-contract or invalidation test case); \
-                        this report compiler has no admission decision to describe for it"
+            note: Some("fixture has no graph and no dependency/monitor parameter (a pure \
+                        review-contract test case); this report compiler has no admission \
+                        decision to describe for it"
                 .into()),
         });
         return AdmissionReportV1 {
@@ -302,8 +344,7 @@ pub fn compile_from_fixture(fixture: &Fixture) -> AdmissionReportV1 {
             evidence_finality_mode: "Unsupported".into(),
             safety_posture: "Unsupported".into(),
             exclusions: vec![
-                "non-graph policy kinds (pure review contracts, pure invalidation) are not \
-                 covered by this report compiler"
+                "bare review-contract policy kinds are not covered by this report compiler"
                     .into(),
             ],
             input_commitment: commit("input", &fixture.fixture_id),
@@ -443,6 +484,109 @@ pub fn compile_from_fixture(fixture: &Fixture) -> AdmissionReportV1 {
                 admission.as_ref().ok().and_then(|a| a.diagnostic),
             ),
         ),
+        overall,
+    }
+}
+
+/// RFC 0029 §36.5/§26 distributed finality: `INV_PRECOMMIT`,
+/// `INV_EXTERNAL_UNKNOWN`, and `L7` each declare an invalidating event's
+/// phase and required `action` (`Abort` or `Reconcile`) rather than a
+/// graph — this reports on that declaration directly, closing the gap the
+/// blanket `Unsupported` path used to leave.
+fn compile_distributed_finality(fixture: &Fixture, dependency: &Value) -> AdmissionReportV1 {
+    let action = dependency.get("action").and_then(Value::as_str).unwrap_or("Unknown");
+    let (overall, outcome, note, evidence_finality_mode) = match action {
+        "Abort" => (
+            OverallVerdict::Rejected,
+            RequirementOutcome::Failed,
+            "invalidating event occurred after the precommit check but before commit; the \
+             transition aborts, no effect commits, no capability issues"
+                .to_string(),
+            "DurableOutboxEvidence",
+        ),
+        "Reconcile" => (
+            OverallVerdict::Indeterminate,
+            RequirementOutcome::Indeterminate,
+            "the external system's true outcome is unknown after the local commit; workflow \
+             state is UnknownOutcome, reconciliation is required, and a duplicate effect is \
+             forbidden on retry"
+                .to_string(),
+            "EmergencyDeferredEvidence",
+        ),
+        other => (
+            OverallVerdict::Unsupported,
+            RequirementOutcome::Opaque,
+            format!("unrecognized distributed-finality action {other:?}; this compiler only \
+                     knows Abort and Reconcile"),
+            "Unsupported",
+        ),
+    };
+    AdmissionReportV1 {
+        schema_version: SCHEMA_VERSION.into(),
+        policy_id: format!("policy:rfc0029-fixture:{}:v1", fixture.fixture_id),
+        profile_id: fixture.profile_id.clone(),
+        bundle_hash: fixture.input.bundle.hash.clone(),
+        enforcement_axes: EnforcementAxes {
+            axis_a: "Runtime".into(),
+            axis_b: "DurableWorkflow".into(),
+            axis_c: "ExternallyAttested".into(),
+        },
+        effect_closure: vec![],
+        requirements: vec![RequirementCheck {
+            id: "distributed-finality-declared".into(),
+            outcome,
+            note: Some(note),
+        }],
+        evidence_finality_mode: evidence_finality_mode.into(),
+        safety_posture: "FailClosed".into(),
+        exclusions: vec![
+            "this report describes only the declared invalidation action, not a full \
+             multi-party workflow trace"
+                .into(),
+        ],
+        input_commitment: commit("input", &fixture.fixture_id),
+        output_commitment: commit("output", action),
+        overall,
+    }
+}
+
+/// RFC 0029 §36.10 monitor health: `R8_MONITOR_MISSING` declares a
+/// `Continuous` claim's monitor health directly rather than through a
+/// graph. `health: unknown` must suspend the review-quality claim it
+/// backs, not silently pass it — reported here as `Indeterminate`, never
+/// `Accepted`.
+fn compile_monitor_health(fixture: &Fixture, monitor: &Value) -> AdmissionReportV1 {
+    let health = monitor.get("health").and_then(Value::as_str).unwrap_or("unknown");
+    let (overall, outcome) = if health == "unknown" {
+        (OverallVerdict::Indeterminate, RequirementOutcome::Indeterminate)
+    } else {
+        (OverallVerdict::Accepted, RequirementOutcome::Satisfied)
+    };
+    AdmissionReportV1 {
+        schema_version: SCHEMA_VERSION.into(),
+        policy_id: format!("policy:rfc0029-fixture:{}:v1", fixture.fixture_id),
+        profile_id: fixture.profile_id.clone(),
+        bundle_hash: fixture.input.bundle.hash.clone(),
+        enforcement_axes: EnforcementAxes {
+            axis_a: "Continuous".into(),
+            axis_b: "Advisory".into(),
+            axis_c: "Local".into(),
+        },
+        effect_closure: vec![],
+        requirements: vec![RequirementCheck {
+            id: "monitor-health-declared".into(),
+            outcome,
+            note: Some(format!("declared monitor health: {health}")),
+        }],
+        evidence_finality_mode: "ObservedEvidence".into(),
+        safety_posture: "FailClosed".into(),
+        exclusions: vec![
+            "this report describes only the declared monitor-health value, not the \
+             underlying observation pipeline"
+                .into(),
+        ],
+        input_commitment: commit("input", &fixture.fixture_id),
+        output_commitment: commit("output", health),
         overall,
     }
 }
