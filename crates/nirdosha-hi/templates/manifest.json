@@ -69,7 +69,7 @@
         },
         {
           "path": "banking/modules/transfers/screens.toml",
-          "sha256": "48f7f7260e247a64e250d810283b82e3f79dc7d558ebce9c6969a7754910bcd0"
+          "sha256": "44fe507d9c4ebec6a943f2a75676f9aec71609d40e79b27b5d05e40c5b1d6787"
         },
         {
           "path": "banking/policy-bundle.toml",

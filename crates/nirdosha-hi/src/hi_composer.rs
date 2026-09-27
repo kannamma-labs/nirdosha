@@ -1053,6 +1053,26 @@ pub fn build_project(project_dir: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Run the composed project's own `cargo test`, same shared-target-dir
+/// approach as `build_project` -- this actually executes any test file
+/// under the composed project's `tests/`, not just compiles it.
+pub fn test_project(project_dir: &Path) -> Result<String, String> {
+    let output = Command::new("cargo")
+        .args(["test", "--quiet"])
+        .env("CARGO_TARGET_DIR", workspace_root().join("target"))
+        .current_dir(project_dir)
+        .output()
+        .map_err(|e| format!("failed to invoke `cargo test`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`cargo test` failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Verify the composed project with `cargo nirdosha verify`.
 pub fn verify_project(project_dir: &Path) -> Result<String, String> {
     run_cargo_nirdosha("verify", project_dir)
@@ -1600,4 +1620,133 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The live transfer_create demo: real HTTP-shaped requests dispatched
+    /// into the actual generated router (not a synthetic fixture), proving
+    /// the whole path `screen -> authenticated POST -> service catalog ->
+    /// RFC 0029 admission -> capability minting -> gateway validation ->
+    /// guarded insert -> evidence record` end to end. Unlike
+    /// `compose_banking_transfers_admits_transfer_create_end_to_end`
+    /// (which only proves the project compiles and was admitted at
+    /// generation time), this actually runs it: the generated project gets
+    /// one extra `tests/` file appended, then its own `cargo test` proves
+    /// the create route works, replays are rejected, and evidence lands on
+    /// disk -- exactly the assertions this milestone step asks for.
+    #[test]
+    fn transfer_create_live_demo_screen_to_gateway() {
+        let dir = std::env::temp_dir().join(format!(
+            "nir_hi_transfer_create_live_demo_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = compose_project(
+            &dir,
+            "banking",
+            &["core".to_string(), "accounts".to_string(), "transfers".to_string()],
+            None,
+        )
+        .expect("banking+transfers compose should succeed");
+
+        generate_screens(&result.path).expect("transfer_create must be admitted and generated");
+
+        let tests_dir = result.path.join("tests");
+        std::fs::create_dir_all(&tests_dir).expect("creating tests/ dir");
+        std::fs::write(
+            tests_dir.join("transfer_create_e2e.rs"),
+            TRANSFER_CREATE_E2E_TEST_SRC,
+        )
+        .expect("writing transfer_create_e2e.rs");
+
+        test_project(&result.path).expect(
+            "the live transfer_create demo must pass: valid create, row round-trip, evidence write, replay rejection, and wrong-role rejection",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Appended as `tests/transfer_create_e2e.rs` into the composed
+    /// project by `transfer_create_live_demo_screen_to_gateway` -- runs as
+    /// that project's own `cargo test`, so it dispatches into the real
+    /// generated `mount_transfers` router, not a copy of its logic. Follows
+    /// the same in-process `Router::dispatch` pattern already established
+    /// by `crates/nirdosha-rt/tests/crud_screens.rs`.
+    const TRANSFER_CREATE_E2E_TEST_SRC: &str = r####"
+use nirdosha_rt::{Auth, Request, Response, Router};
+use retail_banking::transfers_screens_m03_transfers::mount_transfers;
+use std::collections::HashMap;
+
+fn router() -> Router {
+    mount_transfers(Router::new(|req: &Request| {
+        let roles: Vec<&str> = req.header("x-roles").map(|s| s.split(',').collect()).unwrap_or_default();
+        Auth::login("e2e-customer", &roles)
+    }))
+}
+
+fn req(method: &str, path: &str, roles: Option<&str>, body: &str) -> Request {
+    let mut headers = HashMap::new();
+    if let Some(r) = roles {
+        headers.insert("x-roles".to_string(), r.to_string());
+    }
+    if body.trim_start().starts_with('{') {
+        headers.insert("content-type".to_string(), "application/json".to_string());
+    }
+    Request { method: method.into(), path: path.into(), headers, body: body.into() }
+}
+
+fn dispatch(method: &str, path: &str, roles: Option<&str>, body: &str) -> Response {
+    router().dispatch(&req(method, path, roles, body))
+}
+
+const CREATE_BODY: &str = r#"{"transfer_id":"t-e2e-1","debit_account":"ACC-1","credit_account":"ACC-2","amount_cents":"5000","currency":"INR","status":"pending"}"#;
+
+#[test]
+fn transfer_create_screen_to_gateway_demo() {
+    let evidence_path = std::path::Path::new(".nir-evidence/transfer_request_gateway_v1.jsonl");
+    let _ = std::fs::remove_file(evidence_path);
+
+    // Valid customer request succeeds: screen -> auth POST -> admitted
+    // service -> capability minted -> gateway validated -> guarded insert.
+    let created = dispatch("POST", "/api/transfers", Some("Customer"), CREATE_BODY);
+    assert_eq!(created.status, 201, "body: {}", created.body);
+    let entity: serde_json::Value = serde_json::from_str(&created.body).expect("created body is JSON");
+    assert_eq!(entity["transfer_id"], "t-e2e-1");
+
+    // Transfer row is created: it round-trips through the guarded list route.
+    let list = dispatch("GET", "/api/transfers", Some("Customer"), "");
+    assert_eq!(list.status, 200, "body: {}", list.body);
+    let items: serde_json::Value = serde_json::from_str(&list.body).expect("list body is JSON");
+    assert!(
+        items.as_array().unwrap().iter().any(|it| it["transfer_id"] == "t-e2e-1"),
+        "created transfer row missing from list: {}",
+        list.body
+    );
+
+    // Evidence file is written: the gateway's hash-chained log has a real
+    // "accepted" decision for this effect.
+    let evidence = std::fs::read_to_string(evidence_path).expect("evidence file must exist after a real decision");
+    assert!(
+        evidence.lines().any(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("evidence line is JSON");
+            v["content"]["decision"] == "accepted" && v["content"]["action"] == "transfer.request" && v["content"]["resource"] == "TransferRequest"
+        }),
+        "no accepted transfer.request evidence entry found:\n{evidence}"
+    );
+
+    // Replay is rejected: resubmitting the same transfer_id is denied, not
+    // silently double-applied.
+    let replay = dispatch("POST", "/api/transfers", Some("Customer"), CREATE_BODY);
+    assert_eq!(replay.status, 403, "body: {}", replay.body);
+    assert!(replay.body.contains("already exists"), "replay rejection reason: {}", replay.body);
+
+    // Wrong role is rejected: a BranchManager may not create a transfer request.
+    let wrong_role = dispatch(
+        "POST",
+        "/api/transfers",
+        Some("BranchManager"),
+        r#"{"transfer_id":"t-e2e-2","debit_account":"ACC-1","credit_account":"ACC-2","amount_cents":"1000","currency":"INR","status":"pending"}"#,
+    );
+    assert_eq!(wrong_role.status, 403, "body: {}", wrong_role.body);
+}
+"####;
 }

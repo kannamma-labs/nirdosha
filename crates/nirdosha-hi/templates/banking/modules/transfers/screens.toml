@@ -35,7 +35,7 @@ data_binding = { entities = ["TransferRequest"], primary_key = "transfer_id", gu
     { name = "status", type = "String" },
 ] }
 policy = { purpose = "Payments", allowed_actions = ["read", "create"] }
-parameters = { access_create = 'requires role "Customer"', access_read = 'requires role "Customer"' }
+parameters = { access_create = 'requires role "Customer"', access_read = 'requires role "Customer"', create_fields = ["transfer_id", "debit_account", "credit_account", "amount_cents", "currency", "status"] }
 service = { name = "transfer_create", version = "1", parameters = { eligible_roles = ["Customer"], jurisdiction = "IN" } }
 notes = "This only creates a transfer request. Execution is a certified primitive, not a CRUD update."
 

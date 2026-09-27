@@ -1928,6 +1928,7 @@ version = "0.1.0"
 dependencies = [
  "nirdosha-audit",
  "nirdosha-rt",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
