@@ -24,11 +24,45 @@ pub struct DecisionCapability {
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
     pub nonce: String,
+    /// `None` unless the minting [`CapabilityIssuer`] was constructed with
+    /// [`CapabilityIssuer::with_signing_key`] -- see `crate::authority`'s
+    /// module doc. Strictly additive: every existing caller that never
+    /// sets a signing key gets `None` here, exactly as before this field
+    /// existed.
+    #[serde(default)]
+    pub signature_b64: Option<String>,
 }
 
 impl DecisionCapability {
     pub fn is_expired(&self, now_ms: u64) -> bool {
         now_ms >= self.expires_at_ms
+    }
+
+    /// The exact bytes a [`CapabilityIssuer`] signs and a `GatewayCore`
+    /// verifies -- every field except `signature_b64` itself, in a fixed
+    /// order (`serde_json` preserves struct field declaration order), so
+    /// it is deterministic and does not include the signature it attests.
+    pub(crate) fn signable_payload(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signable<'a> {
+            subject: &'a str,
+            resource: &'a str,
+            effect: &'a str,
+            bundle_hash: &'a str,
+            issued_at_ms: u64,
+            expires_at_ms: u64,
+            nonce: &'a str,
+        }
+        serde_json::to_vec(&Signable {
+            subject: &self.subject,
+            resource: &self.resource,
+            effect: &self.effect,
+            bundle_hash: &self.bundle_hash,
+            issued_at_ms: self.issued_at_ms,
+            expires_at_ms: self.expires_at_ms,
+            nonce: &self.nonce,
+        })
+        .expect("DecisionCapability's signable fields always serialize")
     }
 }
 
@@ -50,11 +84,48 @@ pub struct CapabilityIssuer {
     ttl_ms: u64,
     counter: AtomicU64,
     issued: Arc<Mutex<HashSet<String>>>,
+    /// PKCS#8 DER bytes, re-parsed into a keypair on each `mint` call
+    /// (cheap; keeps this type plain `Vec<u8>`-backed rather than storing
+    /// a non-trivial key-object type). `None` unless
+    /// [`Self::with_signing_key`] was used -- see `crate::authority`'s
+    /// module doc for why this is opt-in.
+    signing_key_pkcs8: Option<Vec<u8>>,
+    signing_public_key_b64: Option<String>,
 }
 
 impl CapabilityIssuer {
     pub fn new(bundle: PolicyBundle, ttl_ms: u64) -> Self {
-        Self { bundle, ttl_ms, counter: AtomicU64::new(0), issued: Arc::new(Mutex::new(HashSet::new())) }
+        Self { bundle, ttl_ms, counter: AtomicU64::new(0), issued: Arc::new(Mutex::new(HashSet::new())), signing_key_pkcs8: None, signing_public_key_b64: None }
+    }
+
+    /// Like [`Self::new`], but every minted capability also carries a real
+    /// Ed25519 signature over its own fields -- see `crate::authority`'s
+    /// module doc. `signing_key_pkcs8` is raw PKCS#8 DER bytes (e.g. from
+    /// [`crate::authority::generate_ed25519_keypair`] or a real
+    /// operator-custodied key file).
+    pub fn with_signing_key(bundle: PolicyBundle, ttl_ms: u64, signing_key_pkcs8: Vec<u8>) -> Result<Self, String> {
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+        use base64::Engine;
+        use nirdosha_audit::crypto_backend::signature::{Ed25519KeyPair, KeyPair};
+
+        let keypair = Ed25519KeyPair::from_pkcs8(&signing_key_pkcs8).map_err(|e| format!("not a valid Ed25519 PKCS#8 key: {e}"))?;
+        let signing_public_key_b64 = BASE64_STANDARD.encode(keypair.public_key().as_ref());
+        Ok(Self {
+            bundle,
+            ttl_ms,
+            counter: AtomicU64::new(0),
+            issued: Arc::new(Mutex::new(HashSet::new())),
+            signing_key_pkcs8: Some(signing_key_pkcs8),
+            signing_public_key_b64: Some(signing_public_key_b64),
+        })
+    }
+
+    /// `None` unless this issuer was built with [`Self::with_signing_key`].
+    /// A `GatewayCore` built from this issuer captures this at
+    /// construction and, if present, requires and verifies every
+    /// capability's signature against it.
+    pub fn signing_public_key_b64(&self) -> Option<&str> {
+        self.signing_public_key_b64.as_deref()
     }
 
     pub fn bundle(&self) -> &PolicyBundle {
@@ -91,7 +162,7 @@ impl CapabilityIssuer {
             )
         );
         self.issued.lock().expect("issued-registry lock poisoned").insert(nonce.clone());
-        Ok(DecisionCapability {
+        let mut capability = DecisionCapability {
             subject: auth.user().to_string(),
             resource: resource.to_string(),
             effect: effect.to_string(),
@@ -99,7 +170,18 @@ impl CapabilityIssuer {
             issued_at_ms: now_ms,
             expires_at_ms: now_ms + self.ttl_ms,
             nonce,
-        })
+            signature_b64: None,
+        };
+        if let Some(pkcs8) = &self.signing_key_pkcs8 {
+            use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+            use base64::Engine;
+            use nirdosha_audit::crypto_backend::signature::Ed25519KeyPair;
+
+            let keypair = Ed25519KeyPair::from_pkcs8(pkcs8).expect("this issuer's own pkcs8 was already validated in with_signing_key");
+            let signature = keypair.sign(&capability.signable_payload());
+            capability.signature_b64 = Some(BASE64_STANDARD.encode(signature.as_ref()));
+        }
+        Ok(capability)
     }
 }
 
@@ -117,6 +199,12 @@ pub enum GatewayError {
     NotIssued,
     CapabilityExpired,
     CapabilityReplayed,
+    /// The gateway requires a signed capability (its issuer was built with
+    /// [`CapabilityIssuer::with_signing_key`]) but this one carries none.
+    SignatureMissing,
+    /// A signature was present but did not verify against the gateway's
+    /// trusted signing key -- forged or tampered.
+    SignatureInvalid,
     /// The replay store itself failed (e.g. a durable store's I/O error) --
     /// fail closed: a capability is never treated as non-replayed just
     /// because the store couldn't be consulted.
@@ -142,6 +230,8 @@ impl fmt::Display for GatewayError {
             }
             GatewayError::CapabilityExpired => write!(f, "capability has expired"),
             GatewayError::CapabilityReplayed => write!(f, "capability has already been consumed"),
+            GatewayError::SignatureMissing => write!(f, "this gateway requires a signed capability, but none was provided"),
+            GatewayError::SignatureInvalid => write!(f, "capability signature does not verify against this gateway's trusted signing key"),
             GatewayError::ReplayStoreUnavailable(e) => write!(f, "replay store unavailable: {e}"),
             GatewayError::Execution(e) => write!(f, "gateway-executed effect failed: {e}"),
         }

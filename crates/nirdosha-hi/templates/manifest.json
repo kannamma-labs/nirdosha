@@ -202,11 +202,11 @@
         },
         {
           "path": "fintech/modules/transaction_monitoring/menus.toml",
-          "sha256": "bb76e8e1dab39a3b467c83129ab36ca8e9255080769285b3cc37248b1cc2e397"
+          "sha256": "75702564ab0308413765c42eff7530794d8266fbfc2566fc73add42b56957a5d"
         },
         {
           "path": "fintech/modules/transaction_monitoring/screens.toml",
-          "sha256": "65463c56a3f1a49cb81043e089de06cdf8deb176032dd37f91082d1366b2aacc"
+          "sha256": "05c5b611928837792ca56b2cea992fdf5b1d2f2ecc9d678809a8dd2b995a3940"
         },
         {
           "path": "fintech/modules/wallets/menus.toml",
@@ -215,6 +215,14 @@
         {
           "path": "fintech/modules/wallets/screens.toml",
           "sha256": "92f251b69b01c285c9ee5208b4817e870f6caf4c9ec4ff393dd5a8542c6f54c6"
+        },
+        {
+          "path": "fintech/policy-bundle.toml",
+          "sha256": "8e54eb7015d0f92482119f98b6e2ff8f589e9e4e01585f33dffa34fe61317aab"
+        },
+        {
+          "path": "fintech/policy-services.toml",
+          "sha256": "522948cca288a66e0c551263a1d9e780109c19f12dd3337aae2eac746ea5e262"
         }
       ]
     },

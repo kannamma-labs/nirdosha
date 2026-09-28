@@ -886,15 +886,54 @@ fn ident_safe_screen_id(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
 }
 
+/// Which concrete Rust gateway type a service-catalog `(gateway, effect)`
+/// pair binds to, for gateways this generator actually knows how to wire
+/// today. A `(gateway, effect)` pair outside this table fails generation
+/// (see [`render_capability_gate`]) rather than silently falling back to
+/// an unguarded insert — adding a real gateway means adding it here
+/// deliberately, matching `service_catalog::KNOWN_GATEWAYS`'s own
+/// "no typo discovered at codegen time" discipline. Every entry's Rust
+/// type shares the exact same `::new(evidence_path, &issuer)` constructor
+/// and inherent `consume_and_execute` forwarder shape (see
+/// `TransferRequestGatewayV1`'s and each `nirdosha_ctms` gateway's own doc
+/// comment for why the forwarder exists), which is what lets this table
+/// stay this small: `render_capability_gate`'s emitted code is otherwise
+/// identical for every one of them.
+fn known_gateway_rust_type(gateway: &str, effect: &str) -> Option<&'static str> {
+    match gateway {
+        // Exactly one Rust type regardless of effect (the same as this
+        // generator's behavior before this table existed) -- the
+        // gateway's own runtime `consume_and_execute` still rejects a
+        // capability whose effect doesn't match its `EffectGateway::EFFECT`
+        // const with `GatewayError::CapabilityMismatch`, so an
+        // implausible effect isn't silently accepted, just not rejected
+        // at *generation* time for this single-type gateway.
+        "transfer_request_gateway_v1" => Some("::nirdosha_guard_rfc0029::TransferRequestGatewayV1"),
+        "ctms_alert_gateway_v1" => Some("::nirdosha_ctms::alert::CtmsAlertGatewayV1"),
+        // Several distinct Rust types share this one gateway name (one
+        // logical gateway boundary, several effects -- see
+        // `nirdosha_ctms::case`'s own module doc), so here effect really
+        // does disambiguate which type to emit.
+        "ctms_case_gateway_v1" => match effect {
+            "case.assign" => Some("::nirdosha_ctms::case::CtmsCaseAssignGatewayV1"),
+            "case.escalate" => Some("::nirdosha_ctms::case::CtmsCaseEscalateGatewayV1"),
+            "case.senior_review" => Some("::nirdosha_ctms::case::CtmsCaseSeniorReviewGatewayV1"),
+            "case.disposition" => Some("::nirdosha_ctms::case::CtmsCaseDispositionGatewayV1"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// RFC 0029 §7.1: emits the runtime capability-gate wrapper function (and
 /// its per-project singletons) for one serviced screen, keyed off the
-/// catalog entry's own declared `gateway` — the catalog, not this
-/// generator, decides which gateway a service binds to. Only
-/// `transfer_request_gateway_v1` has real runtime wiring today;
-/// `funds_reserve_gateway_v1` or any other declared-but-unwired gateway
-/// fails generation rather than silently falling back to the unguarded
-/// insert path this whole mechanism exists to close off. Returns
-/// `(gate_fn_ident, code_to_emit_above_the_macro_invocation)`.
+/// catalog entry's own declared `(gateway, effect)` pair via
+/// [`known_gateway_rust_type`] — the catalog, not this generator, decides
+/// which gateway a service binds to. A pair with no runtime wiring
+/// (e.g. `funds_reserve_gateway_v1`, still real-but-unwired at codegen
+/// time) fails generation rather than silently falling back to the
+/// unguarded insert path this whole mechanism exists to close off.
+/// Returns `(gate_fn_ident, code_to_emit_above_the_macro_invocation)`.
 fn render_capability_gate(
     screen_id: &str,
     entity_struct_name: &str,
@@ -906,12 +945,12 @@ fn render_capability_gate(
     let depth = Path::new(output_file).parent().map(|p| p.components().count()).unwrap_or(0);
     let bundle_include_path = format!("{}policy-bundle.toml", "../".repeat(depth));
 
-    if entry.gateway != "transfer_request_gateway_v1" {
+    let Some(gateway_type) = known_gateway_rust_type(&entry.gateway, &entry.effect) else {
         return Err(format!(
-            "screen {screen_id}: service catalog names gateway `{}`, which has no runtime capability-gate wiring in this generator yet (only transfer_request_gateway_v1 is wired) — refusing to generate a live create route for it rather than silently falling back to an unguarded insert",
-            entry.gateway
+            "screen {screen_id}: service catalog names gateway `{}` for effect `{}`, which has no runtime capability-gate wiring in this generator yet — refusing to generate a live create route for it rather than silently falling back to an unguarded insert",
+            entry.gateway, entry.effect
         ));
-    }
+    };
 
     let suffix = ident_safe_screen_id(screen_id);
     let gate_fn = format!("rfc0029_capability_gate_{suffix}");
@@ -935,8 +974,9 @@ fn render_capability_gate(
         "    let bundle = ::nirdosha_guard_rfc0029::PolicyBundle::from_toml_str({bundle_const})\n        .expect(\"policy-bundle.toml was already validated at generation time\");\n"
     ));
     code.push_str("    ::nirdosha_guard_rfc0029::CapabilityIssuer::new(bundle, 300_000)\n});\n");
+    let evidence_file = format!(".nir-evidence/{}.jsonl", entry.gateway);
     code.push_str(&format!(
-        "static {gateway_static}: ::std::sync::LazyLock<::nirdosha_guard_rfc0029::TransferRequestGatewayV1> = ::std::sync::LazyLock::new(|| {{\n    ::nirdosha_guard_rfc0029::TransferRequestGatewayV1::new(\".nir-evidence/transfer_request_gateway_v1.jsonl\", &{issuer_static})\n}});\n"
+        "static {gateway_static}: ::std::sync::LazyLock<{gateway_type}> = ::std::sync::LazyLock::new(|| {{\n    {gateway_type}::new({evidence_file:?}, &{issuer_static})\n}});\n"
     ));
     code.push_str(&format!(
         "fn {gate_fn}(\n    auth: &::nirdosha_rt::Auth,\n    execute: impl FnOnce() -> Result<{entity_struct_name}, ::nirdosha_guard_screens::GuardScreenError>,\n) -> Result<{entity_struct_name}, ::nirdosha_guard_screens::GuardScreenError> {{\n"

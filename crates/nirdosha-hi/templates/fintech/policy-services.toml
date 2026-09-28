@@ -1,0 +1,35 @@
+# RFC 0029 §7.1 domain service catalog for the fintech template.
+# Schema: docs/SERVICE_CATALOG_SCHEMA.json
+# Loaded/validated by crates/cargo-nirdosha/src/service_catalog.rs.
+#
+# A screen may only reference one of these entries by name via
+# [screen.service]; it supplies just the declared allowed_parameters. The
+# catalog -- not the screen, not an LLM -- is the source of the
+# security-critical meaning (resource, effect, policy kind, gateway,
+# required facts, failure posture).
+
+# `required_facts = ["subject_identity"]`: the only fact this generator's
+# admission engine has a static resolver for today (bound to the screen's
+# own role/eligible_roles declaration) -- see
+# crates/cargo-nirdosha/src/policy_adapter.rs's KNOWN_RESOLVABLE_FACTS.
+# nirdosha-ctms's own richer fact model (transaction_event_valid,
+# analyst_identity, and real issuer/freshness/revocation checking) lives
+# in that crate's own `facts` module and is proven by its own tests; it
+# is not yet wired into this generation-time admission engine.
+[service.alert_create]
+resource = "TransactionAlert"
+effect = "alert.create"
+policy_kind = "Authorization"
+gateway = "ctms_alert_gateway_v1"
+required_facts = ["subject_identity"]
+allowed_parameters = ["jurisdiction"]
+failure_posture = "FailClosed"
+
+[service.case_assign]
+resource = "MonitoringCase"
+effect = "case.assign"
+policy_kind = "Authorization"
+gateway = "ctms_case_gateway_v1"
+required_facts = ["subject_identity"]
+allowed_parameters = ["eligible_roles", "jurisdiction"]
+failure_posture = "FailClosed"

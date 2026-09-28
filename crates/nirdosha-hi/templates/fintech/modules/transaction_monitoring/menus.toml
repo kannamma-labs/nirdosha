@@ -27,3 +27,23 @@ route = "/transactions/rules"
 guard = { action = "read", resource = "transaction" }
 roles = ["PlatformAdmin", "RiskAnalyst"]
 order = 20
+
+[[menu]]
+id = "nav.ctms_alerts"
+label_key = "nav.ctms_alerts"
+group = "monitoring"
+screen_id = "9.3"
+route = "/ctms/alerts"
+guard = { action = "read", resource = "transactionalert" }
+roles = ["RiskAnalyst"]
+order = 30
+
+[[menu]]
+id = "nav.ctms_cases"
+label_key = "nav.ctms_cases"
+group = "monitoring"
+screen_id = "9.4"
+route = "/ctms/cases"
+guard = { action = "read", resource = "monitoringcase" }
+roles = ["RiskAnalyst"]
+order = 40

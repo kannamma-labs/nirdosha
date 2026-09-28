@@ -21,18 +21,28 @@
 //! a bundle the gateway no longer trusts, is rejected outright rather than
 //! merely resource/effect/expiry checked like a genuine one.
 //!
-//! Scope this crate does **not** claim: the capability carries no
-//! cryptographic signature (no MAC over its fields) -- the issued-registry
-//! check defends against forgery only *within the same process* that holds
-//! the `Arc` the issuer and gateway share; it is not proof against a
-//! malicious actor with the ability to fabricate arbitrary process state
-//! (e.g. via unsafe code or a compromised dependency in the same address
-//! space). The policy bundle's `approved_by`/`signed_by` are checked for
-//! presence and the validity window against the clock -- not verified as a
-//! real Ed25519 signature. The issuer's own mint-provenance registry
-//! (`issued_registry`) is still in-process only. And
-//! [`funds_reserve::InMemoryFundsReserveBackend`]'s own ledger is
-//! in-process, not a durable store.
+//! **Capability and bundle signing, real but opt-in** (`authority`
+//! module): a [`CapabilityIssuer`] built with
+//! [`CapabilityIssuer::with_signing_key`] Ed25519-signs every capability
+//! it mints, and any `GatewayCore` built from that issuer then requires
+//! and verifies that signature before ever running the guarded effect --
+//! closing "the capability carries no cryptographic signature" for
+//! deployments that opt in. Likewise [`SignedPolicyBundle`] pairs a
+//! [`PolicyBundle`] with a real, verified detached Ed25519 signature
+//! against an [`AuthorityRegistry`] of trusted keys, closing "not verified
+//! as a real Ed25519 signature" for `approved_by`/`signed_by`. Every
+//! *existing* call site (`CapabilityIssuer::new`, `GatewayCore::new`,
+//! `PolicyBundle::from_toml_str` alone) is completely unaffected --
+//! signing is additive, not a breaking requirement.
+//!
+//! Scope this crate still does **not** claim, even with signing enabled:
+//! *production key custody*. `AuthorityRegistry` says which public keys
+//! are trusted, not how those keys were minted, rotated, or protected (a
+//! real HSM/KMS-backed signing ceremony, multi-party authorization to add
+//! a new trusted authority) -- see `authority`'s own module doc. The
+//! issuer's own mint-provenance registry (`issued_registry`) is still
+//! in-process only. And [`funds_reserve::InMemoryFundsReserveBackend`]'s
+//! own ledger is in-process, not a durable store.
 //!
 //! The one exception is single-use *replay* protection: `GatewayCore`'s
 //! consumed-nonce tracking is now a pluggable [`replay_store::ReplayStore`],
@@ -40,18 +50,20 @@
 //! multi-process deployment (see its module doc for why an in-process
 //! `HashSet` can't do this) -- [`replay_store::InMemoryReplayStore`] remains
 //! the default for tests and single-process development. Everything else
-//! above is disclosed scope boundary, not silent gap: real capability
-//! signing, durable mint-provenance, a durable reservation store, and
-//! shadow-mode comparison against the existing banking implementation are
-//! explicitly later work -- see `funds_reserve`'s own module doc for the
+//! above is disclosed scope boundary, not silent gap: durable
+//! mint-provenance, a durable reservation store, and shadow-mode
+//! comparison against the existing banking implementation are explicitly
+//! later work -- see `funds_reserve`'s own module doc for the
 //! `funds.reserve`-specific ones.
 
+mod authority;
 mod bundle;
 mod capability;
 mod funds_reserve;
 mod gateway;
 mod replay_store;
 
+pub use authority::{generate_ed25519_keypair, AuthorityRegistry, AuthorityRegistryError, SignedBundleError, SignedPolicyBundle};
 pub use bundle::{BundleError, PolicyBundle};
 pub use capability::{CapabilityIssuer, DecisionCapability, GatewayError};
 pub use funds_reserve::{

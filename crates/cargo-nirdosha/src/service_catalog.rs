@@ -17,7 +17,8 @@ use serde::Deserialize;
 /// to. A `gateway` name outside this list fails catalog loading — adding a
 /// real gateway means adding it here deliberately, not discovering a typo
 /// at codegen time on some unrelated screen.
-pub const KNOWN_GATEWAYS: &[&str] = &["transfer_request_gateway_v1", "funds_reserve_gateway_v1"];
+pub const KNOWN_GATEWAYS: &[&str] =
+    &["transfer_request_gateway_v1", "funds_reserve_gateway_v1", "ctms_alert_gateway_v1", "ctms_case_gateway_v1"];
 
 /// RFC 0029 §8 policy kinds with published formal artifacts (operational
 /// semantics, composition algebra, proof obligations, evidence schema) as

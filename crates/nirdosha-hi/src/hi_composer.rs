@@ -1098,6 +1098,12 @@ fn write_cargo_project_stub(
          # every composed project takes the dependency unconditionally, the\n\
          # same way the guard-* deps above are never conditional either.\n\
          nirdosha-guard-rfc0029 = {{ path = \"{}\" }}\n\
+         # CTMS (continuous transaction monitoring) effect gateways --\n\
+         # only a screen whose service catalog entry names a\n\
+         # `ctms_*_gateway_v1` gateway actually calls into this, same\n\
+         # unconditional-dependency convention as nirdosha-guard-rfc0029\n\
+         # above.\n\
+         nirdosha-ctms = {{ path = \"{}\" }}\n\
          serde = {{ version = \"1\", features = [\"derive\"] }}\n\
          serde_json = \"1\"\n",
         repo_relative_path("crates/nirdosha-rt"),
@@ -1107,6 +1113,7 @@ fn write_cargo_project_stub(
         repo_relative_path("crates/nirdosha-guard-core"),
         repo_relative_path("crates/nirdosha-guard-screens"),
         repo_relative_path("crates/nirdosha-guard-rfc0029"),
+        repo_relative_path("crates/nirdosha-ctms"),
     );
 
     let cargo_toml = format!(
@@ -1745,6 +1752,179 @@ fn transfer_create_screen_to_gateway_demo() {
         "/api/transfers",
         Some("BranchManager"),
         r#"{"transfer_id":"t-e2e-2","debit_account":"ACC-1","credit_account":"ACC-2","amount_cents":"1000","currency":"INR","status":"pending"}"#,
+    );
+    assert_eq!(wrong_role.status, 403, "body: {}", wrong_role.body);
+}
+"####;
+
+    /// The live CTMS demo, mirroring `transfer_create_live_demo_screen_to_gateway`:
+    /// real HTTP-shaped requests dispatched into the actual generated
+    /// router, proving that `cargo-nirdosha`'s `render_capability_gate`
+    /// (generalized this session beyond `transfer_request_gateway_v1`)
+    /// correctly wires two different `nirdosha-ctms` gateway types
+    /// (`CtmsAlertGatewayV1` for `alert.create`, `CtmsCaseAssignGatewayV1`
+    /// for `case.assign`) from one fintech template. This screen's own
+    /// row storage is still the generic guarded table `crud_screens!`
+    /// always uses (see the screens.toml entries' own "notes" field) --
+    /// `nirdosha-ctms`'s own richer Alert/MonitoringCase domain model is
+    /// proven separately by that crate's own 63+ tests, not exercised
+    /// here.
+    #[test]
+    fn ctms_alert_and_case_screens_live_demo_screen_to_gateway() {
+        let dir = std::env::temp_dir().join(format!("nir_hi_ctms_live_demo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = compose_project(
+            &dir,
+            "fintech",
+            &["core".to_string(), "merchants".to_string(), "transaction_monitoring".to_string()],
+            None,
+        )
+        .expect("fintech+transaction_monitoring compose should succeed");
+
+        generate_screens(&result.path).expect("alert_create/case_assign must be admitted and generated");
+
+        let tests_dir = result.path.join("tests");
+        std::fs::create_dir_all(&tests_dir).expect("creating tests/ dir");
+        std::fs::write(tests_dir.join("ctms_e2e.rs"), CTMS_SCREENS_E2E_TEST_SRC).expect("writing ctms_e2e.rs");
+
+        test_project(&result.path).expect(
+            "the live CTMS demo must pass: valid create, row round-trip, evidence write, replay rejection, and wrong-role rejection, for both alert_create and case_assign",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Appended as `tests/ctms_e2e.rs` into the composed project by
+    /// `ctms_alert_and_case_screens_live_demo_screen_to_gateway`.
+    const CTMS_SCREENS_E2E_TEST_SRC: &str = r####"
+use nirdosha_rt::{Auth, Request, Response, Router};
+use fintech_payments::transaction_monitoring_screens_m09_ctms_alerts::{mount_ctms_alerts, mount_ctms_cases};
+use std::collections::HashMap;
+
+fn alerts_router() -> Router {
+    mount_ctms_alerts(Router::new(|req: &Request| {
+        let roles: Vec<&str> = req.header("x-roles").map(|s| s.split(',').collect()).unwrap_or_default();
+        Auth::login("e2e-analyst", &roles)
+    }))
+}
+
+fn cases_router() -> Router {
+    mount_ctms_cases(Router::new(|req: &Request| {
+        let roles: Vec<&str> = req.header("x-roles").map(|s| s.split(',').collect()).unwrap_or_default();
+        Auth::login("e2e-analyst", &roles)
+    }))
+}
+
+fn req(method: &str, path: &str, roles: Option<&str>, body: &str) -> Request {
+    let mut headers = HashMap::new();
+    if let Some(r) = roles {
+        headers.insert("x-roles".to_string(), r.to_string());
+    }
+    if body.trim_start().starts_with('{') {
+        headers.insert("content-type".to_string(), "application/json".to_string());
+    }
+    Request { method: method.into(), path: path.into(), headers, body: body.into() }
+}
+
+fn dispatch(router: &Router, method: &str, path: &str, roles: Option<&str>, body: &str) -> Response {
+    router.dispatch(&req(method, path, roles, body))
+}
+
+const ALERT_BODY: &str = r#"{"alert_id":"alert-e2e-1","rule_id":"velocity_24h","customer_key":"cust-1","severity":"high","status":"New"}"#;
+
+#[test]
+fn alert_create_screen_to_ctms_alert_gateway_demo() {
+    let evidence_path = std::path::Path::new(".nir-evidence/ctms_alert_gateway_v1.jsonl");
+    let _ = std::fs::remove_file(evidence_path);
+    let router = alerts_router();
+
+    // Valid RiskAnalyst request succeeds: screen -> auth POST -> admitted
+    // service -> capability minted -> CtmsAlertGatewayV1 validated -> guarded insert.
+    let created = dispatch(&router, "POST", "/api/ctms/alerts", Some("RiskAnalyst"), ALERT_BODY);
+    assert_eq!(created.status, 201, "body: {}", created.body);
+    let entity: serde_json::Value = serde_json::from_str(&created.body).expect("created body is JSON");
+    assert_eq!(entity["alert_id"], "alert-e2e-1");
+
+    // Alert row is created: it round-trips through the guarded list route.
+    let list = dispatch(&router, "GET", "/api/ctms/alerts", Some("RiskAnalyst"), "");
+    assert_eq!(list.status, 200, "body: {}", list.body);
+    let items: serde_json::Value = serde_json::from_str(&list.body).expect("list body is JSON");
+    assert!(
+        items.as_array().unwrap().iter().any(|it| it["alert_id"] == "alert-e2e-1"),
+        "created alert row missing from list: {}",
+        list.body
+    );
+
+    // Evidence file is written: CtmsAlertGatewayV1's hash-chained log has a
+    // real "accepted" decision for this effect.
+    let evidence = std::fs::read_to_string(evidence_path).expect("evidence file must exist after a real decision");
+    assert!(
+        evidence.lines().any(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("evidence line is JSON");
+            v["content"]["decision"] == "accepted" && v["content"]["action"] == "alert.create" && v["content"]["resource"] == "TransactionAlert"
+        }),
+        "no accepted alert.create evidence entry found:\n{evidence}"
+    );
+
+    // Replay is rejected: resubmitting the same alert_id is denied, not
+    // silently double-applied.
+    let replay = dispatch(&router, "POST", "/api/ctms/alerts", Some("RiskAnalyst"), ALERT_BODY);
+    assert_eq!(replay.status, 403, "body: {}", replay.body);
+    assert!(replay.body.contains("already exists"), "replay rejection reason: {}", replay.body);
+
+    // Wrong role is rejected: a PlatformAdmin may not create an alert here.
+    let wrong_role = dispatch(
+        &router,
+        "POST",
+        "/api/ctms/alerts",
+        Some("PlatformAdmin"),
+        r#"{"alert_id":"alert-e2e-2","rule_id":"velocity_24h","customer_key":"cust-2","severity":"high","status":"New"}"#,
+    );
+    assert_eq!(wrong_role.status, 403, "body: {}", wrong_role.body);
+}
+
+const CASE_BODY: &str = r#"{"case_id":"case-e2e-1","alert_id":"alert-e2e-1","assigned_analyst":"priya","status":"Assigned"}"#;
+
+#[test]
+fn case_assign_screen_to_ctms_case_gateway_demo() {
+    let evidence_path = std::path::Path::new(".nir-evidence/ctms_case_gateway_v1.jsonl");
+    let _ = std::fs::remove_file(evidence_path);
+    let router = cases_router();
+
+    let created = dispatch(&router, "POST", "/api/ctms/cases", Some("RiskAnalyst"), CASE_BODY);
+    assert_eq!(created.status, 201, "body: {}", created.body);
+    let entity: serde_json::Value = serde_json::from_str(&created.body).expect("created body is JSON");
+    assert_eq!(entity["case_id"], "case-e2e-1");
+
+    let list = dispatch(&router, "GET", "/api/ctms/cases", Some("RiskAnalyst"), "");
+    assert_eq!(list.status, 200, "body: {}", list.body);
+    let items: serde_json::Value = serde_json::from_str(&list.body).expect("list body is JSON");
+    assert!(
+        items.as_array().unwrap().iter().any(|it| it["case_id"] == "case-e2e-1"),
+        "created case row missing from list: {}",
+        list.body
+    );
+
+    let evidence = std::fs::read_to_string(evidence_path).expect("evidence file must exist after a real decision");
+    assert!(
+        evidence.lines().any(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("evidence line is JSON");
+            v["content"]["decision"] == "accepted" && v["content"]["action"] == "case.assign" && v["content"]["resource"] == "MonitoringCase"
+        }),
+        "no accepted case.assign evidence entry found:\n{evidence}"
+    );
+
+    let replay = dispatch(&router, "POST", "/api/ctms/cases", Some("RiskAnalyst"), CASE_BODY);
+    assert_eq!(replay.status, 403, "body: {}", replay.body);
+    assert!(replay.body.contains("already exists"), "replay rejection reason: {}", replay.body);
+
+    let wrong_role = dispatch(
+        &router,
+        "POST",
+        "/api/ctms/cases",
+        Some("PlatformAdmin"),
+        r#"{"case_id":"case-e2e-2","alert_id":"alert-e2e-1","assigned_analyst":"priya","status":"Assigned"}"#,
     );
     assert_eq!(wrong_role.status, 403, "body: {}", wrong_role.body);
 }

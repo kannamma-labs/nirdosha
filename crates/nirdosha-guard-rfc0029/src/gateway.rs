@@ -25,6 +25,12 @@ pub struct GatewayCore {
     expected_bundle_hash: String,
     issued: Arc<Mutex<HashSet<String>>>,
     replay_store: Arc<dyn ReplayStore>,
+    /// Captured from `issuer.signing_public_key_b64()` at construction --
+    /// `None` unless that issuer was built with
+    /// `CapabilityIssuer::with_signing_key` (see `crate::authority`'s
+    /// module doc). When present, every capability this core verifies
+    /// must carry a signature that verifies against this exact key.
+    verifying_public_key_b64: Option<String>,
 }
 
 impl GatewayCore {
@@ -54,6 +60,7 @@ impl GatewayCore {
             expected_bundle_hash: issuer.bundle().bundle_hash.clone(),
             issued: issuer.issued_registry(),
             replay_store,
+            verifying_public_key_b64: issuer.signing_public_key_b64().map(str::to_string),
         }
     }
 
@@ -79,6 +86,23 @@ impl GatewayCore {
         }
         if capability.is_expired(now_ms) {
             return Err(GatewayError::CapabilityExpired);
+        }
+        if let Some(verifying_key) = &self.verifying_public_key_b64 {
+            let Some(signature_b64) = &capability.signature_b64 else {
+                return Err(GatewayError::SignatureMissing);
+            };
+            use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+            use base64::Engine;
+            let Ok(signature_bytes) = BASE64_STANDARD.decode(signature_b64) else {
+                return Err(GatewayError::SignatureInvalid);
+            };
+            let Ok(public_key_bytes) = BASE64_STANDARD.decode(verifying_key) else {
+                return Err(GatewayError::SignatureInvalid);
+            };
+            let public_key = nirdosha_audit::crypto_backend::signature::UnparsedPublicKey::new(&nirdosha_audit::crypto_backend::signature::ED25519, &public_key_bytes);
+            if public_key.verify(&capability.signable_payload(), &signature_bytes).is_err() {
+                return Err(GatewayError::SignatureInvalid);
+            }
         }
         // Provenance check: a nonce this gateway's bound issuer never minted
         // is rejected here, before the guarded effect ever runs -- this is
@@ -323,6 +347,7 @@ expires_at = "2027-01-01T00:00:00Z"
             issued_at_ms: now,
             expires_at_ms: now + 1,
             nonce: "not-from-an-issuer".into(),
+            signature_b64: None,
         };
         let mut executed = false;
         let err = gateway
@@ -366,6 +391,78 @@ expires_at = "2027-01-01T00:00:00Z"
         assert_eq!(err, GatewayError::CapabilityReplayed);
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn a_signed_capability_from_the_gateways_trusted_key_is_accepted() {
+        let dir = std::env::temp_dir().join(format!("rfc0029_gw_test_signed_ok_{}", std::process::id()));
+        let (pkcs8, _public_key_b64) = crate::authority::generate_ed25519_keypair();
+        let bundle = PolicyBundle::from_toml_str(VALID_BUNDLE).unwrap();
+        let issuer = CapabilityIssuer::with_signing_key(bundle, 5 * 60 * 1000, pkcs8).unwrap();
+        let gateway = TransferRequestGatewayV1::new(&dir, &issuer);
+        let auth = Auth::login("alice", &["Customer"]);
+        let now = ms_2026_06_01();
+        let cap = issuer.mint(&auth, TransferRequestGatewayV1::RESOURCE, TransferRequestGatewayV1::EFFECT, now).unwrap();
+        assert!(cap.signature_b64.is_some(), "a signing-key issuer must attach a signature");
+        assert!(gateway.consume_and_execute(&cap, now, || Ok::<_, String>(())).is_ok());
+    }
+
+    #[test]
+    fn a_gateway_requiring_signatures_rejects_a_capability_with_none() {
+        let dir = std::env::temp_dir().join(format!("rfc0029_gw_test_signed_missing_{}", std::process::id()));
+        let (pkcs8, _public_key_b64) = crate::authority::generate_ed25519_keypair();
+        let bundle = PolicyBundle::from_toml_str(VALID_BUNDLE).unwrap();
+        let signing_issuer = CapabilityIssuer::with_signing_key(bundle, 5 * 60 * 1000, pkcs8).unwrap();
+        let gateway = TransferRequestGatewayV1::new(&dir, &signing_issuer);
+        let now = ms_2026_06_01();
+        let mut unsigned_cap = signing_issuer.mint(&Auth::login("alice", &["Customer"]), TransferRequestGatewayV1::RESOURCE, TransferRequestGatewayV1::EFFECT, now).unwrap();
+        unsigned_cap.signature_b64 = None; // simulates a downgrade/strip attempt
+        let err = gateway.consume_and_execute(&unsigned_cap, now, || Ok::<_, String>(())).unwrap_err();
+        assert_eq!(err, GatewayError::SignatureMissing);
+    }
+
+    #[test]
+    fn a_gateway_requiring_signatures_rejects_one_signed_by_a_different_key() {
+        let dir = std::env::temp_dir().join(format!("rfc0029_gw_test_signed_wrong_key_{}", std::process::id()));
+        let bundle_for_trusted_issuer = PolicyBundle::from_toml_str(VALID_BUNDLE).unwrap();
+        let (trusted_pkcs8, _) = crate::authority::generate_ed25519_keypair();
+        let trusted_issuer = CapabilityIssuer::with_signing_key(bundle_for_trusted_issuer, 5 * 60 * 1000, trusted_pkcs8).unwrap();
+        let gateway = TransferRequestGatewayV1::new(&dir, &trusted_issuer);
+
+        // A second issuer, same bundle content, but a different signing
+        // key -- as if an attacker minted a capability under their own key
+        // and tried to pass it to a gateway that trusts someone else's.
+        let bundle_for_attacker_issuer = PolicyBundle::from_toml_str(VALID_BUNDLE).unwrap();
+        let (attacker_pkcs8, _) = crate::authority::generate_ed25519_keypair();
+        let attacker_issuer = CapabilityIssuer::with_signing_key(bundle_for_attacker_issuer, 5 * 60 * 1000, attacker_pkcs8).unwrap();
+        let now = ms_2026_06_01();
+        let attacker_cap = attacker_issuer.mint(&Auth::login("mallory", &["Customer"]), TransferRequestGatewayV1::RESOURCE, TransferRequestGatewayV1::EFFECT, now).unwrap();
+
+        let err = gateway.consume_and_execute(&attacker_cap, now, || Ok::<_, String>(())).unwrap_err();
+        // Signature verification runs before the in-process provenance
+        // check (see `verify_and_consume`'s ordering) -- the attacker's
+        // capability is signed by a key this gateway doesn't trust, so it
+        // is rejected as `SignatureInvalid` (it would also fail `NotIssued`
+        // if it somehow got past that, since this gateway's trusted issuer
+        // never minted this nonce either).
+        assert_eq!(err, GatewayError::SignatureInvalid);
+    }
+
+    #[test]
+    fn a_genuinely_issued_capability_with_a_tampered_signature_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("rfc0029_gw_test_signed_tampered_{}", std::process::id()));
+        let (pkcs8, _public_key_b64) = crate::authority::generate_ed25519_keypair();
+        let bundle = PolicyBundle::from_toml_str(VALID_BUNDLE).unwrap();
+        let issuer = CapabilityIssuer::with_signing_key(bundle, 5 * 60 * 1000, pkcs8).unwrap();
+        let gateway = TransferRequestGatewayV1::new(&dir, &issuer);
+        let now = ms_2026_06_01();
+        // Genuinely minted (nonce is real, in the issued registry) but its
+        // signature is corrupted after the fact -- provenance/bundle/expiry
+        // all pass, only the signature check can catch this.
+        let mut cap = issuer.mint(&Auth::login("alice", &["Customer"]), TransferRequestGatewayV1::RESOURCE, TransferRequestGatewayV1::EFFECT, now).unwrap();
+        cap.signature_b64 = Some("tampered-not-a-real-signature".to_string());
+        let err = gateway.consume_and_execute(&cap, now, || Ok::<_, String>(())).unwrap_err();
+        assert_eq!(err, GatewayError::SignatureInvalid);
     }
 
     #[test]

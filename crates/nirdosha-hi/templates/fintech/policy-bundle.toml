@@ -1,0 +1,24 @@
+# RFC 0029 §7.1 governed policy bundle for the fintech template's service
+# catalog (policy-services.toml). This is the domain authority's approval
+# envelope every catalog entry is admitted under -- bundle_hash is computed
+# from this file's exact bytes (never authored here) by both
+# crates/cargo-nirdosha/src/service_catalog.rs (generation time) and
+# crates/nirdosha-guard-rfc0029 (runtime), so the two can never silently
+# drift onto different notions of "the current bundle".
+#
+# Scope note: approved_by/signed_by are checked for presence and the
+# effective_from/expires_at window is checked against the clock. Neither
+# this file nor the loaders that read it verify a real cryptographic
+# signature yet by default -- nirdosha_guard_rfc0029::SignedPolicyBundle +
+# AuthorityRegistry can verify a real detached Ed25519 signature over this
+# file's exact bytes when a deployment opts in; see that crate's module
+# doc.
+
+[bundle]
+authority_id = "ctms-domain-authority"
+policy_owner = "risk-platform-team"
+jurisdiction = "IN"
+approved_by = "ctms-domain-authority"
+signed_by = "ctms-domain-authority"
+effective_from = "2026-01-01T00:00:00Z"
+expires_at = "2027-01-01T00:00:00Z"

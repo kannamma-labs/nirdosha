@@ -59,6 +59,13 @@ members = [
     # effect. Depended on by generated apps whose screens.toml declares a
     # [screen.service] reference.
     "crates/nirdosha-guard-rfc0029",
+    # CTMS (continuous transaction monitoring) first demo slice: canonical
+    # event schema, a demo-mode Kafka-compatible stream adapter, one
+    # deterministic velocity rule, and the alert.create/case.assign/
+    # case.disposition effect gateways -- composes nirdosha-guard-rfc0029's
+    # capability/gateway contract and nirdosha-ingestion-topic-kafka's
+    # StreamSource/StreamSink port rather than reimplementing either.
+    "crates/nirdosha-ctms",
     # RTM live-demo plan, Phase 0: bridges GuardClient/StoreDriver into
     # nirdosha-rt's screen-archetype macros (crud_screens! and friends) --
     # see the crate's own doc comment for exactly which evaluator gaps
