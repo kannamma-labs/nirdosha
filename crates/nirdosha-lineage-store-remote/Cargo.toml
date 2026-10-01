@@ -1,0 +1,10 @@
+[package]
+name = "nirdosha-lineage-store-remote"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "Remote GraphStore driver for the RFC 0026 metadata plane (structural stub — see crate docs)"
+license = "MIT"
+
+[dependencies]
+nirdosha-lineage = { path = "../nirdosha-lineage" }

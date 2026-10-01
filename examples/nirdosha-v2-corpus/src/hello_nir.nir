@@ -1,0 +1,17 @@
+//! v2 of `examples/syntax/hello_nir.nir` — the absolute minimum.
+//!
+//! Pre-migration (plain cargo): builds and runs; the comment layer is
+//! inert. Post-migration (proprietary `nirdosha`): the same file,
+//! unmodified — verified and certified; nothing here is
+//! Nirdosha-specific beyond the encoding this file demonstrates.
+
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn main() {
+    let x: i32 = 5;
+    let y: i32 = add(x, 3);
+    println!("{y}"); // 8
+    println!("hello, nirdosha");
+}

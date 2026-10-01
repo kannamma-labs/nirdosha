@@ -1,0 +1,39 @@
+[package]
+name = "nirdosha-driver"
+version = "0.1.0"
+edition = "2024"
+description = "The Nirdosha rustc driver: MIR interprocedural effects and numeric proof discharge. Requires nightly + rustc-dev."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "nirdosha-driver"
+path = "src/main.rs"
+
+[dependencies]
+nirdosha-contract-core = { path = "../nirdosha-contract-core" }
+nirdosha-smt-core = { path = "../nirdosha-smt-core", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Re-parses a `requires(expr)`/`ensures(expr)` predicate's doc-encoded
+# source string (nirdosha-contract-core's macro-time parse only travels
+# as text through rustdoc JSON) into the same `syn::Expr` shape
+# `predicate::check_predicate_shape` already validated, then resolves its
+# identifiers against real MIR locals -- issue #68.
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+# Only for tests/pack_check.rs, to write a fixture `.nir/hi.db` in the
+# exact shape `nirdosha-contract-core::pack` reads.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[features]
+default = ["smt"]
+smt = ["nirdosha-smt-core/smt"]
+dist = ["smt", "nirdosha-smt-core/dist"]
+
+# The dialect's own toolchain: explicitly exempt from itself (the
+# verifier does not lint its own implementation — see
+# docs/nirdosha-rt-dialect.md §5).
+[package.metadata.nirdosha-rt]
+toolchain = true

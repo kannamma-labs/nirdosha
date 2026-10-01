@@ -1,0 +1,32 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-sanctions"
+version = "1.0.0"
+module = "M15"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "15.1"
+name = "Sanctions Screening"
+module = "M15"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "ComplianceOfficer"]
+stage = "blocked"
+blocked_by = ["primitive:sanctions_screen", "primitive:pep_check", "primitive:watchlist_sync"]
+codegen = { template = "crud_screens", mount_symbol = "mount_sanctions", route_path = "/sanctions", generated_files = ["src/screens/m15_sanctions.nir"] }
+data_binding = { entities = ["SanctionsHit"], primary_key = "hit_id", guard = { table = "sanctions_hit", purpose = "SanctionsRead" }, fields = [
+    { name = "hit_id", type = "String" },
+    { name = "entity_name", type = "String" },
+    { name = "entity_type", type = "String" },
+    { name = "list_source", type = "String" },
+    { name = "match_score", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "SanctionsRead", allowed_actions = ["read", "update"] }
+file = "src/screens/m15_sanctions.nir"
+notes = "BLOCKED: sanctions-screening + PEP/watchlist primitives not yet available."

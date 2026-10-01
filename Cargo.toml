@@ -1,43 +1,203 @@
 [workspace]
 resolver = "2"
+# Native runtime adapters depend on this separate build workspace. Explicit
+# exclusion keeps Cargo from auto-enrolling the path dependency as a member.
+exclude = ["crates/runtime-kernels", "crates/compiled-serve"]
 members = [
-    "crates/compiler",
-    "crates/grammar_check",
-    "crates/grammar_export",
+    # RFC 0029 candidate canonical IR/JCS conformance boundary. This crate is
+    # deliberately isolated from live gateways until the Phase 0 schema and
+    # evaluator gates pass.
+    "crates/rfc0029-conformance",
+    # `crates/compiler` (the original interpreted `.nir` language) was
+    # deleted 2026-09-20 -- deprecated in favor of the v2 Rust dialect
+    # below (docs/ROADMAP.md's 2026-09-17 note; see
+    # docs/V2_MIGRATION_ROADMAP.md for how this repo's own frozen copy
+    # relates to the still-actively-developed native compiler product
+    # in a separate repository). `crates/grammar_export` and
+    # `crates/grammar_check` were deleted alongside it -- both existed
+    # solely to validate that deleted grammar.
+    #
+    # The `hi` agentic build console, extracted out of `crates/compiler`
+    # 2026-09-16 so it has no dependency on the native `.nir` compiler
+    # crate at all -- every "does this v2 candidate build/describe/
+    # verify" question goes through `nirdosha-hi`'s own `v2_verify.rs`
+    # (real `cargo build` + `cargo-nirdosha`), never the native parser.
+    "crates/nirdosha-hi",
+    "crates/nirdosha-graph",
+    "crates/nirdosha-workflow",
+    # Shared Ed25519 signing + tamper-evident audit-log primitives --
+    # used by `crates/nirdosha-hi` (the self-repair loop's hint-cache
+    # audit trail); also once used by the now-deleted `crates/compiler`
+    # (certificate/pack signing), which is why it was extracted as its
+    # own crate rather than living inside `nirdosha-hi`.
+    "crates/nirdosha-audit",
+    # RFC 0023: store-agnostic access-control IR and invariants.
+    "crates/nirdosha-guard-core",
+    # RFC 0026: vendor-free observed-lineage types, collector, projection,
+    # and GraphStore port — plus the composition/query proc-macros and the
+    # two GraphStore drivers (embedded + remote).
+    "crates/nirdosha-lineage",
+    "crates/nirdosha-lineage-macros",
+    "crates/nirdosha-lineage-store-embedded",
+    "crates/nirdosha-lineage-store-remote",
+    # RFC 0023 §1C: federated reads, catalog routing, and budget coordination.
+    "crates/nirdosha-guard-federation",
+    # RFC 0023 macros: policy!, #[dataset], #[classify], etc.
+    "crates/nirdosha-guard-macros",
+    # RFC 0023 §1C.3 / RFC 0024: first-class guarded MCP surface for agents.
+    "crates/nirdosha-guard-mcp",
+    # RFC 0023/0025 substrate: catalog record registry (linkme slices),
+    # module interconnection contract (GuardClient, StoreDriver SPI,
+    # guarded_apply), and the V-pass / conformance verify engine.
+    "crates/nirdosha-guard-registry",
+    "crates/nirdosha-guard-mic",
+    "crates/nirdosha-guard-verify",
+    # RFC 0029 §7.1 runtime capability + effect gateway for the
+    # service-catalog vertical slice (transfer_create) -- deliberately
+    # separate from crates/rfc0029-conformance, which documents itself as
+    # having no real gateway and being unable to authorize a production
+    # effect. Depended on by generated apps whose screens.toml declares a
+    # [screen.service] reference.
+    "crates/nirdosha-guard-rfc0029",
+    # CTMS (continuous transaction monitoring) first demo slice: canonical
+    # event schema, a demo-mode Kafka-compatible stream adapter, one
+    # deterministic velocity rule, and the alert.create/case.assign/
+    # case.disposition effect gateways -- composes nirdosha-guard-rfc0029's
+    # capability/gateway contract and nirdosha-ingestion-topic-kafka's
+    # StreamSource/StreamSink port rather than reimplementing either.
+    "crates/nirdosha-ctms",
+    # RTM live-demo plan, Phase 0: bridges GuardClient/StoreDriver into
+    # nirdosha-rt's screen-archetype macros (crud_screens! and friends) --
+    # see the crate's own doc comment for exactly which evaluator gaps
+    # (field_policy, requires conditions, scope-function filters, and the
+    # one-row-per-resource storage schema) it closes and how.
+    "crates/nirdosha-guard-screens",
+    # Real Postgres StoreDriver (write path): pooled + TLS-by-default
+    # connection, RLS via session variables, honest FilterNodeKind
+    # manifest — RFC 0026 checklist's "production store drivers" line.
+    "crates/nirdosha-guard-store-postgres",
+    # RFC 0026 §14: LineageSink federation drivers (JSONL file + HTTP batch),
+    # satisfying the two-driver rule for the sink port.
+    "crates/nirdosha-lineage-sink-jsonl",
+    "crates/nirdosha-lineage-sink-http",
+    # RFC 0025 §8 domain drivers (Plan Phase 13): the missing StoreDriver-
+    # adjacent ports the RTM ecosystem RFC declares but nothing in the
+    # workspace implemented -- each follows the same one-honest-driver
+    # pattern as nirdosha-guard-store-postgres above.
+    "crates/nirdosha-screening-list-fixture",
+    "crates/nirdosha-scoring-model-onnx",
+    "crates/nirdosha-ingestion-topic-kafka",
+    "crates/nirdosha-egress-report-goaml",
+    "crates/nirdosha-guard-snapshot-ws",
+    # Pure, dependency-light transaction-isolation-anomaly detection
+    # (the Direct Serialization Graph algorithm), shared verbatim by
+    # `crates/runtime-kernels` (the live FFI-hooked path, via its own
+    # separate nested workspace's own path dependency on this same
+    # crate -- see `crates/runtime-kernels/Cargo.toml`'s own comment on
+    # why it can't join *this* workspace, mirroring `compiled-serve`'s
+    # identical reasoning); also once used by the now-deleted
+    # `crates/compiler` (`nirdosha check-isolation` and certificate
+    # isolation-violation attachment). No `[workspace]` table of its
+    # own, so it stays an ordinary member here, not a workspace root
+    # the way `runtime-kernels`/`compiled-serve` had to become to solve
+    # the reverse problem.
+    "crates/isolation-core",
     "crates/presence-gateway",
     # rfcs/0008-native-plugin-abi-widening.md Phase 1/4: the first two
     # real, *compiled-path* reference plugins, built against
     # `NativePluginBuiltin` directly (a plain `#[no_mangle] extern "C"`
     # symbol, not the deleted interpreter's `PluginBuiltin` trait) — see
     # each crate's own README for the plugin-author and app-author
-    # sides, and `crates/compiler/tests/native_plugin_examples.rs` for
-    # the automated "compiles and the real binary runs correctly" proof.
+    # sides. Their automated "compiles and the real binary runs
+    # correctly" proof (`crates/compiler/tests/native_plugin_examples.rs`)
+    # went away with `crates/compiler` itself (2026-09-20) -- these
+    # crates still compile standalone, but linking their staticlib output
+    # into a real native binary has no consumer left in this repo (v2 has
+    # no AOT codegen to link into). Not deleted: this is real,
+    # still-wanted functionality (v2 needs its own answer for
+    # third-party/native plugin support) with no v2-native port built yet
+    # -- tracked as an open item in `docs/V1_CAPABILITY_PORT_MAP.md`
+    # rather than lost. Kept as members so they keep compiling and
+    # bit-rotting less while that port is pending.
     "crates/plugin-example-native-shout",
     "crates/plugin-example-native-kv",
     # rfcs/0011-uniform-service-provider-model.md Phase 8: the RFC's own
     # closing checklist item -- one real, shipped `call`-shape plugin,
     # proving Phases 3-7's plugin-provider machinery works end to end
     # with real compiled/linked/executed code, not just typechecked
-    # `NativePluginBuiltin` metadata. See its own README and
-    # `crates/compiler/tests/native_plugin_examples.rs`.
+    # `NativePluginBuiltin` metadata. See its own README; its
+    # `crates/compiler/tests/native_plugin_examples.rs` proof is gone
+    # along with that crate -- same "not deleted, pending a v2 port"
+    # status as the two crates above, same tracking doc.
     "crates/plugin-example-native-authed-http",
     # rfcs/0009-ui-catalog-extensibility.md Phase B's real reference UI
     # component -- a genuinely separate crate (not inline Rust in a
     # test file) contributing a `layout { ... }` widget kind. See its
-    # own README and `crates/compiler/tests/ui_plugin_examples.rs` for
-    # the "reads real, separately-compiled bytes" proof, mirroring the
-    # two native-plugin examples above.
+    # own README; its `crates/compiler/tests/ui_plugin_examples.rs`
+    # proof is gone along with that crate, and its own consumer-side
+    # example (`nirdosha::ui_plugin::NativeUiComponent`) named a type
+    # that lived in `crates/compiler` and is gone too -- same "not
+    # deleted, pending a v2 port" status, same tracking doc.
     "crates/ui-plugin-example-sparkline",
-    # `crates/bench`, the original six interpreter-era `plugin-example-*`
-    # crates, `plugin-support`, and `plugin-examples` stay removed: each
-    # depended entirely on the interpreter (interpreted plugin dispatch
-    # via `PluginBuiltin`/`PluginFn`, or scoring an LLM-generated
-    # program's *interpreted* result value) — a mechanism that no longer
-    # exists now that the interpreter is gone. See git history if any of
-    # this (a real MySQL/Cassandra/ActiveMQ/Neo4j/HBase plugin, ported
-    # onto the compiled-path ABI above instead of the deleted trait) is
-    # worth rebuilding — rfcs/0008 Phase 4 names this as the real
-    # remaining proof, not yet done.
+    # `crates/bench` (2026-09) -- nirdosha-master-plan.md Part 3 Sprint 2's
+    # "Benchmark harness v1", rebuilt from nothing (the original,
+    # interpreter-era `crates/bench` was removed for the same reason the
+    # six interpreter-era `plugin-example-*` crates further below were:
+    # it scored an LLM-generated program's *interpreted* result value, a
+    # mechanism that no longer exists). Repointed to v2 2026-09-20:
+    # `nirdosha_hi::v2_verify::verify_v2_source`'s own in-process verdict
+    # decides pass/fail (`cargo build` + `cargo-nirdosha`'s contract
+    # scanner), the same check `nirdosha_hi::hi_llm`'s own self-repair
+    # loop already gates every attempt on -- never a second, bench-local
+    # notion of "correct" that could drift from what the compiler itself
+    # says. v2 has no SMT/Z3 proof-discharge pipeline yet (unlike the
+    # deleted `crates/compiler`'s `nirdosha certify`) -- tracked as an
+    # open item in `docs/V1_CAPABILITY_PORT_MAP.md`, not silently
+    # dropped.
+    "crates/bench",
+    # The original six interpreter-era `plugin-example-*` crates,
+    # `plugin-support`, and `plugin-examples` stay removed: each depended
+    # entirely on the interpreter (interpreted plugin dispatch via
+    # `PluginBuiltin`/`PluginFn`) -- a mechanism that no longer exists
+    # now that the interpreter is gone. A real MySQL/Cassandra/ActiveMQ/
+    # Neo4j/HBase plugin, ported onto the compiled-path ABI above instead
+    # of the deleted trait, is the real remaining proof rfcs/0008 Phase 4
+    # names -- tracked in `docs/V1_CAPABILITY_PORT_MAP.md`, not done.
+
+    # ── The Nirdosha Rust dialect (Stage 1) ──────────────────────────────
+    # To the external world, Nirdosha-dialect code is just another Rust
+    # program: it compiles and runs under plain `cargo` with zero
+    # Nirdosha tooling. Hand the same source to the Nirdosha compiler
+    # (`cargo nirdosha build`) and the contract claims riding in its
+    # attributes/doc comments stop being comments and become checks —
+    # lying becomes a build error. See docs/nirdosha-rt-dialect.md for
+    # the design and the two demo crates below for the story.
+    "crates/nirdosha-contract-core",
+    "crates/nirdosha-smt-core",
+    "crates/nirdosha-macros",
+    "crates/nirdosha-rt",
+    "crates/cargo-nirdosha",
+    # Stage 2: the rustc driver — MIR-level interprocedural effects
+    # verification. Nightly + rustc-dev only; the driver is invoked as
+    # RUSTC_WORKSPACE_WRAPPER by `cargo nirdosha build --deep` and is a
+    # pass-through for crates without Nirdosha contracts.
+    "crates/nirdosha-driver",
+    "examples/rt-payroll",
+    "examples/rt-payroll-lying",
+    "examples/rt-payroll-pure-chain",
+    "examples/nirdosha-v2-corpus",
+    # v2 dialect: real-time transaction monitoring vertical slice
+    # (ingestion -> RFC 0023 data guard -> policy engine -> alerts -> UI),
+    # one .nir file that is a plain Rust program under both compilers.
+    "examples/rtm",
+    # v2 dialect: AWCC Revenue Assurance companion demo, mirroring RTM's
+    # structure with RA-specific roles, datasets, and screens.
+    "examples/awcc-rev_assurance",
+    # v2 dialect: greenfield generator proof — the whole app is emitted
+    # by `cargo nirdosha generate-screens` from screens.toml + menus.toml
+    # (v2 register as source of truth; guard is the single data
+    # authority in every generated screen).
+    "examples/helpdesk",
 ]
 
 # Rust's own integer-overflow panic is `nirdosha`'s only runtime guard for

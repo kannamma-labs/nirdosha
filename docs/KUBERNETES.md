@@ -41,6 +41,20 @@ an Ingress/mesh, not in `tiny_http`.
 > product decision (revive `serve.rs` on the compiled path vs. a new
 > design), not a doc fix.
 
+> **Deprecation note (2026-09-17).** `crates/compiler` (the native
+> `.nir` compiler this entire document containerizes) is now
+> deprecated in favor of the v2 Rust dialect
+> (`docs/nirdosha-rt-dialect.md`). `.github/workflows/docker.yml`'s
+> `runtime` image job and `.github/workflows/release.yml` are both
+> retired, the repo-root `Dockerfile` this doc's every `[DONE]` row
+> below refers to is deleted, and `ghcr.io/protobox/nirdosha-runtime`
+> is no longer published. The Helm chart and Kustomize bases under
+> `deploy/` still reference that image for their main container and
+> are not currently deployable against a real registry. Everything
+> below is accurate as a historical record of what was built and
+> verified against `crates/compiler`, not a description of a live,
+> supported deployment path today.
+
 ## The one question that actually matters: what happens at >1 replica?
 
 `nirdosha serve` fuses UI and API into **one process** — it answers

@@ -1,0 +1,16 @@
+[package]
+name = "nirdosha-ingestion-topic-kafka"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "StreamSource/StreamSink TopicDriver for RFC 0025 SS8.1 ingestion, backed by a real Kafka-protocol client (rskafka), tested against Redpanda"
+license = "MIT"
+publish = false
+
+[dependencies]
+rskafka = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+async-trait = "0.1"
+chrono = "0.4"
+
+[dev-dependencies]

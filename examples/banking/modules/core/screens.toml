@@ -1,0 +1,126 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "banking-core"
+version = "1.0.0"
+module = "core"
+total_screens = 6
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+# ------------------------------------------------------------------ M1 Auth
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.users_file"]
+blocked_by = []
+stage = "built"
+codegen = { template = "login", mount_symbol = "mount_login", route_path = "/login", generated_files = ["src/app_shell.nir"] }
+parameters.demo_users = [
+    { username = "alice", password = "pass123", roles = ["Customer"] },
+    { username = "bob",   password = "pass123", roles = ["Customer", "LoanOfficer"] },
+    { username = "carol", password = "pass123", roles = ["BranchManager"] },
+    { username = "dave",  password = "pass123", roles = ["TreasuryHead"] },
+    { username = "eve",   password = "pass123", roles = ["ComplianceOfficer"] },
+]
+notes = "demo auth; production mode needs OIDC/JWKS wiring"
+
+[[screen]]
+id = "1.2"
+name = "Nav Shell"
+module = "M1"
+archetype = "app_shell_from_toml"
+combo = []
+roles = ["AllRoles:R"]
+datasets = []
+blocked_by = []
+stage = "built"
+codegen = { template = "app_shell_from_toml", mount_symbol = "mount_app_shell", route_path = "/shell", generated_files = ["src/app_shell.nir"] }
+notes = "nav/landing generated from composed menus.toml"
+
+# -------------------------------------------------------------- M7 Compliance
+[[screen]]
+id = "7.1"
+name = "Audit Trail"
+module = "M7"
+archetype = "report_builder"
+combo = []
+roles = ["ComplianceOfficer:R", "BranchManager:R"]
+datasets = ["PG.audit_log"]
+blocked_by = []
+stage = "built"
+codegen = { template = "report_builder", mount_symbol = "mount_audit_report", route_path = "/compliance/audit", generated_files = ["src/screens/m07_compliance.nir"] }
+data_binding = { entities = ["AuditEntry"], primary_key = "entry_id", guard = { table = "audit_table", purpose = "Compliance" }, fields = [
+    { name = "entry_id", type = "String" },
+    { name = "actor_id", type = "String" },
+    { name = "action", type = "String" },
+    { name = "resource", type = "String" },
+    { name = "timestamp", type = "String" },
+] }
+policy = { purpose = "Compliance", allowed_actions = ["aggregate", "read"] }
+parameters = { access = 'requires role "ComplianceOfficer"', dimensions = ["action", "resource"] }
+notes = "audit log is append-only from primitives, never directly editable"
+
+# ------------------------------------------------------------------ M8 Admin
+[[screen]]
+id = "8.1"
+name = "Holiday Calendar"
+module = "M8"
+archetype = "crud_screens"
+combo = []
+roles = ["BranchManager:R/W"]
+datasets = ["PG.holidays"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_holidays", route_path = "/admin/holidays", generated_files = ["src/screens/m08_admin.nir"] }
+data_binding = { entities = ["Holiday"], primary_key = "holiday_id", guard = { table = "holiday_table", purpose = "Admin" }, fields = [
+    { name = "holiday_id", type = "String" },
+    { name = "date", type = "String" },
+    { name = "jurisdiction", type = "String" },
+    { name = "description", type = "String" },
+] }
+policy = { purpose = "Admin", allowed_actions = ["read", "create", "update"] }
+parameters = { access_create = 'requires role "BranchManager"', access_read = 'requires role "BranchManager"', access_update = 'requires role "BranchManager"' }
+
+[[screen]]
+id = "8.2"
+name = "Product Config"
+module = "M8"
+archetype = "settings_screen"
+combo = []
+roles = ["TreasuryHead:R/W"]
+datasets = ["PG.product_config"]
+blocked_by = []
+stage = "built"
+codegen = { template = "settings_screen", mount_symbol = "mount_product_config", route_path = "/admin/products", generated_files = ["src/screens/m08_admin.nir"] }
+data_binding = { entities = ["ProductConfig"], primary_key = "product_code", guard = { table = "product_config_table", purpose = "Admin", row_id = "singleton" }, fields = [
+    { name = "product_code", type = "String" },
+    { name = "interest_rate_bps", type = "String" },
+    { name = "min_balance_cents", type = "String" },
+] }
+policy = { purpose = "Admin", allowed_actions = ["read", "update"] }
+parameters = { access = 'requires role "TreasuryHead"' }
+
+# ------------------------------------------------------------------
+# Shared entities declared here so other modules can reference them.
+# They are not exposed as screens directly.
+# ------------------------------------------------------------------
+[[screen]]
+id = "0.1"
+name = "Customer (shared entity)"
+module = "M0"
+archetype = "static_embed"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["PG.customers"]
+stage = "blocked"
+blocked_by = ["primitive:customer_entity"]
+codegen = { template = "static_embed", mount_symbol = "mount_customer_stub", route_path = "/_entities/customer", generated_files = ["src/screens/m00_core.nir"] }
+parameters = { title = "Customer Entity", content_file = "files/customer-entity.md", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }
+notes = "placeholder: Customer is a shared entity used by accounts, loans, cards. No screen yet."

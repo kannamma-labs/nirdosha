@@ -1,0 +1,139 @@
+//! M2 Dashboards, Shell & Landing — AWCC Revenue Assurance.
+//!
+//! RA analog of `examples/rtm/src/screens/m02_dashboards.nir`.
+//! Phase A: shell from menus.toml, L1 My Day dashboard, team dashboard.
+
+use crate::bridge::{alert_table, cdr_table, leak_case_table};
+
+fn my_pending_alerts(auth: &nirdosha_rt::Auth) -> i64 {
+    match alert_table().guarded_snapshot(auth, "Operations") {
+        Ok(rows) => rows.iter().filter(|r| r.status == "new" || r.status == "in_progress").count() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn my_alerts_by_status(auth: &nirdosha_rt::Auth) -> String {
+    let rows = match alert_table().guarded_snapshot(auth, "Operations") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_status: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for row in &rows {
+        *by_status.entry(row.status.clone()).or_insert(0) += 1;
+    }
+    serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_l1_dashboard,
+    path: "/dashboard/my-day",
+    title: "My Day",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "My pending alerts", fn: my_pending_alerts, guarded: true },
+        Chart  { label: "My alerts by status", fn: my_alerts_by_status, mark: bar, guarded: true },
+    }
+}
+
+fn team_alert_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    alert_table().guarded_aggregate(auth, "Operations").map(|r| r.len() as i64).unwrap_or(0)
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_team_dashboard,
+    path: "/dashboard/team",
+    title: "Team Dashboard",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Team alert volume", fn: team_alert_volume, guarded: true },
+    }
+}
+
+nirdosha_rt::app_shell_from_toml!(
+    "menus.toml",
+    title: "AWCC Revenue Assurance (demo)",
+);
+
+// 2.4 Finance Controller Dashboard
+fn fc_pending_atra(auth: &nirdosha_rt::Auth) -> i64 {
+    match crate::bridge::atra_bundle_table().guarded_snapshot(auth, "Operations") {
+        Ok(rows) => rows.iter().filter(|r| r.status == "pending_review").count() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn fc_leak_cases(auth: &nirdosha_rt::Auth) -> i64 {
+    match leak_case_table().guarded_aggregate(auth, "Analytics") {
+        Ok(rows) => rows.len() as i64,
+        Err(_) => 0,
+    }
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_fc_dashboard,
+    path: "/dashboard/finance",
+    title: "Finance Controller Dashboard",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "ATRA pending review", fn: fc_pending_atra, guarded: true },
+        Metric { label: "Leak cases", fn: fc_leak_cases, guarded: true },
+    }
+}
+
+// 2.5 Real-Time CDR Monitoring Wall
+fn unused_wall_store() -> &'static nirdosha_rt::prelude::SharedTable<i64, crate::bridge::CdrRow> {
+    static STORE: std::sync::OnceLock<nirdosha_rt::prelude::SharedTable<i64, crate::bridge::CdrRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(nirdosha_rt::prelude::SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_monitoring_wall,
+    entity: crate::bridge::CdrRow,
+    store: unused_wall_store,
+    path: "/wall",
+    fields: [
+        cdr_id: String,
+        tenant_id: String,
+        msisdn: String,
+        call_type: String,
+        status: String,
+        amount: f64,
+        occurred_at: i64,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: cdr_table,
+        purpose: "Operations",
+    },
+    refresh_seconds: 15,
+    sort_by: occurred_at,
+}
+
+// 2.6 Executive KPI Dashboard
+fn exec_alert_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    alert_table().guarded_aggregate(auth, "Analytics").map(|r| r.len() as i64).unwrap_or(0)
+}
+
+fn exec_leak_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    leak_case_table().guarded_aggregate(auth, "Analytics").map(|r| r.len() as i64).unwrap_or(0)
+}
+
+fn exec_model_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    crate::bridge::model_run_volume(auth)
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_exec_kpi_dashboard,
+    path: "/exec",
+    title: "Executive KPI Dashboard",
+    refresh_seconds: 300,
+    widgets {
+        Metric { label: "Alert volume", fn: exec_alert_volume, guarded: true },
+        Metric { label: "Leak case volume", fn: exec_leak_volume, guarded: true },
+        Metric { label: "Model-scored volume", fn: exec_model_volume, guarded: true },
+    }
+}

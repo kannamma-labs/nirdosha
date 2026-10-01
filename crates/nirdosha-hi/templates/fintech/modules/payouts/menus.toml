@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Payouts"
+
+[[group]]
+id = "payouts"
+label_key = "nav.group.payouts"
+order = 60
+
+[[menu]]
+id = "nav.payouts"
+label_key = "nav.payouts"
+group = "payouts"
+screen_id = "6.1"
+route = "/payouts"
+guard = { action = "read", resource = "payout" }
+roles = ["PlatformAdmin", "MerchantAdmin"]
+order = 10

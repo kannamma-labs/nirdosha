@@ -1,0 +1,33 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-chargebacks"
+version = "1.0.0"
+module = "M14"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "14.1"
+name = "Chargebacks"
+module = "M14"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "RiskAnalyst", "MerchantAdmin"]
+stage = "blocked"
+blocked_by = ["primitive:dispute_manage", "primitive:chargeback_post"]
+codegen = { template = "crud_screens", mount_symbol = "mount_chargebacks", route_path = "/chargebacks", generated_files = ["src/screens/m14_chargebacks.nir"] }
+data_binding = { entities = ["Dispute"], primary_key = "dispute_id", guard = { table = "dispute", purpose = "DisputeOps" }, fields = [
+    { name = "dispute_id", type = "String" },
+    { name = "payment_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "deadline", type = "String" }
+] }
+policy = { purpose = "DisputeOps", allowed_actions = ["read", "update"] }
+file = "src/screens/m14_chargebacks.nir"
+notes = "BLOCKED: dispute-management + chargeback-posting primitives not yet available."

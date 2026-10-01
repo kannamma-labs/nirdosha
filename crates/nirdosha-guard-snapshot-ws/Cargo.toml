@@ -1,0 +1,22 @@
+[package]
+name = "nirdosha-guard-snapshot-ws"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "Networked policy-snapshot distribution (WebSocket) for RFC 0023's PolicyStore, so a running GuardClient can pick up a new policy_version without redeploying — Plan Phase 18"
+license = "MIT"
+publish = false
+
+[dependencies]
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+# Same transport choice as crates/presence-gateway (this workspace's only
+# other real-time push service) — for consistency, per the plan's own
+# scope note, not a second, independent transport decision.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde_json = "1"
+
+[dev-dependencies]
+nirdosha-guard-mic = { path = "../nirdosha-guard-mic" }
+nirdosha-audit = { path = "../nirdosha-audit" }

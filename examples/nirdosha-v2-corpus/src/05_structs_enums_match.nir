@@ -1,0 +1,49 @@
+//! v2 of `examples/features/05_structs_enums_match.nir` — fixed
+//! concrete fields, named construction (`.nir`'s positional call),
+//! `.field` access, and `match` over a closed, exhaustively-checked
+//! variant set.
+
+use nirdosha_rt::prelude::*;
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+    Origin,
+}
+
+fn area(s: &Shape) -> f64 {
+    match s {
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rectangle(w, h) => w * h,
+        Shape::Origin => 0.0,
+    }
+}
+
+fn main() {
+    let p = Point { x: 3.0, y: 4.0 };
+    println!("{}", p.x);
+    println!("{}", p.y);
+    println!("{}", norm(&Vector([p.x, p.y]))); // 5
+
+    let c = Shape::Circle(2.0);
+    let r = Shape::Rectangle(3.0, 4.0);
+    let o = Shape::Origin;
+    println!("{}", area(&c)); // 12.56636
+    println!("{}", area(&r)); // 12
+    println!("{}", area(&o)); // 0
+
+    // a literal-pattern match over a plain scalar — closed by a
+    // mandatory trailing `_` wildcard
+    let code: i64 = 2;
+    let label = match code {
+        1 => Shape::Circle(1.0),
+        2 => Shape::Rectangle(2.0, 2.0),
+        _ => Shape::Origin,
+    };
+    println!("{}", area(&label)); // 4
+}

@@ -1,0 +1,18 @@
+[package]
+name = "nirdosha-smt-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Shared Rust integer semantics for native and MIR numeric proofs"
+
+[features]
+default = ["smt"]
+smt = ["dep:z3"]
+dist = ["smt", "z3/vendored"]
+
+[dependencies]
+z3 = { version = "0.20.2", optional = true }
+
+[package.metadata.nirdosha-rt]
+toolchain = true

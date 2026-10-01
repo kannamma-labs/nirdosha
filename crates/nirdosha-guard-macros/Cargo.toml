@@ -1,0 +1,18 @@
+[package]
+name = "nirdosha-guard-macros"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nirdosha Contributors"]
+description = "Proc-macro surface for Nirdosha Guard policies and dataset bindings"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }

@@ -1,0 +1,47 @@
+//! M18 Admin — user management, queue assignment rules, SLA/workflow config, notification templates, retention/purge, delegation, DSAR, license.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{user_profile_table, UserProfileRow, app_settings_store, AppSettingsRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_user_store() -> &'static SharedTable<i64, UserProfileRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, UserProfileRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_user_management,
+    entity: UserProfileRow,
+    store: unused_user_store,
+    path: "/admin/users",
+    fields: [
+        user_id: String,
+        tenant_id: String,
+        email: String,
+        locale: String,
+        timezone: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: user_profile_table,
+        purpose: "PlatformOperations",
+    },
+}
+
+nirdosha_rt::settings_screen! {
+    mount: mount_sla_config,
+    entity: AppSettingsRow,
+    store: app_settings_store,
+    path: "/admin/sla",
+    fields: [ site_name: String, email_notifications: bool, in_app_notifications: bool ],
+    access: public,
+}
+
+pub fn mount_m18_admin(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_user_management(router);
+    mount_sla_config(router)
+}

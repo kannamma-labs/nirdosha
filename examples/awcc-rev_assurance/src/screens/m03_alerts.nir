@@ -1,0 +1,157 @@
+//! M3 CDR Discrepancy Work Queue — guard-enforced queue, detail, disposition, related, bulk, reassignment, RFI, escalation, SLA.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{alert_table, case_task_table, leak_case_table, AlertRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_alert_store() -> &'static SharedTable<i64, AlertRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, AlertRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_alert_screens,
+    entity: AlertRow,
+    store: unused_alert_store,
+    path: "/alerts",
+    fields: [
+        alert_id: String,
+        tenant_id: String,
+        msisdn: String,
+        cdr_id: String,
+        score: f64,
+        status: String,
+        assignee: String,
+        disposition_code: String,
+        rationale: String,
+        case_id: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: alert_table,
+        purpose: "Operations",
+        update_fields: [
+            status: String,
+            assignee: String,
+            disposition_code: String,
+            rationale: String,
+            case_id: String,
+        ],
+    },
+}
+
+pub fn mount_bulk_alert_reassign(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/alerts/bulk", "Bulk alert actions", |_req, _params, _auth| {
+            let body = r#"<!doctype html>
+<html><head><title>Bulk Alert Reassign</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60rem;margin:2rem auto">
+<h1>Bulk alert reassign</h1>
+<form method="post" action="/alerts/bulk-reassign">
+<p><label>Alert IDs (comma-separated):<br><textarea name="ids" rows="4" cols="60" placeholder="A-1001, A-1002"></textarea></label></p>
+<p><label>New assignee:<br><input name="assignee" type="text" /></label></p>
+<p><button type="submit">Reassign</button></p>
+</form>
+</body></html>"#;
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/alerts/bulk-reassign", "Bulk reassign", |req, _params, auth| {
+            let form = req.form_or_json();
+            let Some(ids_raw) = form.get("ids") else { return nirdosha_rt::Response::bad_request("ids required") };
+            let Some(new_assignee) = form.get("assignee") else { return nirdosha_rt::Response::bad_request("assignee required") };
+            let ids: Vec<&str> = ids_raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            if ids.len() > 100 {
+                return nirdosha_rt::Response::bad_request("cap(affected_rows = 100): at most 100 ids per bulk call");
+            }
+            let mut results: Vec<serde_json::Value> = Vec::new();
+            let changed: std::collections::HashSet<String> = ["assignee".into()].into();
+            for id in ids {
+                let assignee = new_assignee.clone();
+                let outcome = alert_table().guarded_update(auth, "Operations", id, &changed, move |row| row.assignee = assignee);
+                let entry = match outcome {
+                    Ok(_) => serde_json::json!({ "id": id, "ok": true }),
+                    Err(e) => serde_json::json!({ "id": id, "ok": false, "error": format!("{e:?}") }),
+                };
+                results.push(entry);
+            }
+            nirdosha_rt::Response::json(200, &serde_json::json!({ "results": results }))
+        })
+}
+
+pub fn mount_alert_rfi(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/alerts/{id}/rfi", "Pending Info / RFI (3.7)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        let rfis = match case_task_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows.into_iter().filter(|r| r.item_ref == id && r.task_type == "rfi").collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "alert_id": id, "rfis": rfis }))
+    })
+}
+
+pub fn mount_escalate_to_case(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/alerts/{id}/escalate-case", "Escalation to Leak Case (3.8)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Escalate {id} to Leak Case</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Escalate alert {id} to leak case</h1>
+<form method="post" action="/alerts/{id}/escalate-case">
+<p><label>Subject reference:<br><input name="subject_ref" type="text" /></label></p>
+<p><button type="submit">Create case</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/alerts/{id}/escalate-case", "Escalate to case submit", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let form = req.form_or_json();
+            let subject_ref = form.get("subject_ref").cloned().unwrap_or_default();
+            let new_case_id = format!("LC-{}", id);
+            let case = crate::bridge::LeakCaseRow {
+                id: 0,
+                case_id: new_case_id.clone(),
+                tenant_id: "awcc-demo".into(),
+                status: "open".into(),
+                assigned_to: "unassigned".into(),
+                alert_ids: id.clone(),
+                subject_ref,
+                atra_id: "".into(),
+                disposition: "".into(),
+                rationale: "".into(),
+            };
+            match leak_case_table().guarded_insert(auth, "Operations", case) {
+                Ok(_) => nirdosha_rt::Response::json(200, &serde_json::json!({ "case_id": new_case_id })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+pub fn mount_sla_monitor(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/alerts/sla", "SLA & Aging Monitor (3.9)", |_req, _params, auth| {
+        let alerts = match alert_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let mut buckets: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        for a in &alerts {
+            *buckets.entry(a.status.clone()).or_insert(0) += 1;
+        }
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "aging_buckets": buckets, "total_alerts": alerts.len() }))
+    })
+}
+
+pub fn mount_m03_alerts(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_bulk_alert_reassign(router);
+    let router = mount_alert_rfi(router);
+    let router = mount_escalate_to_case(router);
+    let router = mount_sla_monitor(router);
+    mount_alert_screens(router)
+}

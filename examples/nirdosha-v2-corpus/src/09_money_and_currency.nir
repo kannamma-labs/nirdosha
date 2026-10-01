@@ -1,0 +1,38 @@
+//! v2 of `examples/features/09_money_and_currency.nir` — `Money`/
+//! `CurrencyCode`, real prelude types. Currency mixing is refused at
+//! the point of combination (`add_money`), not by the compiler.
+
+use nirdosha_rt::prelude::*;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    CurrencyMismatch,
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn add_money(a: &Money, b: &Money) -> Result<Money, ErrorCode> {
+    if a.currency != b.currency {
+        return Err(ErrorCode::CurrencyMismatch);
+    }
+    Ok(Money { amount: a.amount + b.amount, currency: a.currency })
+}
+
+fn main() {
+    let price = Money { amount: dec_from_i64(1999, 2), currency: Currency::USD };
+    println!("{}", price.amount); // 19.99
+    println!("{}", price.currency); // USD()
+
+    let tax = Money { amount: dec_from_i64(160, 2), currency: Currency::USD };
+    let total = match add_money(&price, &tax) {
+        Ok(m) => m,
+        Err(_e) => Money { amount: dec_from_i64(0, 0), currency: Currency::USD },
+    };
+    println!("{}", total.amount); // 21.59
+
+    let euros = Money { amount: dec_from_i64(500, 2), currency: Currency::EUR };
+    let mismatch_caught: bool = match add_money(&price, &euros) {
+        Ok(_m) => false,
+        Err(_e) => true,
+    };
+    println!("{mismatch_caught}"); // true — USD + EUR is refused, never silently summed
+}

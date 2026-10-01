@@ -1,0 +1,67 @@
+//! M11 Intervention — interception queue, hold decision, override approval, hold outcomes log/stats.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{payment_table, PaymentRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_payment_store() -> &'static SharedTable<i64, PaymentRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, PaymentRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_intervention_screens,
+    entity: PaymentRow,
+    store: unused_payment_store,
+    path: "/holds",
+    fields: [
+        payment_id: String,
+        tenant_id: String,
+        subscriber_id: String,
+        amount: f64,
+        currency: String,
+        status: String,
+        hold_reason: String,
+        hold_expires_at: i64,
+        decision_by: String,
+        decision_rationale: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: payment_table,
+        purpose: "Operations",
+        update_fields: [
+            status: String,
+            hold_reason: String,
+            hold_expires_at: i64,
+            decision_by: String,
+            decision_rationale: String,
+        ],
+    },
+    refresh_seconds: 15,
+    sort_by: hold_expires_at,
+    countdown_field: hold_expires_at,
+}
+
+pub fn mount_hold_outcomes(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/holds/outcomes", "Hold Outcomes Log & Stats (11.5)", |_req, _params, auth| {
+        let payments = match payment_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let mut outcomes: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        for p in &payments {
+            *outcomes.entry(p.status.clone()).or_insert(0) += 1;
+        }
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "outcomes": outcomes, "total": payments.len() }))
+    })
+}
+
+pub fn mount_m11_intervention(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_hold_outcomes(router);
+    mount_intervention_screens(router)
+}

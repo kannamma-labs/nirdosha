@@ -1,0 +1,45 @@
+//! v2 of `examples/features/13_deterministic_simulation.nir` — the
+//! Phase-3 simulation builtins: a from-scratch SplitMix64 stream
+//! (same seed, same draws), geometry, and the Kalman steps. All real
+//! prelude code.
+
+use nirdosha_rt::prelude::*;
+
+fn main() {
+    rand_seed(42); // required before any draw
+    println!("{}", rand_f64()); // uniform [0, 1)
+    println!("{}", rand_gaussian(100.0, 5.0)); // Box-Muller
+
+    // geometry: lat/lon/alt <-> ECEF, a local ENU frame, distance, bearing
+    let here = Vector([37.7749, -122.4194, 0.0]); // San Francisco
+    let there = Vector([34.0522, -118.2437, 0.0]); // Los Angeles
+    println!("{}", distance(&here, &there)); // Euclidean, input units
+    println!("{}", bearing(&here, &there)); // initial great-circle bearing
+
+    let ecef = lla_to_ecef(&here);
+    let back = ecef_to_lla(&ecef);
+    println!("{}", back); // round-trips (approximately) to `here`
+
+    let enu = ecef_to_enu(&lla_to_ecef(&there), &here);
+    println!("{}", enu); // `there` in a local East-North-Up frame on `here`
+
+    // a 4-state constant-velocity Kalman filter, one predict+update step
+    let x = Vector([0.0, 0.0, 1.0, 1.0]);
+    let p = identity::<4>();
+    let f = Matrix([
+        [1.0, 0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]);
+    let q = identity::<4>();
+    let x_pred = kf_predict_state(&x, &p, &f, &q);
+    let p_pred = kf_predict_cov(&x, &p, &f, &q);
+    println!("{}", x_pred); // [1, 1, 1, 1]
+
+    let z = Vector([1.1, 0.9]);
+    let h = Matrix([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]);
+    let r = identity::<2>();
+    let x_upd = kf_update_state(&x_pred, &p_pred, &z, &h, &r);
+    println!("{}", x_upd); // position pulled toward the measurement
+}

@@ -1,0 +1,185 @@
+// RFC 0015's own "Implementation plan" Phase A1 experiment, run for
+// real: does the single-statement collapse claimed in "The example
+// this RFC uses" (rfcs/0015-keyed-guard-external-state.md) actually
+// hold under real concurrent `spawn` load, the same way
+// race_probe_atomic.nir empirically verifies the balance-transfer
+// collapse instead of just arguing for it in prose?
+//
+// The invariant under test: room `room_id`'s bookings must never
+// overlap. `try_book_inner` below is the exact
+// `INSERT ... SELECT ... WHERE NOT EXISTS (...)` statement from the
+// RFC's Motivation section -- no `guard`, no lock, no SELECT-then-
+// INSERT gap. If SQLite really does evaluate and apply this as one
+// atomic statement the way `race_probe_atomic.nir`'s `WHERE
+// balance_cents >= ?` is atomic, then of the 8 workers racing to book
+// each of 250 disjoint time slots on the same room, exactly one should
+// win each slot -- 250 successful bookings total, no more, no fewer,
+// and no two rows overlapping.
+//
+// Run it:
+//   nirdosha build examples/killer_demo/race_probe_booking.nir -o /tmp/race_probe_booking
+//   /tmp/race_probe_booking
+
+enum ErrorCode {
+    DbError(str),
+}
+
+struct Text {
+    value: str,
+}
+
+fn reset_booking_inner(conn: db) -> Result(Text, ErrorCode) {
+    let created: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS booking (id INTEGER PRIMARY KEY AUTOINCREMENT, room_id INTEGER, start_ts INTEGER, end_ts INTEGER)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let cleared: Result(Text, ErrorCode) = match db_execute(conn, "DELETE FROM booking") {
+        Ok(n) => Ok(Text("reset")),
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return cleared
+}
+
+fn reset_booking() -> Result(Text, ErrorCode) {
+    return match db_connect("examples/killer_demo/race_probe_booking.db") {
+        Ok(conn) => reset_booking_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn count_bookings_inner(conn: db) -> Result(i64, ErrorCode) {
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COUNT(*) as c FROM booking WHERE room_id = 1") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "c") {
+                Ok(c) => Ok(c),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn count_bookings() -> Result(i64, ErrorCode) {
+    return match db_connect("examples/killer_demo/race_probe_booking.db") {
+        Ok(conn) => count_bookings_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn overlap_count_inner(conn: db) -> Result(i64, ErrorCode) {
+    // A second, independent check of the same invariant: count pairs of
+    // *distinct* committed rows for room 1 whose ranges overlap. Should
+    // be zero regardless of how count_bookings() comes out.
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COUNT(*) as c FROM booking a JOIN booking b ON a.id < b.id AND a.room_id = b.room_id WHERE a.room_id = 1 AND NOT (a.end_ts <= b.start_ts OR a.start_ts >= b.end_ts)") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "c") {
+                Ok(c) => Ok(c),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn overlap_count() -> Result(i64, ErrorCode) {
+    return match db_connect("examples/killer_demo/race_probe_booking.db") {
+        Ok(conn) => overlap_count_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+// The single-statement collapse from RFC 0015's Motivation section.
+// The "check" (does any existing booking for this room overlap
+// [start_ts, end_ts)?) and the "write" (insert the new booking) are one
+// SQL statement -- there is no gap between them for a concurrent
+// thread to land inside, the same argument `race_probe_atomic.nir`
+// makes for its own `WHERE balance_cents >= ?`.
+fn try_book_inner(conn: db, room_id: i64, start_ts: i64, end_ts: i64) -> Result(i64, ErrorCode) {
+    sleep_ms(2) // same simulated round-trip cost as race_probe_atomic.nir, for a fair comparison
+    let inserted: Result(i64, ErrorCode) = match db_execute(conn, "INSERT INTO booking (room_id, start_ts, end_ts) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM booking WHERE room_id = ? AND NOT (end_ts <= ? OR start_ts >= ?))", room_id, start_ts, end_ts, room_id, start_ts, end_ts) {
+        Ok(n) => Ok(n),
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return inserted
+}
+
+fn try_book(room_id: i64, start_ts: i64, end_ts: i64) -> Result(i64, ErrorCode) {
+    return match db_connect("examples/killer_demo/race_probe_booking.db") {
+        Ok(conn) => try_book_inner(conn, room_id, start_ts, end_ts),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+// All 8 workers race for the *same* 250 disjoint slots on the *same*
+// room, in the *same* order -- deliberately, so every slot is actually
+// contested by up to 8 concurrent attempts, not just attempted once
+// each. Exactly one attempt per slot should ever see `n >= 1`.
+fn worker(room_id: i64, iterations: i64) -> i64 {
+    let i: i64 = 0
+    let successes: i64 = 0
+    while i < iterations {
+        let start_ts: i64 = i * 10
+        let end_ts: i64 = start_ts + 10
+        let r: Result(i64, ErrorCode) = try_book(room_id, start_ts, end_ts)
+        let ok: bool = match r {
+            Ok(n) => n >= 1,
+            Err(_) => false,
+        }
+        if ok {
+            successes = successes + 1
+        }
+        i = i + 1
+    }
+    return successes
+}
+
+fn main() {
+    let setup: Result(Text, ErrorCode) = reset_booking()
+    match setup {
+        Ok(n) => print("booking table reset"),
+        Err(e) => print("setup error"),
+    }
+
+    let t1: thread i64 = spawn worker(1, 250)
+    let t2: thread i64 = spawn worker(1, 250)
+    let t3: thread i64 = spawn worker(1, 250)
+    let t4: thread i64 = spawn worker(1, 250)
+    let t5: thread i64 = spawn worker(1, 250)
+    let t6: thread i64 = spawn worker(1, 250)
+    let t7: thread i64 = spawn worker(1, 250)
+    let t8: thread i64 = spawn worker(1, 250)
+
+    let s1: i64 = join t1
+    let s2: i64 = join t2
+    let s3: i64 = join t3
+    let s4: i64 = join t4
+    let s5: i64 = join t5
+    let s6: i64 = join t6
+    let s7: i64 = join t7
+    let s8: i64 = join t8
+
+    print("successful bookings (sum across workers, expected 250):")
+    print(s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8)
+
+    let final_count: Result(i64, ErrorCode) = count_bookings()
+    print("final booking row count for room 1 (expected 250):")
+    match final_count {
+        Ok(n) => print(n),
+        Err(e) => print("error reading count"),
+    }
+
+    let overlaps: Result(i64, ErrorCode) = overlap_count()
+    print("overlapping booking pairs for room 1 (expected 0):")
+    match overlaps {
+        Ok(n) => print(n),
+        Err(e) => print("error reading overlap count"),
+    }
+}

@@ -1,0 +1,28 @@
+//! v2 of `examples/features/04_first_class_functions.nir` — a plain
+//! function name used where a `fn(T) -> R` value is expected evaluates
+//! to that function as a value. Rust's `fn` pointer IS that, 1:1.
+
+fn double(x: i64) -> i64 {
+    x * 2
+}
+
+fn square(x: i64) -> i64 {
+    x * x
+}
+
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+    f(x)
+}
+
+fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64, x: i64) -> i64 {
+    f(g(x))
+}
+
+fn main() {
+    let d: fn(i64) -> i64 = double;
+    println!("{}", d(21)); // 42
+
+    println!("{}", apply(double, 10)); // 20
+    println!("{}", apply(square, 5)); // 25
+    println!("{}", compose(double, square, 3)); // double(square(3)) = 18
+}

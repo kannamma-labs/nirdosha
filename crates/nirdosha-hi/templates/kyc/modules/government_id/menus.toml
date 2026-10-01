@@ -1,0 +1,20 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Government ID"
+
+[landing]
+
+[[group]]
+id = "integrations"
+label_key = "nav.group.integrations"
+order = 40
+
+[[menu]]
+id = "nav.government_id_integrations"
+label_key = "Government ID Integrations"
+group = "integrations"
+screen_id = "1.1"
+route = "/vendors/government-id"
+roles = ["OnboardingOfficer", "compliance_officer"]
+order = 10

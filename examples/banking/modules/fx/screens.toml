@@ -1,0 +1,52 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "banking-fx"
+version = "1.0.0"
+module = "fx"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+
+# ------------------------------------------------------------------ M6 Treasury / FX
+[[screen]]
+id = "6.1"
+name = "FX Rates"
+module = "M6"
+archetype = "crud_screens"
+combo = []
+roles = ["TreasuryHead:R/W", "BranchManager:R"]
+datasets = ["PG.fx_rates"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_fx_rates", route_path = "/fx-rates", generated_files = ["src/screens/m06_treasury.nir"] }
+data_binding = { entities = ["FxRate"], primary_key = "rate_id", guard = { table = "fx_rate_table", purpose = "Treasury" }, fields = [
+    { name = "rate_id", type = "String" },
+    { name = "pair", type = "String" },
+    { name = "buy_rate", type = "String" },
+    { name = "sell_rate", type = "String" },
+    { name = "effective_from", type = "String" },
+] }
+policy = { purpose = "Treasury", allowed_actions = ["read", "create", "update"] }
+
+[[screen]]
+id = "6.2"
+name = "FX Conversion"
+module = "M6"
+archetype = "wizard"
+combo = []
+roles = ["Customer:R/W"]
+datasets = ["PG.fx_rates", "PG.accounts"]
+stage = "blocked"
+blocked_by = ["primitive:fx_convert"]
+codegen = { template = "wizard", mount_symbol = "mount_fx_convert", route_path = "/fx-convert", generated_files = ["src/screens/m06_treasury.nir"] }
+data_binding = { entities = ["FxRate"], primary_key = "rate_id", guard = { table = "fx_rate_table", purpose = "Treasury" }, fields = [
+    { name = "pair", type = "String" },
+    { name = "amount_cents", type = "String" },
+] }
+policy = { purpose = "Treasury", allowed_actions = ["read"] }
+parameters = { access = 'requires role "Customer"', steps = [
+    { name = "Rate", fields = [ { name = "pair", type = "String" } ] },
+    { name = "Amount", fields = [ { name = "amount_cents", type = "String" } ] },
+] }
+notes = "BLOCKED: needs live rate lookup + spread + dual-currency ledger posting primitive"

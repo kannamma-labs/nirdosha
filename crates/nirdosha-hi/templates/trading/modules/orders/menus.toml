@@ -1,0 +1,29 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading Orders"
+
+[[group]]
+id = "orders"
+label_key = "nav.group.orders"
+order = 40
+
+[[menu]]
+id = "nav.orders"
+label_key = "nav.orders"
+group = "orders"
+screen_id = "3.1"
+route = "/orders"
+guard = { action = "read", resource = "order" }
+roles = ["Trader", "RiskManager", "Operations"]
+order = 10
+
+[[menu]]
+id = "nav.new_order"
+label_key = "nav.new_order"
+group = "orders"
+screen_id = "3.2"
+route = "/orders/new"
+guard = { action = "create", resource = "order" }
+roles = ["Trader"]
+order = 20

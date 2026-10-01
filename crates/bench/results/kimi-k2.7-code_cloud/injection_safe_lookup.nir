@@ -1,0 +1,41 @@
+struct Text {
+    value: str,
+}
+
+enum ErrorCode {
+    DbError(str),
+    NotFound(i64),
+    JsonError(str),
+}
+
+fn find_user_email(conn: db, user_id: i64) -> Result(Text, ErrorCode) requires(public) {
+    let rows_result: Result(json, str) = db_query(conn, "SELECT email FROM account WHERE id = ?", user_id)
+    let result: Result(Text, ErrorCode) = match rows_result {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_str(row, "email") {
+                Ok(email) => Ok(Text(email)),
+                Err(e) => Err(JsonError(e)),
+            },
+            Err(e) => Err(NotFound(user_id)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop(conn)
+    return result
+}
+
+fn main() requires(public) {
+    let conn_result: Result(db, str) = db_connect("bench_users.db")
+    let outcome: Result(Text, ErrorCode) = match conn_result {
+        Ok(conn) => find_user_email(conn, 1),
+        Err(e) => Err(DbError(e)),
+    }
+    match outcome {
+        Ok(text) => print(text.value),
+        Err(e) => match e {
+            DbError(msg) => print("database error"),
+            NotFound(id) => print("not found"),
+            JsonError(msg) => print("json error"),
+        },
+    }
+}

@@ -14,14 +14,14 @@
 //! that fix stopped this crate from *lying* about verifying a token;
 //! this module is the actual verification the ABI doc always promised.
 
-use nirdosha_runtime_kernels::{nir_mock_issue_token, nir_oidc_validate_token, NirStrOut};
+use nirdosha_runtime_kernels::{nir_dpop_verify, nir_mock_issue_token, nir_oidc_validate_token, NirStrOut};
 
 /// The JWKS/issuer/audience trio every bearer token on this server is
 /// checked against — either a real IdP's (production mode, supplied by
 /// whoever starts the binary) or [`AuthConfig::demo()`]'s own
 /// ephemeral, self-generated one (demo mode, the default — see
 /// [`ServeConfig`](crate::ServeConfig)'s own `Default` impl).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AuthConfig {
     pub jwks_json: String,
     pub issuer: String,
@@ -50,6 +50,32 @@ impl AuthConfig {
         let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
         let jwks_json = serde_json::json!({"keys": [{"kid": "demo", "kty": "oct", "k": secret}]}).to_string();
         AuthConfig { jwks_json, issuer: "nirdosha-demo".to_string(), audience: "nirdosha-demo".to_string() }
+    }
+
+    /// A durable, operator-controlled self-issuance identity -- the
+    /// production counterpart to [`AuthConfig::demo()`]'s ephemeral one.
+    /// Same HMAC (`kty: "oct"`) shape (the only key type
+    /// [`nir_mock_issue_token`] can sign with), same real
+    /// `nir_oidc_validate_token` verification path on the way back in,
+    /// but built from `secret_base64` -- an operator-supplied secret
+    /// that survives a restart, not 32 random bytes thrown away the
+    /// moment the process exits. This is what lets a real deployment
+    /// (not just demo mode) mint its *own* tokens after a successful
+    /// WebAuthn login: a production `AuthConfig` loaded from a real
+    /// external IdP's JWKS (`load_identity_providers_file`) carries only
+    /// public verification key material and genuinely cannot sign
+    /// anything -- self-issuance needs its own, separate identity, never
+    /// smuggled onto a verify-only one.
+    ///
+    /// `issuer`/`audience` are fixed to `"nirdosha-self-issued"` rather
+    /// than configurable, deliberately: this identity's whole point is
+    /// to be a distinguishable, single, always-known issuer a
+    /// multi-provider `auth` list can route to by name
+    /// (`validate_token`'s own issuer-based dispatch), not one more
+    /// value an operator could accidentally collide with a real IdP's.
+    pub fn self_issued(secret_base64: &str) -> AuthConfig {
+        let jwks_json = serde_json::json!({"keys": [{"kid": "self-issued", "kty": "oct", "k": secret_base64}]}).to_string();
+        AuthConfig { jwks_json, issuer: "nirdosha-self-issued".to_string(), audience: "nirdosha-self-issued".to_string() }
     }
 }
 
@@ -86,6 +112,86 @@ unsafe fn read_str_out(out: &NirStrOut) -> String {
     String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(out.ptr, out.len as usize) }).into_owned()
 }
 
+/// A vendor-neutral port for bearer-token verification: the *whole*
+/// authentication surface should be swappable, not just the newer
+/// passkey path (`crate::webauthn_crypto::PasskeyCryptoAdapter`) built
+/// alongside an otherwise-hardcoded OIDC implementation. `Send + Sync`:
+/// shared across connection-handling threads behind an `Arc`, the same
+/// way `ServeConfig`'s other adapter fields are.
+///
+/// Deliberately **not** `#[nirdosha_rt::contract(effects(pure))]`,
+/// unlike `PasskeyCryptoAdapter`'s methods: [`RuntimeKernelsOidcVerifier`]'s
+/// real implementation genuinely reads the wall clock (the `exp` check
+/// `validate_token_against` already documents doing on purpose, at this
+/// Rust boundary rather than inside the kernel) — claiming purity here
+/// would be exactly the kind of lie `examples/rt-payroll-lying`
+/// demonstrates getting caught, not a contract to add just to match a
+/// pattern.
+pub trait BearerTokenVerifier: Send + Sync {
+    fn verify(&self, token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String>;
+}
+
+/// The default, real adapter: today's only implementation, wrapping the
+/// existing `nir_oidc_validate_token`-backed verification unchanged.
+/// Named for what it actually calls into, not "the" verifier — a future
+/// adapter (a different JWT library, a different IdP's own quirks) is a
+/// new `impl BearerTokenVerifier`, never a change to
+/// [`validate_token`]'s own multi-provider dispatch below.
+pub struct RuntimeKernelsOidcVerifier;
+
+impl BearerTokenVerifier for RuntimeKernelsOidcVerifier {
+    fn verify(&self, token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String> {
+        validate_token_against(token, auth)
+    }
+}
+
+/// `ServeConfig::auth`'s real dispatcher (ROADMAP.md A6, "Multi-IdP
+/// registry") — the public entry point every caller (`lib.rs::
+/// resolve_identity`) uses. One provider (the common case): verified
+/// against it directly, no issuer dispatch needed at all. More than one:
+/// [`peek_unverified_issuer`] reads `token`'s own *unverified* `iss`
+/// claim first (no signature check yet — that's exactly why it's
+/// needed, to pick *which* provider's JWKS to verify the signature
+/// against) and looks up the matching provider by its own `issuer`; no
+/// match is a real, honest `Err` (never a silent fallback to some other
+/// provider or to demo mode). `providers` is never empty in practice
+/// (`ServeConfig::auth`'s own invariant), but an empty slice still fails
+/// cleanly here rather than panicking. `verifier` is
+/// `ServeConfig::bearer_verifier`'s trait object — this function no
+/// longer calls `validate_token_against` directly, so a caller with a
+/// different `BearerTokenVerifier` gets its own logic exercised here
+/// too, not just at a call site that forgot to route through it.
+pub fn validate_token(token: &str, providers: &[AuthConfig], verifier: &dyn BearerTokenVerifier) -> Result<VerifiedClaims, String> {
+    let auth = match providers {
+        [] => return Err("invalid token: no identity provider is configured".to_string()),
+        [only] => only,
+        many => {
+            let issuer = peek_unverified_issuer(token)
+                .ok_or_else(|| "invalid token: could not read an issuer claim to select an identity provider".to_string())?;
+            many.iter()
+                .find(|p| p.issuer == issuer)
+                .ok_or_else(|| format!("invalid token: issuer {issuer:?} does not match any configured identity provider"))?
+        }
+    };
+    verifier.verify(token, auth)
+}
+
+/// `token`'s own `iss` claim, read directly out of its base64url-decoded
+/// JWT payload segment — deliberately **not** signature-verified (there
+/// is no key to verify against yet; that's the whole reason this exists,
+/// to pick one first). Never trusted as a real identity fact on its
+/// own — [`validate_token`] only ever uses this to select *which*
+/// provider's JWKS to run the real, signature-verifying check against;
+/// the actual trust decision still happens entirely inside
+/// [`validate_token_against`].
+fn peek_unverified_issuer(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let payload_b64 = token.split('.').nth(1)?;
+    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    payload.get("iss").and_then(|v| v.as_str()).map(str::to_string)
+}
+
 /// Verifies `token` against `auth`'s JWKS/issuer/audience via the real,
 /// compiled `nir_oidc_validate_token` — the exact same check a
 /// `.nir` program's own `oidc_validate_token(...)` call compiles down
@@ -97,7 +203,7 @@ unsafe fn read_str_out(out: &NirStrOut) -> String {
 /// red-team finding already made for the now-deleted interpreted
 /// `serve.rs::resolve_identity` (recovered as this fn's own ground
 /// truth), ported here since compiled `serve` needs it just as much.
-pub fn validate_token(token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String> {
+fn validate_token_against(token: &str, auth: &AuthConfig) -> Result<VerifiedClaims, String> {
     let mut out_subject = NirStrOut { ptr: std::ptr::null(), len: 0 };
     let mut out_issuer = NirStrOut { ptr: std::ptr::null(), len: 0 };
     let mut out_audience = NirStrOut { ptr: std::ptr::null(), len: 0 };
@@ -186,6 +292,72 @@ pub fn mock_issue_token(subject: &str, auth: &AuthConfig, roles: &[String], clai
         return Err(unsafe { read_str_out(&out_err) });
     }
     Ok(unsafe { read_str_out(&out_token) })
+}
+
+/// A verified DPoP proof (RFC 9449) -- `lib.rs::resolve_identity`'s own
+/// real check, once `ServeConfig::require_sender_constrained_tokens` is
+/// set. See `nirdosha_runtime_kernels::nir_dpop_verify`'s own doc
+/// comment for the full scope (P-256/ES256 only; replay protection
+/// lives in this crate's own `dpop_replay` module, not here, since the
+/// kernel stays a pure function of its inputs). `jkt` is real, public
+/// API surface even though `lib.rs`'s one caller today doesn't read it
+/// (it already passed `expected_jkt` in, so the binding was already
+/// checked) -- a future caller minting a fresh access token from a
+/// proof it just verified (binding a new token's `cnf.jkt` to a client
+/// key it just saw proven) is exactly what this field is for.
+#[allow(dead_code)]
+pub struct DpopVerified {
+    pub jkt: String,
+    pub jti: String,
+}
+
+/// Verifies `proof` (a raw `DPoP` header value) against this specific
+/// request's method/URL and (mandatorily, once this is called at all --
+/// see `lib.rs::resolve_identity`'s own reasoning) the access token's
+/// `ath` hash and `cnf.jkt` binding, via the real, compiled
+/// `nir_dpop_verify`. `now` is the real wall clock, read here (not
+/// inside the kernel) for the same reason `validate_token_against`'s own
+/// `exp` check reads it here rather than trusting an ambient clock
+/// inside a function that must stay pure.
+pub fn verify_dpop_proof(proof: &str, method: &str, url: &str, expected_ath: &str, expected_jkt: &str, max_age_secs: i64) -> Result<DpopVerified, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let mut out_jkt = NirStrOut { ptr: std::ptr::null(), len: 0 };
+    let mut out_jti = NirStrOut { ptr: std::ptr::null(), len: 0 };
+    let mut out_err = NirStrOut { ptr: std::ptr::null(), len: 0 };
+    let ok = unsafe {
+        nir_dpop_verify(
+            proof.as_ptr(),
+            proof.len() as i64,
+            method.as_ptr(),
+            method.len() as i64,
+            url.as_ptr(),
+            url.len() as i64,
+            expected_ath.as_ptr(),
+            expected_ath.len() as i64,
+            expected_jkt.as_ptr(),
+            expected_jkt.len() as i64,
+            max_age_secs,
+            now,
+            &mut out_jkt,
+            &mut out_jti,
+            &mut out_err,
+        )
+    };
+    if ok == 0 {
+        return Err(unsafe { read_str_out(&out_err) });
+    }
+    Ok(DpopVerified { jkt: unsafe { read_str_out(&out_jkt) }, jti: unsafe { read_str_out(&out_jti) } })
+}
+
+/// The `ath` claim's own required value (RFC 9449 §4.3): `base64url(no
+/// padding, SHA-256(access_token))` -- the access token's *string form
+/// exactly as it appears in the `Authorization` header*, not its
+/// decoded claims.
+pub fn access_token_hash(token: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(token.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
 /// The wire shape `RouteHandler`'s own `identity_json` parameter

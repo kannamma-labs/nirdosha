@@ -1,0 +1,21 @@
+# RFC 0029 §7.1 governed policy bundle for the banking template's service
+# catalog (policy-services.toml). This is the domain authority's approval
+# envelope every catalog entry is admitted under -- bundle_hash is computed
+# from this file's exact bytes (never authored here) by both
+# crates/cargo-nirdosha/src/service_catalog.rs (generation time) and
+# crates/nirdosha-guard-rfc0029 (runtime), so the two can never silently
+# drift onto different notions of "the current bundle".
+#
+# Scope note: approved_by/signed_by are checked for presence and the
+# effective_from/expires_at window is checked against the clock. Neither
+# this file nor the loaders that read it verify a real cryptographic
+# signature yet -- disclosed in both loaders' own doc comments.
+
+[bundle]
+authority_id = "banking-domain-authority"
+policy_owner = "payments-platform-team"
+jurisdiction = "IN"
+approved_by = "banking-domain-authority"
+signed_by = "banking-domain-authority"
+effective_from = "2026-01-01T00:00:00Z"
+expires_at = "2027-01-01T00:00:00Z"

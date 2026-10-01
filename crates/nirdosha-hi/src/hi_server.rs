@@ -1,0 +1,259 @@
+//! Local HTTP transport for Hi build mode
+//! (rfcs/0014-generative-build-console.md, 2026-09-20 amendment). The
+//! RFC's original default transport was `hi_window.rs`'s `wry`
+//! custom-protocol handler — "no network port at all" — retired along
+//! with the embedded `wry`/`tao` webview it required. This module *is*
+//! now the only transport, serving both the CLI's `--app=`-mode
+//! browser window (`main.rs::cmd_window`) and headless/scripting/CI use
+//! (`nirdosha hi serve`) through the same route table
+//! (`hi_api::handle`) — real network exposure the retired transport
+//! never had, hence the hardening below (`has_browser_origin`): loopback-
+//! only binding, `Origin` allowlisting, and `hi_api.rs`'s own POST-only
+//! mutation rule.
+//!
+//! `tiny_http` is already a workspace dependency
+//! (`crates/compiler/Cargo.toml`, used elsewhere for `compiled-serve`-
+//! adjacent work) — this adds no new dependency to the tree.
+
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::thread;
+
+use tiny_http::{Header, Response, Server};
+
+use crate::hi_api::{self, ApiResponse};
+
+pub struct ServerHandle {
+    pub port: u16,
+}
+
+/// Starts the local API server on an OS-assigned loopback port, on a
+/// background thread, and returns immediately with the bound port.
+/// Runs for the life of the process — no shutdown API yet, matching
+/// this increment's "prove the pipeline" scope, not the full session
+/// lifecycle RFC 0014 describes (still an open question there).
+pub fn serve(root: &Path) -> Result<ServerHandle, String> {
+    let server =
+        Server::http("127.0.0.1:0").map_err(|e| format!("binding local hi server: {e}"))?;
+    let port = server
+        .server_addr()
+        .to_ip()
+        .map(|a| a.port())
+        .ok_or_else(|| "local hi server has no bound IP address".to_string())?;
+    let root: PathBuf = root.to_path_buf();
+    // The one legitimate Origin a browser window pointed at this exact
+    // server can ever present -- see `has_foreign_browser_origin`'s own
+    // doc comment for why comparing against it, rather than rejecting
+    // every `Origin` header outright, is still the RFC's DNS-rebinding/
+    // CSRF closure and not a weakening of it.
+    let expected_origin = format!("http://127.0.0.1:{port}");
+    thread::Builder::new()
+        .name("nirdosha-hi-server".to_string())
+        .spawn(move || {
+            for mut request in server.incoming_requests() {
+                let response = respond(&root, &expected_origin, &mut request);
+                let _ = request.respond(response);
+            }
+        })
+        .map_err(|e| format!("spawning the local hi server thread: {e}"))?;
+    Ok(ServerHandle { port })
+}
+
+/// rfcs/0014's own hardening list for this fallback mode: "`Origin`
+/// header checking" against DNS-rebinding/CSRF. **Origin-allowlisted to
+/// this server's own `http://127.0.0.1:<port>`, not "reject every
+/// `Origin` header" (2026-09-18)**: this module is now also the target
+/// of a real, deliberately-launched browser app-mode window (`main.rs`'s
+/// `launch_app_window`, spawned for the headless `native-window`-less
+/// fallback) -- that window's own page issues ordinary same-origin
+/// `fetch(...)` calls for every button (`hi_graph.html`'s `postForm`),
+/// and a `POST` fetch carries an `Origin` header even same-origin (the
+/// Fetch spec always attaches one to a non-GET/HEAD request), so
+/// rejecting every `Origin` header unconditionally 403'd the app
+/// window's own legitimate button clicks, not just an attacker's. A
+/// DNS-rebinding or CSRF page's own `Origin` is whatever host the
+/// victim actually loaded (`http://evil.example`, or the rebound name
+/// itself) -- never `http://127.0.0.1:<port>` verbatim -- so this still
+/// closes exactly the class the RFC named, just correctly (a same-
+/// origin allowlist, the standard defense), rather than by accident
+/// disabling the one browser surface this fallback exists to serve.
+fn has_foreign_browser_origin(request: &tiny_http::Request, expected_origin: &str) -> bool {
+    request.headers().iter().any(|h| {
+        h.field.as_str().as_str().eq_ignore_ascii_case("Origin")
+            && !h.value.as_str().eq_ignore_ascii_case(expected_origin)
+    })
+}
+
+fn respond(
+    root: &Path,
+    expected_origin: &str,
+    request: &mut tiny_http::Request,
+) -> Response<Cursor<Vec<u8>>> {
+    if has_foreign_browser_origin(request, expected_origin) {
+        return to_tiny_http(ApiResponse::error(
+            403,
+            "this local API does not accept requests from another origin",
+        ));
+    }
+    let (path, query) = request
+        .url()
+        .split_once('?')
+        .map(|(p, q)| (p.to_string(), q.to_string()))
+        .unwrap_or_else(|| (request.url().to_string(), String::new()));
+    let method = request.method().as_str().to_string();
+    let mut body = Vec::new();
+    if let Err(e) = request.as_reader().read_to_end(&mut body) {
+        return to_tiny_http(ApiResponse::error(
+            400,
+            &format!("reading request body: {e}"),
+        ));
+    }
+    to_tiny_http(hi_api::handle(root, &method, &path, &query, &body))
+}
+
+fn to_tiny_http(resp: ApiResponse) -> Response<Cursor<Vec<u8>>> {
+    let content_type = Header::from_bytes(&b"Content-Type"[..], resp.content_type.as_bytes())
+        .expect("static header is always valid");
+    // Same "never cache a live, local, single-viewer response" reason
+    // `hi_window.rs`'s own transport sets this -- see its doc comment.
+    let cache_control = Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+        .expect("static header is always valid");
+    Response::from_data(resp.body)
+        .with_status_code(tiny_http::StatusCode(resp.status))
+        .with_header(content_type)
+        .with_header(cache_control)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "nirdosha_hi_server_test_{name}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// Real end-to-end: start the server, make a real HTTP request over
+    /// loopback, parse the real JSON response — not just unit-testing
+    /// the route function in isolation (that's `hi_api`'s own tests).
+    #[test]
+    fn serve_answers_api_nodes_over_a_real_http_request() {
+        let dir = scratch_dir("nodes_http");
+        std::fs::write(
+            dir.join("a.nir"),
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        )
+        .unwrap();
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_graph::sync(&conn, &dir, &[]).expect("sync");
+        drop(conn); // release the file lock before the server thread opens its own connection
+
+        let handle = serve(&dir).expect("serve");
+        let url = format!("http://127.0.0.1:{}/api/nodes", handle.port);
+        let body = reqwest::blocking::get(&url)
+            .expect("request should succeed")
+            .text()
+            .expect("response body");
+        let nodes: Vec<serde_json::Value> = serde_json::from_str(&body).expect("valid JSON array");
+        assert!(
+            nodes.iter().any(|n| n["id"] == "code:fn:add"),
+            "expected code:fn:add in {body}"
+        );
+    }
+
+    #[test]
+    fn serve_answers_the_build_mode_graph_page_at_root() {
+        let dir = scratch_dir("root_http");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        drop(conn);
+        let handle = serve(&dir).expect("serve");
+        let body = reqwest::blocking::get(format!("http://127.0.0.1:{}/", handle.port))
+            .expect("request should succeed")
+            .text()
+            .expect("response body");
+        assert!(body.contains("Nirdosha Hi"));
+    }
+
+    #[test]
+    fn serve_answers_api_impact_for_a_linked_requirement() {
+        let dir = scratch_dir("impact_http");
+        std::fs::write(
+            dir.join("a.nir"),
+            "fn transfer_funds(amount: i64) -> i64 { return amount }\n",
+        )
+        .unwrap();
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        crate::hi_graph::sync(&conn, &dir, &[]).expect("sync");
+        crate::hi_graph::link(&conn, "R17", "fn:transfer_funds").expect("link");
+        drop(conn);
+
+        let handle = serve(&dir).expect("serve");
+        let url = format!("http://127.0.0.1:{}/api/impact?target=R17", handle.port);
+        let body = reqwest::blocking::get(&url)
+            .expect("request should succeed")
+            .text()
+            .expect("response body");
+        let report: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert!(
+            body.contains("code:fn:transfer_funds"),
+            "expected the linked CodeUnit in {report}"
+        );
+    }
+
+    /// The RFC's own hardening requirement for this fallback mode: a
+    /// request carrying a foreign `Origin` header (what a DNS-rebinding
+    /// or CSRF page sends -- never this server's own page) is rejected
+    /// outright.
+    #[test]
+    fn serve_rejects_a_request_carrying_a_foreign_browser_origin_header() {
+        let dir = scratch_dir("origin_http");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        drop(conn);
+        let handle = serve(&dir).expect("serve");
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/api/nodes", handle.port))
+            .header("Origin", "http://evil.example")
+            .send()
+            .expect("request should succeed");
+        assert_eq!(resp.status().as_u16(), 403);
+    }
+
+    /// The other half of the same check (2026-09-18): a request whose
+    /// `Origin` matches this exact server's own `http://127.0.0.1:<port>`
+    /// -- what the app-mode browser window `main.rs::launch_app_window`
+    /// opens actually sends on every `POST` button click -- must NOT be
+    /// rejected, or the one browser surface this fallback exists to
+    /// serve would 403 its own legitimate use.
+    #[test]
+    fn serve_accepts_a_request_carrying_its_own_origin_header() {
+        let dir = scratch_dir("own_origin_http");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        drop(conn);
+        let handle = serve(&dir).expect("serve");
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/api/nodes", handle.port))
+            .header("Origin", format!("http://127.0.0.1:{}", handle.port))
+            .send()
+            .expect("request should succeed");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[test]
+    fn serve_reports_a_missing_query_param_as_a_client_error() {
+        let dir = scratch_dir("missing_param_http");
+        let conn = crate::hi_graph::open(&dir).expect("open");
+        drop(conn);
+        let handle = serve(&dir).expect("serve");
+        let resp = reqwest::blocking::get(format!("http://127.0.0.1:{}/api/impact", handle.port))
+            .expect("request should succeed");
+        assert_eq!(resp.status().as_u16(), 400);
+    }
+}

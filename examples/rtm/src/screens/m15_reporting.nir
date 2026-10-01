@@ -1,0 +1,224 @@
+//! M15 Reporting, MIS & Analytics (`screen.md` module 15, 5 screens).
+//! Policies: `80_consumers.nir`. RTM live-demo plan Phase B batch 3.
+//!
+//! Real, guard-enforced: 15.1/15.4 leadership aggregates
+//! (`lead-dashboard`'s real `action == "aggregate"` grant, `dashboard!`
+//! `guarded: true` widgets over `alert_table`/`case_table`'s own
+//! `guarded_aggregate` -- same pattern `m02_dashboards.nir`'s Team
+//! Dashboard already proves) and 15.5 the governed export center
+//! (`governed-export`'s real `escalate to approval(chain
+//! egress_release)`, hand-written over the new
+//! `guarded_propose_escalated_export`/`guarded_confirm_escalated_export`
+//! pair -- this batch's own real engine work: export is a guard-enforced
+//! SCAN under quorum, not a per-row write, so it needed its own
+//! propose/confirm shape rather than reusing the update-shaped one).
+//!
+//! Not built this pass: 15.2/15.3 (scheduled report builder, custom
+//! query designer) -- pure UX chrome over the same aggregate/export
+//! primitives above, no distinct `guard_policy!` of their own.
+
+use crate::bridge::alert_table;
+use crate::bridge::case_table;
+use crate::bridge::report_def_table;
+use crate::bridge::scheduled_report_table;
+use crate::bridge::transaction_table;
+use nirdosha_rt::screens::FieldSpec;
+
+/// 15.1 Standard Report Library -- `report-def-read` (real, `Mlro`,
+/// `ComplianceLead`, `Admin`, `Analyst`; a real dataset/policy landed
+/// after this module's own top doc comment marked 15.2/15.3 "not built
+/// this pass" -- superseded, same posture disclosed elsewhere in this
+/// batch).
+pub fn mount_report_library(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/reports", "Standard Report Library (15.1)", |_req, _params, auth| {
+        match report_def_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "report_id", input_type: "text" },
+                    FieldSpec { name: "name", input_type: "text" },
+                    FieldSpec { name: "category", input_type: "text" },
+                    FieldSpec { name: "schedule", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Standard Report Library", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 15.3 Scheduled Reports & Distribution -- `scheduled-report-read`
+/// (real, `Mlro`, `ComplianceLead`, `Admin`).
+pub fn mount_scheduled_reports(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/reports/scheduled", "Scheduled Reports & Distribution (15.3)", |_req, _params, auth| {
+        match scheduled_report_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "schedule_id", input_type: "text" },
+                    FieldSpec { name: "report_id", input_type: "text" },
+                    FieldSpec { name: "recipients", input_type: "text" },
+                    FieldSpec { name: "next_run", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Scheduled Reports & Distribution", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+fn total_case_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    match case_table().guarded_aggregate(auth, "Operations") {
+        Ok(rows) => rows.len() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn alerts_by_status_mis(auth: &nirdosha_rt::Auth) -> String {
+    let rows = match alert_table().guarded_aggregate(auth, "Operations") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_status: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for row in &rows {
+        *by_status.entry(row.status.clone()).or_insert(0) += 1;
+    }
+    serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_mis_dashboard,
+    path: "/reporting/mis",
+    title: "Reporting & MIS",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Total case volume", fn: total_case_volume, guarded: true },
+        Chart  { label: "Alerts by status", fn: alerts_by_status_mis, mark: bar, guarded: true },
+    }
+}
+
+/// 15.4 Typology & Trend Analytics -- landing page pointing at the
+/// real leadership aggregate dashboard. `screens.toml` grants both
+/// `Mlro:R` and `ComplianceLead:R` here -- `get_gated::<Role>` proves
+/// exactly one compile-time role, so (unlike a single-role screen) this
+/// needs the plain `get_with_auth` + explicit `has_role` OR-check shape
+/// instead, same as `m19_it_ops.nir`'s own `registered_policy_count`
+/// role-gated-not-policy-gated posture for a static, non-`#[dataset]`
+/// page.
+pub fn mount_typology_trends(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/reports/typology", "Typology & Trend Analytics (15.4)", |_req, _params, auth| {
+        if !(auth.has_role("Mlro") || auth.has_role("ComplianceLead")) {
+            return nirdosha_rt::Response::forbidden();
+        }
+        nirdosha_rt::Response::html(200, r#"
+<!doctype html>
+<html><head><title>Typology & Trend Analytics</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Typology & Trend Analytics</h1>
+<p>Aggregates by typology, geography, and product: <a href="/reporting/mis">/reporting/mis</a>.</p>
+<p><em>Scheduled/ad-hoc report builder remains future work.</em></p>
+</body></html>"#)
+    })
+}
+
+/// 15.5 Governed Export Center -- landing page describing the export paths.
+pub fn mount_export_center(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/exports", "Governed Export Center (15.5)", |_req, _params, _auth| {
+        nirdosha_rt::Response::html(200, r#"
+<!doctype html>
+<html><head><title>Governed Export Center</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Governed Export Center</h1>
+<p>Propose/confirm governed exports per resource:</p>
+<ul>
+<li>POST /exports/alert/propose | /exports/alert/confirm</li>
+<li>POST /exports/case/propose | /exports/case/confirm</li>
+<li>POST /exports/transaction/propose | /exports/transaction/confirm</li>
+</ul>
+<p>Exports require <code>egress_release</code> quorum approval and are watermarked/content-hashed.</p>
+</body></html>"#)
+    })
+}
+
+/// 15.5 Governed Export Center -- `governed-export` (`Analyst`, `action
+/// == "export" && resource in ["alert", "case", "transaction"]`,
+/// `escalate to approval(chain egress_release)`). One route per real
+/// resource this policy actually covers (`crud_screens!`'s own
+/// archetype has no export-under-escalation shape to lean on, and the
+/// three resources' row types differ, so a generic single route can't
+/// serialize a uniform response type anyway).
+pub fn mount_governed_export(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use nirdosha_guard_core::Action;
+    router
+        .post_with_auth("/exports/alert/propose", "Propose alert export", |_req, _params, auth| {
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match alert_table().guarded_propose_escalated_export(auth, "AmlInvestigation", Action::Export, "export", now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/exports/alert/confirm", "Confirm alert export", |req, _params, auth| {
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match alert_table().guarded_confirm_escalated_export(auth, "AmlInvestigation", Action::Export, "export", &chain, &escalation_id, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/exports/case/propose", "Propose case export", |_req, _params, auth| {
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match case_table().guarded_propose_escalated_export(auth, "AmlInvestigation", Action::Export, "export", now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/exports/case/confirm", "Confirm case export", |req, _params, auth| {
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match case_table().guarded_confirm_escalated_export(auth, "AmlInvestigation", Action::Export, "export", &chain, &escalation_id, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/exports/transaction/propose", "Propose transaction export", |_req, _params, auth| {
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match transaction_table().guarded_propose_escalated_export(auth, "AmlInvestigation", Action::Export, "export", now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/exports/transaction/confirm", "Confirm transaction export", |req, _params, auth| {
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match transaction_table().guarded_confirm_escalated_export(auth, "AmlInvestigation", Action::Export, "export", &chain, &escalation_id, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        // 15.5's own read side -- `nav.exports`'s real `governed-export-read`
+        // (`00_core.nir`) over the SAME `PG.governed_export` row
+        // `nirdosha_rt::export::write_governed_export` writes for every
+        // guarded CSV export (`crud_screens!`'s watermarked path, T-01).
+        // The `/exports/{resource}/propose|confirm` quorum routes above
+        // are a real, SEPARATE `egress_release` escalation path this
+        // read does not (yet) unify with -- disclosed, see this module's
+        // own screens.toml note.
+        .get_with_auth("/exports", "Governed Export Center", |_req, _params, auth| {
+            match crate::bridge::governed_export_table().guarded_snapshot(auth, "PlatformOperations") {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

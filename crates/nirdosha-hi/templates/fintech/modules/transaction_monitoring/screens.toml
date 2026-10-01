@@ -1,0 +1,134 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-txn-monitoring"
+version = "1.0.0"
+module = "M9"
+total_screens = 4
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "9.1"
+name = "Transaction Monitor"
+module = "M9"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "RiskAnalyst", "Operator"]
+datasets = ["transactions"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_txn_monitor", route_path = "/transactions", generated_files = ["src/screens/m09_txn_monitor.nir"] }
+data_binding = { entities = ["Transaction"], primary_key = "transaction_id", guard = { table = "transaction", purpose = "TxnRead" }, fields = [
+    { name = "transaction_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "risk_score", type = "String" },
+    { name = "monitored_at", type = "String" }
+] }
+policy = { purpose = "TxnRead", allowed_actions = ["read", "aggregate", "update"] }
+file = "src/screens/m09_txn_monitor.nir"
+notes = "Real-time transaction stream with risk score and monitoring status."
+
+# Unblocked: primitive:rule_engine / primitive:velocity_check /
+# primitive:amount_threshold now exist for real, in nirdosha-ctms's
+# rule_model/rule_engine/rule_gateway modules (RuleDefinition's governed
+# lifecycle, RuleEngine::evaluate's three deterministic rule types,
+# CtmsRuleGatewayV1's seven capability-gated effects) -- proven by that
+# crate's own tests, including the full draft -> approve -> enable ->
+# realtime-and-batch-match -> alert acceptance scenario in
+# tests/monitoring_rules_e2e.rs. This screen only wires rule *drafting*
+# (rule.create) through the generated HTTP path, mirroring 9.3/9.4's own
+# division of responsibility: generic guarded-table row storage here,
+# RFC 0029 authorization/evidence via CtmsRuleCreateGatewayV1. Approve/
+# enable/disable/retire/rollback are real (CtmsRuleApproveGatewayV1 and
+# friends) but not yet exposed as further screen routes -- disclosed, not
+# silently missing, same as case.escalate/senior_review/disposition's own
+# gateway-only status.
+[[screen]]
+id = "9.2"
+name = "Monitoring Rules"
+module = "M9"
+archetype = "crud_screens"
+combo = []
+roles = ["RuleAuthor:R/W"]
+datasets = ["PG.ctms_rules"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_ctms_rules", route_path = "/ctms/rules", generated_files = ["src/screens/m09_ctms_rules.nir"] }
+data_binding = { entities = ["MonitoringRule"], primary_key = "rule_id", guard = { table = "ctms_rule_table", purpose = "TxnRead" }, fields = [
+    { name = "rule_id", type = "String" },
+    { name = "version", type = "String" },
+    { name = "name", type = "String" },
+    { name = "rule_type", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "jurisdiction", type = "String" },
+    { name = "severity", type = "String" },
+    { name = "status", type = "String" },
+] }
+policy = { purpose = "TxnRead", allowed_actions = ["read", "create"] }
+parameters = { access_create = 'requires role "RuleAuthor"', access_read = 'requires role "RuleAuthor"', create_fields = ["rule_id", "version", "name", "rule_type", "currency", "jurisdiction", "severity", "status"] }
+service = { name = "rule_create", version = "1", parameters = { jurisdiction = "IN" } }
+notes = "Drafting only, through the generic guarded table (same division of responsibility as 9.3/9.4). Approval/activation is a real, tested nirdosha-ctms gateway+service capability (CtmsRuleApproveGatewayV1/CtmsRuleEnableGatewayV1/...), not yet its own screen route."
+
+# ------------------------------------------------------------------ CTMS alert/case gateways
+# Real rule evaluation (velocity_24h), the AI model signal, and the
+# richer Alert/MonitoringCase domain model (idempotent creation, the
+# escalation state machine) live in the separate `nirdosha-ctms` crate --
+# proven there by that crate's own test suite, not duplicated here. These
+# two screens are what closes the last disclosed gap in that crate's own
+# module doc ("screen/cargo-nirdosha codegen wiring... not started"): a
+# real HTTP route whose create action is authorized by
+# nirdosha-ctms's own RFC 0029 capability gateways
+# (CtmsAlertGatewayV1/CtmsCaseAssignGatewayV1), not a generic unguarded
+# insert. Row storage for these two screens is still the generic
+# one-row-per-resource table `crud_screens!` always uses (same as
+# `transfer_create`) -- the gateway here is the authorization + evidence
+# layer, exactly the same division of responsibility `transfer_create`
+# already established, not a new inconsistency.
+[[screen]]
+id = "9.3"
+name = "Alert Queue"
+module = "M9"
+archetype = "crud_screens"
+combo = []
+roles = ["RiskAnalyst:R/W"]
+datasets = ["PG.ctms_alerts"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_ctms_alerts", route_path = "/ctms/alerts", generated_files = ["src/screens/m09_ctms_alerts.nir"] }
+data_binding = { entities = ["TransactionAlert"], primary_key = "alert_id", guard = { table = "ctms_alert_table", purpose = "TxnRead" }, fields = [
+    { name = "alert_id", type = "String" },
+    { name = "rule_id", type = "String" },
+    { name = "customer_key", type = "String" },
+    { name = "severity", type = "String" },
+    { name = "status", type = "String" },
+] }
+policy = { purpose = "TxnRead", allowed_actions = ["read", "create"] }
+parameters = { access_create = 'requires role "RiskAnalyst"', access_read = 'requires role "RiskAnalyst"', create_fields = ["alert_id", "rule_id", "customer_key", "severity", "status"] }
+service = { name = "alert_create", version = "1", parameters = { jurisdiction = "IN" } }
+notes = "This screen's own row storage is the generic guarded table (same as transfer_create); nirdosha-ctms's own AlertStore/rule engine/idempotency semantics are proven separately in that crate's own test suite, not invoked by this row here yet."
+
+[[screen]]
+id = "9.4"
+name = "Case Assignment"
+module = "M9"
+archetype = "crud_screens"
+combo = []
+roles = ["RiskAnalyst:R/W"]
+datasets = ["PG.ctms_cases"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_ctms_cases", route_path = "/ctms/cases", generated_files = ["src/screens/m09_ctms_alerts.nir"] }
+data_binding = { entities = ["MonitoringCase"], primary_key = "case_id", guard = { table = "ctms_case_table", purpose = "TxnRead" }, fields = [
+    { name = "case_id", type = "String" },
+    { name = "alert_id", type = "String" },
+    { name = "assigned_analyst", type = "String" },
+    { name = "status", type = "String" },
+] }
+policy = { purpose = "TxnRead", allowed_actions = ["read", "create"] }
+parameters = { access_create = 'requires role "RiskAnalyst"', access_read = 'requires role "RiskAnalyst"', create_fields = ["case_id", "alert_id", "assigned_analyst", "status"] }
+service = { name = "case_assign", version = "1", parameters = { eligible_roles = ["RiskAnalyst"], jurisdiction = "IN" } }
+notes = "Same division of responsibility as 9.3 -- generic guarded-table storage, RFC 0029 authorization/evidence via CtmsCaseAssignGatewayV1."

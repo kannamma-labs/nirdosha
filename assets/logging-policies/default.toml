@@ -1,0 +1,858 @@
+# =============================================================================
+# NIRDOSHA — Consolidated Logging Policy Register
+# schema: logging-policy/v2
+#
+# SEMANTICS (how tools must interpret this file):
+#   1. A rule matches an event when domain, country, and region match
+#      ("*" wildcards allowed; "EU" is a pseudo-jurisdiction token; member
+#      states may add stricter country rules e.g. country = "DE").
+#   2. All matching rules merge into the most specific one (see [precedence]).
+#   3. Conflicts resolve MOST-RESTRICTIVE (see [precedence].merge).
+#   4. Active [[waiver]] may relax exactly one non-statutory constraint.
+#      [[legal_hold]] may raise floors but never lower them.
+# =============================================================================
+
+[meta]
+schema = "logging-policy/v2"
+id = "NIR-LOGPOL-2024-001"
+version = "2024.12"
+title = "Global Logging Policy — Consolidated Register"
+status = "active"                          # draft | active | retired
+issued = "2024-10-01"
+effective = "2024-11-01"
+next_review = "2025-06-01"
+supersedes = "logging-policy/v1@2024.10"
+publisher = "NIRDOSHA Policy Board"
+publisher_contact = "policy@regs.example.org"
+approvers = ["dpo@corp.example", "ciso@corp.example", "counsel@corp.example"]
+distribution = "internal"
+language = "en"
+source = "https://regs.example.org/nirdosha/logging/v2/default.toml"
+content_hash = "sha256:abc123..."          # signed over everything below this line
+
+[signing]
+algorithm = "ed25519"
+key_id = "nirdosha-policy-2024-a"
+key_fingerprint = "sha256:9d1c..."
+signed_at = "2024-10-01T09:00:00Z"
+signature = "base64:..."
+countersigned_by = ["dpo", "ciso", "general-counsel"]
+verify_key_url = "https://keys.regs.example.org/nirdosha-policy-2024-a.pub"
+
+# -----------------------------------------------------------------------------
+# HOW RULES COMBINE
+# -----------------------------------------------------------------------------
+[precedence]
+match = [
+  "select rules where domain matches (rule.domain or '*')",
+  "then country matches (rule.country or '*')",
+  "then region matches (rule.region empty, or intersects event region)",
+]
+specificity = ["region", "subdomain", "country", "domain", "*"]   # most -> least
+waivers_apply_after = "merge"
+legal_holds_apply_after = "waivers"
+lint_rules = [
+  "cap_below_floor_is_error",        # retention_days < min_retention_days
+  "forbidden_field_must_not_appear_in_mask",
+  "waiver_cannot_relax_statutory_floor",
+]
+
+[precedence.merge]
+retention_days = "min"
+min_retention_days = "max"
+mask = "union"
+forbid = "union"
+require_in_event = "union"
+purposes = "intersection"
+integrity = "strongest"
+storage_region = "narrowest"
+
+[definitions]
+levels = ["debug", "info", "notice", "warn", "error", "fatal"]
+event_classes = [
+  "security",       # authN/authZ, intrusion, policy violations
+  "audit",          # access to sensitive resources, admin actions
+  "transaction",    # business transactions (payments, orders)
+  "access",         # who read/wrote what data
+  "operational",    # service health, infra
+  "api",            # request/response metadata
+  "debug",          # developer diagnostics — treat as hostile to privacy
+]
+integrity_levels = ["none", "hash-chain", "merkle", "worm"]        # ascending strength
+authorities = ["binding", "advisory", "guidance"]
+retention_classes = { hot = "queryable < 1 s", warm = "archive, queryable < 1 h", cold = "WORM, forensic only" }
+
+# -----------------------------------------------------------------------------
+# ABSOLUTE PROHIBITIONS — no waiver path exists for these, ever
+# -----------------------------------------------------------------------------
+[never_log]
+fields = [
+  "password", "auth_token", "api_key", "private_key_material",
+  "cvv", "pin", "full_pan", "track2",
+  "biometric_template_raw", "communication_content",
+]
+notes = "If a law appears to require one of these, escalate to counsel. Do not engineer around it silently."
+
+# -----------------------------------------------------------------------------
+# FIELD DICTIONARY — canonical names, classification, default handling
+# -----------------------------------------------------------------------------
+[fields.password]
+classification = "credential"
+default_handling = "forbid"
+[fields.auth_token]
+classification = "credential"
+default_handling = "forbid"
+[fields.api_key]
+classification = "credential"
+default_handling = "forbid"
+[fields.cvv]
+classification = "prohibited_data"
+default_handling = "forbid"
+[fields.pin]
+classification = "prohibited_data"
+default_handling = "forbid"
+[fields.full_pan]
+classification = "prohibited_data"
+default_handling = "forbid"
+[fields.pan]
+classification = "restricted"
+detect = "luhn"                       # detection hint for redaction engines
+default_handling = "partial(6,4)"
+notes = "First 6 / last 4 display permitted (PCI DSS v4 Req 3.3)."
+[fields.ssn]
+classification = "special_category"
+default_handling = "redact"
+[fields.mrn]
+classification = "phi"
+default_handling = "pseudonymize"
+[fields.diagnosis]
+classification = "phi"
+default_handling = "redact"
+[fields.dob]
+classification = "personal_data"
+default_handling = "generalize(year)"
+[fields.email]
+classification = "personal_data"
+default_handling = "hash(sha256)"
+[fields.phone]
+classification = "personal_data"
+default_handling = "truncate(4,suffix)"
+[fields.ip]
+classification = "personal_data"
+default_handling = "truncate(24)"
+[fields.geo_precise]
+classification = "sensitive"
+default_handling = "generalize(1km)"
+[fields.device_id]
+classification = "personal_data"
+default_handling = "pseudonymize"
+[fields.user_id]
+classification = "personal_data"
+default_handling = "pseudonymize"
+[fields.session_id]
+classification = "personal_data"
+default_handling = "pseudonymize"
+[fields.msisdn]
+classification = "personal_data"
+default_handling = "pseudonymize"
+[fields.imsi]
+classification = "prohibited_data"
+default_handling = "forbid"
+[fields.biometric_template]
+classification = "special_category"
+default_handling = "forbid"
+[fields.health_data]
+classification = "special_category"
+default_handling = "forbid"
+[fields.child_data]
+classification = "special_category"
+default_handling = "forbid"
+[fields.free_text]
+classification = "leakage_risk"
+default_handling = "scrub(dlp)"
+notes = "Free-text fields are the biggest real-world leak vector; require DLP scrubbing before egress."
+
+# -----------------------------------------------------------------------------
+# MASK FUNCTION REGISTRY — "mask" keys in rules reference these verbs
+# -----------------------------------------------------------------------------
+[mask_functions.redact]
+value = "[REDACTED]"
+[mask_functions.hash]
+algorithms = ["sha256"]
+salt = "kms://nirdosha/log-pepper"
+[mask_functions.partial]
+params = "keep_first,keep_last"
+[mask_functions.truncate]
+params = "bits_or_chars"
+[mask_functions.tokenize]
+vault = "kms://token-vault"
+[mask_functions.generalize]
+params = "strategy"
+[mask_functions.pseudonymize]
+notes = "Deterministic surrogate; re-id map access-controlled per [access]."
+[mask_functions.scrub]
+engines = ["dlp"]
+on_failure = "drop-field"
+[mask_functions.aggregate]
+params = "window"
+
+# -----------------------------------------------------------------------------
+# GLOBAL DEFAULTS — inherited by every rule unless overridden
+# -----------------------------------------------------------------------------
+[default_rules]
+level = "info"
+retention_days = 90                 # privacy CEILING
+min_retention_days = 0              # legal FLOOR
+archive_after_days = 30
+forbid = ["password", "auth_token", "api_key", "cvv", "pin", "full_pan"]
+require_in_event = ["timestamp", "event_id", "actor", "action", "outcome", "schema_version"]
+purposes = ["security", "audit", "compliance"]
+encrypt_at_rest = "aes-256-gcm"
+encrypt_in_transit = "tls1.3"
+integrity = "hash-chain"
+dsar_searchable = false
+erasure = "crypto-shred"
+
+[storage]
+residency_default = "region-of-data-subject"
+delete_semantics = "hard-delete"    # hard-delete | crypto-shred | anonymize
+proof_of_deletion = true            # signed deletion receipts
+key_management = "kms://nirdosha/log-keys"
+key_rotation = "90d"
+backup_retention_days = 35          # backups inherit the SHORTEST applicable retention
+cross_border_mechanisms = ["adequacy", "sccs", "uk_addendum", "dpf", "bcr", "explicit_consent"]
+
+[access]
+model = "rbac"
+roles = [
+  { role = "log_reader",      can = ["read"],                     approval = "none" },
+  { role = "log_analyst",     can = ["read", "correlate"],        approval = "manager" },
+  { role = "privacy_officer", can = ["read", "export", "erase"],  approval = "none" },
+  { role = "auditor",         can = ["read", "export"],           approval = "dual:dpo+ciso", timeboxed_days = 7 },
+  { role = "log_admin",       can = ["configure", "delete"],      approval = "dual:ciso+counsel" },
+]
+export_requires_case_id = true
+export_watermark = true
+log_access_logging = true           # meta-logging: viewing the logs is itself logged
+log_access_retention_days = 365
+break_glass = { enabled = true, ttl_minutes = 60, notify = ["ciso", "dpo"], post_review_within_hours = 24 }
+anonymize_for_shared_environments = true   # staging/training get anonymized feeds only
+
+[subject_rights]
+dsar_search_default = false
+erasure_mechanisms = ["crypto-shred", "hard-delete", "anonymize"]
+erasure_sla_days = 30               # GDPR Art. 17 alignment
+opt_out_signals = ["gpc", "ccpa-do-not-sell"]
+opt_out_effect = "behavioral logging stops; security logging continues"
+
+[legal_hold]
+enabled = true
+overrides = ["retention_days"]      # raises floors; never lowers statutory floors
+require = ["matter_id", "counsel_approval"]
+review_every_days = 90
+auto_release_on_expiry = true
+
+[enforcement]
+validation_pipeline = ["ci-policy-lint", "runtime-event-schema-allowlist", "egress-dlp-scan", "daily-retention-job"]
+on_forbidden_field   = "drop-field + alert"    # drop-field | drop-event | fail-closed | fail-open-alert
+on_missing_required  = "drop-event + alert"
+on_retention_violation = "purge + incident"
+on_schema_mismatch   = "fail-closed"           # unknown producer shapes are rejected, not accepted
+canary = { enabled = true, fields = ["pan", "email", "ssn"], schedule = "hourly", expect = "masked_or_absent" }
+sampling = { event_class = "debug", rate = 0.01 }
+volume_quota = { event_class = "api", max_events_per_sec = 5000, on_breach = "drop + alert" }
+violation_severity = { forbidden_field = "sev1", integrity_breach = "sev1", retention_breach = "sev2", missing_required = "sev3" }
+remediation_sla_hours = { sev1 = 4, sev2 = 24, sev3 = 72 }
+
+[dpia]
+required_when = ["special_category_logging", "covert_monitoring", "children_involved", "behavioral_logging_at_scale", "new_cross_border_flow"]
+blocking = true
+
+[attestation]
+cadence = "annual"
+attesters = ["service-owners", "security-engineering"]
+evidence = ["rule-coverage-report", "canary-results", "retention-job-audit"]
+
+# =============================================================================
+# RULES
+# =============================================================================
+
+# --- GLOBAL BASELINE ---------------------------------------------------------
+[[rule]]
+id = "R000-global-baseline"
+domain = "*"
+country = "*"
+regulator = "internal"
+basis = ["NIST SP 800-92", "ISO 27001 A.8.15"]
+authority = "binding"
+event_classes = ["security", "audit", "transaction", "access", "operational", "api", "debug"]
+retention_days = 90
+mask = { free_text = "scrub(dlp)", ip = "truncate(24)", email = "hash(sha256)" }
+
+[[rule]]
+id = "R001-debug-hostile"
+domain = "*"
+country = "*"
+authority = "binding"
+event_classes = ["debug"]
+level = "debug"
+retention_days = 7
+forbid = ["user_id", "email", "ip", "device_id", "geo_precise", "pan", "health_data", "child_data", "biometric_template", "free_text"]
+notes = "Debug logs contain no personal data, period. Sampled hard in prod ([enforcement])."
+
+# --- PAYMENTS ----------------------------------------------------------------
+[[rule]]
+id = "R100-payments-pci-global"
+domain = "payments"
+country = "*"
+regulator = "PCI SSC / card networks"
+basis = ["PCI DSS v4.0 Req 10", "PCI DSS v4.0 Req 3.3"]
+authority = "binding"
+event_classes = ["transaction", "security", "audit"]
+level_overrides = [{ event_class = "security", level = "warn" }]
+retention_days = 365
+min_retention_days = 365             # Req 10.5.1: >= 12 months (>= 3 months hot)
+archive_after_days = 90
+mask = { pan = "partial(6,4)" }
+forbid = ["cvv", "pin", "full_pan", "track2"]
+require_in_event = ["timestamp", "actor", "action", "outcome", "auth_result", "request_id"]
+integrity = "worm"
+tamper = "append-only"
+
+[[rule]]
+id = "R101-payments-us"
+domain = "payments"
+country = "US"
+regulator = "FTC / state AGs"
+basis = ["state breach laws (all 50)", "FTC Act §5"]
+authority = "binding"
+retention_days = 365
+breach_notification_hours = 72       # engineering SLA; state laws vary
+dsar_searchable = true
+cross_border = ["dpf"]
+
+[[rule]]
+id = "R102-payments-eu"
+domain = "payments"
+country = "EU"
+regulator = "EDPB / national DPAs"
+basis = ["GDPR Art. 5(1)(c,e)", "GDPR Art. 6(1)(c,f)", "PCI DSS v4.0 Req 10.5.1"]
+legal_basis = ["legal_obligation", "legitimate_interest"]
+authority = "binding"
+# CONFLICT RESOLVED ON RECORD: v1 set 90 days here, which violates the PCI DSS
+# 12-month floor. GDPR caps retention at "as long as necessary"; PCI sets the
+# floor. Resolution: 365 days, pseudonymised identifiers, access restricted to
+# the security purpose only. DPIA-2024-011 documents the balancing test.
+retention_days = 365
+min_retention_days = 365
+pseudonymize = ["user_id", "actor"]
+purposes = ["security", "audit"]     # purpose limitation: NOT marketing
+storage_region = "eu"
+cross_border = ["sccs", "bcr"]
+breach_notification_hours = 72       # GDPR Art. 33
+dpia = true
+
+[[rule]]
+id = "R103-payments-uk"
+domain = "payments"
+country = "UK"
+regulator = "ICO / FCA"
+basis = ["UK GDPR", "PCI DSS v4.0"]
+authority = "binding"
+storage_region = "uk"
+cross_border = ["uk_addendum"]
+breach_notification_hours = 72
+
+[[rule]]
+id = "R104-payments-in"
+domain = "payments"
+country = "IN"
+regulator = "RBI / CERT-In"
+basis = ["RBI Storage of Payment System Data (2018)", "CERT-In Directions 2022"]
+authority = "binding"
+min_retention_days = 180             # CERT-In floor
+storage_region = "in"
+localization_required = true
+notes = "Payment data may be processed abroad but must be repatriated within 24 h and stored only in India."
+
+[[rule]]
+id = "R105-payments-cn"
+domain = "payments"
+country = "CN"
+regulator = "PBOC / CAC"
+basis = ["Cybersecurity Law Art. 21", "PIPL Art. 28, 40"]
+authority = "binding"
+min_retention_days = 180             # CSL: network logs >= 6 months
+storage_region = "cn"
+localization_required = true
+cross_border = ["cac_security_assessment"]
+separate_consent_required = true
+
+# --- HEALTHCARE ---------------------------------------------------------------
+[[rule]]
+id = "R200-healthcare-us"
+domain = "healthcare"
+country = "US"
+regulator = "HHS OCR"
+basis = ["HIPAA §164.312(b)", "HIPAA §164.316(b)(2) (6-year floor)", "HITECH"]
+legal_basis = ["healthcare_operations", "legal_obligation"]
+authority = "binding"
+retention_days = 2555                # org choice (7y); statutory floor below
+min_retention_days = 2190
+special_categories = ["phi"]
+minimum_necessary = true
+mask = { ssn = "redact", mrn = "pseudonymize", diagnosis = "redact", dob = "generalize(year)", free_text = "scrub(dlp)" }
+forbid = ["psychotherapy_notes"]
+require_in_event = ["timestamp", "actor", "patient_id", "access_type", "purpose", "outcome"]
+dsar_searchable = true
+erasure = "legal-process-only"       # PHI deletion governed by law, not DSAR tooling
+breach_notification_hours = 24       # internal SLA; statute allows 60 days to OCR
+
+[[rule]]
+id = "R201-healthcare-eu"
+domain = "healthcare"
+country = "EU"
+regulator = "national DPAs"
+basis = ["GDPR Art. 9(2)(h)", "GDPR Art. 5"]
+legal_basis = ["explicit_consent", "vital_interests"]
+authority = "binding"
+retention_days = 365
+special_categories = ["health"]
+mask = { patient_id = "pseudonymize", mrn = "pseudonymize", diagnosis = "redact" }
+require_in_event = ["timestamp", "actor", "access_type", "legal_basis", "patient_pseudonym"]
+storage_region = "eu"
+dpia = true
+breach_notification_hours = 72
+
+[[rule]]
+id = "R202-healthcare-clinical-trials-us"
+domain = "healthcare"
+subdomain = "clinical_trials"
+country = "US"
+regulator = "FDA"
+basis = ["21 CFR Part 11.10(e)", "ICH GCP E6(R2) 4.9"]
+authority = "binding"
+retention_days = 9125
+min_retention_days = 7300
+integrity = "merkle"                 # ALCOA+: attributable, contemporaneous, original, accurate
+tamper = "worm"
+require_in_event = ["timestamp", "actor", "record_id", "old_value", "new_value", "reason"]
+notes = "Audit trails of record creation/modification are themselves part of the regulated record."
+
+# --- FINANCE -----------------------------------------------------------------
+[[rule]]
+id = "R300-brokerage-us"
+domain = "finance"
+subdomain = "brokerage"
+country = "US"
+regulator = "SEC / FINRA"
+basis = ["SEC Rule 17a-4", "FINRA 4511", "SOX §404"]
+authority = "binding"
+retention_days = 2190                # 6 years
+min_retention_days = 2190            # this is a FLOOR: books-and-records law
+integrity = "worm"
+require_in_event = ["timestamp", "actor", "action", "instrument", "order_id", "outcome"]
+erasure = "legal-process-only"
+notes = "Privacy ceilings cannot shorten this. Early deletion requires counsel sign-off."
+
+[[rule]]
+id = "R301-finance-eu"
+domain = "finance"
+country = "EU"
+regulator = "ESMA / NCAs"
+basis = ["MiFID II Art. 16(7)", "RTS 6"]
+authority = "binding"
+retention_days = 1825                # 5 years; extendable to 7 on NCA request
+min_retention_days = 1825
+mask = { free_text = "scrub(dlp)" }
+require_in_event = ["timestamp", "actor", "channel", "counterparty", "legal_basis"]
+storage_region = "eu"
+
+[[rule]]
+id = "R302-aml-us"
+domain = "finance"
+subdomain = "aml"
+country = "US"
+regulator = "FinCEN"
+basis = ["31 CFR 1010.430", "FinCEN Travel Rule"]
+authority = "binding"
+retention_days = 1825
+min_retention_days = 1825
+require_in_event = ["timestamp", "actor", "transaction_id", "alert_id", "disposition"]
+dsar_searchable = false
+notes = "SAR-related logs must NOT be discoverable by the data subject; access restricted to AML team + counsel."
+
+[[rule]]
+id = "R303-vasp-us"
+domain = "finance"
+subdomain = "crypto"
+country = "US"
+regulator = "FinCEN / OFAC"
+basis = ["31 CFR 1010.410(f)", "OFAC screening"]
+authority = "binding"
+retention_days = 1825
+min_retention_days = 1825
+mask = { wallet_address = "none" }   # kept in full: required for chain analysis
+require_in_event = ["timestamp", "tx_hash", "counterparty_vasp", "screening_result"]
+
+# --- TELECOM -----------------------------------------------------------------
+[[rule]]
+id = "R400-telecom-eu"
+domain = "telecom"
+country = "EU"
+regulator = "DPAs / BEREC"
+basis = ["ePrivacy 2002/58/EC Art. 6", "CJEU C-311/18 (La Quadrature)", "GDPR Art. 5"]
+authority = "binding"
+retention_days = 90
+min_retention_days = 0
+mask = { msisdn = "pseudonymize", imei = "pseudonymize", geo_precise = "generalize(1km)" }
+forbid = ["imsi", "communication_content", "cell_precise"]
+dsar_searchable = true
+notes = "Blanket metadata retention is unlawful in the EU. Retain only for billing/fraud/abuse with a documented purpose."
+
+[[rule]]
+id = "R401-telecom-us"
+domain = "telecom"
+country = "US"
+regulator = "FCC"
+basis = ["47 CFR §64.2001 et seq. (CPNI)", "CALEA §1002"]
+authority = "binding"
+retention_days = 365
+mask = { msisdn = "partial(3,4)" }
+forbid = ["communication_content", "cpni_marketing_use"]
+
+[[rule]]
+id = "R402-telecom-in"
+domain = "telecom"
+country = "IN"
+regulator = "DoT / CERT-In"
+basis = ["CERT-In Directions 2022"]
+authority = "binding"
+retention_days = 730
+min_retention_days = 180
+storage_region = "in"
+localization_required = true
+
+# --- CRITICAL INFRASTRUCTURE -------------------------------------------------
+[[rule]]
+id = "R500-energy-us"
+domain = "critical_infrastructure"
+subdomain = "energy"
+country = "US"
+regulator = "NERC / FERC"
+basis = ["NERC CIP-007 R4", "CIP-005 R2"]
+authority = "binding"
+level = "warn"
+retention_days = 1095
+min_retention_days = 90              # CIP-007 R4.2: 90-day rolling window
+mask = {}
+require_in_event = ["timestamp", "asset_id", "actor", "action", "outcome"]
+integrity = "worm"
+notes = "Logs must be time-synced to a common source (CIP-007 R4.3); ESP-boundary assets only."
+
+[[rule]]
+id = "R501-pipelines-us"
+domain = "critical_infrastructure"
+subdomain = "pipelines"
+country = "US"
+regulator = "TSA / PHMSA"
+basis = ["TSA Security Directive PIPI-S2", "49 CFR 195"]
+authority = "binding"
+level = "warn"
+retention_days = 365
+min_retention_days = 180
+require_in_event = ["timestamp", "asset_id", "outcome"]
+breach_notification_hours = 24       # TSA incident reporting window
+
+# --- CHILDREN & EDUCATION ----------------------------------------------------
+[[rule]]
+id = "R600-children-us"
+domain = "children"
+country = "US"
+regulator = "FTC"
+basis = ["COPPA 16 CFR 312"]
+authority = "binding"
+retention_days = 30
+forbid = ["child_data", "geo_precise", "persistent_identifiers", "behavioral_profiling"]
+require_in_event = ["timestamp", "consent_state"]
+notes = "No behavioral logging of under-13s without verifiable parental consent."
+
+[[rule]]
+id = "R601-children-uk"
+domain = "children"
+country = "UK"
+regulator = "ICO"
+basis = ["Age Appropriate Design Code", "UK GDPR Art. 8"]
+authority = "binding"
+retention_days = 30
+forbid = ["child_data", "geo_precise", "nudge_logging"]
+dpia = true
+
+[[rule]]
+id = "R610-education-us"
+domain = "education"
+country = "US"
+regulator = "ED / PPRA office"
+basis = ["FERPA 34 CFR 99"]
+authority = "binding"
+retention_days = 1095
+mask = { student_id = "pseudonymize" }
+require_in_event = ["timestamp", "actor", "record_id", "access_type", "purpose"]
+notes = "Disclosure logging required; parent access rights may reach the logs themselves."
+
+# --- AI SYSTEMS --------------------------------------------------------------
+[[rule]]
+id = "R700-ai-highrisk-eu"
+domain = "ai"
+subdomain = "high_risk"
+country = "EU"
+regulator = "AI Office / market surveillance"
+basis = ["EU AI Act Art. 12 (providers)", "Art. 19 (deployers)"]
+authority = "binding"
+retention_days = 365
+min_retention_days = 180             # deployer logs >= 6 months
+require_in_event = ["timestamp", "model_id", "model_version", "input_reference", "output_reference", "human_reviewer_id", "decision_outcome"]
+integrity = "worm"
+storage_region = "eu"
+notes = "Automatic event logging over the system lifetime; must enable traceability of decisions."
+
+[[rule]]
+id = "R701-ai-us"
+domain = "ai"
+country = "US"
+regulator = "advisory"
+basis = ["NIST AI RMF", "Colorado AI Act (2026)"]
+authority = "advisory"
+retention_days = 365
+require_in_event = ["timestamp", "model_id", "model_version", "decision_outcome"]
+
+# --- BIOMETRICS --------------------------------------------------------------
+[[rule]]
+id = "R800-biometrics-bipa"
+domain = "biometrics"
+country = "US"
+region = ["IL"]
+regulator = "Illinois AG / courts"
+basis = ["BIPA 740 ILCS 14"]
+authority = "binding"
+retention_days = 1095                # 3y from last interaction OR purpose fulfilled, whichever first
+forbid = ["biometric_template"]
+require_in_event = ["timestamp", "consent_state", "purpose", "destruction_date"]
+notes = "A public retention schedule is itself a BIPA requirement — publish it and honor it."
+
+# --- ADTECH ------------------------------------------------------------------
+[[rule]]
+id = "R900-adtech-ca"
+domain = "adtech"
+country = "US"
+region = ["CA"]
+regulator = "CPPA / CA AG"
+basis = ["CCPA/CPRA §1798.100 et seq.", "GPC"]
+authority = "binding"
+retention_days = 90
+forbid = ["cross_context_behavioral_after_optout"]
+require_in_event = ["timestamp", "consent_state", "opt_out_signal"]
+dsar_searchable = true
+erasure = "hard-delete"
+
+[[rule]]
+id = "R901-adtech-eu"
+domain = "adtech"
+country = "EU"
+regulator = "DPAs"
+basis = ["ePrivacy Art. 5(3)", "GDPR"]
+authority = "binding"
+retention_days = 30
+forbid = ["fingerprinting_without_consent", "cross_device_id"]
+require_in_event = ["timestamp", "consent_state"]
+mask = { device_id = "pseudonymize" }
+
+# --- HR / EMPLOYMENT ---------------------------------------------------------
+[[rule]]
+id = "R910-hr-eu"
+domain = "hr"
+country = "EU"
+regulator = "DPAs / works councils"
+basis = ["GDPR Art. 88", "national employment law"]
+authority = "binding"
+retention_days = 90
+forbid = ["covert_monitoring", "keystroke_content", "screen_content"]
+require_in_event = ["timestamp", "actor", "purpose"]
+dpia = true
+
+# --- GOVERNMENT / LAW ENFORCEMENT -------------------------------------------
+[[rule]]
+id = "R920-law-enforcement-us"
+domain = "law_enforcement"
+country = "US"
+regulator = "DOJ / courts"
+basis = ["SCA 18 U.S.C. §2701 et seq.", "Pen Register Act §3121"]
+authority = "binding"
+forbid = ["communication_content_without_warrant"]
+require_in_event = ["timestamp", "legal_process_id", "requesting_authority", "scope"]
+notes = "Metadata collection requires court order; keep logs that support annual SCA reports."
+
+# --- AVIATION ----------------------------------------------------------------
+[[rule]]
+id = "R930-aviation-global"
+domain = "aviation"
+country = "*"
+regulator = "ICAO / FAA / EASA"
+basis = ["ICAO Annex 6", "14 CFR 121.359", "EU Reg. 965/2012"]
+authority = "binding"
+retention_days = 30                  # FDR 25 h / CVR 2 h rolling
+min_retention_days = 1
+forbid = ["cvr_playback_for_discipline"]
+require_in_event = ["timestamp", "aircraft_id", "flight_phase"]
+notes = "CVR use restricted to safety investigation; auto-bulk-erase after 2 h in normal ops."
+
+# --- JURISDICTION ADDENDA (domain "*") --------------------------------------
+[[rule]]
+id = "R950-jur-cn"
+domain = "*"
+country = "CN"
+regulator = "CAC"
+basis = ["Cybersecurity Law Art. 21", "PIPL", "DSL"]
+authority = "binding"
+retention_days = 180
+min_retention_days = 180
+storage_region = "cn"
+localization_required = true
+
+[[rule]]
+id = "R951-jur-in"
+domain = "*"
+country = "IN"
+regulator = "CERT-In / DPB"
+basis = ["CERT-In Directions 2022", "DPDP Act 2023"]
+authority = "binding"
+retention_days = 180
+min_retention_days = 180
+storage_region = "in"
+breach_notification_hours = 6        # CERT-In: report incidents within 6 hours
+
+[[rule]]
+id = "R952-jur-br"
+domain = "*"
+country = "BR"
+regulator = "ANPD"
+basis = ["Marco Civil da Internet Art. 15", "LGPD"]
+authority = "binding"
+min_retention_days = 180             # access logs: statutory 6-month floor
+retention_days = 180
+dsar_searchable = true
+
+[[rule]]
+id = "R953-jur-au-telecom"
+domain = "telecom"
+country = "AU"
+regulator = "ACMA / OAIC"
+basis = ["TIA Act 2015 Sch. 1"]
+authority = "binding"
+min_retention_days = 730             # 2-year metadata retention
+retention_days = 730
+
+[[rule]]
+id = "R954-jur-jp"
+domain = "*"
+country = "JP"
+regulator = "PPC"
+basis = ["APPI"]
+authority = "binding"
+retention_days = 180
+notes = "Pseudonymously processed info is a distinct APPI category; cross-border disclosure duties apply."
+
+[[rule]]
+id = "R955-jur-kr"
+domain = "*"
+country = "KR"
+regulator = "PIPC"
+basis = ["PIPA"]
+authority = "binding"
+retention_days = 180
+forbid = ["resident_registration_number"]
+
+[[rule]]
+id = "R956-jur-ca"
+domain = "*"
+country = "CA"
+regulator = "OPC"
+basis = ["PIPEDA", "Quebec Law 25"]
+authority = "binding"
+retention_days = 365
+notes = "Quebec Law 25: PIA required for log systems; transborder flows must be disclosed."
+
+[[rule]]
+id = "R957-jur-ch"
+domain = "*"
+country = "CH"
+regulator = "FDPIC"
+basis = ["revFADP"]
+authority = "binding"
+retention_days = 365
+storage_region = "ch"
+
+# =============================================================================
+# WAIVERS — relax exactly one constraint, with approval + expiry
+# =============================================================================
+[[waiver]]
+id = "W-2024-003"
+rule_id = "R000-global-baseline"
+constraint = "mask"
+field = "ip"
+granted_handling = "none (full IP)"
+scope = { service = "fraud-engine", environment = "prod" }
+requested_by = "team-fraud"
+approved_by = ["dpo@corp.example", "ciso@corp.example"]
+justification = "Fraud-graph investigation requires full IPs; documented in DPIA-2024-017."
+issued = "2024-10-02"
+expires = "2024-12-31"
+status = "active"
+compensating_controls = ["egress-dlp-strict", "retention-capped-30d"]
+
+# =============================================================================
+# TEST VECTORS — must pass in CI against the reference validator
+# =============================================================================
+[[test_vector]]
+id = "TV-001"
+description = "Payment event carrying a full PAN must be rejected"
+event = { event_class = "transaction", domain = "payments", country = "US", fields = { pan = "4111111111111111" } }
+expect = "fail"
+expect_reason = "forbidden_field: full_pan"
+
+[[test_vector]]
+id = "TV-002"
+description = "Masked, complete payment event passes"
+event = { event_class = "transaction", domain = "payments", country = "US", fields = { pan = "411111******1111", timestamp = "t", actor = "svc-checkout", action = "auth", outcome = "declined", auth_result = "declined", request_id = "r-1", event_id = "e-1", schema_version = "1" } }
+expect = "pass"
+
+[[test_vector]]
+id = "TV-003"
+description = "Debug log containing a user_id must be rejected"
+event = { event_class = "debug", domain = "*", country = "*", fields = { user_id = "u-42" } }
+expect = "fail"
+expect_reason = "forbidden_field: user_id (R001-debug-hostile)"
+
+[[test_vector]]
+id = "TV-004"
+description = "EU adtech event without consent_state must be rejected"
+event = { event_class = "api", domain = "adtech", country = "EU", fields = { device_id = "d-1", timestamp = "t" } }
+expect = "fail"
+expect_reason = "missing_required: consent_state (R901-adtech-eu)"
+
+# =============================================================================
+# CHANGE HISTORY
+# =============================================================================
+[[revision]]
+version = "2024.12"
+date = "2024-10-01"
+author = "policy-board"
+changes = [
+  "MODEL: min/max retention (statutory floors vs privacy ceilings)",
+  "FIX: EU payments 90d -> 365d (v1 violated PCI DSS 10.5.1 floor)",
+  "ADD: precedence + most-restrictive merge semantics",
+  "ADD: mask-function registry, field dictionary, never_log tier",
+  "ADD: storage, access (meta-logging), subject-rights, legal-hold, enforcement, dpia, attestation",
+  "ADD: AI Act, BIPA, 21 CFR Part 11, telecom/AML/VASP rules; 9 jurisdiction addenda",
+  "ADD: waivers, test vectors, change history",
+]

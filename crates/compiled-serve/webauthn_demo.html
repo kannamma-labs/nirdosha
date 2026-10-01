@@ -1,0 +1,88 @@
+<!doctype html>
+<!--
+  Reference-only WebAuthn ceremony driver for the `/api/webauthn/*`
+  endpoints in this crate's own `lib.rs` -- proves the four-endpoint
+  register/login flow is real and reachable from a real browser's
+  `navigator.credentials` API, the same way `/api/_demo_login` needed no
+  UI of its own to be a real, working endpoint. Not a product login page:
+  no styling, no error recovery beyond an alert, one hard-coded subject
+  field. Serve this file yourself (it is not baked into any compiled
+  binary) next to a `nirdosha-compiled-serve`-based server and open it
+  from the exact origin (scheme+host+port) that server's `ServeConfig`
+  will see in the `Host` header -- WebAuthn ties every ceremony to the
+  origin it started from.
+-->
+<html>
+<head><meta charset="utf-8"><title>WebAuthn reference demo</title></head>
+<body>
+<p>Subject: <input id="subject" value="alice"></p>
+<button id="register">Register a passkey</button>
+<button id="login">Log in with a passkey</button>
+<pre id="log"></pre>
+<script>
+const log = (msg) => { document.getElementById('log').textContent += msg + "\n"; };
+const subject = () => document.getElementById('subject').value;
+
+// base64url, matching this crate's own encoding (base64::URL_SAFE_NO_PAD).
+const toB64Url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const fromB64Url = (s) => {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64.padEnd(b64.length + (4 - b64.length % 4) % 4, '='));
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0)).buffer;
+};
+
+async function postJson(path, body) {
+  const resp = await fetch(path, { method: 'POST', body: JSON.stringify(body) });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`${path} -> ${resp.status}: ${text}`);
+  return JSON.parse(text);
+}
+
+document.getElementById('register').onclick = async () => {
+  try {
+    const start = await postJson('/api/webauthn/register/start', { subject: subject() });
+    const credential = await navigator.credentials.create({
+      publicKey: {
+        challenge: fromB64Url(start.challenge),
+        rp: start.rp,
+        user: { id: fromB64Url(toB64Url(new TextEncoder().encode(start.user.id))), name: start.user.name, displayName: start.user.displayName },
+        pubKeyCredParams: start.pubKeyCredParams,
+        timeout: 60000,
+      },
+    });
+    await postJson('/api/webauthn/register/finish', {
+      subject: subject(),
+      attestation_object: toB64Url(credential.response.attestationObject),
+      client_data_json: toB64Url(credential.response.clientDataJSON),
+    });
+    log('registered.');
+  } catch (e) {
+    log('register failed: ' + e);
+  }
+};
+
+document.getElementById('login').onclick = async () => {
+  try {
+    const start = await postJson('/api/webauthn/login/start', { subject: subject() });
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: fromB64Url(start.challenge),
+        rpId: start.rp_id,
+        allowCredentials: start.allow_credentials.map((c) => ({ type: c.type, id: fromB64Url(c.id) })),
+        timeout: 60000,
+      },
+    });
+    const result = await postJson('/api/webauthn/login/finish', {
+      subject: subject(),
+      authenticator_data: toB64Url(assertion.response.authenticatorData),
+      client_data_json: toB64Url(assertion.response.clientDataJSON),
+      signature: toB64Url(assertion.response.signature),
+    });
+    log('logged in, token: ' + result.token);
+  } catch (e) {
+    log('login failed: ' + e);
+  }
+};
+</script>
+</body>
+</html>

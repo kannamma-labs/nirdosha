@@ -10,15 +10,16 @@ systems language with no garbage collector, no data races, no
 deadlocks, and no integer/buffer overflow, built around a small LL(1)
 grammar. I'm going to ask you to write `.nir` code. Follow the rules
 below exactly — Nirdosha's syntax is stricter and less forgiving than
-most languages you've seen, and small deviations (using `::`, using
-`str` as a function parameter, adding a semicolon, using `for`,
-putting a multi-statement block or a `return` inside a `match` arm,
-using `+=`, using `/* */` block comments, a trailing comma in a call's
-arguments, or putting `if`/`match` directly on the right of a plain
-`x = ...` reassignment) will produce code that doesn't compile. A
-"Quick reference: wrong vs. right" section below has a verified
-bad/good pair for every one of these — check your draft against it
-before presenting anything as final.
+most languages you've seen, and small deviations (using `str` as a
+function parameter, adding a semicolon, using `for`, putting a
+multi-statement block or a `return` inside a `match` arm, using `+=`,
+using `/* */` block comments, a trailing comma in a call's arguments,
+using a reserved word (`state`, `open`, `serve`, `match`, ...) as a
+variable/field/function name, or putting `if`/`match` directly on the
+right of a plain `x = ...` reassignment) will produce code that
+doesn't compile. A "Quick reference: wrong vs. right" section below
+has a verified bad/good pair for every one of these — check your draft
+against it before presenting anything as final.
 
 
 
@@ -32,9 +33,13 @@ generate *valid* Nirdosha on the first try.
 
 ## The rules that will break your output if you get them wrong
 
-1. **No `::` token exists anywhere in the lexer.** Enum variants are
-   flat, unqualified calls: `Some(5)`, `None()`, `Circle(r)` — never
-   `EnumName::Variant`. A zero-payload variant still needs `()` at the
+1. **Enum variants are flat, unqualified calls: `Some(5)`, `None()`,
+   `Circle(r)`.** A qualified `EnumName::Variant` spelling is also
+   accepted as optional disambiguation sugar (`Shape::Circle(1.0)`
+   parses; the flat form is the canonical one every example uses),
+   but inside a real `module Ident { ... }` block the *qualified*
+   form is what's required — references to anything declared in one
+   must spell `Mod::Name`. A zero-payload variant still needs `()` at the
    call site: `None()`, not bare `None`. This flat namespace is
    *program-wide*, including two built-in prelude enums you didn't
    declare: `CurrencyCode` (every active ISO 4217 code — `USD`, `EUR`,
@@ -69,7 +74,12 @@ generate *valid* Nirdosha on the first try.
    continuation of the previous one (this bites unary `-` and calls
    most often).
 5. **No `for` loops, no closures/lambdas, no tuples.** Use `while` for
-   iteration. Use a real `struct`/`enum` instead of a tuple. Plain
+   iteration. Use a real `struct`/`enum` instead of a tuple — and the
+   ban is *literal*: `Result((i64, str), E)` and `Option((i64, str))`
+   nest a tuple inside a generic and still fail to parse
+   (`expected a type, found "("`). If a function must return more
+   than one value, declare a `struct` to carry them, or return `json`
+   (which has no static shape at all). Plain
    first-class functions exist (`let f: fn(i64) -> i64 = double`) but
    capture nothing — there's no enclosing-scope capture at all.
 6. **No implicit conversions, ever**, between two already-typed values
@@ -88,13 +98,13 @@ generate *valid* Nirdosha on the first try.
 
    **A variant arm's pattern is flat, one variant deep — it can never
    nest another constructor.** `Err(DbError(_)) => ...` is a parse
-   error (`expected \`)\`, found LParen`), every time — a pattern's
+   error (`expected \`)\`, found \`(\``), every time — a pattern's
    payload position can only bind a plain name (or `_`), never another
    variant call. To inspect *what kind* of error a bound payload itself
    is, bind the whole payload to a name and `match` on that name again,
    nested:
    ```nirdosha
-   // WRONG — parse error, "expected `)`, found LParen":
+   // WRONG — parse error, "expected `)`, found `(`":
    match setup {
        Ok(_) => "ready",
        Err(DbError(_)) => "db error",
@@ -114,7 +124,7 @@ generate *valid* Nirdosha on the first try.
    `{ statement; statement }` block.** This is the single most common
    mistake an LLM makes writing Nirdosha (it's valid in Rust, which is
    why the instinct is strong). `Ok(conn) => { let x = f(conn) stop(conn) x }`
-   is a parse error (`expected an expression, found LBrace`), full
+   is a parse error (`expected an expression, found `{``), full
    stop, even though it looks completely reasonable. If an arm needs
    more than one step, do what every real Nirdosha program in this
    repo does: **extract a small helper function and call it as the
@@ -150,7 +160,7 @@ generate *valid* Nirdosha on the first try.
    early-return-on-error idiom that's completely normal in most
    languages —
    ```nirdosha
-   // WRONG — "found Return" parse error, every time:
+   // WRONG — "found the reserved keyword `return`" parse error, every time:
    let x: i64 = match may_fail(n) {
        Ok(v) => v,
        Err(e) => return Err(e),
@@ -210,11 +220,11 @@ generate *valid* Nirdosha on the first try.
    must not run after a prior failure, guard each one with its own
    `if previous_ok { ... } else { -1 }` instead of a flat sequence.
 10. **No compound assignment operators.** `total += i` is a parse
-    error (`expected an expression, found Assign`) — there is no `+=`,
+    error (`expected an expression, found `=``) — there is no `+=`,
     `-=`, `*=`, `/=` at all. Write it out: `total = total + i`.
 11. **Only `//` line comments exist — no `/* ... */` block comments at
     all.** The lexer doesn't recognize `/*` as the start of anything;
-    a leading `/*` produces `parse error: expected 'fn', found Slash`
+    a leading `/*` produces `parse error: expected `fn`, found `/``
     (or similar, wherever it appears) because the parser just sees a
     stray `/` where a top-level item or expression was expected. Use
     `//` for every comment, including multi-line ones (one `//` per
@@ -244,14 +254,14 @@ generate *valid* Nirdosha on the first try.
     A call's argument list (`f(a, b,)`), a `fn`'s own parameter list
     (`fn f(a: i64, b: i64,)`), and an array/matrix literal
     (`[1, 2, 3,]`) all reject a trailing comma before the closing
-    delimiter — `expected an expression, found RParen`/`RBracket`, or
-    (for params) a bogus "expected identifier" once the parser tries
+    delimiter — `expected an expression, found `)`/`]``, or
+    (for params) `expected identifier, found `)`` once the parser tries
     to read a nonexistent next parameter. Only `struct`/`enum`
     declarations tolerate one.
 14. **A plain reassignment's right-hand side can't start with `if`,
     `match`, or `transact` directly** — only a `let` binding or
     `return` can. `x = if cond { 1 } else { 2 }` is a parse error
-    (`expected an expression, found If`), because `x = ...`'s
+    (`expected an expression, found the reserved keyword `if``), because `x = ...`'s
     right-hand side is parsed by a rule that never re-enters the
     top-level dispatch those three keywords need; a `let`'s value and
     a `return`'s value *do* go through that dispatch, which is why
@@ -262,10 +272,14 @@ generate *valid* Nirdosha on the first try.
     `if`/`match`/`transact` again. Needed most often accumulating a
     value across loop iterations, e.g. `total = (if v > 0 { total + v } else { total })`.
 15. **A call's result can't be followed by `.field` or `[index]`.**
-    `source_label(t.source).value` and `lookup(k)[0]` are both parse
-    errors — postfix field/index access only ever applies to a
-    primary expression, and the parser never gives a call's own
-    result another pass through that rule. Bind the call to a `let`
+    `source_label(t.source).value` is a parse error (`expected an
+    expression, found `.``) — postfix field access only ever applies
+    to a primary expression, and the parser never gives a call's own
+    result another pass through that rule. `lookup(k)[0]` is *worse
+    than a parse error*: with no statement separator, the statement
+    silently ends at the call and the `[0]` becomes a stray array-
+    literal statement — so it looks like it worked while `x` holds the
+    whole call result, not the indexed cell. Bind the call to a `let`
     first: `let s: Text = source_label(t.source)` then use `s.value`.
 16. **`%` is a real operator — truncating remainder, same precedence
     as `*`/`/` — for `i64`/`f64` only.** `x % board_width`,
@@ -275,14 +289,135 @@ generate *valid* Nirdosha on the first try.
     producing a wrong or NaN-looking `i64`. There is no `dec128`
     (`Money`) remainder — a type error, not a runtime failure, if you
     try `some_money % other_money`.
+17. **Reserved words can never be identifiers.** Nirdosha has a fixed
+    reserved-word list, and none of them can be a variable, field,
+    parameter, `fn`, `struct`, `enum`, `screen`, or `module` name — not
+    a style rule, but a lexer fact: each one lexes as its own keyword
+    token, so the parser sees a keyword where a name is required and
+    stops. `struct Player { state: str }` is a parse error
+    (`expected identifier, found the reserved keyword `state``),
+    because `state` names a `workflow` state-machine state and is
+    reserved language-wide. The full list: `fn let return if else
+    while box froze spawn join thread chan send recv sandbox stop
+    connect listen accept open effect requires nfr acquire audited
+    transact struct enum match screen dashboard landing serve module
+    workflow state workspace validate pub use Vector Matrix handle
+    true false` — plus every scalar type name (`i8`…`i64`, `str`,
+    `bool`, `tcp`, `db`, `mq`, ...) is equally unusable as an identifier
+    (`the reserved type name `str``). The ones that actually collide
+    with ordinary app vocabulary: `state`, `open`, `serve`, `screen`,
+    `landing`, `handle`, `send`, `recv`, `connect`, `listen`, `accept`,
+    `match`, `use`, `effect`, `stop`. If you need one of those words
+    as a name, pick a synonym (`game_state`, `open_order`, ...) —
+    there is no quoting or escaping mechanism.
+18. **A Hoare contract is a separate top-level `validate` block, never
+    inline in the function body, and its keys are exactly `pre`/`post`
+    (never `requires`/`ensures`, even though those words are reserved
+    too — they're for something else, function-level `requires(role:
+    ...)` gating).** `pre` states an assumption about the parameters
+    that must hold before this predicate applies; `post` states what
+    must be true of `result` (the contract's own name for the return
+    value) afterward. Both are plain `.nir` boolean expressions —
+    combine more than one condition with `&&`, never a repeated
+    `pre:`/`post:` key on the same block:
+    ```nirdosha
+    fn charge_cents(amount_cents: i64, balance_cents: i64) -> i64 {
+        return balance_cents - amount_cents
+    }
+
+    validate charge_cents {
+        pre: amount_cents >= 0 && amount_cents <= balance_cents
+        post: result >= 0
+    }
+    ```
+    Only integer parameters/return values are provable today (no
+    `f64`, `bool`, `struct`, or `enum` in a contract's own predicate) —
+    write the contract anyway for a fully-integer function, and expect
+    `nirdosha verify`'s JSON `verdict` to come back `PROVED` (a real
+    Z3 proof), `DISPROVED` (a real counterexample — the contract or the
+    function has a real bug, don't just loosen the predicate to make it
+    pass), or `UNKNOWN` (a real, disclosed compiler boundary — division-
+    derived predicates and loops are two current examples, not an error
+    on your part).
+    **Enforced, not advisory:** when a component's listed attribute
+    begins `validate contract`, that is a proof demand — the program is
+    refused unless that component's fn carries a `validate` block Z3
+    actually proves. Treat such attributes as mandatory requirements,
+    never decoration.
+19. **Identity, roles, and the `acquire` pattern are builtins — do not
+    redeclare them and do not invent your own identity type.** The only
+    identity type is `VerifiedIdentity`; roles are plain strings such as
+    `"requester"`, `"finance_director"`, `"admin"`. `check_role(identity,
+    "role")` and `acquire fn_name(proof)` are provided by the runtime.
+    Never write `fn check_role(...)`, `fn acquire(...)`, or structs/enums
+    named `User`, `UserRole`, `RoleProof`, etc. A privileged action looks
+    exactly like this:
+    ```nirdosha
+    fn approve_payment(instance_id: i64) -> bool requires(role: "finance_director") {
+        return true
+    }
+
+    fn try_approve(identity: VerifiedIdentity, instance_id: i64) -> bool requires(public) {
+        return match check_role(identity, "finance_director") {
+            Ok(proof) => match acquire approve_payment(proof) {
+                Ok(f) => f(instance_id),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        }
+    }
+    ```
+20. **`transact` step functions must accept the implicit `txn_id`.**
+    Every function used in the `network:`, `verify:`, `commit:`,
+    `compensate:`, or `log:` slots must take `txn_id: str` as one of its
+    arguments, because the desugaring binds that name for idempotent
+    replay. The block itself does **not** declare `txn_id`; it is
+    injected:
+    ```nirdosha
+    fn call_processor(txn_id: str, amount: i64) -> i64 { return amount }
+    fn verify_positive(txn_id: str, amount: i64) -> bool { return amount > 0 }
+    fn commit_payment(txn_id: str, amount: i64) -> i64 { return amount }
+
+    fn settle(amount: i64) -> bool {
+        return transact {
+            network: call_processor(txn_id, amount)
+            verify: verify_positive(txn_id, network)
+            commit: commit_payment(txn_id, network)
+        }
+    }
+    ```
+21. **Dynamic lists are `json`, not `Vector(T, N)`.** `Vector(T, N)` is
+    a fixed-size, compile-time-length array only. A function that
+    returns "a list of pending requests" returns `json` (built with
+    `json_set_str`, or the result of `db_query`), iterated with
+    `json_array_len`/`json_array_get`. Never write `Vector(PaymentRequest, 1)`
+    for a variable-length queue.
+
+22. **Every `let` needs a real type and a real name — there is no
+    `let _ = expr` to discard a value.** Nirdosha's grammar requires
+    `let <ident>: <Type> = <expr>` on every binding, with no shorthand
+    for "run this and ignore the result" the way Rust/OCaml allow.
+    `_` is just an ordinary identifier here (unlike a `match` arm,
+    where it isn't even legal — see rule 8), so `let _ = some_call(...)`
+    fails with `expected `:`, found `=``: the parser stopped at the
+    missing type, not at the underscore. There is no unused-binding
+    warning to satisfy either — name it and type it like any other
+    value, whether or not you read it again:
+    ```nirdosha
+    // WRONG -- parse error: expected `:`, found `=`
+    let _ = debit_account(from_acc, amount_cents)
+    // RIGHT -- every let needs its type, even when the value is never read again
+    let debited: bool = debit_account(from_acc, amount_cents)
+    ```
 
 A fast-scan companion to the rules above — every pair below is
 verified against the real compiler, not hypothetical.
 
 **Enum variant construction (rule 1)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found Colon
-let s: Shape = Shape::Circle(1.0)
+// WRONG -- type error: unknown variable `Circle` (construction is a
+// *call*; a bare variant name is just an identifier to the parser)
+let s: Shape = Circle
 // RIGHT
 let s: Shape = Circle(1.0)
 ```
@@ -352,12 +487,12 @@ let p: Point = Point(1, 2)
 
 **`match` arm bodies (rule 9 — the single most common mistake)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found LBrace
+// WRONG -- parse error: expected an expression, found `{`
 let x: i64 = match r {
     Ok(conn) => { let a = f(conn) stop(conn) a },
     Err(e) => -1,
 }
-// WRONG -- parse error: expected an expression, found Return
+// WRONG -- parse error: expected an expression, found the reserved keyword `return`
 let x: i64 = match r {
     Ok(v) => v,
     Err(e) => return -1,
@@ -377,7 +512,7 @@ let x: i64 = match r {
 
 **Compound assignment (rule 10)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found Assign
+// WRONG -- parse error: expected an expression, found `=`
 total += i
 // RIGHT
 total = total + i
@@ -385,7 +520,7 @@ total = total + i
 
 **Comments (rule 11)**
 ```nirdosha
-// WRONG -- parse error: expected `fn`, found Slash
+// WRONG -- parse error: expected `fn`, found `/`
 /* a block comment */
 // RIGHT -- // is the only comment syntax, one per line
 // a comment
@@ -412,7 +547,7 @@ json_array_get(db_query_result, 0)   // then json_get_i64 on THAT
 
 **Trailing comma (rule 13)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found RParen
+// WRONG -- parse error: expected an expression, found `)`
 create_widget(name, price,)
 // RIGHT -- no trailing comma in a call's arguments (same for a fn's
 // own parameter list, and an array/matrix literal)
@@ -421,7 +556,7 @@ create_widget(name, price)
 
 **`if`/`match` on a reassignment's right-hand side (rule 14)**
 ```nirdosha
-// WRONG -- parse error: expected an expression, found If
+// WRONG -- parse error: expected an expression, found the reserved keyword `if`
 total = if v > 0 { total + v } else { total }
 // RIGHT -- wrap it in parens so it's re-parsed from the top
 total = (if v > 0 { total + v } else { total })
@@ -429,11 +564,56 @@ total = (if v > 0 { total + v } else { total })
 
 **Field/index access after a call (rule 15)**
 ```nirdosha
-// WRONG -- parse error: expected `)`, found Dot
+// WRONG -- parse error: expected an expression, found `.`
 let s: str = source_label(t.source).value
 // RIGHT -- bind the call's result first
 let label: Text = source_label(t.source)
 let s: str = label.value
+```
+
+**Reserved words as identifiers (rule 17)**
+```nirdosha
+// WRONG -- parse error: expected identifier, found the reserved keyword `state`
+struct Player { state: PlayerState, score: i64 }
+// RIGHT -- the concept keeps a synonym; the keyword stays untouched
+struct Player { game_state: PlayerState, score: i64 }
+```
+
+19. **`print` takes scalars only** — `i64`/`f64`/`str`/`bool`/`unit`,
+    any number of them. `print` on a `json`, `Vector`/`Matrix`,
+    `struct`, `enum`, or `Result` value is a hard codegen error
+    ("codegen doesn't support `print` on a ... argument yet"), and no
+    stringify/dump builtin exists to paper over it. There is no
+    debugging shortcut here at all: when you need to see an aggregate
+    on the console, extract scalars and print those — the exact
+    json/Vector display loops are in the Print entry of the Common
+    builtins section below.
+
+20. **Type names are never expressions.** The lexer reserves the type
+    names `i8` `i16` `i32` `i64` `u8` `u16` `u32` `u64` `usize` `f64`
+    `dec128` `bool` `unit` `str` `tcp` `tcp_listener` `file` `json` `db`
+    `mq` as their own token class, and the parser rejects one wherever
+    an expression is expected: `expected an expression, found the
+    reserved type name `unit``. There is no `unit` literal — a
+    `-> unit` fn simply ends after its last statement, and an early
+    exit returns a *unit-typed call*, never the word:
+
+```nirdosha
+// WRONG -- parse error: expected an expression, found the reserved type name `unit`
+fn log_decision(instance_id: i64) -> unit {
+    return unit
+}
+// RIGHT -- the body just ends; the last statement is the implicit return
+fn log_decision(instance_id: i64) -> unit {
+    print("approved", instance_id)
+}
+// RIGHT -- early exit: return a unit-typed call's result
+fn log_if_positive(amount: i64) -> unit {
+    if amount < 0 {
+        return print("negative, skipping")
+    }
+    print("positive", amount)
+}
 ```
 
 ## Types
@@ -712,7 +892,48 @@ function (no `acquire` needed, callable exactly as normally) and exists
 purely to silence rule 12's warning on a `fn` you're deliberately
 leaving open to anyone.
 
-**Print**: `print(x)` — any number of args, any scalar type.
+**Print**: `print(x, y, ...)` — any number of args, but **scalars only**:
+`i64`/`f64`/`str`/`bool`/`unit` (rule 19). `print` on a `json`,
+`Vector`/`Matrix`, `struct`, `enum`, or `Result` value is a hard
+codegen error — and there is no `json_to_str`/stringify builtin, so
+when a program must *show* an aggregate (a landing-page payload, a
+queue of requests, a db result set), extract scalars and print those.
+The exact shapes — note every json accessor returns a `Result`, always
+`match`ed:
+
+```nirdosha
+// a json object: pull typed fields out with json_get_*, print scalars
+let j: json = doc
+let user: str = match json_get_str(j, "user") {
+    Ok(s) => s,
+    Err(e) => "?",
+}
+print("landing for", user)
+
+// a json array: json_array_len + json_array_get in a while loop
+let rows: json = queue_json
+let n: i64 = match json_array_len(rows) {
+    Ok(k) => k,
+    Err(e) => 0,
+}
+let i: i64 = 0
+while i < n {
+    let status: str = match json_array_get(rows, i) {
+        Ok(row) => match json_get_str(row, "status") {
+            Ok(s) => s,
+            Err(e) => "?",
+        },
+        Err(e) => "?",
+    }
+    print("request", i, "status", status)
+    i = i + 1
+}
+```
+
+A `Vector` is the same loop shape with `v[i]` instead of the json
+accessors; a `struct` prints field by field (`s.field`); an `enum`
+`match`es to its variants and prints each payload; a `Result` is
+always `match`ed before anything inside it can be shown.
 
 ## A complete worked example
 
@@ -772,10 +993,11 @@ fn main() requires(public) {
 Naming `list_<struct>`/`create_<struct>`/`update_<struct>`/
 `delete_<struct>` functions like this is also what `nirdosha emit-ui`
 uses to auto-generate a full CRUD web UI with zero extra syntax (a
-static HTML file — there is no `nirdosha serve`/compiled serving mode
-anymore, the interpreter it depended on was deleted) — see the `screen`/`dashboard` DSL in `docs/LANGUAGE.md` §11 if
-you need to customize that generated UI (custom labels, field
-validation, role-gated visibility, dashboard tiles/charts).
+static HTML file), and what `nirdosha build file.nir --serve` renders as
+live, authenticated pages from a real compiled HTTP server — see
+"Serving it on the web" below. The `screen`/`dashboard` DSL in
+`docs/LANGUAGE.md` §11 customizes that generated UI (custom labels,
+field validation, role-gated visibility, dashboard tiles/charts).
 
 **This naming match has to be exact, and getting it wrong is silent —
 compiles fine, runs fine, the struct just never gets a screen at all.**
@@ -812,17 +1034,158 @@ from the nav until a specific role can act on it, give it a real
 `create_<struct>`.
 
 Multi-step approval / state-machine flows (KYC onboarding, purchase
-approvals, maker-checker) have their own construct: `workflow Name {
-data { field: Ty, ... } state Name { on_entry { ... } on Event ->
-Target } ... }` — durable, named states with `on <Event> -> <Target>`
-transitions, desugared into ordinary `fn`s (`start_<name>`,
-`advance_<name>`, etc.), so it needs no new runtime. `state { owner:
-role("...") }` names who may fire that state's outgoing events —
-checked live, per instance, not statically — and `nirdosha emit-ui`
-generates a "Workflows" queue screen from it automatically
-(each role sees only what's waiting on them, plus a "my requests" tab
-for whoever started an instance and an audit-trail "history" view), no
-extra syntax needed. See `docs/WORKFLOW.md` for the full construct.
+approvals, maker-checker) have their own construct, `workflow Name { ... }`,
+desugared into ordinary fns right after parsing — no new runtime.
+For `nirdosha build` the `data` block must stay **empty** (`data {}`) —
+a non-empty data block is the one part of this construct the compiled
+backend rejects by name; if instances must remember something, keep
+it in your own struct (keyed by `instance_id`), not in `data`.
+
+```nirdosha
+fn log_opened(instance_id: i64) -> unit {
+    print("approval", instance_id, "pending")
+}
+
+workflow Approval {
+    data {}
+    state Pending {
+        sla_seconds: 86400
+        on_entry { log_opened(instance_id) }
+        on Approve -> Approved
+        on Reject -> Rejected
+    }
+    state Approved terminal { }
+    state Rejected terminal { }
+}
+```
+
+Each state holds `on <Event> -> <Target>` transitions, an optional
+`sla_seconds: N` SLA, an optional `owner: role("...")` gate (checked
+live, per instance — an identity lacking the role gets
+`Err(NotStateOwner)`, never a trap), and `on_entry { ... }` actions —
+which may only use `instance_id` and call other fns; `data.<field>`
+access doesn't exist in the compiled layer.
+
+The desugaring synthesizes, per workflow `Approval`:
+- an `ApprovalEvent` enum — one zero-payload variant per event
+  (`Approve()` / `Reject()` — still need their `()`), plus a
+  `WorkflowActionError` error enum you match on;
+- `start_approval(identity: Option(VerifiedIdentity), data: ApprovalData) -> Result(i64, WorkflowActionError)` — `data` is the
+  synthesized empty struct, constructed `ApprovalData()`; returns the
+  new instance id. Pass `Some(identity)` when any state has an
+  `owner:` gate, `None()` otherwise;
+- `advance_approval(identity: VerifiedIdentity, instance_id: i64, event: ApprovalEvent, payload: json) -> Result(bool, WorkflowActionError)` —
+  `true` = advanced; `Err(NotStateOwner)` on an `owner:` mismatch.
+  `payload` is a plain `json` value (an empty object literal works
+  when you carry nothing extra);
+- `list_approval_overdue() -> json` — instances whose state's
+  `sla_seconds` has elapsed. Nothing fires on its own: poll it from
+  `fn main()` or an exposed fn and `advance_approval` what it reports;
+- `list_approval_submitted_by_me(identity: VerifiedIdentity) -> json`.
+
+`nirdosha emit-ui` and the served pages render a "Workflows" queue
+screen from a workflow automatically (each role sees only what's
+waiting on them, plus a "my requests" tab and an audit-trail
+"history" view), no extra syntax needed. See `docs/WORKFLOW.md` for
+the full construct.
+
+## Real transactions (`transact`)
+
+Two-sided settlement flows have a dedicated block form. The whole
+block is an expression of type `bool` — `true` means every step ran
+and committed; `false` means it compensated (rolled back) and
+returned safely. Each step is `name: <one expression>` on its own
+line — no braces, no commas, no trailing separators — and later
+steps read earlier steps' bindings (`network`, `verify`, ...) by
+name:
+
+```nirdosha
+fn db_up() -> bool { return true }
+fn call_processor(txn_id: str, amount: i64) -> i64 { return amount }
+fn resp_ok(resp: i64) -> bool { return resp > 0 }
+fn commit_db(amount: i64) -> i64 {
+    print("committing", amount)
+    return amount
+}
+fn refund(amount: i64) -> i64 {
+    print("compensating", amount)
+    return amount
+}
+fn write_log(amount: i64, ok: bool) -> unit { print("settled", amount, ok) }
+
+fn settle(amount: i64) -> bool {
+    return transact {
+        precheck:   db_up()
+        network:    call_processor(txn_id, amount)
+        verify:     resp_ok(network)
+        commit:     commit_db(amount)
+        compensate: refund(amount)
+        log:        write_log(amount, verify)
+    }
+}
+```
+
+`txn_id` is a unique id the desugaring provides (safe-to-replay
+deduplication); `precheck:`/`compensate:`/`log:` are optional —
+`network:`/`verify:`/`commit:` are the minimum shape. The compiled
+backend also keeps a durability log and replays incomplete
+transactions after a crash, so the same `network:` call may run
+twice across a restart — build downstream effects to be idempotent
+on `txn_id`.
+
+## Serving it on the web
+
+`nirdosha build file.nir --serve -o app` (then run `./app`) compiles
+the *same* program into a real HTTP server: the naming-convention
+pages render live under `/`, and each `expose`d fn becomes one
+authenticated route. One `serve { ... }` block per program, `expose`
+followed by a comma-separated fn-name list:
+
+```nirdosha
+serve {
+    expose list_payment_request, stat_open_approval_count, approve_payment
+}
+```
+
+Three rules are enforced for you, at the route boundary:
+- an exposed fn named `create_...`/`update_...`/`delete_...` must
+  carry `requires(role: ...)` (or explicit `public`) or the program
+  doesn't typecheck — mutating routes are deny-by-default;
+- every exposed fn's `requires(...)` is checked against the signed-in
+  identity before the call, using the same kernels `acquire` uses;
+- any `VerifiedIdentity` parameter is filled from the signed-in
+  identity itself, never from the request body — so
+  `fn get_landing_page(identity: VerifiedIdentity, user_id: i64) -> json`
+  answers each signed-in user with that user's own identity. That is
+  how per-user pages are built.
+
+With no IdP configured the server runs demo mode: the sign-in page
+lets you declare any subject + roles and mints a real,
+signature-verified token for them — per-process ephemeral key, so a
+restart invalidates every demo token. Production mode passes a real
+IdP's `--jwks-file`/`--issuer`/`--audience` instead; the verification
+path is the same either way.
+
+`screen <Struct> { ... }` blocks are the optional cosmetic layer over
+the auto-generated pages — a friendlier title, relabeled or
+validated fields, an extra action button:
+
+```nirdosha
+screen PaymentRequest {
+    title: "Payment Requests"
+    field amount_cents {
+        label: "Amount (cents)"
+    }
+    action "Approve Selected" -> approve_payment {
+        confirm: "Approve this payment?"
+    }
+}
+```
+
+`screen <Struct>` must name a real struct, `field <f>` a real field
+of it, and an action's `->` target a real fn — typecheck enforces
+all three. A struct with no screen block gets the default page
+unchanged.
 
 ## How to verify what you wrote
 
@@ -835,9 +1198,10 @@ first line, which can look confusingly unrelated to "I forgot to
 delete two lines." Save only what's between the fences as the `.nir`
 file's actual content.
 
-If you have shell access to a machine with `nirdosha` installed
-(`curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/kannamma-labs/nirdosha/main/scripts/install.sh | sh`),
-verify before presenting code as final:
+If you have shell access to a machine with `nirdosha` built from
+source (no prebuilt binary is published any more -- `crates/compiler`
+is deprecated, see its own crate doc comment; `cd crates/compiler &&
+cargo build --release`), verify before presenting code as final:
 
 ```sh
 nirdosha emit-ui file.nir -o /tmp/out.html   # full typecheck + ownership check, no side effects (doesn't run main())
@@ -851,11 +1215,17 @@ interpreter, and there is no fallback for it (the panic-on-
 `DuplicateConstructor` gap this section used to warn about was specific
 to that deleted flag, and no longer applies to anything reachable).
 `nirdosha build` only compiles what `codegen.rs::check_supported`
-accepts — `db`/`json`/`mq`/`transact`/`sandbox` and most Row 12 identity
-builtins (`oidc_validate_token`, `extract_claim`, ...) aren't in that
-set yet, so a program using any of them will fail `build`/`emit-llvm`
-with a named "unsupported" reason (`docs/LANGUAGE.md` §10's
-compiled-vs-not table) — that's not a bug to work around, it's today's
+accepts. That compiled set now includes `db`, `json`, `transact`,
+`tcp`, the Row 12 identity builtins (`oidc_validate_token`,
+`extract_claim`, ...) — and `requires(role/claim: ...)`/`acquire`/
+`check_role`, workflow state machines (empty `data {}` only), and
+`serve { expose ... }` blocks all compile and run for real. What still
+does *not* build is named in `docs/LANGUAGE.md` §10's live
+compiled-vs-not table — `dec128` is the one construct in this prompt's
+working set: a program using it (or any other Row the table marks no)
+will fail `build`/`emit-llvm`
+with a named "unsupported" reason — that's not a bug to work around,
+it's today's
 real, disclosed boundary of what actually runs. `requires(role/claim:
 ...)`/`acquire`/`check_role` **do** compile and run for real.
 
@@ -870,7 +1240,9 @@ A `type error: ...`/`ownership error: ...` line (from `emit-ui`) or an
 `unsupported: ...` line (from `build`/`emit-llvm`) names the exact rule
 violated — read it and fix the named issue rather than guessing. If you
 don't have shell access (a plain chat interface), self-check your
-output line-by-line against the 15 rules above before presenting it,
+output line-by-line against the numbered rules above — including the
+workflow/`transact`/`serve` recipes, which are exact spellings the
+compiler accepts, not paraphrases — before presenting it,
 and say plainly that it hasn't been run through the real compiler.
 
 ## Where to go deeper
@@ -896,12 +1268,15 @@ I'll describe what I want in plain language. Respond with:
    wrote any comments, confirm every single one uses `//` — no `/* */`
    anywhere. If you read a single row out of a `db_query` result,
    confirm you called `json_array_get(rows, 0)` before `json_get_*` —
-   skipping that compiles fine and fails silently. Go through every
-   `fn` you wrote and confirm each one has `requires(role/claim: ...)`,
-   `requires(public)`, or takes a `VerifiedIdentity` parameter — rule
-   12's warning, not a compile error, but every function in your output
-   should end up in exactly one of those three buckets on purpose, not
-   by omission.
+   skipping that compiles fine and fails silently. If the request
+   involves roles, confirm you used `VerifiedIdentity` and plain-string
+   roles with `check_role`/`acquire`, and did not invent a `User` or
+   `UserRole` type. If you used `transact`, confirm every step function
+   takes `txn_id: str`. Go through every `fn` you wrote and confirm
+   each one has `requires(role/claim: ...)`, `requires(public)`, or takes
+   a `VerifiedIdentity` parameter — rule 12's warning, not a compile
+   error, but every function in your output should end up in exactly one
+   of those three buckets on purpose, not by omission.
 4. A one-line reminder that this hasn't been run through the real
    compiler — I should verify with
    `nirdosha emit-ui file.nir -o /tmp/out.html` (typecheck-only, no

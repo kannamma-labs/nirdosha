@@ -1,0 +1,33 @@
+//! v2 of `examples/features/22_tcp_client.nir` — a raw TCP client
+//! against a self-hosted listener on a background thread, so the file
+//! runs standalone with REAL sockets. `.nir`'s free-fn `send`/`recv`
+//! ride `Tcp` methods (the free `send` belongs to `chan` — the
+//! documented NirFile-precedent delta).
+
+use nirdosha_rt::prelude::*;
+
+struct Text {
+    value: String,
+}
+
+fn server(l: &TcpListener) -> Text {
+    let conn = accept(l);
+    let request = conn.recv();
+    conn.send("HTTP/1.1 200 OK\r\n\r\nhello from the server");
+    stop(conn);
+    Text { value: request }
+}
+
+fn main() {
+    let l = listen(9700);
+    let h = spawn(move || server(&l));
+
+    let conn = connect("127.0.0.1", 9700);
+    conn.send("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let response = conn.recv(); // one read syscall, not a loop
+    stop(conn);
+
+    let seen = join(h);
+    println!("{}", seen.value); // what the server received
+    println!("{response}"); // what the client received back
+}

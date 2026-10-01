@@ -1,0 +1,49 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-merchants"
+version = "1.0.0"
+module = "M2"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "2.1"
+name = "Merchants"
+module = "M2"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "MerchantAdmin"]
+datasets = ["merchants"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_merchants", route_path = "/merchants", generated_files = ["src/screens/m02_merchants.nir"] }
+data_binding = { entities = ["Merchant"], primary_key = "merchant_id", guard = { table = "merchant", purpose = "MerchantOps" }, fields = [
+    { name = "merchant_id", type = "String" },
+    { name = "legal_name", type = "String" },
+    { name = "status", type = "String" },
+    { name = "country", type = "String" },
+    { name = "settlement_currency", type = "String" }
+] }
+policy = { purpose = "MerchantOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m02_merchants.nir"
+notes = "Manage merchant onboarding and configuration."
+
+[[screen]]
+id = "2.2"
+name = "Merchant Onboarding Wizard"
+module = "M2"
+archetype = "wizard"
+roles = ["PlatformAdmin"]
+stage = "blocked"
+blocked_by = ["primitive:merchant_kyc", "primitive:merchant_id_verify"]
+codegen = { template = "wizard", mount_symbol = "mount_merchant_onboarding", route_path = "/merchants/onboard", generated_files = ["src/screens/m02_merchants.nir"] }
+data_binding = { entities = ["Merchant"], primary_key = "merchant_id", guard = { table = "merchant", purpose = "MerchantOps" }, fields = [
+    { name = "merchant_id", type = "String" },
+    { name = "legal_name", type = "String" },
+    { name = "tax_id", type = "Option<String>", sensitive = true },
+    { name = "country", type = "String" }
+] }
+file = "src/screens/m02_merchants.nir"
+notes = "BLOCKED: needs KYC and identity verification primitives."

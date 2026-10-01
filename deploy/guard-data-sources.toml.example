@@ -1,0 +1,45 @@
+# Generated deployment artifact shape. Keep variable names here; never replace
+# them with resolved URLs, passwords, tokens, or certificates.
+
+[manifest]
+schema = "nirdosha.guard-data-sources/v1"
+application = "nirdosha"
+generated_from_env = true
+environment_namespace = "NIRDOSHA"
+
+[[source]]
+id = "PG"
+kind = "rdbms"
+driver = "postgres"
+url_env = "NIRDOSHA_PG_URL"
+credential_env = "NIRDOSHA_PG_PASSWORD"
+access = "read_write"
+tls_required = true
+healthcheck = "select_1"
+required = true
+lineage_label = "postgres-primary"
+
+[[source]]
+id = "K"
+kind = "mq"
+driver = "redis"
+url_env = "NIRDOSHA_K_REDIS_URL"
+access = "publish"
+tls_required = true
+healthcheck = "ping"
+required = false
+lineage_label = "guard-events"
+
+[[source]]
+id = "O"
+kind = "object_storage"
+driver = "s3"
+url_env = "NIRDOSHA_O_ENDPOINT"
+credential_env = "NIRDOSHA_O_CREDENTIAL"
+region_env = "NIRDOSHA_O_REGION"
+namespace = "nirdosha-artifacts"
+access = "read_write"
+tls_required = true
+healthcheck = "head_bucket"
+required = true
+lineage_label = "evidence-object-store"

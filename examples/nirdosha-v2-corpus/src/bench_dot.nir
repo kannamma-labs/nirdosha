@@ -1,0 +1,19 @@
+//! v2 of `benchmarks/nirdosha/dot.nir` — 8-element dot product, 200k
+//! iterations.
+
+use nirdosha_rt::prelude::*;
+
+fn main() {
+    let mut n: i64 = 0;
+    let n_max: i64 = 200000;
+    let mut t: f64 = 0.0;
+    let mut checksum: f64 = 0.0;
+    while n < n_max {
+        let a = Vector([t, t + 1.0, t + 2.0, t + 3.0, t + 4.0, t + 5.0, t + 6.0, t + 7.0]);
+        let b = Vector([t + 1.0, t, t + 3.0, t + 2.0, t + 5.0, t + 4.0, t + 7.0, t + 6.0]);
+        checksum += dot(&a, &b);
+        t += 0.0001;
+        n += 1;
+    }
+    println!("{checksum}");
+}

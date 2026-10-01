@@ -60,13 +60,23 @@ rule and should get called out in the next PR, not left silent.
 
 ## Releases
 
-- Tags matching `v*` trigger [`release.yml`](./.github/workflows/release.yml)
-  (prebuilt binaries → GitHub Release) and
+> **2026-09-17 — `crates/compiler` deprecated, its release pipeline
+> retired.** `release.yml` (prebuilt binaries → GitHub Release) no
+> longer exists, and `docker.yml`'s `runtime` image job (the container
+> image built from `crates/compiler`) was removed — neither publishes
+> anything for the native `.nir` compiler any more, which is itself
+> deprecated in favor of the v2 Rust dialect. The rest of this section
+> describes what those workflows did while they existed; the OIDC/
+> credentials posture below still applies to `docker.yml`'s one
+> remaining image (`nirdosha-presence-gateway`).
+
+- Tags matching `v*` used to trigger `release.yml`
+  (prebuilt binaries → GitHub Release, now retired) and still trigger
   [`docker.yml`](./.github/workflows/docker.yml) (container images,
   cosign-signed and SBOM'd, all via GitHub OIDC — no long-lived
   registry credentials are stored as repo secrets today; verified
-  2026-09-04 via `gh secret list`, which returned none, and both
-  workflows authenticate with the ephemeral `GITHUB_TOKEN`/OIDC, not a
+  2026-09-04 via `gh secret list`, which returned none, and the
+  workflow authenticates with the ephemeral `GITHUB_TOKEN`/OIDC, not a
   personal access token. If a future workflow needs a third-party
   registry or crates.io, it should use that same OIDC/trusted-publishing
   pattern — a GitHub Environment with an OIDC trust relationship, not a

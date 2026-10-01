@@ -41,6 +41,16 @@ any form today; added 2026-09, see the callout just below).
 > and `docs/PHASE0.md`'s "Twentieth" through "Twenty-sixth" updates for
 > the full detail this list doesn't yet reflect below.
 
+> **Deprecation note (2026-09-17).** `crates/compiler`, the native
+> `.nir` compiler this entire roadmap tracks, is now deprecated in
+> favor of the v2 Rust dialect (`docs/nirdosha-rt-dialect.md`:
+> `crates/cargo-nirdosha`/`crates/nirdosha-rt`/`crates/nirdosha-driver`).
+> Prebuilt binaries, the `.github/workflows/release.yml` pipeline, and
+> the `ghcr.io/protobox/nirdosha-runtime` Docker image are all retired
+> — install by building from source (see `README.md`). Every `[DONE]`
+> item below about release/Docker infrastructure remains an accurate
+> historical record, not a description of a currently live pipeline.
+
 ---
 
 ## Shipped
@@ -70,6 +80,132 @@ any form today; added 2026-09, see the callout just below).
   backstop this bullet used to describe for everything Tier-1 can't
   prove no longer exists (it lived in the now-deleted interpreter) —
   see `docs/LANGUAGE.md` §16 for the current, honest split.
+- [DONE] `nirdosha verify <file.nir>` (2026-09) — a standalone,
+  machine-readable verdict over typecheck/ownership/`validate`-contract
+  results plus Z3 Tier-1 proof-obligation counts: JSON on stdout, no
+  LLVM/clang toolchain and no binary produced. The first concrete step
+  of the "sell the verdict, not the syntax" trust-layer direction —
+  turns the compiler into something CI or an agent's own repair loop can
+  call directly. See `docs/LANGUAGE.md` §1.
+- [DONE] **Three-valued verdict** (2026-09, master plan Part 3 Sprint
+  0) — `verify`'s top-level `verdict` field and exit code are now
+  `PROVED`/`DISPROVED`/`UNKNOWN` (exit `0`/`1`/`2`), never a binary
+  pass/fail: a `validate` obligation Z3 can't model (a non-integer
+  parameter, today) reports `UNKNOWN`, not a silent `PROVED` the way the
+  first cut of `verify` reported it. Parity target: Velvet, C Proof.
+  Z3 counterexamples were already embedded in the verdict's
+  `contracts.obligations[].detail` from `verify`'s first cut (parity
+  target: Imandra, Theorem) — both Sprint 0 items now closed, alongside
+  the JSON verdict + exit code item above.
+- [PARTIAL] `nirdosha fix` (2026-09, master plan Part 3 Sprint 1) —
+  byte-offset `FixPatch`es (`token::Span::byte`) plus three fixability
+  classes modeled on `rustc`'s own `Applicability`
+  (`auto`/`assisted`/`manual`, `main.rs`'s `Applicability` doc comment),
+  `--apply` writes every `Auto` patch to disk (highest byte offset
+  first, so earlier patches' ranges never shift under a later one) and
+  re-verifies afterward. Parity target: Kōdo. Two real fixability
+  analyses now, both built on the same edit-distance technique
+  (`fix_unbound_identifier`) against names actually in scope — an
+  unambiguous single closest candidate is `auto`, a tie is `assisted`
+  (names both, picks neither), nothing close enough is `manual`:
+  unknown-identifier typos (`TypeErrorKind::UnknownVar`), and (2026-09)
+  `validate <fn_name> { ... }` targeting a misspelled function name
+  (`TypeErrorKind::ValidateFnNotFound`, against `program.fns`' real
+  names) — `ValidateDecl` now carries the target identifier's own
+  `fn_name_span`, not just the `validate` keyword's, so the patch lands
+  on the right byte range. **Investigated and explicitly rejected**: a
+  mechanical "insert `.clone()`" fix for ownership's `UseAfterMove` —
+  this language's `box` has no `.clone()`/copy operation at all
+  (deliberately affine, unlike Rust's `Box`), so there's no
+  semantics-preserving mechanical patch to offer; `fix: null` stays the
+  honest answer there, not a fabricated one. `[PARTIAL]` because parse
+  errors and every other diagnostic kind (ownership violations,
+  counterexamples, unsupported obligations) still report `fix: null`,
+  honestly — parse-error fixability specifically needs
+  `loader::load_program`/`ParseError` widened to carry structured spans
+  first, a real refactor, not a shortcut skipped here. Tests:
+  `crates/compiler/tests/fix_command.rs` (CLI-level, including a
+  regression test for a real bug caught by hand-running this end to
+  end: an earlier revision's `--apply` only scanned
+  `contracts.obligations` for `Auto` patches, silently dropping every
+  one attached to a `load`/`typecheck`/`ownership` diagnostic instead).
+- [PARTIAL] `nirdosha explain [<code>]` (2026-09, master plan Part 3
+  Sprint 1) — a curated, hand-written index (`explain::REGISTRY`),
+  `NIR0001`-`NIR0012` mapped 1:1 to `agent-skills/nirdosha/AGENTS.md`'s
+  twelve numbered "rules that will break your output," plus `NIR0013`
+  for the unbound-identifier/typo case `fix` already automates. Parity
+  target: Kōdo, Midspiral. Modeled on `rustc --explain`'s real
+  precedent (a curated subset of diagnostics get long-form docs, most
+  don't) rather than a mechanical dump of every internal error variant.
+  `[PARTIAL]` because only six diagnostic sites auto-attach a `code`
+  to `verify`/`fix`'s own JSON output today — `NIR0002` (`str` in a
+  `fn` signature), `NIR0012` (reserved word as identifier, recovered
+  from `loader::load_program`'s formatted error string via a narrowly-
+  scoped substring match, since `ParseError` doesn't carry a structured
+  code field yet), `NIR0013` (unbound identifier), and, 2026-09:
+  `NIR0001` (a bare enum variant name with no `(...)` — `UnknownVar`
+  checked against the program's own declared variant names before
+  falling through to `NIR0013`'s typo path), `NIR0006` (`TypeMismatch`
+  narrowed to the numeric-vs-numeric case — two already-typed values
+  combined without a conversion), `NIR0008` (`MatchArmMustBeVariant`/
+  `NonExhaustiveMatch` — a wildcard arm on an enum match, or a variant
+  left uncovered, the two ways to violate "match is exhaustive, no
+  wildcard for variants"). The remaining six codes (`NIR0003`-`0005`,
+  `0007`, `0009`-`0011`) stay real, browsable reference material only
+  (`nirdosha explain NIR0009` works today) — mostly parse-side
+  diagnostics, blocked on the same `ParseError`-widening `fix`'s own
+  parse-error gap needs (see the `fix` entry above), not attempted here.
+  Tests: `crates/compiler/tests/explain_command.rs`.
+- [DONE] `nirdosha mcp` (2026-09, master plan Part 3 Sprint 1) — an MCP
+  server on the stdio transport (JSON-RPC 2.0, newline-delimited),
+  parity target: Acutis, Imandra, Kōdo. Four tools, all `source`-based
+  (never a filesystem path, matching how an MCP client actually calls
+  a tool): `verify_code`, `get_grammar` (the real `nirdosha.gbnf`),
+  `fix` (with `apply: true` returning `patched_source` instead of
+  writing a file — there's no file in an MCP call to write back to),
+  and `describe` (a curated fn/struct/enum/`validate` structural
+  summary, parse-only, modeled on Kōdo's own `kodo.describe` tool —
+  distinct from `emit-ast`'s full span-carrying AST). Every tool
+  reuses the exact `run_verify_pipeline`/`write_auto_patches` the CLI
+  commands run, including a shared fix applied via the same helper
+  `nirdosha fix --apply` uses (extracted, not duplicated, specifically
+  to avoid a second copy of the byte-offset-ordering bug `nirdosha
+  fix`'s own changelog entry above already names once). Tests:
+  `crates/compiler/tests/mcp_server.rs` — spawns the real binary and
+  speaks the stdio transport directly (initialize/tools list/tools
+  call/notifications/malformed input/unknown method).
+- [DONE] `nirdosha certify <file.nir>` (2026-09, master plan Part 3
+  Sprint 1) — Certificate v0, parity target: Velvet, Kōdo. A
+  deterministic JSON attestation over the same `run_verify_pipeline`
+  result `verify`/`fix`/`mcp` share: real SHA-256 `source_hash`/
+  `grammar_hash` (reproducible by a third party, never a timestamp or
+  the caller's own file path), `toolchain_version`, an `evidence_tier`
+  field (`proved`/`checked`/`sampled`/`unknown` — only the first and
+  last are reachable today; `checked`/`sampled` are reserved so the
+  schema doesn't have to break when the CHECKED tier lands post-seed),
+  and a compact `verdict_summary`. Issues a certificate for every
+  verdict including `DISPROVED` — a conclusive counterexample is real,
+  conclusive evidence, not withheld until the code passes. Tests:
+  `crates/compiler/tests/certify_command.rs` (all three verdicts'
+  evidence tiers, real-hash verification against the shipped
+  `nirdosha.gbnf`, byte-for-byte determinism across two runs, and that
+  the caller's own file path never leaks into the certificate).
+- [PARTIAL] PyPI thin client `nirdosha-verify` (2026-09, master plan
+  Part 3 Sprint 1, parity target: dottxt/Outlines' distribution model)
+  — `clients/python/nirdosha-verify/`: a real, tested, buildable Python
+  package (`pip install -e .` and `python -m build` both verified —
+  `pyproject.toml`/hatchling, a wheel + sdist actually built) wrapping
+  `nirdosha verify`/`fix`/`certify` as `nirdosha_verify.verify()`/
+  `fix()`/`certify()` plus a `nirdosha-verify` console-script
+  passthrough. `[PARTIAL]`, honestly: it is not yet published to PyPI
+  (a real, external, one-way action nobody has asked for yet) and does
+  not bundle/download a prebuilt binary — v0 expects `nirdosha` already
+  on `PATH` or pointed to via `NIRDOSHA_BIN`; auto-fetching a release
+  binary needs nirdosha to actually publish tagged release binaries
+  first (`docs/STABILITY_AND_RELEASES.md`'s monthly cadence). Tests:
+  `clients/python/nirdosha-verify/tests/test_verify.py`, run against
+  the real locally-built binary (9/9 passing, including the console
+  script and a real `python -m build` producing an installable wheel).
 
 **Identity, data protection, and non-functional requirements** (2026-09,
 compiled, no interpreter involved at any point)
@@ -219,10 +355,334 @@ runs behind it.
   plain-text errors); `emit-ast`'s own JSON output, listed separately
   below, is unaffected
 - [DONE] `emit-ast`/`validate_fragment` for typed AST/fragment tooling
-- [PARTIAL] `crates/bench/` pass@1 + self-repair-rate harness — scaffold,
-  corpus, and a real `Model` (`--mode real`, any OpenAI-compatible
-  `/chat/completions` endpoint) all exist; not yet run against a live
-  provider for lack of an API key in this environment
+- [PARTIAL] `crates/bench/` pass@1 + self-repair-rate harness — this
+  entry's own earlier text (a `--mode real`/`Model` scaffold "not yet
+  run against a live provider") was stale: that crate was removed
+  entirely when the interpreter was (it scored an LLM-generated
+  program's *interpreted* result value, per the workspace `Cargo.toml`'s
+  own removal note), and nothing under this name existed in the repo
+  until 2026-09's rebuild, below (master plan Part 3 Sprint 2's
+  "Benchmark harness v1") — real this time: 3 tasks, run for real
+  against **two independent live providers** (`gemini-2.5-flash` via
+  Google AI Studio, and `kimi-k2.7-code:cloud` via a local Ollama
+  daemon proxying a cloud-hosted code model — added when Gemini's
+  free-tier daily quota ran out mid-session, and kept as a second,
+  independent result rather than replacing the first), self-repaired
+  against real compiler diagnostics (`hi_llm::generate_from_task_prompt`,
+  reusing `nirdosha hi`'s own Generate-mode loop), scored by
+  `nirdosha certify`'s real JSON verdict. **Updated 2026-09-11 (master
+  plan Part 3 Oct 10–30):** `crates/bench/src/cross_lang.rs` adds a real
+  TypeScript/Rust plain-LLM baseline (same model, one shot, no self-
+  repair, actually compiled and run with `node`/`rustc`) for the
+  `overflow`/`type_confusion` tasks, plus a weaker static heuristic for
+  `injection` — see `crates/bench/RESULTS.md`'s cross-language section
+  for the full table and an honest read in both directions (Nirdosha's
+  `overflow` proof genuinely beats both baselines; its `type_confusion`
+  verdict is genuinely beaten by both, the same disclosed Tier-1 gap
+  below, not softened here). `[PARTIAL]` because three columns of the
+  master plan's full matrix are still not attempted, each checked
+  directly rather than assumed missing: **LLM+XGrammar** needs raw
+  logit access for grammar-constrained decoding, which Ollama's
+  OpenAI-compatible chat-completions endpoint (what this harness talks
+  to) doesn't expose. **LLM+Imandra** needs a commercial license not
+  available here. **AlgoVeri/Vericoding** — the real corpus
+  (github.com/haoyuzhao123/algoveri, arXiv 2602.09464, 77 algorithms)
+  was fetched and read directly: its tasks require universally-
+  quantified postconditions over arbitrary-length sequences
+  (`forall i :: ... s[i] < target`) discharged via loop-invariant/
+  inductive reasoning — confirmed by grep that `contract_check.rs` has
+  zero quantifier support of any kind. Not a narrower version of
+  Tier-1's bounded per-function arithmetic checking; a genuinely
+  different verification paradigm Tier-1 was never built to attempt.
+  Named here as a real architectural boundary, not a "not attempted
+  yet." A real compiler gap surfaced along the way, disclosed rather
+  than patched around, and independently reproduced by *both* models
+  (ruling out "one model's own quirk" as the explanation): Tier 1 can't
+  model a `validate` predicate built on a division result at all yet
+  (`crates/bench/RESULTS.md`'s `average_no_float_confusion` section).
+- [DONE] Red-team invitation published (2026-09, master plan Part 3
+  Sprint 2, parity target: Certora's audit ethos) — `SECURITY.md`'s new
+  top section reframes the file from a passive reporting form into an
+  active invitation: what counts as a real finding versus a
+  already-disclosed limitation, how a report is credited, and two real
+  internal findings of the invited shape already fixed and on the
+  record (`docs/ROADMAP.md`'s "A10"/"A11" — `serve.rs`'s dispatcher
+  default-open, symmetric-only JWKS validation) as proof this isn't
+  just posture. Surfaced and fixed a real staleness bug along the way:
+  both `SECURITY.md` and `docs/API_TRUST_MODEL.md` §4a still said "no
+  compiled serving mode" after `nirdosha build --serve` (RFC 0010, B8)
+  had already shipped — corrected in both, with the compiled serve
+  surface itself now named as one of the areas most worth a red-team
+  pass.
+- [PARTIAL] GitHub Action for CI/PR gating (2026-09, master plan
+  Part 3 Nov 2026, parity target: Predictable, Sequent) —
+  `.github/actions/verify/`: a real composite action wrapping
+  `nirdosha verify`, gating on its own three-valued exit code
+  (`PROVED`/`DISPROVED`/`UNKNOWN` — no JSON parsing dependency needed
+  on the runner) rather than a re-derived pass/fail. `UNKNOWN` doesn't
+  fail the job by default (`fail-on-unknown` input to opt in) — the
+  same "don't punish honest uncertainty like a real defect" posture
+  the CLI's own exit code already draws. `[PARTIAL]`: this action does
+  not install `nirdosha` itself (no published release binary exists
+  yet, `docs/STABILITY_AND_RELEASES.md`'s cadence starts 2026-10-01) —
+  a caller's own workflow must produce a binary first; the action's
+  own README names a `setup-nirdosha`-style action or a Docker variant
+  as the natural follow-up once release artifacts exist. Tests:
+  `.github/actions/verify/tests/run_test.sh` (15 real assertions
+  against a locally-built binary — no `act`/GitHub-runner simulation
+  available in this environment, so tested as a plain shell script
+  directly, the same "test the logic, not the YAML" split as
+  everywhere else) plus a real self-test step in
+  `.github/workflows/build.yml` running inside actual GitHub Actions.
+- [PARTIAL] Spec Kit extension `nirdosha-speckit` (2026-09, master plan
+  Part 3 Nov 2026, parity target: GitHub Spec Kit ecosystem) —
+  `extensions/nirdosha-speckit/`, a real extension matching Spec Kit's
+  own published schema (`extension.yml` validated against
+  `extensions/EXTENSION-PUBLISHING-GUIDE.md`'s documented fields).
+  Two commands: `speckit.nirdosha-speckit.contracts` turns `spec.md`'s
+  functional requirements into `validate` blocks and runs `nirdosha
+  verify` on each one immediately, never assuming a contract that
+  compiles is one that holds; `speckit.nirdosha-speckit.converge`
+  checks every requirement against the *current* code for contract
+  existence, predicate-still-matches-spec, and a real `nirdosha
+  certify` verdict, reporting an honest fraction rather than a rollup.
+  Since Spec Kit commands are agent-executed prompts, not compiled
+  code, "tested" means a full hand-run walkthrough against the real
+  compiler: `extensions/nirdosha-speckit/docs/examples/wallet-debit.md`
+  is a real requirement → contract → real `DISPROVED` counterexample →
+  real fix → real `PROVED` certificate trace, every JSON snippet
+  copy-pasted from an actual run, not illustrative. `[PARTIAL]`: not
+  yet submitted to Spec Kit's community catalog — that's a GitHub
+  issue against a third-party repo naming a human submitter, left as a
+  deliberate manual step (`extensions/nirdosha-speckit/README.md`'s
+  own "Publishing status").
+- [DONE] Signed certificates v1 — key-pinned verdicts (2026-09, master
+  plan Part 3 Nov 2026, parity target: Velvet) — `nirdosha certify
+  --sign <key.pk8>` adds a real Ed25519 signature (`ring`, already a
+  dependency) over Certificate v0's own canonical bytes, additive on
+  top of every v0 field per `docs/STABILITY_AND_RELEASES.md`'s rule for
+  this schema. `nirdosha keygen` generates the keypair; `nirdosha
+  verify-certificate` checks a signature against its own embedded
+  public key, answering exactly "is this signature valid for this
+  key" — never "should this key be trusted," which stays the
+  verifier's own operational pinning policy. Tests:
+  `crates/compiler/tests/signed_certificate.rs` — a real keypair
+  signing a real certificate that verifies, a tampered certificate
+  correctly rejected, a certificate re-signed-looking-but-wrong-key
+  correctly rejected, and a plain (unsigned) certificate failing
+  `verify-certificate` cleanly rather than crashing.
+- [PARTIAL] Equivalence checking (2026-09, master plan Part 3
+  Dec 2026, "prove the agent's refactor is behavior-identical", parity
+  target: Velvet, Imandra) — `nirdosha equivalence <file.nir> <fn_a>
+  <fn_b>` (`contract_check::check_equivalence`), built entirely out of
+  `validate` contract-checking's own already-tested `int_expr`
+  expression-to-Z3 translation (a value-position `if`/`else` already
+  becomes a full nested `ite` term) rather than a second symbolic-
+  execution engine. Real, checked end to end: a genuine refactor bug
+  (`max_v1`/`max_buggy`) caught with a real counterexample
+  (`a=0, b=1`, `1 != 0`), and two differently-tie-broken-but-
+  behaviorally-identical implementations of the same function
+  correctly proved equivalent. `[PARTIAL]`, deliberately narrower than
+  `validate` checking: each function's body must be exactly one
+  `return <expr>` statement (nested if/else is fine; a `let` binding,
+  an early-return chain, or a loop is not — those need a per-return-
+  point predicate check, a materially different design this v1
+  doesn't attempt, honestly `UNSUPPORTED` rather than approximated).
+  Parameters pair positionally with matching integer types; both
+  functions must return the same integer type. Tests:
+  `crates/compiler/tests/equivalence_command.rs`.
+- [DONE] Confidence/trust propagation + reviewer-forgery prevention
+  (2026-09, master plan Part 3 Dec 2026, "`known_agents`/
+  `human_reviewers` trust config — an LLM can't fake `@reviewed_by`")
+  — `nirdosha attest`/`nirdosha audit`, a real signed sidecar
+  attestation over a file's content hash (reusing `certify --sign`'s
+  Ed25519 signing), deliberately not a new `.nir` grammar annotation
+  (a breaking pre-1.0 addition worth its own RFC, not a side effect of
+  this feature). `attest` refuses to sign for a reviewer name not
+  registered in the trust config's matching `known_agents`/
+  `human_reviewers` list; `audit` combines the real `verify` verdict
+  with every attestation's real checked status
+  (`UNTRUSTED_REVIEWER`/`FORGED_OR_TAMPERED`/`STALE`/`CURRENT`) into
+  one `trust_summary` rollup. A known-agent attestation never counts
+  as human-reviewed, by construction — the role comes from which
+  trust-config list the name is registered in, never the attestation's
+  own claim. Doubles as a deliberately small first version of the
+  later (Q1 2027) `nirdosha audit` "consolidated trust report" item —
+  same command, more inputs added later, not a competing one. Tests:
+  `crates/compiler/tests/trust_audit.rs` — real keys signing real
+  attestations, an unregistered reviewer rejected at `attest` time, a
+  tampered attestation caught as forged (rejecting the whole report),
+  a stale attestation correctly downgrading `trust_summary` without
+  failing the report outright, and an agent attestation never
+  satisfying a human-reviewed rollup.
+- [DONE] Fintech canon v1 (2026-09, master plan Part 3 Dec 2026, "12-15
+  `validate` templates (payments, ledger, masking)", parity target:
+  C Proof) — `examples/fintech-canon/`: 13 real files, 12 with a
+  genuine Z3-proved `validate` contract (`nirdosha certify` output
+  captured for every one in `examples/fintech-canon/RESULTS.md`, not
+  hand-written), plus one demonstrating the real, compiled field-
+  masking mechanism (`requires(role: ...)` on a struct field) for
+  financial PII, trimmed from `examples/features/50_field_masking_and_check_role.nir`'s
+  full demonstration. Six payments templates (fee/refund/late-fee/
+  minimum-payment/discount/daily-limit), six ledger templates
+  (nonnegative-balance/overdraft/interest-accrual/ledger-entry/
+  withdrawal/credit-limit), one masking template. A real miss surfaced
+  and fixed while writing these, kept in `RESULTS.md` rather than
+  quietly edited away: `02_overdraft_within_limit.nir`'s first draft
+  computed its clamped floor from the current balance instead of a
+  fixed value, and `nirdosha certify` caught it with a real
+  counterexample before it landed. Tests:
+  `crates/compiler/tests/fintech_canon.rs` — regression coverage
+  against the real, checked-in files so a future compiler change that
+  silently regresses Tier-1's modeling of any of these patterns fails
+  a test, not just goes unnoticed in a markdown file.
+- [DONE] v1.0 stability promise, test-count claim checked (2026-09,
+  master plan Part 3 Dec 2026, "tests 211 → 10,000") — the "211"
+  circulating in planning material was stale. **Re-verified 2026-09-11
+  against a real `cargo test --release` run (Redis + Postgres present,
+  not a grep estimate): 644 real tests (95 unit + 549 integration), 623
+  passing with no extra infra, 21 `#[ignore]`-gated needing Postgres —
+  see `docs/STABILITY_AND_RELEASES.md`.** The prior entry here said
+  "~1,350," itself a bad grep-based estimate corrected the same way the
+  "211" figure was: by actually counting and running, not repeating a
+  number forward. Deliberately not "fixed" by writing filler tests
+  toward 10,000 — a round number chased for its own sake would cut
+  directly against this project's actual testing culture, where every
+  test traces to a real regression, counterexample, or feature's own
+  end-to-end proof (this session's own commits are the pattern:
+  `fintech_canon.rs`/`trust_audit.rs`/`equivalence_command.rs`/
+  `signed_certificate.rs` and the rest, each earning its place). The
+  "v1.0 stability promise" itself is `docs/STABILITY_AND_RELEASES.md`,
+  already `[DONE]` under this roadmap's own Track A entry — this item
+  closes out the one unchecked claim (test count) that document didn't
+  itself carry.
+- [DONE] `nirdosha suggest-contracts` v1 — LLM-assisted contract
+  inference (2026-09, master plan Part 3 Q1 2027, parity target:
+  Kōdo's `kodoc annotate --ai`, Certora AutoProver) —
+  `nirdosha suggest-contracts <file.nir> <fn_name>` asks a real LLM
+  (`hi_llm::suggest_contract`, reusing `nirdosha hi`'s Generate-mode/
+  `crates/bench`'s own activation plumbing) for a `validate` block,
+  then actually checks it against Z3 before ever presenting it as
+  trustworthy — never accepted on the strength of an LLM having
+  produced it (Certora AutoProver's own Aave v4 miss is the cited
+  precedent). Refuses up front on a function that already has a
+  `validate` block. Real gap discovered and fixed while manually
+  testing this: `agent-skills/nirdosha/paste-anywhere-prompt.md` (the
+  system prompt every LLM call in this compiler sends) never
+  documented `validate`/`pre`/`post` syntax at all — only listed
+  `validate` as a reserved word — so a first real test produced
+  `requires(...)`/`ensures(...)`, plausible in other languages, a
+  parse error here; fixed by adding real syntax documentation with a
+  worked example, `[PARTIAL]` still open across `paste-anywhere-
+  prompt.md`'s 7 synced copies (`AGENTS.md`, `core.md`, `clinerules`,
+  `windsurfrules`, `cursor/nirdosha.mdc`, `claude-code/SKILL.md`,
+  `github/copilot-instructions.md`) — each has its own rule numbering
+  and curation, so propagating the fix needs a per-file pass, not a
+  blind copy, and is named here as a real follow-up rather than
+  silently left. After the prompt fix, a real Gemini run caught a
+  second genuine issue: a syntactically valid but out-of-range `i64`
+  literal (`x > -9223372036854775808`) in a suggested `abs_value`
+  precondition — correctly reported `DISPROVED`, not accepted. A
+  clean, genuine `PROVED` success (`clamp_to_zero`, `contracts_proved: 1`)
+  was captured against a local Ollama-proxied cloud code model
+  (`kimi-k2.7-code:cloud`, no API key or quota needed) once Gemini's
+  free-tier daily quota ran out mid-session. Tests:
+  `crates/compiler/tests/suggest_contracts.rs` covers everything that
+  doesn't need a live LLM call (usage errors, unknown function,
+  already-validated function refused, no provider configured); the
+  live-LLM path is documented, not simulated, per that file's own
+  doc comment naming all three real observed runs above.
+- [DONE] Spec v1 published — verdict schema + certificate format +
+  repair protocol as an in-toto predicate (2026-09, master plan
+  Part 3 Q1 2027, "compose with SLSA, don't compete") —
+  [`docs/SPEC_V1.md`](./SPEC_V1.md), a real, versioned schema for all
+  three JSON shapes (`nirdosha verify`/`certify`/`fix`'s own output),
+  published separately from `crates/compiler` so an alternative
+  implementation can produce or consume them without depending on this
+  compiler at all. `--in-toto` on `verify`/`fix`/`certify` wraps the
+  existing, unchanged JSON as the `predicate` of a real in-toto v1
+  Statement (`_type: "https://in-toto.io/Statement/v1"`, verified
+  against the published in-toto spec directly, not guessed), addressed
+  to the source file via a real SHA-256 `subject` digest, under one of
+  three nirdosha-owned `predicateType` URIs. Composes with
+  `certify --sign` (a signed certificate's signature fields ride inside
+  the wrapped predicate unchanged). Tests:
+  `crates/compiler/tests/in_toto.rs` — the Statement envelope checked
+  field by field against the real spec shape for all three predicate
+  kinds, the subject digest checked against the file's actual SHA-256
+  (not just "some string"), composition with `--sign`, and confirming
+  the flag is a pure wrapper (identical predicate content whether
+  `--in-toto` is given or not).
+- [DONE] Test count re-verified again — 644, not ~1,350 (2026-09-11) —
+  the prior "~1,350" entry above was itself a bad grep-based estimate;
+  see `docs/STABILITY_AND_RELEASES.md`'s own note for the corrected,
+  actually-run number (644 total, 623 passing with no extra infra, 21
+  needing a real local Postgres).
+- [DONE] `v0.1.0` tagged, and two real CI bugs it exposed, both fixed
+  (2026-09-11, master plan Part 3 "land the branch" milestone) — the
+  tag push itself surfaced two real, previously-silent release-pipeline
+  bugs, not hypothetical ones: (1) the `x86_64-apple-darwin` matrix leg
+  targeted `macos-13`, a GitHub-hosted runner image retired 2025-12-08
+  — it queued forever with no runner ever assigned (confirmed
+  reproducing identically on the prior day's `v0.1.0-alpha.4` release,
+  stuck 23+ hours, never previously noticed); fixed by moving to
+  `macos-15-intel`, GitHub's replacement label. (2) A real
+  cold-machine install rehearsal (`scripts/install.sh` run inside a
+  fresh, unmodified `debian:bookworm-slim` container — no repo clone,
+  no dev tools staged) found the Linux release binary needs
+  `GLIBC_2.39`/`GLIBCXX_3.4.31` (from building on `ubuntu-latest` =
+  24.04) to even start — excluding Debian 12, Ubuntu 22.04 LTS, RHEL 9,
+  and older. Fixed by building on `ubuntu-22.04` instead (floor now
+  glibc 2.35); a new "Cold-machine rehearsal" CI step runs every future
+  Linux release binary inside a fresh `debian:bookworm-slim` container
+  as a permanent regression guard, since the pre-existing same-machine
+  smoke test structurally cannot catch a glibc mismatch. **Real,
+  disclosed gap left open**: RHEL 8/Debian 11/Amazon Linux 2 (glibc
+  <2.35) still can't run the binary; closing that needs a static
+  `x86_64-unknown-linux-musl` build, not attempted in this pass. The
+  `v0.1.0` tag itself was left pointing at the pre-fix commit (both
+  fixes landed in commits immediately after) rather than force-moved —
+  its GitHub Release currently has zero binaries attached (the stuck
+  run was cancelled outright, not just the broken leg); a corrected
+  tag/release is a deliberately deferred follow-up, not silently
+  glossed over here.
+- [DONE] PyPI package prepped, not published (2026-09-11, master plan
+  Part 3 Sep 26–Oct 9) — `clients/python/nirdosha-verify` builds a real
+  sdist + wheel (`python -m build`) and both pass `twine check`.
+  Publishing to the real PyPI index needs a maintainer's own PyPI
+  account/token, deliberately not done by an agent — prepared and
+  handed off, not silently skipped.
+- [DONE] First external red-team submission, triaged and the critical
+  finding fixed same day (2026-09-11, `SECURITY.md`'s invitation) — a
+  submitted report (`nirdosha-redteam/`) named `codegen.rs`'s
+  `requires`/`acquire`/masking lowering as the highest-leverage place to
+  probe; a concrete probe against it found compiled `serve` would
+  accept a client-forged `RoleView` (`[{"role":"admin"}]` in a request
+  body) and use it to bypass field-level masking for a caller whose
+  real verified identity only ever proved `hr_staff` — reproduced live
+  against a real compiled binary and a real demo-mode bearer token
+  before being fixed. Full writeup: `docs/ROADMAP.md`'s **A18** (search
+  for it) — the cause (`RoleView`/`ClaimView` parameters fell through
+  to the same generic request-body JSON decode any struct gets, with no
+  special case at all, unlike `VerifiedIdentity`), the two-part fix
+  (`typeck::check_serve_exposure` refuses to compile an exposed
+  `RoleView`/`ClaimView` parameter with no matching `requires`;
+  `codegen.rs::emit_serve_route_wrapper` now constructs the value from
+  the already-verified check instead), and the real HTTP-level
+  regression test (`crates/compiler/tests/codegen.rs::
+  compiled_serve_never_lets_a_client_supplied_role_view_bypass_field_masking`)
+  that sends the exact exploit payload against the real compiled binary
+  and asserts the real salary never appears. The report's other three
+  probes were also run for real: `RoleView` direct-construction forgery
+  (probe 01) and `serve`'s deny-by-default exposure model (probe 03,
+  confirming an unexposed route 404s even under a valid token) both held
+  as claimed; the `&` incomplete-exclusivity probe (04) confirms an
+  already-disclosed gap (`README.md`'s own "what these guarantees do
+  not cover"), not a new one. One confusing-but-lower-severity find
+  from the same pass — a stale `ungated_fn_warnings` false positive on
+  `main` — is a real, disclosed, deliberately-not-fixed-here follow-up
+  (`docs/ROADMAP.md` A18's own closing paragraph has the reason it's
+  more than a one-line fix).
 
 ---
 
@@ -247,8 +707,11 @@ a hypothetical future.)
   secrets/JWKS handling) — `nirdosha serve` itself no longer exists
 - [PARTIAL] Observability — a local OTel-shaped tracer exists; wiring
   to a real collector (OTLP) is open
-- [OPEN] A compatibility/versioning policy before the next breaking
-  language change
+- [DONE] A compatibility/versioning policy before the next breaking
+  language change — `docs/STABILITY_AND_RELEASES.md` (2026-09):
+  monthly tagged releases starting 2026-10-01, a named checklist for
+  what `v1.0` requires, and a breaking-change policy that already
+  covers `nirdosha verify`'s JSON verdict schema
 - [PARTIAL] Identity admin console — role-mapping cache is done;
   multi-IdP registry and a roles→functions/fields report are open
 - [OPEN] Real Windows verification — the compiled `tcp`/`tcp_listener`
@@ -310,17 +773,21 @@ identity section under "Shipped" above and B1/B2/B3/B5/B8 below)
   cargo-dependency.md`) that can depend on crates.io crates — the
   actual, previously-invisible reason `dec128` stayed interpreter-only
   this long: `rust_decimal` was simply unreachable from the old build.
-- [PARTIAL] `dec128` — `dec_from_i64`/`dec_to_str`/`dec_round`/
+- [DONE] `dec128` (2026-09) — `dec_from_i64`/`dec_to_str`/`dec_round`/
   `dec_scale`, `+`/`-`/`*`/`/`, and all six comparisons compile to real
   `rust_decimal`-backed native code (`nir_dec128_*` kernels), verified
   against the interpreter byte for byte, including the division-by-zero
-  trap and a `dec128` field inside a real `struct`. Only `dec_from_str`
-  remains — its `.nir`-visible return type is `Result(dec128, str)`,
-  and no existing compiled builtin actually constructs a real
-  `Result(_, _)` enum value as its return yet (`inv`/`solve`, this
-  codebase's other fallible builtins, present failure a different way)
-  — a real, deliberately deferred design question, not a shortcut;
-  cleanly rejected in the meantime.
+  trap and a `dec128` field inside a real `struct`. `dec_from_str` now
+  closes the set: its `.nir`-visible return type is `Result(dec128,
+  str)`, built via `emit_result_merge` — the same generic tag-then-
+  payload convention every `db`/`json` builtin already established, not
+  a new one. `nir_dec128_from_str` now reports a real `Err` message on a
+  malformed string via the standard `NirStrOut` out-param, not a silent
+  zero. Verified end to end (not just typechecked): `nirdosha build`
+  against `examples/features/11_decimal_dec128.nir`, unmodified, plus
+  `crates/compiler/tests/codegen.rs`'s
+  `dec_from_str_parses_a_well_formed_string_into_a_real_ok_dec128`/
+  `dec_from_str_reports_a_real_err_message_for_a_malformed_string`.
 - `[DONE]` **B1. `transact` codegen** (2026-09) — Layer 1 real:
   `precheck?/network/verify/commit/compensate?/log?`, a real `bool`
   result, `examples/features/36_transact.nir` unmodified and verified.
@@ -356,9 +823,21 @@ identity section under "Shipped" above and B1/B2/B3/B5/B8 below)
   landed as planned. Postgres landed as a real 2026-09 follow-up too —
   pooled (`kernel::pool::PoolRegistry`), vendored-TLS (`postgres`/
   `postgres-native-tls`, verify-by-default off-`localhost`,
-  `docs/adr/0005`). Named gaps still open: a zero-payload `enum` bind
-  value not yet compiled; `BLOB` columns represented as JSON `null` (no
-  `bytes` type to carry them).
+  `docs/adr/0005`). A zero-payload `enum` bind value now compiles too
+  (2026-09) — `typeck::check_db_bind_ty` accepts it (any variant
+  carrying a payload is a clean compile-time rejection instead, closing
+  a real, previously-unchecked miscompiled-IR risk this same check found
+  — bind arguments had *no* type restriction before this), binding as
+  the enum's plain `i64` discriminant (`emit_db_binds`'s new branch);
+  verified against a real SQLite column, not just typechecked
+  (`crates/compiler/tests/codegen.rs`:
+  `zero_payload_enum_bind_value_round_trips_through_a_real_sqlite_column`).
+  One named gap still open, deliberately not attempted alongside the
+  above: `BLOB` columns represented as JSON `null` — blocked on Nirdosha
+  having no `bytes`/`blob` first-class type at all (the same undesigned-
+  type dependency the file/attachment roadmap entry names), a
+  materially bigger, separate design question from a bind-value
+  encoding fix.
 - [DONE] **B8. Compiled `serve` mode** (2026-09) — this was never
   actually gated on the rest of Track B (that was a sequencing choice,
   not a technical one), and shipped in two real layers, both still

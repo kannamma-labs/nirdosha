@@ -6,12 +6,17 @@ triage, or design feedback — helps.
 
 ## Quick ways to help
 
-- **Try it and report what breaks.** Build from source (below) or grab
-  a [prebuilt binary](https://github.com/kannamma-labs/nirdosha/releases/latest),
-  try a few `examples/features/*.nir`/`examples/syntax/*.nir` files
-  through `nirdosha emit-ui`/`build` (there is no interpreter anymore —
-  see `examples/features/README.md`'s 2026-09 note on what still
-  actually runs), open an issue for anything confusing or wrong.
+- **Try it and report what breaks.** `crates/compiler` (the native
+  `.nir` compiler this section used to point a prebuilt binary release
+  at) is deprecated — no prebuilt binaries are published any more; the
+  project's active surface is the v2 Rust dialect
+  (`docs/nirdosha-rt-dialect.md`: `cargo build && cargo install --path
+  crates/cargo-nirdosha`). Build from source (below) to try the native
+  compiler anyway; try a few `examples/features/*.nir`/
+  `examples/syntax/*.nir` files through `nirdosha emit-ui`/`build`
+  (there is no interpreter anymore — see `examples/features/
+  README.md`'s 2026-09 note on what still actually runs), open an
+  issue for anything confusing or wrong.
 - **Improve docs.** Typos, unclear explanations, and missing examples
   are all welcome fixes.
 - **Add `.nir` examples**, especially ones exercising a feature that
@@ -32,7 +37,9 @@ triage, or design feedback — helps.
 2. For anything non-trivial, open an issue first so we can agree on
    direction before you sink time into an implementation. **Exception:**
    an issue already labeled `good first issue` is pre-scoped — just send
-   the PR, no need to ask.
+   the PR, no need to ask. See [`docs/FEATURE_WORKFLOW.md`](./docs/FEATURE_WORKFLOW.md)
+   for the full issue → RFC → commit → close cycle this project follows,
+   including how a multi-part idea splits into separate issues.
 3. Keep changes minimal and focused — a bug fix doesn't need drive-by
    refactoring bundled in.
 
@@ -75,10 +82,26 @@ the right design doc for whatever you're changing.
 ## Pull request process
 
 1. Fork and branch.
-2. Run the full test suite: `cargo test` in `crates/compiler/`.
+2. Run the full test suite: `cargo test` in `crates/compiler/`. If your
+   change touches a command in `README.md`, also run
+   `sh scripts/verify_readme_commands.sh` from the repo root (CI runs
+   this too, but catching it locally is faster) — every fenced ` ```sh `
+   block in the README is a claim that command actually works, checked
+   by running it, not by reading it.
 3. Update relevant docs (`docs/LANGUAGE.md`, `docs/GRAMMAR.md`, `docs/ROADMAP.md`,
    `docs/PUBLIC_ROADMAP.md`) in the *same* PR, not a follow-up — this
-   project treats docs as load-bearing, not aspirational.
+   project treats docs as load-bearing, not aspirational. For Nirdosha
+   specifically, this is not ordinary hygiene: a scope statement in
+   `README.md`/`SECURITY.md` (e.g. "no data races *between the
+   language's own concurrency primitives*") is the boundary a
+   certificate's proof is actually scoped to — an overclaim there makes
+   the proof claim something it doesn't, and a stale claim in
+   `SECURITY.md`'s "Scope" section undermines the one document this
+   project invites the world to attack it through. Prefer a doc change
+   that names *why* a claim is true now (a test name, a `docs/ROADMAP.md`
+   item letter, a file/line) over a bare assertion — the "why" is what
+   lets a later change notice it broke the claim, the same way A10/A11/
+   A18 in `docs/ROADMAP.md` each cite the exact test/line that backs them.
 4. Reference the issue your PR addresses: `Closes #123`.
 5. Keep commits small and messages descriptive.
 

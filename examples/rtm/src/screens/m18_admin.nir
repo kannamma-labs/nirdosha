@@ -1,0 +1,306 @@
+//! M18 System Administration & Security (`screen.md` module 18, 10
+//! screens). Policies: `90_ops_admin.nir`. RTM live-demo plan Phase B
+//! batch 3.
+//!
+//! Real, guard-enforced: 18.1/18.2 role grant (`admin-grant-role`'s real
+//! `escalate to approval(chain policy_release)`, modeled as a pre-seeded
+//! "requested" row moving to "granted" -- see `bridge.nir`'s
+//! `UserRoleRow` doc comment for why), 18.8 delegation mint
+//! (`admin-mint-delegation`'s real `action == "delegate"`, via
+//! `guarded_insert_action`'s generalization -- no escalation, `cap
+//! (ttl_max = 90d)` enforced as a plain field bound in this handler
+//! rather than a corpus cap kind this crate's `Cap` enum has no
+//! `TtlMax` variant for), 18.9 DSAR export (`dsar-export`'s real
+//! `requires invariant(no_legal_hold)` + `escalate to approval(chain
+//! egress_release)`, reusing M15's export engine over `customer_table`),
+//! and M19's own driver registry migrate (`driver-migrate`, the exact
+//! `RefDatasetRow`-shaped maker≠checker escalation, reused verbatim).
+//!
+//! **Disclosed, not built this pass**: 18.7 retention purge
+//! (`retention-purge`, `action == "delete"`, `escalate to approval(chain
+//! purge_release)`) -- this crate's escalation engine has no DELETE-
+//! shaped propose/confirm pair (`commit_action`'s own shape assumes a
+//! row survives the write to decode as `E`; a real delete-under-quorum
+//! needs a third, disclosed engine variant this batch's own scope
+//! doesn't reach, the same proportionate-scope call `m08_rules.nir`
+//! makes for its own not-built items). 18.3-18.6, 18.10 (catalog
+//! browser, permission matrix, IP allowlist, session management, config
+//! versioning) name no corresponding `#[dataset]`/`guard_policy!` in
+//! this corpus.
+
+use crate::bridge::assignment_rules_table;
+use crate::bridge::customer_table;
+use crate::bridge::delegation_table;
+use crate::bridge::delegation_token_table;
+use crate::bridge::driver_table;
+use crate::bridge::dsar_request_table;
+use crate::bridge::license_info_table;
+use crate::bridge::notif_template_table;
+use crate::bridge::retention_config_table;
+use crate::bridge::sla_config_table;
+use crate::bridge::user_role_table;
+use crate::bridge::DelegationTokenRow;
+use nirdosha_guard_core::{Action, WriteAction};
+use nirdosha_rt::screens::FieldSpec;
+use std::collections::HashSet;
+
+/// 18.3 Assignment Rules -- `assignment-rules-read` (Admin, ComplianceLead).
+pub fn mount_assignment_rules(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/queues", "Assignment Rules (18.3)", |_req, _params, auth| {
+        match assignment_rules_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "rule_id", input_type: "text" },
+                    FieldSpec { name: "queue", input_type: "text" },
+                    FieldSpec { name: "rule_expr", input_type: "text" },
+                    FieldSpec { name: "assignee_pool", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Assignment Rules", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.6 Notification Templates -- `notif-template-read` (Admin).
+pub fn mount_notif_templates(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/templates", "Notification Templates (18.6)", |_req, _params, auth| {
+        match notif_template_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "template_id", input_type: "text" },
+                    FieldSpec { name: "channel", input_type: "text" },
+                    FieldSpec { name: "subject", input_type: "text" },
+                    FieldSpec { name: "body_template", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Notification Templates", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.7 Retention Config -- `retention-config-read` (Admin, ComplianceLead).
+/// Read-only: the purge escalation itself (`retention-purge`) is a
+/// separate, disclosed-not-built DELETE-shaped write this module's own
+/// doc comment already covers.
+pub fn mount_retention_config(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/retention", "Retention Config (18.7)", |_req, _params, auth| {
+        match retention_config_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "config_id", input_type: "text" },
+                    FieldSpec { name: "data_class", input_type: "text" },
+                    FieldSpec { name: "years", input_type: "number" },
+                    FieldSpec { name: "legal_hold_allowed", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Retention Config", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.8 Delegation list -- `delegation-read` (Admin, ComplianceLead). The
+/// real `DelegationRow`/`delegation_table()` (distinct from
+/// `delegation_token_table()`, which backs `mount_delegation_mint`'s
+/// separate token-minting write below).
+pub fn mount_delegation_list(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/delegation", "Delegations (18.8)", |_req, _params, auth| {
+        match delegation_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "delegation_id", input_type: "text" },
+                    FieldSpec { name: "from_user", input_type: "text" },
+                    FieldSpec { name: "to_user", input_type: "text" },
+                    FieldSpec { name: "scope", input_type: "text" },
+                    FieldSpec { name: "ttl_days", input_type: "number" },
+                    FieldSpec { name: "status", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Delegations", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.9 DSAR requests list -- `dsar-request-read` (Admin, ComplianceLead).
+pub fn mount_dsar_list(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/dsar", "DSAR Requests (18.9)", |_req, _params, auth| {
+        match dsar_request_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "dsar_id", input_type: "text" },
+                    FieldSpec { name: "requester", input_type: "text" },
+                    FieldSpec { name: "request_type", input_type: "text" },
+                    FieldSpec { name: "status", input_type: "text" },
+                    FieldSpec { name: "deadline", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("DSAR Requests", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.10 License info -- `license-info-read` (Admin).
+pub fn mount_license_info(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/license", "License Info (18.10)", |_req, _params, auth| {
+        match license_info_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "license_id", input_type: "text" },
+                    FieldSpec { name: "product", input_type: "text" },
+                    FieldSpec { name: "version", input_type: "text" },
+                    FieldSpec { name: "expiry", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("License Info", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.1 User Management -- list pending/requested user-role grants
+/// (real `user_role_table` read under `user-role-read`) plus the
+/// existing propose/confirm grant flow.
+pub fn mount_user_management(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/users", "User Management (18.1)", |_req, _params, auth| {
+        match user_role_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!({ "users": rows })),
+            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.4 SLA & Workflow Config -- list SLA configurations.
+pub fn mount_sla_config(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/admin/sla-config", "SLA & Workflow Config (18.4)", |_req, _params, auth| {
+        match sla_config_table().guarded_snapshot(auth, "PlatformOperations") {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!({ "sla_configs": rows })),
+            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 18.1/18.2 -- `admin-grant-role` moving a pre-seeded `UserRoleRow`
+/// (`bridge.nir`'s `grant-001`, status `requested`) to `granted`.
+pub fn mount_role_grant(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .post_with_auth("/admin/roles/{id}/propose-grant", "Propose role grant", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let changed: HashSet<String> = ["status".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match user_role_table().guarded_propose_escalated_update(auth, "PlatformOperations", &id, &changed, |row| row.status = "granted".into(), now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/admin/roles/{id}/confirm-grant", "Confirm role grant", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let changed: HashSet<String> = ["status".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match user_role_table().guarded_confirm_escalated_update(auth, "PlatformOperations", &id, &chain, &escalation_id, &changed, |row| row.status = "granted".into(), now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+/// 18.8 -- `admin-mint-delegation` (`Admin`, `action == "delegate"`, no
+/// escalation). `cap(ttl_max = 90d)` enforced here as a plain bound
+/// (real, not decorative -- a request for more than 90 days is
+/// rejected), since `Cap` (`nirdosha_guard_core`) carries no `TtlMax`
+/// variant this crate's own `evaluate()`-driven cap plumbing could
+/// enforce generically.
+pub fn mount_delegation_mint(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.post_with_auth("/admin/delegations", "Mint delegation token", |req, _params, auth| {
+        let values = req.form_or_json();
+        let scope = values.get("scope").cloned().unwrap_or_default();
+        let Some(ttl_days) = values.get("ttl_days").and_then(|s| s.parse::<i64>().ok()) else {
+            return nirdosha_rt::Response::bad_request("ttl_days must be a whole number");
+        };
+        if !(1..=90).contains(&ttl_days) {
+            return nirdosha_rt::Response::bad_request("ttl_days must be between 1 and 90 (cap(ttl_max = 90d))");
+        }
+        let token_id = format!("tok-{}", ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis());
+        let entity = DelegationTokenRow { id: 0, token_id: token_id.clone(), tenant_id: crate::bridge::DEMO_TENANT.into(), scope, ttl_days, minted_by: auth.user().to_string() };
+        let submitted: HashSet<String> = ["scope".into(), "ttl_days".into()].into();
+        match delegation_token_table().guarded_insert_action(auth, "PlatformOperations", Action::Delegate, "delegate", &submitted, entity) {
+            Ok(row) => nirdosha_rt::Response::json(201, &serde_json::json!(row)),
+            Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// M19's own driver registry migrate -- `driver-migrate`, same
+/// maker≠checker escalated-migrate shape `m13_risk_config.nir`'s
+/// `refdata-migrate` already proves, reused verbatim.
+pub fn mount_driver_migrate(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .post_with_auth("/admin/drivers/{id}/propose-migrate", "Propose driver upgrade", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let version = values.get("version").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["version".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match driver_table().guarded_propose_escalated_action(auth, "PlatformOperations", Action::Migrate, "migrate", WriteAction::Migrate, &id, &changed, move |row| row.version = version, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/admin/drivers/{id}/confirm-migrate", "Confirm driver upgrade", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let version = values.get("version").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["version".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match driver_table().guarded_confirm_escalated_action(auth, "PlatformOperations", Action::Migrate, "migrate", WriteAction::Migrate, &id, &chain, &escalation_id, &changed, move |row| row.version = version, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+/// 18.9 -- `dsar-export` (`Admin`, `action == "export" && resource ==
+/// "customer"`, `requires invariant(no_legal_hold)`, `escalate to
+/// approval(chain egress_release)`). Reuses M15's export engine over
+/// `customer_table` -- the same propose/confirm shape, a different
+/// resource.
+pub fn mount_dsar_export(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .post_with_auth("/admin/dsar/propose", "Propose DSAR export", |_req, _params, auth| {
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match customer_table().guarded_propose_escalated_export(auth, "Operations", Action::Export, "export", now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/admin/dsar/confirm", "Confirm DSAR export", |req, _params, auth| {
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required") };
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match customer_table().guarded_confirm_escalated_export(auth, "Operations", Action::Export, "export", &chain, &escalation_id, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(rows)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "rows": rows })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}

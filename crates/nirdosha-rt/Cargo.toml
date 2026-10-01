@@ -1,0 +1,91 @@
+[package]
+name = "nirdosha-rt"
+version = "0.1.0"
+edition = "2024"
+description = "The Nirdosha runtime: unforgeable role proofs, NFR guards (latency + concurrency), and the flight recorder. A plain Rust crate — the enforcement code the dialect injects is ordinary Rust that runs under any toolchain."
+license = "MIT"
+publish = false
+
+[features]
+default = ["async-runtime", "dpop", "tls"]
+native = ["dep:nirdosha-runtime-kernels"]
+# `web::Router`'s async transport (`Runtime::Async`, the default
+# `Router::new` picks -- most apps are I/O-bound, not CPU-bound, so a
+# tokio-based accept loop that never dedicates one OS thread per
+# connection is the better default; `Runtime::Sync` stays available via
+# `Router::with_runtime` for whoever wants today's thread-per-connection
+# model instead). Handler closures themselves are unchanged, ordinary
+# sync `Fn(&Request, &PathParams) -> Response` either way -- only the
+# accept-loop/IO strategy underneath them differs; this deliberately
+# never touches the dialect's own driver, which still rejects `async
+# fn` outright (`nirdosha-driver`'s pure-subset check) and isn't part
+# of this feature's scope. Default-on, but still a real feature (not a
+# plain dependency) so a build with no use for `web::Router` at all can
+# `--no-default-features` and skip tokio entirely -- the same reasoning
+# `nirdosha-hi`'s own `native-window` feature already established for
+# an optional-but-usually-wanted heavy dependency.
+async-runtime = ["dep:tokio"]
+# `web::Router::with_sender_constrained_tokens` -- RFC 9449 DPoP proof
+# verification (`web/dpop.rs`, a plain-Rust port of `runtime-kernels`'
+# own `dpop_verify_inner`/`dpop_jwk_thumbprint`, not an FFI call into
+# that crate -- `nirdosha-rt` is plain Rust with no compiled-artifact
+# ABI boundary to cross, so there's nothing the FFI wrapping would buy
+# here). Default-on, same reasoning as `async-runtime`: a real,
+# usually-wanted capability for anything exposing sender-constrained
+# tokens, not a mandatory one for a build with no use for it.
+dpop = ["dep:jsonwebtoken", "dep:base64"]
+# `ServeConfig`'s optional TLS termination (`web/tls.rs`) -- `rustls`
+# for the sync transport, plus `tokio-rustls` when `async-runtime` is
+# also enabled. Default-on: a real deployment almost always wants this
+# available, even if a given one still terminates TLS at a reverse
+# proxy instead (`ServeConfig::tls: None`, unchanged default behavior).
+tls = ["dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls"]
+# `Router::with_fleet_rate_limit` -- a Redis-backed sibling to
+# `with_rate_limit`'s own per-process limiter, for a multi-instance
+# deployment where per-process state isn't enough (`ratelimit.rs`'s own
+# doc comment already discloses this as real, separate follow-up work).
+# Default-**off**: most apps run one instance, or accept per-process
+# limiting even with several, and a Redis dependency is real weight to
+# carry for a capability most builds won't use.
+fleet-rate-limit = ["dep:redis"]
+
+[dependencies]
+nirdosha-macros = { path = "../nirdosha-macros" }
+nirdosha-guard-macros = { path = "../nirdosha-guard-macros" }
+nirdosha-guard-registry = { path = "../nirdosha-guard-registry" }
+nirdosha-lineage = { path = "../nirdosha-lineage" }
+nirdosha-lineage-macros = { path = "../nirdosha-lineage-macros" }
+# T-11 (audit_projection): the per-module hash-chained audit log
+# `GuardClient` already writes to on every guarded decision (`ModuleAuditChain`)
+# is this crate's real substrate for "AC.<domain>_chain" -- read back and
+# reconciled across modules here, not a second audit mechanism.
+nirdosha-audit = { path = "../nirdosha-audit" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nirdosha-runtime-kernels = { path = "../runtime-kernels", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"], optional = true }
+jsonwebtoken = { version = "9", optional = true }
+# Hard (non-optional) dependency: `export.rs`'s governed-egress content
+# hash (T-01) needs this unconditionally, not just under the `dpop`
+# feature that used to be its only consumer.
+sha2 = { version = "0.10" }
+base64 = { version = "0.22", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+redis = { version = "0.27", default-features = false, features = ["script"], optional = true }
+
+[dev-dependencies]
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+nirdosha-guard-mic = { path = "../nirdosha-guard-mic" }
+nirdosha-guard-verify = { path = "../nirdosha-guard-verify" }
+nirdosha-guard-federation = { path = "../nirdosha-guard-federation" }
+nirdosha-guard-mcp = { path = "../nirdosha-guard-mcp" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+jsonwebtoken = "9"
+proptest = "1"
+# The dialect's own toolchain: explicitly exempt from itself (the
+# verifier does not lint its own implementation — see
+# docs/nirdosha-rt-dialect.md §5).
+[package.metadata.nirdosha-rt]
+toolchain = true

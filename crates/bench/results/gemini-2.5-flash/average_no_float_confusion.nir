@@ -1,0 +1,14 @@
+fn average_score(total_points: i64, num_students: i64) -> i64 requires(public) {
+    // Integer division for i64 in Nirdosha naturally rounds down.
+    return total_points / num_students
+}
+
+validate average_score {
+    pre: total_points >= 0 && num_students >= 1
+    post: result <= total_points
+}
+
+fn main() requires(public) {
+    let score: i64 = average_score(275, 4)
+    print("Average score for 275 points and 4 students:", score)
+}

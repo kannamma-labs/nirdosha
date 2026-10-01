@@ -1,0 +1,21 @@
+//! v2 of `enterprise_app.nir`'s `module Ledger` — a real Rust module
+//! via `#[path]`, the v2 form of `.nir`'s namespacing. `pub` stays
+//! `pub`; `RetentionPolicy` stays private to the module.
+
+#[allow(non_snake_case)]
+pub mod Ledger {
+    pub struct AuditEntry {
+        pub id: i64,
+        pub action: String,
+    }
+
+    // Private to `Ledger` — unreachable from outside, even qualified.
+    struct RetentionPolicy {
+        days: i64,
+    }
+
+    /// nirdosha:contract {"effects":["pure"]}
+pub fn record_entry(id: i64, action: String) -> AuditEntry {
+        AuditEntry { id, action }
+    }
+}

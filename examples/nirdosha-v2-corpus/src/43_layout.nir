@@ -1,0 +1,60 @@
+//! v2 of `examples/features/43_layout.nir` — the composable
+//! arrangement tree: `row`/`column`/`grid`, titled `group`s,
+//! `tabs`, `divider`, and field/action items that *reference* (never
+//! duplicate) the screen's own declarations. One `nirdosha:layout`
+//! claim carries the whole tree; the action it references is the
+//! ordinary fn below.
+
+use nirdosha_v2::{json_parse, Json};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    #[allow(dead_code)] // declared-complete for the declaration layer
+    MalformedListing,
+}
+
+#[allow(dead_code)] // declared-complete for the screen layer
+struct Case {
+    id: i64,
+    case_number: String,
+    status: String,
+    priority: i64,
+    assigned_to: String,
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the declaration layer
+fn list_case() -> Result<Json, ErrorCode> {
+    match json_parse("[]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn escalate_case(id: i64) -> Result<i64, ErrorCode> {
+    Ok(id)
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+#[allow(dead_code)] // declared-complete for the declaration layer
+#[allow(unused_variables)] // the case_id param is part of the .nir shape
+fn list_case_history(case_id: i64) -> Result<Json, ErrorCode> {
+    match json_parse("[]") {
+        Ok(doc) => Ok(doc),
+        Err(_e) => Err(ErrorCode::MalformedListing),
+    }
+}
+
+/// nirdosha:screen {"struct":"Case","actions":[{"label":"Escalate","fn":"escalate_case"}]}
+/// nirdosha:layout {"tree":{"row":[{"column":[{"group":"Details","fields":["case_number","status","priority"]},{"divider":true},{"group":"Assignment","fields":["assigned_to"]}]},{"column":[{"tabs":[{"tab":"History","timeline":{"source":"list_case_history"}},{"tab":"Actions","action":"Escalate"}]}]}]}}
+#[allow(dead_code)] // declared-complete for the declaration layer
+struct CaseScreenMarker;
+
+fn main() {
+    let escalated: i64 = match escalate_case(1) {
+        Ok(id) => id,
+        Err(_e) => -1,
+    };
+    println!("{escalated}"); // 1
+}

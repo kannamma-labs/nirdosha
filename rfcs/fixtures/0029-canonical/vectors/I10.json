@@ -1,0 +1,599 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": "FactWrongModel",
+      "status": "rejected"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_issued"
+    },
+    "extensions": {},
+    "final_authority": "adjuster",
+    "graph_id": "insurance-lineage-wrong-model",
+    "invalidation": "not_evaluated",
+    "model_authorized": false,
+    "model_level": "Recommend",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "pass"
+    }
+  },
+  "fixture_id": "I10",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [
+      {
+        "catalog": "authority",
+        "name": "adjuster",
+        "value": {
+          "id": "authority:adjuster",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "acknowledged",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.acknowledged == true",
+          "id": "predicate:acknowledged",
+          "input_schema": [
+            "review.acknowledged:bool"
+          ],
+          "kind": "ExplicitAction",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "authenticated",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "subject.authenticated == true",
+          "id": "predicate:authenticated",
+          "input_schema": [
+            "subject.authenticated:bool"
+          ],
+          "kind": "Qualification",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "authority",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "reviewer.authorized == true",
+          "id": "predicate:authority",
+          "input_schema": [
+            "reviewer.authorized:bool"
+          ],
+          "kind": "Authority",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "capacity",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.capacity_healthy == true",
+          "id": "predicate:capacity",
+          "input_schema": [
+            "review.capacity_healthy:bool"
+          ],
+          "kind": "CapacityHealthy",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "escalation",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.escalation_available == true",
+          "id": "predicate:escalation",
+          "input_schema": [
+            "review.escalation_available:bool"
+          ],
+          "kind": "EscalationAvailable",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "evidence_accessed",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "evidence.accessed == true",
+          "id": "predicate:evidence-accessed",
+          "input_schema": [
+            "evidence.accessed:bool"
+          ],
+          "kind": "EvidenceAccessed",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "evidence_available",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "evidence.available == true",
+          "id": "predicate:evidence-available",
+          "input_schema": [
+            "evidence.available:bool"
+          ],
+          "kind": "EvidenceAvailable",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "explicit_action",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.explicit_action == true",
+          "id": "predicate:explicit-action",
+          "input_schema": [
+            "review.explicit_action:bool"
+          ],
+          "kind": "ExplicitAction",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "independence",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "reviewer.independent == true",
+          "id": "predicate:independence",
+          "input_schema": [
+            "reviewer.independent:bool"
+          ],
+          "kind": "Independence",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "independent_choice",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.independent_choice == true",
+          "id": "predicate:independent-choice",
+          "input_schema": [
+            "review.independent_choice:bool"
+          ],
+          "kind": "IndependentOutcomeChoice",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "limitations_visible",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "model.limitations_visible == true",
+          "id": "predicate:limitations-visible",
+          "input_schema": [
+            "model.limitations_visible:bool"
+          ],
+          "kind": "LimitationVisible",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "override",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.override_available == true",
+          "id": "predicate:override",
+          "input_schema": [
+            "review.override_available:bool"
+          ],
+          "kind": "OverrideAvailable",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "qualification",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "reviewer.qualified == true",
+          "id": "predicate:qualification",
+          "input_schema": [
+            "reviewer.qualified:bool"
+          ],
+          "kind": "Qualification",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "reason_bound",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.reason_bound == true",
+          "id": "predicate:reason-bound",
+          "input_schema": [
+            "review.reason_bound:bool"
+          ],
+          "kind": "ReasonBound",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "predicate_definition",
+        "name": "sampling",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "expression": "review.sampling_assigned == true",
+          "id": "predicate:sampling",
+          "input_schema": [
+            "review.sampling_assigned:bool"
+          ],
+          "kind": "SamplingAssigned",
+          "result_type": "Bool",
+          "version": 1
+        }
+      },
+      {
+        "catalog": "review_contract",
+        "name": "rc-independent-pass",
+        "value": {
+          "authority": "authority:fixture-review-policy",
+          "evaluation_fixture": "R5_PASS",
+          "id": "review-contract:independent-pass",
+          "mode": "IndependentDecision",
+          "predicates": [
+            "authenticated",
+            "acknowledged",
+            "qualification",
+            "authority",
+            "independence",
+            "evidence_available",
+            "evidence_accessed",
+            "limitations_visible",
+            "explicit_action",
+            "reason_bound",
+            "override",
+            "escalation",
+            "capacity",
+            "independent_choice",
+            "sampling"
+          ],
+          "version": 1
+        }
+      }
+    ],
+    "edges": [
+      {
+        "kind": "AssertFact",
+        "source": "node:I10:a",
+        "target": "node:I10:f"
+      },
+      {
+        "kind": "Authorize",
+        "source": "node:I10:d",
+        "target": "node:I10:c"
+      },
+      {
+        "kind": "DataFlow",
+        "source": "node:I10:f",
+        "target": "node:I10:d"
+      },
+      {
+        "kind": "HumanInput",
+        "source": "node:I10:v",
+        "target": "node:I10:a"
+      },
+      {
+        "kind": "Recommend",
+        "source": "node:I10:m",
+        "target": "node:I10:v"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "contract": "rc-independent-pass",
+          "covered_input_origins": [
+            "m",
+            "v"
+          ],
+          "covered_model_paths": [
+            "m"
+          ],
+          "covered_targets": [
+            "f",
+            "d",
+            "c"
+          ],
+          "id": "a"
+        },
+        "id": "node:I10:a",
+        "kind": "AuthorityAssertion"
+      },
+      {
+        "attributes": {
+          "effect_class": "settlement.approve"
+        },
+        "id": "node:I10:c",
+        "kind": "Capability"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:I10:d",
+          "required_deployment": "deployment:I10:v1",
+          "required_model": "model:I10:v1"
+        },
+        "id": "node:I10:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "authority_class": "profile_authority",
+          "authorized_consumers": [
+            "node:I10:d"
+          ],
+          "produced_by_deployment": "deployment:I10:v1",
+          "produced_by_model": "model:I10-imposter:v1",
+          "revoked": false,
+          "type_id": "fact:I10:f",
+          "valid_until": "2026-09-28T00:00:00Z",
+          "version": 1
+        },
+        "id": "node:I10:f",
+        "kind": "Fact"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:I10:v1",
+          "receipt_id": "receipt:I10:m:v1"
+        },
+        "id": "node:I10:m",
+        "kind": "ModelInvocation"
+      },
+      {
+        "attributes": {
+          "review_contract": "rc-independent-pass"
+        },
+        "id": "node:I10:v",
+        "kind": "Review"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "settlement.approve",
+        "maximum_model_level": "Recommend"
+      },
+      "evaluations": [
+        {
+          "definition_id": "predicate:authenticated",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:authenticated:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:authenticated:inputs",
+          "predicate": "authenticated",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:acknowledged",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:acknowledged:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:acknowledged:inputs",
+          "predicate": "acknowledged",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:qualification",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:qualification:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:qualification:inputs",
+          "predicate": "qualification",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:authority",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:authority:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:authority:inputs",
+          "predicate": "authority",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:independence",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:independence:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:independence:inputs",
+          "predicate": "independence",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:evidence-available",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:evidence_available:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:evidence_available:inputs",
+          "predicate": "evidence_available",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:evidence-accessed",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:evidence_accessed:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:evidence_accessed:inputs",
+          "predicate": "evidence_accessed",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:limitations-visible",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:limitations_visible:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:limitations_visible:inputs",
+          "predicate": "limitations_visible",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:explicit-action",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:explicit_action:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:explicit_action:inputs",
+          "predicate": "explicit_action",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:reason-bound",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:reason_bound:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:reason_bound:inputs",
+          "predicate": "reason_bound",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:override",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:override:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:override:inputs",
+          "predicate": "override",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:escalation",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:escalation:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:escalation:inputs",
+          "predicate": "escalation",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:capacity",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:capacity:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:capacity:inputs",
+          "predicate": "capacity",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:independent-choice",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:independent_choice:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:independent_choice:inputs",
+          "predicate": "independent_choice",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        },
+        {
+          "definition_id": "predicate:sampling",
+          "definition_version": 1,
+          "evaluated_at": "2026-09-27T00:00:00Z",
+          "evaluator_authority": "authority:fixture-review-evaluator:v1",
+          "evidence_commitment": "symbolic:I10:sampling:evidence",
+          "failure_behavior": "Deny",
+          "input_commitment": "symbolic:I10:sampling:inputs",
+          "predicate": "sampling",
+          "result": "True",
+          "revoked": false,
+          "valid_until": "2026-09-28T00:00:00Z"
+        }
+      ],
+      "review_contract": "rc-independent-pass"
+    }
+  },
+  "profile_id": "profile:rfc0029:insurance:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

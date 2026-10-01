@@ -1,0 +1,9 @@
+[package]
+name = "rt-payroll"
+version = "0.1.0"
+edition = "2024"
+description = "Nirdosha dialect demo: a compliant payroll. Builds and runs under plain cargo; gains verification and a certificate under cargo nirdosha."
+publish = false
+
+[dependencies]
+nirdosha-rt = { path = "../../crates/nirdosha-rt" }

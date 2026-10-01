@@ -1,0 +1,52 @@
+//! v2 of `examples/features/19_channels.nir` — `chan T`: an unbounded
+//! MPMC queue, `send` never blocks, `recv` blocks. The handle is
+//! freely copyable — in v2 that shows up as an explicit `.clone()`
+//! where a channel crosses into a `spawn` while the parent keeps
+//! using it (the documented delta; `.nir` hides the copy).
+
+use nirdosha_rt::prelude::*;
+
+fn producer(c: &Chan<i64>) {
+    send(c, 14);
+    send(c, 28);
+}
+
+fn box_producer(c: &Chan<Box<i64>>) {
+    send(c, Box::new(99));
+}
+
+fn emit(c: &Chan<f64>, v: f64) {
+    send(c, v);
+}
+
+fn main() {
+    let c = Chan::new();
+    let c2 = c.clone();
+    let h = spawn(move || producer(&c2));
+
+    let a: i64 = recv(&c);
+    let b: i64 = recv(&c);
+    join(h);
+
+    println!("{}", a + b); // 42
+
+    // two producers feeding one consumer
+    let ca = Chan::<f64>::new();
+    let cb = Chan::<f64>::new();
+    let ca2 = ca.clone();
+    let t1 = spawn(move || emit(&ca2, 1.5));
+    let cb2 = cb.clone();
+    let t2 = spawn(move || emit(&cb2, 2.5));
+    let total: f64 = recv(&ca) + recv(&cb);
+    join(t1);
+    join(t2);
+    println!("{total}"); // 4
+
+    // an affine payload — `Box<i64>` — crossing a channel
+    let bc = Chan::<Box<i64>>::new();
+    let bc2 = bc.clone();
+    let h2 = spawn(move || box_producer(&bc2));
+    let received: Box<i64> = recv(&bc);
+    join(h2);
+    println!("{}", *received); // 99
+}

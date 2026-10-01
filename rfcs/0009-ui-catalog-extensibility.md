@@ -112,6 +112,18 @@
 >
 > The rest of this document is the original design capture, kept as
 > written below; this box is the only part updated after the fact.
+>
+> **A second, independent track was appended 2026-09-16: see "Track C —
+> the v2 Rust dialect's own UI engine" at the end of this document.**
+> Everything above (Phase 0/A/B, the catalog, `ui_gen.rs`, GBNF) targets
+> the native `.nil` compiler (`crates/compiler`). Track C targets the
+> separate v2 Rust-dialect pipeline (`nirdosha-rt`/`nirdosha-macros`/
+> `cargo-nirdosha`) built out this session, and shares no code, no
+> catalog, and no trust model with Phase 0/A/B — it's recorded in this
+> same document because it answers the same underlying question
+> ("how does this ecosystem's UI vocabulary grow without a fork or a
+> hidden runtime hole") for a genuinely different compiler, not because
+> the two tracks compose.
 
 > **Provenance note.** This RFC responds to an external draft spec
 > ("NUIM" — a generative-UI manifest format synthesizing OpenUI Lang,
@@ -430,3 +442,241 @@ the metadata convention this RFC (and `rfcs/0008` Phase 3) define.
   narrower than this document's original sketch; whether the wider
   shape is worth building is a separate decision from whether the
   mechanism itself is sound.
+
+---
+
+## Track C — the v2 Rust dialect's own UI engine
+
+**Status: Phase 0 (dashboards) and the CRUD/List/Detail/Form/Delete
+archetypes are built and proven** — `nirdosha_rt::dashboard!`,
+`nirdosha_rt::crud_screens!`, `crates/nirdosha-rt/src/{dashboard,
+screens}.rs`, worked example `examples/nirdosha-v2-corpus/src/
+57_ui_engine_demo.nir` (CRUD + categorical actions + dashboard, all
+attached to one real datasource, verified live via curl, a headless-
+browser screenshot pass, and a real-socket golden test). `Router` also
+gained a top nav bar (`with_nav`) and cookie-session login/logout
+(`with_login`) — the Auth-screens row below is now partial, not
+unstarted. Two real bugs were found live and fixed with regression
+tests: `Router::serve` panicking the whole process on a client that
+disconnected mid-response, and a literal-suffix route (`/products/new`)
+being silently swallowed by the `/products/{id}` wildcard because of
+registration order. Phases 2–5 (query-param filtering, per-widget
+visibility, real-time push, client-side interactivity) remain as
+originally designed below, not yet built. Everything here targets
+`nirdosha-rt`/`nirdosha-macros`/`cargo-nirdosha` — the Rust dialect
+whose role/policy/categorical-action/HTTP work is recorded in RFC 0020,
+not `crates/compiler`'s native `.nil` grammar. Read alongside RFC 0020,
+which this track depends on directly (`Router`, `RoleProof<R>`/
+`Auth::prove`, the Road 1/Road 2 framing).
+
+### Why a separate track, not a shared catalog
+
+Phase 0/A/B's whole design centers on a **closed, GBNF-enumerable
+vocabulary** resolved and typechecked at `nirdosha build` time against
+a bound struct, because the native compiler's contract with an LLM
+caller is "every valid completion is a valid program." The v2 dialect
+has no GBNF-constrained generation story and no separate compiler
+front-end to resolve a catalog against — its whole design principle,
+established over this session and stated plainly in
+`docs/nirdosha-rt-dialect.md`, is **no bespoke parser, ever**: every
+guarantee must be real `rustc` — the type system, ordinary proc-macro
+expansion, or `const`-evaluation — never a closed-vocabulary DSL
+checked by a separate tool. So Track C does not reuse `ChartSpec`,
+`NativeUiComponent`, `catalog/std/0.1.json`, or any GBNF fragment —
+those are load-bearing for a fundamentally different trust model. What
+*does* generalize is the underlying shape: dashboards are already
+`stat_fn`/`chart_fn` references in this dialect's own corpus
+(`nirdosha:dashboard` doc comments in `enterprise_app.nir`,
+`40_dashboard.nir`), and Track A's mark/encode vocabulary
+(`bar`/`line`/`area`/`point`/`arc`/`rule`) is worth borrowing as a
+*convention*, not as shared code.
+
+### Where dashboards sit in the larger UI-screen map
+
+Dashboards are one of ten recurring screen archetypes in web
+applications, each with its own dominant interaction pattern — worth
+naming up front so "the UI engine" has a real destination, not just a
+dashboard-shaped hole:
+
+| Archetype | Primary verb | Interaction density | v2 dialect status |
+|---|---|---|---|
+| CRUD: List/Index | scan & select | high (filter, sort, search, paginate, batch actions) | **built** — `crud_screens!`'s `list_html`; no filter/sort/paginate yet (Phase 2) |
+| CRUD: Detail/Show | read & tweak | medium (tabs, history, related records) | **built** — `crud_screens!`'s `detail_html`; no tabs/history |
+| CRUD: Create/Edit Form | input & validate | medium-high (inline errors, autosave, steppers) | **built** — `crud_screens!`'s `form_html`, inline field-scoped errors on a failed submit; no autosave/steppers |
+| CRUD: Delete/destructive | confirm & undo | low, high-stakes | **built** — `crud_screens!`'s typed "type DELETE to confirm" page; no undo-toast |
+| Dashboard/Overview | monitor & drill | medium (date range, drill-down, cross-filter) | **built (Phase 0)** — `dashboard!`, `Metric`/`Chart` widgets; no drill-down yet (Phase 2) |
+| Auth screens | credential & verify | low-medium, security-sensitive | **partial** — `Router::with_login` (cookie session, login form, logout) + `with_nav`'s Login/Logout button; no MFA/SSO/password-strength/CAPTCHA |
+| Workflow/Wizard | progress linearly | low per step, gated | not started; `nirdosha:workflow` doc comments exist in the corpus (inert) but Track C would need its own, non-GBNF mechanism |
+| Search & Discovery | find & narrow | high (autocomplete, facets) | not started |
+| Board/Canvas | manipulate spatially | very high (drag, zoom, connect) | not started, likely out of scope for a "no JS pipeline" dialect (see Open Questions) |
+| Settings/Configuration | configure safely | low-medium (danger zones, guards) | not started — a natural next slice: `crud_screens!` against a singleton datasource |
+| Communication | react & respond | high, often real-time | **built** - `communication_feed!` with timer refresh or opt-in bounded long polling; concurrent Router workers (#66); SSE/WebSocket still pending |
+| System state (404/empty/loading) | recover | low | **partial** — real 404 (`Response::not_found`), 403, and empty-list states exist; no styled error pages or loading skeletons |
+| Report/Export | select & schedule | medium (format, columns, preview) | not started |
+| Audit trail | review & attest | medium (who, when, before/after) | not started — natural generalization of `workflow_history` |
+| Approval chain | decide & escalate | high (quorum, delegation, SLA) | not started — extends `workflow!` with quorum + delegation |
+| Notification inbox | read & dismiss | medium (categories, read/unread) | not started — `on_entry` can already insert rows; no bell-icon convention |
+| RBAC admin | assign & review | low-medium (roles, claims, mappings) | not started — needs claim primitive first |
+| Scheduled job / scheduler | schedule & monitor | medium (cron, retries, log) | not started — no cron primitive; external scheduler contract |
+| Search & faceted discovery | find & narrow | high (autocomplete, saved queries) | not started |
+| Import / export job | upload & validate / select & download | medium-high | not started — blocked on file/blob type |
+
+Read-heavy archetypes (List, Dashboard, Search) optimize for scanning
+and filtering; write-heavy ones (Form, Wizard) optimize for validation
+and preventing mistakes; spatial ones (Board/Canvas) optimize for
+direct manipulation and are the ones most likely to need a client-side
+JS layer this dialect doesn't have yet (see Phase 5). This table is a
+map, not a commitment — it exists so "add screen type X" has an
+obvious place to slot in later, not so every row gets built.
+
+### Dashboards, phased
+
+| Phase | Adds | New infra needed | Risk |
+|---|---|---|---|
+| 0 | `Metric` + `Chart` widgets, `refresh_seconds`, JSON+HTML dual output | None — reuses `Router` entirely | Low |
+| 1 | `Trend` + `Table` widgets | SVG sparkline primitive, JSON→table column convention | Low |
+| 2 | Query-param filtering (interactive drill-down) | Query-string parsing in `Request`, new macro syntax | Medium |
+| 3 | Per-widget role visibility within one dashboard | Extends existing `get_gated::<R>`/masking pattern | Low-Medium |
+| 4 | True real-time push (WebSocket/SSE) | A WS layer — zero WS support exists today | High |
+| 5 | Client-side interactivity (cross-highlight, pivot, no reload) | This dialect's first JS artifact, ever | High, architectural |
+| — | Self-service/embedded dashboard builder | A different product (a builder UI) | Out of scope |
+
+**Phase 0 — foundation.** `nirdosha_rt::dashboard!`, same shape as
+`categorical_actions!` (RFC 0020): takes widget declarations that
+reference real Rust functions by name, so a wrong name or signature is
+an ordinary `rustc` error, not a runtime surprise or a `cargo-nirdosha`
+finding.
+
+```rust
+nirdosha_rt::dashboard! {
+    title: "Sales Overview",
+    refresh_seconds: 300,
+    widgets {
+        Metric { label: "Revenue MTD", fn: stat_revenue_mtd, target: 1_000_000, alert_below: true },
+        Chart  { label: "By Region", fn: chart_revenue_by_region, mark: bar },
+    }
+}
+```
+
+Registers `GET /dashboard.json` (structured data, an OpenAPI entry for
+free via the existing `Router`) and `GET /dashboard` (server-rendered
+HTML: `Metric` as a colored number against its `target`, `Chart` as
+inline SVG). `refresh_seconds` becomes a `<meta http-equiv="refresh">`
+tag — covers both the "periodic" (strategic, weekly+) and
+"near-real-time" (operational, minutes) update-frequency tiers
+honestly, with zero JS. The macro also auto-emits the equivalent
+`/// nirdosha:dashboard {...}` doc comment — Road 2, non-authoritative
+documentation of what Road 1 (the generated routes) actually does,
+same trick `#[contract(...)]` already plays for its own doc encoding.
+
+Verification: a new worked example (e.g. `57_dashboard_ui.nir`), a
+real-socket golden test against both routes (same convention as
+`56_product_crud_api.nir`'s `product_crud_api_serves_real_requests`),
+and property tests (`dashboard.json` lists every registered widget
+exactly once; the SVG renderer never panics on arbitrary label/value
+data — `proptest`, same posture as RFC 0020's router tests).
+
+**Phase 1 — widget completeness.** `Trend` (a number plus an inline
+sparkline, `fn() -> Vec<(String, f64)>`) and `Table` (`fn() -> Json`
+rendered as an HTML table). Real decision to make explicitly rather
+than leave implicit: column inference from the first JSON object's
+keys, or an explicit `columns: [...]` list in the macro call. Given
+this dialect's `#[serde(deny_unknown_fields)]`-everywhere posture
+elsewhere (RFC 0020's `Contract`/`Crud`/`Policy` models all reject
+rather than guess), explicit columns is the better default.
+
+**Phase 2 — server-side interactivity.** `GET /dashboard.json?range=7d`
+passes `range` through to a backing function
+(`chart_revenue_by_range(range: &str)`). Needs `Request` to actually
+parse its query string (today `path_without_query` in
+`crates/nirdosha-rt/src/web.rs` discards it) and a new, optional
+`filter:` key in the macro syntax. OpenAPI generation gains a
+`parameters` entry per filterable widget for free once this lands.
+Covers the "analytical" (explore, drill down) purpose without any
+client-side code.
+
+**Phase 3 — per-widget visibility.** A whole dashboard can already be
+gated (`Router::get_gated::<R>`, reused directly) — the new piece is
+one *ungated* dashboard where some widgets are still role-restricted
+(e.g. an exact-revenue `Metric` visible only to `Admin`, a rounded one
+visible to everyone). Mechanism: the same `Option<&RoleProof<R>>`
+masking pattern RFC 0020 already proved for `cost_cents`, applied
+per-widget instead of per-field.
+
+**Phase 4 — true real-time (WebSocket/SSE).** The honest
+seconds-latency "operational" tier (live ops centers, trading, IoT).
+Nothing in `nirdosha-rt` speaks WebSocket or SSE today; this is a new
+protocol layer on raw `TcpStream`, not a config flag — the same
+"declare the gap, don't fake it" posture RFC 0020 takes toward
+at-rest/in-transit encryption. Deserves its own RFC before being built,
+given the blast radius (a persistent-connection primitive) is bigger
+than dashboards alone, and would also be the mechanism Communication
+screens (chat, live notifications) eventually need.
+
+**Phase 5 — client-side interactivity.** Cross-highlighting, pivoting,
+drill-down without a full page reload — and Board/Canvas screens
+(drag-and-drop, zoom/pan) if this dialect ever takes those on. This is
+the one that changes what kind of project the v2 dialect is, not just
+what a dashboard does: every guarantee built this session has been
+"real `rustc`, checked at compile time," and a JS runtime is a
+different trust boundary entirely (no bundler exists today; even a
+hand-written vanilla-JS asset is a new kind of artifact). Deserves a
+real design conversation of its own before any code lands — not a
+sub-bullet of a dashboard feature.
+
+**Out of scope, explicitly:** a self-service dashboard *builder* (a
+different product — a UI for building UIs — not an engine feature).
+
+### Effect on the permission model (Track C)
+
+No new permission primitive, same posture as Phase A/B's own section
+takes for the native catalog. `Metric`/`Chart`/etc. gating is exactly
+`Router::get_gated::<R>`/`Auth::prove::<R>()`, already proven
+unforgeable; per-widget visibility (Phase 3) is exactly
+`Option<&RoleProof<R>>` masking, already proven for field-level data in
+RFC 0020. The one new *documentation* surface — the auto-emitted
+`nirdosha:dashboard` doc comment — is Road 2 by construction: derived
+from the same macro invocation as the real gates, never an independent
+input, never consulted for authorization.
+
+### Rejected alternatives (Track C)
+
+**Reusing Phase 0/A/B's catalog/GBNF mechanism for the v2 dialect.**
+Rejected: that machinery's entire value proposition is bounding what
+an LLM can generate inside a closed, enumerable grammar resolved by a
+separate compiler front-end. The v2 dialect has neither a GBNF story
+nor a separate front-end to resolve against — grafting the catalog on
+would mean building a parallel, unused enforcement path, not reusing
+one.
+
+**A `nirdosha:dashboard`-style doc-comment JSON schema, checked by an
+opt-in `cargo-nirdosha` scanner extension**, mirroring what Track A/B
+do for the native compiler. Rejected for the same reason RFC 0020
+rejected this shape for `nirdosha:entity`/`nirdosha:policy`: doc
+comments are inert to `rustc`, so the guarantee would only hold for
+whoever remembers to run the scanner — a real regression from every
+other mechanism in this dialect, all of which hold under plain
+`cargo build` alone.
+
+### Open questions (Track C)
+
+- Whether Board/Canvas screens are in scope for this dialect at all, or
+  permanently out of reach without Phase 5's JS layer — spatial
+  direct-manipulation UIs are hard to imagine as server-rendered HTML
+  no matter how the rest of Phase 5 shakes out.
+- Whether Workflow/Wizard screens should generalize
+  `categorical_actions!` (a wizard step is arguably a categorical
+  "current step" field with role/validation-gated transitions) or need
+  their own mechanism — not yet explored.
+- Whether `Table`'s column convention (explicit `columns:` list,
+  recommended above) should also support a typed row struct instead of
+  raw `Json`, once a real use case asks for it.
+- Which of the new archetypes (audit trail, approval chain,
+  notification inbox, RBAC admin, scheduler, search, import/export)
+  belong as standalone macros versus extensions of `crud_screens!`/
+  `dashboard!` — most are macro-only once the underlying table/view
+  convention is decided.
+- Same "who reviews this" question Phase B's own Open Questions raises
+  for `render_js`, deferred to Phase 5: once any client-side JS exists
+  in this dialect, what review convention keeps "add a UI script" a
+  visible human decision rather than something slipped in unreviewed.

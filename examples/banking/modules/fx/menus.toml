@@ -1,0 +1,29 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "FX"
+
+[[group]]
+id = "treasury"
+label_key = "nav.group.treasury"
+order = 60
+
+[[menu]]
+id = "nav.fx_rates"
+label_key = "nav.fx_rates"
+group = "treasury"
+screen_id = "6.1"
+route = "/fx-rates"
+guard = { action = "read", resource = "fxrate" }
+roles = ["BranchManager", "TreasuryHead"]
+order = 10
+
+[[menu]]
+id = "nav.fx_convert"
+label_key = "nav.fx_convert"
+group = "treasury"
+screen_id = "6.2"
+route = "/fx-convert"
+guard = { action = "read", resource = "fxrate" }
+roles = ["Customer"]
+order = 20

@@ -1,0 +1,50 @@
+//! v2 of `examples/features/45_module_namespacing.nir` — real
+//! namespacing + `pub` + `use`: two modules free to reuse the short
+//! name `Entry` with zero collision, plus a second file's namespace
+//! imported via `#[path]` (v2's `use "path"`).
+
+#[path = "45_module_namespacing_helper.nir"]
+mod helper;
+
+#[allow(non_snake_case)]
+mod Audit {
+    pub struct Entry {
+        pub id: i64,
+    }
+
+    /// nirdosha:contract {"effects":["pure"]}
+    pub fn make(id: i64) -> Entry {
+        Entry { id }
+    }
+}
+
+// a second module, reusing the short name (`Entry`) the first already
+// used — zero collision, each under its own qualified key.
+#[allow(non_snake_case)]
+mod Billing {
+    pub struct Entry {
+        pub amount_cents: i64,
+    }
+
+    /// nirdosha:contract {"effects":["pure"]}
+    pub fn make(amount_cents: i64) -> Entry {
+        Entry { amount_cents }
+    }
+}
+
+use helper::Shared;
+
+fn main() {
+    let a = Audit::make(1);
+    let b = Billing::make(500);
+    println!("{}", a.id); // 1
+    println!("{}", b.amount_cents); // 500
+
+    // `Shared::` came from another file entirely — reachable the same
+    // qualified way as a module declared in this file.
+    let entry = Shared::make_entry(7);
+    println!("{}", entry.id); // 7
+    println!("{}", entry.note); // created
+
+    println!("{}", a.id + b.amount_cents); // 501
+}

@@ -1,0 +1,402 @@
+//! M4 Case Management / L2 Investigation (`screen.md` module 4, 14
+//! screens). Policies: `60_case_management.nir`. RTM live-demo plan
+//! Phase B.
+//!
+//! Real, guard-enforced: 4.1 queue + 4.2 overview (`crud_screens!`
+//! list/detail, `case-read`'s real `field_policy { forbidden(sar_id) }`
+//! -- tipping-off, same posture `50_alerts.nir` uses for alerts),
+//! creating a case (`analyst-create-case`'s real `field_policy {
+//! required(tenant_id, subject_ref, alert_ids, rationale) forbidden
+//! (status, sar_id, disposition) }`, wired via `crud_screens!`'s new
+//! `guard.create_fields`), 4.10 disposition/closure (`update_fields`,
+//! `case-transition`'s real `requires field(status).transition_allowed()
+//! && invariant(rationale_present)`), a status-column board (4.1's
+//! kanban view, `kanban_board!`'s own `guard:`), and 4.11 four-eyes
+//! review -- `case-close-confirm`'s real `escalate to approval(chain
+//! case_review)` (`quorum(2, of = [ComplianceLead])`), hand-written as
+//! two POSTs (`/cases/{id}/propose-close`, `/cases/{id}/confirm-close`)
+//! over `GuardedTable::guarded_propose_escalated_update`/
+//! `guarded_confirm_escalated_update` -- a real, tested quorum flow
+//! (`crates/nirdosha-guard-screens`'s own `escalated_update_*` tests),
+//! not a single-click "approve" button.
+//!
+//! Also real, guard-enforced (T-06/B11): 4.3 investigation workspace,
+//! 4.4 Linked Alerts Tab, 4.5 Case Transactions Tab. Also real (C1,
+//! screens-plan.md): 4.8 Tasks & Checklist, 4.9 Internal RFI — both
+//! guard-enforced list/create/update over `PG.case_task`.
+//!
+//! Not built this pass (same reasoning as `m03_alerts.nir`'s doc
+//! comment: this is UX chrome the `guard_policy!` corpus doesn't encode,
+//! not a guard-enforcement question): 4.6/4.7 (documents/notes -- each
+//! names its own dataset `screen-field-mappings.md` invents with no
+//! corresponding `#[dataset]`/`guard_policy!` anywhere in this corpus),
+//! 4.12 escalation to MLRO (no distinct policy from 4.11's own
+//! `case-close-confirm`), 4.13 merge/link cases (no corpus policy). 4.14
+//! Initiate SAR is a plain link to `/sar/draft?case_id=` -- M12 itself is
+//! a later, bespoke batch.
+
+use crate::bridge::case_table;
+use crate::bridge::case_transactions_for_case;
+use crate::bridge::case_workspace_header;
+use crate::bridge::related_alerts_for_case;
+use crate::bridge::CaseRow;
+use nirdosha_rt::prelude::SharedTable;
+
+fn case_overview_html(case_id: &str, row: &CaseRow) -> String {
+    format!(
+        r#"<!doctype html>
+<html><head><title>Case Overview - {case_id}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:80ch;margin:2rem auto">
+<h1>Case {case_id}</h1>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Status</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Assignee</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+<tr><td style="border:1px solid #ccc;padding:.5rem"><strong>Alert IDs</strong></td><td style="border:1px solid #ccc;padding:.5rem">{}</td></tr>
+</table>
+<p><a href="/cases/{case_id}">Edit case</a> · <a href="/cases/{case_id}/escalate-mlro">Escalate to MLRO</a> · <a href="/cases/{case_id}/merge">Merge/link</a></p>
+</body></html>"#,
+        nirdosha_rt::html_escape(&row.status),
+        nirdosha_rt::html_escape(&row.assigned_to),
+        nirdosha_rt::html_escape(&row.alert_ids)
+    )
+}
+
+/// 4.2 Case Overview -- read-only summary of a case, with links to
+/// escalation/merge actions (4.12, 4.13).
+pub fn mount_case_overview(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/cases/{id}/overview", "Case Overview (4.2)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        match case_table().guarded_get(auth, "AmlInvestigation", &id) {
+            Ok(Some(row)) => nirdosha_rt::Response::html(200, case_overview_html(&id, &row)),
+            Ok(None) => nirdosha_rt::Response::json(404, &serde_json::json!({ "error": "not found" })),
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 4.12 Escalation to MLRO -- form that updates case status to
+/// `escalate` with a recommendation field (reuses the existing
+/// `case-transition` update policy).
+pub fn mount_escalate_to_mlro(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/escalate-mlro", "Escalate to MLRO (4.12)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Escalate {id} to MLRO</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Escalate case {id} to MLRO</h1>
+<form method="post" action="/cases/{id}/escalate-mlro">
+<p><label>Recommendation:<br><textarea name="recommendation" rows="4" cols="50"></textarea></label></p>
+<p><button type="submit">Escalate</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/cases/{id}/escalate-mlro", "Escalate to MLRO submit", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let _recommendation = values.get("recommendation").cloned().unwrap_or_default();
+            let changed: std::collections::HashSet<String> = ["status".into()].into();
+            match case_table().guarded_update(auth, "AmlInvestigation", &id, &changed, |row| row.status = "escalate".into()) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "escalated", "row": row })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+/// 4.13 Merge / Link Cases -- form to record a merge/link decision
+/// against a case. For demo purposes this writes `related_case_ids`
+/// into the case's `alert_ids` field under a separate policy action.
+pub fn mount_merge_link_cases(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/merge", "Merge / Link Cases (4.13)", |_req, params, _auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let body = format!(
+                r#"<!doctype html>
+<html><head><title>Merge/Link {id}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Merge or link case {id}</h1>
+<form method="post" action="/cases/{id}/merge">
+<p><label>Related case IDs (comma-separated):<br><input name="related_case_ids" type="text" size="50" /></label></p>
+<p><button type="submit">Record link</button></p>
+</form>
+</body></html>"#
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/cases/{id}/merge", "Merge/link submit", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let related = values.get("related_case_ids").cloned().unwrap_or_default();
+            let changed: std::collections::HashSet<String> = ["alert_ids".into()].into();
+            match case_table().guarded_update(auth, "AmlInvestigation", &id, &changed, |row| {
+                if !row.alert_ids.is_empty() {
+                    row.alert_ids.push_str(",");
+                }
+                row.alert_ids.push_str(&related);
+            }) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "linked", "row": row })),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+fn unused_case_store() -> &'static SharedTable<i64, CaseRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, CaseRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_case_screens,
+    entity: CaseRow,
+    store: unused_case_store,
+    path: "/cases",
+    fields: [
+        case_id: String,
+        tenant_id: String,
+        status: String,
+        assigned_to: String,
+        alert_ids: String,
+        subject_ref: String,
+        sar_id: String,
+        disposition: String,
+        rationale: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: case_table,
+        purpose: "AmlInvestigation",
+        create_fields: [
+            case_id: String,
+            tenant_id: String,
+            subject_ref: String,
+            alert_ids: String,
+            rationale: String,
+        ],
+        update_fields: [
+            status: String,
+            assigned_to: String,
+            disposition: String,
+            rationale: String,
+        ],
+    },
+}
+
+nirdosha_rt::kanban_board! {
+    mount: mount_case_board,
+    entity: CaseRow,
+    store: unused_case_store,
+    path: "/cases/board",
+    access: public,
+    title_field: case_id,
+    column_field: status,
+    columns: ["open", "investigating", "confirmed_fraud", "false_positive", "sar_filed", "closed"],
+    move_path: "/cases/{id}/board-move/{to}",
+    guard: {
+        table: case_table,
+        purpose: "AmlInvestigation",
+    },
+    machine: "CaseStatus",
+}
+
+/// 4.11 Four-Eyes Review — `case-close-confirm` (`ComplianceLead`,
+/// `requires field(status) in ["confirmed_fraud", "false_positive"]`,
+/// `escalate to approval(chain case_review)`). Two real, distinct HTTP
+/// calls, each a real `ComplianceLead` identity, each independently
+/// policy- and role-eligibility-checked -- the self-review block is
+/// `ApprovalChainRuntime::approve`'s own duplicate-approver rejection
+/// (see `guarded_confirm_escalated_update`'s doc comment), not a
+/// same-request check this handler adds on top.
+pub fn mount_case_four_eyes(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .post_with_auth("/cases/{id}/propose-close", "Propose closure (4-eyes)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let verdict = values.get("review_verdict").cloned().unwrap_or_default();
+            let note = values.get("review_note").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["review_verdict".into(), "review_note".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match case_table().guarded_propose_escalated_update(auth, "Operations", &id, &changed, move |row| { row.review_verdict = verdict; row.review_note = note; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/cases/{id}/confirm-close", "Confirm closure (4-eyes)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let values = req.form_or_json();
+            let Some(chain) = values.get("chain").cloned() else { return nirdosha_rt::Response::bad_request("chain required (from the propose step's response)") };
+            let Some(escalation_id) = values.get("escalation_id").cloned() else { return nirdosha_rt::Response::bad_request("escalation_id required (from the propose step's response)") };
+            let verdict = values.get("review_verdict").cloned().unwrap_or_default();
+            let note = values.get("review_note").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["review_verdict".into(), "review_note".into()].into();
+            let now_ms = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            match case_table().guarded_confirm_escalated_update(auth, "Operations", &id, &chain, &escalation_id, &changed, move |row| { row.review_verdict = verdict; row.review_note = note; }, now_ms) {
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Committed(row)) => nirdosha_rt::Response::json(200, &serde_json::json!({ "status": "committed", "row": row })),
+                Ok(::nirdosha_guard_screens::EscalatedWrite::Pending(p)) => nirdosha_rt::Response::json(202, &serde_json::json!({ "status": "pending", "escalation_id": p.escalation_id, "chain": p.chain, "approvals_so_far": p.approvals_so_far, "quorum": p.quorum })),
+                Err(e) => ::nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+}
+
+// T-04/B10: 4.11's approval_inbox! — the real cross-entity worklist over
+// `case_review`'s pending escalations (`ApprovalChainRuntime`, reused,
+// not forked). "Review & approve" still lands on `/cases/{id}` (the
+// real `crud_screens!` detail page for this case) rather than a
+// one-click approve here — `mount_case_four_eyes`'s own
+// `confirm-close` route re-derives the exact `review_verdict`/
+// `review_note` mutation the proposal fixed, which this cross-entity
+// list has no way to know generically (see `approval_inbox.rs`'s own
+// module doc comment). Return-with-reason is real and generic here.
+nirdosha_rt::approval_inbox! {
+    mount: mount_case_review_inbox,
+    path: "/four-eyes",
+    access: requires role "ComplianceLead",
+    sources: [
+        { table: case_table, chain: "case_review", resource: "case", detail_path: "/cases/{id}" },
+    ],
+}
+
+// T-06/B11: 4.3 Investigation Workspace — `workspace!`'s two real
+// context needs for this corpus's `Analyst`/`ComplianceLead` case-read
+// grant (`related_alerts_for_case`, `case_transactions_for_case`, both
+// `bridge.nir`). An `audit_timeline` panel was deliberately NOT added
+// here: `entity_audit_timeline` runs under `purpose(Audit)`, and
+// `Analyst` — 4.3's own primary declared role — has no grant on that
+// resource (`96_restricted_views.nir`'s disclosed gap); since one
+// failing need fails the WHOLE workspace read (never a partial render),
+// including it would 422 this screen for its main user on every
+// request. Evidence pinboard (`PG.case_evidence`) stays unbuilt — this
+// screen's remaining blocker after this ticket.
+nirdosha_rt::workspace! {
+    mount: mount_investigation_workspace,
+    path: "/cases/{id}/workspace",
+    subject: { table: case_table, purpose: "AmlInvestigation", label_fn: case_workspace_header },
+    budget: { max_rows: 500, max_execution_ms: 2000 },
+    panels: [
+        { need: "related_alerts", title: "Related Alerts", render: "table", source: related_alerts_for_case },
+        { need: "case_transactions", title: "Transactions In Scope", render: "table", source: case_transactions_for_case },
+    ],
+}
+
+/// 4.4 Linked Alerts Tab / 4.5 Case Transactions Tab: the same two real
+/// context reads `mount_investigation_workspace` uses, each as its own
+/// dedicated route rather than only embedded in the composite workspace
+/// — these two screens are declared separately in `screens.toml` with
+/// their own roles/blockers.
+pub fn mount_case_context_tabs(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/cases/{id}/alerts", "Linked Alerts Tab (4.4)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            match related_alerts_for_case(auth, &id) {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{}</p>", nirdosha_rt::screens::value_display(&serde_json::Value::String(reason)))),
+            }
+        })
+        .get_with_auth("/cases/{id}/transactions", "Case Transactions Tab (4.5)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            match case_transactions_for_case(auth, &id) {
+                Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+                Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{}</p>", nirdosha_rt::screens::value_display(&serde_json::Value::String(reason)))),
+            }
+        })
+}
+
+/// C1 (screens-plan.md): 4.8 Tasks & Checklist + 4.9 Internal RFI — both
+/// real guard-enforced list/create/update over `PG.case_task`
+/// (`case-task-read`/`case-task-create`/`case-task-update`,
+/// `00_core.nir`), scoped to this case via `item_ref = "case:<id>"`,
+/// distinguished by `task_type` (`"checklist"` vs `"rfi"`) — `menus.toml`
+/// declares these as two separate routes/screens over the same resource,
+/// the same "one table, several screen-facing views" posture `case`/
+/// `alert` themselves already have.
+pub fn mount_case_tasks(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    use std::collections::HashSet;
+    router
+        .get_with_auth("/cases/{id}/tasks", "Tasks & Checklist (4.8)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let item_ref = format!("case:{id}");
+            match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+                Ok(rows) => {
+                    let filtered: Vec<_> = rows.into_iter().filter(|r| r.item_ref == item_ref && r.task_type == "checklist").collect();
+                    nirdosha_rt::Response::json(200, &serde_json::json!(filtered))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/cases/{id}/tasks", "Add checklist task (4.8)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            create_case_task(req, auth, &id, "checklist")
+        })
+        .post_with_auth("/cases/{id}/tasks/{task_id}/status", "Update task status (4.8)", |req, params, auth| {
+            let Some(task_id) = params.get("task_id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("task_id required") };
+            let form = req.form_or_json();
+            let Some(status) = form.get("status").cloned() else { return nirdosha_rt::Response::bad_request("status required") };
+            let blocked_reason = form.get("blocked_reason").cloned().unwrap_or_default();
+            if status == "blocked" && blocked_reason.is_empty() {
+                return nirdosha_rt::Response::bad_request("blocked_reason required when status = blocked");
+            }
+            let completion_note = form.get("completion_note").cloned().unwrap_or_default();
+            let changed: HashSet<String> = ["status".into(), "blocked_reason".into(), "completion_note".into()].into();
+            match crate::bridge::case_task_table().guarded_update(auth, "Operations", &task_id, &changed, move |row| {
+                row.status = status;
+                row.blocked_reason = blocked_reason;
+                row.completion_note = completion_note;
+            }) {
+                Ok(row) => nirdosha_rt::Response::json(200, &serde_json::json!(row)),
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .get_with_auth("/cases/{id}/rfi", "Internal RFI (4.9)", |_req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            let item_ref = format!("case:{id}");
+            match crate::bridge::case_task_table().guarded_snapshot(auth, "Operations") {
+                Ok(rows) => {
+                    let filtered: Vec<_> = rows.into_iter().filter(|r| r.item_ref == item_ref && r.task_type == "rfi").collect();
+                    nirdosha_rt::Response::json(200, &serde_json::json!(filtered))
+                }
+                Err(e) => nirdosha_guard_screens::guard_error_response(e),
+            }
+        })
+        .post_with_auth("/cases/{id}/rfi", "Send Internal RFI (4.9)", |req, params, auth| {
+            let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+            create_case_task(req, auth, &id, "rfi")
+        })
+}
+
+fn create_case_task(req: &nirdosha_rt::Request, auth: &nirdosha_rt::Auth, case_id: &str, task_type: &str) -> nirdosha_rt::Response {
+    use std::collections::HashSet;
+    let form = req.form_or_json();
+    let Some(title) = form.get("title").cloned() else { return nirdosha_rt::Response::bad_request("title required") };
+    let assignee = form.get("assignee").cloned().unwrap_or_else(|| auth.user().to_string());
+    let due_date = form.get("due_date").cloned().unwrap_or_default();
+    let priority = form.get("priority").cloned().unwrap_or_else(|| "normal".into());
+    let detail = form.get("detail").cloned().unwrap_or_default();
+    let task_id = format!("task-{}", ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_millis());
+    let submitted: HashSet<String> = ["item_ref".into(), "task_type".into(), "title".into(), "assignee".into(), "due_date".into(), "priority".into()].into();
+    let entity = crate::bridge::CaseTaskRow {
+        id: 0,
+        task_id,
+        tenant_id: crate::bridge::DEMO_TENANT.into(),
+        item_ref: format!("case:{case_id}"),
+        task_type: task_type.into(),
+        title,
+        detail,
+        assignee,
+        due_date,
+        priority,
+        status: "open".into(),
+        blocked_reason: String::new(),
+        completion_note: String::new(),
+    };
+    match crate::bridge::case_task_table().guarded_insert_checked(auth, "Operations", &submitted, entity) {
+        Ok(row) => nirdosha_rt::Response::json(201, &serde_json::json!(row)),
+        Err(e) => nirdosha_guard_screens::guard_error_response(e),
+    }
+}

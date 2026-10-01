@@ -1,0 +1,29 @@
+// ============================================================================
+// 30_features.nir — [RFC §8.2 verbatim] + model-input features.
+// Verbatim from examples/rtm/roles-N-guard_policy.md — `window!` is real now
+// (see crates/nirdosha-guard-macros), so this file no longer has any
+// skipped/blocked content.
+// ============================================================================
+
+nirdosha_rt::window! {                                      // [RFC §8.2 verbatim]
+    feature velocity_1h(subject_id) =
+        sliding(1h, keys = [subject_id], aggs = [count, sum(amount)]);
+    feature impossible_travel(subject_id) =
+        session(30m, keys = [subject_id], expr = geo_speed(geo) > 900 km/h);
+}
+nirdosha_rt::window! {                                      // [NEW — model inputs, §8.3]
+    feature distinct_payees_7d(subject_id) =
+        hopping(7d every 1h, keys = [subject_id], aggs = [count_distinct(beneficiary)]);
+    feature amount_dev_30d(subject_id) =
+        hopping(30d every 6h, keys = [subject_id], aggs = [stddev(amount)]);
+}
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.2 verbatim + grants]
+    allow "features-read" for SvcFeatures
+    when action == "read" && resource == "txn_events"
+    purpose(FraudMonitoring)
+    destination(feature_pipeline)
+    cap(max_scan_rows = 500_000, max_execution = 10s)
+    grant predicate_use(merchant_id, geo, amount)           // I15: explicit, auditable
+    obligate audit(sampled)
+}

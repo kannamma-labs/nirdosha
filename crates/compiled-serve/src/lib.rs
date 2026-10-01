@@ -20,17 +20,24 @@
 //! for the exact contract a codegen-generated (or, for now, hand-
 //! written test) handler must honor.
 //!
-//! **Identity is real; route dispatch is not wired to `codegen.rs`
-//! yet.** `identity`'s bearer-token verification (demo mode's
-//! self-minted, ephemeral-but-genuinely-signed tokens, and production
-//! mode's real IdP JWKS) is real, exercised end to end by this crate's
-//! own tests, against hand-written `extern "C"` test routes — the
-//! matching `codegen.rs` work to emit real per-route wrapper functions
-//! from a compiled program's own exposure set (RFC 0010) and a
-//! `nirdosha build --serve` CLI flag to link this crate in is real,
-//! separate follow-up work, the same "build the mechanism, prove it,
-//! then wire it to codegen" order this session's own `transact`
-//! durability work (`docs/adr/0009`) already followed.
+//! **Identity is real; route dispatch is wired to `codegen.rs` too, as
+//! of a later 2026-09 session than this comment originally described.**
+//! `identity`'s bearer-token verification (demo mode's self-minted,
+//! ephemeral-but-genuinely-signed tokens, and production mode's real IdP
+//! JWKS — one provider or, since Multi-IdP registry landed, more than
+//! one, dispatched by a token's own issuer claim, see
+//! [`auth_providers_from_env`]) is real, exercised end to end both by
+//! this crate's own tests (against hand-written `extern "C"` test
+//! routes) *and* by `nirdosha build --serve`'s real production path:
+//! `codegen.rs`'s Stage 3 emits real per-route wrapper functions from a
+//! compiled program's own exposure set (RFC 0010) and links this crate
+//! in — see `crates/compiler/tests/codegen.rs`'s
+//! `compiled_serve_production_path_exposes_a_route_via_a_real_http_post_with_a_body`.
+//! `nirdosha build --serve` still bakes in demo mode only at the
+//! *codegen* layer (`ServeCodegenOptions` has no identity fields); real
+//! production identity is chosen entirely at *runtime*, by this crate's
+//! own env-var read (`auth_providers_from_env`) — no rebuild needed to
+//! point a given binary at a different IdP.
 
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
@@ -40,12 +47,24 @@ use std::time::Duration;
 use nirdosha_runtime_kernels::kernel::{self, domain};
 use nirdosha_runtime_kernels::constant_time_eq;
 
+mod dpop_replay;
 mod http;
 mod identity;
 mod ratelimit;
+mod webauthn_cbor;
+mod webauthn_challenge;
+mod webauthn_crypto;
+mod webauthn_postgres_store;
+mod webauthn_store;
+#[cfg(test)]
+mod webauthn_test_support;
 
 pub use http::MAX_BODY_BYTES;
-pub use identity::{AuthConfig, VerifiedClaims};
+pub use identity::{AuthConfig, BearerTokenVerifier, RuntimeKernelsOidcVerifier, VerifiedClaims};
+pub use webauthn_challenge::{ChallengeContext, ChallengeStore};
+pub use webauthn_crypto::{AttestationResult, Es256CborAdapter, PasskeyCryptoAdapter};
+pub use webauthn_postgres_store::PostgresPasskeyCredentialStore;
+pub use webauthn_store::{CredentialStoreError, InMemoryPasskeyCredentialStore, PasskeyCredential, PasskeyCredentialStore};
 
 /// One exposed route's real dispatch target — a plain function pointer,
 /// never a name string (`rfcs/0010-landing-and-serve-exposure.md`'s own
@@ -169,19 +188,53 @@ pub struct ServeConfig {
     /// itself is bound to localhost; `Some` requires
     /// `Authorization: Bearer <token>` to match exactly.
     pub metrics_token: Option<String>,
-    /// The JWKS/issuer/audience every bearer token on this server is
-    /// checked against. Every server has one — there is no "identity
-    /// checking is off" mode — the only choice is *whose*:
-    /// [`AuthConfig::demo()`] (this struct's own `Default`, when
-    /// whoever starts the binary supplied no real `--jwks-file`/
-    /// `--issuer`/`--audience`) or a real IdP's own trio.
-    pub auth: AuthConfig,
-    /// `true` exactly when `auth` is [`AuthConfig::demo()`] — gates
-    /// whether `/api/_demo_login` exists at all (real production
-    /// identity has no self-service login; a caller gets a token from
-    /// the org's actual IdP). Tracked as its own flag rather than
-    /// inferred from `auth`'s contents, so the "which mode" decision
-    /// stays a single, explicit fact set once at startup, not a
+    /// The JWKS/issuer/audience trio(s) every bearer token on this
+    /// server is checked against — always non-empty, since every server
+    /// has one, there is no "identity checking is off" mode. One entry
+    /// (the common case): every token is checked against it directly, no
+    /// issuer dispatch needed. More than one (2026-09, ROADMAP.md A6's
+    /// "Multi-IdP registry"): [`identity::validate_token`] peeks the
+    /// token's own *unverified* `iss` claim first to pick the matching
+    /// entry, then runs the exact same real verification against it —
+    /// an unrecognized issuer is a real 401, never a silent fallback.
+    /// [`AuthConfig::demo()`] (this struct's own `Default`, a single
+    /// entry, when whoever starts the binary supplied no real provider
+    /// via `NIRDOSHA_JWKS_FILE`/`NIRDOSHA_IDENTITY_PROVIDERS`) or one or
+    /// more real IdPs' own trios — see [`auth_providers_from_env`] for
+    /// the env-var/config-file mechanism, deliberately not the
+    /// interpreter-era DB-admin-editable pattern (that scaffolding was
+    /// deleted along with the interpreter and isn't being rebuilt here;
+    /// a real, disclosed narrowing of A6's original spec).
+    pub auth: Vec<AuthConfig>,
+    /// The bearer-token verification vendor -- defaults to
+    /// [`identity::RuntimeKernelsOidcVerifier`] (today's only real
+    /// adapter), swappable without touching `resolve_identity` or
+    /// anything else that calls [`identity::validate_token`]. `Arc`, not
+    /// `Box`: `ServeConfig` is `Clone` (shared into every connection
+    /// thread), and a trait object needs a cheap-to-clone handle, not a
+    /// deep copy of whatever's behind it.
+    pub bearer_verifier: Arc<dyn identity::BearerTokenVerifier>,
+    /// The WebAuthn crypto/protocol vendor -- defaults to
+    /// [`webauthn_crypto::Es256CborAdapter`] (CBOR/COSE parsing + P-256
+    /// ECDSA via `ring`), swappable the same way `bearer_verifier` is: a
+    /// different backend is a new `impl PasskeyCryptoAdapter`, never a
+    /// change to the `/api/webauthn/*` handlers.
+    pub passkey_crypto: Arc<dyn webauthn_crypto::PasskeyCryptoAdapter>,
+    /// Where registered passkeys are persisted -- defaults to
+    /// [`webauthn_store::InMemoryPasskeyCredentialStore`], honestly
+    /// non-durable (see that type's own doc comment). A durable backend
+    /// is a separate adapter, not built here.
+    pub passkey_store: Arc<dyn webauthn_store::PasskeyCredentialStore>,
+    /// Short-lived WebAuthn registration/login challenges -- internal
+    /// bookkeeping, not a vendor-swappable concern the way the two
+    /// fields above are, so a concrete type rather than a trait object.
+    pub webauthn_challenges: webauthn_challenge::ChallengeStore,
+    /// `true` exactly when `auth` is a single [`AuthConfig::demo()`]
+    /// entry — gates whether `/api/_demo_login` exists at all (real
+    /// production identity has no self-service login; a caller gets a
+    /// token from the org's actual IdP). Tracked as its own flag rather
+    /// than inferred from `auth`'s contents, so the "which mode"
+    /// decision stays a single, explicit fact set once at startup, not a
     /// heuristic re-derived from a JWKS/issuer string shape.
     pub demo_mode: bool,
     /// `GET /`'s response body — the program's own `emit-ui`-derived
@@ -194,10 +247,26 @@ pub struct ServeConfig {
     /// --serve` always sets this; only a hand-rolled `ServeConfig` (this
     /// crate's own tests) leaves it empty.
     pub ui_html: Vec<u8>,
+    /// RFC 0016's FAPI wiring, `sender_constrained_tokens` requirement:
+    /// `false` (default, unchanged behavior) means an ordinary bearer
+    /// token is enough, same as every server before this field existed.
+    /// `true` additionally requires a valid `DPoP` header (RFC 9449) on
+    /// every request that also carries an `Authorization` header --
+    /// proof-of-possession over the token, checked in `resolve_identity`
+    /// via `nirdosha_runtime_kernels::nir_dpop_verify` -- rejecting a
+    /// missing or invalid proof with `401`, the same hard-failure
+    /// posture an invalid bearer token already gets. Set by `nirdosha
+    /// build --serve` only when a governing pack's compliance profile
+    /// declares this wiring requirement (`hi_plugin.rs`'s
+    /// `wiring_requires_sender_constrained_tokens`) -- never inferred,
+    /// never on by default, so an ungoverned build's behavior is
+    /// unchanged.
+    pub require_sender_constrained_tokens: bool,
 }
 
 impl Default for ServeConfig {
     fn default() -> Self {
+        let (auth, demo_mode) = auth_providers_from_env();
         ServeConfig {
             header_timeout: Duration::from_secs(10),
             body_timeout: Duration::from_secs(30),
@@ -209,9 +278,14 @@ impl Default for ServeConfig {
             rate_limit_window: Duration::from_secs(60),
             trusted_proxies: trusted_proxies_from_env(),
             metrics_token: None,
-            auth: AuthConfig::demo(),
-            demo_mode: true,
+            auth,
+            bearer_verifier: Arc::new(identity::RuntimeKernelsOidcVerifier),
+            passkey_crypto: Arc::new(webauthn_crypto::Es256CborAdapter::new()),
+            passkey_store: Arc::new(webauthn_store::InMemoryPasskeyCredentialStore::new()),
+            webauthn_challenges: webauthn_challenge::ChallengeStore::new(),
+            demo_mode,
             ui_html: Vec::new(),
+            require_sender_constrained_tokens: false,
         }
     }
 }
@@ -236,6 +310,124 @@ fn trusted_proxies_from_env() -> Vec<IpAddr> {
             }
         })
         .collect()
+}
+
+/// `ServeConfig::auth`/`demo_mode`'s real source (ROADMAP.md A6, "Multi-
+/// IdP registry") — same "read once at process start, degrade to the
+/// safe default on absence/parse failure with a loud `eprintln!`, never
+/// fail the whole process" posture [`trusted_proxies_from_env`] already
+/// established for `NIRDOSHA_SERVE_TRUSTED_PROXIES`. A **runtime** env
+/// read, not a `nirdosha build` flag — no `codegen.rs`/LLVM IR change
+/// needed at all, and it means the exact same built binary can be
+/// redeployed against a different IdP (or a different provider list)
+/// without a rebuild.
+///
+/// Three cases, checked in order:
+/// - `NIRDOSHA_IDENTITY_PROVIDERS` set (a path to a JSON file: `[{
+///   "jwks_file": "...", "issuer": "...", "audience": "..."}, ...]`) —
+///   one or more real providers, [`identity::validate_token`] dispatches
+///   between them by the token's own issuer claim. An empty list or a
+///   read/parse failure degrades to demo mode, same as every other case
+///   here — a real, deliberately non-fatal deployment mistake, not a
+///   crash.
+/// - `NIRDOSHA_JWKS_FILE`/`NIRDOSHA_ISSUER`/`NIRDOSHA_AUDIENCE` all set —
+///   exactly one real provider, no issuer dispatch needed.
+/// - Neither — [`AuthConfig::demo()`], this crate's long-standing
+///   default; `demo_mode: true`.
+fn auth_providers_from_env() -> (Vec<AuthConfig>, bool) {
+    if let Ok(path) = std::env::var("NIRDOSHA_IDENTITY_PROVIDERS") {
+        match load_identity_providers_file(&path) {
+            Ok(providers) if !providers.is_empty() => return (with_self_issued_provider(providers), false),
+            Ok(_) => {
+                eprintln!("nirdosha compiled-serve: NIRDOSHA_IDENTITY_PROVIDERS at {path:?} is an empty list -- falling back to demo mode")
+            }
+            Err(e) => {
+                eprintln!("nirdosha compiled-serve: NIRDOSHA_IDENTITY_PROVIDERS at {path:?} could not be read: {e} -- falling back to demo mode")
+            }
+        }
+    } else if let Some(auth) = single_provider_from_env() {
+        return (with_self_issued_provider(vec![auth]), false);
+    }
+    (vec![AuthConfig::demo()], true)
+}
+
+/// Appends [`identity::AuthConfig::self_issued`] to a *production*
+/// provider list when `NIRDOSHA_SELF_ISSUED_SIGNING_SECRET` is set --
+/// never called for demo mode, which already has its own, separate
+/// self-issuance identity (`AuthConfig::demo()` itself). This is what
+/// lets a real deployment's WebAuthn login mint a real, durable token
+/// after a successful ceremony: the provider list a bearer token is
+/// *verified* against, and the one identity this process can *mint*
+/// with, both include this same entry, the same "one JWKS, both
+/// directions" shape `AuthConfig::demo()` already relies on. Absent env
+/// var: providers pass through unchanged, zero behavior change for
+/// every deployment that doesn't opt in.
+fn with_self_issued_provider(mut providers: Vec<AuthConfig>) -> Vec<AuthConfig> {
+    if let Ok(secret) = std::env::var("NIRDOSHA_SELF_ISSUED_SIGNING_SECRET") {
+        if secret.trim().is_empty() {
+            eprintln!("nirdosha compiled-serve: NIRDOSHA_SELF_ISSUED_SIGNING_SECRET is set but empty -- ignored");
+        } else {
+            providers.push(AuthConfig::self_issued(&secret));
+        }
+    }
+    providers
+}
+
+/// The provider this process can itself mint a token with, if any --
+/// `config.auth`'s single demo entry in demo mode (unchanged from
+/// before this field existed), or the specific
+/// `AuthConfig::self_issued` entry `with_self_issued_provider` appended,
+/// found by its own fixed issuer rather than assumed to be at any
+/// particular index (production `auth` lists can have more than one
+/// real IdP entry ahead of it). `None` means this process holds no
+/// signing key at all -- a real, honest state, not an error by itself;
+/// only WebAuthn's own login/finish handler treats it as one, since
+/// *that* flow specifically needs to mint a token to be useful at all.
+fn self_issuing_provider(config: &ServeConfig) -> Option<&AuthConfig> {
+    if config.demo_mode {
+        return config.auth.first();
+    }
+    config.auth.iter().find(|a| a.issuer == "nirdosha-self-issued")
+}
+
+/// The single-provider case: all three of `NIRDOSHA_JWKS_FILE`/
+/// `NIRDOSHA_ISSUER`/`NIRDOSHA_AUDIENCE` must be set together, or this
+/// falls back like any other absent/malformed config (a partially-set
+/// trio almost certainly means a deployment mistake, not "two of three
+/// intentionally unset").
+fn single_provider_from_env() -> Option<AuthConfig> {
+    let jwks_file = std::env::var("NIRDOSHA_JWKS_FILE").ok()?;
+    let issuer = std::env::var("NIRDOSHA_ISSUER").ok()?;
+    let audience = std::env::var("NIRDOSHA_AUDIENCE").ok()?;
+    match std::fs::read_to_string(&jwks_file) {
+        Ok(jwks_json) => Some(AuthConfig { jwks_json, issuer, audience }),
+        Err(e) => {
+            eprintln!("nirdosha compiled-serve: NIRDOSHA_JWKS_FILE at {jwks_file:?} could not be read: {e} -- falling back to demo mode");
+            None
+        }
+    }
+}
+
+/// `NIRDOSHA_IDENTITY_PROVIDERS`'s own file format — a plain
+/// `serde_json::Value` walk, not a `#[derive(Deserialize)]` struct
+/// (this crate doesn't otherwise depend on `serde`'s derive machinery,
+/// only `serde_json`, the same "walk `Value` directly" style
+/// `identity::mock_issue_token` already uses for its own JSON building).
+fn load_identity_providers_file(path: &str) -> Result<Vec<AuthConfig>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let entries = value.as_array().ok_or("expected a JSON array of provider objects")?;
+    entries
+        .iter()
+        .map(|entry| {
+            let jwks_file = entry.get("jwks_file").and_then(|v| v.as_str()).ok_or("each provider needs a string `jwks_file`")?;
+            let issuer = entry.get("issuer").and_then(|v| v.as_str()).ok_or("each provider needs a string `issuer`")?;
+            let audience = entry.get("audience").and_then(|v| v.as_str()).ok_or("each provider needs a string `audience`")?;
+            let jwks_json = std::fs::read_to_string(jwks_file)
+                .map_err(|e| format!("provider issuer {issuer:?}: jwks_file {jwks_file:?} could not be read: {e}"))?;
+            Ok(AuthConfig { jwks_json, issuer: issuer.to_string(), audience: audience.to_string() })
+        })
+        .collect::<Result<Vec<AuthConfig>, String>>()
 }
 
 /// A bound-but-not-yet-accepting listener — the bind-before-replay
@@ -323,6 +515,7 @@ impl Listener {
     pub fn run(self, routes: &'static [Route], config: ServeConfig, readiness: Readiness) -> std::io::Result<()> {
         let config = Arc::new(config);
         let limiter = Arc::new(ratelimit::RateLimiter::new());
+        let dpop_replay = Arc::new(dpop_replay::DpopReplayCache::new());
         for stream in self.tcp.incoming() {
             let stream = match stream {
                 Ok(s) => s,
@@ -336,8 +529,9 @@ impl Listener {
             }
             let config = Arc::clone(&config);
             let limiter = Arc::clone(&limiter);
+            let dpop_replay = Arc::clone(&dpop_replay);
             let readiness = readiness.clone();
-            std::thread::spawn(move || handle_connection(stream, routes, &config, &limiter, &readiness));
+            std::thread::spawn(move || handle_connection(stream, routes, &config, &limiter, &dpop_replay, &readiness));
         }
         Ok(())
     }
@@ -380,7 +574,7 @@ pub struct CRoute {
 /// process). `ui_html_ptr`/`ui_html_len` (zero/null for "no UI") must
 /// meet the same contract.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nir_compiled_serve_run(routes_ptr: *const CRoute, routes_count: i64, ui_html_ptr: *const u8, ui_html_len: i64, port: i64) -> i32 {
+pub unsafe extern "C" fn nir_compiled_serve_run(routes_ptr: *const CRoute, routes_count: i64, ui_html_ptr: *const u8, ui_html_len: i64, port: i64, require_dpop: i64) -> i32 {
     let c_routes = unsafe { std::slice::from_raw_parts(routes_ptr, routes_count as usize) };
     let mut routes = Vec::with_capacity(c_routes.len());
     for r in c_routes {
@@ -413,7 +607,7 @@ pub unsafe extern "C" fn nir_compiled_serve_run(routes_ptr: *const CRoute, route
     // ordering — bind happens above, replay happened earlier still, in
     // the caller) — this is "ready" the instant the listener is up.
     readiness.mark_ready();
-    let config = ServeConfig { ui_html, ..ServeConfig::default() };
+    let config = ServeConfig { ui_html, require_sender_constrained_tokens: require_dpop != 0, ..ServeConfig::default() };
     match listener.run(routes, config, readiness) {
         Ok(()) => 0,
         Err(e) => {
@@ -453,7 +647,7 @@ impl Drop for ServeHttpLease {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, readiness: &Readiness) {
+fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, dpop_replay: &dpop_replay::DpopReplayCache, readiness: &Readiness) {
     // `Listener::run` already called `kernel::acquire(domain::serve_http())`
     // for this connection before spawning the thread that's now running
     // this function (A11/A23 fix, see `run`'s own doc comment) — this
@@ -476,7 +670,7 @@ fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConf
         };
 
         let keep_alive = req.wants_keep_alive() && request_index + 1 < config.max_requests_per_connection;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, routes, config, limiter, peer, readiness)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, routes, config, limiter, dpop_replay, peer, readiness)));
         let response = result.unwrap_or_else(|_| http::Response::error(500, "internal error"));
         let done = http::write_response(&mut stream, response.status, response.content_type, &response.body, &response.headers, response.cookie.as_deref());
         if done.is_err() || !keep_alive {
@@ -485,7 +679,7 @@ fn handle_connection(mut stream: TcpStream, routes: &[Route], config: &ServeConf
     }
 }
 
-fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, peer: Option<SocketAddr>, readiness: &Readiness) -> http::Response {
+fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter: &ratelimit::RateLimiter, dpop_replay: &dpop_replay::DpopReplayCache, peer: Option<SocketAddr>, readiness: &Readiness) -> http::Response {
     if req.method == "OPTIONS" {
         return cors_preflight_response(req, config);
     }
@@ -510,8 +704,20 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
     if req.path == "/api/_demo_login" {
         return with_cors(demo_login_response(req, config), req, config);
     }
+    if req.path == "/api/webauthn/register/start" {
+        return with_cors(webauthn_register_start_response(req, config), req, config);
+    }
+    if req.path == "/api/webauthn/register/finish" {
+        return with_cors(webauthn_register_finish_response(req, config), req, config);
+    }
+    if req.path == "/api/webauthn/login/start" {
+        return with_cors(webauthn_login_start_response(req, config), req, config);
+    }
+    if req.path == "/api/webauthn/login/finish" {
+        return with_cors(webauthn_login_finish_response(req, config), req, config);
+    }
     if req.path == "/api/_whoami" {
-        return with_cors(whoami_response(req, config), req, config);
+        return with_cors(whoami_response(req, config, dpop_replay), req, config);
     }
     if config.rate_limited_paths.iter().any(|p| *p == req.path) {
         let key = client_ip_for_rate_limit(req, peer, config);
@@ -521,7 +727,7 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
             }
         }
     }
-    let identity_json = match resolve_identity(req, config) {
+    let identity_json = match resolve_identity(req, config, dpop_replay) {
         Ok(json) => json,
         Err(resp) => return with_cors(resp, req, config),
     };
@@ -542,15 +748,69 @@ fn dispatch(req: &http::Request, routes: &[Route], config: &ServeConfig, limiter
 /// whether the path even exists — mirrors the deleted interpreted
 /// `serve.rs::resolve_identity`'s own "present but invalid is always a
 /// hard failure, never silently anonymous" behavior.
-fn resolve_identity(req: &http::Request, config: &ServeConfig) -> Result<Option<String>, http::Response> {
+/// Freshness window `nir_dpop_verify`'s own `max_age_secs` bounds a
+/// proof's `iat` to, and the matching window `dpop_replay`'s cache
+/// remembers a `jti` for -- one constant, so the two stay in lockstep
+/// (this crate's own single source of truth, not two numbers that could
+/// drift apart). RFC 9449 sets no mandated value; 300s is generous
+/// enough for real network latency and clock drift while still bounding
+/// how long a captured-off-the-wire proof stays replayable at all.
+const DPOP_PROOF_FRESHNESS_WINDOW_SECS: i64 = 300;
+
+fn resolve_identity(req: &http::Request, config: &ServeConfig, dpop_replay: &dpop_replay::DpopReplayCache) -> Result<Option<String>, http::Response> {
     let Some(auth_header) = req.header("authorization") else { return Ok(None) };
     let Some(token) = auth_header.strip_prefix("Bearer ").or_else(|| auth_header.strip_prefix("bearer ")) else {
         return Err(http::Response::error(401, "Authorization header must be `Bearer <token>`"));
     };
-    match identity::validate_token(token, &config.auth) {
-        Ok(claims) => Ok(Some(identity::identity_json(&claims))),
-        Err(e) => Err(http::Response::error(401, &format!("invalid token: {e}"))),
+    let claims = match identity::validate_token(token, &config.auth[..], config.bearer_verifier.as_ref()) {
+        Ok(claims) => claims,
+        Err(e) => return Err(http::Response::error(401, &format!("invalid token: {e}"))),
+    };
+    if config.require_sender_constrained_tokens {
+        if let Err(resp) = check_dpop_binding(req, token, &claims, dpop_replay) {
+            return Err(resp);
+        }
     }
+    Ok(Some(identity::identity_json(&claims)))
+}
+
+/// RFC 0016's FAPI wiring, `sender_constrained_tokens` requirement --
+/// only ever called when `ServeConfig::require_sender_constrained_tokens`
+/// is set, so an ungoverned build's behavior (and every existing test
+/// that doesn't set it) is completely unchanged. Fails closed at every
+/// step: no `DPoP` header, a token with no `cnf.jkt` binding at all (an
+/// AS that issued a plain bearer token even though this deployment
+/// requires sender-constrained ones), a proof that doesn't verify, or a
+/// replayed `jti` are all a real `401`, never silently accepted.
+fn check_dpop_binding(req: &http::Request, token: &str, claims: &identity::VerifiedClaims, dpop_replay: &dpop_replay::DpopReplayCache) -> Result<(), http::Response> {
+    let Some(proof) = req.header("dpop") else {
+        return Err(http::Response::error(401, "this server requires a `DPoP` header (sender-constrained tokens only, RFC 9449)"));
+    };
+    let expected_jkt = match serde_json::from_str::<serde_json::Value>(&claims.claims_json).ok().and_then(|v| v.get("cnf").and_then(|c| c.get("jkt")).and_then(|j| j.as_str()).map(str::to_string)) {
+        Some(jkt) => jkt,
+        None => return Err(http::Response::error(401, "this access token has no `cnf.jkt` binding -- it was not issued as a sender-constrained token, and this server requires one")),
+    };
+    // `Host`, not a scheme this plain-HTTP server never terminates
+    // (`ServeConfig`'s own doc comments: TLS termination, if any, is a
+    // deployer's reverse proxy, not this crate) -- `http://` is what
+    // this process itself actually speaks, so it's what `htu` is
+    // checked against; a proxy-terminated-HTTPS deployment needs its
+    // proxy to forward the original scheme if `htu` must say `https://`
+    // instead, a real, disclosed limit of a from-scratch HTTP/1.1
+    // listener with no TLS of its own.
+    let host = req.header("host").unwrap_or("");
+    let expected_url = format!("http://{host}{}", req.path);
+    let expected_ath = identity::access_token_hash(token);
+    // `jkt` is already checked *inside* `verify_dpop_proof` (against
+    // `expected_jkt`, passed above) -- only `jti` is still this caller's
+    // own job, for replay tracking (`nir_dpop_verify`'s own doc comment
+    // on why that split exists).
+    let identity::DpopVerified { jkt: _, jti } = identity::verify_dpop_proof(proof, &req.method, &expected_url, &expected_ath, &expected_jkt, DPOP_PROOF_FRESHNESS_WINDOW_SECS)
+        .map_err(|e| http::Response::error(401, &format!("invalid DPoP proof: {e}")))?;
+    if !dpop_replay.check_and_record(&jti, Duration::from_secs(DPOP_PROOF_FRESHNESS_WINDOW_SECS as u64)) {
+        return Err(http::Response::error(401, "this DPoP proof has already been used (replay)"));
+    }
+    Ok(())
 }
 
 /// `POST /api/_demo_login` — demo mode only (`config.demo_mode`); `404`
@@ -579,9 +839,235 @@ fn demo_login_response(req: &http::Request, config: &ServeConfig) -> http::Respo
         .and_then(serde_json::Value::as_object)
         .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
         .unwrap_or_default();
-    match identity::mock_issue_token(&subject, &config.auth, &roles, &claims) {
+    // `demo_mode` (already checked above) is only ever `true` alongside
+    // a single-entry `auth` (`auth_providers_from_env`'s own contract) --
+    // `.first()` over an index, so a hand-built `ServeConfig` that
+    // somehow violates that (this crate's own tests never do) degrades
+    // to a clean 500, not a panic.
+    let Some(demo_auth) = config.auth.first() else {
+        return http::Response::error(500, "demo mode is enabled but no identity provider is configured");
+    };
+    match identity::mock_issue_token(&subject, demo_auth, &roles, &claims) {
         Ok(token) => http::Response::ok_text(200, &serde_json::json!({"token": token}).to_string()),
         Err(e) => http::Response::error(500, &format!("failed to mint demo token: {e}")),
+    }
+}
+
+/// WebAuthn challenges expire after this long -- generous enough for a
+/// real user to complete a passkey ceremony (a platform authenticator
+/// prompt, a security-key tap) without racing a clock, tight enough that
+/// a minted-but-abandoned challenge doesn't stay redeemable for long.
+const WEBAUTHN_CHALLENGE_WINDOW: Duration = Duration::from_secs(120);
+
+/// only ever needed by `webauthn_login_finish_response`: a successful
+/// ceremony ends in a real bearer token minted via
+/// `identity::mock_issue_token`, which needs a private signing key --
+/// `AuthConfig::demo()`'s ephemeral one in demo mode, or a real,
+/// operator-configured `AuthConfig::self_issued` in production
+/// (`NIRDOSHA_SELF_ISSUED_SIGNING_SECRET`, see `self_issuing_provider`).
+/// `register/start`, `register/finish`, and `login/start` mint nothing
+/// and never call this -- they work the same regardless of whether this
+/// process can issue a token at all.
+fn webauthn_signing_gate(config: &ServeConfig) -> Option<http::Response> {
+    if self_issuing_provider(config).is_none() {
+        return Some(http::Response::error(
+            403,
+            "this server has no self-issuance identity configured (set NIRDOSHA_SELF_ISSUED_SIGNING_SECRET, or run in demo mode) -- WebAuthn login cannot mint a token without one",
+        ));
+    }
+    None
+}
+
+/// The origin a WebAuthn ceremony's `clientDataJSON.origin` must match --
+/// derived from the request's own `Host` header, the same "this process
+/// only ever speaks plain http://, TLS termination is a deployer's
+/// reverse proxy" posture `check_dpop_binding`'s own `expected_url`
+/// already documents.
+fn webauthn_expected_origin(req: &http::Request) -> String {
+    format!("http://{}", req.header("host").unwrap_or(""))
+}
+
+/// `rp.id` (WebAuthn's Relying Party ID) must be a bare domain, never a
+/// full origin URL with scheme/port -- the `Host` header's own hostname
+/// part, port stripped.
+fn webauthn_rp_id(req: &http::Request) -> String {
+    req.header("host").unwrap_or("").split(':').next().unwrap_or("").to_string()
+}
+
+fn webauthn_register_start_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let Some(subject) = body.get("subject").and_then(serde_json::Value::as_str) else {
+        return http::Response::error(400, "\"subject\" is required");
+    };
+    let challenge = match config.webauthn_challenges.mint(subject, WEBAUTHN_CHALLENGE_WINDOW) {
+        Ok(c) => c,
+        Err(e) => return http::Response::error(500, &format!("failed to mint a webauthn challenge: {e}")),
+    };
+    http::Response::ok_text(
+        200,
+        &serde_json::json!({
+            "challenge": challenge,
+            "rp": { "id": webauthn_rp_id(req), "name": webauthn_rp_id(req) },
+            "user": { "id": subject, "name": subject, "displayName": subject },
+            "pubKeyCredParams": [{ "type": "public-key", "alg": -7 }],
+        })
+        .to_string(),
+    )
+}
+
+fn webauthn_register_finish_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    use base64::Engine as _;
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let (Some(subject), Some(attestation_b64), Some(client_data_b64)) = (
+        body.get("subject").and_then(serde_json::Value::as_str),
+        body.get("attestation_object").and_then(serde_json::Value::as_str),
+        body.get("client_data_json").and_then(serde_json::Value::as_str),
+    ) else {
+        return http::Response::error(400, "\"subject\", \"attestation_object\", and \"client_data_json\" are required");
+    };
+    let Ok(attestation_object) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(attestation_b64) else {
+        return http::Response::error(400, "attestation_object is not valid base64url");
+    };
+    let Ok(client_data_json) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(client_data_b64) else {
+        return http::Response::error(400, "client_data_json is not valid base64url");
+    };
+    // The challenge store's own key is the *challenge value* `mint`
+    // returned (a random string), never the subject -- read it back out
+    // of `clientDataJSON` (where the client is required to echo it) to
+    // redeem the right entry. Checking the redeemed context's own
+    // `subject` against the request's claimed `subject` afterward is
+    // what actually stops a captured/forged `clientDataJSON` from one
+    // subject's ceremony being replayed against a different subject's
+    // `/finish` call -- redemption alone (key presence + freshness)
+    // isn't enough on its own.
+    let expected_challenge = match serde_json::from_slice::<serde_json::Value>(&client_data_json).ok().and_then(|v| v.get("challenge").and_then(|c| c.as_str()).map(str::to_string)) {
+        Some(c) => c,
+        None => return http::Response::error(400, "client_data_json has no \"challenge\" field"),
+    };
+    let Ok(Some(challenge_ctx)) = config.webauthn_challenges.redeem(&expected_challenge, WEBAUTHN_CHALLENGE_WINDOW) else {
+        return http::Response::error(400, "no outstanding (or already-expired/redeemed) registration challenge");
+    };
+    if challenge_ctx.subject != subject {
+        return http::Response::error(400, "this challenge was minted for a different subject");
+    }
+
+    let origin = webauthn_expected_origin(req);
+    match config.passkey_crypto.parse_and_verify_attestation(&attestation_object, &client_data_json, &expected_challenge, &origin, &webauthn_rp_id(req)) {
+        Ok(result) => {
+            let credential = webauthn_store::PasskeyCredential { credential_id: result.credential_id, public_key_x: result.public_key_x, public_key_y: result.public_key_y, sign_count: result.sign_count };
+            match config.passkey_store.save(subject, credential) {
+                Ok(()) => http::Response::ok_text(200, &serde_json::json!({"registered": true}).to_string()),
+                Err(e) => http::Response::error(500, &format!("registration succeeded but could not be stored: {e}")),
+            }
+        }
+        Err(e) => http::Response::error(400, &format!("registration ceremony failed: {e}")),
+    }
+}
+
+fn webauthn_login_start_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let Some(subject) = body.get("subject").and_then(serde_json::Value::as_str) else {
+        return http::Response::error(400, "\"subject\" is required");
+    };
+    let credential = match config.passkey_store.load(subject) {
+        Ok(c) => c,
+        Err(_) => return http::Response::error(404, "no passkey registered for this subject"),
+    };
+    let challenge = match config.webauthn_challenges.mint(subject, WEBAUTHN_CHALLENGE_WINDOW) {
+        Ok(c) => c,
+        Err(e) => return http::Response::error(500, &format!("failed to mint a webauthn challenge: {e}")),
+    };
+    use base64::Engine as _;
+    http::Response::ok_text(
+        200,
+        &serde_json::json!({
+            "challenge": challenge,
+            "rp_id": webauthn_rp_id(req),
+            "allow_credentials": [{ "type": "public-key", "id": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential.credential_id) }],
+        })
+        .to_string(),
+    )
+}
+
+fn webauthn_login_finish_response(req: &http::Request, config: &ServeConfig) -> http::Response {
+    if let Some(resp) = webauthn_signing_gate(config) {
+        return resp;
+    }
+    use base64::Engine as _;
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return http::Response::error(400, &format!("invalid JSON body: {e}")),
+    };
+    let (Some(subject), Some(auth_data_b64), Some(client_data_b64), Some(signature_b64)) = (
+        body.get("subject").and_then(serde_json::Value::as_str),
+        body.get("authenticator_data").and_then(serde_json::Value::as_str),
+        body.get("client_data_json").and_then(serde_json::Value::as_str),
+        body.get("signature").and_then(serde_json::Value::as_str),
+    ) else {
+        return http::Response::error(400, "\"subject\", \"authenticator_data\", \"client_data_json\", and \"signature\" are required");
+    };
+    let (Ok(authenticator_data), Ok(client_data_json), Ok(signature)) = (
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(auth_data_b64),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(client_data_b64),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature_b64),
+    ) else {
+        return http::Response::error(400, "authenticator_data, client_data_json, and signature must all be valid base64url");
+    };
+    // Same "redeem by the challenge value read out of clientDataJSON,
+    // then check the redeemed context's own subject" shape as
+    // registration/finish above -- see that handler's comment for why
+    // keying by subject would be wrong here.
+    let expected_challenge = match serde_json::from_slice::<serde_json::Value>(&client_data_json).ok().and_then(|v| v.get("challenge").and_then(|c| c.as_str()).map(str::to_string)) {
+        Some(c) => c,
+        None => return http::Response::error(400, "client_data_json has no \"challenge\" field"),
+    };
+    let Ok(Some(challenge_ctx)) = config.webauthn_challenges.redeem(&expected_challenge, WEBAUTHN_CHALLENGE_WINDOW) else {
+        return http::Response::error(400, "no outstanding (or already-expired/redeemed) login challenge");
+    };
+    if challenge_ctx.subject != subject {
+        return http::Response::error(400, "this challenge was minted for a different subject");
+    }
+    let credential = match config.passkey_store.load(subject) {
+        Ok(c) => c,
+        Err(_) => return http::Response::error(404, "no passkey registered for this subject"),
+    };
+    let origin = webauthn_expected_origin(req);
+    let new_sign_count = match config.passkey_crypto.verify_assertion(&authenticator_data, &client_data_json, &signature, &expected_challenge, &origin, &webauthn_rp_id(req), &credential.public_key_x, &credential.public_key_y) {
+        Ok(count) => count,
+        Err(e) => return http::Response::error(401, &format!("login ceremony failed: {e}")),
+    };
+    // WebAuthn's own cloned-authenticator defense: a sign count that
+    // hasn't strictly advanced (a fresh authenticator legitimately
+    // reports 0 every time and is exempted, matching the spec's own
+    // guidance for authenticators that don't implement a counter at
+    // all) means either a replayed assertion or two physical
+    // authenticators sharing one credential -- refused, not silently
+    // accepted because the signature itself still checked out.
+    if new_sign_count != 0 && new_sign_count <= credential.sign_count {
+        return http::Response::error(401, "sign counter did not advance -- possible cloned authenticator or replayed assertion");
+    }
+    if let Err(e) = config.passkey_store.advance_sign_count(subject, new_sign_count) {
+        return http::Response::error(500, &format!("login succeeded but the sign counter could not be updated: {e}"));
+    }
+    // `webauthn_signing_gate` above already confirmed one of these exists;
+    // re-deriving it here (rather than threading it through as an
+    // argument) keeps this function's own signature unchanged and this
+    // check colocated with the one place its result is actually used.
+    let Some(signing_auth) = self_issuing_provider(config) else {
+        return http::Response::error(500, "no self-issuance identity configured");
+    };
+    match identity::mock_issue_token(subject, signing_auth, &[], &[]) {
+        Ok(token) => http::Response::ok_text(200, &serde_json::json!({"token": token}).to_string()),
+        Err(e) => http::Response::error(500, &format!("login succeeded but a token could not be minted: {e}")),
     }
 }
 
@@ -591,8 +1077,8 @@ fn demo_login_response(req: &http::Request, config: &ServeConfig) -> http::Respo
 /// since-restarted demo-mode process whose ephemeral signing key no
 /// longer matches (`ui_gen.rs`'s own doc comment on why this route
 /// exists).
-fn whoami_response(req: &http::Request, config: &ServeConfig) -> http::Response {
-    match resolve_identity(req, config) {
+fn whoami_response(req: &http::Request, config: &ServeConfig, dpop_replay: &dpop_replay::DpopReplayCache) -> http::Response {
+    match resolve_identity(req, config, dpop_replay) {
         Ok(Some(json)) => http::Response { status: 200, content_type: "application/json", body: json.into_bytes(), headers: Vec::new(), cookie: None },
         Ok(None) => http::Response::error(401, "no Authorization header"),
         Err(resp) => resp,

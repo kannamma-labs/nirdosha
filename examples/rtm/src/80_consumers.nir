@@ -1,0 +1,36 @@
+// ============================================================================
+// 80_consumers.nir — [RFC §8.7 verbatim] + leadership aggregates + egress.
+// Verbatim from examples/rtm/roles-N-guard_policy.md.
+// ============================================================================
+
+nirdosha_rt::guard_policy! {                                // [RFC §8.7 verbatim — 15.1/15.4]
+    allow "bi-aggregate" for SvcBi
+    when action == "aggregate" && resource == "transaction"
+    filter time_range(occurred_at, within, retention_window())
+    cap(cohort_floor = 10, max_scan_bytes = 5GB, max_execution = 60s)
+    mask(subject_id, tokenized)                             // k-anonymity via tokenization
+    destination(warehouse)
+    obligate audit(full)                                    // aggregates are still audited (I9)
+}
+
+// → 2.2–2.4, 2.6 dashboards — browser aggregate reads [NEW]
+nirdosha_rt::guard_policy! {
+    allow "lead-dashboard" for ComplianceLead
+    when action == "aggregate" && resource in ["alert", "case", "sar_bundle_stats"]
+    purpose(Operations)
+    filter tenant_scope()
+    cap(cohort_floor = 5, max_execution = 30s)
+    mask(subject_id, tokenized)
+    obligate audit(full)
+}
+
+// → 15.5 governed export center [NEW — egress action, §2]
+nirdosha_rt::guard_policy! {
+    allow "governed-export" for Analyst
+    when action == "export" && resource in ["alert", "case", "transaction"]
+    purpose(AmlInvestigation)
+    destination(export-file)
+    escalate to approval(chain egress_release)              // above-threshold rows → approval
+    cap(row_cap = 50_000, max_result_bytes = 100MB)
+    obligate audit(full)                                    // export: most-audited action
+}

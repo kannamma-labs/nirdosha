@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nirdosha.dev/schema/ui-proof-specification/v1",
+  "title": "Nirdosha UI Proof Specification v1",
+  "type": "object",
+  "required": ["proof", "screen", "invariant", "release_gate"],
+  "additionalProperties": false,
+  "properties": {
+    "proof": {
+      "type": "object",
+      "required": ["schema", "strict"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "nirdosha.ui-proof-spec/v1", "description": "Proof-specification identifier used to select the behavioral UI contract."},
+        "strict": {"type": "boolean", "description": "When true, missing evidence, unknown solver results, and undeclared behavior fail validation."},
+        "description": {"type": "string", "description": "Human-readable purpose of this proof specification; it does not replace executable invariants."}
+      }
+    },
+    "application": {"$ref": "#/$defs/application"},
+    "browser": {"$ref": "#/$defs/browser"},
+    "solver": {"$ref": "#/$defs/solver"},
+    "screen": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/screen"}
+    },
+    "invariant": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/invariant"}
+    },
+    "journey": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/journey"}
+    },
+    "oracle": {"$ref": "#/$defs/oracle"},
+    "generation": {"$ref": "#/$defs/generation"},
+    "release_gate": {"$ref": "#/$defs/release_gate"}
+  },
+  "$defs": {
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "description": "Stable application name used in reports, evidence namespaces, and recipes."},
+        "build_source": {"type": "string", "description": "Command, artifact reference, or source location used to build the application under test."},
+        "default_base_url": {"type": "string", "format": "uri", "description": "Default absolute URL used when a screen or oracle does not specify a base URL."}
+      }
+    },
+    "browser": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "engine": {"enum": ["chromium", "firefox", "webkit"], "description": "Browser engine used for automation; consumers must pin the corresponding browser build."},
+        "headless": {"type": "boolean"},
+        "viewport_width": {"type": "integer", "minimum": 1},
+        "viewport_height": {"type": "integer", "minimum": 1},
+        "locale": {"type": "string", "description": "BCP-47 locale injected into the browser context for deterministic formatting."},
+        "timezone": {"type": "string", "description": "IANA timezone injected into the browser context."},
+        "color_scheme": {"enum": ["light", "dark", "no-preference"], "description": "Browser color-scheme preference used to exercise theme-sensitive rendering."},
+        "record_screenshots": {"type": "boolean"},
+        "record_dom": {"type": "boolean"},
+        "record_accessibility_tree": {"type": "boolean"},
+        "record_network": {"type": "boolean"},
+        "record_console": {"type": "boolean"},
+        "record_video": {"type": "boolean"}
+      }
+    },
+    "solver": {
+      "type": "object",
+      "required": ["name", "version", "determinism_mechanism", "rlimit"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"const": "z3", "description": "Required SMT solver; the proof semantics are defined for Z3."},
+        "version": {"type": "string", "minLength": 1, "description": "Pinned Z3 version used to reproduce the result."},
+        "determinism_mechanism": {"const": "rlimit", "description": "Deterministic Z3 resource accounting mechanism; wall-clock timeouts are not substitutes."},
+        "rlimit": {"type": "integer", "minimum": 1},
+        "unknown_is_failure": {"type": "boolean"}
+      }
+    },
+    "screen": {
+      "type": "object",
+      "required": ["id", "route", "selector", "initial_state", "states"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$", "description": "Stable screen ID shared with the screen register."},
+        "route": {"type": "string", "pattern": "^/", "description": "Exact route path the browser must open; route parameters must be represented by a fixture."},
+        "source": {"type": "string", "description": "Source or generated artifact reference used to trace this proof back to implementation."},
+        "selector": {"type": "string", "minLength": 1, "description": "Stable semantic selector proving that the expected screen root is present."},
+        "initial_state": {"type": "string", "minLength": 1, "description": "Named finite-state-machine state required immediately after navigation and fixture setup."},
+        "states": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "description": "Allowed named state in the screen model."}},
+        "fixture": {"type": "string", "description": "Deterministic fixture identifier used to seed the screen's data and identity context."},
+        "login_required": {"type": "boolean"},
+        "roles": {"type": "array", "items": {"type": "string", "description": "Identity roles permitted to execute this screen proof."}},
+        "evidence": {"type": "array", "items": {"type": "string", "description": "Evidence kinds required from the browser run, such as `dom`, `accessibility`, `network`, or `audit`."}},
+        "control": {"type": "array", "items": {"$ref": "#/$defs/control"}},
+        "transition": {"type": "array", "items": {"$ref": "#/$defs/transition"}},
+        "assertion": {"type": "array", "items": {"$ref": "#/$defs/assertion"}}
+      }
+    },
+    "control": {
+      "type": "object",
+      "required": ["id", "kind", "selector"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$", "description": "Stable control identifier referenced by transitions and assertions."},
+        "kind": {"type": "string", "description": "Control semantic type, such as `button`, `input`, `link`, `select`, or `table`."},
+        "selector": {"type": "string", "minLength": 1, "description": "Stable semantic selector used to locate and interact with this control."},
+        "required": {"type": "boolean"},
+        "roles": {"type": "array", "items": {"type": "string", "description": "Roles allowed to see or operate this control."}}
+      }
+    },
+    "transition": {
+      "type": "object",
+      "required": ["id", "action", "from", "to", "roles", "ensures"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "description": "Stable transition identifier referenced by journeys, traces, and failure reports."},
+        "action": {"type": "string", "minLength": 1, "description": "Control action or semantic event that triggers the transition."},
+        "from": {"type": "string", "minLength": 1, "description": "Named source state from which this transition is valid."},
+        "to": {"type": "string", "minLength": 1, "description": "Named destination state required after the action completes."},
+        "roles": {"type": "array", "minItems": 1, "items": {"type": "string", "description": "Roles authorized to perform this transition."}},
+        "requires": {"type": "array", "items": {"type": "string", "description": "Preconditions that must hold before the action is attempted."}},
+        "ensures": {"type": "array", "minItems": 1, "items": {"type": "string", "description": "Postconditions that must hold after the action completes."}},
+        "api": {"type": "array", "items": {"type": "string", "description": "API operation or route expected to be invoked by the transition."}},
+        "audit_events": {"type": "array", "items": {"type": "string", "description": "Audit event identifiers or predicates expected after the transition."}},
+        "notifications": {"type": "array", "items": {"type": "string", "description": "Notification or outbox event identifiers expected after the transition."}}
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "required": ["id", "after", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "description": "Stable assertion identifier used in evidence and reports."},
+        "after": {"type": "string", "minLength": 1, "description": "Transition ID or named event after which this assertion is evaluated."},
+        "kind": {"enum": ["api_matches_ui", "forbidden_data_absent", "audit_event", "notification", "accessibility", "custom"], "description": "Assertion semantics selecting the verifier to run."},
+        "api": {"type": "string", "description": "API field, route, or response expression compared with the UI."},
+        "ui_selector": {"type": "string", "description": "Selector identifying the UI value or region under assertion."},
+        "comparison": {"type": "string", "description": "Explicit comparison operator or mapping rule, such as `equals`, `contains`, or `matches`."},
+        "condition": {"type": "string", "description": "Predicate that must be true for the assertion to pass."},
+        "expected": {"type": ["string", "boolean", "number", "null"], "description": "Expected scalar value for the assertion; the verifier compares it using the declared comparison rule."}
+      }
+    },
+    "invariant": {
+      "type": "object",
+      "required": ["id", "description", "formula", "counterexample"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^INV-[A-Za-z0-9._-]+$", "description": "Stable invariant identifier included in solver results and recipes."},
+        "description": {"type": "string", "minLength": 1, "description": "Plain-language statement of the safety or correctness property being proved."},
+        "scope": {"type": "array", "items": {"type": "string", "description": "Screen, state, role, or fixture names to which the invariant applies."}},
+        "formula": {"type": "string", "minLength": 1, "description": "Finite-domain logical formula encoded for Z3; it must describe the negation of the desired property."},
+        "counterexample": {"type": "string", "minLength": 1, "description": "Named artifact or projection describing the counterexample returned when the formula is satisfiable."}
+      }
+    },
+    "journey": {
+      "type": "object",
+      "required": ["id", "name", "role", "step"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^JOURNEY-[A-Za-z0-9._-]+$", "description": "Stable end-to-end journey identifier used in browser traces."},
+        "name": {"type": "string", "minLength": 1, "description": "Human-readable journey name shown in reports."},
+        "role": {"type": "string", "minLength": 1, "description": "Role or identity under which every journey step executes."},
+        "fixture": {"type": "string", "description": "Fixture namespace or record set used to make the journey reproducible."},
+        "step": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/journey_step"}},
+        "expected_final_state": {"type": "string", "description": "Named state that must hold when the journey finishes."},
+        "required_evidence": {"type": "array", "items": {"type": "string", "description": "Evidence kinds that must be present for the journey to pass."}}
+      }
+    },
+    "journey_step": {
+      "type": "object",
+      "required": ["screen", "transition"],
+      "additionalProperties": false,
+      "properties": {
+        "screen": {"type": "string", "description": "Screen ID from the proof specification at this journey step."},
+        "transition": {"type": "string", "description": "Transition ID executed on the referenced screen."}
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["independent"], "description": "Oracle mode; `independent` requires a read path separate from the UI automation path."},
+        "base_url": {"type": "string", "format": "uri", "description": "Absolute base URL used by the independent oracle."},
+        "database_read_model": {"type": "string", "description": "Read-only database/model projection used to compare committed application state."},
+        "audit_log": {"type": "string", "description": "Audit-log or audit-chain projection used to verify recorded actions."},
+        "require_api_readback": {"type": "boolean"},
+        "require_audit_event": {"type": "boolean"},
+        "require_notification_outbox": {"type": "boolean"}
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": {"type": "boolean"}
+    },
+    "release_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require_all_built_screens": {"type": "boolean"},
+        "require_all_critical_transitions": {"type": "boolean"},
+        "require_negative_authorization_tests": {"type": "boolean"},
+        "require_z3_unsat": {"type": "boolean"},
+        "require_runtime_trace": {"type": "boolean"},
+        "require_independent_oracle": {"type": "boolean"},
+        "allow_unknown": {"type": "boolean"},
+        "allow_missing_evidence": {"type": "boolean"}
+      }
+    }
+  }
+}

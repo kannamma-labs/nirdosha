@@ -1,0 +1,35 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-reconciliation"
+version = "1.0.0"
+module = "M13"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "13.1"
+name = "Reconciliation"
+module = "M13"
+archetype = "report_builder"
+roles = ["PlatformAdmin", "Operator"]
+stage = "blocked"
+blocked_by = ["primitive:reconcile_settlements", "primitive:exception_queue"]
+codegen = { template = "report", mount_symbol = "mount_reconciliation", route_path = "/reconciliation", generated_files = ["src/screens/m13_reconciliation.nir"] }
+data_binding = { entities = ["Settlement"], primary_key = "settlement_id", guard = { table = "settlement", purpose = "ReconRead" }, fields = [
+    { name = "settlement_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "reconciled_at", type = "String" }
+] }
+policy = { purpose = "ReconRead", allowed_actions = ["read"] }
+[screen.parameters]
+dimensions = ["currency", "status"]
+access = "role_gated"
+file = "src/screens/m13_reconciliation.nir"
+notes = "BLOCKED: settlement-reconciliation + exception-queue primitives not yet available."

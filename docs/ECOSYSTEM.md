@@ -393,9 +393,12 @@ document or a real GitHub setting behind it, not just this design doc:
   (`CONTRIBUTING.md`#response-time), GitHub Discussions (already
   enabled), and the full label set live on GitHub, reconciled with
   [`.github/labels.yml`](../.github/labels.yml).
-- **Release credentials** — audited, not changed: `release.yml`/
-  `docker.yml` already authenticate via the ephemeral `GITHUB_TOKEN`/
-  OIDC, not a personal token (`gh secret list` returns none). Signed
+- **Release credentials** — audited, not changed: `docker.yml`
+  already authenticates via the ephemeral `GITHUB_TOKEN`/
+  OIDC, not a personal token (`gh secret list` returns none).
+  `release.yml` — the native `.nir` compiler's prebuilt-binary
+  pipeline — was retired 2026-09-17 along with `crates/compiler`'s
+  deprecation; see `GOVERNANCE.md`'s own note. Signed
   release tags are documented as policy in `GOVERNANCE.md` but not yet
   enforced — needs each maintainer's signing key registered first, a
   real follow-up, not done here.

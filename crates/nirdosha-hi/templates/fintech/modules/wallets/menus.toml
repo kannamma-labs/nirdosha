@@ -1,0 +1,29 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Wallets"
+
+[[group]]
+id = "wallets"
+label_key = "nav.group.wallets"
+order = 50
+
+[[menu]]
+id = "nav.wallets"
+label_key = "nav.wallets"
+group = "wallets"
+screen_id = "5.1"
+route = "/wallets"
+guard = { action = "read", resource = "wallet" }
+roles = ["PlatformAdmin", "MerchantAdmin", "Customer"]
+order = 10
+
+[[menu]]
+id = "nav.wallet_topup"
+label_key = "nav.wallet_topup"
+group = "wallets"
+screen_id = "5.2"
+route = "/wallets/topup"
+guard = { action = "create", resource = "wallet" }
+roles = ["Customer", "MerchantAdmin"]
+order = 20

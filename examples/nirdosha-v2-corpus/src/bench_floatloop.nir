@@ -1,0 +1,12 @@
+//! v2 of `benchmarks/nirdosha/floatloop.nir` — 200M float ops.
+
+fn main() {
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < 200000000 {
+        acc += 1.5;
+        acc *= 0.999999;
+        i += 1;
+    }
+    println!("{acc}");
+}

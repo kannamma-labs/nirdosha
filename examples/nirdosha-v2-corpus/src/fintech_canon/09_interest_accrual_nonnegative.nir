@@ -1,0 +1,13 @@
+//! v2 of `examples/fintech-canon/09_interest_accrual_nonnegative.nir`
+//! — accruing interest onto a principal must never reduce the balance
+//! below the principal itself — a sign error here quietly erodes
+//! customer balances instead of growing them.
+
+/// nirdosha:validate {"fn":"accrue_interest_cents","pre":["principal_cents >= 0 && interest_cents >= 0"],"post":["result >= principal_cents"]}
+fn accrue_interest_cents(principal_cents: i64, interest_cents: i64) -> i64 {
+    principal_cents + interest_cents
+}
+
+fn main() {
+    println!("{}", accrue_interest_cents(100000, 417));
+}

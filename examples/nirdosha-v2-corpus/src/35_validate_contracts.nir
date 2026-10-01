@@ -1,0 +1,38 @@
+//! v2 of `examples/features/35_validate_contracts.nir` — Hoare
+//! contracts (`validate`'s `pre:`/`post:`), the refinement tier.
+//!
+//! **The encoding:** `.nir`'s free-standing `validate <fn> { post: ... }`
+//! blocks become `nirdosha:validate` doc comments on the function —
+//! data about code, in the one channel every reader already accepts.
+//! The dialect's Z3 discharge (Stage 2.5) and the proprietary
+//! tier's SMT proofs consume exactly this form; until then the comment
+//! rides inert (today's scanners ignore unknown `nirdosha:*` kinds by
+//! design — Phase 1 gives it teeth).
+//!
+//! Pre-migration (plain cargo): the functions run; the clauses are
+//! documented claims. Post-migration: the same clauses are *proved*
+//! (integer params/return, no loop, no division — every fn here
+//! qualifies) and the certificate's `proofs` array carries the
+//! discharge objects.
+
+/// nirdosha:validate {"fn":"max_of","post":["result >= a","result >= b"]}
+fn max_of(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+/// nirdosha:validate {"fn":"clamp_positive","post":["result >= 0"]}
+fn clamp_positive(n: i64) -> i64 {
+    if n < 0 { 0 } else { n }
+}
+
+/// nirdosha:validate {"fn":"half_of_even","pre":["n - (n / 2) * 2 == 0"],"post":["result * 2 == n"]}
+fn half_of_even(n: i64) -> i64 {
+    n / 2
+}
+
+fn main() {
+    println!("{}", max_of(3, 9)); // 9 — both `post` clauses hold
+    println!("{}", clamp_positive(-5)); // 0
+    println!("{}", clamp_positive(7)); // 7
+    println!("{}", half_of_even(10)); // 5 — the `pre` holds (10 is even)
+}

@@ -1,0 +1,35 @@
+//! v2 of `examples/features/10_measure_and_unit.nir` — `Measure`/
+//! `UnitCode`, same shape and reasoning as `Money`/`CurrencyCode`.
+
+use nirdosha_rt::prelude::*;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    UnitMismatch,
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn add_measure(a: &Measure, b: &Measure) -> Result<Measure, ErrorCode> {
+    if a.unit_code != b.unit_code {
+        return Err(ErrorCode::UnitMismatch);
+    }
+    Ok(Measure { value: a.value + b.value, unit_code: a.unit_code })
+}
+
+fn main() {
+    let box1 = Measure { value: dec_from_i64(2, 0), unit_code: UnitCode::Kilogram };
+    let box2 = Measure { value: dec_from_i64(3, 0), unit_code: UnitCode::Kilogram };
+    let total = match add_measure(&box1, &box2) {
+        Ok(m) => m,
+        Err(_e) => Measure { value: dec_from_i64(0, 0), unit_code: UnitCode::Kilogram },
+    };
+    println!("{}", total.value); // 5
+    println!("{}", total.unit_code); // Kilogram()
+
+    let distance = Measure { value: dec_from_i64(10, 0), unit_code: UnitCode::Mile };
+    let mismatch_caught: bool = match add_measure(&total, &distance) {
+        Ok(_m) => false,
+        Err(_e) => true,
+    };
+    println!("{mismatch_caught}"); // true — kg + miles is refused, never silently summed
+}

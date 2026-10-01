@@ -1,0 +1,64 @@
+//! v2 of `examples/features/37_transact_cross_process.nir` —
+//! `transact`'s cross-process layer + `retry`/`timeout` modifiers.
+//! The saga claim rides a `nirdosha:transact` comment (with
+//! `retry`/`timeout` recorded); the executable half is the same
+//! hand-desugared slot sequence 36 established. The network slot
+//! really does use a cross-process-capable effect — a REAL socket to
+//! the self-hosted gateway thread.
+
+use nirdosha_rt::prelude::*;
+
+/// nirdosha:contract {"effects":["io"]}
+fn call_gateway(txn: &str, amount: i64) -> i64 {
+    let conn = connect("127.0.0.1", 9702);
+    conn.send(txn);
+    let _reply = conn.recv();
+    stop(conn);
+    amount
+}
+
+/// nirdosha:contract {"effects":["pure"]}
+fn check(resp: i64) -> bool {
+    resp > 0
+}
+
+/// nirdosha:contract {"effects":["io"]}
+fn update_db(amount: i64) -> i64 {
+    println!("committing {amount}");
+    amount
+}
+
+/// nirdosha:transact {"network":"call_gateway","retry":3,"timeout":5,"verify":"check","commit":"update_db"}
+fn checkout(amount: i64) -> bool {
+    let txn = txn_id();
+    let network = call_gateway(&txn, amount);
+    if check(network) {
+        update_db(network);
+        true
+    } else {
+        false
+    }
+}
+
+struct Text {
+    value: String,
+}
+
+fn gateway(l: &TcpListener) -> Text {
+    let conn = accept(l);
+    let received_txn_id = conn.recv();
+    conn.send("charged");
+    stop(conn);
+    Text { value: received_txn_id }
+}
+
+fn main() {
+    let l = listen(9702);
+    let h = spawn(move || gateway(&l));
+
+    let committed = checkout(42);
+    println!("{committed}"); // true
+
+    let seen = join(h);
+    println!("{}", seen.value); // the real txn_id `transact` generated
+}

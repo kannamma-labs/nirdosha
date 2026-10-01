@@ -1,0 +1,31 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Accounts"
+
+# This module does not override global landing; it contributes a nav group.
+
+[[group]]
+id = "accounts"
+label_key = "nav.group.accounts"
+order = 20
+
+[[menu]]
+id = "nav.accounts"
+label_key = "nav.accounts"
+group = "accounts"
+screen_id = "2.1"
+route = "/accounts"
+guard = { action = "read", resource = "account" }
+roles = ["Customer", "BranchManager"]
+order = 10
+
+[[menu]]
+id = "nav.account_open"
+label_key = "nav.account_open"
+group = "accounts"
+screen_id = "2.2"
+route = "/accounts/open"
+guard = { action = "create", resource = "account" }
+roles = ["BranchManager"]
+order = 20

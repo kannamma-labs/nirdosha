@@ -1,0 +1,74 @@
+[package]
+name = "nirdosha-hi"
+version = "0.1.0"
+edition = "2024"
+description = "The nirdosha hi agentic build console -- a knowledge-graph-driven generate/publish/preview loop over v2 (real Rust + nirdosha_rt macros) source. Standalone since 2026-09-16: no dependency on the native nirdosha compiler crate."
+
+[[bin]]
+name = "nirdosha-hi"
+path = "src/main.rs"
+
+[lib]
+name = "nirdosha_hi"
+path = "src/lib.rs"
+
+[build-dependencies]
+sha2 = "0.10"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies]
+# v2 build/verify: the same in-process contract scanner `cargo nirdosha
+# verify` runs, reused as a library (`v2_verify.rs`) so `verify_code`/
+# `fix`/`certify_code`/`build_project`/`publish_project` can check a v2
+# source string's declared-vs-actual claims without a subprocess.
+cargo-nirdosha = { path = "../cargo-nirdosha" }
+nirdosha-contract-core = { path = "../nirdosha-contract-core" }
+# `v2_verify.rs`'s `build_project`/`ensure_scratch_package` build a real
+# v2 candidate against this crate as its own `nirdosha-rt` path
+# dependency.
+nirdosha-rt = { path = "../nirdosha-rt" }
+nirdosha-audit = { path = "../nirdosha-audit" }
+nirdosha-graph = { path = "../nirdosha-graph" }
+# `nirdosha-hi workflow ...` (RFC 0021.b's approval/workflow runtime) --
+# a real, separate service from the authoring graph above (that RFC's
+# own status header: "independent delivery work, not a phase of the
+# core graph service"), so it gets its own CLI subcommand family
+# rather than being folded into `graph`'s MCP transport.
+nirdosha-workflow = { path = "../nirdosha-workflow" }
+# Parses v2 (plain Rust) candidates: `v2_verify::describe_v2_source`,
+# `hi_graph::code_units_in_file`'s syntactic knowledge-graph sync, and
+# the syntactic mandatory-primitive/primitive-exclusivity coverage
+# checks in `hi_llm.rs`. "visit" for `syn::visit::Visit`-based call/
+# construct-site walks.
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+proc-macro2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `hi_graph::derive_screen_navigation` reads the app shell's own nav
+# register (`app_shell_from_toml!("menus.toml", ...)`'s file) at sync
+# time so the screen-only graph's nav edges stay in sync with what the
+# app actually ships -- the same dependency nirdosha-macros and
+# nirdosha-contract-core already pin ("0.8", one shared lockfile entry,
+# no new vendored source).
+toml = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+# `hi_plugin::pack_content_id` (RFC 0016 "the pack ID is the law"):
+# JCS (RFC 8785) canonicalization so two byte-different encodings of
+# the same logical manifest share one content-addressed identity,
+# instead of hashing whatever raw bytes happened to be on disk.
+serde_jcs = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+base64 = "0.22"
+tiny_http = "0.12"
+
+# The agentic console is part of the dialect's own toolchain (the
+# verifier doesn't lint itself, same precedent as `crates/nirdosha-rt`):
+# its host-side caches/plugin registries legitimately use `std::sync::
+# Mutex` internally, which the dialect-wide raw-lock deny (issue #77)
+# would otherwise refuse. Application/dialect crates never get this
+# exemption — they get `nirdosha_rt::prelude::SharedTable`/`SharedCell`.
+[package.metadata.nirdosha-rt]
+toolchain = true

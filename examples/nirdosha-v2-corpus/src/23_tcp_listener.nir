@@ -1,0 +1,42 @@
+//! v2 of `examples/features/23_tcp_listener.nir` — one bound+listening
+//! socket serving two clients: `accept` borrows (only `stop`
+//! consumes), exactly `.nir`'s rule, and Rust's `&TcpListener` makes
+//! the same guarantee structurally.
+
+use nirdosha_rt::prelude::*;
+
+struct Text {
+    value: String,
+}
+
+fn handle_two_clients(l: &TcpListener) -> Text {
+    let first = accept(l);
+    let first_msg = first.recv();
+    stop(first);
+
+    let second = accept(l); // same listener, still usable
+    let second_msg = second.recv();
+    stop(second);
+
+    Text { value: format!("{first_msg}|{second_msg}") }
+}
+
+fn talk(port: i64, message: &str) {
+    let conn = connect("127.0.0.1", port);
+    conn.send(message);
+    stop(conn);
+}
+
+fn main() {
+    let l = listen(9701);
+    let h = spawn(move || handle_two_clients(&l));
+
+    let c1 = spawn(move || talk(9701, "hello from client 1"));
+    join(c1);
+    let c2 = spawn(move || talk(9701, "hello from client 2"));
+    join(c2);
+
+    let first = join(h);
+    // "hello from client 1|hello from client 2" — the listener served both
+    println!("{}", first.value);
+}

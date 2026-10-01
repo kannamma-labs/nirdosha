@@ -1,0 +1,29 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Gateways"
+
+[[group]]
+id = "gateways"
+label_key = "nav.group.gateways"
+order = 30
+
+[[menu]]
+id = "nav.gateways"
+label_key = "nav.gateways"
+group = "gateways"
+screen_id = "3.1"
+route = "/gateways"
+guard = { action = "read", resource = "paymentgateway" }
+roles = ["PlatformAdmin", "MerchantAdmin"]
+order = 10
+
+[[menu]]
+id = "nav.routing"
+label_key = "nav.routing"
+group = "gateways"
+screen_id = "3.2"
+route = "/gateways/routing"
+guard = { action = "configure", resource = "paymentgateway" }
+roles = ["PlatformAdmin"]
+order = 20

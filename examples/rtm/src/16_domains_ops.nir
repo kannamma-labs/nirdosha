@@ -1,0 +1,207 @@
+//! Ops-group datasets (M16 shift handover, M18 admin/compliance config, M19
+//! ops reads). Datasets only — the matching `guard_policy!` grants live in
+// ============================================================================
+// 16_domains_ops.nir — ops/config entities. Serves: M16 (16.3), M18 (18.1,
+// 18.3–18.9), M19, M3.9 SLA aging.
+// Field lists: screen-field-mappings.md §16.3, §18.3–18.9.
+//
+// Notes:
+// - `user_role` and `delegation_token` structs ONLY — their policies already
+//   exist verbatim in 90_ops_admin.nir (`admin-grant-role`, lines 7-14;
+//   `admin-mint-delegation`, lines 17-23). Entity strings match those
+//   policies' `resource` strings exactly (Gate-3 cross-check).
+// - Nested row structs (SlaRow, EscalationStep, ...) are plain field types,
+//   not datasets — same posture as domain_types.nir's ActivityProfile.
+// ============================================================================
+
+use crate::domain_types::*;
+
+// ---- user_role — [NEW: M18.1/18.2; struct only — policy already at
+// 90_ops_admin.nir "admin-grant-role": Admin create/update/delete, maker≠checker
+// escalation via policy_release, full audit] ----
+#[nirdosha_rt::dataset(entity = "user_role", store = "pg_primary", kind = "table")]
+pub struct UserRole {
+    pub tenant_id: TenantId,
+    pub grant_id: String,        // primary id
+    pub user_id:  UserId,
+    pub role:     String,        // role name from 00_core.nir `roles!`
+    pub status:   RoleGrantStatus, // requested → granted (escalated grant)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleGrantStatus {
+    Requested,
+    Granted,
+}
+
+// ---- assignment_rules — [NEW: M18.3 queue assignment config] ----
+#[nirdosha_rt::dataset(entity = "assignment_rules", store = "pg_primary", kind = "table")]
+pub struct AssignmentRules {
+    pub tenant_id: TenantId,
+    pub rule_id:   String,       // primary id
+    pub strategy:  AssignmentStrategy,
+    pub max_wip_per_analyst: i64,
+    pub skill_mapping: Vec<SkillMapping>,           // skill → analysts, all R per row
+    pub priority_weight_multipliers: Vec<PriorityWeight>, // per severity
+    pub fallback_queue: String,                     // required
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentStrategy {
+    RoundRobin,
+    LoadBased,
+    SkillBased,
+    Hybrid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillMapping {
+    pub skill: String,
+    pub analysts: Vec<UserId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriorityWeight {
+    pub severity: Severity,      // domain_types.nir
+    pub multiplier: f64,
+}
+
+// ---- sla_config — [NEW: M18.4 SLA & workflow config; M3.9 aging buckets read
+// this; M19 auto-escalate toggle pending] ----
+#[nirdosha_rt::dataset(entity = "sla_config", store = "pg_primary", kind = "table")]
+pub struct SlaConfig {
+    pub tenant_id: TenantId,
+    pub config_id: String,       // primary id
+    pub sla_rows: Vec<SlaRow>,   // severity × type grid, all cells required
+    pub escalation_ladder: Vec<EscalationStep>,
+    pub business_hours_calendar: String, // required
+    pub always_on_24x7: bool,    // business-hours vs 24×7 toggle
+}
+
+/// One severity × case-type cell. Invariant: resolve_hrs > respond_hrs
+/// (screen enforces on save; flagged here so the corpus records it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlaRow {
+    pub severity: Severity,
+    pub case_type: String,
+    pub respond_hrs: i64,
+    pub resolve_hrs: i64,        // invariant: resolve_hrs > respond_hrs
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EscalationStep {
+    pub level: i64,
+    pub after_hours: i64,
+    pub notify_target: String,
+}
+
+// ---- retention_config — [NEW: M18.7 data retention & purge config] ----
+#[nirdosha_rt::dataset(entity = "retention_config", store = "pg_primary", kind = "table")]
+pub struct RetentionConfig {
+    pub tenant_id: TenantId,
+    pub config_id: String,       // primary id
+    pub retention_rows: Vec<RetentionRow>,
+    pub purge_frequency: String, // purge job config
+    pub dry_run_first: bool,     // enforced: dry-run must precede every execute
+    pub legal_holds: Vec<LegalHold>, // any hold blocks purge for that entity
+}
+
+/// Invariant: years >= regulatory floor for the data_class (enforced on
+/// save — a row can never be set below its floor).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionRow {
+    pub data_class: String,
+    pub years: i64,              // invariant: >= regulatory floor
+    pub regulatory_basis: String,
+}
+
+/// Legal hold: all fields required; presence blocks purge for `entity`
+/// (mirrors the `no_legal_hold` invariant gate on `retention-purge` /
+/// `dsar-export` in 90_ops_admin.nir).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegalHold {
+    pub entity: String,
+    pub reason: String,
+    pub scope: String,
+}
+
+// ---- delegation_token — [NEW: M18.8; struct only — policy already at
+// 90_ops_admin.nir "admin-mint-delegation": Admin delegate, cap(ttl_max = 90d),
+// full audit (I11). Entity string = that policy's resource string.] ----
+#[nirdosha_rt::dataset(entity = "delegation_token", store = "pg_primary", kind = "table")]
+pub struct DelegationToken {
+    pub tenant_id: TenantId,
+    pub token_id: String,        // primary id
+    pub delegatee: UserId,       // required; base-role sufficiency validated
+    pub minted_by: UserId,       // delegator (Admin per the existing policy)
+    pub scope: String,           // required
+    pub valid_from: Date,
+    pub valid_to:   Date,        // invariant: valid_from < valid_to, range ≤ 90d
+    pub justification: String,   // required
+    pub status: DelegationStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegationStatus {
+    Active,
+    Revoked,                     // early revoke requires reason (screen rule)
+    Expired,
+}
+
+// ---- dsar_request — [NEW: M18.9 privacy/DSAR handling. Reuses the
+// dsar-export / retention-purge semantics from 90_ops_admin.nir:
+// no_legal_hold gate, egress_release escalation, export-file destination,
+// full audit.] ----
+#[nirdosha_rt::dataset(entity = "dsar_request", store = "pg_primary", kind = "table")]
+pub struct DsarRequest {
+    pub tenant_id: TenantId,
+    pub request_id: String,      // primary id
+    pub subject_name: CustomerName,   // CONFIDENTIAL
+    pub subject_identifier: SubjectId, // CONFIDENTIAL
+    pub request_type: String,    // required
+    pub received_date: Date,     // required
+    pub channel: String,         // required
+    pub auto_scan_results: Vec<String>, // RO: entities found incl. alert/case/SAR flags
+    pub legal_hold_conflict: bool,      // RO flag; exemption claim required if set
+    pub exemption_claim: Option<String>, // required, min 200 chars, iff legal_hold_conflict
+    pub decision: Option<DsarDecision>, // fulfil | partial | refuse
+    pub decision_rationale: Option<String>, // required, min 100 chars, if refuse
+    pub deadline_days_remaining: i64,   // 30d countdown from received_date
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DsarDecision {
+    Fulfil,
+    Partial,
+    Refuse,
+}
+
+// ---- handover — [NEW: M16.3 shift handover. Read grant already exists at
+// 90_ops_admin.nir "handover-read" (Analyst, ComplianceLead, OpsAnalyst);
+// write grant appended there alongside this declaration.] ----
+#[nirdosha_rt::dataset(entity = "handover", store = "pg_primary", kind = "table")]
+pub struct Handover {
+    pub tenant_id: TenantId,
+    pub handover_id: String,     // primary id
+    pub from_user: UserId,
+    pub to_user:   UserId,
+    pub notes: String,           // required, min 50 chars
+    pub wip_summary: String,     // auto-generated from outgoing WIP (RO on screen)
+    pub urgent_items: Vec<UrgentItem>,
+    pub status: HandoverStatus,  // initiate locks outgoing WIP edits until accepted
+}
+
+/// Each urgent item carries its incoming-side acknowledgment (screen: a
+/// required checkbox per item).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrgentItem {
+    pub item: String,
+    pub acknowledged: bool,      // incoming ack — required per item
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoverStatus {
+    Initiated,
+    Accepted,
+    Declined,                    // decline requires reason (screen rule)
+}

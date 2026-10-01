@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading Market Data"
+
+[[group]]
+id = "market_data"
+label_key = "nav.group.market_data"
+order = 60
+
+[[menu]]
+id = "nav.market_data"
+label_key = "nav.market_data"
+group = "market_data"
+screen_id = "6.1"
+route = "/market-data"
+guard = { action = "read", resource = "marketdatasnapshot" }
+roles = ["Trader", "RiskManager"]
+order = 10

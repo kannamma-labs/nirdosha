@@ -1,0 +1,4038 @@
+//! RTM live-demo plan: the `nirdosha_guard_screens::GuardedEntity` impls
+//! and shared demo constants every `screens/*.nir` module wires into.
+//! Grown module-by-module across Phase A (`Transaction`) and Phase B's
+//! rollout batches (`Alert`/`Case`/`Customer`, then `Model`/`ScreeningHit`/
+//! `RefDataset`/`WindowConfig`) -- see the plan's per-module rollout
+//! table for what's still owed.
+//!
+//! **`crud_screens!`'s `requires role "..."` grammar cannot name any RTM
+//! role.** `nirdosha-contract-core::role::role_ident` requires
+//! lowercase snake_case (`"hr_staff"`) and PascalCases it into the
+//! `RoleProof<R>` type name it needs; RTM's `00_core.nir` roles are
+//! *already* PascalCase idents (`role Analyst;` → wire name
+//! `stringify!(Analyst)` = `"Analyst"`, the same string every
+//! `guard_policy!` `for Analyst` subject match needs verbatim -- see
+//! that macro's own doc comment on why it can't invent a second,
+//! snake_case name for the same role without breaking that string
+//! equality). So no RTM `crud_screens!` invocation can pass a real role
+//! name to `create:`/`read:`/`update:`/`delete:` today; every one in
+//! this phase uses `public` for those four verbs and relies on `guard:`
+//! (this crate's own bridge) for the real authorization instead. This is
+//! a real, workspace-wide blocker for every one of the remaining 21
+//! modules, not an RTM-local one -- flagged for Phase B, not routed
+//! around by renaming RTM's roles.
+
+use nirdosha_guard_screens::GuardedEntity;
+
+pub const DEMO_TENANT: &str = "acme-demo";
+
+/// Wire role names both `m01_auth.nir`'s avatar picker and every
+/// `GuardedTable` in this crate check `Auth::has_role(...)` against --
+/// the 11 human roles `00_core.nir`'s `roles!` block declares, service
+/// principals (`SvcIngest`, ...) excluded: those are backend identities
+/// a browser session never authenticates as.
+pub const HUMAN_ROLES: &[&str] = &[
+    "Analyst",
+    "ComplianceLead",
+    "Mlro",
+    "QaReviewer",
+    "OpsAnalyst",
+    "PolicyEngineer",
+    "Admin",
+    "Auditor",
+    "CsAgent",
+    "RmUser",
+    "RegulatorViewer",
+];
+
+/// The screen-row projection of `crate::domains::Transaction`. Not that
+/// struct itself: every `nirdosha_rt::screens` render helper
+/// (`detail_html`, `list_html`, ...) and `crud_screens!`'s own generated
+/// code assume a synthetic `id: i64`, which the corpus's real dataset
+/// struct deliberately has no room for (`TxnId` is RTM's real identity,
+/// a string newtype). Keeping the UI-only synthetic key here, off the
+/// corpus's own dataset declaration, is the RTM live-demo plan's Phase A
+/// call -- see `bridge.nir`'s module doc comment.
+///
+/// `occurred_at` is `i64`, not the domain type's `u64`
+/// (`domain_types::Timestamp(pub u64)`): `nirdosha_rt::screens::ParseField`
+/// has no `u64` impl (only `String`/`i64`/`f64`/`bool`) -- `crud_screens!`'s
+/// generated `__parse` needs one for every `fields:` entry regardless of
+/// whether the guard-backed read path (which never calls `__parse`) uses
+/// it. A demo-scale epoch-ms value fits `i64` with room to spare.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TransactionRow {
+    pub id: i64,
+    pub txn_id: String,
+    pub tenant_id: String,
+    pub subject_id: String,
+    pub account_id: String,
+    pub amount: f64,
+    pub currency: String,
+    pub status: String,
+    pub occurred_at: i64,
+    pub channel: String,
+    pub merchant_id: String,
+    pub card_token: String,
+    pub device_id: String,
+    pub geo: String,
+    /// Neither field exists on the corpus's own `#[dataset] struct
+    /// Transaction` (`10_domains.nir`) either -- `20_ingestion.nir`'s
+    /// `analyst-flag-transaction` policy names them in its own
+    /// `field_policy { allowed(analyst_flag, analyst_flag_reason) }`
+    /// (a real, pre-existing corpus drift Phase A's own
+    /// `account_id` fix already established the precedent for: a
+    /// `guard_policy!` block naming a field its dataset never declared).
+    /// Real, checked fields here (unlike `id`/`txn_id`, which are
+    /// screen-only and `field_policy_exempt`) -- proving this policy's
+    /// G1 enforcement for real is the point of wiring them at all.
+    pub analyst_flag: bool,
+    pub analyst_flag_reason: String,
+}
+
+impl GuardedEntity for TransactionRow {
+    const RESOURCE: &'static str = "transaction";
+    fn row_id(&self) -> String {
+        self.txn_id.clone()
+    }
+    // Neither field exists on the corpus's own `#[dataset] struct
+    // Transaction` (`10_domains.nir`) -- `id` is the synthetic screen
+    // key every `nirdosha_rt::screens` render helper needs, `txn_id` is
+    // this row's own storage/guard identity (`Transaction` itself has no
+    // self-referencing id field at all; `Alert.txn_id` is a *reference*
+    // to one, a different thing). `20_ingestion.nir`'s `ingest-create-txn`
+    // field_policy was never written with either in mind, and shouldn't
+    // be -- exempting them here is the honest fix, not editing that
+    // policy to mention fields that aren't part of its own dataset.
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "txn_id"]
+    }
+    // `analyst_flag`/`analyst_flag_reason` are real, checked fields for
+    // *update* (`analyst-flag-transaction`'s own `field_policy` names
+    // them, see `check_invariant`'s neighboring comment) but
+    // `ingest-create-txn`'s `field_policy` never mentions them at all --
+    // create-time exempt-only, not exempt everywhere, is the honest fix
+    // (see `GuardedEntity::create_field_policy_exempt`'s own doc
+    // comment); swallowing them into `field_policy_exempt` above would
+    // silently blind the update check to the one thing it exists to
+    // enforce.
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        &["id", "txn_id", "analyst_flag", "analyst_flag_reason"]
+    }
+
+    /// `analyst-flag-transaction`'s real `requires invariant
+    /// (amount_positive) && invariant(currency_iso)` (`00_core.nir`),
+    /// dispatched to the same real, shared logic those invariant fns
+    /// use: `Money::is_positive`/`CurrencyCode::is_iso_4217`
+    /// (`10_domains.nir`) -- not a `Transaction` reconstruction (this
+    /// row is a flat screen projection, not that struct) and not a
+    /// re-typed duplicate of the check either.
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            "amount_positive" => Some(crate::domains::Money(self.amount).is_positive()),
+            "currency_iso" => Some(crate::domain_types::CurrencyCode(self.currency.clone()).is_iso_4217()),
+            _ => None,
+        }
+    }
+}
+
+/// The one process-wide, guard-enforced `Transaction` table -- backed by
+/// `MemStoreDriver` in Phase A (real Postgres wiring is a Phase C item
+/// per the plan, gated on `docker-compose.dev.yml`'s Postgres service
+/// actually being up). Every `guard_policy!` this table evaluates
+/// against comes from `rtm`'s own linked-in corpus
+/// (`nirdosha_guard_registry::candidates()`/`dump()`), not a hand-built
+/// fixture.
+pub fn transaction_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, TransactionRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, TransactionRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-{}.jsonl", std::process::id())),
+            // HUMAN_ROLES (browser sessions) plus "SvcIngest" -- the one
+            // service principal that writes `transaction` rows
+            // (`20_ingestion.nir`'s `ingest-create-txn`; the generator's
+            // seed path authenticates as this principal, not a human
+            // role -- see `Auth::has_role` being just a string check,
+            // with nothing that actually distinguishes a human session
+            // from a service one).
+            HUMAN_ROLES.iter().chain(["SvcIngest"].iter()).map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+/// The corpus's own registered `approval_chain!` definitions
+/// (`nirdosha_guard_registry::dump().approval_chains`), converted to
+/// `ApprovalChainDefinition` -- the real, single source of truth every
+/// `GuardedTable` that needs escalation support (M4's `case_review`
+/// chain today) is seeded from, rather than each screen module
+/// hand-copying `00_core.nir`'s `quorum(...)`/`of = [...]` numbers.
+pub fn corpus_approval_chains() -> Vec<nirdosha_guard_core::approval_chain::ApprovalChainDefinition> {
+    nirdosha_guard_registry::dump()
+        .approval_chains
+        .into_iter()
+        .map(|c| nirdosha_guard_core::approval_chain::ApprovalChainDefinition { name: c.name, quorum: c.quorum, approver_roles: c.approvers, cooling_period_ms: c.cooling_ms })
+        .collect()
+}
+
+// ============================================================================
+// M3 Alerts — screens/m03_alerts.nir's row type + table.
+//
+// `nirdosha_guard_macros::workflow! { machine AlertStatus { ... } }`
+// (`10_domains.nir`) is catalog-only -- same posture this file's own
+// module doc comment already establishes for `#[relation]`: it registers
+// the block's raw source text (`CatalogRegistration`), not a real Rust
+// enum or `advance_*` fn (confirmed by reading `workflow!`'s own
+// expansion in `nirdosha-guard-macros/src/lib.rs`: it emits nothing but
+// a `CatalogRegistration` static). `AlertRow::transition_allowed` below
+// is a hand-written, disclosed reimplementation of that same declared
+// graph -- not a stub, but not compiler-enforced type-state either.
+// ============================================================================
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AlertRow {
+    pub id: i64,
+    pub alert_id: String,
+    pub tenant_id: String,
+    pub txn_id: String,
+    pub score: f64,
+    pub model_version: String,
+    pub policy_version: String,
+    pub status: String,
+    pub assignee: String,
+    pub disposition_code: String,
+    pub rationale: String,
+    pub case_id: String,
+    /// Real, checked field -- `50_alerts.nir`'s `analyst-read-alert`
+    /// `field_policy { forbidden(sar_linked) }` names it; kept here (not
+    /// on the corpus's own `#[dataset] struct Alert`, `10_domains.nir`)
+    /// so the G1 check has something real to enforce, the same
+    /// `account_id`/`analyst_flag` precedent `TransactionRow` set.
+    /// **`Option<String>`, not `bool` or bare `String`** -- T-02's fix to
+    /// `nirdosha_guard_screens::field_policy::read_masks_from_field_policy`
+    /// synthesizes `MaskTransform::Drop` (true key removal) for this
+    /// field_policy-forbidden field, not `Full`/`"[REDACTED]"` (batch
+    /// 4's earlier fix, since superseded): the tipping-off rule this
+    /// field exists to enforce means a forbidden reader must not see
+    /// that `sar_linked` even EXISTS, not just see it masked. `Option`
+    /// so a dropped key decodes to `None` instead of a hard deserialize
+    /// error, and `skip_serializing_if` so it round-trips back out of
+    /// the typed entity still absent, not reintroduced as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sar_linked: Option<String>,
+    /// `lead-bulk-alert`'s `field_policy { allowed(assignee, severity,
+    /// tags) }` -- `severity`/`tags` don't exist on the corpus's own
+    /// `Alert` dataset either (another real, disclosed drift, same shape
+    /// as `analyst_flag`).
+    pub severity: String,
+    pub tags: String,
+}
+
+impl GuardedEntity for AlertRow {
+    const RESOURCE: &'static str = "alert";
+    fn row_id(&self) -> String {
+        self.alert_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "alert_id"]
+    }
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        // `alert-raise`'s real `field_policy { required(tenant_id,
+        // txn_id, score, model_version, policy_version) forbidden
+        // (status) }` -- caught by this test suite's own
+        // `seed_alert` helper the first time it ran: `status` is
+        // FORBIDDEN even for `SvcAlerts` at create (the corpus's own
+        // `10_domains.nir` comment: "status — analyst-only field, guard
+        // rejects writes to it" -- creation implicitly starts at `new`,
+        // never submitted), and `sar_linked` is named by no create
+        // policy at all (set later, by whatever links an alert to a
+        // SAR). Same real "not submitted, not this action's business"
+        // reasoning as every other field below.
+        &["id", "alert_id", "status", "assignee", "disposition_code", "rationale", "case_id", "sar_linked", "severity", "tags"]
+    }
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            "rationale_present" => Some(!self.rationale.is_empty()),
+            // `00_core.nir`'s real `disposition_code_valid` [NEW: T-03] --
+            // unset (not yet dispositioned) is fine; a non-empty value must
+            // be in the closed set.
+            "disposition_code_valid" => Some(
+                self.disposition_code.is_empty()
+                    || crate::domains::DISPOSITION_CODES.contains(&self.disposition_code.as_str()),
+            ),
+            _ => None,
+        }
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        // `10_domains.nir`'s declared `machine AlertStatus` graph,
+        // verbatim: `new -> in_progress -> [closed_false_positive,
+        // escalated, pending_info]; pending_info -> [in_progress,
+        // escalated]; closed_false_positive -> in_progress;`
+        let legal: &[&str] = match self.status.as_str() {
+            "" | "new" => &["in_progress"], // "" -- a freshly-created row this policy forbids setting `status` on (see AlertRow doc) starts implicitly at the machine's initial state
+            "in_progress" => &["closed_false_positive", "escalated", "pending_info"],
+            "pending_info" => &["in_progress", "escalated"],
+            "closed_false_positive" => &["in_progress"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn alert_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AlertRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AlertRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-alert-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().chain(["SvcAlerts"].iter()).map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        )
+        // `alert-raise`'s real `obligate notify(channel("analyst-inbox"))`
+        // -- see M16's `notify_into_inbox`/`notification_table` doc
+        // comments for the real obligation-consumption this wires into.
+        .with_notify_hook(notify_into_inbox);
+        // Demo bootstrap only (see `PaymentRow`'s identical disclosure) --
+        // `lead-sla-aggregate`'s real `cap(cohort_floor = 5)` (3.9 SLA
+        // monitor) structurally can never return anything but a k-anonymity
+        // refusal against an empty table, and this corpus has no live
+        // alert-raising traffic generator (`alert-raise` is `SvcAlerts`
+        // create-only, never invoked by anything running in this binary).
+        // 5 rows, not 1, so the floor is real to satisfy, not just present.
+        for (i, (status, sev, score)) in [
+            ("new", "medium", 42.0), ("in_progress", "high", 71.0), ("in_progress", "low", 18.0),
+            ("escalated", "high", 88.0), ("closed_false_positive", "medium", 35.0),
+        ].into_iter().enumerate() {
+            // `alert-9xx`: outside every literal alert id the test suite
+            // seeds (001/002/010/011/020/021), so this bootstrap can never
+            // collide with a test's own `raw_driver_seed` into the same
+            // process-wide `OnceLock` table.
+            table.raw_driver_seed(DEMO_TENANT, &AlertRow {
+                id: (900 + i + 1) as i64, alert_id: format!("alert-9{:02}", i + 1), tenant_id: DEMO_TENANT.into(),
+                txn_id: format!("txn-9{:02}", i + 1), score, model_version: "rt_fraud_v1".into(), policy_version: "rtm-demo".into(),
+                status: status.into(), assignee: "".into(), disposition_code: "".into(), rationale: "".into(), case_id: "".into(),
+                sar_linked: None, severity: sev.into(), tags: "".into(),
+            });
+        }
+        table
+    })
+}
+
+// ============================================================================
+// M3.9 SLA Configuration — `PG.sla_config` table
+// ============================================================================
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SlaConfigRow {
+    pub id: i64,
+    pub config_id: String,
+    pub severity: String,
+    pub sla_minutes: i64,
+    pub auto_escalate: bool,
+}
+
+impl GuardedEntity for SlaConfigRow {
+    const RESOURCE: &'static str = "sla_config";
+    fn row_id(&self) -> String {
+        self.config_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "config_id"]
+    }
+}
+
+pub fn sla_config_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SlaConfigRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SlaConfigRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-sla-config-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &SlaConfigRow { id: 1, config_id: "high".into(), severity: "high".into(), sla_minutes: 120, auto_escalate: true });
+        table.raw_driver_seed(DEMO_TENANT, &SlaConfigRow { id: 2, config_id: "medium".into(), severity: "medium".into(), sla_minutes: 240, auto_escalate: false });
+        table.raw_driver_seed(DEMO_TENANT, &SlaConfigRow { id: 3, config_id: "low".into(), severity: "low".into(), sla_minutes: 480, auto_escalate: false });
+        table
+    })
+}
+
+// ============================================================================
+// M4 Cases — screens/m04_cases.nir's row type + table.
+// ============================================================================
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CaseRow {
+    pub id: i64,
+    pub case_id: String,
+    pub tenant_id: String,
+    pub status: String,
+    pub assigned_to: String,
+    /// Comma-joined `Vec<AlertId>` -- a flat screen projection, per this
+    /// file's own established convention (`TransactionRow`'s doc comment)
+    /// of never re-declaring the corpus's own dataset types verbatim.
+    pub alert_ids: String,
+    pub subject_ref: String,
+    // T-02: `case-read`'s real `field_policy { forbidden(sar_id) }`
+    // (`60_case_management.nir`) -- tipping-off, same posture as
+    // `AlertRow.sar_linked` -- means this field must be genuinely absent
+    // for `Analyst`'s own read, not a `"[REDACTED]"` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sar_id: Option<String>,
+    pub disposition: String,
+    pub rationale: String,
+    /// `case-close-confirm`'s own `field_policy { allowed(review_verdict,
+    /// review_note) forbidden(everything_else) }` -- real, checked fields
+    /// for the escalated four-eyes write (`m04_cases.nir`'s
+    /// `guarded_propose_escalated_update`/`guarded_confirm_escalated_update`
+    /// calls), same `analyst_flag`-style drift as `AlertRow.severity`.
+    pub review_verdict: String,
+    pub review_note: String,
+}
+
+impl GuardedEntity for CaseRow {
+    const RESOURCE: &'static str = "case";
+    fn row_id(&self) -> String {
+        self.case_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "case_id"]
+    }
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        // `analyst-create-case`'s `field_policy { required(tenant_id,
+        // subject_ref, alert_ids, rationale) forbidden(status, sar_id,
+        // disposition) }` -- `status`/`sar_id`/`disposition` are
+        // explicitly FORBIDDEN at create (svc:case seeds `status`
+        // separately per `60_case_management.nir`'s own comment), so
+        // they must never be treated as "submitted" even though
+        // `CaseRow::default()` still gives them empty-string values.
+        // `review_verdict`/`review_note` are a different (later,
+        // ComplianceLead-only) action's fields, never set at create
+        // time.
+        &["id", "case_id", "status", "sar_id", "disposition", "assigned_to", "review_verdict", "review_note"]
+    }
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            "rationale_present" => Some(!self.rationale.is_empty()),
+            // `00_core.nir`'s real `case_disposition_valid` [NEW: T-03] --
+            // unset (still investigating) is fine; a non-empty value must
+            // be in the closed set (mirrors the CaseStatus terminal states).
+            "case_disposition_valid" => Some(
+                self.disposition.is_empty()
+                    || crate::domains::CASE_DISPOSITION_CODES.contains(&self.disposition.as_str()),
+            ),
+            _ => None,
+        }
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        // `10_domains.nir`'s declared `machine CaseStatus` graph,
+        // verbatim: `open -> investigating -> [confirmed_fraud,
+        // false_positive, escalate]; confirmed_fraud -> sar_filed ->
+        // closed; false_positive -> closed;`
+        let legal: &[&str] = match self.status.as_str() {
+            "" | "open" => &["investigating"], // "" -- same freshly-created-row convention as AlertRow
+            "investigating" => &["confirmed_fraud", "false_positive", "escalate"],
+            "confirmed_fraud" => &["sar_filed"],
+            "sar_filed" => &["closed"],
+            "false_positive" => &["closed"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn case_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-case-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().chain(["SvcCase"].iter()).map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        )
+        // `analyst-create-case`'s real `obligate notify(channel("case-inbox"))`.
+        .with_notify_hook(notify_into_inbox)
+    })
+}
+
+// ============================================================================
+// T-06/B11 — `PG.case_txn_scope` + the real guarded context-read fns
+// `workspace!`'s declared panels call (`nirdosha_rt::workspace::
+// ContextNeed::source`). Each fn below is a real guarded read (or, for
+// `case_transactions_for_case`, a real guarded read plus a `system_write`
+// materialization step) over `bridge.nir`'s own tables -- never
+// fabricated rows. See `60_case_management.nir`'s `case-txn-scope-read`
+// policy for the real grant these reads run under.
+// ============================================================================
+
+/// One transaction known to be inside a case's investigation scope.
+/// Derived (below) from the case's own linked alerts' `txn_id`s --
+/// `screens-plan.md` B11's own "PG.case_txn_scope" scope line, not a
+/// speculative table.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CaseTxnScopeRow {
+    pub id: i64,
+    pub scope_id: String,
+    pub tenant_id: String,
+    pub case_id: String,
+    pub txn_id: String,
+    pub added_at: i64,
+}
+
+impl GuardedEntity for CaseTxnScopeRow {
+    const RESOURCE: &'static str = "case_txn_scope";
+    fn row_id(&self) -> String {
+        self.scope_id.clone()
+    }
+}
+
+pub fn case_txn_scope_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTxnScopeRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTxnScopeRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-case-txn-scope-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_case_txn_scope_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Subject header for `mount_investigation_workspace` (4.3) — the
+/// `label_fn` `workspace!`'s expansion calls once per request.
+pub fn case_workspace_header(row: &CaseRow) -> Vec<(String, String)> {
+    vec![
+        ("Case".to_string(), row.case_id.clone()),
+        ("Status".to_string(), row.status.clone()),
+        ("Assigned to".to_string(), row.assigned_to.clone()),
+    ]
+}
+
+/// Related-alerts context need (4.3's workspace panel, and 4.4 Linked
+/// Alerts Tab's own dedicated route): the case's own linked `alert_ids`
+/// -- a real, checked field already on `CaseRow` -- resolved one guarded
+/// `alert_table().guarded_get` at a time. This IS "related alerts" for
+/// an investigation workspace: the alert set the case was actually
+/// opened from, not a speculative similarity join this corpus's
+/// `AlertRow` (no `customer_id` field) cannot support today.
+pub fn related_alerts_for_case(auth: &nirdosha_rt::Auth, case_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let case = case_table()
+        .guarded_get(auth, "AmlInvestigation", case_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("case `{case_id}` not found"))?;
+    let mut rows = Vec::new();
+    for alert_id in case.alert_ids.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match alert_table().guarded_get(auth, "AmlInvestigation", alert_id) {
+            Ok(Some(alert)) => rows.push(serde_json::to_value(&alert).map_err(|e| e.to_string())?),
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(rows)
+}
+
+/// Case-transactions context need (4.3's workspace panel, and 4.5 Case
+/// Transactions Tab's own dedicated route). Derives the case's
+/// transaction scope from its linked alerts' `txn_id`s (never
+/// fabricated), materializes any newly-seen `(case_id, txn_id)` pair
+/// into the real `PG.case_txn_scope` table via `system_write` — this
+/// automatic derivation is the "scope discovery" half; the table's own
+/// `guarded_insert`/`guarded_update` paths stay open for a future
+/// explicit "add to scope"/"remove from scope" analyst action, not
+/// built this pass — then reads the scoped rows back through the real
+/// guarded path and resolves each into its transaction.
+pub fn case_transactions_for_case(auth: &nirdosha_rt::Auth, case_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let case = case_table()
+        .guarded_get(auth, "AmlInvestigation", case_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("case `{case_id}` not found"))?;
+
+    let mut txn_ids: Vec<String> = Vec::new();
+    for alert_id in case.alert_ids.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Ok(Some(alert)) = alert_table().guarded_get(auth, "AmlInvestigation", alert_id) {
+            if !alert.txn_id.is_empty() && !txn_ids.contains(&alert.txn_id) {
+                txn_ids.push(alert.txn_id.clone());
+            }
+        }
+    }
+
+    let already: std::collections::HashSet<String> = case_txn_scope_table()
+        .system_scan()
+        .unwrap_or_default()
+        .iter()
+        .filter(|r: &&CaseTxnScopeRow| r.case_id == case_id)
+        .map(|r| r.txn_id.clone())
+        .collect();
+    for txn_id in &txn_ids {
+        if already.contains(txn_id) {
+            continue;
+        }
+        case_txn_scope_table().system_write(
+            DEMO_TENANT,
+            &CaseTxnScopeRow {
+                id: next_case_txn_scope_row_id(),
+                scope_id: format!("{case_id}:{txn_id}"),
+                tenant_id: DEMO_TENANT.into(),
+                case_id: case_id.to_string(),
+                txn_id: txn_id.clone(),
+                added_at: nirdosha_rt::screens::now_epoch_secs(),
+            },
+        );
+    }
+
+    let scoped = case_txn_scope_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for scope_row in scoped.into_iter().filter(|r| r.case_id == case_id) {
+        if let Ok(Some(txn)) = transaction_table().guarded_get(auth, "AmlInvestigation", &scope_row.txn_id) {
+            rows.push(serde_json::to_value(&txn).map_err(|e| e.to_string())?);
+        }
+    }
+    Ok(rows)
+}
+
+/// Related-alerts context need for 3.4 (Related & Linked Alerts): alerts
+/// sharing this alert's own case (if escalated), falling back to alerts
+/// on the same transaction's `subject_id` (the "same customer/
+/// counterparty" half of T-06's own scope description) when the alert
+/// has no case yet.
+pub fn related_alerts_for_alert(auth: &nirdosha_rt::Auth, alert_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let alert = alert_table()
+        .guarded_get(auth, "AmlInvestigation", alert_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("alert `{alert_id}` not found"))?;
+
+    if !alert.case_id.is_empty() {
+        return related_alerts_for_case(auth, &alert.case_id);
+    }
+
+    let Ok(Some(txn)) = transaction_table().guarded_get(auth, "AmlInvestigation", &alert.txn_id) else {
+        return Ok(Vec::new());
+    };
+    let siblings = transaction_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let sibling_txn_ids: std::collections::HashSet<String> = siblings.iter().filter(|t| t.subject_id == txn.subject_id).map(|t| t.txn_id.clone()).collect();
+
+    let alerts = alert_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for other in alerts.into_iter().filter(|a| a.alert_id != alert_id && sibling_txn_ids.contains(&a.txn_id)) {
+        rows.push(serde_json::to_value(&other).map_err(|e| e.to_string())?);
+    }
+    Ok(rows)
+}
+
+/// Related-alerts context need for 6.2 (Transaction Detail): every
+/// alert opened on this exact transaction — real, `AmlInvestigation`-
+/// purpose, no join beyond the `txn_id` equality every alert already
+/// carries.
+pub fn related_alerts_for_transaction(auth: &nirdosha_rt::Auth, txn_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let alerts = alert_table().guarded_snapshot(auth, "AmlInvestigation").map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for alert in alerts.into_iter().filter(|a| a.txn_id == txn_id) {
+        rows.push(serde_json::to_value(&alert).map_err(|e| e.to_string())?);
+    }
+    Ok(rows)
+}
+
+/// Per-entity audit-timeline context need (3.10 Alert Audit History):
+/// reuses T-11/B8's real `AC.all_chains` projection
+/// (`refresh_all_chains`/`all_chains_table`) rather than a second audit
+/// mechanism, filtered to the one module + id this screen names. Runs
+/// under `purpose(Audit)` — the same real grant 20.1/20.2 already use
+/// (`Auditor`/`Mlro`/`ComplianceLead`/`Admin`; `Analyst` has none, a
+/// pre-existing corpus gap `96_restricted_views.nir`'s own doc comment
+/// already discloses, not invented or routed around here).
+pub fn entity_audit_timeline(auth: &nirdosha_rt::Auth, module: &str, id_needle: &str) -> Result<Vec<serde_json::Value>, String> {
+    refresh_all_chains();
+    let rows = all_chains_table().guarded_snapshot(auth, "Audit").map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows.into_iter().filter(|r| r.module == module && r.content_json.contains(id_needle)) {
+        out.push(serde_json::to_value(&row).map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// ============================================================================
+// M5 Customer — screens/m05_customer.nir's row type + table.
+//
+// **Real, disclosed corpus gap** (found building this module, not
+// routed around): grepping every `.nir` file under `src/` for `resource
+// == "customer"` / `resource in [...]` finds exactly two human-role
+// grants -- `rm-restriction-view` (`96_restricted_views.nir`, `RmUser`,
+// one field) and `auditor-read` (same file, `Auditor`, broad). No
+// `Analyst`/`ComplianceLead`/other L1-L2 role has ANY `guard_policy!`
+// read grant on `customer` anywhere in this corpus, despite
+// `screen.md`'s Module 5 ("Customer & Entity Intelligence") clearly
+// being written for L1/L2 investigators (5.2 "Customer 360" etc.). This
+// screen is built against the policies that actually exist, not a
+// fabricated one -- inventing a new `guard_policy!` grant to make the
+// screen "work" for Analyst would be writing new security policy, which
+// isn't this phase's call to make silently. `m05_customer.nir`'s own doc
+// comment repeats this for anyone landing there first.
+// ============================================================================
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CustomerRow {
+    pub id: i64,
+    pub customer_id: String,
+    pub tenant_id: String,
+    // T-02: `rm-restriction-view`'s real `field_policy {
+    // allowed(restriction_status) forbidden(national_id, name, dob,
+    // ..., pep_flag, sanctions_status, ...) }` (`96_restricted_views.nir`)
+    // means these fields must come back genuinely ABSENT for `RmUser`,
+    // not a `"[REDACTED]"` placeholder -- `read_masks_from_field_policy`
+    // now synthesizes `MaskTransform::Drop` (true key removal) for a
+    // `forbidden(...)` name, so every field it can name here is
+    // `Option<T>` with `skip_serializing_if`, not a bare masked-shaped
+    // `String`/`bool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub national_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dob: Option<String>,
+    pub occupation: String,
+    pub kyc_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_rating: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pep_flag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanctions_status: Option<String>,
+    /// The ONE field `rm-restriction-view` actually grants `RmUser` --
+    /// every other field above is real (matches `10_domains.nir`'s
+    /// `#[dataset] struct Customer`) but only reachable by `Auditor`'s
+    /// broad `auditor-read` grant; `RmUser`'s own read is masked down to
+    /// this single field by that policy's own `field_policy {
+    /// allowed(restriction_status) forbidden(...) }` -- real, read-side
+    /// enforcement since batch 4's `read_masks_from_field_policy` fix
+    /// (`nirdosha-guard-screens`'s own module doc comment), exercised
+    /// live by `m21_restricted.nir`'s masked view.
+    pub restriction_status: String,
+    pub legal_hold: bool,
+}
+
+impl GuardedEntity for CustomerRow {
+    const RESOURCE: &'static str = "customer";
+    fn row_id(&self) -> String {
+        self.customer_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "customer_id"]
+    }
+}
+
+pub fn customer_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CustomerRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CustomerRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-customer-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            // `dsar-export`'s real `escalate to approval(chain
+            // egress_release)` (`90_ops_admin.nir`) -- wired here in
+            // batch 3, `vec![]` before this had no escalating customer
+            // policy to serve.
+            corpus_approval_chains(),
+        )
+    })
+}
+
+// ============================================================================
+// M9 ML Models — screens/m09_ml_models.nir's row type + table.
+//
+// `scoring-model-swap` (`40_scoring.nir`): `for PolicyEngineer`,
+// `action == "update" && resource == "model"`, `escalate to
+// approval(chain model_release)` (`quorum(2, of = [PolicyEngineer,
+// ComplianceLead])`) -- PolicyEngineer both proposes AND is chain-
+// eligible, same "four-eyes among peers" shape M4's `case-close-confirm`
+// already exercises; reuses `guarded_propose_escalated_update`/
+// `guarded_confirm_escalated_update` verbatim, no new engine work.
+//
+// `model_artifact! { model rt_fraud_v1 { format = onnx; inputs = [...];
+// outputs = [...]; threshold_alert = 0.85; } }` (`40_scoring.nir`) is
+// catalog-only (same posture `stream_port!`/`window!` already establish
+// elsewhere in this file) -- no `update`/`create` action exists on it at
+// runtime; `40_scoring.nir`'s own comment calls the swap "a guarded admin
+// mutation, never a config edit". This row is seeded ONCE at process
+// startup from that real catalog record via `raw_driver_seed` -- a
+// deliberate exception to that method's own "not for anything this
+// crate's own runtime code should call" doc comment: a one-time boot
+// load from the compiled-in catalog is the same posture a real
+// deployment's migration/backfill step has, not a live guarded write a
+// human or service ever performs, so there is no `guarded_apply`-shaped
+// call this could be instead.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelRow {
+    pub id: i64,
+    pub model_id: String,
+    pub format: String,
+    pub threshold_alert: f64,
+    pub shadow_mode: bool,
+    pub inputs: String,
+    pub outputs: String,
+}
+
+impl GuardedEntity for ModelRow {
+    const RESOURCE: &'static str = "model";
+    fn row_id(&self) -> String {
+        self.model_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "model_id"]
+    }
+}
+
+pub fn model_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-model-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        );
+        // Real `model_artifact! { model rt_fraud_v1 { ... } }` values,
+        // `40_scoring.nir:8-15`, transcribed by hand (the catalog record
+        // itself carries `inputs`/`outputs` as opaque source text per
+        // `model_artifact!`'s own doc comment, not a `Vec<String>` this
+        // row could read directly).
+        table.raw_driver_seed(DEMO_TENANT, &ModelRow {
+            id: 1,
+            model_id: "rt_fraud_v1".into(),
+            format: "onnx".into(),
+            threshold_alert: 0.85,
+            shadow_mode: false,
+            inputs: "velocity_1h,distinct_payees_7d,amount_dev_30d,impossible_travel".into(),
+            outputs: "score:f64,explanation:vec[string]".into(),
+        });
+        table
+    })
+}
+
+// ============================================================================
+// M10 Watchlist & Screening — screens/m10_screening.nir's row type + table.
+//
+// Real corpus policies (`40_scoring.nir`): `screening-write-hit` (create,
+// `SvcScreening`-only, same "service-principal-only create" posture as
+// `ingest-create-txn` -- no `create_fields` wired here, same reasoning
+// `m06_transactions.nir` already documents) and `analyst-disposition-hit`
+// (update, `for Analyst`, `field_policy { allowed(disposition, rationale)
+// forbidden(subject_ref, list_id, match_score) }`, `requires
+// invariant(rationale_present)`). **Disclosed real gap**: no
+// `guard_policy!` anywhere in this corpus grants ANY human role a plain
+// `read` on `screening_hit` -- `screening-check` (`SvcScreening`) reads
+// `sanctions_lists`, a different resource. So this screen's list/detail
+// routes correctly deny-by-default for every human role; only a
+// disposition update (keyed by a `hit_id` the analyst already has from
+// elsewhere, e.g. an alert) is real. Same class of gap as `m05_customer.nir`'s
+// "no Analyst read on customer" -- built against what's real, not
+// fabricated.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ScreeningHitRow {
+    pub id: i64,
+    pub hit_id: String,
+    pub tenant_id: String,
+    pub subject_ref: String,
+    pub list_id: String,
+    pub match_score: f64,
+    pub disposition: String,
+    pub rationale: String,
+}
+
+impl GuardedEntity for ScreeningHitRow {
+    const RESOURCE: &'static str = "screening_hit";
+    fn row_id(&self) -> String {
+        self.hit_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "hit_id"]
+    }
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            "rationale_present" => Some(!self.rationale.is_empty()),
+            _ => None,
+        }
+    }
+}
+
+pub fn screening_hit_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ScreeningHitRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ScreeningHitRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-screening-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().chain(["SvcScreening"].iter()).map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        // Demo bootstrap only (see `ModelRow`'s identical `raw_driver_seed`
+        // disclosure): two hits so the update path has something real to
+        // act on, standing in for what `SvcScreening`'s real
+        // `screening-write-hit` would have produced from a live matcher
+        // run -- a genuinely guarded write in the ingestion pipeline this
+        // phase doesn't run (Phase C's generator).
+        table.raw_driver_seed(DEMO_TENANT, &ScreeningHitRow { id: 1, hit_id: "hit-001".into(), tenant_id: DEMO_TENANT.into(), subject_ref: "subj-77".into(), list_id: "ofac_sdn".into(), match_score: 0.94, disposition: String::new(), rationale: String::new() });
+        table.raw_driver_seed(DEMO_TENANT, &ScreeningHitRow { id: 2, hit_id: "hit-002".into(), tenant_id: DEMO_TENANT.into(), subject_ref: "subj-12".into(), list_id: "pep_global".into(), match_score: 0.97, disposition: String::new(), rationale: String::new() });
+        table
+    })
+}
+
+// ============================================================================
+// M13 Risk Configuration — screens/m13_risk_config.nir's row type + table.
+//
+// `refdata-migrate` (`90_ops_admin.nir`): `for Admin`, `action ==
+// "migrate" && resource in ["refdata", "country_risk", "global_params"]`,
+// `escalate to approval(chain policy_release)` (`quorum(2, of =
+// [PolicyEngineer, ComplianceLead])`). Real maker≠checker: `Admin`
+// proposes but holds neither approver role -- see
+// `nirdosha_guard_screens`'s own `maker_neq_checker_...` regression test,
+// added alongside this module for exactly this real shape.
+// `#[reference(...)]` declarations (`10_domains.nir:179-190`) are the
+// fields this catalog actually governs (`customer.kyc_status`,
+// `alert.disposition_code`, `customer.risk_rating`,
+// `transaction.currency`, `case.disposition`, `country_risk`) -- this
+// row is `RefDataset`'s own three columns verbatim (`code`, `label`,
+// `class`), not a re-derivation of those six reference bindings (no
+// separate dataset exists for the binding itself, only for the
+// enumerated values a bound field may take).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RefDatasetRow {
+    pub id: i64,
+    pub code: String,
+    pub label: String,
+    pub class: String,
+}
+
+impl GuardedEntity for RefDatasetRow {
+    const RESOURCE: &'static str = "refdata";
+    fn row_id(&self) -> String {
+        self.code.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "code"]
+    }
+}
+
+pub fn refdata_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RefDatasetRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RefDatasetRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-refdata-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        );
+        // Demo bootstrap only (see `ModelRow`'s identical disclosure) --
+        // one seed row per `#[reference(...)]` binding this corpus
+        // actually declares, standing in for whatever a real deployment's
+        // initial refdata load would have populated.
+        table.raw_driver_seed(DEMO_TENANT, &RefDatasetRow { id: 1, code: "USD".into(), label: "US Dollar".into(), class: "Internal".into() });
+        table.raw_driver_seed(DEMO_TENANT, &RefDatasetRow { id: 2, code: "kyc_verified".into(), label: "KYC: Verified".into(), class: "Internal".into() });
+        table.raw_driver_seed(DEMO_TENANT, &RefDatasetRow { id: 3, code: "country_risk:US".into(), label: "United States — Low".into(), class: "Internal".into() });
+        table
+    })
+}
+
+// ============================================================================
+// M8 Detection Scenario & Rule Management — screens/m08_rules.nir's row
+// type + table.
+//
+// `threshold-migrate` (`75_lineage.nir`): `for PolicyEngineer`, `action ==
+// "migrate" && resource in ["window", "policy", "matcher", "model"]`,
+// `escalate to approval(chain policy_release)`. This row stands for the
+// `"window"` case specifically (the feature-threshold surface
+// `screen-field-mappings.md`'s M8 section actually names) -- `"policy"`/
+// `"matcher"`/`"model"` migrate the same action shape but a different row
+// type each (M9's `ModelRow` already covers `"model"`'s own real
+// `scoring-model-swap` update path; a full `"matcher"`/`"policy"` screen
+// is left for a later batch, same proportionate-scope call this phase
+// has made elsewhere -- see `m08_rules.nir`'s own doc comment).
+// `PolicyEngineer` IS `policy_release`'s own chain-eligible role, so
+// unlike M13's `RefDatasetRow` this is "four-eyes among peers," not the
+// maker≠checker case.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct WindowConfigRow {
+    pub id: i64,
+    pub window_id: String,
+    pub velocity_1h_threshold: f64,
+    pub impossible_travel_kmh: f64,
+}
+
+impl GuardedEntity for WindowConfigRow {
+    const RESOURCE: &'static str = "window";
+    fn row_id(&self) -> String {
+        self.window_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "window_id"]
+    }
+}
+
+pub fn window_config_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, WindowConfigRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, WindowConfigRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-window-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        );
+        // Real `window!` block values, `30_features.nir:8-13` --
+        // `velocity_1h`'s own aggregation has no single scalar threshold
+        // in the catalog record itself (it's a feature, not an alert
+        // rule); `impossible_travel`'s `geo_speed(geo) > 900 km/h` DOES
+        // name one, transcribed verbatim. `velocity_1h_threshold` here is
+        // this demo's own tunable knob, not a value the catalog record
+        // itself carries -- disclosed, not presented as a corpus fact.
+        table.raw_driver_seed(DEMO_TENANT, &WindowConfigRow { id: 1, window_id: "velocity_1h".into(), velocity_1h_threshold: 10.0, impossible_travel_kmh: 900.0 });
+        table
+    })
+}
+
+// ============================================================================
+// M16 Notifications & Collaboration — screens/m16_notifications.nir's row
+// type + table.
+//
+// `notification-read` (`90_ops_admin.nir`) now provides a real
+// `guard_policy!` read grant, so this table loads the corpus registry
+// and serves screen reads through `GuardedTable::guarded_snapshot`.
+// Notifications remain a real `obligate notify(channel(...))` SIDE EFFECT
+// of authorized actions on other resources (`alert-raise`'s
+// `channel("analyst-inbox")`, `analyst-create-case`'s
+// `channel("case-inbox")`, `qa-write-review`'s `channel("qa-inbox")`)
+// — writes continue through `GuardedTable::system_write` inside the
+// shared `notify_into_inbox` hook, which is the one legitimate
+// non-guarded write path for a side effect with no human submitter.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct NotificationRow {
+    pub id: i64,
+    pub notification_id: String,
+    pub tenant_id: String,
+    pub channel: String,
+    pub body_ref: String,
+    pub read: bool,
+}
+
+impl GuardedEntity for NotificationRow {
+    const RESOURCE: &'static str = "notification";
+    fn row_id(&self) -> String {
+        self.notification_id.clone()
+    }
+}
+
+pub fn notification_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-notification-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        );
+        table
+    })
+}
+
+/// Real `channel -> row_id` id minting for [`notification_table`]'s
+/// writes -- an atomic counter, not a UUID/timestamp dependency, so
+/// tests get deterministic, collision-free ids across a whole process
+/// run without pulling in a new crate for it.
+fn next_notification_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("notif-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The one real `notify_hook` closure every obligation-producing table
+/// below shares -- writes a real [`NotificationRow`] via
+/// [`nirdosha_guard_screens::GuardedTable::system_write`] (see that
+/// method's own doc comment for why this is the one legitimate
+/// non-guarded write path, not a policy-evasion hole).
+fn notify_into_inbox(channel: &str, body_ref: &str) {
+    notification_table().system_write(
+        DEMO_TENANT,
+        &NotificationRow { id: 0, notification_id: next_notification_id(), tenant_id: DEMO_TENANT.into(), channel: channel.into(), body_ref: body_ref.into(), read: false },
+    );
+}
+
+// ============================================================================
+// M14 Quality Assurance & Oversight — screens/m14_qa.nir's row type +
+// table.
+//
+// `qa-write-review` (`95_qa.nir`): `for QaReviewer`, `action in ["create",
+// "update"] && resource == "qa_review"`, `requires
+// field(status).transition_allowed()` (`QaReviewStatus` machine,
+// `10_domains.nir`: `assigned -> scored -> [closed, returned];`),
+// `field_policy { required(item_ref, rubric_scores, result)
+// forbidden(item_ref_content) }`, `obligate notify(channel("qa-inbox"))`
+// -- the real obligation this batch's notify-hook wiring exists to prove.
+//
+// **Two real, disclosed drifts, same "policy/workflow names a field the
+// dataset never declares" pattern every prior batch has established**:
+// `status` (the `QaReviewStatus` machine needs it; the corpus's own
+// `#[dataset] struct QaReview`, `10_domains.nir`, has no such field at
+// all -- `result: QaResult` is a DIFFERENT, already-scored value, not a
+// workflow state) and `review_id`/`subject_user_id` (a synthetic screen
+// key and the reviewed analyst's own id -- `self-read-qa`'s real `filter
+// subject_scope()` needs SOME field identifying "whose work this review
+// is about," and the corpus dataset has none; `item_ref` names the
+// ALERT/CASE being reviewed, not the analyst who handled it).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct QaReviewRow {
+    pub id: i64,
+    pub review_id: String,
+    pub tenant_id: String,
+    pub item_ref: String,
+    pub subject_user_id: String,
+    pub rubric_scores: String,
+    pub result: String,
+    pub error_severity: String,
+    pub retraining_flag: bool,
+    pub feedback: String,
+    pub status: String,
+}
+
+impl GuardedEntity for QaReviewRow {
+    const RESOURCE: &'static str = "qa_review";
+    fn row_id(&self) -> String {
+        self.review_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "review_id", "subject_user_id", "status"]
+    }
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        // `tenant_id` joins the others here for the same reason `id`/
+        // `review_id` do: `qa-write-review`'s real field_policy
+        // (`required(item_ref, rubric_scores, result)
+        // forbidden(item_ref_content)`) never names it, but the row
+        // still needs a real tenant value set at create time (parsed via
+        // `guard.create_fields` in `m14_qa.nir`) for the demo's
+        // single-tenant convention to hold -- the corpus simply has
+        // nothing to say about who supplies it, the same "screen
+        // plumbing the policy is silent on" class as every other exempt
+        // field here.
+        &["id", "review_id", "tenant_id", "subject_user_id", "status", "error_severity", "retraining_flag", "feedback"]
+    }
+    fn subject_scope_field() -> Option<&'static str> {
+        Some("subject_user_id")
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        // **Real, batch-3-discovered wrinkle, not present in
+        // `AlertRow`/`CaseRow`'s own `transition_allowed`**: unlike
+        // theirs, `qa-write-review`'s real `requires
+        // field(status).transition_allowed()` also gates `action ==
+        // "create"`, not just `"update"` -- and `guarded_insert_checked`'s
+        // own doc comment already establishes that create has no prior
+        // state (`before == after == entity`), so this fn is always asked
+        // "can `self.status` reach `self.status`" at create time (a
+        // same-state check by construction, not a real transition). A
+        // same-value write is never an illegal transition regardless of
+        // which state it is -- checked FIRST, before the real
+        // `QaReviewStatus` machine below, so create-time's inherent
+        // self-check always passes without opening any UPDATE to an
+        // illegitimate same-state no-op that skirts the real machine (a
+        // genuine value CHANGE, e.g. "assigned"->"assigned" attempted as
+        // if it meant something, is still just this same harmless case).
+        if self.status == requested {
+            return Some(true);
+        }
+        // `10_domains.nir`'s declared `machine QaReviewStatus` graph,
+        // verbatim: `assigned -> scored -> [closed, returned];` -- a
+        // fresh row (this table's own `raw_driver_seed` below) starts at
+        // `assigned`; `returned`/`closed` have no further declared edges
+        // (terminal here, same posture `AlertRow`/`CaseRow` give a
+        // dead-end state).
+        let legal: &[&str] = match self.status.as_str() {
+            "assigned" => &["scored"],
+            "scored" => &["closed", "returned"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn qa_review_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, QaReviewRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, QaReviewRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-qa-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+        .with_notify_hook(notify_into_inbox);
+        // Demo bootstrap only (see `ModelRow`'s identical disclosure) --
+        // one closed-item review already assigned to a real analyst id,
+        // standing in for what `qa-read-closed`'s own sampling would have
+        // produced from real alert/case closures.
+        table.raw_driver_seed(DEMO_TENANT, &QaReviewRow { id: 1, review_id: "qa-001".into(), tenant_id: DEMO_TENANT.into(), item_ref: "alert:alert-001".into(), subject_user_id: "an".into(), rubric_scores: String::new(), result: String::new(), error_severity: String::new(), retraining_flag: false, feedback: String::new(), status: "assigned".into() });
+        table
+    })
+}
+
+// ============================================================================
+// C1 (screens-plan.md): `PG.case_task` — a single cross-module task/RFI
+// resource shared by 5 screens with genuinely different presentations
+// (3.7 Pending Info/RFI on an alert, 4.8 Tasks & Checklist on a case, 4.9
+// Internal RFI on a case, 14.4's coaching action-item mini-form, 16.4's
+// cross-entity "My Tasks" list) plus 2.2's dashboard widget — mirrors
+// `QaReviewRow`'s `item_ref` pattern (a generic "alert:<id>"/"case:<id>"
+// owning-entity reference) rather than a `case_id`-only column, since 3.7
+// is alert-scoped, not case-scoped. `task_type` distinguishes the
+// screen-facing shapes (`"checklist"` / `"rfi"` / `"coaching_action"`)
+// over one real table instead of three, the same "one resource, several
+// screen views" posture `case`/`alert` themselves already have.
+// **Disclosed simplification**: `screen-field-mappings.md`'s per-shape
+// validation (3.7's SLA-clock pause, 4.9's deadline/escalate-after-
+// deadline, 4.8's checklist-template dropdown) is real business logic
+// this table's flat fields don't encode — `due_date`/`status` are real
+// and guard-enforced, the SLA/deadline semantics on top are UI concerns
+// this batch doesn't build, the same posture every prior batch's own
+// "not built this pass" notes already established for comparable gaps.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CaseTaskRow {
+    pub id: i64,
+    pub task_id: String,
+    pub tenant_id: String,
+    pub item_ref: String,
+    pub task_type: String,
+    pub title: String,
+    pub detail: String,
+    pub assignee: String,
+    pub due_date: String,
+    pub priority: String,
+    pub status: String,
+    pub blocked_reason: String,
+    pub completion_note: String,
+}
+
+impl GuardedEntity for CaseTaskRow {
+    const RESOURCE: &'static str = "case_task";
+    fn row_id(&self) -> String {
+        self.task_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "task_id"]
+    }
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        // `tenant_id`/`status` are real screen plumbing `case-task-create`
+        // is silent on (status always starts `"open"`, same posture
+        // `QaReviewRow`'s create-time exemptions already establish) —
+        // not a gap in the policy's own `field_policy`.
+        &["id", "task_id", "tenant_id", "status", "blocked_reason", "completion_note"]
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        if self.status == requested {
+            return Some(true);
+        }
+        // `10_domains.nir`'s real `machine CaseTaskStatus`, verbatim:
+        // `open -> in_progress -> [done, blocked, escalated]; blocked ->
+        // in_progress; escalated -> in_progress;` — a fresh row (this
+        // table's seed below) starts at `"open"`.
+        let legal: &[&str] = match self.status.as_str() {
+            "open" => &["in_progress"],
+            "in_progress" => &["done", "blocked", "escalated"],
+            "blocked" => &["in_progress"],
+            "escalated" => &["in_progress"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn case_task_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTaskRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTaskRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-case-task-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        // Demo bootstrap only (same posture `qa_review_table`'s seed
+        // discloses): one open checklist task assigned to the same real
+        // analyst test identity (`"an"`) prior batches' own tests use,
+        // standing in for whatever 4.2's "create a case" flow would have
+        // produced a checklist template for.
+        table.raw_driver_seed(DEMO_TENANT, &CaseTaskRow { id: 1, task_id: "task-001".into(), tenant_id: DEMO_TENANT.into(), item_ref: "case:case-001".into(), task_type: "checklist".into(), title: "Confirm subject KYC on file".into(), detail: String::new(), assignee: "an".into(), due_date: "2026-10-01".into(), priority: "high".into(), status: "open".into(), blocked_reason: String::new(), completion_note: String::new() });
+        table
+    })
+}
+
+// ============================================================================
+// C2 (screens-plan.md) — model-stats plane: `PG.model_run_stat`,
+// `PG.feature_stat`, `PG.model_validation`. Feeds 2.6, 9.2, 9.3, 9.4,
+// 9.5, 9.6.
+// ============================================================================
+
+/// One computed snapshot of `alert_table()`'s real `score`/`model_version`/
+/// `disposition_code`/`case_id` fields, grouped by `model_version` —
+/// `run_count`/`avg_score`/score-band histogram/`fp_rate` are genuinely
+/// derived (never fabricated); `sar_conversion_rate` cross-references
+/// `sar_bundle_table()`'s real `case_id` linkage. **Disclosed, not
+/// computed**: AUC/precision/recall/F1 (`screen-field-mappings.md`'s 9.2
+/// row) need an independent labeled ground-truth set this corpus has no
+/// signal for beyond the same `disposition_code` already spent on
+/// `fp_rate` — computing them from it would make the label its own
+/// ground truth, not a real metric.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelRunStatRow {
+    pub id: i64,
+    pub stat_id: String,
+    pub tenant_id: String,
+    pub model_version: String,
+    pub run_count: i64,
+    pub avg_score: f64,
+    pub fp_rate: f64,
+    pub sar_conversion_rate: f64,
+    pub score_band_lt50: i64,
+    pub score_band_50_75: i64,
+    pub score_band_75_90: i64,
+    pub score_band_ge90: i64,
+    pub computed_at: i64,
+}
+
+impl GuardedEntity for ModelRunStatRow {
+    const RESOURCE: &'static str = "model_run_stat";
+    fn row_id(&self) -> String {
+        self.stat_id.clone()
+    }
+}
+
+pub fn model_run_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRunStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRunStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-model-run-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_model_run_stat_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Recomputes one fresh snapshot row per `model_version` seen in
+/// `alert_table()`, materializes each via `system_write` (append-only —
+/// `system_write`'s own `WriteAction::Create` semantics reject an
+/// overwrite of an existing key, so each call mints a new `stat_id` keyed
+/// on `computed_at` rather than mutating in place, the same "derive,
+/// never fabricate" posture `case_transactions_for_case` (B11) set), then
+/// reads back through the real guarded path and keeps only the latest
+/// row per `model_version`.
+pub fn refresh_model_run_stat(auth: &nirdosha_rt::Auth) -> Result<Vec<serde_json::Value>, String> {
+    let alerts = alert_table().system_scan().map_err(|e| e.to_string())?;
+    let sar_case_ids: std::collections::HashSet<String> = sar_bundle_table()
+        .system_scan()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.case_id)
+        .filter(|c| !c.is_empty())
+        .collect();
+
+    let mut by_version: std::collections::BTreeMap<String, Vec<&AlertRow>> = std::collections::BTreeMap::new();
+    for a in &alerts {
+        if !a.model_version.is_empty() {
+            by_version.entry(a.model_version.clone()).or_default().push(a);
+        }
+    }
+
+    let now = nirdosha_rt::screens::now_epoch_secs();
+    for (version, rows) in &by_version {
+        let run_count = rows.len() as i64;
+        let avg_score = rows.iter().map(|r| r.score).sum::<f64>() / run_count as f64;
+        let dispositioned: Vec<&&AlertRow> = rows.iter().filter(|r| !r.disposition_code.is_empty()).collect();
+        let fp_rate = if dispositioned.is_empty() {
+            0.0
+        } else {
+            dispositioned.iter().filter(|r| r.disposition_code == "false_positive" || r.disposition_code == "false_hit").count() as f64 / dispositioned.len() as f64
+        };
+        let converted = rows.iter().filter(|r| !r.case_id.is_empty() && sar_case_ids.contains(&r.case_id)).count() as f64;
+        let sar_conversion_rate = converted / run_count as f64;
+        let (mut lt50, mut b5075, mut b7590, mut ge90) = (0i64, 0i64, 0i64, 0i64);
+        for r in rows {
+            if r.score < 0.50 { lt50 += 1 } else if r.score < 0.75 { b5075 += 1 } else if r.score < 0.90 { b7590 += 1 } else { ge90 += 1 }
+        }
+        let row_id = next_model_run_stat_row_id();
+        model_run_stat_table().system_write(
+            DEMO_TENANT,
+            &ModelRunStatRow {
+                id: row_id,
+                // Includes the atomic row-id counter, not just `now` (whose
+                // 1-second resolution collides when a single dashboard
+                // render calls `refresh_model_run_stat` more than once
+                // within the same second -- one call per widget fn).
+                stat_id: format!("{version}:{now}:{row_id}"),
+                tenant_id: DEMO_TENANT.into(),
+                model_version: version.clone(),
+                run_count,
+                avg_score,
+                fp_rate,
+                sar_conversion_rate,
+                score_band_lt50: lt50,
+                score_band_50_75: b5075,
+                score_band_75_90: b7590,
+                score_band_ge90: ge90,
+                computed_at: now,
+            },
+        );
+    }
+
+    let snap = model_run_stat_table().guarded_snapshot(auth, "ModelGovernance").map_err(|e| e.to_string())?;
+    let mut latest: std::collections::BTreeMap<String, ModelRunStatRow> = std::collections::BTreeMap::new();
+    for row in snap {
+        latest
+            .entry(row.model_version.clone())
+            .and_modify(|existing: &mut ModelRunStatRow| if row.computed_at > existing.computed_at { *existing = row.clone(); })
+            .or_insert(row);
+    }
+    Ok(latest.into_values().map(|r| serde_json::to_value(&r).unwrap_or_default()).collect())
+}
+
+/// PSI feature-drift reference rows for `rt_fraud_v1`'s own declared
+/// inputs (`40_scoring.nir`'s `model_artifact!` block: `velocity_1h,
+/// distinct_payees_7d, amount_dev_30d, impossible_travel`). **Demo
+/// bootstrap only** (same posture `case_task_table`/`qa_review_table`'s
+/// seeds already disclose): no raw per-transaction feature value is
+/// computed or persisted anywhere in this corpus (`TransactionRow` has no
+/// such columns), so there is no live signal to derive real PSI from —
+/// unlike `model_run_stat` above, which genuinely derives from real
+/// `alert_table()` data, this table is real guard-enforced plumbing over
+/// seed reference data, not a live drift computation.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct FeatureStatRow {
+    pub id: i64,
+    pub feature_id: String,
+    pub tenant_id: String,
+    pub model_version: String,
+    pub feature_name: String,
+    pub psi: f64,
+    pub trend: String,
+    pub computed_at: i64,
+}
+
+impl GuardedEntity for FeatureStatRow {
+    const RESOURCE: &'static str = "feature_stat";
+    fn row_id(&self) -> String {
+        self.feature_id.clone()
+    }
+}
+
+pub fn feature_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, FeatureStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, FeatureStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-feature-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        let now = nirdosha_rt::screens::now_epoch_secs();
+        let seeds = [
+            ("velocity_1h", 0.08, "stable"),
+            ("distinct_payees_7d", 0.15, "stable"),
+            ("amount_dev_30d", 0.24, "rising"),
+            ("impossible_travel", 0.05, "stable"),
+        ];
+        for (i, (name, psi, trend)) in seeds.into_iter().enumerate() {
+            table.raw_driver_seed(
+                DEMO_TENANT,
+                &FeatureStatRow { id: (i + 1) as i64, feature_id: format!("feat-{name}"), tenant_id: DEMO_TENANT.into(), model_version: "rt_fraud_v1".into(), feature_name: name.into(), psi, trend: trend.into(), computed_at: now },
+            );
+        }
+        table
+    })
+}
+
+/// Validation/governance record for 9.5 — checklist state + sign-off,
+/// `validator ≠ owner` machine-checked (`00_core.nir`'s
+/// `validator_ne_owner` invariant).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelValidationRow {
+    pub id: i64,
+    pub validation_id: String,
+    pub tenant_id: String,
+    pub model_version: String,
+    pub owner: String,
+    pub validator: String,
+    pub status: String,
+    pub concept_doc_reviewed: bool,
+    pub data_lineage_reviewed: bool,
+    pub perf_test_reviewed: bool,
+    pub bias_test_reviewed: bool,
+    pub stability_reviewed: bool,
+    pub signer: String,
+    pub signed_at: i64,
+    pub notes: String,
+}
+
+impl GuardedEntity for ModelValidationRow {
+    const RESOURCE: &'static str = "model_validation";
+    fn row_id(&self) -> String {
+        self.validation_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "validation_id"]
+    }
+    fn create_field_policy_exempt() -> &'static [&'static str] {
+        // `model-validation-create`'s real `field_policy { required(
+        // model_version, owner, validator) forbidden(status, signer,
+        // signed_at) }` — a fresh row starts implicitly at `"in_review"`
+        // with every checklist item unreviewed, same posture
+        // `CaseTaskRow`'s `status`-starts-`"open"` exemption establishes.
+        &["id", "validation_id", "status", "concept_doc_reviewed", "data_lineage_reviewed", "perf_test_reviewed", "bias_test_reviewed", "stability_reviewed", "notes"]
+    }
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            "validator_ne_owner" => Some(!self.validator.is_empty() && self.validator != self.owner),
+            _ => None,
+        }
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        if self.status == requested {
+            return Some(true);
+        }
+        let legal: &[&str] = match self.status.as_str() {
+            "" | "in_review" => &["signed_off"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn model_validation_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelValidationRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelValidationRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-model-validation-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        )
+    })
+}
+
+// ---- 2.6/9.2/9.4 dashboard widget fns — always-live (recompute
+// `refresh_model_run_stat` fresh every call, same posture
+// `team_alert_volume` already established for `alert_table`) ----
+
+pub fn model_run_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    refresh_model_run_stat(auth).map(|rows| rows.iter().filter_map(|r| r.get("run_count").and_then(|v| v.as_i64())).sum()).unwrap_or(0)
+}
+
+pub fn model_run_avg_fp_rate(auth: &nirdosha_rt::Auth) -> f64 {
+    let rows = refresh_model_run_stat(auth).unwrap_or_default();
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = rows.iter().filter_map(|r| r.get("fp_rate").and_then(|v| v.as_f64())).sum();
+    sum / rows.len() as f64
+}
+
+pub fn model_run_fp_rate_by_version(auth: &nirdosha_rt::Auth) -> String {
+    let rows = refresh_model_run_stat(auth).unwrap_or_default();
+    serde_json::to_string(
+        &rows
+            .iter()
+            .map(|r| serde_json::json!({ "label": r.get("model_version").cloned().unwrap_or_default(), "value": r.get("fp_rate").and_then(|v| v.as_f64()).unwrap_or(0.0) }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into())
+}
+
+pub fn model_run_avg_score_by_version(auth: &nirdosha_rt::Auth) -> String {
+    let rows = refresh_model_run_stat(auth).unwrap_or_default();
+    serde_json::to_string(
+        &rows
+            .iter()
+            .map(|r| serde_json::json!({ "label": r.get("model_version").cloned().unwrap_or_default(), "value": r.get("avg_score").and_then(|v| v.as_f64()).unwrap_or(0.0) }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into())
+}
+
+// ---- 9.3 drift dashboard widget ----
+pub fn feature_drift_table(auth: &nirdosha_rt::Auth) -> String {
+    match feature_stat_table().guarded_snapshot(auth, "ModelGovernance") {
+        Ok(rows) => serde_json::to_string(&rows.iter().map(|r| serde_json::json!({ "label": r.feature_name, "value": r.psi })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into()),
+        Err(_) => "[]".into(),
+    }
+}
+
+// ---- 9.6 Score Explainability Viewer: `workspace!` subject + context need ----
+
+/// Subject header for `mount_score_explainability` (9.6) — the alert's
+/// own score/model_version, real fields already on `AlertRow`.
+pub fn alert_explain_header(row: &AlertRow) -> Vec<(String, String)> {
+    vec![("Alert".to_string(), row.alert_id.clone()), ("Score".to_string(), format!("{:.3}", row.score)), ("Model".to_string(), row.model_version.clone())]
+}
+
+/// Model-performance context need: the alert's own `model_version`'s
+/// latest `model_run_stat` snapshot (real, derived — see
+/// `refresh_model_run_stat`). **Disclosed, not built**: per-feature
+/// factor contributions and the counterfactual panel
+/// (`screen-field-mappings.md`'s 9.6 row) need a real SHAP-style
+/// per-transaction breakdown `rt_fraud_v1`'s `model_artifact!` declares
+/// an `explanation: vec[string]` output for, but no scoring execution
+/// anywhere in this corpus persists that output — fabricating numbers
+/// for it would be exactly what R3 forbids, so this panel surfaces only
+/// the real aggregate context, not invented per-feature contributions.
+pub fn model_context_for_alert(auth: &nirdosha_rt::Auth, alert_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let alert = alert_table().guarded_get(auth, "AmlInvestigation", alert_id).map_err(|e| e.to_string())?.ok_or_else(|| format!("alert `{alert_id}` not found"))?;
+    let stats = refresh_model_run_stat(auth)?;
+    Ok(stats.into_iter().filter(|r| r.get("model_version").and_then(|v| v.as_str()) == Some(alert.model_version.as_str())).collect())
+}
+
+// ============================================================================
+// M18 System Administration & Security — screens/m18_admin.nir's row
+// types + tables.
+// ============================================================================
+
+/// `admin-grant-role` (`90_ops_admin.nir`): `for Admin`, `action in
+/// ["create", "update", "delete"] && resource == "user_role"`, `escalate
+/// to approval(chain policy_release)` -- modeled as the same
+/// pre-seeded-then-escalated-UPDATE shape `RefDatasetRow`/`WindowConfigRow`
+/// already use (a "requested" row moving to "granted"), since `action in
+/// [...]` already includes `"update"` and the existing
+/// `guarded_propose_escalated_update`/`guarded_confirm_escalated_update`
+/// engine needs an existing row to fetch, not a from-nothing create --
+/// the real thing being escalated (does this grant happen or not) is
+/// identical either way.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UserRoleRow {
+    pub id: i64,
+    pub grant_id: String,
+    pub user_id: String,
+    pub role: String,
+    pub status: String,
+}
+
+impl GuardedEntity for UserRoleRow {
+    const RESOURCE: &'static str = "user_role";
+    fn row_id(&self) -> String {
+        self.grant_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "grant_id"]
+    }
+}
+
+pub fn user_role_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UserRoleRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UserRoleRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-user-role-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        );
+        // Demo bootstrap: a pending, already-"requested" grant to move
+        // through the real escalation, standing in for whatever a real
+        // deployment's own out-of-band request-intake step would have
+        // produced (same posture `RefDatasetRow`'s seed rows disclose).
+        table.raw_driver_seed(DEMO_TENANT, &UserRoleRow { id: 1, grant_id: "grant-001".into(), user_id: "new-analyst".into(), role: "Analyst".into(), status: "requested".into() });
+        table
+    })
+}
+
+/// `admin-mint-delegation` (`90_ops_admin.nir`): `for Admin`, `action ==
+/// "delegate" && resource == "delegation_token"`, `cap(ttl_max = 90d)`,
+/// no `escalate` clause -- a plain guarded create under a real, non-
+/// `"create"` `Action` (`Action::Delegate`), proving
+/// `guarded_insert_action`'s generalization for real. **Disclosed scope
+/// boundary** (same posture `delegation_scope()` failing closed already
+/// establishes elsewhere in this crate): this mints a real, guarded,
+/// audited TOKEN RECORD -- it does not stand up a delegation-
+/// *verification* system (nothing elsewhere in this workspace checks a
+/// minted token against a live request), because no such system exists
+/// anywhere in this workspace to wire into.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DelegationTokenRow {
+    pub id: i64,
+    pub token_id: String,
+    pub tenant_id: String,
+    pub scope: String,
+    pub ttl_days: i64,
+    pub minted_by: String,
+}
+
+impl GuardedEntity for DelegationTokenRow {
+    const RESOURCE: &'static str = "delegation_token";
+    fn row_id(&self) -> String {
+        self.token_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "token_id", "minted_by"]
+    }
+}
+
+pub fn delegation_token_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DelegationTokenRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DelegationTokenRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-delegation-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+/// `driver-migrate` (`90_ops_admin.nir`): `for Admin`, `action ==
+/// "migrate" && resource == "driver"`, `escalate to approval(chain
+/// policy_release)` -- the exact same shape `RefDatasetRow`'s
+/// maker≠checker migrate already proves (`Admin` proposes,
+/// `policy_release`'s `of = [PolicyEngineer, ComplianceLead]` names
+/// neither); reuses `guarded_propose_escalated_action`/
+/// `guarded_confirm_escalated_action` verbatim, no new engine work.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DriverRow {
+    pub id: i64,
+    pub driver_id: String,
+    pub version: String,
+    pub status: String,
+}
+
+impl GuardedEntity for DriverRow {
+    const RESOURCE: &'static str = "driver";
+    fn row_id(&self) -> String {
+        self.driver_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "driver_id"]
+    }
+}
+
+pub fn driver_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DriverRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DriverRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-driver-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        );
+        table.raw_driver_seed(DEMO_TENANT, &DriverRow { id: 1, driver_id: "postgres-store".into(), version: "1.3.0".into(), status: "active".into() });
+        table
+    })
+}
+
+// ============================================================================
+// M19 IT Operations — screens/m19_it_ops.nir's row type + table.
+//
+// `ops-ingest-admin` (`20_ingestion.nir`): `for Admin`, `action in
+// ["update", "migrate"] && resource == "ingest_admin"`, `escalate to
+// approval(chain policy_release)` -- like `UserRoleRow`/`DriverRow`,
+// `"ingest_admin"` names no `#[dataset]` anywhere in this corpus (it's an
+// operational job, not a stored entity the RFC ever declared a schema
+// for) -- modeled the same way, a pre-seeded "requested" replay job
+// escalated via `guarded_propose_escalated_action`/
+// `guarded_confirm_escalated_action` under `WriteAction::Migrate` (this
+// row stands for 19.2/19.3's "reprocess/exception replay" job, the
+// concrete case `20_ingestion.nir`'s own comment names).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct IngestAdminRow {
+    pub id: i64,
+    pub job_id: String,
+    pub kind: String,
+    pub target: String,
+    pub status: String,
+}
+
+impl GuardedEntity for IngestAdminRow {
+    const RESOURCE: &'static str = "ingest_admin";
+    fn row_id(&self) -> String {
+        self.job_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "job_id"]
+    }
+}
+
+pub fn ingest_admin_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, IngestAdminRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, IngestAdminRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-ingest-admin-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            corpus_approval_chains(),
+        );
+        // Demo bootstrap: a real exception-replay job awaiting the same
+        // maker≠checker `policy_release` quorum `driver-migrate`/
+        // `refdata-migrate` already prove (`Admin` proposes, `of =
+        // [PolicyEngineer, ComplianceLead]` names neither).
+        table.raw_driver_seed(DEMO_TENANT, &IngestAdminRow { id: 1, job_id: "replay-001".into(), kind: "reprocess".into(), target: "txn_in:2026-09-20".into(), status: "requested".into() });
+        table
+    })
+}
+
+// ============================================================================
+// M21 Restricted / Downstream Views — screens/m21_restricted.nir's row
+// type + table. RECONCILED with M11 Intervention (final Phase B batch):
+// `PaymentRow` already carried every real `Payment` field
+// (`10_domains.nir`'s full list) from the day M21 added it, so M11's own
+// hold queue/decision screens read and write this SAME table rather than
+// forking a second one — `cs-payment-status`'s masked view and M11's
+// real intervention queue now share one real data plane, exactly the
+// posture the plan called for. Only `check_invariant`/`transition_allowed`
+// were missing (M21 never needed them; M11's `ops-decide-hold`/
+// `ops-decide-hold-highvalue` do) — added below.
+//
+// `cs-payment-status` (`96_restricted_views.nir`): `for CsAgent`, `action
+// == "read" && resource == "payment"`, `field_policy { allowed(status,
+// hold_expires_at, currency) forbidden(amount, rail_ref, originator,
+// beneficiary, hold_reason, decision_by, decision_rationale) }`.
+// `Payment` is a real `#[dataset]` (`10_domains.nir`).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PaymentRow {
+    pub id: i64,
+    pub payment_id: String,
+    pub tenant_id: String,
+    // T-02: `cs-payment-status` (`96_restricted_views.nir`) and
+    // `ops-decide-hold` (`85_intervention.nir`) both `forbidden(...)`
+    // every field below except `status`/`currency`/`hold_expires_at`.
+    // `read_masks_from_field_policy` now synthesizes `MaskTransform::Drop`
+    // (true key removal, not a `"[REDACTED]"` placeholder) for those --
+    // `Option<T>`, not a bare masked-shaped `String`/`f64`, so a dropped
+    // key decodes to `None` instead of a hard deserialize error, and
+    // `skip_serializing_if` so it stays absent on the way back out.
+    // `amount` was already flattened to `String` (not `f64`) for the
+    // identical "masking always produces a JSON string" reason, before
+    // this fix could remove the key outright.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rail_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beneficiary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    pub currency: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_reason: Option<String>,
+    pub hold_expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_rationale: Option<String>,
+}
+
+impl GuardedEntity for PaymentRow {
+    const RESOURCE: &'static str = "payment";
+    fn row_id(&self) -> String {
+        self.payment_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "payment_id"]
+    }
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            // `ops-decide-hold`'s own `requires invariant(rationale_present)`
+            // -- this dataset's rationale field is `decision_rationale`,
+            // not the generic `rationale` `AlertRow`/`CaseRow` use.
+            "rationale_present" => Some(!self.decision_rationale.as_deref().unwrap_or("").is_empty()),
+            // `00_core.nir`'s real `hold_reason_valid` [NEW: T-03] --
+            // `ingest-create-hold` requires `hold_reason` non-empty, so
+            // (unlike the disposition checks) empty is never valid here.
+            "hold_reason_valid" => {
+                let hold_reason = self.hold_reason.as_deref().unwrap_or("");
+                Some(!hold_reason.is_empty() && crate::domains::HOLD_REASON_CODES.contains(&hold_reason))
+            }
+            _ => None,
+        }
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        // `10_domains.nir`'s declared `machine PaymentStatus` graph,
+        // verbatim: `received -> held -> [released, blocked]; held ->
+        // held;` (the comment on that last edge, "no self-loop
+        // releases", documents intent for `ops-decide-hold`'s own
+        // runtime revalidation at commit -- I3 -- not that the edge
+        // itself is illegal; the machine as declared permits it).
+        let legal: &[&str] = match self.status.as_str() {
+            "" | "received" => &["held"], // "" -- same freshly-created-row convention as AlertRow
+            "held" => &["released", "blocked", "held"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn payment_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PaymentRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PaymentRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-payment-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().chain(["SvcIngest"].iter()).map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            // `override_release` (M11's `ops-decide-hold-highvalue`) --
+            // was `vec![]` when M21 first added this table (that batch
+            // never needed an escalation); real chain defs added now
+            // that M11 does.
+            corpus_approval_chains(),
+        );
+        // Demo bootstrap only (see `ModelRow`'s identical disclosure) --
+        // a real `Payment` row for `cs-payment-status`'s masked read to
+        // act on, standing in for what `ingest-create-hold` (M11,
+        // unbuilt) would have produced.
+        table.raw_driver_seed(DEMO_TENANT, &PaymentRow {
+            id: 1, payment_id: "pay-001".into(), tenant_id: DEMO_TENANT.into(), rail_ref: Some("rtp-778812".into()),
+            originator: Some("subj-77".into()), beneficiary: Some("subj-12".into()), amount: Some("4500.00".into()), currency: "USD".into(),
+            status: "held".into(), hold_reason: Some("velocity".into()), hold_expires_at: 1_800_000_000, decision_by: None, decision_rationale: None,
+        });
+        table
+    })
+}
+
+// ============================================================================
+// M22 Miscellaneous — screens/m22_misc.nir's row types + tables.
+//
+// `self-update-profile` (`90_ops_admin.nir`): `for Analyst`, `action ==
+// "update" && resource == "user_profile"`, `filter subject_scope()`,
+// `field_policy { allowed(locale, tz, notif_prefs) forbidden(user_id) }`.
+// No create policy exists for `user_profile` anywhere in this corpus (a
+// row must already exist, matching a real deployment's own account-
+// provisioning step) -- `raw_driver_seed` below stands in for that,
+// same disclosed posture every other unbuilt-create-path table already
+// uses. `NotifPrefs { digest: bool, quiet_hours: Option<String> }`
+// (`domain_types.nir`) is flattened onto this row's own two fields
+// (`digest`/`quiet_hours`), the same "flat screen projection, not the
+// corpus struct verbatim" convention every row in this file follows.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UserProfileRow {
+    pub id: i64,
+    pub user_id: String,
+    pub locale: String,
+    pub tz: String,
+    pub digest: bool,
+    pub quiet_hours: String,
+}
+
+impl GuardedEntity for UserProfileRow {
+    const RESOURCE: &'static str = "user_profile";
+    fn row_id(&self) -> String {
+        self.user_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id"]
+    }
+    fn subject_scope_field() -> Option<&'static str> {
+        Some("user_id")
+    }
+}
+
+pub fn user_profile_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UserProfileRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UserProfileRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-user-profile-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        // One profile per demo login (`m01_auth.nir`'s `HUMAN_ROLES`
+        // lowercased usernames, matching `Auth::user()`'s real value —
+        // see `m01_auth.nir`'s `demo_users:` list), so `subject_scope()`
+        // has a real row to find for whichever role signs in.
+        for role in HUMAN_ROLES {
+            let user_id = role.to_lowercase();
+            table.raw_driver_seed(DEMO_TENANT, &UserProfileRow { id: 0, user_id: user_id.clone(), locale: "en-US".into(), tz: "UTC".into(), digest: true, quiet_hours: String::new() });
+        }
+        table
+    })
+}
+
+/// `any-create-ticket` (`90_ops_admin.nir`): `for Analyst`, `action ==
+/// "create" && resource == "support_ticket"`, `field_policy {
+/// required(tenant_id, category, priority, description) }`. No read
+/// policy exists for `support_ticket` anywhere in this corpus either --
+/// same disclosed "write grant, no matching read grant" shape
+/// `m10_screening.nir`/`m05_customer.nir` already established (this is
+/// the fourth real instance of it across this rollout).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SupportTicketRow {
+    pub id: i64,
+    pub ticket_id: String,
+    pub tenant_id: String,
+    pub category: String,
+    pub priority: String,
+    pub description: String,
+}
+
+impl GuardedEntity for SupportTicketRow {
+    const RESOURCE: &'static str = "support_ticket";
+    fn row_id(&self) -> String {
+        self.ticket_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "ticket_id"]
+    }
+}
+
+pub fn support_ticket_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SupportTicketRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SupportTicketRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-support-ticket-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+// ============================================================================
+// M12 SAR / Regulatory Reporting — screens/m12_sar.nir's row type + table.
+// Final Phase B batch.
+//
+// `65_sar.nir`'s real policies: `analyst-draft-sar` (`for Analyst`,
+// `requires invariant(sar_subject_in_case)`, `field_policy {
+// required(case_id, subject) forbidden(status, goaml_ref, filed_at) }`),
+// `analyst-edit-sar` (`requires field(status) == "draft"`, `field_policy
+// { allowed(narrative, activity_codes, amount_total, txn_refs,
+// next_review_at) forbidden(case_id, subject, status, goaml_ref) }`),
+// `mlro-decide-sar` (`for Mlro`, `requires
+// field(status).transition_allowed()`, `field_policy { allowed(status,
+// mlro_rationale) forbidden(narrative, txn_refs) }`), `sar-export` (`for
+// ComplianceLead`, `requires field(status) == "confirmed_fraud"`,
+// `escalate to approval(chain sar_release)`). `mlro_rationale` is named
+// by `mlro-decide-sar`'s own `field_policy` but never declared on the
+// corpus's own `SarBundle` struct (`10_domains.nir`) -- same
+// `analyst_flag`-style drift as `TransactionRow`/`CaseRow`'s own extra
+// screen-only fields, added here for the same reason.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SarBundleRow {
+    pub id: i64,
+    pub sar_id: String,
+    pub tenant_id: String,
+    pub case_id: String,
+    pub subject: String,
+    pub status: String,
+    pub narrative: String,
+    /// Comma-joined `Vec<ActivityCode>` -- flat screen projection, per
+    /// this file's established convention.
+    pub activity_codes: String,
+    pub amount_total: f64,
+    /// Comma-joined `Vec<TxnId>`.
+    pub txn_refs: String,
+    pub filed_at: i64,
+    pub goaml_ref: String,
+    pub next_review_at: i64,
+    pub mlro_rationale: String,
+}
+
+impl GuardedEntity for SarBundleRow {
+    const RESOURCE: &'static str = "sar_bundle";
+    fn row_id(&self) -> String {
+        self.sar_id.clone()
+    }
+    fn field_policy_exempt() -> &'static [&'static str] {
+        &["id", "sar_id"]
+    }
+    fn check_invariant(&self, name: &str) -> Option<bool> {
+        match name {
+            // `00_core.nir`'s real `sar_subject_in_case` invariant,
+            // rewritten (per that file's own doc comment) to what's
+            // actually checkable from `SarBundle`'s own fields: non-empty
+            // `case_id`/`subject`.
+            "sar_subject_in_case" => Some(!self.case_id.is_empty() && !self.subject.is_empty()),
+            _ => None,
+        }
+    }
+    fn transition_allowed(&self, requested_status: &serde_json::Value) -> Option<bool> {
+        let Some(requested) = requested_status.as_str() else { return Some(false) };
+        // `10_domains.nir`'s declared `machine SarStatus` graph,
+        // verbatim: `draft -> in_review -> [filed, rejected,
+        // do_not_file]; rejected -> draft; filed -> continuation_due ->
+        // [filed, ceased];`
+        let legal: &[&str] = match self.status.as_str() {
+            "" | "draft" => &["in_review"], // "" -- same freshly-created-row convention as AlertRow
+            "in_review" => &["filed", "rejected", "do_not_file"],
+            "rejected" => &["draft"],
+            "filed" => &["continuation_due"],
+            "continuation_due" => &["filed", "ceased"],
+            _ => &[],
+        };
+        Some(legal.contains(&requested))
+    }
+}
+
+pub fn sar_bundle_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarBundleRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarBundleRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-sar-bundle-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            // `sar_release` (`sar-export`'s real quorum(2)).
+            corpus_approval_chains(),
+        )
+    })
+}
+
+// ============================================================================
+// T-01 governed egress — `PG.governed_export`. Real `GuardedTable`
+// backing every export event `nirdosha_rt::export::write_governed_export`
+// mints (watermark, content hash, row count, expiry). Same posture as
+// `NotificationRow` above: no `guard_policy!` names `"governed_export"`
+// as a resource anywhere in this corpus today (no screen reads export
+// HISTORY yet -- 15.5 Governed Export Center, the one screen that
+// would, stays blocked on `ticket:T-04`'s not-yet-built
+// `approval_inbox!`), so this is written only via `system_write`
+// (`record_export`, wired as the crate-generic `export` module's sink
+// below) and left for a future ticket to add a real `governed-export-
+// read` policy once 15.5 actually needs one. Disclosed, not faked.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct GovernedExportRow {
+    pub id: i64,
+    pub export_id: String,
+    pub tenant_id: String,
+    pub purpose: String,
+    pub content_hash: String,
+    pub row_count: i64,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+impl GuardedEntity for GovernedExportRow {
+    const RESOURCE: &'static str = "governed_export";
+    fn row_id(&self) -> String {
+        self.export_id.clone()
+    }
+}
+
+pub fn governed_export_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, GovernedExportRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, GovernedExportRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            // T-04/B10: wired to the real corpus now that
+            // `governed-export-read` (`00_core.nir`) exists — was `vec![]`
+            // (disclosed, no policy existed yet; see this row type's own
+            // doc comment above).
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-governed-export-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_governed_export_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn record_export(record: &nirdosha_rt::export::GovernedExportRecord) {
+    governed_export_table().system_write(
+        DEMO_TENANT,
+        &GovernedExportRow {
+            id: next_governed_export_row_id(),
+            export_id: record.export_id.clone(),
+            tenant_id: DEMO_TENANT.into(),
+            purpose: record.purpose.clone(),
+            content_hash: record.content_hash.clone(),
+            row_count: record.row_count as i64,
+            created_at: record.created_at,
+            expires_at: record.expires_at,
+        },
+    );
+}
+
+/// Registers [`record_export`] as `nirdosha_rt::export`'s sink so every
+/// `crud_screens!`-generated guarded CSV export produces a real
+/// `PG.governed_export` row here, not just the generic in-memory `O.*`
+/// artifact that crate keeps on its own. Called once from
+/// `src/bin/serve.nir`'s `main()`, before any route is mounted.
+pub fn init_governed_export_sink() {
+    nirdosha_rt::export::set_export_sink(record_export);
+}
+
+// ============================================================================
+// T-11 — `AC.all_chains` unified audit-chain projection + `PG.sar_visibility`
+// tipping-off visibility (screens 20.1/20.2/12.11/14.5). See
+// `nirdosha_rt::audit_projection`'s own module doc comment for what this
+// projects FROM: every `GuardedTable` above already writes a real,
+// hash-chained `ModuleAuditChain` on every guarded decision (its
+// `audit_path` constructor arg) -- this section reads those chains back
+// and re-projects them into a guarded, queryable dataset of their own,
+// rather than inventing a second audit mechanism.
+// ============================================================================
+
+/// One row of the `AC.all_chains` projection. `module` is the *source*
+/// chain's own label (`"alert"`, `"case"`, ...), not the constant
+/// `"rtm-demo"` every table's underlying `GuardClient` shares -- see
+/// `audit_projection::project`'s doc comment for why the projection has
+/// to carry that itself rather than reading it back out of the envelope.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AllChainsRow {
+    pub id: i64,
+    pub module: String,
+    pub seq: i64,
+    pub ts_ms: i64,
+    pub trace_id: String,
+    pub subject: String,
+    pub action: String,
+    pub resource: String,
+    pub decision: String,
+    pub kind: String,
+    pub content_json: String,
+}
+
+impl GuardedEntity for AllChainsRow {
+    const RESOURCE: &'static str = "audit_chain";
+    fn row_id(&self) -> String {
+        format!("{}:{}", self.module, self.seq)
+    }
+}
+
+pub fn all_chains_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AllChainsRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AllChainsRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-all-chains-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+fn next_all_chains_row_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Every `bridge.nir` table whose real, per-domain audit chain the
+/// projection reads from -- one `ChainSource` per `GuardedTable::new`
+/// call site above, reconstructing the exact `audit_path` each one was
+/// built with (same process, same `std::process::id()`, so the paths
+/// are deterministic; `GuardedTable` has no public getter for its own
+/// `audit_path` to read this back through instead -- disclosed, not a
+/// missing feature this pass needed to add).
+fn all_chain_sources() -> Vec<nirdosha_rt::audit_projection::ChainSource> {
+    use nirdosha_audit::envelope::ModuleAuditChain;
+    use nirdosha_rt::audit_projection::ChainSource;
+    let pid = std::process::id();
+    let path = |name: &str| std::env::temp_dir().join(format!("rtm-demo-audit-{name}-{pid}.jsonl"));
+    [
+        ("alert", "alert"),
+        ("case", "case"),
+        ("entity", "customer"),
+        ("model", "model"),
+        ("screening", "screening"),
+        ("refdata", "refdata"),
+        ("window_config", "window"),
+        ("notification", "notification"),
+        ("qa_review", "qa"),
+        ("user_role", "user-role"),
+        ("delegation_token", "delegation"),
+        ("driver", "driver"),
+        ("ingest_admin", "ingest-admin"),
+        ("payment", "payment"),
+        ("user_profile", "user-profile"),
+        ("support_ticket", "support-ticket"),
+        ("sar_bundle", "sar-bundle"),
+        ("governed_export", "governed-export"),
+    ]
+    .into_iter()
+    .map(|(label, file_tag)| ChainSource { label: Box::leak(label.to_string().into_boxed_str()), chain: ModuleAuditChain::new("rtm-demo", path(file_tag)) })
+    .collect()
+}
+
+/// Rebuilds the `AC.all_chains` projection from the real source chains.
+/// Idempotent by `(module, seq)`: re-running after more events have been
+/// appended only inserts the new rows, so this is cheap to call before
+/// every read rather than only once at boot (a chain grows for as long
+/// as the demo runs). Tampered source chains (T-11's immutability
+/// requirement) are excluded from the projection and returned by label
+/// so a caller can surface them, never silently merged in.
+pub fn refresh_all_chains() -> Vec<String> {
+    let (rows, tampered) = nirdosha_rt::audit_projection::project(&all_chain_sources());
+    let table = all_chains_table();
+    let already: std::collections::HashSet<String> = table.system_scan().unwrap_or_default().iter().map(|r: &AllChainsRow| r.row_id()).collect();
+    for entry in rows {
+        let row = AllChainsRow {
+            id: next_all_chains_row_id(),
+            module: entry.module.clone(),
+            seq: entry.seq as i64,
+            ts_ms: entry.ts_ms as i64,
+            trace_id: entry.trace_id,
+            subject: entry.subject,
+            action: entry.action,
+            resource: entry.resource,
+            decision: entry.decision,
+            kind: entry.kind,
+            content_json: entry.content.to_string(),
+        };
+        if already.contains(&row.row_id()) {
+            continue;
+        }
+        table.system_write(DEMO_TENANT, &row);
+    }
+    tampered.into_iter().map(|t| format!("{}: {}", t.label, t.error)).collect()
+}
+
+/// `PG.sar_visibility` (12.11 Tipping-Off Controls): who has read a
+/// SAR-linked alert/case row, derived from the same projection rather
+/// than a second, independent audit path -- an access to a row this
+/// corpus already knows is `sar_linked`/has a `sar_id` (B1/B3's real
+/// fields on `AlertRow`/`CaseRow`) is exactly the tipping-off-relevant
+/// event this screen exists to surface.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SarVisibilityRow {
+    pub id: i64,
+    pub visibility_id: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub accessed_by: String,
+    pub accessed_at: i64,
+    pub purpose: String,
+}
+
+impl GuardedEntity for SarVisibilityRow {
+    const RESOURCE: &'static str = "sar_visibility";
+    fn row_id(&self) -> String {
+        self.visibility_id.clone()
+    }
+}
+
+pub fn sar_visibility_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarVisibilityRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarVisibilityRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-sar-visibility-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        )
+    })
+}
+
+/// Rebuilds `PG.sar_visibility` from the current `AC.all_chains`
+/// projection: every `read` decision on the `alert`/`case` resource
+/// becomes one visibility record, real per-tenant access accounting for
+/// the two resources SAR linkage lives on.
+///
+/// **Disclosed limitation, not silently papered over**: this cannot
+/// attribute a read to the *specific* row that was accessed, only to the
+/// resource *type* (`"alert"`, `"case"`) -- `GuardClient`'s own audit
+/// envelope deliberately carries `resource = request.context.entity`
+/// (the bare type `evaluator::matches_context` policy-matches against,
+/// e.g. `"alert"`), not the per-row `"<type>:<row-id>"` storage key
+/// `GuardedTable`'s own module doc comment explains it builds
+/// separately for storage identity (the G4 workaround). So this table
+/// answers "who read alert/case data, when, under what decision" (a
+/// real, corpus-wide access ledger) rather than "who read *this*
+/// SAR-linked row specifically" -- true row-level tipping-off
+/// attribution needs a row-scoped audit envelope, a real, separate
+/// change to `nirdosha-guard-mic::GuardClient` shared by every app on
+/// this crate, out of this ticket's honest blast radius (same posture
+/// `nirdosha-audit/src/audit_chain.rs`'s own doc comment already takes
+/// on a comparably-scoped decision). `AlertRow.sar_linked`/
+/// `CaseRow.sar_id` (real since B1/B3) still gate what a *screen* built
+/// on this table is allowed to render per-row -- this table's job is
+/// only to say who touched the resource type at all. Call
+/// [`refresh_all_chains`] first -- this reads the projection table, it
+/// does not re-derive from the raw source chains itself.
+pub fn refresh_sar_visibility() {
+    let all = all_chains_table().system_scan().unwrap_or_default();
+    let table = sar_visibility_table();
+    // Mutable + updated as we go (not just seeded once before the loop):
+    // `trace_id` on anonymous/system-attributed reads is timestamp-derived
+    // and two distinct chain entries in the same batch can legitimately
+    // collide on `{module}:{trace_id}` under fast repeated reads (the same
+    // module read twice inside one wall-clock millisecond). A set that's
+    // only a pre-loop snapshot would try to `create` the second one and
+    // panic on the resulting "already exists" guard rejection; checking
+    // and inserting inline makes this call idempotent within itself too,
+    // matching this function's own doc comment above.
+    let mut already: std::collections::HashSet<String> = table.system_scan().unwrap_or_default().iter().map(|r: &SarVisibilityRow| r.row_id()).collect();
+    for entry in all.iter().filter(|e: &&AllChainsRow| e.action == "Read" && matches!(e.module.as_str(), "alert" | "case")) {
+        let visibility_id = format!("{}:{}", entry.module, entry.trace_id);
+        if !already.insert(visibility_id.clone()) {
+            continue;
+        }
+        table.system_write(
+            DEMO_TENANT,
+            &SarVisibilityRow {
+                id: next_all_chains_row_id(),
+                visibility_id,
+                resource_type: entry.module.clone(),
+                resource_id: entry.resource.clone(),
+                accessed_by: entry.subject.clone(),
+                accessed_at: entry.ts_ms,
+                purpose: "Audit".into(),
+            },
+        );
+    }
+}
+
+// ============================================================================
+// Phase C dataset bulk-add — declared in bridge.nir, guarded via policies in
+// 90_ops_admin.nir / 50_alerts.nir / 60_case_management.nir / 80_consumers.nir.
+// Each row below is a screen-projection struct (synthetic id + string row_id)
+// paired with a GuardedTable, the same pattern the Phase B tables use.
+// ============================================================================
+
+// ---- M1.6 / M18.x unlock request + assignment rules + reason codes + templates ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UnlockRequestRow {
+    pub id: i64,
+    pub request_id: String,
+    pub user_id: String,
+    pub reason: String,
+    pub status: String,
+}
+
+impl GuardedEntity for UnlockRequestRow {
+    const RESOURCE: &'static str = "unlock_request";
+    fn row_id(&self) -> String { self.request_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "request_id"] }
+}
+
+pub fn unlock_request_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UnlockRequestRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UnlockRequestRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-unlock-request-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &UnlockRequestRow { id: 1, request_id: "unlock-001".into(), user_id: "an".into(), reason: "vacation".into(), status: "pending".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AssignmentRuleRow {
+    pub id: i64,
+    pub rule_id: String,
+    pub queue: String,
+    pub rule_expr: String,
+    pub assignee_pool: String,
+}
+
+impl GuardedEntity for AssignmentRuleRow {
+    const RESOURCE: &'static str = "assignment_rules";
+    fn row_id(&self) -> String { self.rule_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "rule_id"] }
+}
+
+pub fn assignment_rules_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AssignmentRuleRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AssignmentRuleRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-assignment-rules-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &AssignmentRuleRow { id: 1, rule_id: "round-robin".into(), queue: "l1".into(), rule_expr: "round_robin".into(), assignee_pool: "an,bo".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DispositionCodeRow {
+    pub id: i64,
+    pub code: String,
+    pub label: String,
+    pub category: String,
+    pub active: bool,
+}
+
+impl GuardedEntity for DispositionCodeRow {
+    const RESOURCE: &'static str = "disposition_code";
+    fn row_id(&self) -> String { self.code.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "code"] }
+}
+
+pub fn disposition_code_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DispositionCodeRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DispositionCodeRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-disposition-code-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        for (code, label, cat) in [
+            ("false_positive", "False positive", "alert"),
+            ("false_hit", "False hit", "alert"),
+            ("duplicate", "Duplicate", "alert"),
+            ("known_fraud", "Known fraud", "alert"),
+            ("confirmed_fraud", "Confirmed fraud", "case"),
+            ("not_substantiated", "Not substantiated", "case"),
+        ] {
+            table.raw_driver_seed(DEMO_TENANT, &DispositionCodeRow { id: 0, code: code.into(), label: label.into(), category: cat.into(), active: true });
+        }
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct NotificationTemplateRow {
+    pub id: i64,
+    pub template_id: String,
+    pub channel: String,
+    pub subject: String,
+    pub body_template: String,
+}
+
+impl GuardedEntity for NotificationTemplateRow {
+    const RESOURCE: &'static str = "notif_template";
+    fn row_id(&self) -> String { self.template_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "template_id"] }
+}
+
+pub fn notif_template_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationTemplateRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationTemplateRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-notif-template-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &NotificationTemplateRow { id: 1, template_id: "sla-breach".into(), channel: "email".into(), subject: "SLA breach".into(), body_template: "Alert {{alert_id}} breached SLA.".into() });
+        table
+    })
+}
+
+// ---- M4 evidence / case notes (4.6/4.7/16.2) ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceDocRow {
+    pub id: i64,
+    pub doc_id: String,
+    pub item_ref: String,
+    pub filename: String,
+    pub classification: String,
+    pub uploaded_by: String,
+}
+
+impl GuardedEntity for EvidenceDocRow {
+    const RESOURCE: &'static str = "evidence_doc";
+    fn row_id(&self) -> String { self.doc_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "doc_id"] }
+}
+
+pub fn evidence_doc_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, EvidenceDocRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, EvidenceDocRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-evidence-doc-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &EvidenceDocRow { id: 1, doc_id: "doc-001".into(), item_ref: "case:case-001".into(), filename: "kyc.pdf".into(), classification: "internal".into(), uploaded_by: "an".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CaseNoteRow {
+    pub id: i64,
+    pub note_id: String,
+    pub item_ref: String,
+    pub author: String,
+    pub body: String,
+}
+
+impl GuardedEntity for CaseNoteRow {
+    const RESOURCE: &'static str = "case_note";
+    fn row_id(&self) -> String { self.note_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "note_id"] }
+}
+
+pub fn case_note_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseNoteRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseNoteRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-case-note-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &CaseNoteRow { id: 1, note_id: "note-001".into(), item_ref: "case:case-001".into(), author: "an".into(), body: "Initial note.".into() });
+        table
+    })
+}
+
+// ---- M5 customer-related tables (KYC, risk, flags, restrictions) ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct KycDocRow {
+    pub id: i64,
+    pub doc_id: String,
+    pub customer_id: String,
+    pub doc_type: String,
+    pub status: String,
+    pub expiry_date: String,
+}
+
+impl GuardedEntity for KycDocRow {
+    const RESOURCE: &'static str = "kyc_doc";
+    fn row_id(&self) -> String { self.doc_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "doc_id"] }
+}
+
+pub fn kyc_doc_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, KycDocRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, KycDocRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-kyc-doc-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &KycDocRow { id: 1, doc_id: "kyc-001".into(), customer_id: "cust-001".into(), doc_type: "passport".into(), status: "valid".into(), expiry_date: "2027-01-01".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RiskFactorRow {
+    pub id: i64,
+    pub factor_id: String,
+    pub name: String,
+    pub weight: i64,
+}
+
+impl GuardedEntity for RiskFactorRow {
+    const RESOURCE: &'static str = "risk_factor";
+    fn row_id(&self) -> String { self.factor_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "factor_id"] }
+}
+
+pub fn risk_factor_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RiskFactorRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RiskFactorRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-risk-factor-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &RiskFactorRow { id: 1, factor_id: "geo".into(), name: "Geography".into(), weight: 30 });
+        table.raw_driver_seed(DEMO_TENANT, &RiskFactorRow { id: 2, factor_id: "pep".into(), name: "PEP".into(), weight: 25 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct EntityFlagRow {
+    pub id: i64,
+    pub flag_id: String,
+    pub customer_id: String,
+    pub flag_type: String,
+    pub note: String,
+}
+
+impl GuardedEntity for EntityFlagRow {
+    const RESOURCE: &'static str = "entity_flag";
+    fn row_id(&self) -> String { self.flag_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "flag_id"] }
+}
+
+pub fn entity_flag_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, EntityFlagRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, EntityFlagRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-entity-flag-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &EntityFlagRow { id: 1, flag_id: "flag-001".into(), customer_id: "cust-001".into(), flag_type: "watch".into(), note: "High velocity".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CustomerRestrictionRow {
+    pub id: i64,
+    pub restriction_id: String,
+    pub customer_id: String,
+    pub band: String,
+    pub reason: String,
+    pub proposed_by: String,
+}
+
+impl GuardedEntity for CustomerRestrictionRow {
+    const RESOURCE: &'static str = "customer_restriction";
+    fn row_id(&self) -> String { self.restriction_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "restriction_id"] }
+}
+
+pub fn customer_restriction_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CustomerRestrictionRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CustomerRestrictionRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-customer-restriction-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DeviceSessionRow {
+    pub id: i64,
+    pub session_id: String,
+    pub subject_id: String,
+    pub device_id: String,
+    pub geo: String,
+    pub occurred_at: i64,
+}
+
+impl GuardedEntity for DeviceSessionRow {
+    const RESOURCE: &'static str = "device_session";
+    fn row_id(&self) -> String { self.session_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "session_id"] }
+}
+
+pub fn device_session_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DeviceSessionRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DeviceSessionRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-device-session-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &DeviceSessionRow { id: 1, session_id: "sess-001".into(), subject_id: "cust-001".into(), device_id: "dev-001".into(), geo: "US".into(), occurred_at: 1_700_000_000 });
+        table
+    })
+}
+
+// ---- M7/M8 graph + rules helper tables ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinkEdgeRow {
+    pub id: i64,
+    pub edge_id: String,
+    pub from_id: String,
+    pub to_id: String,
+    pub edge_type: String,
+    pub strength: f64,
+}
+
+impl GuardedEntity for LinkEdgeRow {
+    const RESOURCE: &'static str = "link_edge";
+    fn row_id(&self) -> String { self.edge_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "edge_id"] }
+}
+
+pub fn link_edge_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, LinkEdgeRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, LinkEdgeRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-link-edge-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &LinkEdgeRow { id: 1, edge_id: "e1".into(), from_id: "cust-001".into(), to_id: "cust-002".into(), edge_type: "shared_device".into(), strength: 0.9 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AggBinsRow {
+    pub id: i64,
+    pub bin_id: String,
+    pub bucket_start: i64,
+    pub bucket_end: i64,
+    pub count: i64,
+    pub amount_sum: f64,
+}
+
+impl GuardedEntity for AggBinsRow {
+    const RESOURCE: &'static str = "agg_bins";
+    fn row_id(&self) -> String { self.bin_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "bin_id"] }
+}
+
+pub fn agg_bins_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AggBinsRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AggBinsRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-agg-bins-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &AggBinsRow { id: 1, bin_id: "9k-10k".into(), bucket_start: 9000, bucket_end: 10000, count: 7, amount_sum: 67_000.0 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct FlowEdgeRow {
+    pub id: i64,
+    pub edge_id: String,
+    pub from_subject: String,
+    pub to_subject: String,
+    pub amount: f64,
+    pub currency: String,
+    pub period: String,
+}
+
+impl GuardedEntity for FlowEdgeRow {
+    const RESOURCE: &'static str = "flow_edge";
+    fn row_id(&self) -> String { self.edge_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "edge_id"] }
+}
+
+pub fn flow_edge_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, FlowEdgeRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, FlowEdgeRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-flow-edge-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &FlowEdgeRow { id: 1, edge_id: "f1".into(), from_subject: "cust-001".into(), to_subject: "cust-002".into(), amount: 50_000.0, currency: "USD".into(), period: "2026-01".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RuleStatRow {
+    pub id: i64,
+    pub stat_id: String,
+    pub rule_id: String,
+    pub version: String,
+    pub alert_count: i64,
+    pub fp_rate: f64,
+}
+
+impl GuardedEntity for RuleStatRow {
+    const RESOURCE: &'static str = "rule_stat";
+    fn row_id(&self) -> String { self.stat_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "stat_id"] }
+}
+
+pub fn rule_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RuleStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RuleStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-rule-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &RuleStatRow { id: 1, stat_id: "rs-001".into(), rule_id: "velocity_1h".into(), version: "1.0".into(), alert_count: 12, fp_rate: 0.15 });
+        table
+    })
+}
+
+// ---- M10 screening tables ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ListVersionRow {
+    pub id: i64,
+    pub version_id: String,
+    pub list_id: String,
+    pub effective_at: String,
+    pub record_count: i64,
+}
+
+impl GuardedEntity for ListVersionRow {
+    const RESOURCE: &'static str = "list_versions";
+    fn row_id(&self) -> String { self.version_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "version_id"] }
+}
+
+pub fn list_versions_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ListVersionRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ListVersionRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-list-versions-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &ListVersionRow { id: 1, version_id: "ofac-2026-01".into(), list_id: "ofac_sdn".into(), effective_at: "2026-01-01".into(), record_count: 12_000 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct InternalListRow {
+    pub id: i64,
+    pub entry_id: String,
+    pub list_id: String,
+    pub subject_ref: String,
+    pub reason: String,
+    pub expiry_at: String,
+}
+
+impl GuardedEntity for InternalListRow {
+    const RESOURCE: &'static str = "internal_list";
+    fn row_id(&self) -> String { self.entry_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "entry_id"] }
+}
+
+pub fn internal_list_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, InternalListRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, InternalListRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-internal-list-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RescreenJobRow {
+    pub id: i64,
+    pub job_id: String,
+    pub list_id: String,
+    pub status: String,
+    pub progress_pct: i64,
+}
+
+impl GuardedEntity for RescreenJobRow {
+    const RESOURCE: &'static str = "rescreen_job";
+    fn row_id(&self) -> String { self.job_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "job_id"] }
+}
+
+pub fn rescreen_job_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RescreenJobRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RescreenJobRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-rescreen-job-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RescreenCampaignRow {
+    pub id: i64,
+    pub campaign_id: String,
+    pub list_id: String,
+    pub started_at: String,
+    pub matches_found: i64,
+}
+
+impl GuardedEntity for RescreenCampaignRow {
+    const RESOURCE: &'static str = "rescreen_campaign";
+    fn row_id(&self) -> String { self.campaign_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "campaign_id"] }
+}
+
+pub fn rescreen_campaign_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RescreenCampaignRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RescreenCampaignRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-rescreen-campaign-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+// ---- M11 timeout config ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TimeoutConfigRow {
+    pub id: i64,
+    pub config_id: String,
+    pub rail: String,
+    pub timeout_seconds: i64,
+    auto_release: bool,
+}
+
+impl GuardedEntity for TimeoutConfigRow {
+    const RESOURCE: &'static str = "timeout_config";
+    fn row_id(&self) -> String { self.config_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "config_id"] }
+}
+
+pub fn timeout_config_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, TimeoutConfigRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, TimeoutConfigRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-timeout-config-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &TimeoutConfigRow { id: 1, config_id: "swift".into(), rail: "swift".into(), timeout_seconds: 300, auto_release: false });
+        table
+    })
+}
+
+// ---- M12/M15 reporting / SAR submission / calendar ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SarSubmissionRow {
+    pub id: i64,
+    pub submission_id: String,
+    pub sar_id: String,
+    pub goaml_ref: String,
+    pub status: String,
+    submitted_at: String,
+}
+
+impl GuardedEntity for SarSubmissionRow {
+    const RESOURCE: &'static str = "sar_submission";
+    fn row_id(&self) -> String { self.submission_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "submission_id"] }
+}
+
+pub fn sar_submission_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarSubmissionRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SarSubmissionRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-sar-submission-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReportingCalendarRow {
+    pub id: i64,
+    pub calendar_id: String,
+    pub jurisdiction: String,
+    pub deadline: String,
+    pub responsible_role: String,
+}
+
+impl GuardedEntity for ReportingCalendarRow {
+    const RESOURCE: &'static str = "reporting_calendar";
+    fn row_id(&self) -> String { self.calendar_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "calendar_id"] }
+}
+
+pub fn reporting_calendar_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReportingCalendarRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReportingCalendarRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-reporting-calendar-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &ReportingCalendarRow { id: 1, calendar_id: "fin-001".into(), jurisdiction: "FinCEN".into(), deadline: "2026-03-15".into(), responsible_role: "Mlro".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReportDefRow {
+    pub id: i64,
+    pub report_id: String,
+    pub name: String,
+    pub category: String,
+    pub schedule: String,
+}
+
+impl GuardedEntity for ReportDefRow {
+    const RESOURCE: &'static str = "report_def";
+    fn row_id(&self) -> String { self.report_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "report_id"] }
+}
+
+pub fn report_def_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReportDefRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReportDefRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-report-def-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &ReportDefRow { id: 1, report_id: "alert-volume".into(), name: "Alert Volume".into(), category: "ops".into(), schedule: "daily".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ScheduledReportRow {
+    pub id: i64,
+    pub schedule_id: String,
+    pub report_id: String,
+    pub recipients: String,
+    pub next_run: String,
+}
+
+impl GuardedEntity for ScheduledReportRow {
+    const RESOURCE: &'static str = "scheduled_report";
+    fn row_id(&self) -> String { self.schedule_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "schedule_id"] }
+}
+
+pub fn scheduled_report_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ScheduledReportRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ScheduledReportRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-scheduled-report-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+// ---- M13 risk refdata (country, product, pep) ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CountryRiskRow {
+    pub id: i64,
+    pub country_code: String,
+    pub risk_band: String,
+    pub source: String,
+}
+
+impl GuardedEntity for CountryRiskRow {
+    const RESOURCE: &'static str = "country_risk";
+    fn row_id(&self) -> String { self.country_code.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "country_code"] }
+}
+
+pub fn country_risk_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CountryRiskRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CountryRiskRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-country-risk-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &CountryRiskRow { id: 1, country_code: "US".into(), risk_band: "low".into(), source: "internal".into() });
+        table.raw_driver_seed(DEMO_TENANT, &CountryRiskRow { id: 2, country_code: "IR".into(), risk_band: "high".into(), source: "internal".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProductRiskRow {
+    pub id: i64,
+    pub product_code: String,
+    pub channel: String,
+    pub risk_weight: i64,
+}
+
+impl GuardedEntity for ProductRiskRow {
+    const RESOURCE: &'static str = "product_risk";
+    fn row_id(&self) -> String { self.product_code.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "product_code"] }
+}
+
+pub fn product_risk_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ProductRiskRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ProductRiskRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-product-risk-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &ProductRiskRow { id: 1, product_code: "wire".into(), channel: "swift".into(), risk_weight: 3 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PepCategoryRow {
+    pub id: i64,
+    pub category_code: String,
+    pub label: String,
+    pub declassification_rule: String,
+}
+
+impl GuardedEntity for PepCategoryRow {
+    const RESOURCE: &'static str = "pep_category";
+    fn row_id(&self) -> String { self.category_code.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "category_code"] }
+}
+
+pub fn pep_category_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PepCategoryRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PepCategoryRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-pep-category-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &PepCategoryRow { id: 1, category_code: "domestic".into(), label: "Domestic PEP".into(), declassification_rule: "12mo".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct GlobalParamsRow {
+    pub id: i64,
+    pub param_id: String,
+    pub name: String,
+    pub value: String,
+}
+
+impl GuardedEntity for GlobalParamsRow {
+    const RESOURCE: &'static str = "global_params";
+    fn row_id(&self) -> String { self.param_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "param_id"] }
+}
+
+pub fn global_params_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, GlobalParamsRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, GlobalParamsRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-global-params-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &GlobalParamsRow { id: 1, param_id: "fx_usd_eur".into(), name: "USD/EUR".into(), value: "0.92".into() });
+        table
+    })
+}
+
+// ---- M16 handover + saved views ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct HandoverRow {
+    pub id: i64,
+    pub handover_id: String,
+    pub from_user: String,
+    pub to_user: String,
+    pub summary: String,
+    pub acknowledged: bool,
+}
+
+impl GuardedEntity for HandoverRow {
+    const RESOURCE: &'static str = "handover";
+    fn row_id(&self) -> String { self.handover_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "handover_id"] }
+}
+
+pub fn handover_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, HandoverRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, HandoverRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-handover-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SavedViewRow {
+    pub id: i64,
+    pub view_id: String,
+    pub owner: String,
+    pub name: String,
+    pub filters: String,
+}
+
+impl GuardedEntity for SavedViewRow {
+    const RESOURCE: &'static str = "saved_view";
+    fn row_id(&self) -> String { self.view_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "view_id"] }
+}
+
+pub fn saved_view_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SavedViewRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SavedViewRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-saved-view-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+// ---- M18 retention / delegation / DSAR / license ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RetentionConfigRow {
+    pub id: i64,
+    pub config_id: String,
+    pub data_class: String,
+    pub years: i64,
+    pub legal_hold_allowed: bool,
+}
+
+impl GuardedEntity for RetentionConfigRow {
+    const RESOURCE: &'static str = "retention_config";
+    fn row_id(&self) -> String { self.config_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "config_id"] }
+}
+
+pub fn retention_config_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RetentionConfigRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, RetentionConfigRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-retention-config-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &RetentionConfigRow { id: 1, config_id: "txn".into(), data_class: "transaction".into(), years: 7, legal_hold_allowed: true });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DelegationRow {
+    pub id: i64,
+    pub delegation_id: String,
+    pub from_user: String,
+    pub to_user: String,
+    pub scope: String,
+    pub ttl_days: i64,
+    pub status: String,
+}
+
+impl GuardedEntity for DelegationRow {
+    const RESOURCE: &'static str = "delegation";
+    fn row_id(&self) -> String { self.delegation_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "delegation_id"] }
+}
+
+pub fn delegation_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DelegationRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DelegationRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-delegation-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DsarRequestRow {
+    pub id: i64,
+    pub dsar_id: String,
+    pub requester: String,
+    pub request_type: String,
+    pub status: String,
+    pub deadline: String,
+}
+
+impl GuardedEntity for DsarRequestRow {
+    const RESOURCE: &'static str = "dsar_request";
+    fn row_id(&self) -> String { self.dsar_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "dsar_id"] }
+}
+
+pub fn dsar_request_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DsarRequestRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, DsarRequestRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-dsar-request-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LicenseInfoRow {
+    pub id: i64,
+    pub license_id: String,
+    pub product: String,
+    pub version: String,
+    pub expiry: String,
+}
+
+impl GuardedEntity for LicenseInfoRow {
+    const RESOURCE: &'static str = "license_info";
+    fn row_id(&self) -> String { self.license_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "license_id"] }
+}
+
+pub fn license_info_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, LicenseInfoRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, LicenseInfoRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-license-info-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &LicenseInfoRow { id: 1, license_id: "rtm-demo".into(), product: "RTM".into(), version: "2026.09".into(), expiry: "2027-01-01".into() });
+        table
+    })
+}
+
+// ---- M19 ops monitor tables ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SvcHealthRow {
+    pub id: i64,
+    pub service_id: String,
+    pub status: String,
+    pub latency_ms: i64,
+    pub last_heartbeat: i64,
+}
+
+impl GuardedEntity for SvcHealthRow {
+    const RESOURCE: &'static str = "svc_health";
+    fn row_id(&self) -> String { self.service_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "service_id"] }
+}
+
+pub fn svc_health_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SvcHealthRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SvcHealthRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-svc-health-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &SvcHealthRow { id: 1, service_id: "ingest".into(), status: "ok".into(), latency_ms: 12, last_heartbeat: 1_700_000_000 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PipelineStatRow {
+    pub id: i64,
+    pub pipeline_id: String,
+    pub source: String,
+    pub lag_seconds: i64,
+    pub throughput: i64,
+}
+
+impl GuardedEntity for PipelineStatRow {
+    const RESOURCE: &'static str = "pipeline_stat";
+    fn row_id(&self) -> String { self.pipeline_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "pipeline_id"] }
+}
+
+pub fn pipeline_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PipelineStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PipelineStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-pipeline-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &PipelineStatRow { id: 1, pipeline_id: "core-banking".into(), source: "core".into(), lag_seconds: 2, throughput: 1200 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct IngestExceptionRow {
+    pub id: i64,
+    pub exception_id: String,
+    pub source: String,
+    pub error_code: String,
+    pub payload_ref: String,
+}
+
+impl GuardedEntity for IngestExceptionRow {
+    const RESOURCE: &'static str = "ingest_exception";
+    fn row_id(&self) -> String { self.exception_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "exception_id"] }
+}
+
+pub fn ingest_exception_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, IngestExceptionRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, IngestExceptionRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-ingest-exception-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReconReportRow {
+    pub id: i64,
+    pub report_id: String,
+    pub source: String,
+    pub expected: i64,
+    pub actual: i64,
+}
+
+impl GuardedEntity for ReconReportRow {
+    const RESOURCE: &'static str = "recon_report";
+    fn row_id(&self) -> String { self.report_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "report_id"] }
+}
+
+pub fn recon_report_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReconReportRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReconReportRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-recon-report-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct IntegrationStatRow {
+    pub id: i64,
+    pub integration_id: String,
+    pub target: String,
+    pub status: String,
+    pub latency_ms: i64,
+}
+
+impl GuardedEntity for IntegrationStatRow {
+    const RESOURCE: &'static str = "integration_stat";
+    fn row_id(&self) -> String { self.integration_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "integration_id"] }
+}
+
+pub fn integration_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, IntegrationStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, IntegrationStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-integration-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &IntegrationStatRow { id: 1, integration_id: "goaml".into(), target: "fintrac".into(), status: "ok".into(), latency_ms: 45 });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct BatchJobRow {
+    pub id: i64,
+    pub job_id: String,
+    pub job_name: String,
+    pub status: String,
+    pub run_at: String,
+}
+
+impl GuardedEntity for BatchJobRow {
+    const RESOURCE: &'static str = "batch_job";
+    fn row_id(&self) -> String { self.job_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "job_id"] }
+}
+
+pub fn batch_job_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, BatchJobRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, BatchJobRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-batch-job-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &BatchJobRow { id: 1, job_id: "eod".into(), job_name: "End-of-day".into(), status: "scheduled".into(), run_at: "02:00".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CapacityStatRow {
+    pub id: i64,
+    pub metric_id: String,
+    pub resource: String,
+    pub usage_pct: i64,
+    pub projected_date: String,
+}
+
+impl GuardedEntity for CapacityStatRow {
+    const RESOURCE: &'static str = "capacity_stat";
+    fn row_id(&self) -> String { self.metric_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "metric_id"] }
+}
+
+pub fn capacity_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CapacityStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CapacityStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-capacity-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &CapacityStatRow { id: 1, metric_id: "storage".into(), resource: "pg_primary".into(), usage_pct: 45, projected_date: "2026-12-01".into() });
+        table
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SyncStatRow {
+    pub id: i64,
+    pub sync_id: String,
+    pub refdata_type: String,
+    pub last_sync: String,
+    pub staleness_hours: i64,
+}
+
+impl GuardedEntity for SyncStatRow {
+    const RESOURCE: &'static str = "sync_stat";
+    fn row_id(&self) -> String { self.sync_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "sync_id"] }
+}
+
+pub fn sync_stat_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SyncStatRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SyncStatRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-sync-stat-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table.raw_driver_seed(DEMO_TENANT, &SyncStatRow { id: 1, sync_id: "fx".into(), refdata_type: "fx_rates".into(), last_sync: "2026-09-01T00:00:00Z".into(), staleness_hours: 2 });
+        table
+    })
+}
+
+// ---- Adverse media (external integration stub) ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AdverseMediaRow {
+    pub id: i64,
+    pub hit_id: String,
+    pub subject_ref: String,
+    pub headline: String,
+    pub source: String,
+    pub published_at: String,
+    pub sentiment: String,
+}
+
+impl GuardedEntity for AdverseMediaRow {
+    const RESOURCE: &'static str = "adverse_media";
+    fn row_id(&self) -> String { self.hit_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "hit_id"] }
+}
+
+pub fn adverse_media_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AdverseMediaRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AdverseMediaRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-adverse-media-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+
+// ---- Catalog projection stub (compiled metadata read) ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CatalogProjectionRow {
+    pub id: i64,
+    pub entry_id: String,
+    pub kind: String,
+    pub name: String,
+    pub source_ref: String,
+}
+
+impl GuardedEntity for CatalogProjectionRow {
+    const RESOURCE: &'static str = "catalog_projection";
+    fn row_id(&self) -> String { self.entry_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "entry_id"] }
+}
+
+pub fn catalog_projection_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CatalogProjectionRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CatalogProjectionRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-catalog-projection-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        // Seed from real guard registry dump: policies, windows, models, matchers.
+        let dump = nirdosha_guard_registry::dump();
+        for (i, p) in dump.policies.iter().enumerate() {
+            table.raw_driver_seed(DEMO_TENANT, &CatalogProjectionRow { id: i as i64 + 1, entry_id: format!("policy-{}", i), kind: "policy".into(), name: p.id.clone(), source_ref: format!("{}/{}", p.action, p.resource) });
+        }
+        for (i, w) in dump.windows.iter().enumerate() {
+            table.raw_driver_seed(DEMO_TENANT, &CatalogProjectionRow { id: 1000 + i as i64, entry_id: format!("window-{}", i), kind: "window".into(), name: w.name.clone(), source_ref: w.name.clone() });
+        }
+        for (i, m) in dump.models.iter().enumerate() {
+            table.raw_driver_seed(DEMO_TENANT, &CatalogProjectionRow { id: 2000 + i as i64, entry_id: format!("model-{}", i), kind: "model".into(), name: m.name.clone(), source_ref: m.name.clone() });
+        }
+        for (i, m) in dump.matchers.iter().enumerate() {
+            table.raw_driver_seed(DEMO_TENANT, &CatalogProjectionRow { id: 3000 + i as i64, entry_id: format!("matcher-{}", i), kind: "matcher".into(), name: m.name.clone(), source_ref: m.name.clone() });
+        }
+        table
+    })
+}
+
+// ---- M5.6 customer relationship (UBO) ----
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CustomerRelRow {
+    pub id: i64,
+    pub rel_id: String,
+    pub from_customer: String,
+    pub to_customer: String,
+    pub rel_type: String,
+}
+
+impl GuardedEntity for CustomerRelRow {
+    const RESOURCE: &'static str = "customer_rel";
+    fn row_id(&self) -> String { self.rel_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "rel_id"] }
+}
+
+pub fn customer_rel_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CustomerRelRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CustomerRelRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let table = nirdosha_guard_screens::GuardedTable::new(
+            nirdosha_guard_mic::MemStoreDriver::new(),
+            nirdosha_guard_registry::candidates(),
+            nirdosha_guard_registry::dump().policies,
+            "rtm-demo",
+            std::env::temp_dir().join(format!("rtm-demo-audit-customer-rel-{}.jsonl", std::process::id())),
+            HUMAN_ROLES.iter().map(|r| r.to_string()).collect(),
+            DEMO_TENANT,
+            vec![],
+        );
+        table
+    })
+}
+

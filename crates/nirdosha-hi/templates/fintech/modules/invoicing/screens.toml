@@ -1,0 +1,32 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-invoicing"
+version = "1.0.0"
+module = "M11"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "11.1"
+name = "Invoices"
+module = "M11"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "MerchantAdmin"]
+stage = "blocked"
+blocked_by = ["primitive:invoice_create", "primitive:invoice_pay", "primitive:tax_calc"]
+codegen = { template = "crud_screens", mount_symbol = "mount_invoices", route_path = "/invoices", generated_files = ["src/screens/m11_invoicing.nir"] }
+data_binding = { entities = ["Invoice"], primary_key = "invoice_id", guard = { table = "invoice", purpose = "InvoiceOps" }, fields = [
+    { name = "invoice_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "due_date", type = "String" }
+] }
+policy = { purpose = "InvoiceOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m11_invoicing.nir"
+notes = "BLOCKED: invoice lifecycle + tax-calculation primitives not yet available."

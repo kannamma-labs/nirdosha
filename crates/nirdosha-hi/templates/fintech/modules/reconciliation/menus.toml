@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Reconciliation"
+
+[[group]]
+id = "reconciliation"
+label_key = "nav.group.reconciliation"
+order = 120
+
+[[menu]]
+id = "nav.reconciliation"
+label_key = "nav.reconciliation"
+group = "reconciliation"
+screen_id = "13.1"
+route = "/reconciliation"
+guard = { action = "read", resource = "settlement" }
+roles = ["PlatformAdmin", "Operator"]
+order = 10

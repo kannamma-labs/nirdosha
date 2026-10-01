@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Trading Positions"
+
+[[group]]
+id = "positions"
+label_key = "nav.group.positions"
+order = 30
+
+[[menu]]
+id = "nav.positions"
+label_key = "nav.positions"
+group = "positions"
+screen_id = "4.1"
+route = "/positions"
+guard = { action = "read", resource = "position" }
+roles = ["Trader", "RiskManager", "Operations"]
+order = 10

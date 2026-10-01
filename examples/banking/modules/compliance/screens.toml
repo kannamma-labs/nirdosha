@@ -1,0 +1,46 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "banking-compliance"
+version = "1.0.0"
+module = "compliance"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+
+# ------------------------------------------------------------------ M7 Compliance
+[[screen]]
+id = "7.1"
+name = "Audit Trail"
+module = "M7"
+archetype = "report_builder"
+combo = []
+roles = ["ComplianceOfficer:R", "BranchManager:R"]
+datasets = ["PG.audit_log"]
+blocked_by = []
+stage = "built"
+codegen = { template = "report_builder", mount_symbol = "mount_audit_report", route_path = "/compliance/audit", generated_files = ["src/screens/m07_compliance.nir"] }
+data_binding = { entities = ["AuditEntry"], primary_key = "entry_id", guard = { table = "audit_table", purpose = "Compliance" }, fields = [
+    { name = "entry_id", type = "String" },
+    { name = "actor_id", type = "String" },
+    { name = "action", type = "String" },
+    { name = "resource", type = "String" },
+    { name = "timestamp", type = "String" },
+] }
+policy = { purpose = "Compliance", allowed_actions = ["aggregate", "read"] }
+parameters = { access = 'requires role "ComplianceOfficer"', dimensions = ["action", "resource"] }
+notes = "Audit log is append-only from primitives. This report screen is built."
+
+[[screen]]
+id = "7.2"
+name = "Sanction Scan"
+module = "M7"
+archetype = "static_embed"
+combo = []
+roles = ["ComplianceOfficer:R/W"]
+datasets = ["STATIC.sanction_lists"]
+stage = "blocked"
+blocked_by = ["plugin:sanction_screening_api"]
+codegen = { template = "static_embed", mount_symbol = "mount_sanction_scan", route_path = "/compliance/sanction-scan", generated_files = ["src/screens/m07_compliance.nir"] }
+parameters = { title = "Sanction Scan", content_file = "files/sanction-scan.md", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }
+notes = "BLOCKED: needs external watchlist API plugin. Could later be a real workspace screen over screened parties."

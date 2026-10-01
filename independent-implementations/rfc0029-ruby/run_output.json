@@ -1,0 +1,1208 @@
+{
+  "fixture_ids": [
+    "EQ1A",
+    "EQ1B",
+    "EQ2A",
+    "EQ2B",
+    "EQ3A",
+    "EQ3B",
+    "EQ4A",
+    "EQ4B",
+    "B1",
+    "B2_STALE",
+    "B3",
+    "K1",
+    "K1_STRUCTURAL_ONLY",
+    "K3",
+    "K4",
+    "K5",
+    "H1",
+    "H1_ORDER_REUSE",
+    "H2",
+    "H3",
+    "H4",
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "I1",
+    "I2",
+    "I3",
+    "I3_PAYMENT_REUSE",
+    "I4",
+    "R1_ACK",
+    "R2_ACK_FOR_APPROVAL",
+    "R3_NOT_ACCESSED",
+    "R4_CONFLICT",
+    "R5_PASS",
+    "R6_STALE",
+    "R7_CAPACITY",
+    "R8_MONITOR_MISSING",
+    "R9_EVALUATION_MISSING",
+    "INV_PRECOMMIT",
+    "INV_EXTERNAL_UNKNOWN",
+    "L1",
+    "L2",
+    "L3",
+    "L4",
+    "L5",
+    "L6",
+    "L7",
+    "L8",
+    "L9",
+    "L10",
+    "L11",
+    "L12",
+    "L13",
+    "L14",
+    "K2",
+    "H5",
+    "M6",
+    "I5",
+    "B4",
+    "K7",
+    "H6",
+    "B5",
+    "K8",
+    "B6",
+    "K9",
+    "H7",
+    "I6",
+    "B7",
+    "H8",
+    "M7",
+    "I7",
+    "B8",
+    "K10",
+    "H9",
+    "M8",
+    "B9",
+    "B10",
+    "B11",
+    "B12",
+    "B13",
+    "B14",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "H10",
+    "H11",
+    "H12",
+    "H13",
+    "H14",
+    "H15",
+    "M9",
+    "M10",
+    "M11",
+    "M12",
+    "M13",
+    "M14",
+    "I8",
+    "I9",
+    "I10",
+    "I11",
+    "I12",
+    "I13"
+  ],
+  "canon": {
+    "EQ1A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "c4e4323a1975b2f90fed3f483a521c4ef858cc513443b907372a2465fe5a7ea1",
+      "our_sha": "c4e4323a1975b2f90fed3f483a521c4ef858cc513443b907372a2465fe5a7ea1"
+    },
+    "EQ1B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "36e212e8e4aa3ba5ee0d828afa2e63c648af5c04abcc5d3f1c7a39470cf5b1c4",
+      "our_sha": "36e212e8e4aa3ba5ee0d828afa2e63c648af5c04abcc5d3f1c7a39470cf5b1c4"
+    },
+    "EQ2A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "73fdb406729770df18f9bb249019e082765779d8e948bb4006cfc38e3931deeb",
+      "our_sha": "73fdb406729770df18f9bb249019e082765779d8e948bb4006cfc38e3931deeb"
+    },
+    "EQ2B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "9b757194041995a5d103814371f843fe97e5fbadb506da5597131cb14381c007",
+      "our_sha": "9b757194041995a5d103814371f843fe97e5fbadb506da5597131cb14381c007"
+    },
+    "EQ3A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "eb43c8f6266f66df2acfdff663defff8bf0c90dd24f0e88e8199bccd62f90d48",
+      "our_sha": "eb43c8f6266f66df2acfdff663defff8bf0c90dd24f0e88e8199bccd62f90d48"
+    },
+    "EQ3B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "ed3da80f6514d9b6cf901be60d2516a899c689cad092b6e035d39eff3bb44d7c",
+      "our_sha": "ed3da80f6514d9b6cf901be60d2516a899c689cad092b6e035d39eff3bb44d7c"
+    },
+    "EQ4A": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "b2558723630177893a19d655cc6f6638a0305c553c1672bc1e47d6d689933d1e",
+      "our_sha": "b2558723630177893a19d655cc6f6638a0305c553c1672bc1e47d6d689933d1e"
+    },
+    "EQ4B": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "1d0e172931374366d7db89e77c967370412c2be3e8c55001f267c41d9f6b5d65",
+      "our_sha": "1d0e172931374366d7db89e77c967370412c2be3e8c55001f267c41d9f6b5d65"
+    },
+    "B1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "a51a103265a9c9c0f947ee5f60ee6ea88cab651abe1fb6b6af351f1a9570bea3",
+      "our_sha": "a51a103265a9c9c0f947ee5f60ee6ea88cab651abe1fb6b6af351f1a9570bea3"
+    },
+    "B2_STALE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "e542336b4899bac855140c102e16c0038f25fd2f993e6b0608fc1017006fc9dd",
+      "our_sha": "e542336b4899bac855140c102e16c0038f25fd2f993e6b0608fc1017006fc9dd"
+    },
+    "B3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "313fe1235dca47ab662d3cc1f88ae67bac1e25c350417d9b81ef7a4693f8387a",
+      "our_sha": "313fe1235dca47ab662d3cc1f88ae67bac1e25c350417d9b81ef7a4693f8387a"
+    },
+    "K1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "8fbcbcf742695f208dcbbf44b37f3f5e064135b596142c33d3318700f978f9f6",
+      "our_sha": "8fbcbcf742695f208dcbbf44b37f3f5e064135b596142c33d3318700f978f9f6"
+    },
+    "K1_STRUCTURAL_ONLY": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "e731c0848625bc2853dd524f7181661a45cf3028258780905923488718fc9dac",
+      "our_sha": "e731c0848625bc2853dd524f7181661a45cf3028258780905923488718fc9dac"
+    },
+    "K3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "7b67e7c3e93e563966032ea0754643714050e9d199f0336ffd61960e4f9af604",
+      "our_sha": "7b67e7c3e93e563966032ea0754643714050e9d199f0336ffd61960e4f9af604"
+    },
+    "K4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d36107d271a05a8fa767d544218011a7a240fe5228e74ef759dd5992d6b5362f",
+      "our_sha": "d36107d271a05a8fa767d544218011a7a240fe5228e74ef759dd5992d6b5362f"
+    },
+    "K5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "5b7d0e3ad5188c94333fdf59bf4179048e59b711e9acf57c7300708419c287cd",
+      "our_sha": "5b7d0e3ad5188c94333fdf59bf4179048e59b711e9acf57c7300708419c287cd"
+    },
+    "H1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "ea28e0284e206ad69dbd669aafdc4e06985328b581ba2fa73a005b18ea1e83ca",
+      "our_sha": "ea28e0284e206ad69dbd669aafdc4e06985328b581ba2fa73a005b18ea1e83ca"
+    },
+    "H1_ORDER_REUSE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "e21890182186008ffa30586d40517dccb11e9830707ce51ca4c245f097a52637",
+      "our_sha": "e21890182186008ffa30586d40517dccb11e9830707ce51ca4c245f097a52637"
+    },
+    "H2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f9af299bbe8b278efdea29747812374ec455099c4aa063998a1d07cf91a82bdd",
+      "our_sha": "f9af299bbe8b278efdea29747812374ec455099c4aa063998a1d07cf91a82bdd"
+    },
+    "H3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "831301bd4beef28193b37d81f8b819ffe7e06f60b5fc66ca12cd54929eb2e42f",
+      "our_sha": "831301bd4beef28193b37d81f8b819ffe7e06f60b5fc66ca12cd54929eb2e42f"
+    },
+    "H4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "112342fa024e8aff456cc98bcde5d218508b09accc33afd549c96b5d774119cb",
+      "our_sha": "112342fa024e8aff456cc98bcde5d218508b09accc33afd549c96b5d774119cb"
+    },
+    "M1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "60e37ebc4ecbf87866e7ccc59cfd94ff9b17fc253f471fa30f3452598021f52e",
+      "our_sha": "60e37ebc4ecbf87866e7ccc59cfd94ff9b17fc253f471fa30f3452598021f52e"
+    },
+    "M2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d44b49303636514130775c2b7e284504451f0bae57133bd324a759336d3e4af2",
+      "our_sha": "d44b49303636514130775c2b7e284504451f0bae57133bd324a759336d3e4af2"
+    },
+    "M3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "347a9c3233467d622278a9bfda01257ddb87a51807ff2555cae5228db58e764d",
+      "our_sha": "347a9c3233467d622278a9bfda01257ddb87a51807ff2555cae5228db58e764d"
+    },
+    "M4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "5c83380a4726b410a0cbb22fade33fddf56e0198a7230314103f38d2672872cb",
+      "our_sha": "5c83380a4726b410a0cbb22fade33fddf56e0198a7230314103f38d2672872cb"
+    },
+    "M5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "158345c72985813df269078f483fd1957ce326cb2874ed08c36ab487b52bd91f",
+      "our_sha": "158345c72985813df269078f483fd1957ce326cb2874ed08c36ab487b52bd91f"
+    },
+    "I1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "145bd759d778ed2bc12d04acc7b01ce43d84f31bc72274155aa964224b07092d",
+      "our_sha": "145bd759d778ed2bc12d04acc7b01ce43d84f31bc72274155aa964224b07092d"
+    },
+    "I2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "fd2d5f65f56250831f4b635a7f731d9374fc2636fa1252b084a46107f8ed566a",
+      "our_sha": "fd2d5f65f56250831f4b635a7f731d9374fc2636fa1252b084a46107f8ed566a"
+    },
+    "I3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "c9cc4b5c9ab51212c5bd5955a139d90178f1f2c295e5e0cd98659991029c8522",
+      "our_sha": "c9cc4b5c9ab51212c5bd5955a139d90178f1f2c295e5e0cd98659991029c8522"
+    },
+    "I3_PAYMENT_REUSE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "4e82a5b644fcee6559e39c33df09a391200203fd7fd288f17cb64452634ec433",
+      "our_sha": "4e82a5b644fcee6559e39c33df09a391200203fd7fd288f17cb64452634ec433"
+    },
+    "I4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "698eb9e751ca42e7feeb5826e63bc932f364d98deb9a208fc8db88ceeb6bfa96",
+      "our_sha": "698eb9e751ca42e7feeb5826e63bc932f364d98deb9a208fc8db88ceeb6bfa96"
+    },
+    "R1_ACK": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "754f1b1dce87acfd3aac1a284776f24e8160424da224a121de1c61b51179ffb3",
+      "our_sha": "754f1b1dce87acfd3aac1a284776f24e8160424da224a121de1c61b51179ffb3"
+    },
+    "R2_ACK_FOR_APPROVAL": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "95fd708c199e97d8f8e7529bcd631555770af7b19dc96f5f816ee14c70d3f2cb",
+      "our_sha": "95fd708c199e97d8f8e7529bcd631555770af7b19dc96f5f816ee14c70d3f2cb"
+    },
+    "R3_NOT_ACCESSED": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "aff1fcf3242476685e83e20a2977b558a9b657f9222ba96107538134f1b6c9e2",
+      "our_sha": "aff1fcf3242476685e83e20a2977b558a9b657f9222ba96107538134f1b6c9e2"
+    },
+    "R4_CONFLICT": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "8a52b3a017dce2c3048ad0eeb5006bf80dc18f9259202168dee528e5c437321a",
+      "our_sha": "8a52b3a017dce2c3048ad0eeb5006bf80dc18f9259202168dee528e5c437321a"
+    },
+    "R5_PASS": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "8d381c95d5bf3ea17708db221fcd91c84844600d6fa3e6934022a231660c5a9b",
+      "our_sha": "8d381c95d5bf3ea17708db221fcd91c84844600d6fa3e6934022a231660c5a9b"
+    },
+    "R6_STALE": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "07fad5d988cfb099d57942332836c26349916537b2ab8c0679ed211e37f08134",
+      "our_sha": "07fad5d988cfb099d57942332836c26349916537b2ab8c0679ed211e37f08134"
+    },
+    "R7_CAPACITY": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "91ff71e5635e7d65e742d7c633823a4052dfcacb5801b0a046cf927c4b55a293",
+      "our_sha": "91ff71e5635e7d65e742d7c633823a4052dfcacb5801b0a046cf927c4b55a293"
+    },
+    "R8_MONITOR_MISSING": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "7078ef795de907e50994f7966bc362ddf8dc2302ecc95c7b971f2006a8bfdcfa",
+      "our_sha": "7078ef795de907e50994f7966bc362ddf8dc2302ecc95c7b971f2006a8bfdcfa"
+    },
+    "R9_EVALUATION_MISSING": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f81ea42ec1bf48ecf578bfc4e682e8baa68aa8bebb55f5be5c5aa8fea7cfe571",
+      "our_sha": "f81ea42ec1bf48ecf578bfc4e682e8baa68aa8bebb55f5be5c5aa8fea7cfe571"
+    },
+    "INV_PRECOMMIT": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "70154391397d5f6ed664e29ca56b35706573a3e2853abcf8891ddcc22d1e076a",
+      "our_sha": "70154391397d5f6ed664e29ca56b35706573a3e2853abcf8891ddcc22d1e076a"
+    },
+    "INV_EXTERNAL_UNKNOWN": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "9c237044106aec7df4a303cb239c69907713380d8fee86a61575052c3959da90",
+      "our_sha": "9c237044106aec7df4a303cb239c69907713380d8fee86a61575052c3959da90"
+    },
+    "L1": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "65a91ae83da76abf62d634ecffb0370c604567e4af0c76e3d247ebf8b967250f",
+      "our_sha": "65a91ae83da76abf62d634ecffb0370c604567e4af0c76e3d247ebf8b967250f"
+    },
+    "L2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d41dc618348e45de7923364f1a88c160ff7e8309bea6171efbe3a711307514bc",
+      "our_sha": "d41dc618348e45de7923364f1a88c160ff7e8309bea6171efbe3a711307514bc"
+    },
+    "L3": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "6a7e660634dc9a51312d5b731a14c2edb6cbca55dde78b74dd475701cc27b34f",
+      "our_sha": "6a7e660634dc9a51312d5b731a14c2edb6cbca55dde78b74dd475701cc27b34f"
+    },
+    "L4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "c500215047d0d5eb5e164a9f656cd50ba9d1b27128370a42764bd08ce4c2a12c",
+      "our_sha": "c500215047d0d5eb5e164a9f656cd50ba9d1b27128370a42764bd08ce4c2a12c"
+    },
+    "L5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "67126ce2363e2da03a30bd370dea873d42fc5a2a92344c1db156c133b59154e9",
+      "our_sha": "67126ce2363e2da03a30bd370dea873d42fc5a2a92344c1db156c133b59154e9"
+    },
+    "L6": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d86b51b92b7355c1772a7da006ac5f279754b44f2552e250dfff108e984af4c3",
+      "our_sha": "d86b51b92b7355c1772a7da006ac5f279754b44f2552e250dfff108e984af4c3"
+    },
+    "L7": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "50e3595c30c1509dcdf0511a6b20dc39af8fb7b18f1bb5a7a140589301aa4c69",
+      "our_sha": "50e3595c30c1509dcdf0511a6b20dc39af8fb7b18f1bb5a7a140589301aa4c69"
+    },
+    "L8": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "920b70d6fbad57037c5162047fb0059a29d4047fdf1bbfaa690fa61c21bae39c",
+      "our_sha": "920b70d6fbad57037c5162047fb0059a29d4047fdf1bbfaa690fa61c21bae39c"
+    },
+    "L9": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f10799451c42b906f7c02f23f721bfb455a35bb44c35c3c9e6ebeeaff4968ca3",
+      "our_sha": "f10799451c42b906f7c02f23f721bfb455a35bb44c35c3c9e6ebeeaff4968ca3"
+    },
+    "L10": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "3c842127d08951056f73be7a0b7d6b8be1f2a0d65443248b2ffc0570bd799bef",
+      "our_sha": "3c842127d08951056f73be7a0b7d6b8be1f2a0d65443248b2ffc0570bd799bef"
+    },
+    "L11": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "189d2a9b168dc18f7bfe3bf5b73e16cde6c4f7ae465af7e9f94751a768223ef7",
+      "our_sha": "189d2a9b168dc18f7bfe3bf5b73e16cde6c4f7ae465af7e9f94751a768223ef7"
+    },
+    "L12": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "189e474ee6bee08fc5a20e16428db29041757d93c362ec925df6b29cd6f295f8",
+      "our_sha": "189e474ee6bee08fc5a20e16428db29041757d93c362ec925df6b29cd6f295f8"
+    },
+    "L13": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "357f601e2f23a94abc1175047168673f13b4c45f2e0fcee61ed8a74949498a5e",
+      "our_sha": "357f601e2f23a94abc1175047168673f13b4c45f2e0fcee61ed8a74949498a5e"
+    },
+    "L14": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d616e8ee04b3927cf11787ce6b78dd30e58370bc1d939fe5c08b414f211f29cc",
+      "our_sha": "d616e8ee04b3927cf11787ce6b78dd30e58370bc1d939fe5c08b414f211f29cc"
+    },
+    "K2": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "0864f93698abdf8bb90e115cf164e1db4a2825bb8b496b3da43e989966f3b384",
+      "our_sha": "0864f93698abdf8bb90e115cf164e1db4a2825bb8b496b3da43e989966f3b384"
+    },
+    "H5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "1c53bf5a6be78f851b85b244af1bbbfb818eecab8980eda5132862b34f0ed0d3",
+      "our_sha": "1c53bf5a6be78f851b85b244af1bbbfb818eecab8980eda5132862b34f0ed0d3"
+    },
+    "M6": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "b5771db8ee660e2eb089415d3422b931afb1088ac725b041ee17d0f35e97b3f9",
+      "our_sha": "b5771db8ee660e2eb089415d3422b931afb1088ac725b041ee17d0f35e97b3f9"
+    },
+    "I5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "7e445f13f2ff2c4979888359c29e9808206589d2bce471a2ebdfd279d63b7960",
+      "our_sha": "7e445f13f2ff2c4979888359c29e9808206589d2bce471a2ebdfd279d63b7960"
+    },
+    "B4": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "352f213c71f1fb28cb23b56d3a60b954ee11925f2d85c4fd5536d85f45225397",
+      "our_sha": "352f213c71f1fb28cb23b56d3a60b954ee11925f2d85c4fd5536d85f45225397"
+    },
+    "K7": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "6c3e037d3121bd9d4606859bb401e4f4fcba7150818a052f38267b4d2b1113f8",
+      "our_sha": "6c3e037d3121bd9d4606859bb401e4f4fcba7150818a052f38267b4d2b1113f8"
+    },
+    "H6": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "a22c039922e2778bf2dae044b5b3c9d7f61f7dbd551cda58adf05029d804ee41",
+      "our_sha": "a22c039922e2778bf2dae044b5b3c9d7f61f7dbd551cda58adf05029d804ee41"
+    },
+    "B5": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "6ac97f493402ec6174a47821d96d77779f8748f0be3aec0fd94d85f762be2f9c",
+      "our_sha": "6ac97f493402ec6174a47821d96d77779f8748f0be3aec0fd94d85f762be2f9c"
+    },
+    "K8": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "1fd2e0df35383420bd40970185f09d880f2e13b0a71f6536505badfdb3218fbb",
+      "our_sha": "1fd2e0df35383420bd40970185f09d880f2e13b0a71f6536505badfdb3218fbb"
+    },
+    "B6": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "9225bef542bb3fc14e0365f1b1c72b76c32cc314ba577c6192b527c9cefe1d89",
+      "our_sha": "9225bef542bb3fc14e0365f1b1c72b76c32cc314ba577c6192b527c9cefe1d89"
+    },
+    "K9": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "2e812b9451ce6b61fe666e605d708225e76c9d1b41441db72a89c6cd78fdc90d",
+      "our_sha": "2e812b9451ce6b61fe666e605d708225e76c9d1b41441db72a89c6cd78fdc90d"
+    },
+    "H7": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "06979a1918c050e39cbbaeb7ebdfe1e4721923ecb7f6d9469b72129dc78d909d",
+      "our_sha": "06979a1918c050e39cbbaeb7ebdfe1e4721923ecb7f6d9469b72129dc78d909d"
+    },
+    "I6": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "20c84c43bdc2b10c4d3f7c58536198c6b0840d05a13e9ec557fd23313ce6b483",
+      "our_sha": "20c84c43bdc2b10c4d3f7c58536198c6b0840d05a13e9ec557fd23313ce6b483"
+    },
+    "B7": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f7217945cc12795d263f54cd71128ef870baced28964b0143dacc81853c9fcd4",
+      "our_sha": "f7217945cc12795d263f54cd71128ef870baced28964b0143dacc81853c9fcd4"
+    },
+    "H8": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "078c1e4071917beed503ba3316380fa5adfa8ec3279c279ec1c8ec5471cf6f97",
+      "our_sha": "078c1e4071917beed503ba3316380fa5adfa8ec3279c279ec1c8ec5471cf6f97"
+    },
+    "M7": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "bcaff6323bb8e0f82bff7d7e76eb26855a07ea499d936b21a4b4eaffcaf078a2",
+      "our_sha": "bcaff6323bb8e0f82bff7d7e76eb26855a07ea499d936b21a4b4eaffcaf078a2"
+    },
+    "I7": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f324004a99d15c5e62dad352bb1cea9b79cb04555754a7916131ce87bce9fe4a",
+      "our_sha": "f324004a99d15c5e62dad352bb1cea9b79cb04555754a7916131ce87bce9fe4a"
+    },
+    "B8": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f87dd797ec58702ed8f75034275883d72a52ed855d4b086926a2ac28929ce094",
+      "our_sha": "f87dd797ec58702ed8f75034275883d72a52ed855d4b086926a2ac28929ce094"
+    },
+    "K10": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "80426996296cc300f6ce026ade09291c2631c3f0474f64c736c8b0f8453a80b7",
+      "our_sha": "80426996296cc300f6ce026ade09291c2631c3f0474f64c736c8b0f8453a80b7"
+    },
+    "H9": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "1b0367190ca6d99f47a77d7cd9d81a9960b273818f240828f6cd0fde62ce2b80",
+      "our_sha": "1b0367190ca6d99f47a77d7cd9d81a9960b273818f240828f6cd0fde62ce2b80"
+    },
+    "M8": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "9a738f052acec85b05690866f426823ed8a9d406083a75d715f13ad5d6b5680c",
+      "our_sha": "9a738f052acec85b05690866f426823ed8a9d406083a75d715f13ad5d6b5680c"
+    },
+    "B9": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "d4b7a4b008f6063a0ec626c2c70cd8522bffa336a4e46120614335aac9efbe1f",
+      "our_sha": "d4b7a4b008f6063a0ec626c2c70cd8522bffa336a4e46120614335aac9efbe1f"
+    },
+    "B10": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "a9f2afc43517ee8e8d95a2de2654ed0b9fcbb25c2175efc28fce9b106d89a166",
+      "our_sha": "a9f2afc43517ee8e8d95a2de2654ed0b9fcbb25c2175efc28fce9b106d89a166"
+    },
+    "B11": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "3624c7aa0c31b2a800ee9ea602e397b67fb24e8c0afddc304387d4087eb9596e",
+      "our_sha": "3624c7aa0c31b2a800ee9ea602e397b67fb24e8c0afddc304387d4087eb9596e"
+    },
+    "B12": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "a415d5f667f7da5e8f7e27e5d2fa3bb217138a5d944ad6fea02540d3741a970a",
+      "our_sha": "a415d5f667f7da5e8f7e27e5d2fa3bb217138a5d944ad6fea02540d3741a970a"
+    },
+    "B13": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "0137ac23b0aab6f3659e7041202cea0c07ff2a086edf79e70e5c773aedfe0bee",
+      "our_sha": "0137ac23b0aab6f3659e7041202cea0c07ff2a086edf79e70e5c773aedfe0bee"
+    },
+    "B14": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "b1f19d7bb882de57e3c044d550cc21fd9e154b3c72dd2b280a27484a7ad013a1",
+      "our_sha": "b1f19d7bb882de57e3c044d550cc21fd9e154b3c72dd2b280a27484a7ad013a1"
+    },
+    "K11": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "82cdadd08fb1ccbb886caac24f9909a79398104c054d53518ba8b8cd1e73dd32",
+      "our_sha": "82cdadd08fb1ccbb886caac24f9909a79398104c054d53518ba8b8cd1e73dd32"
+    },
+    "K12": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "c796e93a8c68b1df1a88497e520087f0f22981dff877efd72316ca78cbabf468",
+      "our_sha": "c796e93a8c68b1df1a88497e520087f0f22981dff877efd72316ca78cbabf468"
+    },
+    "K13": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "0425621a37481d88458b4f924d2d579749ea3fca71d6808da356c51b2ac1afb3",
+      "our_sha": "0425621a37481d88458b4f924d2d579749ea3fca71d6808da356c51b2ac1afb3"
+    },
+    "K14": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "abaf46fb94c0357ac8f068176610200ccbe90fa45d542d204a46375fa9e7be06",
+      "our_sha": "abaf46fb94c0357ac8f068176610200ccbe90fa45d542d204a46375fa9e7be06"
+    },
+    "K15": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "117e0507301da5b28677028454635e926237982c649f446e1ffbcc8b13209e22",
+      "our_sha": "117e0507301da5b28677028454635e926237982c649f446e1ffbcc8b13209e22"
+    },
+    "K16": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "a746f0105de6db0101d00b50f53bbd981ce27c41ca67475cbfd1fccd7a906b04",
+      "our_sha": "a746f0105de6db0101d00b50f53bbd981ce27c41ca67475cbfd1fccd7a906b04"
+    },
+    "H10": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "65f419cf190f797bb3b5de220477fd81b6f73f8244df65c943703ea59e5bbd4d",
+      "our_sha": "65f419cf190f797bb3b5de220477fd81b6f73f8244df65c943703ea59e5bbd4d"
+    },
+    "H11": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "2983e3053432dc0ba447382aa83227da7d647360b4b9352df397fa9bb9f4d62d",
+      "our_sha": "2983e3053432dc0ba447382aa83227da7d647360b4b9352df397fa9bb9f4d62d"
+    },
+    "H12": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "bbbe7217fb831aca6b1975d3c0ccb99f4d9e3376ccce38b32a56cc6165567062",
+      "our_sha": "bbbe7217fb831aca6b1975d3c0ccb99f4d9e3376ccce38b32a56cc6165567062"
+    },
+    "H13": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "338a36633588f66dc53c0bdeb1f377d1eb1909cb57b31a80de75f2cc13a85b78",
+      "our_sha": "338a36633588f66dc53c0bdeb1f377d1eb1909cb57b31a80de75f2cc13a85b78"
+    },
+    "H14": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "3e05dd5fb5693239f18e3519b0554133c8a6be104a48482a8248069661e964dc",
+      "our_sha": "3e05dd5fb5693239f18e3519b0554133c8a6be104a48482a8248069661e964dc"
+    },
+    "H15": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "a1b8dc6f579835ab3d9998cfa5cd18fa24eac298231c03502cfd26929783d6ec",
+      "our_sha": "a1b8dc6f579835ab3d9998cfa5cd18fa24eac298231c03502cfd26929783d6ec"
+    },
+    "M9": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "0a59e2f54937964c6273ebdb3e3804fc181f4c2da16ed258f0b7301fcddf4833",
+      "our_sha": "0a59e2f54937964c6273ebdb3e3804fc181f4c2da16ed258f0b7301fcddf4833"
+    },
+    "M10": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "6023820de577eca9dcad8e07e7bdb93b2a756a115e23f68ba961edb334a87e44",
+      "our_sha": "6023820de577eca9dcad8e07e7bdb93b2a756a115e23f68ba961edb334a87e44"
+    },
+    "M11": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "5e1e587673df2158db777ebf4e4189d52688f73936f1edb061391c004a0eebe2",
+      "our_sha": "5e1e587673df2158db777ebf4e4189d52688f73936f1edb061391c004a0eebe2"
+    },
+    "M12": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "3d8dccac44cf6bd902335e4c5d307d85efa2ae0a782d7f2c3646bd01851b38d2",
+      "our_sha": "3d8dccac44cf6bd902335e4c5d307d85efa2ae0a782d7f2c3646bd01851b38d2"
+    },
+    "M13": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f786cfc1f4bdd4a0ff235f4ca445597d4be0c5be33717784e6a4255fc2c2d273",
+      "our_sha": "f786cfc1f4bdd4a0ff235f4ca445597d4be0c5be33717784e6a4255fc2c2d273"
+    },
+    "M14": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "2d3c430cf31d7cf855a5391fe004bcb244572b3ed69a402aa1167a42e488e03f",
+      "our_sha": "2d3c430cf31d7cf855a5391fe004bcb244572b3ed69a402aa1167a42e488e03f"
+    },
+    "I8": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "438145719193a26bca711ea380a490dd6db951bf45a8ec11638abc848cefdb8b",
+      "our_sha": "438145719193a26bca711ea380a490dd6db951bf45a8ec11638abc848cefdb8b"
+    },
+    "I9": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "e46fcf60417daffcad679ec0dc3540c5729747c700f8655fb53d8a5a300b746f",
+      "our_sha": "e46fcf60417daffcad679ec0dc3540c5729747c700f8655fb53d8a5a300b746f"
+    },
+    "I10": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "75fc95216e5f023e2eac732eac54740b13be001c0f9722c729ee6ce87d35ad8c",
+      "our_sha": "75fc95216e5f023e2eac732eac54740b13be001c0f9722c729ee6ce87d35ad8c"
+    },
+    "I11": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "f0665300d7ef433b076b8285c2930f2c452f91194bb5c22d6219a7a6e30cba75",
+      "our_sha": "f0665300d7ef433b076b8285c2930f2c452f91194bb5c22d6219a7a6e30cba75"
+    },
+    "I12": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "29c87f50ca518de86c6c087799377a44d749437435a01989021e650d4b011352",
+      "our_sha": "29c87f50ca518de86c6c087799377a44d749437435a01989021e650d4b011352"
+    },
+    "I13": {
+      "hash_match": true,
+      "bytes_match": true,
+      "oracle_sha": "48a1c9b112ffe1d8c76e29770d1f048c58bb6ec470c892362460e382b391732e",
+      "our_sha": "48a1c9b112ffe1d8c76e29770d1f048c58bb6ec470c892362460e382b391732e"
+    }
+  },
+  "semantic_diffs": [
+    {
+      "fixture_id": "EQ3A",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "EQ3B",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B3",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K5",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H2",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M1",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M5",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I1",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I4",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "R6_STALE",
+      "field": "review.detail",
+      "ours": "ReviewPredicateMissing",
+      "oracle": "ReviewPredicateFailedClosed"
+    },
+    {
+      "fixture_id": "L3",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L5",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L8",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L9",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L10",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L11",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L12",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L13",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "L14",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B6",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K9",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H7",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I6",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B9",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B10",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B11",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B12",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B13",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "B14",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K11",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K12",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K13",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K14",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K15",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "K16",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H10",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H11",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H12",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H13",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H14",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "H15",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M9",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M10",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M11",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M12",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M13",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "M14",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I8",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I9",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I10",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I11",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I12",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    },
+    {
+      "fixture_id": "I13",
+      "field": "review.detail",
+      "ours": "IndependentDecision",
+      "oracle": null
+    }
+  ],
+  "fixtures_fully_agreed": [
+    "EQ1A",
+    "EQ1B",
+    "EQ2A",
+    "EQ2B",
+    "EQ4A",
+    "EQ4B",
+    "B1",
+    "B2_STALE",
+    "K1",
+    "K1_STRUCTURAL_ONLY",
+    "K3",
+    "H1",
+    "H1_ORDER_REUSE",
+    "H3",
+    "M2",
+    "M3",
+    "I2",
+    "I3",
+    "I3_PAYMENT_REUSE",
+    "R1_ACK",
+    "R2_ACK_FOR_APPROVAL",
+    "R3_NOT_ACCESSED",
+    "R4_CONFLICT",
+    "R5_PASS",
+    "R7_CAPACITY",
+    "R8_MONITOR_MISSING",
+    "R9_EVALUATION_MISSING",
+    "INV_PRECOMMIT",
+    "INV_EXTERNAL_UNKNOWN",
+    "L1",
+    "L2",
+    "L4",
+    "L6",
+    "L7",
+    "K2",
+    "H5",
+    "M6",
+    "I5",
+    "B4",
+    "K7",
+    "H6",
+    "B5",
+    "K8",
+    "B7",
+    "H8",
+    "M7",
+    "I7",
+    "B8",
+    "K10",
+    "H9",
+    "M8"
+  ],
+  "fixtures_with_disagreement": [
+    "EQ3A",
+    "EQ3B",
+    "B3",
+    "K4",
+    "K5",
+    "H2",
+    "H4",
+    "M1",
+    "M4",
+    "M5",
+    "I1",
+    "I4",
+    "R6_STALE",
+    "L3",
+    "L5",
+    "L8",
+    "L9",
+    "L10",
+    "L11",
+    "L12",
+    "L13",
+    "L14",
+    "B6",
+    "K9",
+    "H7",
+    "I6",
+    "B9",
+    "B10",
+    "B11",
+    "B12",
+    "B13",
+    "B14",
+    "K11",
+    "K12",
+    "K13",
+    "K14",
+    "K15",
+    "K16",
+    "H10",
+    "H11",
+    "H12",
+    "H13",
+    "H14",
+    "H15",
+    "M9",
+    "M10",
+    "M11",
+    "M12",
+    "M13",
+    "M14",
+    "I8",
+    "I9",
+    "I10",
+    "I11",
+    "I12",
+    "I13"
+  ],
+  "semantic_fields_checked": 945,
+  "semantic_fields_agreed": 889,
+  "hash_agree": 107,
+  "bytes_agree": 107
+}

@@ -1,0 +1,555 @@
+//! AWCC Revenue Assurance — foundations. Serves: ALL modules.
+//!
+//! RA analog of `examples/rtm/src/00_core.nir`.
+//! Declares the role/principal vocabulary, purpose taxonomy, audit sampling,
+//! approval chains, invariants, and the guard-policy corpus that backs every
+//! menu/route guard declared in `menus.toml`.
+
+use crate::domain_types::{AlertUpdate, CaseDispositionUpdate};
+use crate::domains::Payment;
+
+// ---- Roles & principals ----
+nirdosha_rt::roles! {
+    // Human roles
+    role RaAnalyst;          // L1 investigator — CDR discrepancies, leak cases
+    role RaLead;             // L2 team lead / four-eyes approver
+    role FinanceController;  // L3 — final ATRA signer
+    role OpsEngineer;        // real-time wall, holds, intervention queue
+    role PolicyEngineer;     // rule/threshold/model author
+    role Admin;              // system & ops admin
+    role Auditor;            // read-only assurance
+    role QaReviewer;         // QA sampling & scorecards
+    role CsAgent;            // CS transaction status lookup (4 fields only)
+    role RetailLiaison;      // business customer status (single field)
+    role RegulatorViewer;    // ATRA inspector — scoped delegation view
+
+    // Service principals
+    principal SvcIngest    = "spiffe://awcc/ns/ra/sa/ingest";
+    principal SvcRecon     = "spiffe://awcc/ns/ra/sa/recon";
+    principal SvcRating    = "spiffe://awcc/ns/ra/sa/rating";
+    principal SvcAtra      = "spiffe://awcc/ns/ra/sa/atra";
+    principal SvcAlerts    = "spiffe://awcc/ns/ra/sa/alerts";
+    principal SvcCase      = "spiffe://awcc/ns/ra/sa/case";
+    principal SvcBi        = "spiffe://awcc/ns/ra/sa/bi";
+    principal McpCopilot   = "mcp:ra-copilot";
+}
+
+// ---- Purpose taxonomy ----
+nirdosha_guard_macros::purpose_taxonomy! {
+    enum Purpose {
+        Operations,
+        FraudMonitoring,
+        AmlInvestigation,
+        CustomerService,
+        QaReview,
+        Audit,
+        RegulatoryInspection,
+        Analytics,
+        ModelGovernance,
+        PlatformOperations,
+    }
+}
+
+// ---- Audit sampling ----
+nirdosha_rt::audit_sampling! {
+    classification: PUBLIC       -> rate 0.01;
+    classification: INTERNAL     -> rate 0.10;
+    classification: CONFIDENTIAL -> rate 1.0;
+    classification: RESTRICTED   -> rate 1.0;
+}
+
+// ---- Approval chains ----
+nirdosha_rt::approval_chain! {
+    chain atra_release { quorum(2, of = [FinanceController]); timeout(deny); }
+}
+nirdosha_rt::approval_chain! {
+    chain leak_case_review { quorum(2, of = [RaLead]); timeout(deny); }
+}
+nirdosha_rt::approval_chain! {
+    chain policy_release { quorum(2, of = [PolicyEngineer, RaLead]); timeout(deny); cooling(days = 1); }
+}
+nirdosha_rt::approval_chain! {
+    chain model_release { quorum(2, of = [PolicyEngineer, RaLead]); timeout(deny); }
+}
+nirdosha_rt::approval_chain! {
+    chain override_release { quorum(1, of = [RaLead]); timeout(deny); }
+}
+nirdosha_rt::approval_chain! {
+    chain purge_release { quorum(2, of = [Admin, RaLead]); timeout(deny); }
+}
+nirdosha_rt::approval_chain! {
+    chain egress_release { quorum(1, of = [RaLead]); timeout(deny); }
+}
+
+// ---- Invariants ----
+#[nirdosha_rt::invariant(name = "amount_positive", schema = "payment")]
+fn amount_positive(p: &Payment) -> bool { p.amount.0 > 0.0 }
+
+#[nirdosha_rt::invariant(name = "currency_iso", schema = "payment")]
+fn currency_iso(p: &Payment) -> bool { p.currency.is_iso_4217() }
+
+#[nirdosha_rt::invariant(name = "rationale_present", schema = "alert")]
+fn rationale_present(a: &AlertUpdate) -> bool { !a.rationale.is_empty() }
+
+#[nirdosha_rt::invariant(name = "disposition_code_valid", schema = "alert")]
+fn disposition_code_valid(a: &AlertUpdate) -> bool {
+    a.disposition_code.is_empty() || crate::domains::DISPOSITION_CODES.contains(&a.disposition_code.as_str())
+}
+
+#[nirdosha_rt::invariant(name = "case_disposition_valid", schema = "leak_case")]
+fn case_disposition_valid(c: &CaseDispositionUpdate) -> bool {
+    c.disposition.is_empty() || crate::domains::LEAK_CASE_DISPOSITION_CODES.contains(&c.disposition.as_str())
+}
+
+#[nirdosha_rt::invariant(name = "hold_reason_valid", schema = "payment")]
+fn hold_reason_valid(p: &Payment) -> bool {
+    match &p.hold_reason {
+        Some(reason) => crate::domains::HOLD_REASON_CODES.contains(&reason.0.as_str()),
+        None => false,
+    }
+}
+
+// ---- Guard policies backing menus.toml / routes ----
+// Generated from the (action, resource) pairs declared in menus.toml so that
+// every non-blocked nav item resolves to a real guard_policy! record.
+
+nirdosha_rt::guard_policy! {
+    allow "ra-aggregate-alert" for RaAnalyst, RaLead, FinanceController, Admin
+    when action == "aggregate" && resource == "alert"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-aggregate-cdr" for RaAnalyst
+    when action == "aggregate" && resource == "cdr"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-aggregate-leak-case" for RaLead, FinanceController
+    when action == "aggregate" && resource == "leak_case"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-aggregate-payment" for RaLead, FinanceController
+    when action == "aggregate" && resource == "payment"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-atra-bundle" for RaAnalyst, RaLead, FinanceController, OpsEngineer, PolicyEngineer, Admin, Auditor, QaReviewer
+    when action == "create" && resource == "atra_bundle"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-case-note" for RaAnalyst, RaLead
+    when action == "create" && resource == "case_note"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-case-task" for RaAnalyst, RaLead
+    when action == "create" && resource == "case_task"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-entity-flag" for RaAnalyst, RaLead, OpsEngineer
+    when action == "create" && resource == "entity_flag"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-evidence-doc" for RaAnalyst, RaLead
+    when action == "create" && resource == "evidence_doc"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-leak-case" for RaAnalyst, RaLead
+    when action == "create" && resource == "leak_case"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-subscriber-restriction" for RaLead, OpsEngineer
+    when action == "create" && resource == "subscriber_restriction"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-support-ticket" for RaAnalyst, RaLead, CsAgent, RetailLiaison
+    when action == "create" && resource == "support_ticket"
+    purpose(CustomerService)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-create-unlock-request" for AllHuman
+    when action == "create" && resource == "unlock_request"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-export-atra-bundle" for FinanceController, Admin
+    when action == "export" && resource == "atra_bundle"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-export-link-edge" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "export" && resource == "link_edge"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-link-query-network-of" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "link_query" && resource == "network_of"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-migrate-policy" for PolicyEngineer, Admin
+    when action == "migrate" && resource == "policy"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-migrate-window" for PolicyEngineer, Admin
+    when action == "migrate" && resource == "window"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-adverse-media" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "adverse_media"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-agg-bins" for RaAnalyst, RaLead, FinanceController, Admin
+    when action == "read" && resource == "agg_bins"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-alert" for RaAnalyst, RaLead, QaReviewer, McpCopilot, Admin, Auditor
+    when action == "read" && resource == "alert"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-allowlist" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "allowlist"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-assignment-rules" for RaLead, PolicyEngineer, Admin
+    when action == "read" && resource == "assignment_rules"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-atra-bundle" for RaAnalyst, RaLead, FinanceController, Admin, Auditor, RegulatorViewer
+    when action == "read" && resource == "atra_bundle"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-atra-submission" for RaAnalyst, RaLead, FinanceController, Admin, Auditor
+    when action == "read" && resource == "atra_submission"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-atra-visibility" for FinanceController, Admin, Auditor
+    when action == "read" && resource == "atra_visibility"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-audit-record" for Admin, Auditor, RegulatorViewer
+    when action == "read" && resource == "audit_record"
+    purpose(Audit)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-batch-job" for OpsEngineer, Admin
+    when action == "read" && resource == "batch_job"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-capacity-stat" for OpsEngineer, Admin
+    when action == "read" && resource == "capacity_stat"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-case-task" for RaAnalyst, RaLead, FinanceController, OpsEngineer, PolicyEngineer, Admin, Auditor, QaReviewer, CsAgent, RetailLiaison
+    when action == "read" && resource == "case_task"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-catalog-item" for Admin, Auditor
+    when action == "read" && resource == "catalog_item"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-cdr" for RaAnalyst, RaLead, OpsEngineer, QaReviewer, PolicyEngineer, Admin, Auditor
+    when action == "read" && resource == "cdr"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-country-risk" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "country_risk"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-delegation" for Admin, Auditor
+    when action == "read" && resource == "delegation"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-device-session" for RaAnalyst, RaLead, PolicyEngineer, Admin
+    when action == "read" && resource == "device_session"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-disposition-code" for RaAnalyst, RaLead, QaReviewer, Admin
+    when action == "read" && resource == "disposition_code"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-dsar-request" for Admin, Auditor
+    when action == "read" && resource == "dsar_request"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-feature-stat" for PolicyEngineer, Admin
+    when action == "read" && resource == "feature_stat"
+    purpose(ModelGovernance)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-global-params" for PolicyEngineer, Admin
+    when action == "read" && resource == "global_params"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-governed-export" for RaAnalyst, RaLead, Auditor
+    when action == "read" && resource == "governed_export"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-handover" for RaLead, Admin
+    when action == "read" && resource == "handover"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-ingest-exception" for OpsEngineer, Admin
+    when action == "read" && resource == "ingest_exception"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-integration-stat" for OpsEngineer, Admin
+    when action == "read" && resource == "integration_stat"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-kyc-doc" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "kyc_doc"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-leak-case" for RaAnalyst, RaLead, FinanceController, OpsEngineer, QaReviewer, Admin, Auditor
+    when action == "read" && resource == "leak_case"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-license-info" for Admin, Auditor
+    when action == "read" && resource == "license_info"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-matcher" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "matcher"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-model" for PolicyEngineer, Admin, Auditor
+    when action == "read" && resource == "model"
+    purpose(ModelGovernance)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-model-run-stat" for FinanceController, Admin
+    when action == "read" && resource == "model_run_stat"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-notif-template" for Admin, Auditor
+    when action == "read" && resource == "notif_template"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-notification" for AllHuman
+    when action == "read" && resource == "notification"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-payment" for RaAnalyst, RaLead, FinanceController, OpsEngineer, Admin, Auditor
+    when action == "read" && resource == "payment"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-pep-category" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "pep_category"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-pipeline-stat" for OpsEngineer, Admin
+    when action == "read" && resource == "pipeline_stat"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-product-risk" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "product_risk"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-qa-review" for QaReviewer, RaLead, Admin
+    when action == "read" && resource == "qa_review"
+    purpose(QaReview)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-recon-report" for RaAnalyst, RaLead, FinanceController, Admin
+    when action == "read" && resource == "recon_report"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-report-def" for RaLead, FinanceController, Admin
+    when action == "read" && resource == "report_def"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-reporting-calendar" for FinanceController, Admin
+    when action == "read" && resource == "reporting_calendar"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-rescreen-campaign" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "rescreen_campaign"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-rescreen-job" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "rescreen_job"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-retention-config" for Admin, Auditor
+    when action == "read" && resource == "retention_config"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-risk-factor" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "risk_factor"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-rule-stat" for RaAnalyst, RaLead, PolicyEngineer, Admin
+    when action == "read" && resource == "rule_stat"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-sanctions-lists" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "sanctions_lists"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-saved-view" for AllHuman
+    when action == "read" && resource == "saved_view"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-scheduled-report" for RaLead, FinanceController, Admin
+    when action == "read" && resource == "scheduled_report"
+    purpose(Analytics)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-screening-hit" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "screening_hit"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-sla-config" for Admin, Auditor
+    when action == "read" && resource == "sla_config"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-static-docs" for AllHuman
+    when action == "read" && resource == "static_docs"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-subscriber" for RaAnalyst, RaLead, FinanceController, OpsEngineer, PolicyEngineer, QaReviewer, Admin, Auditor, CsAgent, RetailLiaison
+    when action == "read" && resource == "subscriber"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-subscriber-rel" for RaAnalyst, RaLead, PolicyEngineer
+    when action == "read" && resource == "subscriber_rel"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-svc-health" for OpsEngineer, Admin
+    when action == "read" && resource == "svc_health"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-sync-stat" for OpsEngineer, Admin
+    when action == "read" && resource == "sync_stat"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-timeout-config" for Admin, Auditor
+    when action == "read" && resource == "timeout_config"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-user-profile" for AllHuman
+    when action == "read" && resource == "user_profile"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-read-user-role" for Admin, Auditor
+    when action == "read" && resource == "user_role"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-simulate-policy-simulation" for PolicyEngineer, RaLead
+    when action == "simulate" && resource == "policy_simulation"
+    purpose(ModelGovernance)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-alert" for RaAnalyst, RaLead, QaReviewer
+    when action == "update" && resource == "alert"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-atra-bundle" for RaAnalyst, RaLead, FinanceController
+    when action == "update" && resource == "atra_bundle"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-leak-case" for RaAnalyst, RaLead
+    when action == "update" && resource == "leak_case"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-model" for PolicyEngineer, RaLead
+    when action == "update" && resource == "model"
+    purpose(ModelGovernance)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-model-validation" for PolicyEngineer, RaLead
+    when action == "update" && resource == "model_validation"
+    purpose(ModelGovernance)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-payment" for RaAnalyst, RaLead, OpsEngineer
+    when action == "update" && resource == "payment"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-pending-approval" for RaLead, FinanceController
+    when action == "update" && resource == "pending_approval"
+    purpose(PlatformOperations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-qa-review" for QaReviewer, RaLead
+    when action == "update" && resource == "qa_review"
+    purpose(QaReview)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-screening-hit" for RaAnalyst, RaLead
+    when action == "update" && resource == "screening_hit"
+    purpose(Operations)
+}
+nirdosha_rt::guard_policy! {
+    allow "ra-update-user-profile" for AllHuman
+    when action == "update" && resource == "user_profile"
+    purpose(Operations)
+}

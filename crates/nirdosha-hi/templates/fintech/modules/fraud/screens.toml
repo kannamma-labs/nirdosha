@@ -1,0 +1,31 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-fraud"
+version = "1.0.0"
+module = "M7"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "7.1"
+name = "Fraud Alerts"
+module = "M7"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "RiskAnalyst"]
+datasets = ["alerts"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_fraud", route_path = "/fraud", generated_files = ["src/screens/m07_fraud.nir"] }
+data_binding = { entities = ["FraudAlert"], primary_key = "alert_id", guard = { table = "fraud_alert", purpose = "FraudRead" }, fields = [
+    { name = "alert_id", type = "String" },
+    { name = "payment_id", type = "String" },
+    { name = "risk_score", type = "String" },
+    { name = "rule_triggered", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "FraudRead", allowed_actions = ["read", "update"] }
+file = "src/screens/m07_fraud.nir"
+notes = "Review and manage fraud alerts; risk_score is String for certified primitive."

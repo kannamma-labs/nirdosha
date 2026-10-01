@@ -1,0 +1,249 @@
+//! M2 Dashboards & Landing (`screen.md` module 2, 7 screens) + the
+//! app-wide shell/landing every other module depends on. RTM live-demo
+//! plan Phase B.
+//!
+//! The navigation shell and post-login landing rules are now generated
+//! from `menus.toml` via `app_shell_from_toml!`, so the nav/landing stay
+//! in sync with the 152-screen inventory as screens move through
+//! `built` / `emittable` / `interim` / `blocked` stages.
+//!
+//! Real, guard-enforced: 2.1 Global Navigation Shell, landing, 2.2 L1
+//! dashboard, 2.3 Team Dashboard — same grounded details as before.
+//!
+//! **Real, disclosed corpus gaps** remain listed for 2.4–2.7.
+
+use crate::bridge::alert_table;
+use crate::bridge::case_table;
+use crate::bridge::case_task_table;
+use crate::bridge::model_run_avg_fp_rate;
+use crate::bridge::model_run_volume;
+use crate::bridge::model_table;
+use crate::bridge::payment_table;
+use crate::bridge::refdata_table;
+use crate::bridge::sar_bundle_table;
+use crate::bridge::transaction_table;
+use crate::bridge::window_config_table;
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_wall_store() -> &'static SharedTable<i64, crate::bridge::PaymentRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, crate::bridge::PaymentRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+fn my_pending_alerts(auth: &nirdosha_rt::Auth) -> i64 {
+    match alert_table().guarded_snapshot(auth, "AmlInvestigation") {
+        Ok(rows) => rows.iter().filter(|r| r.status == "new" || r.status == "in_progress").count() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn my_alerts_by_status(auth: &nirdosha_rt::Auth) -> String {
+    let counts = match alert_table().guarded_snapshot(auth, "AmlInvestigation") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_status: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for row in &counts {
+        *by_status.entry(row.status.clone()).or_insert(0) += 1;
+    }
+    serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
+}
+
+// C1 (screens-plan.md): 2.2's tasks widget -- real, guard-enforced
+// (`case-task-read`, `00_core.nir`), counting every open/in_progress
+// `PG.case_task` row the requester's grant can see. **Disclosed gap**:
+// not filtered to `assignee = auth.user()` -- same "no self-scope
+// filter built yet" gap `mount_my_tasks` (16.4) discloses.
+fn my_open_task_count(auth: &nirdosha_rt::Auth) -> i64 {
+    match case_task_table().guarded_snapshot(auth, "Operations") {
+        Ok(rows) => rows.iter().filter(|r| r.status == "open" || r.status == "in_progress").count() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn team_alert_volume(auth: &nirdosha_rt::Auth) -> i64 {
+    match alert_table().guarded_aggregate(auth, "Operations") {
+        Ok(rows) => rows.len() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn team_alerts_by_status(auth: &nirdosha_rt::Auth) -> String {
+    let rows = match alert_table().guarded_aggregate(auth, "Operations") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_status: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for row in &rows {
+        *by_status.entry(row.status.clone()).or_insert(0) += 1;
+    }
+    serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_l1_dashboard,
+    path: "/dashboard/my-day",
+    title: "My Day",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "My pending alerts", fn: my_pending_alerts, guarded: true },
+        Chart  { label: "My alerts by status", fn: my_alerts_by_status, mark: bar, guarded: true },
+        Metric { label: "My open tasks", fn: my_open_task_count, guarded: true },
+    }
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_team_dashboard,
+    path: "/dashboard/team",
+    title: "Team Dashboard",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Team alert volume", fn: team_alert_volume, guarded: true },
+        Chart  { label: "Team alerts by status", fn: team_alerts_by_status, mark: bar, guarded: true },
+    }
+}
+
+/// 2.4 MLRO Dashboard -- guard-enforced aggregate dashboard for Mlro /
+/// ComplianceLead over sar_bundle + case + alert tables.
+pub fn mount_mlro_dashboard(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    fn sar_due_count(auth: &nirdosha_rt::Auth) -> i64 {
+        match sar_bundle_table().guarded_aggregate(auth, "RegulatoryInspection") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "continuation_due").count() as i64,
+            Err(_) => 0,
+        }
+    }
+    fn sar_pending_review(auth: &nirdosha_rt::Auth) -> i64 {
+        match sar_bundle_table().guarded_aggregate(auth, "RegulatoryInspection") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "in_review").count() as i64,
+            Err(_) => 0,
+        }
+    }
+    fn case_escalated_count(auth: &nirdosha_rt::Auth) -> i64 {
+        match case_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "escalate").count() as i64,
+            Err(_) => 0,
+        }
+    }
+    nirdosha_rt::dashboard! {
+        mount: mount_mlro_dashboard_internal,
+        path: "/dashboard/mlro",
+        title: "MLRO Dashboard",
+        refresh_seconds: 60,
+        widgets {
+            Metric { label: "SARs due for continuation", fn: sar_due_count, guarded: true },
+            Metric { label: "SARs pending MLRO review", fn: sar_pending_review, guarded: true },
+            Metric { label: "Escalated cases", fn: case_escalated_count, guarded: true },
+        }
+    }
+    mount_mlro_dashboard_internal(router)
+}
+
+// C2 (screens-plan.md): 2.6 Executive KPI Dashboard's "model health
+// widget pending" note closed -- real `model-run-stat-read`
+// (`Mlro`/`Admin`) over `model_run_stat_table()`
+// (`m09_ml_models.nir`'s own C2 doc comments have the full derivation
+// story). Period-over-period comparison still not built this pass --
+// disclosed, not this ticket's scope (no historical snapshot retention
+// beyond each `refresh_model_run_stat` call's own `computed_at`).
+nirdosha_rt::dashboard! {
+    mount: mount_exec_kpi_dashboard,
+    path: "/exec",
+    title: "Executive KPI Dashboard",
+    refresh_seconds: 60,
+    widgets {
+        Metric { label: "Team alert volume", fn: team_alert_volume, guarded: true },
+        Metric { label: "Model-scored volume", fn: model_run_volume, guarded: true },
+        Metric { label: "Model avg FP rate", fn: model_run_avg_fp_rate, guarded: true },
+    }
+}
+
+// → 2.5 Real-Time Monitoring Wall [T-09]. Real, guard-enforced
+// (`ops-read-holds`, `OpsAnalyst`, `FraudMonitoring`) over the SAME
+// `payment_table()` M11 writes -- one real data plane, not a second
+// fork. `refresh_seconds` is a real `<meta http-equiv="refresh">` poll
+// (`crud_screens!` gained this combo this ticket -- it previously only
+// existed on `dashboard!`/`communication_feed!`, a disclosed governance
+// hole D1 named); `sort_by`/`countdown_field` make the queue genuinely
+// sorted-by-time-remaining with a live "Xm Ys remaining" column, not a
+// decorative table. **Disclosed gap, not built this pass**: the
+// screen's OTHER named dataset, `K.guard.decisions` -- a live decision
+// ticker/audit-stream -- has no real topic consumer or queryable
+// projection anywhere in this corpus yet (the closest real thing,
+// `GuardClient`'s own JSONL audit log, is file-backed and unqueried by
+// any screen; see `m03_alerts.nir`'s 3.10 doc comment for the same,
+// already-disclosed gap). That half stays exactly what its own note
+// already called it: "true ticker = realtime archetype later" -- this
+// ticket closes the `refresh_seconds` poll mechanism it was always
+// meant to sit behind, not the ticker itself. ComplianceLead (also in
+// this screen's `roles`) has no plain `read payment` grant in this
+// corpus (only `hold-stats`'s `aggregate`) -- a real, disclosed denial,
+// same posture `m05_customer.nir`'s Analyst-denied-on-customer already
+// established, not routed around by inventing a grant.
+nirdosha_rt::crud_screens! {
+    mount: mount_monitoring_wall,
+    entity: crate::bridge::PaymentRow,
+    store: unused_wall_store,
+    path: "/wall",
+    fields: [
+        payment_id: String,
+        tenant_id: String,
+        status: String,
+        currency: String,
+        hold_reason: Option<String>,
+        hold_expires_at: i64,
+        decision_by: Option<String>,
+        decision_rationale: Option<String>,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: payment_table,
+        purpose: "FraudMonitoring",
+    },
+    refresh_seconds: 15,
+    sort_by: hold_expires_at,
+    countdown_field: hold_expires_at,
+}
+
+nirdosha_rt::app_shell_from_toml!(
+    "menus.toml",
+    title: "RTM — Real-Time Transaction Monitoring (demo)",
+);
+
+// T-04/B10: `nav.approvals`'s real, single unified inbox (`menus.toml`'s
+// own `id = "nav.approvals"` names `route = "/approvals"` with
+// `also_screens = ["8.8", "11.3", "12.6", ...]` -- one nav entry fanning
+// out to every T-04 screen) -- merges every chain this corpus's real
+// `escalate to approval(...)` policies use, across every module, the
+// same `AC.all_chains`-style merge-projection B8 already established for
+// audit chains. The four per-module mounts (`mount_case_review_inbox`,
+// `mount_policy_release_inbox`, `mount_hold_override_inbox`,
+// `mount_sar_release_inbox`) stay mounted too, at their own module-scoped
+// paths -- a ComplianceLead drilling into "case reviews only" isn't
+// forced through the noisier merged view, same as `crud_screens!`'s
+// list/detail split.
+nirdosha_rt::approval_inbox! {
+    mount: mount_unified_approvals_inbox,
+    path: "/approvals",
+    access: requires role "ComplianceLead" or role "Mlro",
+    sources: [
+        { table: case_table, chain: "case_review", resource: "case", detail_path: "/cases/{id}" },
+        { table: payment_table, chain: "override_release", resource: "payment", detail_path: "/holds/{id}" },
+        { table: sar_bundle_table, chain: "sar_release", resource: "sar_bundle", detail_path: "/sar" },
+        { table: window_config_table, chain: "policy_release", resource: "window", detail_path: "/rules/windows/{id}" },
+        { table: refdata_table, chain: "policy_release", resource: "refdata", detail_path: "/risk-config/refdata/{id}" },
+        { table: model_table, chain: "policy_release", resource: "model", detail_path: "/models/{id}" },
+        // 15.5 Governed Export Center's own `egress_release` escalations
+        // (`mount_governed_export`'s real `/exports/{alert,case,transaction}/
+        // propose|confirm` -- B7's disclosed gap: this path doesn't yet
+        // route through B7's watermarked O.* writer, so it's genuinely
+        // real but not the full governed path; `/reporting/mis` is the
+        // nearest real screen to review exports on, no dedicated
+        // per-export detail page exists yet).
+        { table: alert_table, chain: "egress_release", resource: "alert-export", detail_path: "/reporting/mis" },
+        { table: case_table, chain: "egress_release", resource: "case-export", detail_path: "/reporting/mis" },
+        { table: transaction_table, chain: "egress_release", resource: "transaction-export", detail_path: "/reporting/mis" },
+    ],
+}

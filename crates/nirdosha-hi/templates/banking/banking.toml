@@ -1,0 +1,96 @@
+# Retail Banking Platform — root module manifest.
+# This is a design scaffold for module composition.
+
+[template]
+schema = "nirdosha.banking-manifest/v1"
+app_title = "Retail Banking Platform"
+app_name = "retail-banking"
+org_name = "Nirdosha Bank"
+environment_name = "local"
+default_country = "IN"
+
+# Module selection. 'core' is mandatory; the rest can be toggled.
+# In a real deployment this section is what an implementer edits to say
+# "we want loans and cards, but not FX desk".
+[modules]
+core = { required = true }
+accounts = { required = true }
+transfers = { required = true }
+loans = { required = false, default = true }
+cards = { required = false, default = true }
+fx = { required = false, default = false }
+compliance = { required = false, default = true }
+
+# Shared entities live in one module but are referenced by others.
+# The composer must verify that every module declaring these entities uses
+# the same primary_key and field shape, or refuse to compose.
+[shared_entities]
+Customer = { owner = "core", pk = "customer_id" }
+AuditEntry = { owner = "core", pk = "entry_id" }
+Holiday = { owner = "core", pk = "holiday_id" }
+ProductConfig = { owner = "core", pk = "product_code" }
+
+# Country-specific parameters used by certified primitives.
+# These are NOT screen parameters; they are the law the primitives apply.
+[country.IN]
+currency = "INR"
+decimal_places = 2
+transfer_daily_limit_cents = "5000000"      # ₹50,000
+large_transfer_threshold_cents = "10000000" # ₹100,000
+loan_max_principal_cents = "500000000"      # ₹50 lakh
+
+[country.DE]
+currency = "EUR"
+decimal_places = 2
+transfer_daily_limit_cents = "5000000"
+large_transfer_threshold_cents = "10000000"
+loan_max_principal_cents = "500000000"
+
+# Default logging contract for all generated screen handlers.
+[logging]
+domain = "retail-banking"
+country = "IN"
+event_class = "audit"
+
+# ---------------------------------------------------------------------------
+# Rough edges discovered while writing this manifest
+# ---------------------------------------------------------------------------
+#
+# E1. Module ordering: menus.toml group ordering is per-module. The composer
+#     needs a global ordering policy (e.g., core first, then products by
+#     module weight) or a global [group_order] section.
+#
+# E2. Cross-module guard policies: a transfer screen wants to check that the
+#     debit account belongs to the same customer. The guard policy today only
+#     filters by tenant/role/resource/action. Cross-entity ownership checks
+#     belong in certified primitives, not in the guard corpus.
+#
+# E3. Shared entities vs. re-declaration: each module that touches Customer
+#     currently has to declare data_binding.entities = ["Customer"]. The
+#     composer must detect when two modules declare the same entity with
+#     different fields and refuse, rather than silently last-one-wins.
+#
+# E4. Role explosion: core declares Customer, BranchManager. Each product
+#     adds LoanOfficer, CardOps, TreasuryHead, ComplianceOfficer. With
+#     many modules the role list becomes large and jurisdiction-dependent.
+#     A real system needs role namespaces or (domain, role) pairs.
+#
+# E5. Primitive visibility: a primitive like `transfer_execute` declared in
+#     module/transfers must be callable from the generated serve binary and
+#     from other modules (e.g., cards paying down a loan). The composer must
+#     build a `primitives.nir` module that re-exports all enabled primitives.
+#
+# E6. Country-specific law: the same transfer in IN vs. DE has different
+#     limits and reporting thresholds. The register has no per-country screen
+#     variant; primitives read the country table at runtime. But the
+#     screens themselves may need jurisdiction-aware labels/hints.
+#
+# E7. Approval chain scope: chains like "large_transfer" belong to transfers,
+#     but an FX conversion above a threshold might want to reuse it. The
+#     composer needs to know whether chains are module-local or global.
+#     This manifest declares them global by merging all chains.
+#
+# E8. Logging domain mismatch: if a module is from a different regulated
+#     domain (e.g., insurance later), its logging domain may differ from
+#     the banking root. The composer needs to allow per-module logging
+#     overrides or refuse incompatible domains.

@@ -3,6 +3,202 @@
 The single tracking file for what's done, what's pending, and when —
 across the whole project, in one place.
 
+## Domain-neutral policy enforcement proposal
+
+- `[PROPOSED — NOT IMPLEMENTED]` **2026-09-26, RFC 0029: typed,
+  domain-neutral policy admission and enforcement.**
+  [The reviewed design](../rfcs/0029-domain-neutral-policy-enforcement.md)
+  defines a canonical policy IR, formal admission boundary, platform tiers,
+  per-decision enforcement strength, PDP/PIP/PEP and effect gateways,
+  transactional/workflow obligations, fact provenance, coverage and bypass
+  classification, signed lifecycle, and evidence/replay profiles. It composes
+  RFCs 0016/0017/0023/0026 rather than replacing them. No new runtime,
+  compiler, policy language, gateway, or certificate behavior described by
+  RFC 0029 is implemented merely by landing the document; Phases 0–4 are all
+  pending. Its companion
+  [responsibility impact and migration plan](../rfcs/0029-impact-and-migration-plan.md)
+  records the required amendments to existing RFCs, retained subsystem
+  ownership, likely implementation surfaces, migration stages, and completion
+  criteria; those amendments and implementation stages are also pending. A
+  [banking and healthcare tabletop](../rfcs/evidence/0029/tabletops/banking-healthcare.md)
+  found twelve cross-domain blockers (resource/effect identity closure,
+  decision-capability binding, evidence finality, distributed finality,
+  fail-operational safety posture, multi-authority disagreement, transition
+  revalidation, aggregate consistency, monitor health, policy-plane
+  confidentiality, and jurisdiction applicability among them). RFC 0029 now
+  includes all twelve as normative cross-domain hardening requirements in
+  §36 and threads them through admission, gateways, evidence, formal
+  prerequisites, delivery phases, and checklists. The tabletop must still be
+  rerun against those amended semantics before Phase 0 is frozen. The
+  [Phase 0 readiness matrix](../rfcs/0029-phase0-readiness-and-domain-matrix.md)
+  resolves the apparent status conflict: the MAP core's later conceptual
+  freeze does not close this universal-policy F1–F12 gate. It defines five
+  domain profiles plus a per-decision
+  [model-influence overlay](../rfcs/0029.a-model-assurance-port.md#model-influence-overlay), avoiding
+  binary “AI/non-AI domain” profiles while retaining exact authority and
+  assurance requirements. It also defines unambiguous representation
+  classifications, the concrete banking/healthcare rerun cases, and Phase 0
+  entry/exit criteria. All five candidate profiles and the overlay now exist,
+  but an
+  [independent influence/review semantics audit](../rfcs/evidence/0029/influence-review/fail-report.md)
+  failed with eight blocking findings and reopened the material-influence and
+  meaningful-review ambiguities. Revision 1 subsequently corrected R1–R8 and
+  a [focused independent re-review](../rfcs/evidence/0029/influence-review/pass-report.md)
+  passed the schema-independent A1/A2 gate. A candidate
+  [canonical fixture package](../rfcs/0029-canonical-ir-and-conformance-vectors.md)
+  now expands all 37 reviewed cases into schema-valid readable JSON and exact
+  RFC 8785 bytes with a checked SHA-256 manifest. This is not yet final
+  production IR. The isolated `rfc0029-conformance` crate now independently
+  parses and re-encodes all 37 vectors, reproduces every JCS hash, rejects
+  malformed/downgraded graphs, and computes matching influence results for all
+  26 graph-bearing cases. It now also rejects nested duplicate JSON names and
+  computes all nine review fixtures from closed, authority/version/commitment/
+  validity-bound predicate records. It also computes all 16 asserted admission
+  outcomes and 11 graph-based capability outcomes using explicit per-effect
+  limits, mandatory denies and exact capability/effect binding. Closed schemas
+  for remaining attribute/profile payloads, dependency invalidation and
+  complete normalizer results remain pending, as do
+  schema-backed domain matrices and the remaining Phase 0 gates. A separate
+  [AI-first KYC tabletop](../rfcs/evidence/0029/tabletops/ai-first-kyc.md) rejects a
+  claimed fully autonomous KYC guarantee under the current design and finds
+  eight additional AI-inference gaps (artifact/runtime identity, calibrated
+  uncertainty and abstention, subgroup assurance, adversarial resilience,
+  explanation/appeal, meaningful review, model-data lifecycle, and drift/
+  feedback control). Risk-based automation with qualified escalation is only
+  conditionally admissible after those gaps receive formal semantics.
+  [RFC 0029.a](../rfcs/0029.a-model-assurance-port.md) now proposes the
+  provider-neutral Model Assurance Port for those gaps: canonical immutable
+  model/deployment identity, sequenced signed status, per-inference receipts,
+  incident/change envelopes, evidence independence, promise evaluation,
+  derived lifecycle state, policy-triggered degrade/suspend/revoke, human
+  review and appeal, continuous monitoring, and impact discovery. All phases
+  A–E are pending; the existing `model_artifact!`, ONNX load/score driver, and
+  RTM dashboards do not implement this protocol.
+  A [medical AI tabletop](../rfcs/evidence/0029/tabletops/medical-ai.md) applies the
+  port to emergency sepsis prediction. Advisory use is only conditionally
+  admissible; autonomous diagnosis/treatment is rejected. The exercise finds
+  eight medical-profile requirements still needing formalization: intended
+  use/regulatory binding, clinical measurement semantics, autonomy/effect
+  tiers, clinical utility and harm endpoints, label/adjudication and
+  intervention feedback, workflow capacity/human factors, local validation/
+  transportability, and post-market safety/recall. The medical profile and
+  all associated rerun gates are pending.
+  A subsequent
+  [manufacturing and insurance tabletop](../rfcs/evidence/0029/tabletops/cross-domain-expansion.md)
+  tests both AI-first and non-AI processes: lockout/interlocks, predictive
+  maintenance/vision inspection, claim adjudication/payout, and AI damage/
+  fraud/risk assistance. It conditionally admits bounded advisory/reversible
+  automation and rejects hazardous autonomous actuation or opaque unattended
+  adverse decisions. Its six generic findings are now normative RFC 0029.a
+  contracts: semantic inputs, effect/autonomy tiers, outcome/harm,
+  label/adjudication, human-system capacity, and deployment validation/
+  surveillance. The
+  [unified conformance rerun](../rfcs/evidence/0029/tabletops/unified-conformance-rerun.md)
+  applies that vocabulary to KYC, medical, manufacturing, and insurance. No
+  seventh generic contract was required: bounded KYC, advisory medical,
+  advisory/reversible manufacturing, and assistive/bounded insurance AI are
+  architecturally admissible subject to profiles; autonomous KYC correctness,
+  autonomous treatment, hazardous machine actuation, and opaque unattended
+  adverse insurance actions remain rejected. **Update (2026-09-27):** the
+  [convergence plan](../rfcs/0029-phase0-readiness-and-domain-matrix.md#convergence-and-independent-validation-plan)'s
+  two independent gates have both closed. An independent reviewer with no
+  prior involvement found no seventh generic contract needed for
+  logistics/customs — a domain absent from the original C1–C6 design loop —
+  after actively trying six hard cases beyond the tabletop's own table
+  ([report](../rfcs/evidence/0029/out-of-sample-review/review-report.md)).
+  A separate independent review of banking/healthcare F1–F12 against RFC
+  0029's current §36 text found 11 of 12 items PASS with one gap (F8); RFC
+  0029 was corrected for that and four related findings, and a second,
+  independent re-reviewer confirmed all five corrections resolve cleanly
+  ([review](../rfcs/evidence/0029/f1-f12-review/review-report.md),
+  [re-review](../rfcs/evidence/0029/f1-f12-review/rereview-report.md)). C1–C6
+  is accordingly promoted from `Candidate baseline` to **`Validated core`**
+  — precisely for the "does this need a new universal primitive" question,
+  not as a claim that Phase 0 is complete. **Update (2026-09-27):
+  `Frozen version` is now declared, but core-only** — the canonical IR,
+  validator semantics (including a new closed-table edge-kind validator),
+  the result taxonomy (closed `AdmissionDiagnostic`/`ReviewFinding` enums,
+  replacing free-form strings), compatibility/version rules, and the
+  51-fixture conformance corpus, together with a permanent CI differential
+  gate (`.github/workflows/rfc0029-differential.yml`) that re-runs a
+  second, from-scratch Ruby implementation on every relevant change rather
+  than asserting agreement once. Getting there required fixing five real
+  defects found along the way, most of them by the tooling built specifically
+  to find them: the symbolic YAML's "lossless" claim was false (an
+  authority-ceiling table existed only in the excluded generator); a
+  pre-existing typo in fixture `M4`'s authority reference; `L8`–`L13` used
+  an edge shape RFC 0029.a's own closed table forbids, not once but
+  **twice** (`ModelInvocation` cannot structurally produce a `Fact`, and
+  separately `Eligibility` cannot source from `Fact` either — both
+  corrected); and the Ruby implementation itself had never implemented the
+  `FactProvenanceMissing` diagnostic, caught only once a new fixture (`L14`)
+  exercised it. The temporal-separation gap (no fixture showed a real
+  elapsed-time gap between an authority's assertion and its later,
+  possibly-revoked consumption) is closed as a **stateful falsification
+  pilot** (`src/pilot/assertion_lifecycle.rs`, a full t0→t3 revocation
+  sequence), not as an extension of the static fixture corpus — and its
+  success without needing any new primitive is itself further evidence for
+  the out-of-sample gate's PASS. Full account in the
+  [readiness matrix §8–§9](../rfcs/0029-phase0-readiness-and-domain-matrix.md#9-frozen-version--core-only-2026-09-27).
+  **This freeze explicitly excludes** `AdmissionReportV1` beyond the
+  `funds.reserve` pilot's scope and all five domain profiles' executable
+  conformance matrices — those remain `Candidate baseline`, to be built
+  *against* this now-frozen core, not shape it. See the convergence plan's
+  §6, §8 and §9 for the complete accounting. **(Superseded same day — both
+  items below are now closed; this sentence is kept as the historical
+  record of what §9's freeze itself declared, not as the current state.)**
+  **Update (2026-09-27): Phase 0 exit-gate work.** Formal operational
+  semantics, composition algebra, proof obligations, enforcement phases,
+  and evidence schema now exist for the first four of RFC 0029 §8's
+  fourteen policy kinds — Authorization, Data policy, Numeric invariant,
+  State invariant (RFC 0029 §8.1–§8.4). The remaining ten (Transition,
+  Sequence, Separation of duty, Resource lifecycle, Temporal, Aggregate,
+  External evidence, Operational, Physical world, Human judgment) are an
+  enumerated backlog (readiness matrix §11), not yet built, and not
+  currently required by any class this project advertises. The readiness
+  matrix §7 banking/healthcare matrices (19 rows total) are now fully
+  executable — `funds_reserve` gained daily-limit consistency, external-
+  submission timeout/reconciliation, evidence-plane-outage, and authority-
+  compromise discovery; a new `clinical_access` pilot covers all ten
+  healthcare rows. `AdmissionReportV1` now also reports on distributed
+  finality (`INV_PRECOMMIT`/`INV_EXTERNAL_UNKNOWN`/`L7`) and monitor health
+  (`R8_MONITOR_MISSING`) instead of a blanket `Unsupported`.
+  **Update (2026-09-27, same day): the one remaining exit-gate item —
+  each of the five domain profiles' own full positive/negative matrix — is
+  now closed too.** 51 new fixtures bring banking, KYC, healthcare,
+  manufacturing and insurance to the same nine-row coverage logistics
+  already had (no-model decision, autonomous reversible effect,
+  human-reviewed assertion, exceeds-ceiling rejection, mandatory-deny,
+  self-certification rejection, invalidation/reconcile, and all six
+  fact-provenance-negative cases) — see
+  [canonical-IR §12](../rfcs/0029-canonical-ir-and-conformance-vectors.md#12-cross-domain-conformance-matrix-2026-09-27-closed-same-day--see-update-below)
+  for the full table. This found one more real defect in the independent
+  Ruby implementation (`INSTITUTIONAL_AUTHORITY_BY_PROFILE` only covered
+  banking/logistics), fixed the same mechanical way prior findings were.
+  Re-verified: 107 canonical fixtures, `cargo test -p rfc0029-conformance`
+  all green (95 tests), Ruby differential gate PASS (107/107
+  canonicalization, semantics agree outside the pre-existing disclosed
+  `review.detail` exception). **Phase 0's exit gate is now fully closed** —
+  see [readiness matrix §10](../rfcs/0029-phase0-readiness-and-domain-matrix.md#10-phase-0-exit-gate)
+  and [§11](../rfcs/0029-phase0-readiness-and-domain-matrix.md#11-10s-one-remaining-item-closed-full-five-domain-matrix-same-day-2026-09-27).
+  Phase 1 (bundle/admission implementation) may now be described as
+  building on a frozen Phase 0 core. This does not promote anything beyond
+  Phase 0: the formal-semantics backlog (10 of 14 policy kinds, readiness
+  matrix §11 of the earlier section) remains open and unaffected, and
+  nothing here claims `Validated core` or `Frozen version` status for
+  anything beyond what §9's freeze already declared.
+  **Update (2026-09-27, same day): grammar/type/decidability re-audited
+  per an explicit checklist, one real gap found and closed.** `schema.json`
+  (the candidate IR's formal JSON Schema) existed but was never actually
+  validated against — a real, if narrow, enforcement gap, since the schema
+  and the Rust parser's own types could have silently drifted apart with
+  nothing to notice. All 107 generated vectors were checked against it
+  (0 violations found), and `generate.py` now runs this validation on
+  every invocation, wired into the CI workflow. The first-four
+  policy-kind semantics (§8.1–§8.4) were independently re-read end to end
+  and confirmed to carry all five required properties each. Full account:
+  [readiness matrix §10 status](../rfcs/0029-phase0-readiness-and-domain-matrix.md#status-2026-09-27).
+
 **Why the other planning/spec docs (`docs/Nirdosha_Unified_Plan.md`,
 `docs/goal.md`, `docs/TRANSACT.md`, `docs/SANDBOXING.md`, `docs/PROTOLANG_PORT.md`,
 `docs/nirdosha_row11_amendment.md`, `docs/nirdosha_row12_functions_identity.md`,
@@ -22,6 +218,301 @@ directly as the project's own documented map for readers. This file
 tracks **status and sequencing** across all of them in one place, plus
 the work items that don't have a home in any existing doc yet (Track
 A, Track B, Track C below) — but the specs themselves stay put.
+
+## Hi graph authoring proposal
+
+- `[PROPOSED — NOT IMPLEMENTED]` **2026-09-17, RFC 0021: typed graph,
+  project MCP, and incremental authoring.**
+  [Design and phased acceptance criteria](../rfcs/0021-typed-hi-graph-mcp-and-incremental-authoring.md)
+  cover explicit fields/signatures/contracts/bindings, stable scoped
+  identities, revisioned node/edge/whole-graph retrieval, atomic agent
+  patches, resumable streams and a durable change feed. The emission
+  proposal uses accepted typed snapshots and custom body slots to
+  produce v2 `.nir` deterministically; no other `.nir` dialect is supported.
+  The reviewed core defines exact acceptance dependency pins, gap
+  lifecycle, per-spec schema versions, canonical hashes, replay/error
+  contracts and revocation checks. Extensions have separate scopes and
+  acceptance criteria: [0021.a](../rfcs/0021.a-workflow-authoring-graph.md)
+  for non-executable workflow authoring,
+  [0021.b](../rfcs/0021.b-approval-runtime.md) for distinct-person
+  approval/runtime/outbox enforcement, and
+  [0021.c](../rfcs/0021.c-graph-analysis.md) for checker integration.
+  These are design documents only;
+  existing graph storage, MCP tools and whole-program LLM generation
+  are unchanged. Core phases A–E and all extension stages are pending.
+
+- `[PARTIAL — SHIPPED 2026-09-22]` **RFC 0022: the screen-only graph
+  view (its §2) is real.**
+  [The RFC](../rfcs/0022-screen-map-app-shell-login.md) proposed a
+  header toggle between the code datastructure graph and a screens
+  interconnections map; the toggle now exists (`hi_graph.html`'s
+  Screens/Data button), `/api/screens` serves every screen-kind node
+  (macro screens **and** reverse-engineered `router.get*` route pages,
+  typed `page`) plus the navigation edges `hi sync` derives from the
+  app's own code: `menus.toml` per-menu routes and per-role post-login
+  landings (read from the register `app_shell_from_toml!` names),
+  static string-literal redirects, and `approval_inbox!` detail paths
+  (template- and crud-subtree-resolved). Derived edges are real
+  `NAVIGATES_TO` edges with labels, regenerated wholesale each sync
+  (pure derived data — never human-authored); the synthetic shell
+  fan-out now applies only to screens no derived edge reaches. The
+  prompt screen (RFC 0014 §1) no longer blocks a code-populated graph:
+  any project whose units carry synced `content_hash`es opens straight
+  into build mode; the screen remains only for genuinely empty
+  projects. Same-day follow-up: the `+ Screen` rail now offers a
+  **register-entry form** next to the free-text describe flow — a
+  structured, validated screen entry driven entirely by the project's
+  own `screens.toml` (its module/archetype/stage/role/file
+  vocabularies, next-id prefill, role chips, inline per-field errors);
+  a valid entry is appended to the register (`total_screens` bumped)
+  and recorded as a reviewable `screen` candidate, never silently
+  pretending code exists; and the graph legend has its own
+  hide/show toggle with persisted state. §3–§5 (login!/app_shell!
+  macros, prompt taxonomy) shipped
+  earlier; §2's acceptance criterion 5 is met on the examples/rtm
+  corpus (130 screens, 88 derived nav edges). Proven end-to-end:
+  `cargo test -p nirdosha-hi`, then `nirdosha-hi sync` + `serve` against
+  `examples/rtm` and `GET /api/screens`.
+
+## V2 issue fixes
+
+- `[PARTIAL — SHIPPED 2026-09-23]` **Finite UI assurance proof harness.**
+  `nirdosha-contract-core::ui_assurance` accepts a `.nir/ui-proof.json`
+  declaration and exhaustively proves finite-model invariants (unique
+  identities, declared transition endpoints, explicit roles/postconditions,
+  and reachability). `nirdosha-hi publish` fails closed on an invalid proof
+  and embeds the proof summary in its certificate; absent declarations are
+  explicitly reported as `not_declared`, never treated as proof. Browser and
+  backend runtime adapters remain the next layer.
+
+- `[PARTIAL — SHIPPED 2026-09-23]` **Recipe Format v1 deterministic core.**
+  `nirdosha-contract-core::recipe` provides byte-preserving DSSE PAE, RFC
+  8785 JCS, self-nulled `recipe_id`, `result_hash`, and the normative
+  non-empty/strictly-sorted invariant flattening rule. Sigstore discovery,
+  Ed25519 key policy, OCI reproduction, and the runtime recipe runner remain
+  integration work. The recipe spec's raw-byte self-hash needs a fixed
+  sentinel or an external immutable copy; replacing its placeholder in-place
+  would otherwise be self-referential.
+
+- `[OPEN — CURRENT PHASE]` **Browser-backed UI assurance and Z3 model
+  encoding.** Add a real-browser runner (Playwright/Chromium adapter), stable
+  semantic selectors, DOM/accessibility/network/audit evidence, an independent
+  backend oracle, and signed runtime traces. Encode the finite screen/action
+  contracts as Z3 obligations; `unknown`, missing evidence, selector drift, or
+  build/environment mismatch fails closed. Test ownership is split: product
+  owners define requirements and invariants, the solution agent generates
+  positive cases, the problem-finder agent generates adversarial cases, and a
+  deterministic runner/verifier writes and decides the executable result. No
+  agent certifies its own proposed tests; humans approve the declared claims,
+  not every repeated execution.
+  The first generator seam is shipped as `cargo nirdosha ui-proof
+  --register <screens.toml> --output <path>`; it creates an explicitly
+  conservative inventory skeleton and never invents business transitions.
+  The second seam — the full code generator — shipped as
+  `cargo nirdosha generate-screens <project-dir>` (2026-09-23): it reads a
+  v2 `screens.toml` + `menus.toml` and emits the crate's whole `src/*.nir`
+  tree (bridge with `roles!`/entities/`GuardedTable` constructors/real
+  `guard_policy!` records synthesized from each guarded screen's own
+  `policy` block, app shell + login, per-module screen files, lib, serve
+  binary with literal-before-wildcard mount order). The guard is the
+  single data authority in every generated screen: any entity a generated
+  screen touches must be `data_binding.guard`ed somewhere in the register
+  (a generated app cannot contain an unguarded data screen), guard-mode
+  macros emit only `*_with_auth` routes (declared `access_*` become
+  vestigial OpenAPI metadata, not a second check), and unsupported
+  archetypes hard-error instead of silently skipping. End-to-end proof:
+  `examples/helpdesk/` — 12 screens → generated app → 13 passing smoke
+  tests (including Agent 403 on /settings with no policy and per-subject
+  field masking — Viewer reads drop `internal_notes` entirely while
+  Agent still sees it — proving the corpus decides, per subject).
+  Field-policy synthesis from `data_binding.fields` flags (masked →
+  forbidden, required → create-scoped required, fail-closed allowed
+  set) is shipped. Register-pair validation is shipped (2026-09-23):
+  `menus.toml` is typed in the generator and cross-validated against
+  `screens.toml` before emission — screen-id existence (V1), role
+  subsets (V2), built-stage targets (V3), route agreement with
+  `codegen.route_path` + route uniqueness (V6-lite), guard resolution
+  against the synthesized policy surface (V5-lite), and landing
+  reachability (V8-lite) — with the invariant count in the generation
+  report; schemas: `docs/MENUS_SCHEMA.{json,md}`, per-archetype
+  parameter sub-schemas in `SCREEN_REGISTER_SCHEMA.json`
+  (`params_*` defs), and generator-enforced field-membership checks
+  (crud write lists vs declared/masked fields, kanban column/title,
+  tree_view id/parent/label, report dimensions — all typo-proofed,
+  10 harness tests in `generate.rs`). The approval/workflow archetypes
+  are now guard-complete in the generator (2026-09-23):
+  `approval_inbox!` gains a guard clause (per-source `purpose:`, all-or-
+  nothing; the view routes `get_with_auth` and reads the worklist via the
+  new `GuardedTable::guarded_list_pending_approvals` — one real `read`
+  evaluation per source, fail-whole-not-partial; `access:` stays
+  vestigial metadata), a new `[[approval_chain]]` register section emits
+  real `nirdosha_rt::approval_chain!` blocks + the registry-dump helper
+  into every `GuardedTable` constructor, and `workspace!` emits real
+  guarded panel fns (inline `{ entity, link_field }` sources = a
+  `guarded_snapshot` filtered to the subject row) plus a generated
+  `label_fn` — a hand-written-string source is refused with a named
+  error rather than emitted as a compile error later. Remaining
+  generator gaps:
+  missing archetype macros (sankey, graph_renderer, rule_builder!,
+  whatif!), business-logic fn generation, `codegen_profile` selection,
+  full JSON-Schema validation of the registers (the generator today
+  enforces the load-bearing parts of the schemas; strict
+  `jsonschema`-based validation is the follow-up).
+
+- `[PARTIAL — CURRENT PHASE]` **Screen-register v2 schema.**
+  `docs/SCREEN_REGISTER_SCHEMA.json` and its companion guide define the
+  inventory contract for deterministic code generation: pinned codegen and
+  data bindings, policy/dependency/provenance metadata, renderer profiles,
+  determinism controls, and per-screen logging. Logging requires explicit
+  `domain` and `country` values. The checked-in RTM register remains v1 until
+  those fields are migrated and validated.
+
+- `[PARTIAL — CURRENT PHASE]` **Environment-bound guard data sources.**
+  `docs/GUARD_DATA_SOURCES_SCHEMA.json`, `docs/GUARD_DATA_SOURCES.md`, and
+  `deploy/guard-data-sources.toml.example` define the redacted manifest shape
+  for resolving logical stores from orchestrator-provided environment
+  variables. A guard-runtime loader still needs to be wired to resolve,
+  health-check, TLS-check, and register these sources at startup.
+
+- `[DONE]` **2026-09-18, Hi graph screen generation and preview.**
+  Generate still makes one whole-program LLM request per attempt; it
+  does not fill function bodies one at a time. Its graph prompt now uses
+  v2 Rust UI macros, with a stable `mount_<ScreenName>` mapping for each
+  confirmed screen. A graph-coverage gate rejects omitted units,
+  unmounted screens, and `main` without `.serve(<literal port>)` before
+  a compiling console fallback can be locked. Graph sync tracks each
+  UI macro as its screen unit. Preview rejects a source with no listener
+  and waits for the child to bind before reporting success. This does
+  not implement RFC 0021's proposed typed, incremental body emission.
+  Follow-up 2026-09-18: four saved generation attempts used
+  `SharedTable.iter()` or `.values()` even though its read API is
+  `snapshot()`. Generate now repairs those exact calls when the callee
+  is declared to return `SharedTable`, preserving source comments;
+  the system prompt also states the API explicitly.
+  Follow-up 2026-09-18: preview previously opened `/` even when the
+  compiled app only mounted `/tasks`, `/projects`, etc., yielding a 404.
+  It now derives the first UI macro's route and returns it in both start
+  and status responses; the rail opens that route and describes login
+  according to the generated app rather than promising demo login.
+
+- `[DONE]` **2026-09-17, GitHub #73: macro-time workflow/state-machine
+  conformance checking.** Depended on issue #70's "item 4" gap
+  (a general `workflow!` macro) actually landing first — confirmed by
+  reading `wizard.rs` directly that it's a linear multi-step form with
+  no states/events/transitions/terminal concept at all, so it couldn't
+  host `workflow_conformance.rs`'s real algorithm without comparing
+  fundamentally mismatched shapes. Built the missing prerequisite:
+  `nirdosha_rt::workflow! { name: .., data: [..], states: [state X {
+  on_entry: [..], on Event -> Y }, ..] }` (`nirdosha-macros/src/
+  workflow.rs`) generates a state enum and a pure `advance_<name>`
+  transition function; every `on .. -> Target` naming an undeclared
+  state is a real macro-expansion-time `compile_error!`, verified.
+  Then landed #73's own ask on top: an optional `against =
+  "spec.json"` clause runs the same finite set/relation-equality
+  conformance check `workflow_conformance.rs` documents needing no
+  solver for, ported to `nirdosha-contract-core::workflow_spec` (6 fast
+  unit tests) and wired into the macro — a real spec/declaration
+  mismatch is a `compile_error!` naming the exact missing/extra state,
+  transition, or data field, verified against a real mismatched
+  fixture. `on_entry`/`on_exit` stay plain labels compared by count
+  only, matching `workflow_conformance.rs`'s own stated scope limit
+  (no action-name-to-real-call binding attempted, in either compiler).
+
+- `[PARTIAL]` **2026-09-17, GitHub #72: reduce `nirdosha-driver`'s
+  `rustc_private` churn surface.** The `stable_mir`/`rustc_smir`
+  migration itself is **blocked in this environment**: confirmed by
+  searching the installed sysroot (both the compiled `.rlib`s and the
+  vendored `rustc-src`) — neither crate ships in the pinned nightly's
+  `rustc-dev` component at all, so there is nothing to migrate onto
+  today, not merely partial coverage to work around. Landed the two
+  asks that don't depend on it: (1) a startup toolchain-version guard
+  (issue #65 item 9) — under `RUSTC_WORKSPACE_WRAPPER`, cargo hands the
+  driver the *active* toolchain's own `rustc` path; a mismatch against
+  `NIRDOSHA_RUSTC_VERSION` (embedded by `build.rs` at build time) now
+  fails closed with an actionable "rebuild against this toolchain"
+  message before `run_compiler` ever links against it, instead of
+  risking a symbol/ABI mismatch in-process; (2) `deep-effects-next-nightly`
+  (`.github/workflows/v2-guarantees.yml`), a daily job building against
+  a floating `nightly` (not the pinned one) so a breaking
+  `rustc_private` change is caught the day it lands upstream, matching
+  Miri/Clippy's own toolstate-bot practice — `continue-on-error`, an
+  early-warning signal rather than a merge gate.
+
+- `[DONE]` **2026-09-17, GitHub #71: curated std/core/alloc effect
+  summary table.** Stage 2 rejected *every* external call by name,
+  including `Vec::push`, `.iter().map(..)`, and the dialect's own
+  injected `nfr(..)` guard — nothing outside the local crate was
+  trusted at all. `nirdosha-driver/src/std_effects.rs`: a curated,
+  `DefId`-resolved table covering a real but bounded std/core/alloc
+  surface, consulted before `foreign_reason`'s blanket rejection. A
+  higher-order call (`Iterator::map`, `Option::and_then`, ...) is
+  trusted for the call itself but the effects walker still recurses
+  into any closure/fn-item argument's own body, so a real effect
+  hidden inside a callback stays rejected — verified via the existing
+  `std_callback_is_not_trusted_by_crate_name` regression test, still
+  green. Deliberately excludes trait methods a downstream type
+  routinely reimplements (`Clone`, `Deref`, arithmetic/comparison
+  operators): confirmed empirically that `def_path_str` resolves a
+  trait method call to the trait's own declared path regardless of
+  which type implements it, so trusting `std::ops::Mul::mul` by name
+  would also silently trust a user type's own, possibly side-effecting
+  `Mul` impl. Also surfaced a separate, pre-existing gap this fix does
+  **not** touch: any value needing drop glue (even a plain `Vec` with
+  no custom `Drop`) is unconditionally rejected too — filed as GitHub
+  #78.
+
+- `[DONE]` **2026-09-17, GitHub #69: domain-specific affine/resource
+  checking via `rustc_mir_dataflow`.** A new `resource(kind = "..")`
+  contract clause: a real `rustc_mir_dataflow` forward "may still hold
+  an acquired, unreleased resource" analysis (`nirdosha-driver/src/
+  dataflow.rs`) proves every `nirdosha_rt::resource::acquire()` this
+  fn's own body produces is matched by a `release()` on every reachable
+  path — leaked resources, double-acquire (a reassignment or second
+  acquire while one is still held), and release-without-acquire are all
+  hard compile errors. Two real bugs surfaced and were fixed while
+  building the test fixtures: drop elaboration routinely lowers even a
+  direct `release(r)` into a fresh-temp move (`_2 = move _1;
+  release(move _2)`), which (1) needs the move-propagation logic to
+  clear the *source* local's bit, not just set the destination's, and
+  (2) means a double-acquire from reassignment shows up as a plain
+  `Assign` statement clobbering an already-held local, not as a second
+  `acquire()` call site — both are checked now. Unlike `numeric.rs`'s
+  hand-rolled path-sensitive walker, this domain is a monotone bitset
+  lattice, so loops are supported (real fixpoint iteration, not
+  unrolling). Scope: intra-procedural only — a resource acquired in one
+  function and released in another is out of scope for this pass (flagged
+  as release-without-acquire from the releasing function's own point of
+  view), and `kind` is currently a diagnostic label only, not a filter.
+
+- `[DONE]` **2026-09-17, GitHub #68: `requires(expr)`/`ensures(expr)`
+  Hoare pre/post conditions.** `nirdosha-contract-core`'s `Requires` now
+  carries a role *or* a boolean expression; a new `Ensures` clause holds
+  a postcondition over `result`. The attribute macro accepts both forms,
+  emits a dead sibling fn so plain rustc type-checks the predicate
+  against the real fn's parameter/return types at macro-expansion time
+  (a real `compile_error!`-grade diagnostic for an undeclared identifier
+  or non-boolean expression, not deferred to Stage 2), and still emits
+  the portable doc encoding. `nirdosha-driver` resolves the predicate's
+  identifiers against real MIR locals and discharges it over the same
+  Z3 VC IR issue #67 built: `requires` is assumed once at function
+  entry, `ensures` is checked at every `Return` the path walk reaches.
+  Supported grammar: identifiers, integer/bool literals, arithmetic,
+  comparisons, `&&`/`||`, unary `-`/`!`, parens — no field/index/method
+  access yet (needs a heavier VC encoding than item 1 provides).
+  Contract-core, macro-expansion, and driver-level MIR tests all pass.
+
+- `[DONE]` **2026-09-17, GitHub #67: MIR numeric proof discharge.**
+  Shared Rust integer encoder, path-sensitive MIR assertions, explicit
+  interval fallback, and bound per-assertion certificates verified. Z3,
+  fallback, native SMT/contract suites and both examples pass. Actual MIR
+  check removal and precondition syntax remain follow-ons. Details and
+  research: `docs/MIR_NUMERIC_PROOFS.md`.
+
+- `[DONE]` **2026-09-16, GitHub #66: concurrent v2 HTTP and live feeds.**
+  Bounded connection workers, shared sessions, orderly shutdown, and opt-in
+  feed long polling implemented. Runtime/macro suite passes (70 tests);
+  all v2 corpus binaries pass `cargo check`. Details:
+  `docs/V2_IMPLEMENTATION_BOOK.md`, issue #66 entry.
 
 ## Status tags
 
@@ -755,6 +1246,31 @@ soon — independent of Track B, since the interpreter path
 (`nirdosha serve`) is what will run those apps regardless of how much
 of Track B has landed.*
 
+> **Deprecation note (2026-09-17).** `crates/compiler` (the native
+> `.nir` compiler this entire track hardens for production) is now
+> deprecated in favor of the v2 Rust dialect
+> (`docs/nirdosha-rt-dialect.md`). The release/Docker infrastructure
+> this track's A2 items describe as `[DONE]`
+> (`.github/workflows/release.yml`, the `runtime` image job in
+> `.github/workflows/docker.yml`, the repo-root `Dockerfile`,
+> `ghcr.io/protobox/nirdosha-runtime`) has been retired — those files
+> no longer exist or no longer build this image. Every `[DONE]`/
+> `[PARTIAL]` entry below remains an accurate historical record of what
+> was built and verified at the time; it does not describe a currently
+> live, published artifact.
+
+> **Follow-up (2026-09-20): actually deleted, not just deprecated in
+> place.** `crates/compiler` (and `crates/grammar_export`/
+> `crates/grammar_check`, both purpose-built to validate its grammar)
+> are gone from this repo, along with the CI jobs, benchmark harness,
+> and Python client that targeted it. See the git history around this
+> date for the full removal; `README.md` is rewritten around the v2
+> Rust dialect as of the same date. Everything below Track A still
+> describes the deleted crate and stays exactly as it was — an accurate
+> historical record of work done on code that no longer exists here,
+> per this doc's own README.md-adjacent convention of not rewriting
+> history to match a later deletion.
+
 - `[DONE]` **A1. `transact` durability under real failure conditions** —
   actually kill the process mid-transaction under load and confirm
   crash-replay behaves, not just trust the existing test suite.
@@ -992,16 +1508,51 @@ of Track B has landed.*
     unrelated `identity_directory` table still reopens a fresh SQLite
     connection on every single `resolve_identity` call — this session's
     cache only covers `role_mapping` reads, not that.
-  - `[OPEN]` **Multi-IdP registry** — today `nirdosha serve` takes exactly one
-    fixed `--jwks-file`/`--issuer`/`--audience` triple (`AuthConfig`).
-    An admin-editable `IdentityProviderConfig` list (mirroring the
-    provider-config struct pattern again) would let `resolve_identity`
-    pick the right provider by the token's own issuer claim.
-  - `[OPEN]` **Roles → functions/fields report** — pure static analysis, no new
-    runtime concept: walk `program.fns`' `requires(role: ...)` and
+  - `[DONE]` **Multi-IdP registry** (2026-09) — closed with a real, disclosed
+    narrowing of the original spec: the interpreter-era `resolve_identity`/
+    DB-admin-editable `IdentityProviderConfig` pattern this bullet
+    originally proposed doesn't exist to extend any more (that
+    scaffolding was deleted with the interpreter, never ported to
+    compiled `serve`) — and compiled `serve` had *no* real single-provider
+    identity wiring at all before this pass (`nirdosha build --serve` was
+    demo-mode-only; `compiled-serve/src/lib.rs`'s own doc comment named
+    this as disclosed follow-up work). Closed both gaps together:
+    `crates/compiled-serve/src/lib.rs::auth_providers_from_env` reads
+    `NIRDOSHA_JWKS_FILE`/`NIRDOSHA_ISSUER`/`NIRDOSHA_AUDIENCE` (one real
+    provider) or `NIRDOSHA_IDENTITY_PROVIDERS` (a JSON file listing more
+    than one) at process start — a **runtime** config read, not a
+    `nirdosha build` flag, so the identical built binary redeploys
+    against a different IdP with no rebuild; degrades to
+    `AuthConfig::demo()` on absence/parse failure with a loud `eprintln!`,
+    same non-fatal posture `trusted_proxies_from_env` already has.
+    `identity::validate_token` dispatches by the token's own *unverified*
+    issuer claim when more than one provider is configured (peeked before
+    any signature check, since that's exactly what picks which JWKS to
+    verify the signature against), then runs the real, unchanged
+    signature verification against the matching provider only — an
+    unrecognized issuer is a real 401, never a silent fallback. Verified
+    end to end against a real bound listener, not just typechecked:
+    `crates/compiled-serve/src/tests.rs`'s
+    `multiple_providers_dispatch_by_the_tokens_own_issuer_claim`/
+    `an_unrecognized_issuer_401s_rather_than_falling_back` (two providers,
+    two independently-minted real tokens, each verifying only against its
+    own JWKS) plus four `#[ignore]`d (process-env-mutating, safe only run
+    alone) `auth_providers_from_env` tests covering the single-provider,
+    multi-provider-file, and malformed-config-degrades-to-demo cases.
+  - `[DONE]` **Roles → functions/fields report** (2026-09) — `nirdosha
+    roles <file.nir>`: pure static analysis, no new runtime concept.
+    Walks `program.fns`' `requires(role/claim: ...)` and
     `ui_gen::field_gates_for_struct`'s already-computed table/field ACL
-    gates (that data already exists, just isn't surfaced as a page),
-    group by role name.
+    gates (that data already existed, just wasn't surfaced as its own
+    report), grouped by role name (claims grouped by their `(key,
+    value)` pair, since a claim isn't a single string the way a role
+    is) — each entry lists the functions it gates plus the `struct`-
+    attributed `view`/`edit` fields it gates. Deliberately excludes
+    workflow `state { owner: role(...) }` gates (out of this report's
+    own "functions/fields" scope; `typeck::collect_role_claim_strings`
+    already covers the fuller role vocabulary including those, for the
+    demo-mode identity catalog). Verified end to end:
+    `crates/compiler/tests/roles_command.rs`.
   - **On-demand activation is already solved, not a new problem** — a
     program that declares none of these marker structs renders none of
     this UI today, the same way a hello-world script that never
@@ -2278,6 +2829,80 @@ types are involved. Worked around throughout this file by routing each
 arm through a small named helper function instead of writing the bare
 constructor as the arm's own tail expression.
 
+- `[DONE]` **A18. Compiled `serve` let a client forge its own `RoleView`
+  over HTTP, bypassing field-level masking.** Found by an external
+  red-team report (`SECURITY.md`'s invitation, submitted 2026-09-11,
+  `nirdosha-redteam/FULL_REDTEAM_REPORT.md`'s Critical #2: "codegen
+  lowering of requires/acquire/masking... is the real security
+  boundary"), confirmed live against the real compiled binary, not just
+  read from source: `codegen.rs::emit_serve_route_wrapper` special-cased
+  `VerifiedIdentity`/`Option(VerifiedIdentity)` parameters to be filled
+  from the verified `identity_json` rather than the request body, but
+  had no equivalent case for `RoleView`/`ClaimView` — those fell through
+  to the same generic per-argument JSON decode every ordinary struct
+  parameter gets. Reproduced: a real `nirdosha build --serve` binary,
+  exposing `fn list_employees(caller: RoleView) -> Employee
+  requires(role: "hr_staff")` where `Employee.salary requires(role:
+  "admin")`, given a real demo-mode bearer token proving only
+  `hr_staff` — `curl .../api/list_employees -d '[{"role":"admin"}]'`
+  returned the real, unmasked salary (`150000.0`), not the `0.0` a
+  `hr_staff`-only caller should ever see. `RoleView` is unforgeable
+  *inside* compiled `.nir` code (`RoleView("admin")` is a compile-time
+  error, `typeck.rs`'s `UnforgeableProofConstruction`) — compiled
+  `serve`'s HTTP boundary was the one caller that wasn't itself
+  `.nir` code already holding that guarantee, and nothing filled the
+  gap.
+
+  **Fixed same day, two parts:**
+  - `typeck::check_serve_exposure` gained
+    `ExposedFnRoleViewParamUnverifiable`: an exposed function with a
+    `RoleView`/`ClaimView`-typed parameter and no function-level
+    `requires` of the matching kind (`requires(role: ...)` /
+    `requires(claim: ..., ...)`) is now a compile error, not a silent
+    fallback to an unsafe shape — there's no safe source for the value
+    at the HTTP boundary otherwise. A `RoleView`/`ClaimView` parameter
+    on a function never exposed to `serve` is unaffected (the ordinary,
+    already-safe `acquire`-gated pattern).
+  - `codegen.rs::emit_serve_route_wrapper`: the existing
+    `nir_check_role`/`nir_extract_claim` call that already enforces
+    `f.requires` now also *constructs* the real `RoleView`/`ClaimView`
+    value right there (from the literal role text / the actually-
+    extracted claim value — never from anything client-suppliable) and
+    hands that to `f`, skipping `RoleView`/`ClaimView` parameters from
+    positional `args_json` decoding entirely (the same skip
+    `VerifiedIdentity` already got).
+
+  Verified two ways: `crates/compiler/tests/serve_exposure.rs` (6 new
+  typeck tests — matching/mismatched/absent `requires` for both
+  `RoleView` and `ClaimView`, and the never-exposed case staying
+  unflagged) and `crates/compiler/tests/codegen.rs::compiled_serve_never_lets_a_client_supplied_role_view_bypass_field_masking`
+  — a real compiled binary, a real demo-mode bearer token, the exact
+  `[{"role":"admin"}]` exploit payload, asserting the real salary never
+  appears in the response and the forged-body response is byte-identical
+  to a clean one. Full `cargo test --release` (651 tests: 630 passing, 21
+  `#[ignore]`-gated needing Postgres) reverified green, Redis included.
+  **Separately noted, not fixed in this pass**: `nirdosha build --serve`
+  emits `` `main` has no `requires(...)`... it will be callable by
+  anyone `` even when `main` isn't `serve`-exposed at all (it never is —
+  `main` has no HTTP route, confirmed live: `curl .../api/main` 404s
+  against a program exposing something else entirely). `typeck::
+  ungated_fn_warnings` scans every declared `fn` in the program, not
+  just `exposed_fn_names` — stale from the deleted interpreted
+  `serve.rs::dispatch`, which really did route any declared fn, unlike
+  compiled `serve`'s real deny-by-default model. **Attempted and
+  reverted, not just left alone**: filtering to `exposed_fn_names`
+  breaks `tests/ungated_fn_warning.rs::a_plain_fn_with_no_gate_at_all_warns`
+  and others, which deliberately assert this warning fires on *any*
+  ungated fn regardless of whether the test program declares a
+  `serve`/`screen` block at all — a real, intentional "would be unsafe
+  if ever exposed" lint, not simply an oversight to filter away.
+  Reconciling "warn proactively before exposure" with "don't warn about
+  a fn that provably has no route" needs a real design decision (a
+  narrower message for the definitely-unexposed case, most likely) plus
+  updating that test suite's own expectations together — a proper
+  follow-up, not a one-line fix, filed here rather than silently
+  patched around or silently dropped.
+
 ---
 
 ## Track C — Agent-Facing API (`docs/nirdosha-agent-api.md`)
@@ -2319,7 +2944,14 @@ interpreter/compiler capabilities, not blocked on either track.
 
 ---
 
-## Track D — Mobile app generation (`docs/MOBILE.md`)
+## Track D — Mobile app generation (`docs/MOBILE.md`) — superseded, see `rfcs/0028-mobile-client-codegen.md`
+
+**This track targeted `crates/compiler`/`ui_gen.rs`, retired
+2026-09-20 — D1-D5 below were never built and the IR they depend on no
+longer exists.** `rfcs/0028-mobile-client-codegen.md` re-specifies the
+same "generate a real native iOS/Android client" goal against the v2
+(Rust + `nirdosha_rt` macros) dialect that actually ships today; treat
+that RFC as current and this track as historical.
 
 *Priority: independent of Tracks A–C — a second renderer of `ui_gen.rs`'s
 existing manifest, not a change to the interpreter/compiler/agent-API
@@ -3168,18 +3800,30 @@ sequencing in `docs/ECOSYSTEM.md`; this entry only tracks status.*
   already-cross-checked LALR(1) grammar, not hand-authored separately),
   then a minimal diagnostics-first LSP, then a VS Code extension,
   formatter last (no canonical style decided yet to format toward).
-- `[PARTIAL]` **G3. Independent LLM validation.** `crates/bench/`
-  (pass@1 + self-repair, 23 tasks) is real; `real_model::RealModel`
-  (`--mode real`) is a real `Model` against any OpenAI-compatible
-  `/chat/completions` endpoint (DeepSeek, Kimi/Moonshot, GLM/Zhipu — base
-  URL/key/model name are env vars, not hardcoded to one provider), with
-  its request-building and response-parsing covered by real unit tests.
-  Still true: it has never actually run against a live provider (no API
-  key set in this project's dev/CI environment) — the flagship "an LLM
-  can write Nirdosha" claim is still unverified by the project's own
-  evidence. What's left of `docs/ECOSYSTEM.md` §G3's ask: set a real key
-  for one of the three providers, run `--mode real` against the existing
-  23 tasks, publish real pass@1/self-repair numbers.
+- `[PARTIAL]` **G3. Independent LLM validation — now actually run
+  against two live providers, corrected from stale.** This entry
+  described `real_model::RealModel`/`--mode real` (23 tasks), which no
+  longer exists — that whole `crates/bench` was removed entirely along
+  with the interpreter, and its claim ("never actually run against a
+  live provider") had gone stale in a different, worse direction than
+  simply outdated: the flagship "an LLM can write Nirdosha" claim
+  *was*, by then, independently verified elsewhere in this repo
+  (`README.md`'s "the part that sounds fake but isn't"), just not by
+  this specific harness — this line kept asserting otherwise regardless.
+  2026-09's rebuild (master plan Part 3 Sprint 2, `nirdosha-bench`) is
+  real and has run for real, twice: `gemini-2.5-flash` (Google AI
+  Studio) and `kimi-k2.7-code:cloud` (local Ollama, no API key), 3
+  Nirdosha generate→self-repair→verify tasks each, both independently
+  hitting the same disclosed Tier-1 gap — real corroboration. A
+  TypeScript/Rust plain-LLM cross-language baseline (2026-09-11) adds a
+  third provider's worth of evidence on the same two failure classes.
+  Full detail, exact numbers, and the honest "what this is not" scope
+  boundary (still Nirdosha-only + a 2-language baseline, not the full
+  master-plan comparison matrix): `crates/bench/RESULTS.md` and
+  `docs/PUBLIC_ROADMAP.md`'s own `crates/bench/` entries — not
+  duplicated here. `[PARTIAL]`, not `[DONE]`, for that same reason:
+  LLM+XGrammar/LLM+Imandra/AlgoVeri are real, disclosed, un-attempted
+  columns of the original ask.
 - **G4. Production/ops ecosystem — no new item, stays Track A.** The
   outside critique's items here (durability, deployment, OTLP,
   versioning policy, Windows/macOS verification) map directly onto
@@ -3203,6 +3847,58 @@ sequencing in `docs/ECOSYSTEM.md`; this entry only tracks status.*
   record), so real bus-factor improvement still needs those seats
   used, not just held. See `docs/ECOSYSTEM.md` §G5 for the full
   before/after.
+
+---
+
+## Track H — Cluster-native `dataflow!` (`rfcs/0027.a-cluster-native-dataflow.md`)
+
+*Priority: depends on RFC 0027 v1 landing first; does not block any existing track.*
+
+Cluster-scale execution for the verified stream-compute layer, designed
+so that one process is a one-member cluster and adding capacity means
+starting more identical processes. The surface syntax (`dataflow!`,
+contracts, driver checks) does not change; clustering is a runtime/
+deployment configuration. Operators are local tasks inside a process,
+not separate processes; cross-node traffic goes only through the shared
+durable log, not RPC.
+
+- `[OPEN]` **H1. Provider-agnostic `LogProvider` abstraction.** Generalize
+  the v1 `DurableLog` into a trait with an `EmbeddedLog` (single-node)
+  and a `KafkaLog` (cluster) implementation. Selection is runtime
+  configuration, never source syntax. `HttpWebhook` sources append to
+  the shared log from the compiled-`serve` route and return HTTP 202
+  once the append is durable; the caller is decoupled from stream
+  processing. Blocked on RFC 0027 Phase 2 runtime.
+- `[OPEN]` **H2. Consumer-group partition ownership + failure model.**
+  Assign source partitions to identical processes via the log's
+  consumer-group protocol (KIP-848 incremental cooperative rebalance).
+  Run one local topology executor per owned partition. Implement
+  graceful revoke (finish in-flight, snapshot, commit offset) and
+  restore on rebalance. Define node-failure windows: HTTP retry +
+  idempotent log producer for pre-202; snapshot + replay for processing
+  node death; `exactly_once` key deduplication for sink-effect replay.
+- `[OPEN]` **H3. Cross-node shuffle through repartition topics.** Map
+  inter-operator edges that need a different key grouping to compacted
+  repartition topics, with credit-based in-flight caps to preserve
+  bounded-mailbox backpressure across the network. No direct node-to-node
+  RPC.
+- `[OPEN]` **H4. Partition-scoped state snapshots and restore.** Snapshot
+  keyed state per partition on barrier, write to changelog/object store,
+  and restore from snapshot + replay after rebalance. Depends on H2.
+- `[OPEN]` **H5. Global barriers and multi-input windows.** Coordinate
+  barrier injection across source partitions and combine per-partition
+  watermarks for joins/session windows. Driver/runtime proof of
+  cross-partition alignment is part of this item.
+- `[OPEN]` **H6. Fleet attestation and node identity.** Apply Row 12
+  identity and the v2 guarantee bundle to cluster membership: mTLS/
+  token-based node identity, binary hash check before a process joins
+  the group, and cluster-scaled evidence for `deterministic_execution`,
+  `durable_transactions`, `authenticated_identity`, `build_provenance`,
+  and `deadlock_freedom`.
+- `[OPEN]` **H7. Self-contained Raft+SWIM mode.** Optional later mode with
+  no external Kafka dependency: SWIM gossip for membership, Raft for the
+  metadata/control log, and a `RaftLog` `LogProvider` implementation.
+  Surface unchanged from H1.
 
 ---
 

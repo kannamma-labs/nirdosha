@@ -1,0 +1,59 @@
+[template]
+schema = "nirdosha.template/v1"
+app_title = "Trading Platform"
+app_name = "trading-platform"
+org_name = "Nirdosha Trading"
+environment_name = "local"
+default_country = "US"
+
+# Modules that make up a trading / brokerage app.
+[modules]
+core = { required = true, default = true }
+instruments = { required = true, default = true }
+orders = { required = false, default = true }
+positions = { required = false, default = true }
+risk = { required = false, default = true }
+market_data = { required = false, default = false }
+backoffice = { required = false, default = false }
+compliance = { required = false, default = false }
+ai_ml = { required = false, default = false }
+
+# Entities reused across modules.
+[shared_entities]
+Instrument.owner = "instruments"
+Instrument.pk = "instrument_id"
+Account.owner = "core"
+Account.pk = "account_id"
+Order.owner = "orders"
+Order.pk = "order_id"
+Position.owner = "positions"
+Position.pk = "position_id"
+AuditEntry.owner = "core"
+AuditEntry.pk = "entry_id"
+
+# Country-specific configuration.
+[country.US]
+currency = "USD"
+decimal_places = 2
+transfer_daily_limit_cents = "100000000"
+large_transfer_threshold_cents = "10000000"
+loan_max_principal_cents = "0"
+
+[country.GB]
+currency = "GBP"
+decimal_places = 2
+transfer_daily_limit_cents = "80000000"
+large_transfer_threshold_cents = "8000000"
+loan_max_principal_cents = "0"
+
+[country.IN]
+currency = "INR"
+decimal_places = 2
+transfer_daily_limit_cents = "500000000"
+large_transfer_threshold_cents = "50000000"
+loan_max_principal_cents = "0"
+
+[logging]
+domain = "trading"
+country = "US"
+event_class = "audit"

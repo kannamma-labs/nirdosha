@@ -1,0 +1,45 @@
+//! v2 of `examples/features/02_operators.nir` — the operator set,
+//! including `Vector`/`Matrix` elementwise and linear-algebra forms.
+//! `.nir`'s `.*`/`./` ride `hadamard`/`hadamard_div` (no operator
+//! overloading of `.` in Rust); everything else is native.
+
+use nirdosha_rt::prelude::*;
+
+fn main() {
+    // scalar arithmetic
+    println!("{}", 7 + 3); // 10
+    println!("{}", 7 - 3); // 4
+    println!("{}", 7 * 3); // 21
+    println!("{}", 7 / 3); // 2 — int division
+    println!("{}", 7.0 / 3.0); // float division saturates, never traps
+    println!("{}", -7); // unary negate
+
+    // comparisons (numeric scalars only)
+    println!("{} {} {}", 7 > 3, 7 >= 7, 7 < 3);
+    println!("{} {} {}", 7 <= 7, 7 == 7, 7 != 3);
+
+    // short-circuit boolean logic
+    println!("{} {} {}", true && false, true || false, !true);
+
+    // box/&: unary `*` (deref) and `&` (borrow)
+    let boxed: Box<i64> = Box::new(9);
+    println!("{}", *boxed);
+    let n: i64 = 5;
+    let r: &i64 = &n;
+    println!("{}", *r);
+
+    // Vector/Matrix: elementwise +/-, Hadamard .*/./, linear-algebra *
+    let v = Vector([1.0, 2.0, 3.0]);
+    let w = Vector([10.0, 20.0, 30.0]);
+    println!("{}", v + w); // [11, 22, 33] elementwise
+    println!("{}", v - w); // [-9, -18, -27] elementwise
+    println!("{}", hadamard(&v, &w)); // [10, 40, 90] Hadamard
+    println!("{}", hadamard_div(&v, &w)); // [0.1, 0.1, 0.1] Hadamard
+    println!("{}", v == v); // true — structural equality
+
+    let m = Matrix([[1.0, 2.0], [3.0, 4.0]]);
+    println!("{}", 2.0 * m); // [[2, 4], [6, 8]] — scalar * matrix
+    println!("{}", m * 2.0); // [[2, 4], [6, 8]] — either order
+    let mv = Vector([1.0, 1.0]);
+    println!("{}", m * mv); // [3, 7] — matrix * vector (inner dims match)
+}

@@ -1,0 +1,19 @@
+//! v2 of `examples/fintech-canon/02_overdraft_within_limit.nir` — an
+//! account with an approved overdraft may go negative, but never past
+//! the agreed limit. `overdraft_limit_cents` is a positive magnitude
+//! (how far below zero the account may go); the actual floor is the
+//! fixed value `-overdraft_limit_cents`, not something computed from
+//! the current balance.
+
+/// nirdosha:validate {"fn":"debit_with_overdraft","pre":["balance_cents >= 0 && amount_cents >= 0 && overdraft_limit_cents >= 0"],"post":["result >= 0 - overdraft_limit_cents"]}
+fn debit_with_overdraft(balance_cents: i64, amount_cents: i64, overdraft_limit_cents: i64) -> i64 {
+    if balance_cents - amount_cents < 0 - overdraft_limit_cents {
+        0 - overdraft_limit_cents
+    } else {
+        balance_cents - amount_cents
+    }
+}
+
+fn main() {
+    println!("{}", debit_with_overdraft(100, 300, 500));
+}

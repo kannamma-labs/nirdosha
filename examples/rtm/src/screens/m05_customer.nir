@@ -1,0 +1,123 @@
+//! M5 Customer & Entity Intelligence (`screen.md` module 5, 10 screens).
+//! Policies: `10_domains.nir` (dataset only), `96_restricted_views.nir`
+//! (the only real read grants). RTM live-demo plan Phase B.
+//!
+//! **Read `bridge.nir`'s `CustomerRow` doc comment before extending this
+//! file**: no `Analyst`/`ComplianceLead`/other L1-L2 role has any real
+//! `guard_policy!` read grant on `customer` anywhere in this corpus,
+//! despite `screen.md`'s own module-5 write-up being clearly aimed at
+//! L1/L2 investigators. This screen is real and guard-enforced for the
+//! two roles the corpus actually grants -- `RmUser` (one masked field,
+//! `rm-restriction-view`) and `Auditor` (broad, `auditor-read`) -- and
+//! correctly denies everyone else, `Analyst` included. That's not a bug
+//! in this screen; it's an accurate reflection of a real corpus gap, not
+//! routed around by adding a `guard_policy!` grant nobody asked this
+//! phase to invent.
+//!
+//! 5.1 (search), 5.2 (Customer 360 -- the one screen this gap actually
+//! blocks for L1/L2), 5.3-5.10 (KYC docs, risk breakdown, expected-vs-
+//! actual, related parties/UBO, adverse media, entity history, risk
+//! notes, restriction recommendation) all name datasets/fields this
+//! corpus never declares (`kyc_document`, `adverse_media`, a
+//! `related_parties`/`ubo_closure` *relation* rather than a queryable
+//! dataset -- `10_domains.nir`'s own comment already discloses those as
+//! catalog-only, empty-bodied functions). Only the single-table read
+//! below (functionally covering what 5.1/5.2 could show for `RmUser`/
+//! `Auditor`) is built.
+
+use crate::bridge::alert_table;
+use crate::bridge::case_table;
+use crate::bridge::customer_table;
+use crate::bridge::CustomerRow;
+use nirdosha_rt::prelude::SharedTable;
+
+/// 5.1 Global Entity Search -- search transactions by txn_id or merchant_id,
+/// with placeholder for customer-axis search until customer read grants
+/// are added for L1/L2 roles.
+pub fn mount_global_entity_search(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/search", "Global Entity Search (5.1)", |req, _params, auth| {
+        let q = req.query().get("q").cloned().unwrap_or_default();
+        let rows = if q.is_empty() {
+            Vec::new()
+        } else {
+            match crate::bridge::transaction_table().guarded_search(auth, "AmlInvestigation", Some(&q), &["txn_id", "merchant_id", "subject_id"]) {
+                Ok(rows) => rows,
+                Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+            }
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "q": q, "results": rows }))
+    })
+}
+
+/// 5.8 Entity Alert/Case History -- per-subject list of alerts and cases.
+/// `AlertRow` has no subject_id field, so resolve via txn_id lookup.
+pub fn mount_entity_history(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/customers/{id}/history", "Entity Alert/Case History (5.8)", |_req, params, auth| {
+        let Some(subject_id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        let txns: std::collections::HashSet<String> = match crate::bridge::transaction_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => rows.into_iter().filter(|r| r.subject_id == subject_id).map(|r| r.txn_id).collect(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let alerts = match alert_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => rows.into_iter().filter(|r| txns.contains(&r.txn_id)).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let cases = match case_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => rows.into_iter().filter(|r| r.subject_ref == subject_id).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "subject_id": subject_id, "alerts": alerts, "cases": cases }))
+    })
+}
+
+fn unused_customer_store() -> &'static SharedTable<i64, CustomerRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, CustomerRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_customer_screens,
+    entity: CustomerRow,
+    store: unused_customer_store,
+    path: "/customers",
+    fields: [
+        customer_id: String,
+        tenant_id: String,
+        // T-02: `CustomerRow`'s own field_policy-forbidden fields are
+        // `Option<String>` now (`bridge.nir`'s doc comment) -- this
+        // macro's ungated `__parse`/`__update` path always type-checks
+        // against these declared types (dead code on this guard-only
+        // screen, but still compiled), so they must match exactly.
+        name: Option<String>,
+        national_id: Option<String>,
+        dob: Option<String>,
+        occupation: String,
+        kyc_status: String,
+        risk_rating: Option<String>,
+        pep_flag: Option<String>,
+        sanctions_status: Option<String>,
+        restriction_status: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        // `RmUser`'s own read is `purpose(CustomerService)`;
+        // `Auditor`'s is `purpose(Audit)` -- two real, different
+        // purposes for the same resource, the identical shape
+        // `m02_dashboards.nir`'s multi-purpose widgets already handle by
+        // calling `guarded_snapshot`/`guarded_aggregate` more than once.
+        // This one `crud_screens!` list route can only carry a single
+        // fixed `purpose:`, so it's bound to the *broader* of the two
+        // real grants (`Audit`, `Auditor`'s own) -- `RmUser` genuinely
+        // cannot reach this exact route today (their one-field view
+        // needs its own `purpose(CustomerService)`-bound screen, not
+        // built this pass; tracked here rather than silently widening
+        // `Auditor`'s purpose to cover both roles, which would be
+        // authorization-plane guesswork this file isn't the place to
+        // make).
+        table: customer_table,
+        purpose: "Audit",
+    },
+}

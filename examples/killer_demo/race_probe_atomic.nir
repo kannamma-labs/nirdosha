@@ -1,0 +1,195 @@
+// The corrected twin of race_probe.nir -- same schema, same 8-thread/
+// 250-iteration workload, same nfr(...) tracking, but `transfer_inner`
+// is rewritten to use a single atomic compare-and-decrement `UPDATE`
+// (the `WHERE balance_cents >= ?` clause *is* the check, evaluated and
+// applied by SQLite as one atomic statement) instead of a separate
+// SELECT-then-UPDATE with a `sleep_ms` gap between them. This closes
+// exactly the race race_probe.nir/RESULTS.md discloses -- and it is
+// **not** a Nirdosha-specific guarantee. It's the same fix any
+// SQL-backed program in any language needs for this exact bug; nothing
+// here is enforced by the compiler, ownership checker, or a language
+// keyword. See RESULTS.md's "what this does and doesn't prove" section
+// before reading more into this file than that.
+//
+// One disclosed gap this version does NOT close: the debit and credit
+// are two separate statements, not one SQL transaction. A crash between
+// them would destroy money -- a real, different failure mode from the
+// read-then-write race this file fixes, and out of scope for it. See
+// RESULTS.md.
+//
+// Run it:
+//   nirdosha build examples/killer_demo/race_probe_atomic.nir -o /tmp/race_probe_atomic
+//   /tmp/race_probe_atomic
+
+enum ErrorCode {
+    DbError(str),
+    NotFound(str),
+    InsufficientFunds(str),
+    InvalidAmount(str),
+}
+
+struct Text {
+    value: str,
+}
+
+fn reset_ledger_inner(conn: db) -> Result(Text, ErrorCode) {
+    let created: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY, name TEXT, balance_cents INTEGER)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    let cleared: Result(i64, ErrorCode) = match db_execute(conn, "DELETE FROM account") {
+        Ok(n) => Ok(n),
+        Err(e) => Err(DbError(e)),
+    }
+    let seeded_a: Result(i64, ErrorCode) = match cleared {
+        Ok(_) => match db_execute(conn, "INSERT INTO account (id, name, balance_cents) VALUES (1, ?, 1000000)", "alice") {
+            Ok(n) => Ok(n),
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(e),
+    }
+    let seeded_b: Result(Text, ErrorCode) = match seeded_a {
+        Ok(_) => match db_execute(conn, "INSERT INTO account (id, name, balance_cents) VALUES (2, ?, 1000000)", "bob") {
+            Ok(n) => Ok(Text("reset")),
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(e),
+    }
+    stop conn
+    return seeded_b
+}
+
+fn reset_ledger() -> Result(Text, ErrorCode) {
+    return match db_connect("examples/killer_demo/race_probe_atomic.db") {
+        Ok(conn) => reset_ledger_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn total_inner(conn: db) -> Result(i64, ErrorCode) {
+    let result: Result(i64, ErrorCode) = match db_query(conn, "SELECT COALESCE(SUM(balance_cents), 0) as s FROM account") {
+        Ok(rows) => match json_array_get(rows, 0) {
+            Ok(row) => match json_get_i64(row, "s") {
+                Ok(s) => Ok(s),
+                Err(e) => Err(DbError(e)),
+            },
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(DbError(e)),
+    }
+    stop conn
+    return result
+}
+
+fn total() -> Result(i64, ErrorCode) {
+    return match db_connect("examples/killer_demo/race_probe_atomic.db") {
+        Ok(conn) => total_inner(conn),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+// Corrected: no SELECT of the current balance at all for the debit --
+// `WHERE balance_cents >= ?` makes the check and the write one atomic
+// statement, so there is no gap between "read a balance" and "write a
+// new one" for a concurrent thread to land inside. `n >= 1` on the
+// returned affected-row count is how a caller learns whether it
+// actually applied (SQLite's WAL mode already serializes writers
+// against this same file -- this doesn't add a new guarantee on top of
+// that, it just stops *asking* for a window the naive version opened
+// for no reason).
+fn transfer_inner(conn: db, from_id: i64, to_id: i64, amount_cents: i64) -> Result(Text, ErrorCode) {
+    let created: i64 = match db_execute(conn, "CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY, name TEXT, balance_cents INTEGER)") {
+        Ok(n) => n,
+        Err(e) => -1,
+    }
+    sleep_ms(2) // same simulated round-trip cost as race_probe.nir, for a fair timing comparison
+    let debited: Result(i64, ErrorCode) = match db_execute(conn, "UPDATE account SET balance_cents = balance_cents - ? WHERE id = ? AND balance_cents >= ?", amount_cents, from_id, amount_cents) {
+        Ok(n) => Ok(n),
+        Err(e) => Err(DbError(e)),
+    }
+    let debit_applied: Result(Text, ErrorCode) = match debited {
+        Ok(n) => if n >= 1 {
+            Ok(Text("debited"))
+        } else {
+            Err(InsufficientFunds("not enough funds, or no such account"))
+        },
+        Err(e) => Err(e),
+    }
+    // Pure atomic increment -- always safe under concurrent writers,
+    // same reasoning as the debit above.
+    let credited: Result(Text, ErrorCode) = match debit_applied {
+        Ok(_) => match db_execute(conn, "UPDATE account SET balance_cents = balance_cents + ? WHERE id = ?", amount_cents, to_id) {
+            Ok(n) => Ok(Text("transferred")),
+            Err(e) => Err(DbError(e)),
+        },
+        Err(e) => Err(e),
+    }
+    stop conn
+    return credited
+}
+
+// Same nfr(...) as race_probe.nir's `transfer` -- identical thresholds,
+// identical real concurrency (8 worker threads), for a fair comparison
+// of what APM actually observes on the corrected version. See
+// RESULTS.md for the captured escalation counts on both sides.
+fn transfer(from_id: i64, to_id: i64, amount_cents: i64) -> Result(Text, ErrorCode)
+    nfr(concurrency_max: 4, latency_ms: 50)
+{
+    return match db_connect("examples/killer_demo/race_probe_atomic.db") {
+        Ok(conn) => transfer_inner(conn, from_id, to_id, amount_cents),
+        Err(e) => Err(DbError(e)),
+    }
+}
+
+fn worker(from_id: i64, to_id: i64, iterations: i64) -> i64 {
+    let i: i64 = 0
+    let successes: i64 = 0
+    while i < iterations {
+        let r: Result(Text, ErrorCode) = transfer(from_id, to_id, 1)
+        let ok: bool = match r {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+        if ok {
+            successes = successes + 1
+        }
+        i = i + 1
+    }
+    return successes
+}
+
+fn main() {
+    let setup: Result(Text, ErrorCode) = reset_ledger()
+    match setup {
+        Ok(n) => print("ledger reset"),
+        Err(e) => print("setup error"),
+    }
+
+    let t1: thread i64 = spawn worker(1, 2, 250)
+    let t2: thread i64 = spawn worker(2, 1, 250)
+    let t3: thread i64 = spawn worker(1, 2, 250)
+    let t4: thread i64 = spawn worker(2, 1, 250)
+    let t5: thread i64 = spawn worker(1, 2, 250)
+    let t6: thread i64 = spawn worker(2, 1, 250)
+    let t7: thread i64 = spawn worker(1, 2, 250)
+    let t8: thread i64 = spawn worker(2, 1, 250)
+
+    let s1: i64 = join t1
+    let s2: i64 = join t2
+    let s3: i64 = join t3
+    let s4: i64 = join t4
+    let s5: i64 = join t5
+    let s6: i64 = join t6
+    let s7: i64 = join t7
+    let s8: i64 = join t8
+
+    print("successful transfers:")
+    print(s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8)
+
+    let final_total: Result(i64, ErrorCode) = total()
+    print("final total (expected 2000000):")
+    match final_total {
+        Ok(n) => print(n),
+        Err(e) => print("error reading total"),
+    }
+}

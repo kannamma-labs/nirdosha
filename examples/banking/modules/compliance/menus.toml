@@ -1,0 +1,28 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Compliance"
+
+[[group]]
+id = "compliance"
+label_key = "nav.group.compliance"
+order = 80
+
+[[menu]]
+id = "nav.audit"
+label_key = "nav.audit"
+group = "compliance"
+screen_id = "7.1"
+route = "/compliance/audit"
+guard = { action = "aggregate", resource = "auditentry" }
+roles = ["ComplianceOfficer", "BranchManager"]
+order = 10
+
+[[menu]]
+id = "nav.sanction_scan"
+label_key = "nav.sanction_scan"
+group = "compliance"
+screen_id = "7.2"
+route = "/compliance/sanction-scan"
+roles = ["ComplianceOfficer"]
+order = 20

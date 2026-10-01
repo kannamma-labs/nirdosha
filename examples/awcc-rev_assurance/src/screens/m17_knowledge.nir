@@ -1,0 +1,50 @@
+//! M17 Knowledge — SOP/procedure viewer, regulatory reference (ATRA), in-context help.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::audit_record_table;
+
+fn knowledge_items() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({"id":"sop-01","title":"RA Investigation Procedure","url":"/help/sop-01"}),
+        serde_json::json!({"id":"sop-02","title":"ATRA Submission Checklist","url":"/help/sop-02"}),
+        serde_json::json!({"id":"reg-atra","title":"ATRA Reporting Guidelines","url":"/help/reg-atra"}),
+    ]
+}
+
+pub fn mount_sop_viewer(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/help/sop-01", "SOP/Procedure Viewer (17.2)", |_req, _params, _auth| {
+        let body = r#"<!doctype html>
+<html><body><h1>RA Investigation Procedure</h1><ol><li>Validate CDR discrepancy</li><li>Link to subscriber profile</li><li>Assess leakage pattern</li><li>Decide disposition or escalate</li></ol></body></html>"#;
+        nirdosha_rt::Response::html(200, body)
+    })
+}
+
+pub fn mount_regulatory_reference(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/help/reg-atra", "Regulatory Reference (ATRA) (17.3)", |_req, _params, _auth| {
+        let body = r#"<!doctype html>
+<html><body><h1>ATRA Regulatory Reference</h1><p>Revenue Assurance reports must be filed within regulatory deadlines. ATRA bundles require Finance Controller sign-off before submission.</p></body></html>"#;
+        nirdosha_rt::Response::html(200, body)
+    })
+}
+
+fn in_context_help_popular(_auth: &nirdosha_rt::Auth) -> i64 {
+    knowledge_items().len() as i64
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_in_context_help,
+    path: "/help",
+    title: "In-Context Help",
+    refresh_seconds: 3600,
+    widgets {
+        Metric { label: "Help articles", fn: in_context_help_popular, guarded: true },
+    }
+}
+
+pub fn mount_m17_knowledge(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let _ = audit_record_table;
+    let router = mount_sop_viewer(router);
+    let router = mount_regulatory_reference(router);
+    mount_in_context_help(router)
+}

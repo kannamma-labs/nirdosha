@@ -1,0 +1,84 @@
+//! M16 Notifications — notification center, my tasks, notification preferences.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{case_task_table, task_store, notification_message_table, app_settings_store};
+
+pub fn mount_notification_feed(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/notifications", "Notification Center (16.1)", |_req, _params, auth| {
+        let messages = match notification_message_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "messages": messages }))
+    })
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_my_tasks,
+    entity: crate::bridge::CaseTaskRow,
+    store: task_store,
+    path: "/tasks",
+    fields: [
+        task_id: String,
+        tenant_id: String,
+        item_ref: String,
+        task_type: String,
+        title: String,
+        assignee: String,
+        due_date: String,
+        priority: String,
+        status: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: case_task_table,
+        purpose: "Operations",
+        update_fields: [
+            status: String,
+        ],
+    },
+}
+
+pub fn mount_notification_preferences(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router
+        .get_with_auth("/preferences/notifications", "Notification Preferences (16.5)", |_req, _params, _auth| {
+            let settings = app_settings_store().get_clone();
+            let body = format!(
+                r#"
+<!doctype html>
+<html><head><title>Notification Preferences</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>Notification Preferences</h1>
+<form method="post" action="/preferences/notifications">
+<p><label><input type="checkbox" name="email" {}> Email notifications</label></p>
+<p><label><input type="checkbox" name="in_app" {}> In-app notifications</label></p>
+<p><button type="submit">Save</button></p>
+</form>
+</body></html>"#,
+                if settings.email_notifications { "checked" } else { "" },
+                if settings.in_app_notifications { "checked" } else { "" }
+            );
+            nirdosha_rt::Response::html(200, body)
+        })
+        .post_with_auth("/preferences/notifications", "Save notification preferences", |req, _params, _auth| {
+            let form = req.form_or_json();
+            let email = form.get("email").map(|s| s == "on").unwrap_or(false);
+            let in_app = form.get("in_app").map(|s| s == "on").unwrap_or(false);
+            app_settings_store().with(|s| {
+                s.email_notifications = email;
+                s.in_app_notifications = in_app;
+            });
+            nirdosha_rt::Response::json(200, &serde_json::json!({ "email": email, "in_app": in_app }))
+        })
+}
+
+pub fn mount_m16_notifications(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let _ = task_store;
+    let router = mount_notification_feed(router);
+    let router = mount_my_tasks(router);
+    mount_notification_preferences(router)
+}

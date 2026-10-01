@@ -1,0 +1,115 @@
+//! v2 of `examples/syntax/03_data_modeling.nir` — struct, enum, match,
+//! generics, Vector/Matrix, and the Money/Measure prelude types.
+//!
+//! Pre-migration (plain cargo): runs with the real `nirdosha-rt`
+//! prelude types (`Vector`, `Matrix`, `Dec128`, `Money`, `Measure` —
+//! entry #11). Post-migration: the same names resolve to the
+//! proprietary tier's runtime kernels; the file itself is unmodified.
+
+#![allow(dead_code)] // declaration-complete: the UI/CRUD layer exists for emit-ui/serve, not for main
+
+use nirdosha_rt::prelude::*;
+
+// Free text at a fn boundary: the one-field carrier struct.
+struct Text {
+    value: String,
+}
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rectangle(w, h) => w * h,
+    }
+}
+
+// Generics: `Duo(i64, i64)` and `Either(i64, i64)` are real, concrete
+// instantiations of the generic shapes.
+struct Duo<A, B> {
+    first: A,
+    second: B,
+}
+
+enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+fn sum_pair(p: Duo<i64, i64>) -> i64 {
+    p.first + p.second
+}
+
+fn pick(e: Either<i64, i64>) -> i64 {
+    match e {
+        Either::Left(n) | Either::Right(n) => n,
+    }
+}
+
+// Option(T)/Result(T, E): built in, no declaration needed.
+fn unwrap_option(o: Option<i64>, default: i64) -> i64 {
+    match o {
+        Some(n) => n,
+        None => default,
+    }
+}
+
+fn main() {
+    let p = Point { x: 3.0, y: 4.0 };
+    println!("{}", norm(&Vector([p.x, p.y]))); // 5
+
+    let c = Shape::Circle(2.0);
+    let r = Shape::Rectangle(3.0, 4.0);
+    println!("{}", area(c)); // 12.56636
+    println!("{}", area(r)); // 12
+
+    let duo = Duo { first: 2, second: 3 };
+    println!("{}", sum_pair(duo)); // 5
+
+    let e = Either::Left(1);
+    println!("{}", pick(e)); // 1
+
+    let some: Option<i64> = Some(41);
+    let none: Option<i64> = None;
+    println!("{}", unwrap_option(some, 0)); // 41
+    println!("{}", unwrap_option(none, 0)); // 0
+
+    // Vector/Matrix: literals, indexing, elementwise ops, linalg.
+    let v = Vector([1.0, 2.0, 3.0]);
+    let w = Vector([4.0, 5.0, 6.0]);
+    println!("{}", v + w); // [5, 7, 9]
+    println!("{}", dot(&v, &w)); // 32
+    println!("{}", v.0[0]); // 1
+
+    let m = Matrix([[1.0, 2.0], [3.0, 4.0]]);
+    println!("{}", transpose(&m)); // [[1, 3], [2, 4]]
+    println!("{}", det(&m)); // -2
+
+    // Money: amount is a type-checked dec128 (fallible parse, never a
+    // silent 0); currency is a closed, exhaustively-matchable enum.
+    let amount = match dec_from_str("19.99") {
+        Ok(d) => d,
+        Err(_e) => dec_from_i64(0, 0),
+    };
+    let price = Money { amount, currency: Currency::USD };
+    println!("{}", price.amount); // 19.99
+    println!("{}", price.currency); // USD()
+
+    // Measure: same shape for physical quantities.
+    let weight = Measure {
+        value: dec_from_i64(2, 0),
+        unit_code: UnitCode::Kilogram,
+    };
+    println!("{}", weight.value); // 2
+    println!("{}", weight.unit_code); // Kilogram()
+
+    let _ = Text { value: String::new() }; // carrier shape, for the record
+}

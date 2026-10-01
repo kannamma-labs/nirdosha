@@ -1,0 +1,17 @@
+//! v2 of `examples/fintech-canon/01_nonnegative_balance_after_debit.nir`
+//! — a wallet/account debit must never take a balance negative. The
+//! naive `balance - amount` is the textbook version of this bug; the
+//! corrected shape clamps to zero instead of going negative.
+
+/// nirdosha:validate {"fn":"debit_wallet","pre":["balance_cents >= 0 && amount_cents >= 0"],"post":["result >= 0"]}
+fn debit_wallet(balance_cents: i64, amount_cents: i64) -> i64 {
+    if amount_cents > balance_cents {
+        0
+    } else {
+        balance_cents - amount_cents
+    }
+}
+
+fn main() {
+    println!("{}", debit_wallet(1000, 300));
+}

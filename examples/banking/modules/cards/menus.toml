@@ -1,0 +1,29 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Cards"
+
+[[group]]
+id = "cards"
+label_key = "nav.group.cards"
+order = 50
+
+[[menu]]
+id = "nav.cards"
+label_key = "nav.cards"
+group = "cards"
+screen_id = "5.1"
+route = "/cards"
+guard = { action = "read", resource = "card" }
+roles = ["Customer", "BranchManager"]
+order = 10
+
+[[menu]]
+id = "nav.card_txns"
+label_key = "nav.card_txns"
+group = "cards"
+screen_id = "5.2"
+route = "/cards/transactions"
+guard = { action = "read", resource = "cardtransaction" }
+roles = ["Customer"]
+order = 20

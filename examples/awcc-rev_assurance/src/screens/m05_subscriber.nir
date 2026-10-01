@@ -1,0 +1,83 @@
+//! M5 Subscriber 360 — entity search, expected vs actual usage, discrepancy/case history.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{alert_table, cdr_table, leak_case_table, subscriber_table, SubscriberRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_subscriber_store() -> &'static SharedTable<i64, SubscriberRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, SubscriberRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_subscriber_screens,
+    entity: SubscriberRow,
+    store: unused_subscriber_store,
+    path: "/subscribers",
+    fields: [
+        subscriber_id: String,
+        tenant_id: String,
+        name: String,
+        msisdn: String,
+        imsi: String,
+        account_type: String,
+        risk_rating: String,
+        restriction_status: String,
+        legal_hold: bool,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: subscriber_table,
+        purpose: "Operations",
+    },
+}
+
+fn expected_vs_actual_usage_data(auth: &nirdosha_rt::Auth) -> String {
+    let cdrs = match cdr_table().guarded_aggregate(auth, "Analytics") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_call_type: std::collections::BTreeMap<String, (i64, f64)> = std::collections::BTreeMap::new();
+    for r in &cdrs {
+        let (count, amount) = by_call_type.entry(r.call_type.clone()).or_insert((0, 0.0));
+        *count += 1;
+        *amount += r.amount;
+    }
+    serde_json::to_string(&by_call_type.into_iter().map(|(k, (c, a))| serde_json::json!({ "label": k, "count": c, "amount": a })).collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_usage_dashboard,
+    path: "/subscribers/usage",
+    title: "Expected vs Actual Usage",
+    refresh_seconds: 300,
+    widgets {
+        Chart { label: "Usage by call type", fn: expected_vs_actual_usage_data, mark: bar, guarded: true },
+    }
+}
+
+pub fn mount_subscriber_history(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/subscribers/{id}/history", "Entity Discrepancy/Case History (5.8)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        let alerts = match alert_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows.into_iter().filter(|r| r.msisdn == id).map(|r| serde_json::json!({ "alert_id": r.alert_id, "status": r.status })).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let cases = match leak_case_table().guarded_snapshot(auth, "Operations") {
+            Ok(rows) => rows.into_iter().filter(|r| r.subject_ref == id).map(|r| serde_json::json!({ "case_id": r.case_id, "status": r.status })).collect::<Vec<_>>(),
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "subscriber_id": id, "alerts": alerts, "cases": cases }))
+    })
+}
+
+pub fn mount_m05_subscriber(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_subscriber_history(router);
+    let router = mount_usage_dashboard(router);
+    mount_subscriber_screens(router)
+}

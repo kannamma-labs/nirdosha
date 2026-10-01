@@ -1,0 +1,87 @@
+{
+  "id": "banking-v0",
+  "name": "Banking domain law v0",
+  "domain_class": "regulated",
+  "jurisdictions": ["US", "EU"],
+  "invariants": [
+    {
+      "kind": "fn",
+      "name": "charge_cents",
+      "signature": {
+        "params": [
+          ["balance_cents", "i64"],
+          ["amount_cents", "i64"]
+        ],
+        "ret": "i64"
+      },
+      "attributes": [
+        "validate contract charge_cents_conservation: result == balance_cents - amount_cents && result >= 0"
+      ],
+      "validates": [
+        {
+          "fn_name": "charge_cents",
+          "pre": "balance_cents >= 0 && amount_cents >= 0 && amount_cents <= balance_cents",
+          "post": [
+            "result == balance_cents - amount_cents",
+            "result >= 0"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "fn",
+      "name": "credit_cents",
+      "signature": {
+        "params": [
+          ["balance_cents", "i64"],
+          ["amount_cents", "i64"]
+        ],
+        "ret": "i64"
+      },
+      "attributes": [
+        "validate contract credit_cents_nonnegative: result >= 0"
+      ],
+      "validates": [
+        {
+          "fn_name": "credit_cents",
+          "pre": "balance_cents >= 0 && amount_cents >= 0",
+          "post": [
+            "result == balance_cents + amount_cents",
+            "result >= 0"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "fn",
+      "name": "net_change_cents",
+      "signature": {
+        "params": [
+          ["credits", "i64"],
+          ["debits", "i64"]
+        ],
+        "ret": "i64"
+      },
+      "attributes": [
+        "validate contract net_change_conservation: result == credits - debits"
+      ],
+      "validates": [
+        {
+          "fn_name": "net_change_cents",
+          "post": [
+            "result == credits - debits"
+          ]
+        }
+      ]
+    }
+  ],
+  "relations": [
+    ["charge_cents", "credit_cents"],
+    ["credit_cents", "net_change_cents"]
+  ],
+  "mandatory_fns": [
+    "charge_cents",
+    "credit_cents",
+    "net_change_cents"
+  ]
+}

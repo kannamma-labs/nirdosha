@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech PSP"
+
+[[group]]
+id = "psp"
+label_key = "nav.group.psp"
+order = 40
+
+[[menu]]
+id = "nav.psp"
+label_key = "nav.psp"
+group = "psp"
+screen_id = "4.1"
+route = "/psp"
+guard = { action = "read", resource = "pspconnection" }
+roles = ["PlatformAdmin"]
+order = 10

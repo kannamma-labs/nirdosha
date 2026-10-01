@@ -1,0 +1,77 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": "SemanticEdgeMissing",
+      "status": "indeterminate"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_evaluated"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "invalid",
+    "invalidation": "not_evaluated",
+    "model_authorized": "unknown",
+    "model_level": "Unknown",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": "unknown",
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "K1_STRUCTURAL_ONLY",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "DataFlow",
+        "source": "node:K1_STRUCTURAL_ONLY:m",
+        "target": "node:K1_STRUCTURAL_ONLY:t"
+      },
+      {
+        "kind": "DataFlow",
+        "source": "node:K1_STRUCTURAL_ONLY:t",
+        "target": "node:K1_STRUCTURAL_ONLY:d"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "decision_class": "decision:K1_STRUCTURAL_ONLY:d"
+        },
+        "id": "node:K1_STRUCTURAL_ONLY:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:K1_STRUCTURAL_ONLY:v1",
+          "receipt_id": "receipt:K1_STRUCTURAL_ONLY:m:v1"
+        },
+        "id": "node:K1_STRUCTURAL_ONLY:m",
+        "kind": "ModelInvocation"
+      },
+      {
+        "attributes": {
+          "transform_id": "transform:K1_STRUCTURAL_ONLY:t",
+          "version": 1
+        },
+        "id": "node:K1_STRUCTURAL_ONLY:t",
+        "kind": "Transform"
+      }
+    ],
+    "parameters": {
+      "declared_binding": "Observe"
+    }
+  },
+  "profile_id": "profile:rfc0029:kyc:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

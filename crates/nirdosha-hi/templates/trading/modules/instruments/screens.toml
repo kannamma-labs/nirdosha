@@ -1,0 +1,31 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-instruments"
+version = "1.0.0"
+module = "M2"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "2.1"
+name = "Instruments"
+module = "M2"
+archetype = "crud_screens"
+roles = ["Trader", "RiskManager", "Operations"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_instruments", route_path = "/instruments", generated_files = ["src/screens/m02_instruments.nir"] }
+data_binding = { entities = ["Instrument"], primary_key = "instrument_id", guard = { table = "instrument", purpose = "InstrumentOps" }, fields = [
+    { name = "instrument_id", type = "String" },
+    { name = "symbol", type = "String" },
+    { name = "name", type = "String" },
+    { name = "asset_class", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "InstrumentOps", allowed_actions = ["read"] }
+file = "src/screens/m02_instruments.nir"
+notes = "Tradeable instruments and reference data."

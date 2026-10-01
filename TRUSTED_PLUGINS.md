@@ -45,19 +45,23 @@ depended on the tree-walking interpreter's own `PluginBuiltin`/
 deleted in a separate pass the same session). `NativePluginBuiltin`
 (the compiled-path plugin ABI these examples never targeted, since
 widened past scalars to `str`/`handle(Kind)` by
-rfcs/0008-native-plugin-abi-widening.md Phase 1) survives and is real —
-`crates/compiler/tests/native_plugin_codegen.rs` exercises it directly,
-and two in-repo reference crates now implement it end to end
-(`crates/plugin-example-native-shout`, `crates/plugin-example-native-kv`,
-proven via `crates/compiler/tests/native_plugin_examples.rs`) — but
-`nirdosha build`'s own CLI still has no flag to load a native plugin at
-all (`build_with_native_plugins` is a library entry point with no
-wired-up CLI caller; Cargo-driven auto-discovery is rfcs/0008's own
-still-open Phase 3), so neither reference crate is a candidate for this
-table yet — there's no app-facing way to depend on one. This table's
-real purpose is unchanged — the template a genuine plugin's listing follows, and the
-day-one gate a future auto-discovery step (RFC 0001) requires — it
-just currently has zero rows to show for it.
+rfcs/0008-native-plugin-abi-widening.md Phase 1) has two in-repo
+reference crates implementing it end to end
+(`crates/plugin-example-native-shout`, `crates/plugin-example-native-kv`)
+plus a real `call`-shape provider (`crates/plugin-example-native-authed-http`,
+rfcs/0011 Phase 8) and a UI-catalog extension
+(`crates/ui-plugin-example-sparkline`, rfcs/0009 Phase B) — but nothing
+in this repo can currently link their staticlib output into a real
+binary (`crates/compiler`, the native AOT compiler that could, was
+retired in favor of the v2 Rust dialect) and `nirdosha build`'s own CLI
+still has no flag to load a native plugin at all, so none of these are
+candidates for this table yet — there's no app-facing way to depend on
+one. Wiring a v2-native equivalent (an ordinary Rust dependency plus
+whatever trust/discovery story v2 needs) is tracked as an open item in
+`docs/V1_CAPABILITY_PORT_MAP.md`, not done. This table's real purpose is
+unchanged — the template a genuine plugin's listing follows, and the
+day-one gate a future auto-discovery step (RFC 0001) requires — it just
+currently has zero rows to show for it.
 
 ## Requesting a listing
 

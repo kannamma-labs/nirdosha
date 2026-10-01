@@ -4,20 +4,20 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# Deliberately NOT `nirdosha = { path = "../compiler" }` as a real
-# dependency (unlike `bench`/`grammar_check`, which use the compiler as a
-# library) -- this is meant to be the "small standalone service" docs/WORKFLOW.md
-# §"notify presence bridge" and docs/ROADMAP.md's A5 both describe, deployed as
-# its own lightweight container/sidecar next to `nirdosha serve`, not a
-# second copy of the whole interpreter (z3, postgres, rusqlite, the full
-# `dist`-feature vendored-Z3 build). It talks to `nirdosha serve` only over
-# the network, the same arm's-length relationship an external WS gateway
-# has in production. `nirdosha` IS pulled in under `[dev-dependencies]`
-# below, purely so tests can start a real `nirdosha serve` in-process and
-# mint real tokens with `mock_issue_token` -- "verify against the real
-# thing, not a hand-rolled stand-in" (this repo's own testing discipline,
-# `tests/mq.rs`'s doc comment) without that cost ever reaching the shipped
-# binary.
+# Deliberately not a real dependency on `crates/compiler` (unlike
+# `bench`/`grammar_check`, back when those depended on it) -- this is
+# meant to be the "small standalone service" docs/WORKFLOW.md
+# §"notify presence bridge" and docs/ROADMAP.md's A5 both describe,
+# deployed as its own lightweight container/sidecar next to
+# `nirdosha serve`, not a second copy of the whole interpreter (z3,
+# postgres, rusqlite, the full `dist`-feature vendored-Z3 build). It
+# talks to `nirdosha serve` only over the network, the same arm's-length
+# relationship an external WS gateway has in production (`jwt.rs`'s own
+# doc comment: JWT verification is reimplemented locally via
+# `jsonwebtoken` rather than reaching into the interpreter's private
+# `validate_oidc_token` for exactly this reason). `crates/compiler` was
+# deleted 2026-09-20; this crate never had a `tests/` directory or any
+# real `nirdosha::` usage to lose.
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync", "io-util"] }
 tokio-tungstenite = "0.28"
@@ -38,9 +38,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 http = "1"
 base64 = "0.22"
-
-[dev-dependencies]
-nirdosha = { path = "../compiler" }
 
 [[bin]]
 name = "nirdosha-presence-gateway"

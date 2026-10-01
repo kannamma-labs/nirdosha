@@ -1,0 +1,478 @@
+//! AWCC Revenue Assurance — bridge between guard corpus and UI screens.
+//!
+//! Minimal RA analog of `examples/rtm/src/bridge.nir`.
+
+use nirdosha_guard_screens::GuardedEntity;
+
+/// Human roles that browser sessions authenticate as.
+pub const HUMAN_ROLES: &[&str] = &[
+    "RaAnalyst",
+    "RaLead",
+    "FinanceController",
+    "OpsEngineer",
+    "PolicyEngineer",
+    "Admin",
+    "Auditor",
+    "QaReviewer",
+    "CsAgent",
+    "RetailLiaison",
+    "RegulatorViewer",
+];
+
+fn role_universe() -> Vec<String> {
+    HUMAN_ROLES.iter().chain(["SvcAlerts", "SvcCase", "SvcAtra", "SvcRecon", "SvcBi"].iter()).map(|r| r.to_string()).collect()
+}
+
+fn make_table<E: GuardedEntity + Send + Sync + 'static>(
+    resource_name: &str,
+) -> nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, E> {
+    nirdosha_guard_screens::GuardedTable::new(
+        nirdosha_guard_mic::MemStoreDriver::new(),
+        nirdosha_guard_registry::candidates(),
+        nirdosha_guard_registry::dump().policies,
+        "awcc-ra-demo",
+        std::env::temp_dir().join(format!("awcc-ra-demo-{}-audit-{}.jsonl", resource_name, std::process::id())),
+        role_universe(),
+        "awcc-ra-demo",
+        vec![],
+    )
+}
+
+// ---- Alert / discrepancy row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AlertRow {
+    pub id: i64,
+    pub alert_id: String,
+    pub tenant_id: String,
+    pub msisdn: String,
+    pub cdr_id: String,
+    pub status: String,
+    pub score: f64,
+    pub rule_hits: String,
+    pub assignee: String,
+    pub disposition_code: String,
+    pub rationale: String,
+    pub case_id: String,
+    pub atra_linked: bool,
+}
+
+impl GuardedEntity for AlertRow {
+    const RESOURCE: &'static str = "alert";
+    fn row_id(&self) -> String { self.alert_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "alert_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "alert_id"] }
+}
+
+pub fn alert_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AlertRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AlertRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<AlertRow>("alert"))
+}
+
+// ---- Leak case row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LeakCaseRow {
+    pub id: i64,
+    pub case_id: String,
+    pub tenant_id: String,
+    pub status: String,
+    pub assigned_to: String,
+    pub alert_ids: String,
+    pub subject_ref: String,
+    pub atra_id: String,
+    pub disposition: String,
+    pub rationale: String,
+}
+
+impl GuardedEntity for LeakCaseRow {
+    const RESOURCE: &'static str = "leak_case";
+    fn row_id(&self) -> String { self.case_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "case_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "case_id"] }
+}
+
+pub fn leak_case_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, LeakCaseRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, LeakCaseRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<LeakCaseRow>("leak_case"))
+}
+
+// ---- Subscriber row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SubscriberRow {
+    pub id: i64,
+    pub subscriber_id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub msisdn: String,
+    pub imsi: String,
+    pub account_type: String,
+    pub risk_rating: String,
+    pub restriction_status: String,
+    pub legal_hold: bool,
+}
+
+impl GuardedEntity for SubscriberRow {
+    const RESOURCE: &'static str = "subscriber";
+    fn row_id(&self) -> String { self.subscriber_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "subscriber_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "subscriber_id"] }
+}
+
+pub fn subscriber_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SubscriberRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SubscriberRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<SubscriberRow>("subscriber"))
+}
+
+// ---- CDR row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CdrRow {
+    pub id: i64,
+    pub cdr_id: String,
+    pub tenant_id: String,
+    pub msisdn: String,
+    pub imsi: String,
+    pub account_id: String,
+    pub call_type: String,
+    pub duration_sec: i64,
+    pub bytes: i64,
+    pub amount: f64,
+    pub currency: String,
+    pub status: String,
+    pub occurred_at: i64,
+}
+
+impl GuardedEntity for CdrRow {
+    const RESOURCE: &'static str = "cdr";
+    fn row_id(&self) -> String { self.cdr_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "cdr_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "cdr_id"] }
+}
+
+pub fn cdr_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CdrRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CdrRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<CdrRow>("cdr"))
+}
+
+// ---- Payment / hold row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PaymentRow {
+    pub id: i64,
+    pub payment_id: String,
+    pub tenant_id: String,
+    pub subscriber_id: String,
+    pub amount: f64,
+    pub currency: String,
+    pub status: String,
+    pub hold_reason: String,
+    pub hold_expires_at: i64,
+    pub decision_by: String,
+    pub decision_rationale: String,
+}
+
+impl GuardedEntity for PaymentRow {
+    const RESOURCE: &'static str = "payment";
+    fn row_id(&self) -> String { self.payment_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "payment_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "payment_id"] }
+}
+
+pub fn payment_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PaymentRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, PaymentRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<PaymentRow>("payment"))
+}
+
+// ---- ATRA bundle row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AtraBundleRow {
+    pub id: i64,
+    pub atra_bundle_id: String,
+    pub tenant_id: String,
+    pub case_id: String,
+    pub subject: String,
+    pub status: String,
+    pub period_start: String,
+    pub period_end: String,
+    pub total_leakage: f64,
+}
+
+impl GuardedEntity for AtraBundleRow {
+    const RESOURCE: &'static str = "atra_bundle";
+    fn row_id(&self) -> String { self.atra_bundle_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "atra_bundle_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "atra_bundle_id"] }
+}
+
+pub fn atra_bundle_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AtraBundleRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AtraBundleRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<AtraBundleRow>("atra_bundle"))
+}
+
+// ---- Screening hit row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ScreeningHitRow {
+    pub id: i64,
+    pub hit_id: String,
+    pub tenant_id: String,
+    pub entity_id: String,
+    pub list_name: String,
+    pub status: String,
+    pub matched_name: String,
+    pub score: f64,
+}
+
+impl GuardedEntity for ScreeningHitRow {
+    const RESOURCE: &'static str = "screening_hit";
+    fn row_id(&self) -> String { self.hit_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "hit_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "hit_id"] }
+}
+
+pub fn screening_hit_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ScreeningHitRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ScreeningHitRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<ScreeningHitRow>("screening_hit"))
+}
+
+// ---- Model / validation row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelRow {
+    pub id: i64,
+    pub model_id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub version: String,
+    pub owner: String,
+    pub status: String,
+    pub champion: bool,
+}
+
+impl GuardedEntity for ModelRow {
+    const RESOURCE: &'static str = "model";
+    fn row_id(&self) -> String { self.model_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "model_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "model_id"] }
+}
+
+pub fn model_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ModelRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<ModelRow>("model"))
+}
+
+// ---- QA review row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct QaReviewRow {
+    pub id: i64,
+    pub review_id: String,
+    pub tenant_id: String,
+    pub reviewer: String,
+    pub analyst: String,
+    pub alert_id: String,
+    pub score: i64,
+    pub overturned: bool,
+}
+
+impl GuardedEntity for QaReviewRow {
+    const RESOURCE: &'static str = "qa_review";
+    fn row_id(&self) -> String { self.review_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "review_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "review_id"] }
+}
+
+pub fn qa_review_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, QaReviewRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, QaReviewRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<QaReviewRow>("qa_review"))
+}
+
+// ---- Case task row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CaseTaskRow {
+    pub id: i64,
+    pub task_id: String,
+    pub tenant_id: String,
+    pub item_ref: String,
+    pub task_type: String,
+    pub title: String,
+    pub assignee: String,
+    pub due_date: String,
+    pub priority: String,
+    pub status: String,
+    pub blocked_reason: String,
+    pub completion_note: String,
+}
+
+impl GuardedEntity for CaseTaskRow {
+    const RESOURCE: &'static str = "case_task";
+    fn row_id(&self) -> String { self.task_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "task_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "task_id"] }
+}
+
+pub fn case_task_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTaskRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, CaseTaskRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<CaseTaskRow>("case_task"))
+}
+
+/// Shared `SharedTable` instance for `crud_screens!` / `communication_feed!` consumers.
+pub fn task_store() -> &'static nirdosha_rt::prelude::SharedTable<i64, CaseTaskRow> {
+    static STORE: std::sync::OnceLock<nirdosha_rt::prelude::SharedTable<i64, CaseTaskRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(nirdosha_rt::prelude::SharedTable::new)
+}
+
+// ---- Notification row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct NotificationRow {
+    pub id: i64,
+    pub notification_id: String,
+    pub tenant_id: String,
+    pub user_id: String,
+    pub channel: String,
+    pub subject: String,
+    pub read: bool,
+}
+
+impl GuardedEntity for NotificationRow {
+    const RESOURCE: &'static str = "notification";
+    fn row_id(&self) -> String { self.notification_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "notification_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "notification_id"] }
+}
+
+pub fn notification_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<NotificationRow>("notification"))
+}
+
+// ---- Feed message row (communication_feed!) ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct NotificationMessageRow {
+    pub id: i64,
+    pub message_id: String,
+    pub tenant_id: String,
+    pub author: String,
+    pub body: String,
+    pub posted_at: String,
+}
+
+impl GuardedEntity for NotificationMessageRow {
+    const RESOURCE: &'static str = "notification";
+    fn row_id(&self) -> String { self.message_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "message_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "message_id"] }
+}
+
+pub fn notification_message_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationMessageRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, NotificationMessageRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<NotificationMessageRow>("notification"))
+}
+
+pub fn notification_message_store() -> &'static nirdosha_rt::prelude::SharedTable<i64, NotificationMessageRow> {
+    static STORE: std::sync::OnceLock<nirdosha_rt::prelude::SharedTable<i64, NotificationMessageRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(nirdosha_rt::prelude::SharedTable::new)
+}
+
+// ---- App settings row (settings_screen!) ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AppSettingsRow {
+    pub site_name: String,
+    pub email_notifications: bool,
+    pub in_app_notifications: bool,
+}
+
+pub fn app_settings_store() -> &'static nirdosha_rt::prelude::SharedCell<AppSettingsRow> {
+    static STORE: std::sync::OnceLock<nirdosha_rt::prelude::SharedCell<AppSettingsRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| nirdosha_rt::prelude::SharedCell::new(AppSettingsRow::default()))
+}
+
+// ---- Audit record row ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AuditRecordRow {
+    pub id: i64,
+    pub record_id: String,
+    pub tenant_id: String,
+    pub actor: String,
+    pub action: String,
+    pub resource: String,
+    pub occurred_at: String,
+    pub details: String,
+}
+
+impl GuardedEntity for AuditRecordRow {
+    const RESOURCE: &'static str = "audit_record";
+    fn row_id(&self) -> String { self.record_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "record_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "record_id"] }
+}
+
+pub fn audit_record_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AuditRecordRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, AuditRecordRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<AuditRecordRow>("audit_record"))
+}
+
+// ---- Saved view / user profile / report_def / scheduled_report helpers ----
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SavedViewRow {
+    pub id: i64,
+    pub view_id: String,
+    pub tenant_id: String,
+    pub user_id: String,
+    pub name: String,
+    pub filters: String,
+}
+
+impl GuardedEntity for SavedViewRow {
+    const RESOURCE: &'static str = "saved_view";
+    fn row_id(&self) -> String { self.view_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "view_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "view_id"] }
+}
+
+pub fn saved_view_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SavedViewRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, SavedViewRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<SavedViewRow>("saved_view"))
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReportDefRow {
+    pub id: i64,
+    pub report_id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub owner: String,
+    pub schedule: String,
+}
+
+impl GuardedEntity for ReportDefRow {
+    const RESOURCE: &'static str = "report_def";
+    fn row_id(&self) -> String { self.report_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "report_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "report_id"] }
+}
+
+pub fn report_def_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReportDefRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, ReportDefRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<ReportDefRow>("report_def"))
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UserProfileRow {
+    pub id: i64,
+    pub user_id: String,
+    pub tenant_id: String,
+    pub email: String,
+    pub locale: String,
+    pub timezone: String,
+}
+
+impl GuardedEntity for UserProfileRow {
+    const RESOURCE: &'static str = "user_profile";
+    fn row_id(&self) -> String { self.user_id.clone() }
+    fn field_policy_exempt() -> &'static [&'static str] { &["id", "user_id"] }
+    fn create_field_policy_exempt() -> &'static [&'static str] { &["id", "user_id"] }
+}
+
+pub fn user_profile_table() -> &'static nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UserProfileRow> {
+    static TABLE: std::sync::OnceLock<nirdosha_guard_screens::GuardedTable<nirdosha_guard_mic::MemStoreDriver, UserProfileRow>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| make_table::<UserProfileRow>("user_profile"))
+}
+
+// ---- Model run stat helpers ----
+pub fn model_run_volume(_auth: &nirdosha_rt::Auth) -> i64 { 0 }
+pub fn model_run_avg_fp_rate(_auth: &nirdosha_rt::Auth) -> f64 { 0.0 }

@@ -1,0 +1,46 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "kyc-screening-match"
+version = "1.0.0"
+module = "screening_match"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "1.1"
+name = "Fuzzy Screening Match"
+module = "M1"
+archetype = "settings_screen"
+combo = []
+roles = ["compliance_officer:R/W"]
+datasets = ["PG.screening_match_config"]
+stage = "built"
+codegen = { template = "settings_screen", mount_symbol = "mount_screening_match_config", route_path = "/vendors/screening-match", generated_files = ["src/screens/m13_screening_match.nir"] }
+data_binding = { entities = ["ScreeningMatchConfig"], primary_key = "config_id", guard = { table = "screening_match_config", purpose = "VendorConfig", row_id = "singleton" }, fields = [
+    { name = "config_id", type = "String", required = true },
+    { name = "algorithm", type = "String" },
+    { name = "match_threshold", type = "String" },
+    { name = "enabled", type = "String" }
+] }
+policy = { purpose = "VendorConfig", allowed_actions = ["read", "update"] }
+parameters = { access = 'requires role "compliance_officer"', note = "Fuzzy name matching is hard; prefer a proven third-party algorithm." }
+file = "src/screens/m13_screening_match.nir"
+notes = "Configure fuzzy name-matching thresholds. Vendor slot is intentionally open."
+
+[[screen]]
+id = "1.2"
+name = "Screening Match Engine"
+module = "M1"
+archetype = "static_embed"
+combo = []
+roles = ["compliance_officer:R"]
+datasets = ["STATIC.screening_match_engine"]
+stage = "blocked"
+blocked_by = ["plugin:screening_match_api"]
+codegen = { template = "static_embed", mount_symbol = "mount_screening_match_engine", route_path = "/engines/screening-match", generated_files = ["src/screens/m13_screening_match.nir"] }
+parameters = { title = "Screening Match Engine", content_file = "files/screening-match-engine.md", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }
+notes = "BLOCKED: fuzzy matching engine is usually sourced from a specialist vendor."

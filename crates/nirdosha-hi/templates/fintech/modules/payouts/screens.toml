@@ -1,0 +1,31 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-payouts"
+version = "1.0.0"
+module = "M6"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "6.1"
+name = "Payouts"
+module = "M6"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "MerchantAdmin"]
+datasets = ["payouts"]
+stage = "blocked"
+blocked_by = ["primitive:payout_schedule", "primitive:ledger_post"]
+codegen = { template = "crud_screens", mount_symbol = "mount_payouts", route_path = "/payouts", generated_files = ["src/screens/m06_payouts.nir"] }
+data_binding = { entities = ["Payout"], primary_key = "payout_id", guard = { table = "payout", purpose = "PayoutOps" }, fields = [
+    { name = "payout_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" }
+] }
+file = "src/screens/m06_payouts.nir"
+notes = "BLOCKED: needs payout scheduling and ledger-posting primitives."

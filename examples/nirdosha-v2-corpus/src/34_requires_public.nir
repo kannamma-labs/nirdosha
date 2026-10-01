@@ -1,0 +1,22 @@
+//! v2 of `examples/features/34_requires_public.nir` — the explicit
+//! "yes, intentionally open" marker: not a gate (no `acquire`, no
+//! token), just a `nirdosha:serve` claim that silences the
+//! anyone-can-reach-this warning. Directly callable, exactly as in
+//! `.nir`.
+
+/// nirdosha:serve {"requires_public": true}
+fn health_check() -> bool {
+    true
+}
+
+/// nirdosha:serve {"requires_public": true}
+fn version_info() -> i64 {
+    1
+}
+
+fn main() {
+    // called exactly like any other ungated function — no `acquire`,
+    // no token, no proof of any kind.
+    println!("{}", health_check()); // true
+    println!("{}", version_info()); // 1
+}

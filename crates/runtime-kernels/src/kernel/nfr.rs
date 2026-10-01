@@ -178,7 +178,7 @@ pub fn call_end(id: i64, start_ns: i64, was_err: bool) {
 /// no-op forever — NFRs are still tracked locally either way, the
 /// "fail open, telemetry never breaks the program" principle RFC 0007
 /// §6 already states for the flight recorder, applied here too.
-fn observability_target() -> Option<&'static (String, u16, String)> {
+pub(crate) fn observability_target() -> Option<&'static (String, u16, String)> {
     static TARGET: OnceLock<Option<(String, u16, String)>> = OnceLock::new();
     TARGET.get_or_init(|| std::env::var("NIRDOSHA_OBSERVABILITY_URL").ok().and_then(|raw| parse_http_url(&raw))).as_ref()
 }
@@ -246,7 +246,6 @@ fn unix_time_ms() -> u128 {
 /// telemetry path in this crate already takes — a broken observability
 /// server must never be the reason a `.nir` program itself fails.
 fn send_escalation(host: &str, port: u16, path: &str, fn_name: &str, nfr_kind: &str, threshold: f64, actual: f64) {
-    use std::io::Write;
     let body = format!(
         r#"{{"function":"{}","nfr":"{}","threshold":{},"actual":{},"timestamp_ms":{}}}"#,
         json_escape(fn_name),
@@ -255,6 +254,20 @@ fn send_escalation(host: &str, port: u16, path: &str, fn_name: &str, nfr_kind: &
         actual,
         unix_time_ms()
     );
+    post_json_fire_and_forget(host, port, path, &body);
+}
+
+/// The raw, hand-written HTTP/1.1 POST this module's own doc comment
+/// explains ("a fixed, tiny, known JSON shape... no HTTP/JSON client
+/// linked in for this") -- factored out so every kernel subsystem that
+/// escalates to `NIRDOSHA_OBSERVABILITY_URL` shares it instead of each
+/// hand-rolling its own copy. `isolation_check.rs`'s anomaly escalation
+/// is the second caller; this crate should never grow a third
+/// hand-written HTTP client. Best-effort, same fail-open posture as
+/// every other telemetry path here: any failure (refused connection,
+/// write error, timeout) is silently swallowed.
+pub(crate) fn post_json_fire_and_forget(host: &str, port: u16, path: &str, body: &str) {
+    use std::io::Write;
     let request = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: {host}\r\n\

@@ -1,0 +1,62 @@
+//! M12 ATRA Reporting — workbench queue, draft wizard, narrative editor, subjects/tabs, FC review, continuing activity, tipping-off controls.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{atra_bundle_table, AtraBundleRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_atra_store() -> &'static SharedTable<i64, AtraBundleRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, AtraBundleRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_atra_screens,
+    entity: AtraBundleRow,
+    store: unused_atra_store,
+    path: "/atra",
+    fields: [
+        atra_bundle_id: String,
+        tenant_id: String,
+        case_id: String,
+        subject: String,
+        status: String,
+        period_start: String,
+        period_end: String,
+        total_leakage: f64,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: atra_bundle_table,
+        purpose: "Operations",
+        update_fields: [
+            status: String,
+            total_leakage: f64,
+        ],
+    },
+}
+
+pub fn mount_continuing_activity(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/atra/continuing", "Continuing Activity ATRA Report (12.9)", |_req, _params, auth| {
+        let continuing = match atra_bundle_table().guarded_aggregate(auth, "Operations") {
+            Ok(rows) => rows.iter().filter(|r| r.status == "continuing").count() as i64,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "continuing_reports": continuing }))
+    })
+}
+
+pub fn mount_tipping_off_controls(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/atra/tipping-off", "Tipping-Off Controls (12.11)", |_req, _params, _auth| {
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "atra_routes_hidden_for": ["CsAgent", "RetailLiaison", "McpCopilot"] }))
+    })
+}
+
+pub fn mount_m12_atra(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_continuing_activity(router);
+    let router = mount_tipping_off_controls(router);
+    mount_atra_screens(router)
+}

@@ -1,0 +1,20 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Screening Match"
+
+[landing]
+
+[[group]]
+id = "screening"
+label_key = "nav.group.screening"
+order = 35
+
+[[menu]]
+id = "nav.screening_match_config"
+label_key = "Fuzzy Screening Match"
+group = "screening"
+screen_id = "1.1"
+route = "/vendors/screening-match"
+roles = ["compliance_officer"]
+order = 20

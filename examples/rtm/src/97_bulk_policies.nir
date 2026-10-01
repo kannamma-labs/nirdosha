@@ -1,0 +1,428 @@
+// ============================================================================
+// 97_bulk_policies.nir — Phase C read-only guard policies for the dataset
+// tables declared in bridge.nir.  These policies intentionally do NOT grant
+// write/delete paths; per-screen write handlers (where a real corpus workflow
+// exists) live next to their owning module.  Every policy here backs at
+// least one built/interim screen in screens-plan Phase C.
+// ============================================================================
+
+// ---- M1.6 / M18.x admin & platform config surfaces ----
+nirdosha_rt::guard_policy! {
+    allow "unlock-request-read" for Admin, ComplianceLead
+    when action == "read" && resource == "unlock_request"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "assignment-rules-read" for Admin, ComplianceLead
+    when action == "read" && resource == "assignment_rules"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "disposition-code-read" for Analyst, ComplianceLead, QaReviewer
+    when action == "read" && resource == "disposition_code"
+    purpose(AmlInvestigation)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "notif-template-read" for Admin, ComplianceLead
+    when action == "read" && resource == "notif_template"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// ---- M4 evidence & notes (4.6, 4.7, 16.2) ----
+nirdosha_rt::guard_policy! {
+    allow "evidence-doc-read" for Analyst, ComplianceLead
+    when action == "read" && resource == "evidence_doc"
+    purpose(AmlInvestigation)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "case-note-read" for Analyst, ComplianceLead
+    when action == "read" && resource == "case_note"
+    purpose(AmlInvestigation)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+// ---- M5 customer surfaces ----
+nirdosha_rt::guard_policy! {
+    allow "kyc-doc-read" for Analyst, ComplianceLead, RmUser
+    when action == "read" && resource == "kyc_doc"
+    purpose(AmlInvestigation)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "risk-factor-read" for Analyst, ComplianceLead, PolicyEngineer
+    when action == "read" && resource == "risk_factor"
+    purpose(AmlInvestigation)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "entity-flag-read" for Analyst, ComplianceLead
+    when action == "read" && resource == "entity_flag"
+    purpose(AmlInvestigation)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "customer-restriction-read" for ComplianceLead, Mlro, RmUser
+    when action == "read" && resource == "customer_restriction"
+    purpose(AmlInvestigation)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "device-session-read" for Analyst, OpsAnalyst, ComplianceLead
+    when action == "read" && resource == "device_session"
+    purpose(FraudMonitoring)
+    cap(row_cap = 500, max_scan_rows = 100_000)
+    obligate audit(sampled)
+}
+
+// ---- M7/M8 graph + rule helper tables ----
+nirdosha_rt::guard_policy! {
+    allow "link-edge-read" for Analyst, ComplianceLead
+    when action == "read" && resource == "link_edge"
+    purpose(AmlInvestigation)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "agg-bins-read" for Analyst
+    when action == "read" && resource == "agg_bins"
+    purpose(AmlInvestigation)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "flow-edge-read" for Analyst, ComplianceLead
+    when action == "read" && resource == "flow_edge"
+    purpose(AmlInvestigation)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "rule-stat-read" for PolicyEngineer, ComplianceLead, Admin
+    when action == "read" && resource == "rule_stat"
+    purpose(ModelGovernance)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+// ---- M10 screening surfaces ----
+nirdosha_rt::guard_policy! {
+    allow "list-versions-read" for Admin, ComplianceLead
+    when action == "read" && resource == "list_versions"
+    purpose(ModelGovernance)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "internal-list-read" for Admin, ComplianceLead, Analyst
+    when action == "read" && resource == "internal_list"
+    purpose(AmlInvestigation)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "rescreen-job-read" for Admin, ComplianceLead
+    when action == "read" && resource == "rescreen_job"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "rescreen-campaign-read" for Admin, ComplianceLead
+    when action == "read" && resource == "rescreen_campaign"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "sanctions-lists-human-read" for Admin, ComplianceLead, Analyst
+    when action == "read" && resource == "sanctions_lists"
+    purpose(AmlInvestigation)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "matcher-read" for Admin, ComplianceLead, PolicyEngineer
+    when action == "read" && resource == "matcher"
+    purpose(ModelGovernance)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// ---- M11 intervention ----
+nirdosha_rt::guard_policy! {
+    allow "timeout-config-read" for Admin, OpsAnalyst, ComplianceLead
+    when action == "read" && resource == "timeout_config"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// ---- M12/M15 reporting / SAR / calendar ----
+nirdosha_rt::guard_policy! {
+    allow "sar-submission-read" for Mlro, ComplianceLead
+    when action == "read" && resource == "sar_submission"
+    purpose(RegulatoryFiling)
+    cap(row_cap = 100)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "reporting-calendar-read" for Mlro, ComplianceLead, Admin
+    when action == "read" && resource == "reporting_calendar"
+    purpose(RegulatoryFiling)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "report-def-read" for Mlro, ComplianceLead, Admin, Analyst
+    when action == "read" && resource == "report_def"
+    purpose(Operations)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "scheduled-report-read" for Mlro, ComplianceLead, Admin
+    when action == "read" && resource == "scheduled_report"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// ---- M13 risk refdata ----
+nirdosha_rt::guard_policy! {
+    allow "country-risk-read" for Analyst, ComplianceLead, PolicyEngineer
+    when action == "read" && resource == "country_risk"
+    purpose(AmlInvestigation)
+    cap(row_cap = 300)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "product-risk-read" for Analyst, ComplianceLead, PolicyEngineer
+    when action == "read" && resource == "product_risk"
+    purpose(AmlInvestigation)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "pep-category-read" for Analyst, ComplianceLead, PolicyEngineer
+    when action == "read" && resource == "pep_category"
+    purpose(AmlInvestigation)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "global-params-read" for Analyst, ComplianceLead, Admin, PolicyEngineer
+    when action == "read" && resource == "global_params"
+    purpose(Operations)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+// ---- M16 collaboration ----
+nirdosha_rt::guard_policy! {
+    allow "handover-read" for Analyst, ComplianceLead, OpsAnalyst
+    when action == "read" && resource == "handover"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "saved-view-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "saved_view"
+    purpose(Operations)
+    cap(row_cap = 50)
+    obligate audit(sampled)
+}
+
+// ---- M18 admin / governance ----
+nirdosha_rt::guard_policy! {
+    allow "retention-config-read" for Admin, ComplianceLead
+    when action == "read" && resource == "retention_config"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "delegation-read" for Admin, ComplianceLead
+    when action == "read" && resource == "delegation"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "dsar-request-read" for Admin, ComplianceLead
+    when action == "read" && resource == "dsar_request"
+    purpose(Operations)
+    cap(row_cap = 100)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "license-info-read" for Admin
+    when action == "read" && resource == "license_info"
+    purpose(PlatformOperations)
+    cap(row_cap = 10)
+    obligate audit(sampled)
+}
+
+// ---- M19 ops monitor ----
+nirdosha_rt::guard_policy! {
+    allow "svc-health-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "svc_health"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "pipeline-stat-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "pipeline_stat"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "ingest-exception-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "ingest_exception"
+    purpose(PlatformOperations)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "recon-report-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "recon_report"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "integration-stat-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "integration_stat"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "batch-job-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "batch_job"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "capacity-stat-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "capacity_stat"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "sync-stat-read" for Admin, OpsAnalyst
+    when action == "read" && resource == "sync_stat"
+    purpose(PlatformOperations)
+    cap(row_cap = 100)
+    obligate audit(sampled)
+}
+
+// ---- M5.7 adverse media (external integration stub) ----
+nirdosha_rt::guard_policy! {
+    allow "adverse-media-read" for Analyst, ComplianceLead
+    when action == "read" && resource == "adverse_media"
+    purpose(AmlInvestigation)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+// ---- M8.1 catalog projection (compiled metadata read) ----
+nirdosha_rt::guard_policy! {
+    allow "catalog-projection-read" for PolicyEngineer, ComplianceLead, Auditor, Admin
+    when action == "read" && resource == "catalog_projection"
+    purpose(ModelGovernance)
+    cap(row_cap = 500)
+    obligate audit(sampled)
+}
+
+// ---- create-side policies for menus.toml routes whose write action was
+// disclosed (V5) as unbacked once their read-side dataset landed above;
+// each `for` list matches the screen's own `roles =` R/W subset exactly
+// (screens-plan.md R4/V2), not a broader grant. ----
+
+nirdosha_rt::guard_policy! {
+    allow "evidence-doc-create" for Analyst
+    when action == "create" && resource == "evidence_doc"
+    purpose(AmlInvestigation)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "case-note-create" for Analyst, ComplianceLead, McpCopilot
+    when action == "create" && resource == "case_note"
+    purpose(AmlInvestigation)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "entity-flag-create" for Analyst, ComplianceLead
+    when action == "create" && resource == "entity_flag"
+    purpose(AmlInvestigation)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "customer-restriction-create" for Analyst, ComplianceLead
+    when action == "create" && resource == "customer_restriction"
+    purpose(AmlInvestigation)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "unlock-request-create" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser, RegulatorViewer
+    when action == "create" && resource == "unlock_request"
+    purpose(Operations)
+    obligate audit(full)
+}

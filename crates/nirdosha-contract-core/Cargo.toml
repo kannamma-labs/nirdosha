@@ -1,0 +1,27 @@
+[package]
+name = "nirdosha-contract-core"
+version = "0.1.0"
+edition = "2024"
+description = "Shared contract model, parsers, and scanners for the Nirdosha Rust dialect (attribute form + doc encoding)."
+license = "MIT"
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.2"
+sha2 = "0.10"
+toml = "0.8"
+# `pack.rs` (issue #76): reads the same `.nir/hi.db` `plugins` table
+# `nirdosha-hi::hi_plugin` already writes, so a real compile path can
+# see which domain packs are actually installed and trusted. Same
+# version already pinned by `crates/compiler`/`crates/nirdosha-hi`.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# The dialect's own toolchain: explicitly exempt from itself (the
+# verifier does not lint its own implementation — see
+# docs/nirdosha-rt-dialect.md §5).
+[package.metadata.nirdosha-rt]
+toolchain = true

@@ -1,0 +1,56 @@
+//! v2 of `examples/features/03_control_flow_and_functions.nir` — `if`
+//! as both statement and expression, `while`, recursion (direct and
+//! mutual — Rust resolves names the same way), reassignment.
+
+fn is_even(n: i64) -> bool {
+    n - (n / 2) * 2 == 0
+}
+
+fn factorial(n: i64) -> i64 {
+    if n <= 1 {
+        return 1;
+    }
+    n * factorial(n - 1) // direct recursion
+}
+
+// mutual recursion: declaration order never matters in Rust either.
+fn is_even_mutual(n: i64) -> bool {
+    if n == 0 {
+        return true;
+    }
+    is_odd_mutual(n - 1)
+}
+
+fn is_odd_mutual(n: i64) -> bool {
+    if n == 0 {
+        return false;
+    }
+    is_even_mutual(n - 1)
+}
+
+fn main() {
+    // `if`/`else` as an expression
+    let n: i64 = 7;
+    let parity: i64 = if is_even(n) { 0 } else { 1 };
+    println!("{parity}"); // 1
+
+    // `if` as a statement — its value discarded
+    if is_even(n) {
+        println!("even");
+    } else {
+        println!("odd");
+    }
+
+    // `while` + reassignment
+    let mut i: i64 = 0;
+    let mut sum: i64 = 0;
+    while i < 5 {
+        sum += i;
+        i += 1;
+    }
+    println!("{sum}"); // 10
+
+    println!("{}", factorial(10)); // 3628800
+    println!("{}", is_even_mutual(10)); // true
+    println!("{}", is_odd_mutual(10)); // false
+}

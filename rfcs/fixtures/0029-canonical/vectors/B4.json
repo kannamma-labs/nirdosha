@@ -1,0 +1,97 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": null,
+      "status": "accepted"
+    },
+    "capability": {
+      "effect_class": "card.freeze",
+      "status": "issued"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "banking-autonomous-freeze",
+    "invalidation": "not_evaluated",
+    "model_authorized": true,
+    "model_level": "ExecuteReversible",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "B4",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "Authorize",
+        "source": "node:B4:d",
+        "target": "node:B4:c"
+      },
+      {
+        "kind": "Issue",
+        "source": "node:B4:c",
+        "target": "node:B4:x"
+      },
+      {
+        "kind": "ModelApproval",
+        "source": "node:B4:m",
+        "target": "node:B4:d"
+      },
+      {
+        "kind": "ModelTrigger",
+        "source": "node:B4:d",
+        "target": "node:B4:x"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "effect_class": "card.freeze"
+        },
+        "id": "node:B4:c",
+        "kind": "Capability"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:B4:d"
+        },
+        "id": "node:B4:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "effect_id": "card.freeze",
+          "reversibility_class": "Reversible"
+        },
+        "id": "node:B4:x",
+        "kind": "Effect"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:B4:v1",
+          "receipt_id": "receipt:B4:m:v1"
+        },
+        "id": "node:B4:m",
+        "kind": "ModelInvocation"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "card.freeze",
+        "maximum_model_level": "ExecuteReversible"
+      }
+    }
+  },
+  "profile_id": "profile:rfc0029:banking:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

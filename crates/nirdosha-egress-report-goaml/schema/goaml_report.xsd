@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reduced, representative subset of the goAML XML report schema
+  (UNODC goAML, https://goaml.unodc.org — publicly documented STR/CTR
+  report envelope shape), not the complete official schema. The real
+  goAML schema spans hundreds of elements across multiple report types
+  and optional party/account/entity sub-structures; this schema keeps
+  the core envelope every report type shares (report header, submission
+  code, one reporting entity, one or more transactions with from/to
+  parties) so a real XSD validator can be exercised against real
+  structural rules (required elements, enumerated codes, minOccurs) —
+  not a hand-rolled stand-in pretending to be XSD. See
+  crates/nirdosha-egress-report-goaml's own ADR (docs/adr/0017) for the
+  scoping rationale.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+
+  <xs:simpleType name="ReportCode">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="STR"/>
+      <xs:enumeration value="CTR"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="SubmissionCode">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="E"/> <!-- new -->
+      <xs:enumeration value="A"/> <!-- addendum -->
+      <xs:enumeration value="C"/> <!-- correction -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="ReportingPersonType">
+    <xs:sequence>
+      <xs:element name="entity_id" type="xs:string"/>
+      <xs:element name="entity_name" type="xs:string"/>
+      <xs:element name="jurisdiction" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="PartyType">
+    <xs:sequence>
+      <xs:element name="party_id" type="xs:string"/>
+      <xs:element name="party_name" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="TransactionType">
+    <xs:sequence>
+      <xs:element name="transaction_number" type="xs:string"/>
+      <xs:element name="transmode_code" type="xs:string"/>
+      <xs:element name="date_transaction" type="xs:date"/>
+      <xs:element name="amount_local" type="xs:decimal"/>
+      <xs:element name="t_from" type="PartyType"/>
+      <xs:element name="t_to" type="PartyType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="TransactionsType">
+    <xs:sequence>
+      <xs:element name="transaction" type="TransactionType" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ReportType">
+    <xs:sequence>
+      <xs:element name="report_code" type="ReportCode"/>
+      <xs:element name="submission_code" type="SubmissionCode"/>
+      <xs:element name="reporting_person" type="ReportingPersonType"/>
+      <xs:element name="transactions" type="TransactionsType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:element name="report" type="ReportType"/>
+
+</xs:schema>

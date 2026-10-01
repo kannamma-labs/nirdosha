@@ -1,0 +1,92 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": "InfluenceLevelExceedsProfile",
+      "status": "rejected"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_issued"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "health-alert-reuse",
+    "invalidation": "not_evaluated",
+    "model_authorized": true,
+    "model_level": "Recommend",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "H1_ORDER_REUSE",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "Authorize",
+        "source": "node:H1_ORDER_REUSE:d",
+        "target": "node:H1_ORDER_REUSE:c"
+      },
+      {
+        "kind": "Issue",
+        "source": "node:H1_ORDER_REUSE:c",
+        "target": "node:H1_ORDER_REUSE:x"
+      },
+      {
+        "kind": "Recommend",
+        "source": "node:H1_ORDER_REUSE:m",
+        "target": "node:H1_ORDER_REUSE:d"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "effect_class": "clinical.alert"
+        },
+        "id": "node:H1_ORDER_REUSE:c",
+        "kind": "Capability"
+      },
+      {
+        "attributes": {
+          "decision_class": "decision:H1_ORDER_REUSE:d"
+        },
+        "id": "node:H1_ORDER_REUSE:d",
+        "kind": "Decision"
+      },
+      {
+        "attributes": {
+          "effect_id": "medication.administer",
+          "reversibility_class": "Irreversible"
+        },
+        "id": "node:H1_ORDER_REUSE:x",
+        "kind": "Effect"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:H1_ORDER_REUSE:v1",
+          "receipt_id": "receipt:H1_ORDER_REUSE:m:v1"
+        },
+        "id": "node:H1_ORDER_REUSE:m",
+        "kind": "ModelInvocation"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "medication.administer",
+        "maximum_model_level": "None"
+      }
+    }
+  },
+  "profile_id": "profile:rfc0029:healthcare:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

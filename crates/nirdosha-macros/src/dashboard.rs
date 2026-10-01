@@ -1,0 +1,296 @@
+//! `dashboard! { .. }` — RFC 0009 Track C, Phase 0. Generates a
+//! `mount_<name>(router) -> router` function registering `GET
+//! <path>.json` (structured widget data, an OpenAPI entry for free)
+//! and `GET <path>` (a server-rendered HTML page — no client-side JS)
+//! on the existing `nirdosha_rt::web::Router`. Widget functions are
+//! called directly in the generated code, so a wrong name or
+//! signature is an ordinary `rustc` error, not a runtime surprise.
+//!
+//! ```ignore
+//! nirdosha_rt::dashboard! {
+//!     mount: mount_sales_dashboard,
+//!     path: "/dashboard",
+//!     title: "Sales Overview",
+//!     refresh_seconds: 300,
+//!     widgets {
+//!         Metric { label: "Revenue MTD", fn: stat_revenue_mtd, target: 1000000, alert_below: true },
+//!         Chart  { label: "By Region", fn: chart_revenue_by_region, mark: bar },
+//!     }
+//! }
+//! ```
+//!
+//! `guarded: true` on a `Metric`/`Chart` entry calls its `fn` as
+//! `#fn(auth)` instead of `#fn()` -- for a widget whose data comes from
+//! a `nirdosha_guard_screens::GuardedTable` (real per-request policy
+//! evaluation), the fn needs the viewer's `&Auth` to evaluate against,
+//! the same way any other guarded route in this crate does. The guard
+//! check itself lives in the widget fn's own body (typically a
+//! `guarded_snapshot`/`guarded_aggregate` call reduced to one number);
+//! this macro only decides whether `auth` is in scope to pass down.
+
+use crate::util::expect_keyword;
+use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
+use quote::quote;
+use syn::ext::IdentExt;
+use syn::parse::{Parse, ParseStream};
+use syn::{braced, Ident, Lit, LitBool, LitInt, LitStr, Token};
+
+enum Widget {
+    Metric {
+        label: LitStr,
+        stat_fn: Ident,
+        target: Option<Lit>,
+        alert_below: bool,
+        requires_role: Option<LitStr>,
+        guarded: bool,
+    },
+    Chart {
+        label: LitStr,
+        chart_fn: Ident,
+        mark: Ident,
+        requires_role: Option<LitStr>,
+        guarded: bool,
+    },
+}
+
+impl Widget {
+    fn requires_role(&self) -> &Option<LitStr> {
+        match self {
+            Widget::Metric { requires_role, .. } | Widget::Chart { requires_role, .. } => requires_role,
+        }
+    }
+}
+
+impl Parse for Widget {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let kind: Ident = input.parse()?;
+        let content;
+        braced!(content in input);
+        match kind.to_string().as_str() {
+            "Metric" => {
+                let (mut label, mut stat_fn, mut target, mut alert_below, mut requires_role, mut guarded) = (None, None, None, false, None, false);
+                while !content.is_empty() {
+                    let key = Ident::parse_any(&content)?;
+                    content.parse::<Token![:]>()?;
+                    match key.to_string().as_str() {
+                        "label" => label = Some(content.parse::<LitStr>()?),
+                        "fn" => stat_fn = Some(content.parse::<Ident>()?),
+                        "target" => target = Some(content.parse::<Lit>()?),
+                        "alert_below" => alert_below = content.parse::<LitBool>()?.value,
+                        "requires_role" => requires_role = Some(content.parse::<LitStr>()?),
+                        "guarded" => guarded = content.parse::<LitBool>()?.value,
+                        other => {
+                            return Err(syn::Error::new(
+                                key.span(),
+                                format!("unknown Metric key `{other}` — valid keys: label, fn, target, alert_below, requires_role, guarded"),
+                            ))
+                        }
+                    }
+                    if content.peek(Token![,]) {
+                        content.parse::<Token![,]>()?;
+                    }
+                }
+                Ok(Widget::Metric {
+                    label: label.ok_or_else(|| syn::Error::new(kind.span(), "Metric needs `label`"))?,
+                    stat_fn: stat_fn.ok_or_else(|| syn::Error::new(kind.span(), "Metric needs `fn`"))?,
+                    target,
+                    alert_below,
+                    requires_role,
+                    guarded,
+                })
+            }
+            "Chart" => {
+                let (mut label, mut chart_fn, mut mark, mut requires_role, mut guarded) = (None, None, None, None, false);
+                while !content.is_empty() {
+                    let key = Ident::parse_any(&content)?;
+                    content.parse::<Token![:]>()?;
+                    match key.to_string().as_str() {
+                        "label" => label = Some(content.parse::<LitStr>()?),
+                        "fn" => chart_fn = Some(content.parse::<Ident>()?),
+                        "mark" => mark = Some(content.parse::<Ident>()?),
+                        "requires_role" => requires_role = Some(content.parse::<LitStr>()?),
+                        "guarded" => guarded = content.parse::<LitBool>()?.value,
+                        other => {
+                            return Err(syn::Error::new(
+                                key.span(),
+                                format!("unknown Chart key `{other}` — valid keys: label, fn, mark, requires_role, guarded"),
+                            ))
+                        }
+                    }
+                    if content.peek(Token![,]) {
+                        content.parse::<Token![,]>()?;
+                    }
+                }
+                let mark = mark.ok_or_else(|| syn::Error::new(kind.span(), "Chart needs `mark`"))?;
+                if mark != "bar" && mark != "line" {
+                    return Err(syn::Error::new(
+                        mark.span(),
+                        "mark must be `bar` or `line` (RFC 0009 Track C Phase 0 supports these two)",
+                    ));
+                }
+                Ok(Widget::Chart {
+                    label: label.ok_or_else(|| syn::Error::new(kind.span(), "Chart needs `label`"))?,
+                    chart_fn: chart_fn.ok_or_else(|| syn::Error::new(kind.span(), "Chart needs `fn`"))?,
+                    mark,
+                    requires_role,
+                    guarded,
+                })
+            }
+            other => Err(syn::Error::new(
+                kind.span(),
+                format!("unknown widget kind `{other}` — valid kinds: Metric, Chart"),
+            )),
+        }
+    }
+}
+
+struct DashboardInput {
+    mount: Ident,
+    path: LitStr,
+    title: LitStr,
+    refresh_seconds: Option<LitInt>,
+    widgets: Vec<Widget>,
+}
+
+impl Parse for DashboardInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        expect_keyword(input, "mount")?;
+        input.parse::<Token![:]>()?;
+        let mount: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        expect_keyword(input, "path")?;
+        input.parse::<Token![:]>()?;
+        let path: LitStr = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        expect_keyword(input, "title")?;
+        input.parse::<Token![:]>()?;
+        let title: LitStr = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        let mut refresh_seconds = None;
+        if input.peek(Ident) {
+            let fork = input.fork();
+            let maybe: Ident = fork.parse()?;
+            if maybe == "refresh_seconds" {
+                input.parse::<Ident>()?;
+                input.parse::<Token![:]>()?;
+                refresh_seconds = Some(input.parse::<LitInt>()?);
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        expect_keyword(input, "widgets")?;
+        let content;
+        braced!(content in input);
+        let mut widgets = Vec::new();
+        while !content.is_empty() {
+            widgets.push(content.parse::<Widget>()?);
+            if content.peek(Token![,]) {
+                content.parse::<Token![,]>()?;
+            }
+        }
+        if widgets.is_empty() {
+            return Err(syn::Error::new(content.span(), "dashboard! needs at least one widget"));
+        }
+        let _ = input.parse::<Token![,]>();
+        Ok(DashboardInput {
+            mount,
+            path,
+            title,
+            refresh_seconds,
+            widgets,
+        })
+    }
+}
+
+pub fn expand(input: TokenStream) -> TokenStream {
+    let parsed = match syn::parse::<DashboardInput>(input) {
+        Ok(p) => p,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    expand_parsed(parsed).into()
+}
+
+fn expand_parsed(input: DashboardInput) -> TokenStream2 {
+    let mount = &input.mount;
+    let path = &input.path;
+    let title = &input.title;
+    let refresh = match &input.refresh_seconds {
+        Some(n) => quote! { Some(#n) },
+        None => quote! { None },
+    };
+    let json_path = format!("{}.json", input.path.value().trim_end_matches('/'));
+
+    let widget_pushes = input.widgets.iter().map(|w| {
+        let push = match w {
+            Widget::Metric { label, stat_fn, target, alert_below, guarded, .. } => {
+                let target_tok = match target {
+                    Some(lit) => quote! { Some(#lit as f64) },
+                    None => quote! { None },
+                };
+                // `guarded: true` calls `#stat_fn(auth)` instead of
+                // `#stat_fn()` -- the fn is responsible for calling a
+                // `GuardedTable::guarded_snapshot`/`guarded_aggregate`
+                // itself and reducing to one value, exactly like every
+                // other guard-enforced route in this crate: the guard
+                // check lives in the widget fn's own body, `dashboard!`
+                // only decides whether `auth` is in scope to pass it.
+                let call = if *guarded { quote! { #stat_fn(auth) } } else { quote! { #stat_fn() } };
+                quote! {
+                    widgets.push(::nirdosha_rt::dashboard::metric_widget(
+                        #label,
+                        ::nirdosha_rt::dashboard::IntoMetricValue::into_metric_value(#call),
+                        #target_tok,
+                        #alert_below,
+                    ));
+                }
+            }
+            Widget::Chart { label, chart_fn, mark, guarded, .. } => {
+                let mark_str = mark.to_string();
+                let call = if *guarded { quote! { #chart_fn(auth) } } else { quote! { #chart_fn() } };
+                quote! {
+                    widgets.push(::nirdosha_rt::dashboard::chart_widget(
+                        #label,
+                        #mark_str,
+                        ::nirdosha_rt::dashboard::IntoChartData::into_chart_data(#call),
+                    ));
+                }
+            }
+        };
+        // Per-widget visibility: a widget with `requires_role` is
+        // simply omitted from the assembled list for a viewer lacking
+        // that role -- the same `Option<&RoleProof<R>>`-masking spirit
+        // as RFC 0020's per-field masking, applied per-widget instead.
+        match w.requires_role() {
+            Some(role) => quote! { if auth.has_role(#role) { #push } },
+            None => push,
+        }
+    });
+
+    quote! {
+        // `pub`, matching `login!`/`app_shell!`/`crud_screens!`'s generated
+        // mount fns -- a private mount fn only ever worked because every
+        // existing caller invoked the macro and called the result in the
+        // same file; a real multi-module app (screens split one-per-file)
+        // needs to call it from outside that module.
+        pub fn #mount(router: ::nirdosha_rt::Router) -> ::nirdosha_rt::Router {
+            fn __nirdosha_dashboard_widgets(auth: &::nirdosha_rt::Auth) -> Vec<::serde_json::Value> {
+                let mut widgets: Vec<::serde_json::Value> = Vec::new();
+                #(#widget_pushes)*
+                widgets
+            }
+            router
+                .get_with_auth(#json_path, concat!(#title, " (JSON)"), |_req, _params, auth| {
+                    let widgets = __nirdosha_dashboard_widgets(auth);
+                    ::nirdosha_rt::Response::json(200, &::serde_json::json!({ "title": #title, "widgets": widgets }))
+                })
+                .get_with_auth(#path, #title, |_req, _params, auth| {
+                    let widgets = __nirdosha_dashboard_widgets(auth);
+                    ::nirdosha_rt::Response::html(200, ::nirdosha_rt::dashboard::render_dashboard_html(#title, #refresh, &widgets))
+                })
+        }
+    }
+}

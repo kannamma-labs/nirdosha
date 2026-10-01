@@ -1,0 +1,9 @@
+[package]
+name = "nirdosha-lineage-sink-jsonl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nirdosha-lineage = { path = "../nirdosha-lineage" }
+serde_json = "1"

@@ -1,0 +1,54 @@
+//! AWCC Revenue Assurance — served UI entry point (Phase A–B: all 22 modules mounted).
+//!
+//! Mounts the avatar picker, login, app shell, dashboards, and every screen
+//! module onto one Router. Literal-path routes are mounted before wildcard
+//! `crud_screens!` routes where they coexist.
+
+fn main() {
+    let router = nirdosha_rt::Router::new(|_req| nirdosha_rt::Auth::login("anon", &[]));
+    let router = awcc_rev_assurance::m02_shell::mount_app_shell(router);
+    let router = awcc_rev_assurance::m01_auth::mount_login(router);
+    let router = awcc_rev_assurance::m01_auth::mount_avatar_picker(router);
+
+    // M2 dashboards + wall
+    let router = awcc_rev_assurance::m02_dashboards::mount_l1_dashboard(router);
+    let router = awcc_rev_assurance::m02_dashboards::mount_team_dashboard(router);
+    let router = awcc_rev_assurance::m02_dashboards::mount_fc_dashboard(router);
+    let router = awcc_rev_assurance::m02_dashboards::mount_exec_kpi_dashboard(router);
+    let router = awcc_rev_assurance::m02_dashboards::mount_monitoring_wall(router);
+
+    // M3 CDR reconciliation — literal routes BEFORE crud_screens! wildcard
+    let router = awcc_rev_assurance::m03_alerts::mount_bulk_alert_reassign(router);
+    let router = awcc_rev_assurance::m03_alerts::mount_alert_rfi(router);
+    let router = awcc_rev_assurance::m03_alerts::mount_escalate_to_case(router);
+    let router = awcc_rev_assurance::m03_alerts::mount_sla_monitor(router);
+    let router = awcc_rev_assurance::m03_alerts::mount_alert_screens(router);
+
+    // M4–M22 screen modules
+    let router = awcc_rev_assurance::m04_cases::mount_m04_cases(router);
+    let router = awcc_rev_assurance::m05_subscriber::mount_m05_subscriber(router);
+    let router = awcc_rev_assurance::m06_cdr::mount_m06_cdr(router);
+    let router = awcc_rev_assurance::m07_network::mount_m07_network(router);
+    let router = awcc_rev_assurance::m08_rules::mount_m08_rules(router);
+    let router = awcc_rev_assurance::m09_ml_models::mount_m09_ml_models(router);
+    let router = awcc_rev_assurance::m10_screening::mount_m10_screening(router);
+    let router = awcc_rev_assurance::m11_intervention::mount_m11_intervention(router);
+    let router = awcc_rev_assurance::m12_atra::mount_m12_atra(router);
+    let router = awcc_rev_assurance::m14_qa::mount_m14_qa(router);
+    let router = awcc_rev_assurance::m15_reporting::mount_m15_reporting(router);
+    let router = awcc_rev_assurance::m16_notifications::mount_m16_notifications(router);
+    let router = awcc_rev_assurance::m17_knowledge::mount_m17_knowledge(router);
+    let router = awcc_rev_assurance::m18_admin::mount_m18_admin(router);
+    let router = awcc_rev_assurance::m20_audit::mount_m20_audit(router);
+    let router = awcc_rev_assurance::m21_restricted::mount_m21_restricted(router);
+    let router = awcc_rev_assurance::m22_misc::mount_m22_misc(router);
+
+    let port: u16 = std::env::var("AWCC_RA_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8080);
+    println!("awcc-rev-assurance-serve — all 22 modules mounted");
+    println!("  guard_policy! registrations : {}", nirdosha_guard_registry::POLICIES.len());
+    println!("  listening on http://localhost:{port}/");
+    router.serve(port);
+}

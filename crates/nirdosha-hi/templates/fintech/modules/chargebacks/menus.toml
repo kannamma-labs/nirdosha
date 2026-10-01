@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Chargebacks"
+
+[[group]]
+id = "chargebacks"
+label_key = "nav.group.chargebacks"
+order = 130
+
+[[menu]]
+id = "nav.chargebacks"
+label_key = "nav.chargebacks"
+group = "chargebacks"
+screen_id = "14.1"
+route = "/chargebacks"
+guard = { action = "read", resource = "dispute" }
+roles = ["PlatformAdmin", "RiskAnalyst", "MerchantAdmin"]
+order = 10

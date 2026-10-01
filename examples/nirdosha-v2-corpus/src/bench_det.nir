@@ -1,0 +1,23 @@
+//! v2 of `benchmarks/nirdosha/det.nir` — 4x4 determinant (Gaussian
+//! elimination w/ partial pivoting), 200k iterations.
+
+use nirdosha_rt::prelude::*;
+
+fn main() {
+    let mut n: i64 = 0;
+    let n_max: i64 = 200000;
+    let mut t: f64 = 0.0;
+    let mut checksum: f64 = 0.0;
+    while n < n_max {
+        let m = Matrix([
+            [t + 4.0, t + 1.0, t + 2.0, t + 0.5],
+            [t + 1.0, t + 5.0, t + 0.3, t + 1.2],
+            [t + 2.0, t + 0.3, t + 6.0, t + 0.7],
+            [t + 0.5, t + 1.2, t + 0.7, t + 7.0],
+        ]);
+        checksum += det(&m);
+        t += 0.0001;
+        n += 1;
+    }
+    println!("{checksum}");
+}

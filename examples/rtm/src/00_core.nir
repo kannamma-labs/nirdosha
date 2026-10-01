@@ -1,0 +1,212 @@
+// ============================================================================
+// 00_core.nir — foundations. Serves: ALL modules.
+//
+// Verbatim from examples/rtm/roles-N-guard_policy.md except:
+// - `purpose!` -> `nirdosha_guard_macros::purpose_taxonomy!` (real macro now;
+//   see crates/nirdosha-guard-macros for why the fully-qualified path).
+// - The five `#[invariant]` bodies, rewritten to compile against real types
+//   (see each one's comment for exactly what was wrong and why).
+// ============================================================================
+
+use crate::domain_types::{AlertUpdate, CaseDispositionUpdate};
+use crate::domains::{Customer, ModelValidation, Payment, SarBundle, Transaction};
+
+// ---- Roles & principals ---- [RFC 0025 §6.2, §7.4; role set per screen-inventory Part 1]
+nirdosha_rt::roles! {
+    // Human roles
+    role Analyst;              // L1 triage + L2 investigation        → M3–M7
+    role ComplianceLead;       // team lead / four-eyes / quorum member → M4, M12
+    role Mlro;                 // final SAR authority                 → M12  [NEW — RFCs name only ComplianceLead]
+    role QaReviewer;           // QA sampling & scorecards            → M14  [NEW]
+    role OpsAnalyst;           // real-time fraud desk, hold release  → M11  [NEW]
+    role PolicyEngineer;       // scenario/model author (RMG)         → M8, M9
+    role Admin;                // catalog, users, drivers, retention  → M18, M19
+    role Auditor;              // read-only assurance                 → M20, M21.1
+    role CsAgent;              // masked payment-status lookup only   → M21.3 [NEW]
+    role RmUser;               // masked customer-status view         → M21.4 [NEW]
+    role RegulatorViewer;      // usable ONLY via scoped delegation   → M21.2 [NEW]
+
+    // Service principals — SPIFFE-backed, one identity per module (P2)
+    principal SvcIngest    = "spiffe://acme/ns/rtm/sa/ingest";
+    principal SvcFeatures  = "spiffe://acme/ns/rtm/sa/features";
+    principal SvcScoring   = "spiffe://acme/ns/rtm/sa/scoring";
+    principal SvcScreening = "spiffe://acme/ns/rtm/sa/screening";
+    principal SvcAlerts    = "spiffe://acme/ns/rtm/sa/alerts";
+    principal SvcCase      = "spiffe://acme/ns/rtm/sa/case";
+    principal SvcBi        = "spiffe://acme/ns/rtm/sa/bi";
+    principal McpCopilot   = "mcp:analyst-copilot";   // RFC 0024 §1 — separate principal
+}
+
+// ---- Purpose taxonomy (closed core; §1B / §17) ----
+nirdosha_guard_macros::purpose_taxonomy! {
+    enum Purpose {
+        Operations,              // default operational purpose
+        FraudMonitoring,         // "fraud_monitoring" — used by svc:* [RFC 0025 §8.1]
+        AmlInvestigation,        // analyst work on alerts/cases          [NEW code]
+        CustomerService,         // CsAgent lookups                       [NEW code]
+        QaReview,                // [NEW]
+        Audit,                   // [NEW]
+        RegulatoryInspection,    // [NEW]
+        Analytics,               // [NEW]
+        ModelGovernance,         // [NEW]
+        PlatformOperations,      // [NEW]
+    }
+}
+
+// ---- Audit sampling table — §17 canonical form ----
+// Hard floors the sampler cannot override (stated here as comments; enforced
+// structurally): denials ALWAYS full (I2) · exports ALWAYS full (§2 Export) ·
+// delegated/agent access ALWAYS full (I17) · lineage reads NEVER sampled (RFC 0026 §9.1).
+nirdosha_rt::audit_sampling! {
+    classification: PUBLIC       -> rate 0.01;
+    classification: INTERNAL     -> rate 0.10;
+    classification: CONFIDENTIAL -> rate 1.0;   // RTM: confidential = full by default
+    classification: RESTRICTED   -> rate 1.0;
+}
+
+// ---- Approval chains ---- [RFC 0025 §8.6 + NEW; all timeouts resolve to DENY]
+nirdosha_rt::approval_chain! {
+    chain sar_release {                              // [RFC §8.6 verbatim]
+        quorum(2, of = [ComplianceLead]);
+        timeout(deny);
+    }
+}
+nirdosha_rt::approval_chain! {
+    chain case_review { quorum(2, of = [ComplianceLead]); timeout(deny); }   // → 4.11 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain policy_release { quorum(2, of = [PolicyEngineer, ComplianceLead]); timeout(deny); cooling(days = 1); } // → 8.8 [NEW]; go-live cooling per screen-field-mappings.md
+}
+nirdosha_rt::approval_chain! {
+    chain model_release { quorum(2, of = [PolicyEngineer, ComplianceLead]); timeout(deny); }  // → 9.1 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain override_release { quorum(1, of = [ComplianceLead]); timeout(deny); } // → 11.3 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain purge_release { quorum(2, of = [Admin, ComplianceLead]); timeout(deny); } // → 18.7 [NEW]
+}
+nirdosha_rt::approval_chain! {
+    chain egress_release { quorum(1, of = [ComplianceLead]); timeout(deny); } // → 15.5, 21.1 [NEW]
+}
+
+// T-04/B10: nav-visibility gate only — menus.toml's `nav.approvals` names
+// `action=update, resource=pending_approval` purely so the shell's V5
+// check resolves; the real per-escalation reads/writes are each screen's
+// own resource-specific policy above (`case-close-confirm`,
+// `threshold-migrate`, `refdata-migrate`, `ops-decide-hold-highvalue`,
+// `mlro-decide-sar`/`sar-export`) via `GuardedTable::list_pending_approvals`/
+// `guarded_return_escalated`/`guarded_finalize_escalated_action`, exactly
+// the same "grant exists only to make a real nav link V5-reachable"
+// posture `90_ops_admin.nir`'s `user-role-read` (A2) already established.
+nirdosha_rt::guard_policy! {
+    allow "approvals-nav-gate" for ComplianceLead, Mlro
+    when action == "update" && resource == "pending_approval"
+    purpose(PlatformOperations)
+    cap(affected_rows = 1)
+    obligate audit(sampled)
+}
+
+// T-04/B10: 15.5's own `governed-export-read` -- `bridge.nir`'s
+// `GovernedExportRow` doc comment explicitly deferred this "once 15.5
+// actually needs one"; it does now (`nav.exports`'s V5 check goes red
+// the moment 15.5 leaves `blocked`).
+nirdosha_rt::guard_policy! {
+    allow "governed-export-read" for Analyst, ComplianceLead, Auditor
+    when action == "read" && resource == "governed_export"
+    purpose(PlatformOperations)
+    cap(row_cap = 200)
+    obligate audit(sampled)
+}
+
+// ---- C1 (screens-plan.md): `PG.case_task` guard policies ----
+// Cross-module resource (3.7/4.8/4.9/14.4/16.4 + 2.2's widget) — placed
+// here rather than a single owning module file for the same reason
+// `notification-read` (90_ops_admin.nir) is the one policy every module's
+// notify obligation resolves against: no single M-module owns it.
+nirdosha_rt::guard_policy! {
+    allow "case-task-read" for Analyst, ComplianceLead, Mlro, QaReviewer, OpsAnalyst, PolicyEngineer, Admin, Auditor, CsAgent, RmUser
+    when action == "read" && resource == "case_task"
+    purpose(Operations)
+    filter tenant_scope()
+    cap(row_cap = 200, max_scan_rows = 20_000)
+    grant predicate_use(item_ref, assignee, status, task_type)
+    obligate audit(sampled)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "case-task-create" for Analyst, ComplianceLead
+    when action == "create" && resource == "case_task"
+    purpose(Operations)
+    field_policy { required(item_ref, task_type, title, assignee, due_date, priority) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+nirdosha_rt::guard_policy! {
+    allow "case-task-update" for Analyst, ComplianceLead
+    when action == "update" && resource == "case_task"
+    requires field(status).transition_allowed()
+    field_policy { allowed(status, blocked_reason, completion_note) }
+    cap(affected_rows = 1)
+    obligate audit(full)
+}
+
+// ---- Global invariant registrations (referenced by policies below) ----
+// [RFC 0023 §2 Condition::Custom registry; §17; RFC 0026 §10.1 examples]
+//
+// All five bodies below are rewritten from the doc's originals, which
+// referenced types/methods nothing in the corpus declares (confirmed by
+// attempting exactly this compile — see rtm_policy_corpus.rs's own doc
+// comment in the platform repo for the identical finding against the same
+// five functions):
+#[nirdosha_rt::invariant(name = "amount_positive", schema = "transaction")]
+fn amount_positive(t: &Transaction) -> bool { t.amount.is_positive() } // real method, 10_domains.nir
+
+#[nirdosha_rt::invariant(name = "currency_iso", schema = "transaction")]
+fn currency_iso(t: &Transaction) -> bool { t.currency.is_iso_4217() } // real method, domain_types.nir
+
+#[nirdosha_rt::invariant(name = "rationale_present", schema = "alert")]       // → 3.3 [NEW]
+fn rationale_present(a: &AlertUpdate) -> bool { !a.rationale.is_empty() } // AlertUpdate now declared, domain_types.nir
+
+// ---- T-03: disposition vocabulary + rationale invariant ----
+// Shared reason-code taxonomy (10_domains.nir's DISPOSITION_CODES /
+// CASE_DISPOSITION_CODES / HOLD_REASON_CODES) across alert/case/payment
+// dispositions, per tickets.md T-03. Each check allows "unset yet" (empty
+// string / no hold_reason) but rejects a non-empty value outside the
+// closed set — mirrors `rationale_present`'s own "checked on every write"
+// posture (see bridge.nir's matching `check_invariant` arms).
+#[nirdosha_rt::invariant(name = "disposition_code_valid", schema = "alert")]  // → 3.3 [NEW: T-03]
+fn disposition_code_valid(a: &AlertUpdate) -> bool {
+    a.disposition_code.is_empty() || crate::domains::DISPOSITION_CODES.contains(&a.disposition_code.as_str())
+}
+
+#[nirdosha_rt::invariant(name = "case_disposition_valid", schema = "case")]   // → 4.10 [NEW: T-03]
+fn case_disposition_valid(c: &CaseDispositionUpdate) -> bool {
+    c.disposition.is_empty() || crate::domains::CASE_DISPOSITION_CODES.contains(&c.disposition.as_str())
+}
+
+#[nirdosha_rt::invariant(name = "hold_reason_valid", schema = "payment")]     // → 11.2 [NEW: T-03]
+fn hold_reason_valid(p: &Payment) -> bool {
+    match &p.hold_reason {
+        Some(reason) => crate::domains::HOLD_REASON_CODES.contains(&reason.0.as_str()),
+        None => false,
+    }
+}
+
+// The doc's original `s.case().subjects().contains(s.subject())` wants a
+// cross-entity join (case's subject list) no relation/join feature in this
+// codebase can resolve today — `nirdosha-guard-mic`'s `#[relation]` surface
+// is catalog-only (see 10_domains.nir's own comment on `accounts_of` etc.).
+// Rewritten to what's actually checkable from `SarBundle`'s own fields.
+#[nirdosha_rt::invariant(name = "sar_subject_in_case", schema = "sar_bundle")] // → 12.2 [NEW]
+fn sar_subject_in_case(s: &SarBundle) -> bool { !s.case_id.0.is_empty() && !s.subject.0.is_empty() }
+
+#[nirdosha_rt::invariant(name = "no_legal_hold", schema = "customer")]        // → 18.9 [NEW]
+fn no_legal_hold(c: &Customer) -> bool { !c.legal_hold } // field access, not a method call
+
+// ---- C2 (screens-plan.md): validator ≠ owner, 9.5's own stated
+// requirement ("Validator assignment ... must ≠ model owner (enforced)",
+// screen-field-mappings.md). Mirrored at bridge.nir::ModelValidationRow.
+#[nirdosha_rt::invariant(name = "validator_ne_owner", schema = "model_validation")] // → 9.5 [NEW: C2]
+fn validator_ne_owner(v: &ModelValidation) -> bool { !v.validator.is_empty() && v.validator != v.owner }

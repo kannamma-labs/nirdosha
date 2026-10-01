@@ -1,0 +1,68 @@
+{
+  "expected": {
+    "admission": {
+      "diagnostic": "InfluenceLevelExceedsProfile",
+      "status": "rejected"
+    },
+    "capability": {
+      "effect_class": null,
+      "status": "not_issued"
+    },
+    "extensions": {},
+    "final_authority": null,
+    "graph_id": "banking-autonomous-exceeds",
+    "invalidation": "not_evaluated",
+    "model_authorized": true,
+    "model_level": "ExecuteIrreversible",
+    "normalized_graph": {
+      "status": "not_asserted"
+    },
+    "provenance": true,
+    "review": {
+      "detail": null,
+      "status": "not_required"
+    }
+  },
+  "fixture_id": "B5",
+  "input": {
+    "bundle": {
+      "hash": "symbolic:bundle-rfc0029-fixtures-v1",
+      "id": "bundle:rfc0029-fixtures",
+      "version": 1
+    },
+    "catalog_entries": [],
+    "edges": [
+      {
+        "kind": "ModelTrigger",
+        "source": "node:B5:m",
+        "target": "node:B5:x"
+      }
+    ],
+    "nodes": [
+      {
+        "attributes": {
+          "effect_id": "wire.transfer.hold",
+          "reversibility_class": "Irreversible"
+        },
+        "id": "node:B5:x",
+        "kind": "Effect"
+      },
+      {
+        "attributes": {
+          "deployment_id": "model:B5:v1",
+          "receipt_id": "receipt:B5:m:v1"
+        },
+        "id": "node:B5:m",
+        "kind": "ModelInvocation"
+      }
+    ],
+    "parameters": {
+      "admission_policy": {
+        "effect_class": "wire.transfer.hold",
+        "maximum_model_level": "Recommend"
+      }
+    }
+  },
+  "profile_id": "profile:rfc0029:banking:candidate-v1",
+  "schema_version": "rfc0029.influence-review.fixture.v1"
+}

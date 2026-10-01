@@ -1,0 +1,99 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-ai-ml"
+version = "1.0.0"
+module = "M10"
+total_screens = 4
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "10.1"
+name = "Model Registry"
+module = "M10"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "ML Engineer"]
+datasets = ["models"]
+stage = "blocked"
+blocked_by = ["primitive:model_registry", "primitive:model_versioning"]
+codegen = { template = "crud_screens", mount_symbol = "mount_model_registry", route_path = "/ai/models", generated_files = ["src/screens/m10_ai_ml.nir"] }
+data_binding = { entities = ["MlModel"], primary_key = "model_id", guard = { table = "ml_model", purpose = "MlOps" }, fields = [
+    { name = "model_id", type = "String" },
+    { name = "name", type = "String" },
+    { name = "version", type = "String" },
+    { name = "model_type", type = "String" },
+    { name = "status", type = "String" },
+    { name = "deployed_at", type = "String" }
+] }
+policy = { purpose = "MlOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m10_ai_ml.nir"
+notes = "BLOCKED: model-registry primitive not yet available."
+
+[[screen]]
+id = "10.2"
+name = "Feature Store"
+module = "M10"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "ML Engineer"]
+stage = "blocked"
+blocked_by = ["primitive:feature_store", "primitive:feature_versioning"]
+codegen = { template = "crud_screens", mount_symbol = "mount_feature_store", route_path = "/ai/features", generated_files = ["src/screens/m10_ai_ml.nir"] }
+data_binding = { entities = ["Feature"], primary_key = "feature_id", guard = { table = "feature", purpose = "MlOps" }, fields = [
+    { name = "feature_id", type = "String" },
+    { name = "name", type = "String" },
+    { name = "source", type = "String" },
+    { name = "data_type", type = "String" },
+    { name = "version", type = "String" }
+] }
+policy = { purpose = "MlOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m10_ai_ml.nir"
+notes = "BLOCKED: feature-store primitive not yet available."
+
+[[screen]]
+id = "10.3"
+name = "Model Performance"
+module = "M10"
+archetype = "dashboard"
+roles = ["PlatformAdmin", "ML Engineer", "RiskAnalyst"]
+stage = "blocked"
+blocked_by = ["primitive:model_metrics", "primitive:drift_detection"]
+codegen = { template = "dashboard", mount_symbol = "mount_model_performance", route_path = "/ai/performance", generated_files = ["src/screens/m10_ai_ml.nir"] }
+data_binding = { entities = ["MlModel"], primary_key = "model_id", guard = { table = "ml_model", purpose = "MlRead" }, fields = [
+    { name = "model_id", type = "String" },
+    { name = "name", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "MlRead", allowed_actions = ["read", "aggregate"] }
+[screen.parameters]
+title = "Model Performance"
+refresh_seconds = 300
+widgets = [
+    { kind = "Metric", label = "AUC", fn = "model_auc", source = { table = "ml_model", purpose = "MlRead", action = "aggregate" }, target = 90, alert_below = true },
+    { kind = "Metric", label = "Drift score", fn = "drift_score", source = { table = "ml_model", purpose = "MlRead", action = "aggregate" }, target = 5, alert_below = false }
+]
+file = "src/screens/m10_ai_ml.nir"
+notes = "BLOCKED: model-metrics and drift-detection primitives not yet available."
+
+[[screen]]
+id = "10.4"
+name = "Inference Log"
+module = "M10"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "ML Engineer", "RiskAnalyst"]
+stage = "blocked"
+blocked_by = ["primitive:inference_log", "primitive:explainability"]
+codegen = { template = "crud_screens", mount_symbol = "mount_inference_log", route_path = "/ai/inferences", generated_files = ["src/screens/m10_ai_ml.nir"] }
+data_binding = { entities = ["Inference"], primary_key = "inference_id", guard = { table = "inference", purpose = "MlRead" }, fields = [
+    { name = "inference_id", type = "String" },
+    { name = "model_id", type = "String" },
+    { name = "input_hash", type = "String" },
+    { name = "score", type = "String" },
+    { name = "explainability", type = "String" },
+    { name = "created_at", type = "String" }
+] }
+policy = { purpose = "MlRead", allowed_actions = ["read"] }
+file = "src/screens/m10_ai_ml.nir"
+notes = "BLOCKED: inference-log + explainability primitives not yet available."

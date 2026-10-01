@@ -1,5 +1,14 @@
 # RFC 0013: Nirdosha Hi's knowledge graph — a local-first project knowledge graph with bidirectional `.nir` traceability
 
+> **Proposed follow-up (2026-09-17):** [RFC 0021](0021-typed-hi-graph-mcp-and-incremental-authoring.md)
+> specifies typed graph enrichment, stable scoped identities, project
+> MCP access and resumable incremental writes. It is not implemented
+> and does not change the historical status recorded below. Its
+> extensions [0021.a](0021.a-workflow-authoring-graph.md),
+> [0021.b](0021.b-approval-runtime.md), and
+> [0021.c](0021.c-graph-analysis.md) separately cover workflow authoring,
+> runtime approval and analysis. The entire new family targets v2 `.nir` only.
+
 > **Naming note.** This RFC and its filename still say "Realm" — its
 > original name when written. The feature itself has since been
 > renamed: the module is `hi_graph.rs` (not `realm.rs`), the database

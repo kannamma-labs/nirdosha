@@ -1,0 +1,56 @@
+//! v2 of `examples/features/51_compiled_serve.nir` — compiled `serve`:
+//! hand-parse an HTTP request line over a raw `tcp_listener`/`accept`
+//! loop, route `/api/<fn>` by plain `if`/`else if`. `.nir`'s
+//! `str_index_of`/`str_slice` ride native Rust str ops. `main` loops
+//! forever by design — run it standalone and drive it with a real
+//! `curl` (or let the golden test do exactly that).
+
+use nirdosha_rt::prelude::*;
+
+struct Text {
+    value: String,
+}
+
+/// nirdosha:serve {"routes":["/api/hello","/api/echo"]}
+/// nirdosha:contract {"effects":["pure"]}
+fn handle_hello() -> Text {
+    Text { value: "hello from /api/hello".into() }
+}
+
+/// nirdosha:serve {"routes":["/api/hello","/api/echo"]}
+/// nirdosha:contract {"effects":["pure"]}
+fn handle_echo() -> Text {
+    Text { value: "hello from /api/echo".into() }
+}
+
+fn main() {
+    let l = listen(8080);
+    loop {
+        let conn = accept(&l);
+        let req = conn.recv();
+
+        // "METHOD SP PATH SP VERSION\r\n..." — three fields, split on
+        // spaces, stopping at the request line's own "\r\n".
+        let line_end = req.find("\r\n").unwrap_or(req.len());
+        let line = &req[..line_end];
+        let sp1 = line.find(' ').unwrap_or(line.len());
+        let after_method = &line[sp1 + 1..];
+        let sp2 = after_method.find(' ').unwrap_or(after_method.len());
+        let path = &after_method[..sp2];
+
+        // No string concatenation exists in `.nir`; each route sends
+        // headers and body as two separate `send`s — the same shape.
+        if path == "/api/hello" {
+            let body = handle_hello();
+            conn.send("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+            conn.send(&body.value);
+        } else if path == "/api/echo" {
+            let body = handle_echo();
+            conn.send("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+            conn.send(&body.value);
+        } else {
+            conn.send("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        }
+        stop(conn);
+    }
+}

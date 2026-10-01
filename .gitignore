@@ -13,6 +13,13 @@
 
 # Generated bundles (kept locally only)
 /all_examples.md
+
+# `nirdosha_guard_registry::write_dump_from_env`'s default output path —
+# written by any dialect crate's `nirdosha_guard_dump` test (see that
+# function's doc comment) when NIRDOSHA_GUARD_DUMP_PATH isn't set, e.g.
+# running `cargo test nirdosha_guard_dump` directly rather than through
+# `cargo nirdosha verify --guard` (which always sets it to a target/ path).
+nirdosha-registry.json
 /nir_files.zip
 
 # Runtime database artifacts
@@ -37,8 +44,17 @@ nirdosha_transact_log.sqlite*
 # running for a live browser demo) -- build artifacts, not source
 /.local-bin
 
+# `hi`'s per-project scratch state -- auto-scaffolded by `hi_graph::open`/
+# `hi_plugin::ensure_default_packs` on first run (hi.db, the confirmed-
+# unit graph; plugins/, an installed copy of each domain pack) and
+# regenerated freely. Local runtime state, not source.
+/.nir/
+
 # Launch marketing drafts (not project documentation)
 /announcements
 scratch/
 
 migrations/*.sql
+.playwright-cli/
+
+crates/nirdosha-hi/.nir/

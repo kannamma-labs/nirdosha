@@ -1,0 +1,33 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-subscriptions"
+version = "1.0.0"
+module = "M12"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "12.1"
+name = "Subscriptions"
+module = "M12"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "MerchantAdmin"]
+stage = "blocked"
+blocked_by = ["primitive:subscription_create", "primitive:recurring_bill", "primitive:plan_engine"]
+codegen = { template = "crud_screens", mount_symbol = "mount_subscriptions", route_path = "/subscriptions", generated_files = ["src/screens/m12_subscriptions.nir"] }
+data_binding = { entities = ["Subscription"], primary_key = "subscription_id", guard = { table = "subscription", purpose = "SubscriptionOps" }, fields = [
+    { name = "subscription_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "plan_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" },
+    { name = "next_bill_date", type = "String" }
+] }
+policy = { purpose = "SubscriptionOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m12_subscriptions.nir"
+notes = "BLOCKED: subscription lifecycle + recurring-billing primitives not yet available."

@@ -1,0 +1,368 @@
+# Nirdosha Screen Register v2
+
+`SCREEN_REGISTER_SCHEMA.json` defines the inventory-side contract for
+`screens.toml`. It is deliberately separate from
+`UI-proof-specification.toml`: the screen register says *what is generated,
+where it comes from, which policies apply, and how it is made reproducible*;
+the proof specification says *what the generated UI must prove at runtime*.
+
+The schema adds deterministic code-generation inputs that were not part of the
+behavioral proof specification:
+
+- `codegen`: template, renderer, mount symbol, artifact namespace, generated
+  files, plugin pack, feature flags, **route path**, route ownership, and source globs.
+- `data_binding`: entity/read-model/store names, schema version, primary key,
+  field mapping, catalog references, **bound field list**, and an optional **guard**
+  binding that forces generated reads/writes through `GuardedTable`.
+- `policy`: policy IDs, allowed actions, masking, subject scope, segregation
+  class, and (for guarded screens) a `purpose` that must restate
+  `data_binding.guard.purpose` verbatim — see the data binding contract below.
+- `parameters`: **archetype-specific macro inputs** consumed by the selected
+  template, such as `refresh_seconds`, `steps`, or `guard`.
+- `dependencies`: pinned macro/plugin/dataset/policy/route/source inputs with
+  optional versions and SHA-256 hashes.
+- `provenance`: owner, reviewers, change ticket, source hash, and the last
+  verified revision.
+- `render_profile`: theme, density, responsive behavior, accessibility level,
+  streaming, and offline support.
+- `determinism`: canonical ordering key, non-negative seed, fixture namespace,
+  stable ID, and whether generated names are allowed.
+
+Every string-valued property and every string-valued enum now carries a JSON
+Schema `description`. These descriptions are part of the authoring contract:
+an LLM producing a register should use them to choose the value, while a
+consumer should use them to interpret the value. They do not replace enum,
+pattern, hash, or cross-register validation; they explain the semantics of a
+value that has already passed those structural checks.
+
+## Logging contract
+
+Every v2 screen has a `logging` object. `domain` and `country` are required;
+they are not inferred from the screen name. This makes the generated logging
+contract agree with Nirdosha's `#[contract(logging(...))]` policy:
+
+```toml
+[screen.logging]
+domain = "payments"
+country = "IN"
+entity = "PaymentInstruction"
+event_class = "transaction"
+region = "APAC"
+subdomain = "approval"
+level = "notice"
+policy_id = "LOG-PAYMENTS-01"
+retention_class = "regulated-7y"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "pci-minimal"
+```
+
+`country` accepts an ISO-like two-letter uppercase code, `EU`, or `*` for a
+deliberately global policy. A consumer should still validate the value against
+the deployed logging-policy register. The schema validates shape; it does not
+authorize a domain or policy.
+
+## Data binding contract
+
+`data_binding.fields` is the ordered list of fields the screen actually binds
+from the entity. Each field carries its name, type, and behavioral flags:
+
+```toml
+[[screen.data_binding.fields]]
+name = "case_id"
+type = "String"
+required = true
+sensitive = false
+masked = false
+display = true
+editable = false
+
+[[screen.data_binding.fields]]
+name = "rationale"
+type = "String"
+required = true
+sensitive = true
+masked = true
+display = true
+editable = true
+```
+
+`data_binding.guard` is optional. When present, the generator MUST emit a macro
+invocation whose reads and writes go through the named `GuardedTable` under the
+given purpose. For singleton screens (e.g. `settings_screen!`) use `row_id` to
+name the fixed logical row; for keyed entities (e.g. `crud_screens!`,
+`wizard!`, `communication_feed!`) omit it.
+
+```toml
+[screen.data_binding.guard]
+table = "case_table"
+purpose = "Operations"
+
+# For a settings singleton only:
+# row_id = "current"
+```
+
+`guard.purpose` is authoritative for the guard tag: it is the exact string the
+generator threads into every `GuardedTable::guarded_*` call it emits for the
+screen, so it is the only value the runtime evaluator can ever match a policy
+against. The generator synthesizes each screen's `guard_policy!` records'
+`purpose(...)` clause from `guard.purpose`, never from `policy.purpose` (see
+below). If `[screen.policy].purpose` is also set, it must be the same value —
+the generator refuses to generate otherwise, naming the screen and both
+values. Do not set `guard.purpose` and `policy.purpose` to different strings
+expecting the difference to mean anything: nothing reads `policy.purpose` for
+guard evaluation, so a screen with disagreeing values would compile clean and
+then deny every guarded action at runtime with no signal beforehand — the
+validation exists specifically to turn that failure mode into a generate-time
+error instead.
+
+## Parameters
+
+`screen.parameters` holds archetype-specific inputs that the selected template
+uses to produce the target macro invocation. Keys are macro-defined. Most values
+pass through and must be parseable by the target macro; `access` is the notable
+register-to-macro translation boundary. Common examples:
+
+```toml
+[screen.parameters]
+refresh_seconds = 5
+
+[screen.parameters.guard]
+table = "message_table"
+purpose = "Operations"
+```
+
+Per-archetype parameter sub-schemas are typed in
+[`SCREEN_REGISTER_SCHEMA.json`](`$defs/params_*`), and the generator enforces
+the load-bearing parts of them at generation time (see below for which parts
+the *generator* checks vs which the *macro* checks).
+
+The schema permits additional keys under `parameters` for archetypes whose
+macros accept macro-defined clauses; generators should validate the key/value
+shape against the selected archetype.
+
+For archetypes with an `access` parameter, the register may use `public`,
+`role`, or `self_or_role`. The generator emits `public` unchanged and expands
+`role`/`self_or_role` to `requires role "..."` using the first concrete screen
+role (dropping capability suffixes such as `:R`/`:RW`). Generated data screens
+authorize the complete role set through their guard policies; the macro access
+clause is vestigial route metadata. `approval_inbox!`, whose grammar explicitly
+supports role alternatives, receives the complete `or role` list. Macro source
+must never contain bare `access: role` or `access: self_or_role`. A register may
+also provide an already-expanded single-role macro clause for compatibility.
+Empty CRUD
+`create_fields` or `update_fields` arrays mean that operation has no generated
+form fields; the generator omits that macro clause because an empty typed field
+list is not valid macro input.
+
+### Generator-enforced parameter checks (2026-09-23)
+
+The generator refuses, as generation errors:
+
+- **crud `create_fields` / `update_fields`** naming a field the entity does
+  not declare (typo-proofing; the pk counts as declared), or naming a field
+  **masked on that screen** — the guard forbids submitting it, so the form
+  could never succeed;
+- **kanban `column_field` / `title_field`** naming undeclared fields — the
+  move handler writes through `column_field`;
+- **tree_view `id_field` / `parent_field` / `label_field`** naming undeclared
+  fields, or fields that are not `String`-typed;
+- **report_builder `dimensions`** naming undeclared fields, or dimensions
+  that are not `String`-typed;
+- **approval_inbox `sources`** whose `table` matches no registered entity
+  (or the entity has no guard anywhere — the worklist read must be
+  guard-gated) or whose `chain` is not a declared `[[approval_chain]]`;
+- **workspace** `subject.entity` / `label_field` and each panel's
+  `source.entity` / `link_field` naming undeclared fields (the panel's
+  link field must be `String`-typed, since it joins to the subject id);
+  a hand-written-string panel `source` is refused — the generator can
+  only emit the inline `{ entity, link_field }` form;
+- **`[[approval_chain]]`** (app-wide, not per-screen): `quorum < 1` is
+  refused, and every `approver` must be a role some screen declares
+  (approvers are exact string compares at the data plane).
+
+Two archetypes with fully-specified parameters (shipped 2026-09-23):
+
+- **`static_embed`** — presentational, no `GuardedTable`; the route gate is the
+  whole story. `parameters = { title, content_file, sha256, access }`, with
+  `content_file` project-root-relative and `sha256` the content file's
+  SHA-256 — **verified at macro expansion** (a content edit without a re-pin
+  is a build error), and disclosed on the served page as a digest footer.
+- **`report_builder`** — ad-hoc aggregate report (RTM's 15.2 archetype).
+  `parameters = { access, dimensions = ["status", "priority"] }`; reads
+  `GuardedTable::guarded_aggregate` under the **aggregate** guard action, so
+  the screen's `policy.allowed_actions` must name `"aggregate"`. Counts only;
+  dimensions must be `String`-typed fields of the entity; guard-required by
+  design (no unguarded path exists).
+- **`tree_view`** — parent/child hierarchy (RTM's 5.6 archetype).
+  `parameters = { access, id_field, parent_field, label_field }`, all
+  `String`-typed; nests the guard-decoded snapshot in-process, cycle-safe,
+  orphans rendered honestly. Guard-required by design.
+
+Two archetypes that became generator-emittable together (2026-09-23):
+
+- **`approval_inbox`** — guard-mode by generation. `parameters.sources = [{ table, chain, detail_path }]`; the generator derives the source `purpose` from the entity's own guard, derives `resource` (no drift), and requires `chain` to be a registered `[[approval_chain]]`. Every source is guard-gated, the view route is `get_with_auth`, and rows come from `GuardedTable::guarded_list_pending_approvals` (one `read` evaluation per source, fail-whole-not-partial). `access` stays vestigial metadata.
+- **`workspace!`** — `parameters.subject = { entity, label_field }` (guard purpose derived, `label_fn` generated) and `parameters.panels = [{ need, title, render, source = { entity, link_field } }]`. Each panel's `source` is a real generated guarded read of the named entity filtered in-process to the subject row; a hand-written-string `source` is refused. `budget.max_rows`/`budget.max_execution_ms` are optional.
+
+App-wide `[[approval_chain]]` entries (`name`, `quorum`, `approvers`, optional `cooling_seconds`) are emitted as `nirdosha_rt::approval_chain!` blocks and passed into every `GuardedTable` constructor; they are the only way an `approval_inbox` source's `chain` resolves.
+
+Field flags in `data_binding.fields` are **security inputs** the generator
+synthesizes into the screen's `guard_policy!` records (shipped 2026-09-23):
+`masked = true` (alias `sensitive`) becomes `forbidden(...)` — dropped from
+reads as genuine absence (the field's type must be `Option<...>`, enforced at
+generation time) and refused on writes via the fail-closed allowed set;
+every other field the screen declares becomes `allowed(...)`; `required = true`
+becomes `required(...)` on **create** policies only (v1 scope). No flags → no
+clause, exactly the pre-synthesis shape. Because subjects come from each
+screen's own `roles`, two screens over the same table with different field
+flags synthesize different policies — per-subject masking with masks that
+follow the subject, not the route.
+
+## Minimal v2 shape
+
+```toml
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "rtm"
+version = "2.0.0"
+source_inventory = "examples/rtm/screen.md"
+total_screens = 152
+canonical_order = "module_then_id"
+codegen_profile = "rtm-web"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en-IN"
+
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login!"
+stage = "built"
+roles = ["AllRoles:R"]
+datasets = ["IDP.users_file"]
+blocked_by = []
+
+[screen.codegen]
+template = "auth/login"
+mount_symbol = "mount_login"
+renderer = "web"
+artifact_namespace = "rtm.m01.login"
+generated_files = ["src/screens/m01_auth.nir"]
+route_path = "/login"
+route_owner = "M1"
+
+[screen.data_binding]
+entities = ["Identity"]
+store = "IDP.users_file"
+schema_version = "identity/v1"
+primary_key = "user_id"
+catalog_ref = "CATALOG.identity.login"
+
+[[screen.data_binding.fields]]
+name = "user_id"
+type = "String"
+required = true
+
+[screen.parameters]
+mode = "demo"
+
+[screen.policy]
+policy_ids = ["AUTH-LOGIN-01"]
+purpose = "authenticate_user"
+allowed_actions = ["read", "propose", "confirm"]
+subject_scope = "self"
+segregation_class = "identity-boundary"
+
+[screen.logging]
+domain = "identity"
+country = "IN"
+entity = "LoginSession"
+event_class = "access"
+level = "notice"
+policy_id = "LOG-IDENTITY-01"
+required_fields = ["screen_id", "actor_id", "correlation_id"]
+redaction_profile = "identity-minimal"
+
+[[screen.dependencies]]
+kind = "policy"
+name = "AUTH-LOGIN-01"
+version = "1"
+hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+required = true
+
+[screen.provenance]
+owner = "identity-platform"
+reviewers = ["security", "ui-platform"]
+change_ticket = "RTM-1234"
+last_verified_revision = "git:0123456"
+
+[screen.render_profile]
+theme = "nirdosha-default"
+density = "comfortable"
+responsive = true
+accessibility_level = "AA"
+supports_streaming = false
+supports_offline = false
+
+[screen.determinism]
+ordering_key = "module,id"
+seed = 0
+fixture_namespace = "rtm.m01.login"
+stable_id = "screen:1.1"
+allow_generated_names = false
+```
+
+## Migration and validation
+
+The checked-in RTM register is currently the historical v1 inventory. It does
+not become v2 merely because this schema exists: it must be migrated by adding
+the v2 metadata and the required per-screen `codegen`, `logging`, and
+`determinism` data (with the other sections added where applicable). During
+migration, keep the existing `id`, `module`, `stage`, role, dataset, and
+`blocked_by` values unchanged and record the migration in `provenance`.
+
+Validation should happen before code generation and before a recipe is issued:
+
+1. Validate the TOML-to-JSON projection against
+   `docs/SCREEN_REGISTER_SCHEMA.json`.
+2. Resolve every dependency and verify supplied hashes.
+3. Check `total_screens` and canonical ordering against the actual `screen`
+   array.
+4. Resolve each logging `policy_id` against the deployed logging-policy
+   register, including its domain and country.
+5. Include the canonical register hash in the recipe inputs so a generated
+   certificate cannot silently use a different screen inventory.
+
+The existing `cargo nirdosha ui-proof` command remains intentionally
+conservative: it generates a structural proof inventory from the register. It
+does not invent behavioral assertions or claim that browser automation has
+executed them.
+
+The full code generator (`cargo nirdosha generate-screens <project-dir>`,
+shipped 2026-09-23) goes further and emits the crate's whole `src/*.nir` tree
+from this register plus `menus.toml`. Its data rule is the guard-posture rule:
+**every entity a generated screen touches must have a `data_binding.guard`
+somewhere in the register** — the generator refuses an entity with none, so a
+generated app cannot contain an unguarded data screen. On guarded screens the
+generator emits only `*_with_auth` routes; the screen's declared `access_*`
+strings become vestigial route metadata (OpenAPI summaries), never a second
+authorization check — the synthesized `guard_policy!` corpus is the single
+authority for row visibility, field masking, required/forbidden write fields,
+caps, tenant scoping, and audit. Unsupported archetypes hard-error; mark such
+screens `stage = "blocked"` with `blocked_by = ["archetype:<name>"]`.
+`examples/helpdesk/` is the end-to-end proof: 8 screens → generated `.nir`
+tree → compiled crate → 8 passing guard-authority smoke tests.
+
+## The register pair (screens.toml + menus.toml)
+
+`screens.toml` never stands alone for a **generated** app: the sibling
+`menus.toml` is validated against it by `cargo nirdosha generate-screens`
+before any code is emitted — menu `screen_id` references (V1), stage
+(V3), role subsets (V2), route agreement with `codegen.route_path`,
+route uniqueness (V6-lite), guard-resolution (V5-lite), and landing
+reachability (V8-lite). The menus-side schema and the full invariant
+table live in [`MENUS_SCHEMA.md`](MENUS_SCHEMA.md) /
+[`MENUS_SCHEMA.json`](MENUS_SCHEMA.json); a green run reports the count
+of checked invariants in the generation report. Violations are
+generation errors — a menu entry is a promise the generated app can
+keep, or the generator refuses to ship it.

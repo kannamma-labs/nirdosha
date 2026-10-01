@@ -1,0 +1,50 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "banking-cards"
+version = "1.0.0"
+module = "cards"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+
+# ------------------------------------------------------------------ M5 Cards
+[[screen]]
+id = "5.1"
+name = "Card List"
+module = "M5"
+archetype = "crud_screens"
+combo = []
+roles = ["Customer:R", "BranchManager:R/W"]
+datasets = ["PG.cards"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_cards", route_path = "/cards", generated_files = ["src/screens/m05_cards.nir"] }
+data_binding = { entities = ["Card"], primary_key = "card_id", guard = { table = "card_table", purpose = "CardOps" }, fields = [
+    { name = "card_id", type = "String" },
+    { name = "account_number", type = "String" },
+    { name = "masked_pan", type = "String" },
+    { name = "status", type = "String" },
+    { name = "daily_limit_cents", type = "String" },
+] }
+policy = { purpose = "CardOps", allowed_actions = ["read", "update"] }
+
+[[screen]]
+id = "5.2"
+name = "Card Transactions"
+module = "M5"
+archetype = "crud_screens"
+combo = []
+roles = ["Customer:R"]
+datasets = ["PG.card_txns"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_card_txns", route_path = "/cards/transactions", generated_files = ["src/screens/m05_cards.nir"] }
+data_binding = { entities = ["CardTransaction"], primary_key = "txn_id", guard = { table = "card_txn_table", purpose = "CardOps" }, fields = [
+    { name = "txn_id", type = "String" },
+    { name = "card_id", type = "String" },
+    { name = "merchant_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "txn_time", type = "String" },
+] }
+policy = { purpose = "CardOps", allowed_actions = ["read"] }

@@ -1,0 +1,3486 @@
+//! Nirdosha Hi's own knowledge graph (originally "Realm",
+//! rfcs/0013-nirdosha-realm.md) -- a local-first, bounded knowledge
+//! graph auto-scaffolded under `.nir/` on every `nirdosha hi` startup
+//! (`main.rs::cmd_hi`'s own sync-then-open-window sequence). v1 slice:
+//! SQLite schema (`nodes`/`edges`/`provenance`/`chunks`+FTS5), per-item
+//! code hashing reusing the same lex/parse primitives `emit-ast`/
+//! `loader::load_program` are built from, bounded bidirectional impact
+//! queries, manual requirement<->code links, and a minimal document
+//! ingest/ask path. Never mandatory: every entry point here degrades to
+//! "log a warning, keep going" for its caller rather than ever being
+//! the thing that breaks `hi` itself (the RFC's own "must run on an
+//! ordinary laptop, must never be the thing that crashes" posture).
+//!
+//! Deliberately reuses `token::Lexer`/`parser::Parser::parse_program`
+//! directly rather than `loader::load_program`: that function resolves
+//! and merges every `use "..."` a file declares, so syncing a project
+//! file-by-file through the merged view would record each imported
+//! file's items once per importer instead of once, total. Parsing each
+//! file on its own (no import resolution) gives exactly that file's own
+//! declared items -- the same "AST of a program that doesn't yet
+//! typecheck is still legitimate to inspect" contract `emit-ast` already
+//! relies on (`main.rs::cmd_emit_ast`'s own doc comment).
+
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+
+use rusqlite::{Connection, OptionalExtension, params};
+
+/// `NIRDOSHA_HI_DISABLE=1` skips the auto-scaffold and auto-sync
+/// `hi` would otherwise run on startup -- same `NIRDOSHA_`-prefixed,
+/// `.ok()`-based env-var convention this crate uses elsewhere.
+pub const HI_DISABLE_VAR: &str = "NIRDOSHA_HI_DISABLE";
+
+/// `env` is injected rather than calling `std::env::var` directly --
+/// a pure, testable check, no direct env access baked in.
+pub fn is_disabled(env: &dyn Fn(&str) -> Option<String>) -> bool {
+    env(HI_DISABLE_VAR).as_deref() == Some("1")
+}
+
+/// `.nir/` under `root` -- rfcs/0013's "Physical layout." Named `.nir`
+/// (not a feature-specific extension) per that RFC's own revision; see
+/// its Open Questions for the acknowledged overlap with the `.nir`
+/// source-file extension.
+pub fn hi_dir(root: &Path) -> PathBuf {
+    root.join(".nir")
+}
+
+/// `crypto_backend::sha256` (2026-09) -- `fips`-feature-aware, so pack/
+/// content integrity hashing goes through the same CMVP-validatable
+/// swap point as this crate's Ed25519 signing, not a separate plain
+/// `sha2` call left behind.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    nirdosha_audit::crypto_backend::sha256(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Creates `.nir/` and `.nir/content/` if absent, opens (or creates)
+/// `.nir/hi.db`, and migrates the schema. Every migration statement
+/// is `IF NOT EXISTS` -- safe to call on every `hi` startup, which is
+/// exactly how it's used.
+pub fn open(root: &Path) -> Result<Connection, String> {
+    let dir = hi_dir(root);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir.join("content"))
+        .map_err(|e| format!("creating {}: {e}", dir.join("content").display()))?;
+    let db_path = dir.join("hi.db");
+    let conn =
+        Connection::open(&db_path).map_err(|e| format!("opening {}: {e}", db_path.display()))?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+fn migrate(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS nodes (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            title TEXT,
+            status TEXT,
+            content_hash TEXT,
+            source_ref TEXT,
+            line INTEGER,
+            col INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            src TEXT NOT NULL,
+            dst TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            hash_at_link TEXT,
+            flag TEXT,
+            flag_reason TEXT,
+            UNIQUE(src, dst, kind)
+        );
+        CREATE TABLE IF NOT EXISTS provenance (
+            edge_id INTEGER NOT NULL,
+            created_by TEXT,
+            model TEXT,
+            prompt TEXT,
+            ts TEXT
+        );
+        CREATE TABLE IF NOT EXISTS chunks (
+            id TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            content TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            chunk_id UNINDEXED, doc_id UNINDEXED, content
+        );
+        ",
+    )
+    .map_err(|e| format!("migrating .nir/hi.db schema: {e}"))?;
+    // `CREATE TABLE IF NOT EXISTS` above never widens an already-existing
+    // `nodes` table -- a `.nir/hi.db` created before `line`/`col`
+    // existed needs them added explicitly, once, idempotently. Real gap
+    // this closes: `source_ref` (the file path) was captured from v1 but
+    // never surfaced anywhere a human could see it (rfcs/0013's own
+    // Open Questions record this); `line`/`col` finish that half-done
+    // fix by giving `:impact`/`hi impact` an actual place in the file
+    // to point at, not just which file.
+    add_column_if_missing(conn, "nodes", "line", "INTEGER")?;
+    add_column_if_missing(conn, "nodes", "col", "INTEGER")?;
+    add_column_if_missing(conn, "nodes", "plugin_origin", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "non_waivable", "INTEGER NOT NULL DEFAULT 0")?;
+    // plugins table for installed domain packs
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS plugins (\n            id TEXT PRIMARY KEY,\n            name TEXT NOT NULL,\n            sha256 TEXT NOT NULL,\n            manifest_path TEXT,\n            installed_at TEXT,\n            revoked_at TEXT\n        )",
+        [],
+    )
+    .map_err(|e| format!("creating plugins table: {e}"))?;
+    // RFC 0016 Phase 4 (Sigstore-pattern pack signing, `hi_plugin::
+    // pack_signing`): `NULL` for every 5a-installed (unsigned, TOFU)
+    // pack, same as before this column existed -- populated only when
+    // `verify_and_install_signed_pack` accepts a real signature against
+    // a trust-anchor identity.
+    add_column_if_missing(conn, "plugins", "signer_identity", "TEXT")?;
+    // rfcs/0014's prompt/build/generate/publish pipeline: the text layer
+    // a `CodeUnit` node carries *before* any `.nir` exists
+    // (`driving_text`), who/what put it there (`created_by` --
+    // `NULL` for anything `hi sync` found in real code, `llm-prompt-
+    // mode` for a prompt-mode candidate), the human review/lock/waive
+    // state Build/Generate mode gate on, and the free-text attribute
+    // lines Build mode's attribute editor attaches. `last_materialized_
+    // hash` is deliberately separate from `content_hash`: the latter is
+    // re-synced by every `hi sync`, so it can never answer "does this
+    // file still match what Generate mode itself last wrote" -- see RFC
+    // 0014's "What's authoritative, when" for the full reasoning this
+    // column exists to satisfy. `0`/`1` integers, not a real SQLite
+    // `BOOLEAN` type (SQLite has none), matching this schema's own
+    // existing convention.
+    add_column_if_missing(conn, "nodes", "driving_text", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "created_by", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "confirmed", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "nodes", "locked", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "nodes", "waived", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "nodes", "waive_reason", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "last_materialized_hash", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "attributes", "TEXT")?;
+    // screen-only graph view: which UI archetype this screen-kind node
+    // belongs to (crud, dashboard, login, shell, ...). NULL for non-
+    // screen nodes.
+    add_column_if_missing(conn, "nodes", "screen_type", "TEXT")?;
+    // screen-only graph: the route path for screen-kind nodes, and the
+    // JSON nav entries for app_shell-kind nodes.
+    add_column_if_missing(conn, "nodes", "screen_path", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "screen_nav", "TEXT")?;
+    // screen-only graph, edges half (RFC 0022 §2): a human-readable
+    // label for derived `NAVIGATES_TO` edges ("nav.approvals",
+    // "landing: Analyst", "redirect", "detail"). NULL for every other
+    // edge kind, whose kinds already say what they mean.
+    add_column_if_missing(conn, "edges", "label", "TEXT")?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    sql_type: &str,
+) -> Result<(), String> {
+    let exists: bool = conn
+        .prepare(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+        ))
+        .and_then(|mut stmt| stmt.exists([column]))
+        .map_err(|e| format!("checking whether {table}.{column} already exists: {e}"))?;
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {sql_type}"),
+            [],
+        )
+        .map_err(|e| format!("adding {table}.{column}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// One GET route registration found by reverse-engineering a fn body
+/// (`router.get_with_auth("/admin/queues", "Assignment Rules (18.3)",
+/// ...)`) -- a real screen the app serves, whether or not any UI macro
+/// produced it. These become `screen`-kind nodes of type `page` so the
+/// screen-only graph shows the app's whole surface, not just its macro
+/// screens.
+#[derive(Debug, Clone)]
+pub(crate) struct RouteReg {
+    /// The registered path, verbatim (`/cases/{id}/alerts` -- `{...}`
+    /// params kept, so template matching downstream sees the app's own
+    /// spelling of the path).
+    path: String,
+    /// The human title passed alongside the path, when the call carries
+    /// one (`get_with_auth`'s second argument). `None` for a bare
+    /// `router.get(path, ...)` with no title literal.
+    title: Option<String>,
+    /// The top-level fn the registration sits in (`mount_case_context_
+    /// tabs`) -- grouping context for the derived node, and how a route
+    /// stays attributable to the module that mounts it.
+    mount_fn: String,
+}
+
+/// Per-file reverse-engineering facts that `hi sync`'s screen-navigation
+/// pass consumes. Everything here is *code-derived* (parsed out of real
+/// registrations/macros, never guessed), which is what makes the
+/// resulting `NAVIGATES_TO` edges honest enough to draw as solid graph
+/// edges rather than "inferred" dashes.
+#[derive(Default)]
+pub(crate) struct ScreenFacts {
+    /// GET route registrations, each tagged with the top-level fn it
+    /// sits in (so a file's own sync pass can claim exactly its own).
+    pub routes: Vec<RouteReg>,
+    /// `(from_route_path, target_path)`: a static string-literal
+    /// `Response::redirect(...)` inside one GET route's handler.
+    /// `format!(...)`-built dynamic redirects are deliberately skipped
+    /// -- their target isn't a literal, so guessing would be a lie.
+    pub redirects: Vec<(String, String)>,
+    /// `(mount_name, detail_path)`: every `detail_path:` an
+    /// `approval_inbox!` macro declares -- the real "this inbox links
+    /// out to that screen" relationship, taken from the macro's own
+    /// `sources: [...]` table.
+    pub detail_paths: Vec<(String, String)>,
+    /// The TOML register path each `app_shell_from_toml!("menus.toml",
+    /// ...)` invocation names, verbatim from source. Resolved against
+    /// the sync root (the macro resolves it against
+    /// `CARGO_MANIFEST_DIR`, which for an app crate is the same
+    /// directory `hi sync` walks from).
+    pub shell_tomls: Vec<String>,
+}
+
+impl ScreenFacts {
+    fn merge(&mut self, other: ScreenFacts) {
+        self.routes.extend(other.routes);
+        self.redirects.extend(other.redirects);
+        self.detail_paths.extend(other.detail_paths);
+        self.shell_tomls.extend(other.shell_tomls);
+    }
+
+    /// Routes declared by fns this file itself declares -- the per-file
+    /// slice of the accumulated facts, so a re-sync of one file only
+    /// upserts that file's own route nodes (same file-at-a-time rule
+    /// the rest of `sync_file` follows).
+    fn routes_owned_by(&self, fn_names: &HashSet<&str>) -> Vec<&RouteReg> {
+        self.routes
+            .iter()
+            .filter(|r| fn_names.contains(r.mount_fn.as_str()))
+            .collect()
+    }
+}
+
+/// One `fn`/`struct`/`enum`/`screen` top-level item, identity =
+/// `(kind, qualified_name)` -- deliberately not line/col (shifts on
+/// unrelated edits) and not a hash (changes on every edit), the same
+/// "chunk identity independent of version" rule the RFC's document
+/// side uses. `content_hash` is that identity's *version*.
+struct CodeUnit {
+    qualified_name: String,
+    kind: &'static str,
+    content_hash: String,
+    line: usize,
+    col: usize,
+    /// For `screen`-kind CodeUnits, the UI archetype derived from the
+    /// macro name (e.g. "dashboard", "login", "shell"). `None` for other
+    /// kinds.
+    screen_type: Option<String>,
+    /// The route path declared by a screen-kind macro (`path: "/tasks"`).
+    screen_path: Option<String>,
+    /// For `app_shell`-kind nodes, the JSON nav entries.
+    screen_nav: Option<String>,
+}
+
+fn hash_tokens<T: quote::ToTokens>(item: &T) -> String {
+    sha256_hex(item.to_token_stream().to_string().as_bytes())
+}
+
+/// Parses one file's own declared items (no `use` resolution -- see
+/// this module's doc comment for why) and hashes each one's own token
+/// stream, whitespace/comment-insensitive by construction (re-rendered
+/// via `quote`, not a byte slice of the original source).
+///
+/// v2 (real Rust, `syn`-parsed) since 2026-09-16's `hi` extraction --
+/// no native `.nir` prelude-seeding to filter out here (unlike the
+/// retired native parser, `syn::parse_file` never injects anything a
+/// file didn't actually write). A screen is identified by the UI
+/// macro's `mount_<ScreenName>` function, giving it a graph identity.
+///
+/// The third element of the tuple is this file's screen-facts yield
+/// (RFC 0022 §2's reverse-engineering pass): GET route registrations,
+/// static redirects, approval-inbox detail paths, and shell TOML
+/// registers -- everything the whole-project navigation pass in `sync`
+/// needs, extracted here where the parse already happened.
+fn code_units_in_file(path: &Path) -> Result<(Vec<CodeUnit>, syn::File, ScreenFacts), String> {
+    let src =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let file =
+        syn::parse_file(&src).map_err(|e| format!("parse error in {}: {e}", path.display()))?;
+
+    let mut units = Vec::with_capacity(file.items.len());
+    let mut facts = ScreenFacts::default();
+    for item in &file.items {
+        let (qualified_name, kind, screen_type, screen_path, screen_nav): (
+            String,
+            &'static str,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = match item {
+            syn::Item::Fn(f) => {
+                collect_screen_facts_from_fn(&f.sig.ident.to_string(), f, &mut facts);
+                (f.sig.ident.to_string(), "fn", None, None, None)
+            }
+            syn::Item::Struct(s) => (s.ident.to_string(), "struct", None, None, None),
+            syn::Item::Enum(e) => (e.ident.to_string(), "enum", None, None, None),
+            syn::Item::Macro(m) => {
+                let macro_name = m
+                    .mac
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
+                if macro_name == "approval_inbox" {
+                    // The inbox's own mount identity (what
+                    // `screen_name_from_macro` would return) pairs each
+                    // `detail_path` with the inbox screen that declares
+                    // it, so the nav pass can draw inbox -> detail
+                    // edges without re-parsing this file later.
+                    if let Some(mount) = screen_name_from_macro(m) {
+                        for detail in string_values_after_key(&m.mac.tokens, "detail_path") {
+                            facts.detail_paths.push((mount.clone(), detail));
+                        }
+                    }
+                }
+                if macro_name == "app_shell_from_toml" {
+                    // First positional argument is the nav register path
+                    // (`app_shell_from_toml!("menus.toml", title: ...)`).
+                    if let Some(lit) = first_string_literal(&m.mac.tokens) {
+                        facts.shell_tomls.push(lit);
+                    }
+                }
+                let Some(name) = screen_name_from_macro(m) else {
+                    continue;
+                };
+                let st = screen_type_from_macro(&macro_name).to_string();
+                let sp = screen_path_from_macro(&m.mac.tokens);
+                let sn = if macro_name == "app_shell" {
+                    app_shell_nav_from_macro(&m.mac.tokens)
+                } else {
+                    None
+                };
+                (name, "screen", Some(st), sp, sn)
+            }
+            _ => continue,
+        };
+        let start = syn::spanned::Spanned::span(item).start();
+        units.push(CodeUnit {
+            qualified_name,
+            kind,
+            content_hash: hash_tokens(item),
+            line: start.line,
+            col: start.column,
+            screen_type,
+            screen_path,
+            screen_nav,
+        });
+    }
+    Ok((units, file, facts))
+}
+
+const UI_MACROS: &[&str] = &[
+    "crud_screens",
+    "dashboard",
+    "kanban_board",
+    "wizard",
+    "settings_screen",
+    "communication_feed",
+    "landing",
+    "login",
+    "app_shell",
+    // RFC 0023's approval inbox is a real screen (a mount + path + a
+    // list the user opens), not just an approval-policy artifact -- the
+    // screen-only graph must show it, or the T-04 inbox screens
+    // (mounted at /approvals, /four-eyes, ...) are invisible in it.
+    "approval_inbox",
+    // Same for T-06's workspace! archetype (multi-panel investigation
+    // workspace, again mount + path).
+    "workspace",
+    // `app_shell_from_toml!("menus.toml", ...)` generates the same
+    // `mount_app_shell` surface `app_shell!` would -- same shell node
+    // identity (`code:screen:app_shell`), but its nav register lives in
+    // the named TOML file, which the navigation pass reads.
+    "app_shell_from_toml",
+];
+
+fn screen_type_from_macro(macro_name: &str) -> &'static str {
+    match macro_name {
+        "crud_screens" => "crud",
+        "dashboard" => "dashboard",
+        "kanban_board" => "kanban",
+        "wizard" => "wizard",
+        "settings_screen" => "settings",
+        "communication_feed" => "feed",
+        "landing" => "landing",
+        "login" => "login",
+        "app_shell" => "shell",
+        "app_shell_from_toml" => "shell",
+        "approval_inbox" => "inbox",
+        "workspace" => "workspace",
+        _ => "screen",
+    }
+}
+
+fn screen_path_from_macro(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    // Token-scan, not a stream parser: the macro bodies carry arbitrary
+    // domain content (login!'s demo user rows, approval_inbox!'s
+    // `access: requires role "..."`) that a key:value stream parser
+    // trips over. Only the token sequence `Ident("path") Punct(:)
+    // Literal(str)` matters, anywhere in the invocation -- every UI
+    // macro spells the screen's route exactly that way.
+    string_values_after_key(tokens, "path").into_iter().next()
+}
+
+#[derive(serde::Serialize)]
+struct NavEntryJson {
+    label: String,
+    href: String,
+    role: Option<String>,
+}
+
+fn app_shell_nav_from_macro(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<Option<String>> {
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![:]>()?;
+            if key == "nav" {
+                let list;
+                syn::bracketed!(list in input);
+                let mut entries = Vec::new();
+                while !list.is_empty() {
+                    let entry;
+                    syn::braced!(entry in list);
+                    let mut label = None;
+                    let mut href = None;
+                    let mut role = None;
+                    while !entry.is_empty() {
+                        let k: syn::Ident = entry.parse()?;
+                        entry.parse::<syn::Token![:]>()?;
+                        if k == "label" {
+                            label = Some(entry.parse::<syn::LitStr>()?.value());
+                        } else if k == "href" {
+                            href = Some(entry.parse::<syn::LitStr>()?.value());
+                        } else if k == "role" {
+                            role = Some(entry.parse::<syn::LitStr>()?.value());
+                        } else {
+                            let _: proc_macro2::TokenTree = entry.parse()?;
+                        }
+                        if entry.peek(syn::Token![,]) {
+                            entry.parse::<syn::Token![,]>()?;
+                        }
+                    }
+                    if let (Some(label), Some(href)) = (label, href) {
+                        entries.push(NavEntryJson { label, href, role });
+                    }
+                    if list.peek(syn::Token![,]) {
+                        list.parse::<syn::Token![,]>()?;
+                    }
+                }
+                return Ok(serde_json::to_string(&entries).ok());
+            } else {
+                let _: proc_macro2::TokenTree = input.parse()?;
+            }
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(None)
+    };
+    syn::parse::Parser::parse2(parser, tokens.clone())
+        .ok()
+        .flatten()
+}
+
+/// The GET route-registration methods a v2 `Router` offers that serve a
+/// page a human opens (`web.rs`'s own method list, filtered to the
+/// read side). POST/PUT/DELETE are actions (endpoints), not screens --
+/// they carry no surface to draw, so the screen-only graph excludes
+/// them rather than pretending every endpoint is a screen.
+const SCREEN_ROUTE_METHODS: &[&str] = &["get", "get_gated", "get_gated_claim", "get_with_auth"];
+
+/// First (optionally second) positional string-literal argument of a
+/// call's argument list -- how a route registration's path (and its
+/// human title, when present) are read back without any macro context.
+fn positional_string_literals(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+) -> Vec<String> {
+    args.iter()
+        .filter_map(|a| match a {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) => Some(s.value()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Walks one top-level fn's body collecting the screen-facts yield:
+/// every GET route registration (with the title literal when present),
+/// and every static `Response::redirect(...)` string inside a route
+/// handler attributed to the route whose arguments contain it.
+fn collect_screen_facts_from_fn(mount_fn: &str, f: &syn::ItemFn, facts: &mut ScreenFacts) {
+    struct Collector<'a> {
+        mount_fn: &'a str,
+        current_route: Option<String>,
+        facts: &'a mut ScreenFacts,
+    }
+    impl syn::visit::Visit<'_> for Collector<'_> {
+        fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            if SCREEN_ROUTE_METHODS.contains(&method.as_str()) {
+                let lits = positional_string_literals(&node.args);
+                if let Some(path) = lits.first().filter(|p| p.starts_with('/')) {
+                    let title = lits.get(1).cloned();
+                    self.facts.routes.push(RouteReg {
+                        path: path.clone(),
+                        title,
+                        mount_fn: self.mount_fn.to_string(),
+                    });
+                    // The handler closure is among this call's args --
+                    // walking it with `current_route` set attributes any
+                    // static redirect inside it to THIS route, then
+                    // restores whatever outer registration (if any) we
+                    // were already inside.
+                    let prev = self.current_route.replace(path.clone());
+                    syn::visit::visit_expr_method_call(self, node);
+                    self.current_route = prev;
+                    return;
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+        fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+            if let syn::Expr::Path(p) = node.func.as_ref() {
+                if p.path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .as_deref()
+                    == Some("redirect")
+                {
+                    if let Some(syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    })) = node.args.first()
+                    {
+                        if let Some(route) = &self.current_route {
+                            self.facts.redirects.push((route.clone(), s.value()));
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    syn::visit::Visit::visit_block(
+        &mut Collector {
+            mount_fn,
+            current_route: None,
+            facts,
+        },
+        &f.block,
+    );
+}
+
+/// The first string literal in a macro's token stream -- how
+/// `app_shell_from_toml!("menus.toml", ...)`'s positional register-path
+/// argument is read back (it has no `key:` spelling to scan for).
+fn first_string_literal(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    tokens.clone().into_iter().find_map(|t| match t {
+        proc_macro2::TokenTree::Literal(l) => {
+            let text = l.to_string();
+            if text.starts_with('"') {
+                Some(literal_string_value(&text))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    })
+}
+
+/// Every string-literal value that follows `key :` anywhere in a macro's
+/// token stream, descending into groups (`sources: [{ ... detail_path:
+/// "/cases/{id}" }]` nests the values inside `Group`s, so a top-level
+/// walk never sees them). How `detail_path:` entries are pulled out of
+/// `approval_inbox!`'s sources table -- and how `path:` is read for
+/// every UI macro -- without writing a full grammar for each macro's
+/// input (the real parsers live in `nirdosha-macros`; here only these
+/// token sequences are needed, and matching `Ident(key) Punct(:)
+/// Literal(str)` is exact for them).
+fn string_values_after_key(tokens: &proc_macro2::TokenStream, key: &str) -> Vec<String> {
+    fn flatten(trees: proc_macro2::TokenStream, out: &mut Vec<proc_macro2::TokenTree>) {
+        for t in trees {
+            if let proc_macro2::TokenTree::Group(g) = &t {
+                flatten(g.stream(), out);
+            }
+            out.push(t);
+        }
+    }
+    let mut trees: Vec<proc_macro2::TokenTree> = Vec::new();
+    flatten(tokens.clone(), &mut trees);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 2 < trees.len() {
+        let is_key =
+            matches!(&trees[i], proc_macro2::TokenTree::Ident(id) if id.to_string() == key);
+        let is_colon =
+            matches!(&trees[i + 1], proc_macro2::TokenTree::Punct(p) if p.as_char() == ':');
+        if is_key && is_colon {
+            if let proc_macro2::TokenTree::Literal(l) = &trees[i + 2] {
+                let text = l.to_string();
+                if text.starts_with('"') {
+                    out.push(literal_string_value(&text));
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `proc_macro2::Literal`'s Display keeps source quoting (`"text"`, and
+/// escapes inside), so a `.nir`-side string value is recovered with a
+/// tiny un-escape (the two escapes a real v2 string literal can carry
+/// here: `"` and `\\`). Full grammar-faithful unescaping lives in the
+/// compiler's own lexer; this only needs to be right for plain route
+/// paths.
+fn literal_string_value(quoted: &str) -> String {
+    let inner = &quoted[1..quoted.len().saturating_sub(1)];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+pub(crate) fn screen_name_from_macro(item: &syn::ItemMacro) -> Option<String> {
+    let macro_name = item.mac.path.segments.last()?.ident.to_string();
+    if !UI_MACROS.contains(&macro_name.as_str())
+        || item.mac.path.segments.first()?.ident != "nirdosha_rt"
+    {
+        return None;
+    }
+    // `app_shell_from_toml!` takes the register path as its first
+    // argument, not a `mount:` key -- the generated mount fn is always
+    // the fixed name `mount_app_shell` (see the macro's own doc
+    // comment), so the screen node gets that fixed identity too.
+    if macro_name == "app_shell_from_toml" {
+        return Some("app_shell".to_string());
+    }
+    let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<String> {
+        let key: syn::Ident = input.parse()?;
+        input.parse::<syn::Token![:]>()?;
+        let mount: syn::Ident = input.parse()?;
+        if key != "mount" {
+            return Err(input.error("expected mount"));
+        }
+        while !input.is_empty() {
+            let _: proc_macro2::TokenTree = input.parse()?;
+        }
+        Ok(mount.to_string())
+    };
+    syn::parse::Parser::parse2(parser, item.mac.tokens.clone())
+        .ok()?
+        .strip_prefix("mount_")
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+pub fn code_unit_node_id(kind: &str, qualified_name: &str) -> String {
+    format!("code:{kind}:{qualified_name}")
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct SyncReport {
+    pub files_scanned: usize,
+    pub units_seen: usize,
+    pub units_added: usize,
+    pub units_changed: usize,
+    pub edges_flagged: usize,
+    /// RFC 0022 §2: how many `NAVIGATES_TO` screen-navigation edges the
+    /// reverse-engineering pass just (re)derived -- menus.toml entries,
+    /// landing routes, static redirects, and approval-inbox detail
+    /// paths. Reported separately from `edges_flagged` because these
+    /// edges are regenerated wholesale each sync (pure derived data,
+    /// never human-authored), not stale-flagged.
+    pub nav_edges: usize,
+}
+
+impl SyncReport {
+    fn merge(&mut self, other: SyncReport) {
+        self.files_scanned += other.files_scanned;
+        self.units_seen += other.units_seen;
+        self.units_added += other.units_added;
+        self.units_changed += other.units_changed;
+        self.edges_flagged += other.edges_flagged;
+    }
+}
+
+/// Re-runs the per-item hash walk for one file, upserts each
+/// `CodeUnit` node, and -- the "code -> knowledge" half of bidirectional
+/// impact (rfcs/0013) -- flags every `IMPLEMENTS` edge out of a
+/// `CodeUnit` whose hash just changed as `possibly_stale`. Never
+/// deletes or rewrites an edge, a node's title, or the `.nir` source
+/// itself -- only ever adds a flag, per the RFC's "explicit vs.
+/// inferred knowledge stay separate" principle.
+fn sync_file(
+    conn: &Connection,
+    path: &Path,
+    facts: &mut ScreenFacts,
+) -> Result<SyncReport, String> {
+    let mut report = SyncReport {
+        files_scanned: 1,
+        ..Default::default()
+    };
+    let (units, file, file_facts) = code_units_in_file(path)?;
+    facts.merge(file_facts);
+    report.units_seen = units.len();
+    let source_ref = path.display().to_string();
+
+    for u in &units {
+        let id = code_unit_node_id(u.kind, &u.qualified_name);
+        // `Option<String>` twice over, deliberately: the outer one (via
+        // `.optional()`) covers "no such node yet" (a real `.nir` file
+        // being synced for the first time); the inner one covers "the
+        // node exists but has no `content_hash` yet" -- true of a
+        // prompt-mode candidate (`hi_graph::add_candidate`) that Generate
+        // mode is only now materializing into this call's own real
+        // source. Reading column 0 as a bare `String` instead would
+        // error out on that NULL rather than treating it as "no prior
+        // hash," the same way a genuinely new node does.
+        let prev_hash: Option<String> = conn
+            .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .map_err(|e| format!("reading node {id}: {e}"))?
+            .flatten();
+
+        match &prev_hash {
+            None => report.units_added += 1,
+            Some(h) if h != &u.content_hash => report.units_changed += 1,
+            _ => {}
+        }
+
+        conn.execute(
+            "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, line, col, screen_type, screen_path, screen_nav)
+             VALUES (?1, 'CodeUnit', ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, source_ref = excluded.source_ref, line = excluded.line, col = excluded.col, screen_type = excluded.screen_type, screen_path = excluded.screen_path, screen_nav = excluded.screen_nav",
+            params![id, u.qualified_name, u.content_hash, source_ref, u.line as i64, u.col as i64, u.screen_type, u.screen_path, u.screen_nav],
+        )
+        .map_err(|e| format!("upserting node {id}: {e}"))?;
+
+        if let Some(prev) = &prev_hash {
+            if prev != &u.content_hash {
+                // `link` always records both directions of one
+                // relationship (`IMPLEMENTS` code->req and its inverse
+                // `IMPLEMENTED_BY` req->code) -- flag both, not just
+                // one: `impact`'s BFS dedups by neighbor id regardless
+                // of which edge reached it, so leaving the inverse
+                // unflagged risks the flag silently disappearing
+                // whenever that edge happens to be visited first.
+                let flagged = conn
+                    .execute(
+                        "UPDATE edges SET flag = 'possibly_stale', flag_reason = ?2
+                         WHERE flag IS NULL AND (
+                             (src = ?1 AND kind = 'IMPLEMENTS')
+                             OR (dst = ?1 AND kind = 'IMPLEMENTED_BY')
+                         )",
+                        params![
+                            id,
+                            format!("CodeUnit content changed ({prev} -> {})", u.content_hash)
+                        ],
+                    )
+                    .map_err(|e| format!("flagging edges touching {id}: {e}"))?;
+                report.edges_flagged += flagged;
+            }
+        }
+    }
+
+    // RFC 0022 §2's reverse-engineering pass, nodes half: every GET
+    // route this file registers is a real screen the app serves, so it
+    // becomes a `screen`-kind node of type `page` even though no UI
+    // macro produced it. Identity is the route path itself (the one
+    // thing `menus.toml`'s V6 invariant already guarantees unique), so
+    // a route can never be confused with a macro screen's mount-based
+    // identity. A macro screen that declares the same path keeps
+    // priority downstream (the nav pass prefers non-page screens when
+    // resolving paths), so this can only ever ADD surface the macro
+    // catalog didn't capture -- exactly what it's for.
+    let fn_names: HashSet<&str> = units
+        .iter()
+        .filter(|u| u.kind == "fn")
+        .map(|u| u.qualified_name.as_str())
+        .collect();
+    for reg in facts.routes_owned_by(&fn_names) {
+        let id = code_unit_node_id("screen", &reg.path);
+        report.units_seen += 1;
+        let title = reg.title.clone().unwrap_or_else(|| reg.path.clone());
+        conn.execute(
+            "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, line, col, screen_type, screen_path, screen_nav)
+             VALUES (?1, 'CodeUnit', ?2, NULL, ?3, ?4, NULL, NULL, 'page', ?5, NULL)
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title, source_ref = excluded.source_ref, screen_path = excluded.screen_path",
+            params![id, title, sha256_hex(format!("{}\n{}", reg.path, title).as_bytes()), source_ref, reg.path],
+        )
+        .map_err(|e| format!("upserting route screen node {id}: {e}"))?;
+    }
+
+    // rfcs/0014's 2026-09-14 amendment, step 5: mark which `fn`s are the
+    // real security boundary. `typeck::check_serve_config`'s deny-by-
+    // default rule already means only a `serve { expose ... }`-listed
+    // fn is externally reachable at all, and `ExposedMutatingFnMissing
+    // Requires` already demands a role/claim gate on exactly those, not
+    // on every internal helper an exposed fn happens to call -- a real
+    // user question ("do I have to add roles to every function
+    // internal ones call?") answered by the compiler's own existing
+    // rule, just never shown anywhere before. Reuses the `nodes.status`
+    // column, unused by any other code path today (every insert site
+    // in this file writes `NULL`) -- the only vocabulary this pass
+    // gives it is the literal string `'exposed'`; a later, unrelated
+    // use of `status` must not silently repurpose that string for
+    // something else.
+    // v2 exposure is a `#[nirdosha_rt::contract(...)]`-gated fn reached
+    // through a `nirdosha_rt::*!` archetype macro invocation, not a
+    // native `serve { expose ... }` list -- there is no macro-expansion
+    // step here to recognize that shape yet, so `nodes.status =
+    // 'exposed'` is never set for v2 code. A real, disclosed gap, not a
+    // silently narrower claim: nothing downstream (`impact`, the graph
+    // UI) currently depends on this flag being set to function at all.
+
+    // rfcs/0014's 2026-09-14 amendment: real call-graph edges for
+    // synced code, not just LLM-decompose's own `depends_on` edges
+    // (`add_relation`, `hi_api::handle_prompt`) or `:link`'s manual
+    // requirement<->code pairs. Before this, ANY function found by
+    // `hi sync` -- however heavily it's actually called -- showed
+    // "impact: none" forever, because nothing ever walked a real
+    // function body looking for what it calls (field-failure,
+    // 2026-09-14: `main` reported zero impact despite calling every
+    // other unit in the program). `Expr::Call` also covers struct/
+    // enum-variant construction (`ast.rs`'s own convention -- there is
+    // no bare-identifier construction form), so `main` calling
+    // `Account(...)` records a real edge to `code:struct:Account` too,
+    // not just to other `fn`s.
+    //
+    // Scope, matching this module's own file-at-a-time limitation (no
+    // `use` resolution, this file's own doc comment): a call only
+    // becomes an edge if its target already exists as a `CodeUnit`
+    // node -- either declared in this same file (just upserted above)
+    // or in any other file already synced. A call to something not
+    // yet synced anywhere records no edge; a later sync of that file
+    // fills it in the same way `possibly_stale` flags catch up after
+    // the fact elsewhere in this function, not retroactively.
+    const CALLABLE_KINDS: [&str; 3] = ["fn", "struct", "enum"];
+    for item in &file.items {
+        let syn::Item::Fn(f) = item else { continue };
+        let caller_name = f.sig.ident.to_string();
+        let caller_id = code_unit_node_id("fn", &caller_name);
+        let (called, constructed) = collect_calls_and_constructs(&f.block);
+        for name in called.union(&constructed) {
+            if name == &caller_name {
+                continue; // recursion isn't a graph edge worth drawing to itself
+            }
+            for kind in CALLABLE_KINDS {
+                let callee_id = code_unit_node_id(kind, name);
+                let exists: Option<String> = conn
+                    .query_row("SELECT id FROM nodes WHERE id = ?1", [&callee_id], |r| {
+                        r.get(0)
+                    })
+                    .optional()
+                    .map_err(|e| format!("checking call target {callee_id}: {e}"))?;
+                if exists.is_some() {
+                    add_relation(conn, &caller_id, &callee_id)?;
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+/// The v2 analogue of the retired native `contract_check::
+/// collect_call_names_stmts`: every bare-fn-call target
+/// (`syn::ExprCall` over a plain path, e.g. `charge_cents(...)`) and
+/// every struct-literal construction (`syn::ExprStruct`, e.g. `Account
+/// { ... }`) inside `block`, by the last path segment's own name --
+/// good enough for this module's "does a `CodeUnit` node with this
+/// name already exist" edge check, not a full name-resolution pass.
+/// Deliberately does not walk into nested item definitions (a local
+/// `fn`/`struct` inside the block) -- `syn::visit::Visit`'s default
+/// `visit_item_*` no-ops already give us that for free by only being
+/// overridden for the two expression kinds below.
+/// `pub(crate)` since `hi_llm`'s syntactic mandatory-primitive/
+/// primitive-exclusivity coverage checks (the v2 replacements for the
+/// retired native `contract_check::collect_call_names`/
+/// `check_primitive_exclusivity`) walk fn bodies the same way this
+/// module's own `sync_file` does, and must never drift from it --
+/// one walk, two call sites, not a second hand-rolled copy.
+/// `called` collects bare-fn-call targets (`syn::ExprCall` over a
+/// plain path, e.g. `charge_cents(...)`); `constructed` collects
+/// struct-literal construction (`syn::ExprStruct`, e.g. `Account {
+/// ... }`) -- kept as two separate sets because a v2 "does this call
+/// a mandatory fn" question and a "does this construct a protected
+/// struct" question are genuinely different questions in real Rust
+/// (unlike the retired native `.nir`, which had no separate literal-
+/// construction expression form at all).
+pub(crate) fn collect_calls_and_constructs(
+    block: &syn::Block,
+) -> (HashSet<String>, HashSet<String>) {
+    struct Collector<'a> {
+        called: &'a mut HashSet<String>,
+        constructed: &'a mut HashSet<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Collector<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = node.func.as_ref() {
+                if let Some(seg) = p.path.segments.last() {
+                    self.called.insert(seg.ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            if let Some(seg) = node.path.segments.last() {
+                self.constructed.insert(seg.ident.to_string());
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+    }
+    let mut called = HashSet::new();
+    let mut constructed = HashSet::new();
+    syn::visit::Visit::visit_block(
+        &mut Collector {
+            called: &mut called,
+            constructed: &mut constructed,
+        },
+        block,
+    );
+    (called, constructed)
+}
+
+const SKIP_DIRS: &[&str] = &[".nir", ".git", "target", "node_modules"];
+
+fn find_nir_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            // A directory that vanished mid-walk (or was never
+            // readable) shouldn't abort the whole sync -- skip it.
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !SKIP_DIRS.contains(&name) {
+                    stack.push(path);
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some("nir") {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The code half of `hi sync` -- run automatically on every `hi`
+/// startup (`root`-wide, `files` empty) or standalone for CI/manual use
+/// (`files` explicit). Content-addressing means a repeat call with no
+/// code changes touches zero `nodes` rows beyond a hash comparison per
+/// file -- the "fast no-op" property rfcs/0013's auto-scaffold section
+/// depends on.
+pub fn sync(conn: &Connection, root: &Path, files: &[String]) -> Result<SyncReport, String> {
+    let mut screen_facts = ScreenFacts::default();
+    let mut total = SyncReport::default();
+    if files.is_empty() {
+        for path in find_nir_files(root)? {
+            let r = sync_file(conn, &path, &mut screen_facts)?;
+            total.merge(r);
+        }
+    } else {
+        for f in files {
+            let r = sync_file(conn, Path::new(f), &mut screen_facts)?;
+            total.merge(r);
+        }
+    }
+    // The navigation pass runs on the accumulated whole-project view,
+    // not per file -- a menus.toml edge needs the shell (declared in
+    // one file) AND the target screen (declared in another) to both be
+    // in the graph before either edge can be drawn.
+    total.nav_edges = derive_screen_navigation(conn, root, &screen_facts)?;
+    Ok(total)
+}
+
+/// RFC 0022 §2's reverse-engineering pass, edges half: (re)derives every
+/// `NAVIGATES_TO` screen-navigation edge from the accumulated code
+/// facts (static redirects, approval-inbox detail paths), the app
+/// shell's TOML nav register (`menus.toml`: per-menu routes and
+/// per-role post-login landings), and the screen inventory now in the
+/// graph. Returns the number of edges inserted.
+///
+/// `NAVIGATES_TO` edges are pure derived data -- nothing human- or
+/// model-authored ever writes this kind (`hi link` writes only the
+/// `IMPLEMENTS`/`IMPLEMENTED_BY` pair; prompt-mode writes `depends_on`)
+/// -- so unlike every other edge kind this pass regenerates them
+/// wholesale: a menu entry removed from `menus.toml` disappears from
+/// the graph the same sync that removed it from the code, instead of
+/// lingering forever as an unflagged ghost. Everything is skipped-not-
+/// failed: an unreadable/missing nav register degrades to "fewer
+/// edges", never a sync error, matching this module's own "never be
+/// the thing that breaks `hi`" posture.
+fn derive_screen_navigation(
+    conn: &Connection,
+    root: &Path,
+    facts: &ScreenFacts,
+) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, screen_type, screen_path FROM nodes WHERE kind = 'CodeUnit' AND screen_type IS NOT NULL")
+        .map_err(|e| format!("listing screen nodes for the navigation pass: {e}"))?;
+    let screens: Vec<(String, Option<String>, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| format!("reading screen nodes: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("reading a screen node row: {e}"))?;
+    drop(stmt);
+
+    // path -> node-id lookup. Two passes so a macro screen (crud,
+    // dashboard, ...) that declares a path always wins over a
+    // reverse-engineered `page` node registering the same path -- the
+    // macro screen is the richer node (its own archetype, title,
+    // confirmed state), the page node only exists because no macro
+    // covered that route.
+    let mut path_to_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for pass in [true, false] {
+        for (id, screen_type, screen_path) in &screens {
+            let is_page = screen_type.as_deref() == Some("page");
+            if is_page != pass {
+                continue;
+            }
+            if let Some(path) = screen_path {
+                path_to_id.entry(path.clone()).or_insert_with(|| id.clone());
+            }
+        }
+    }
+    let lookup = |pattern: &str| -> Option<String> {
+        if pattern.is_empty() || pattern.starts_with('@') {
+            return None;
+        }
+        if let Some(id) = path_to_id.get(pattern) {
+            return Some(id.clone());
+        }
+        // Template match, deterministic by candidate path, in three
+        // passes of decreasing strictness: (a) same shape -- pattern
+        // params may only stand in for candidate params, literals must
+        // be equal; (b) crud-subtree -- the pattern's trailing params
+        // stripped off match a macro screen that owns the entity's base
+        // path (the compiled macro registers `/<path>/{id}` detail
+        // routes source scanning can never see); (c) loose -- a param in
+        // either pattern or candidate matches any one segment (a
+        // concrete redirect target like `/cs/payments/42` finding its
+        // registered `/cs/payments/{txn}` route). (a) before (b) so an
+        // exactly-shaped route always wins over the owning macro screen;
+        // (b) before (c) so `/cases/{id}` resolves to the crud screen
+        // that actually renders case details, not to the first 3-segment
+        // candidate a loose match happens to land on (that was
+        // `/cases/board` -- a real but different screen).
+        let candidates_of = |min_segs: usize| -> Vec<(&String, &String)> {
+            let mut v: Vec<(&String, &String)> = path_to_id
+                .iter()
+                .filter(|(path, _)| path.split('/').count() == min_segs)
+                .collect();
+            v.sort();
+            v
+        };
+        fn segs_of(s: &str) -> Vec<&str> {
+            s.split('/').collect()
+        }
+        let p_segs = segs_of(pattern);
+        let is_param = |s: &str| s.starts_with('{') && s.ends_with('}');
+        let exact_shape = candidates_of(p_segs.len()).iter().find_map(|(path, id)| {
+            let c = segs_of(path);
+            if c.iter()
+                .zip(p_segs.iter())
+                .all(|(cseg, pseg)| cseg == pseg || (is_param(pseg) && is_param(cseg)))
+            {
+                Some((*id).clone())
+            } else {
+                None
+            }
+        });
+        if let Some(shape_hit) = exact_shape {
+            return Some(shape_hit);
+        }
+        {
+            let mut stripped = p_segs.clone();
+            let mut stripped_any = false;
+            while stripped.last().map(|s| is_param(s)).unwrap_or(false) {
+                stripped.pop();
+                stripped_any = true;
+            }
+            if stripped_any {
+                let base = stripped.join("/");
+                if base != pattern {
+                    if let Some(id) = path_to_id.get(base.as_str()) {
+                        return Some(id.clone());
+                    }
+                }
+            }
+        }
+        candidates_of(p_segs.len()).iter().find_map(|(path, id)| {
+            let c = segs_of(path);
+            if c.iter()
+                .zip(p_segs.iter())
+                .all(|(cseg, pseg)| cseg == pseg || is_param(pseg) || is_param(cseg))
+            {
+                Some((*id).clone())
+            } else {
+                None
+            }
+        })
+    };
+
+    let shell_id = screens
+        .iter()
+        .find(|(_, t, _)| t.as_deref() == Some("shell"))
+        .map(|(id, _, _)| id.clone());
+    let login_id = screens
+        .iter()
+        .find(|(_, t, _)| t.as_deref() == Some("login"))
+        .map(|(id, _, _)| id.clone());
+
+    let mut edges: Vec<(String, String, String)> = Vec::new();
+
+    // menus.toml: the shell's own nav register. `app_shell_from_toml!`
+    // reads it at compile time; reading it here at sync time keeps the
+    // graph's navigation half in sync with what the app actually
+    // ships, without any generated-code parsing.
+    if let Some(toml_rel) = facts.shell_tomls.first() {
+        let toml_path = root.join(toml_rel);
+        match std::fs::read_to_string(&toml_path) {
+            Ok(text) => match text.parse::<toml::Value>() {
+                Ok(doc) => {
+                    // [landing] role -> route: the login screen's real
+                    // post-login target per role (menus.toml V8). A
+                    // project without a login macro node falls back to
+                    // the shell as the source so the landing edges still
+                    // exist; with neither there is nothing to attach
+                    // them to, and they are simply absent.
+                    let landing_src = login_id.clone().or_else(|| shell_id.clone());
+                    if let Some(landing) = doc.get("landing").and_then(|v| v.as_table()) {
+                        for (role, target) in landing {
+                            let Some(route) = target.as_str() else {
+                                continue;
+                            };
+                            if let (Some(src), Some(dst)) = (landing_src.as_ref(), lookup(route)) {
+                                edges.push((src.clone(), dst, format!("landing: {role}")));
+                            }
+                        }
+                    }
+                    // [[menu]] entries: shell -> route, labeled by the
+                    // register's own label_key (falls back to the menu
+                    // id when no key is set).
+                    if let Some(shell) = &shell_id {
+                        if let Some(menus) = doc.get("menu").and_then(|v| v.as_array()) {
+                            for menu in menus {
+                                let Some(route) = menu.get("route").and_then(|v| v.as_str()) else {
+                                    continue;
+                                };
+                                let Some(target) = lookup(route) else {
+                                    continue;
+                                };
+                                if target == *shell {
+                                    continue;
+                                }
+                                let label = menu
+                                    .get("label_key")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| menu.get("id").and_then(|v| v.as_str()))
+                                    .unwrap_or("nav")
+                                    .to_string();
+                                edges.push((shell.clone(), target, label));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // A malformed register is the app's own build
+                    // problem (the macro already hard-errors at compile
+                    // time); sync only notes it in the report stream
+                    // through the missing edges, never a hard failure.
+                    eprintln!(
+                        "hi: nav register {} did not parse as TOML, skipping its nav edges: {e}",
+                        toml_path.display()
+                    );
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "hi: nav register {} not readable, skipping its nav edges: {e}",
+                    toml_path.display()
+                );
+            }
+        }
+    }
+
+    // Static redirects: from the route whose handler redirects, to the
+    // target screen (e.g. /cs/lookup/go -> /cs/payments/{id}).
+    for (from, target) in &facts.redirects {
+        if let (Some(src), Some(dst)) = (lookup(from), lookup(target)) {
+            if src != dst {
+                edges.push((src, dst, "redirect".to_string()));
+            }
+        }
+    }
+    // approval_inbox detail paths: the inbox links out to its own
+    // detail screens (e.g. /four-eyes -> /cases/{id}).
+    for (mount, detail) in &facts.detail_paths {
+        let src = code_unit_node_id("screen", mount);
+        if let Some(target) = lookup(detail) {
+            if target != src {
+                edges.push((src, target, "detail".to_string()));
+            }
+        }
+    }
+
+    // Regenerate wholesale (see this fn's doc comment for why this is
+    // safe for this kind only), recording provenance so a future pass
+    // can tell derived nav edges from anything else.
+    conn.execute(
+        "DELETE FROM provenance WHERE edge_id IN (SELECT id FROM edges WHERE kind = 'NAVIGATES_TO')",
+        [],
+    )
+    .map_err(|e| format!("clearing provenance of old nav edges: {e}"))?;
+    conn.execute("DELETE FROM edges WHERE kind = 'NAVIGATES_TO'", [])
+        .map_err(|e| format!("clearing old nav edges: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let mut inserted = 0usize;
+    for (src, dst, label) in edges {
+        conn.execute(
+            "INSERT OR IGNORE INTO edges (src, dst, kind, label) VALUES (?1, ?2, 'NAVIGATES_TO', ?3)",
+            params![src, dst, label],
+        )
+        .map_err(|e| format!("inserting nav edge {src} -> {dst}: {e}"))?;
+        if conn.changes() > 0 {
+            conn.execute(
+                "INSERT INTO provenance (edge_id, created_by, ts) VALUES (?1, 'code-sync', ?2)",
+                params![conn.last_insert_rowid(), ts],
+            )
+            .map_err(|e| format!("recording nav-edge provenance: {e}"))?;
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
+}
+
+/// Resolves a `hi link`/`hi impact` code-side target: either an
+/// explicit `kind:name` (`fn:transfer_funds`), or a bare name that must
+/// uniquely identify one `CodeUnit` -- ambiguity (e.g. a `fn` and a
+/// `struct` sharing a name) is reported, not silently guessed.
+fn resolve_code_unit_id(conn: &Connection, target: &str) -> Result<String, String> {
+    if let Some((kind, name)) = target.split_once(':') {
+        if ["fn", "struct", "enum", "screen"].contains(&kind) {
+            let id = code_unit_node_id(kind, name);
+            let exists: Option<String> = conn
+                .query_row("SELECT id FROM nodes WHERE id = ?1", [&id], |r| r.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            return exists.ok_or_else(|| {
+                format!("no CodeUnit `{id}` in the hi graph -- run `nirdosha hi sync` first")
+            });
+        }
+    }
+    let mut stmt = conn
+        .prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt
+        .query_map([target], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    match ids.len() {
+        0 => Err(format!(
+            "no CodeUnit named `{target}` in the hi graph -- run `nirdosha hi sync` first"
+        )),
+        1 => Ok(ids.into_iter().next().expect("len checked above")),
+        _ => Err(format!(
+            "`{target}` is ambiguous ({} matches: {}) -- disambiguate with `kind:name`, e.g. `fn:{target}`",
+            ids.len(),
+            ids.join(", ")
+        )),
+    }
+}
+
+/// Records a manual `IMPLEMENTS`/`IMPLEMENTED_BY` edge pair between a
+/// requirement/decision id and a `CodeUnit` -- for code that predates
+/// the hi graph or was written by hand, outside `hi`'s own generation-time
+/// auto-linking (rfcs/0013's "How a code<->knowledge link actually gets
+/// created"). Upserts a stub `Requirement` node if `requirement_id`
+/// isn't already known, so `link` works standalone before any
+/// `hi ingest` has run.
+pub fn link(conn: &Connection, requirement_id: &str, target: &str) -> Result<(), String> {
+    let req_node_id = format!("requirement:{requirement_id}");
+    conn.execute(
+        "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref)
+         VALUES (?1, 'Requirement', ?2, NULL, NULL, NULL)
+         ON CONFLICT(id) DO NOTHING",
+        params![req_node_id, requirement_id],
+    )
+    .map_err(|e| format!("upserting requirement node {req_node_id}: {e}"))?;
+
+    let code_id = resolve_code_unit_id(conn, target)?;
+    let hash: String = conn
+        .query_row(
+            "SELECT content_hash FROM nodes WHERE id = ?1",
+            [&code_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("reading node {code_id}: {e}"))?;
+
+    for (src, dst, kind) in [
+        (code_id.as_str(), req_node_id.as_str(), "IMPLEMENTS"),
+        (req_node_id.as_str(), code_id.as_str(), "IMPLEMENTED_BY"),
+    ] {
+        conn.execute(
+            "INSERT INTO edges (src, dst, kind, hash_at_link, flag, flag_reason)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL)
+             ON CONFLICT(src, dst, kind) DO UPDATE SET hash_at_link = excluded.hash_at_link, flag = NULL, flag_reason = NULL",
+            params![src, dst, kind, hash],
+        )
+        .map_err(|e| format!("recording {kind} edge {src} -> {dst}: {e}"))?;
+    }
+    Ok(())
+}
+
+fn resolve_any_node_id(conn: &Connection, target: &str) -> Result<String, String> {
+    if target.starts_with("requirement:")
+        || target.starts_with("decision:")
+        || target.starts_with("code:")
+    {
+        let exists: Option<String> = conn
+            .query_row("SELECT id FROM nodes WHERE id = ?1", [target], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        return exists.ok_or_else(|| format!("no node `{target}` in the hi graph"));
+    }
+    for prefix in ["requirement:", "decision:"] {
+        let id = format!("{prefix}{target}");
+        if conn
+            .query_row("SELECT 1 FROM nodes WHERE id = ?1", [&id], |_| Ok(()))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Ok(id);
+        }
+    }
+    resolve_code_unit_id(conn, target)
+}
+
+/// Bounded (`max_depth`/`max_nodes`) traversal, principle 4 of
+/// rfcs/0013 -- returns `partial: true` on exhaustion rather than
+/// walking further. Same query works for both directions named in the
+/// RFC ("code -> knowledge" and "requirement -> code"): `link` always
+/// records the `IMPLEMENTS`/`IMPLEMENTED_BY` pair together, so walking
+/// every edge touching a node (either as `src` or `dst`) reaches
+/// whichever side is relevant regardless of which kind of id `target`
+/// names.
+#[derive(serde::Serialize)]
+pub struct ImpactHit {
+    pub node_id: String,
+    pub kind: String,
+    pub title: Option<String>,
+    pub edge_kind: String,
+    pub flag: Option<String>,
+    pub flag_reason: Option<String>,
+    pub depth: u32,
+    /// The file this `CodeUnit` node was parsed from (`nodes.source_ref`)
+    /// -- `None` for a `Requirement`/`Document`/`Chunk` node, which has
+    /// no `.nir` file to point at. Previously captured but never
+    /// surfaced anywhere a human could see it (rfcs/0013's own Open
+    /// Questions recorded this); this finishes that fix.
+    pub source_ref: Option<String>,
+    /// 1-based line/col within `source_ref`, from the declaration's own
+    /// AST span -- `None` on the same terms as `source_ref`.
+    pub line: Option<i64>,
+    pub col: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ImpactReport {
+    pub hits: Vec<ImpactHit>,
+    pub partial: bool,
+}
+
+const DEFAULT_MAX_DEPTH: u32 = 5;
+const DEFAULT_MAX_NODES: usize = 500;
+
+pub fn impact(conn: &Connection, target: &str) -> Result<ImpactReport, String> {
+    let start_id = resolve_any_node_id(conn, target)?;
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(start_id.clone());
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+    queue.push_back((start_id, 0));
+    let mut hits = Vec::new();
+    let mut partial = false;
+
+    'walk: while let Some((id, depth)) = queue.pop_front() {
+        if depth >= DEFAULT_MAX_DEPTH {
+            continue;
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT dst, kind, flag, flag_reason FROM edges WHERE src = ?1
+                 UNION ALL
+                 SELECT src, kind, flag, flag_reason FROM edges WHERE dst = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = stmt
+            .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+
+        for (neighbor_id, edge_kind, flag, flag_reason) in rows {
+            if !visited.insert(neighbor_id.clone()) {
+                continue;
+            }
+            if hits.len() >= DEFAULT_MAX_NODES {
+                partial = true;
+                break 'walk;
+            }
+            let (kind, title, source_ref, line, col): (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+            ) = conn
+                .query_row(
+                    "SELECT kind, title, source_ref, line, col FROM nodes WHERE id = ?1",
+                    [&neighbor_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .map_err(|e| format!("reading node {neighbor_id}: {e}"))?;
+            hits.push(ImpactHit {
+                node_id: neighbor_id.clone(),
+                kind,
+                title,
+                edge_kind,
+                flag,
+                flag_reason,
+                depth: depth + 1,
+                source_ref,
+                line,
+                col,
+            });
+            queue.push_back((neighbor_id, depth + 1));
+        }
+    }
+    // Flagged nodes first -- the RFC's own "possibly_stale nodes called
+    // out first" report ordering.
+    hits.sort_by_key(|h| (h.flag.is_none(), h.depth));
+    Ok(ImpactReport { hits, partial })
+}
+
+/// Content-addresses `path` as a `Document` node, splits it into
+/// blank-line-separated chunks, and FTS5-indexes each chunk not already
+/// seen (by content hash) -- the document-ingestion half of rfcs/0013,
+/// deliberately explicit/opt-in, never run by `hi`'s auto-scaffold: no
+/// heuristic here can reliably tell a requirements doc from a README.
+pub fn ingest_document(conn: &Connection, path: &Path) -> Result<usize, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let doc_id = format!("document:{}", path.display());
+    conn.execute(
+        "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref)
+         VALUES (?1, 'Document', ?2, NULL, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash",
+        params![
+            doc_id,
+            path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            sha256_hex(text.as_bytes()),
+            path.display().to_string()
+        ],
+    )
+    .map_err(|e| format!("upserting document node {doc_id}: {e}"))?;
+
+    let mut new_chunks = 0;
+    for para in text.split("\n\n") {
+        let para = para.trim();
+        if para.is_empty() {
+            continue;
+        }
+        let chunk_id = sha256_hex(para.as_bytes());
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO chunks (id, doc_id, content) VALUES (?1, ?2, ?3)",
+                params![chunk_id, doc_id, para],
+            )
+            .map_err(|e| format!("inserting chunk {chunk_id}: {e}"))?;
+        if inserted > 0 {
+            conn.execute(
+                "INSERT INTO chunks_fts (chunk_id, doc_id, content) VALUES (?1, ?2, ?3)",
+                params![chunk_id, doc_id, para],
+            )
+            .map_err(|e| format!("indexing chunk {chunk_id}: {e}"))?;
+            new_chunks += 1;
+        }
+    }
+    Ok(new_chunks)
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct AskHit {
+    pub doc_id: String,
+    pub content: String,
+}
+
+const DEFAULT_ASK_LIMIT: u32 = 10;
+
+/// FTS5-only retrieval -- rfcs/0013's "v1 floor": no vector search, no
+/// embeddings, no LLM call, must still answer "what does R17 say."
+/// FTS5 over ingested documents, plus (rfcs/0014) a plain per-term
+/// substring search over every `CodeUnit`'s own name and driving text
+/// -- "what does tick do" finds a `fn tick` that FTS5's strict,
+/// implicit-AND-of-every-term matching against short driving text
+/// almost never would, and finds it whether or not that unit's own
+/// prose ever literally says "tick": the qualified name is searched
+/// too, not just `driving_text`.
+///
+/// Deliberately *not* folded into `chunks_fts` alongside ingested
+/// documents: that table is content-addressed (`chunks.id` = a hash of
+/// the text), a fit for near-immutable document chunks, not a
+/// candidate's `driving_text`, which `hi_graph::edit_driving_text`
+/// expects to change often -- indexing it there would leave a stale
+/// chunk behind on every edit, with nothing to ever clean it up. A
+/// live query against the current column has no such staleness
+/// problem, at the cost of FTS5's own ranking/tokenization.
+pub fn ask(conn: &Connection, query: &str) -> Result<Vec<AskHit>, String> {
+    let mut hits: Vec<AskHit> = Vec::new();
+
+    let mut doc_stmt = conn.prepare("SELECT doc_id, content FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2").map_err(|e| format!("preparing FTS query: {e}"))?;
+    let doc_hits = doc_stmt
+        .query_map(params![query, DEFAULT_ASK_LIMIT], |r| {
+            Ok(AskHit {
+                doc_id: r.get(0)?,
+                content: r.get(1)?,
+            })
+        })
+        .map_err(|e| format!("running FTS query `{query}`: {e}"))?
+        .filter_map(Result::ok);
+    hits.extend(doc_hits);
+
+    // Words under 3 characters ("do", "a", "of", ...) are almost always
+    // noise for a substring match this loose -- dropped rather than
+    // matched against everything.
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| w.len() >= 3)
+        .collect();
+    if !terms.is_empty() && hits.len() < DEFAULT_ASK_LIMIT as usize {
+        let mut code_stmt = conn.prepare("SELECT id, title, driving_text, source_ref, line FROM nodes WHERE kind = 'CodeUnit'").map_err(|e| format!("preparing CodeUnit search: {e}"))?;
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        )> = code_stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(|e| format!("listing CodeUnit content: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
+        for (id, title, driving_text, source_ref, line) in rows {
+            let name = title.unwrap_or_default();
+            let haystack =
+                format!("{name} {}", driving_text.as_deref().unwrap_or("")).to_lowercase();
+            if !terms.iter().any(|t| haystack.contains(t.as_str())) {
+                continue;
+            }
+            let content = match driving_text.filter(|dt| !dt.is_empty()) {
+                Some(dt) => dt,
+                None => match (source_ref, line) {
+                    (Some(sref), Some(l)) => format!("(no driving text yet -- see {sref}:{l})"),
+                    (Some(sref), None) => format!("(no driving text yet -- see {sref})"),
+                    _ => "(no description available yet)".to_string(),
+                },
+            };
+            hits.push(AskHit {
+                doc_id: id,
+                content,
+            });
+            if hits.len() >= DEFAULT_ASK_LIMIT as usize {
+                break;
+            }
+        }
+    }
+
+    Ok(hits)
+}
+
+/// The tool surface `hi_llm::answer_question` hands the model via its
+/// own tool-calling loop (`LlmClient::complete_with_ask_tools`) --
+/// deliberately separate from `mcp_tools.rs`'s public Nirdosha-
+/// *language* MCP server (`get_grammar`/`verify_code`/`describe`/...,
+/// also advertised externally over `nirdosha mcp` stdio). That server
+/// answers "how do I write Nirdosha"; this one answers "what does
+/// *this project's own graph* actually say" -- private project data
+/// that has no business being handed to an arbitrary externally-
+/// connected MCP client, so it stays local to this one call instead of
+/// joining the public tool list.
+///
+/// One tool, `search_project`, wrapping this exact module's own `ask`
+/// -- the same local, free, network-free keyword search the `/api/ask`
+/// fast path already runs, just callable by the model itself, as many
+/// times and with as many rephrasings as it needs, instead of trusting
+/// a single search picked from the raw user question text plus one
+/// static context dump (the previous design, and the reason "Ask"
+/// answers could come back irrelevant -- a weak fast-path hit was
+/// treated as good enough and the model never got a turn to look
+/// further).
+pub fn ask_tools_list() -> serde_json::Value {
+    serde_json::json!({
+        "tools": [
+            {
+                "name": "search_project",
+                "title": "Search this project's graph",
+                "description": "Keyword-searches this project's ingested docs and code units (by title/driving text), same search the Ask rail's own fast path runs. Call this as many times as you need, rephrasing the query, before answering -- ground your answer only in what it actually returns.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "query": { "type": "string", "description": "search terms" } },
+                    "required": ["query"],
+                },
+            },
+        ],
+    })
+}
+
+/// Dispatches one `ask_tools_list` tool call by name -- the local
+/// analog of `mcp_tools::tools_call`, kept in this module (rather than
+/// `hi_llm.rs`) so the actual query stays next to `ask` itself and
+/// this whole surface stays offline-testable without a real
+/// `LlmClient`.
+pub fn ask_tools_call(
+    conn: &Connection,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match name {
+        "search_project" => {
+            let query = arguments
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing required argument `query`".to_string())?;
+            let hits = ask(conn, query)?;
+            Ok(serde_json::json!({ "hits": hits }))
+        }
+        other => Err(format!(
+            "unknown tool `{other}` -- expected `search_project`"
+        )),
+    }
+}
+
+/// A bounded plain-text summary of the whole graph's `CodeUnit`
+/// content (name: driving text, or source location when there's no
+/// driving text) -- context for a project-level question `ask`'s own
+/// local keyword search can't answer at all ("what is this project
+/// about" matches no single node's name or text, because it isn't
+/// really about any one node). See `hi_llm::answer_question`, the only
+/// caller: this function itself stays network-free, same as everything
+/// else in this module. Capped at `PROJECT_CONTEXT_MAX_UNITS`, not the
+/// entire graph verbatim -- this module's own "every expensive
+/// operation is bounded" principle, applied here so a very large
+/// project can't blow an LLM prompt past a reasonable size.
+const PROJECT_CONTEXT_MAX_UNITS: u32 = 200;
+
+/// A richer per-node summary than `project_context`'s bare "name:
+/// description" -- github #49's proactive-suggestion LLM call needs
+/// enough to actually spot a gap ("no role check on this exposed fn",
+/// "no create_ counterpart for this screen"), which needs each unit's
+/// sub-kind (parsed from its id, same `code:<kind>:<name>` convention
+/// `hi_graph.html`'s own `subKind` reads client-side), exposure status,
+/// and already-attached attributes -- none of which `project_context`
+/// carries. Still name/description-shaped, still capped at
+/// `PROJECT_CONTEXT_MAX_UNITS`, still network-free (the LLM call itself
+/// lives in `hi_llm::suggest_gaps`, not here).
+pub fn suggestion_context(conn: &Connection) -> Result<String, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, title, status, attributes FROM nodes WHERE kind = 'CodeUnit' ORDER BY id LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map([PROJECT_CONTEXT_MAX_UNITS], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let mut out = String::new();
+    for (id, title, status, attributes) in rows {
+        let sub_kind = id.splitn(3, ':').nth(1).unwrap_or("fn");
+        let name = title.unwrap_or_else(|| id.clone());
+        let exposed = if status.as_deref() == Some("exposed") {
+            " [API-exposed]"
+        } else {
+            ""
+        };
+        let attrs = attributes
+            .filter(|a| !a.trim().is_empty())
+            .map(|a| a.replace('\n', "; "))
+            .unwrap_or_else(|| "(none)".to_string());
+        out.push_str(&format!(
+            "- {sub_kind} {name}{exposed} -- attributes: {attrs}\n"
+        ));
+    }
+    Ok(out)
+}
+
+pub fn project_context(conn: &Connection) -> Result<String, String> {
+    let mut stmt = conn.prepare("SELECT id, title, driving_text, source_ref FROM nodes WHERE kind = 'CodeUnit' ORDER BY id LIMIT ?1").map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map([PROJECT_CONTEXT_MAX_UNITS], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let mut out = String::new();
+    for (id, title, driving_text, source_ref) in rows {
+        let name = title.unwrap_or(id);
+        let desc = driving_text
+            .filter(|d| !d.is_empty())
+            .or(source_ref)
+            .unwrap_or_else(|| "(no description)".to_string());
+        out.push_str(&format!("- {name}: {desc}\n"));
+    }
+    Ok(out)
+}
+
+// ---- Build/Generate mode (rfcs/0014) -- the write surface over the
+// same `CodeUnit` nodes `sync` populates from real code. Deliberately
+// kept network/LLM-free, same as everything else in this module: the
+// LLM calls that produce candidates/generated source live in
+// `hi_llm.rs`, which calls back into these functions with plain data,
+// so this module stays a pure, offline-testable graph store.
+
+const CODE_UNIT_KINDS: &[&str] = &["fn", "struct", "enum", "screen"];
+
+fn require_node_exists(conn: &Connection, id: &str) -> Result<(), String> {
+    let exists: bool = conn
+        .prepare("SELECT 1 FROM nodes WHERE id = ?1")
+        .and_then(|mut s| s.exists([id]))
+        .map_err(|e| e.to_string())?;
+    if exists {
+        Ok(())
+    } else {
+        Err(format!("no node `{id}` in the hi graph"))
+    }
+}
+
+/// Resolves either a real node `id` (`code:{kind}:{name}`) or a bare
+/// CodeUnit `title` to its real id -- github #49's suggestion rail is
+/// the reason this exists: `suggestion_context` only ever shows the
+/// LLM a unit's bare title (never its `code:`-prefixed id, see that
+/// function's own doc comment), so an accepted `attribute` suggestion's
+/// `target` arrives here as a title, not an id. A literal id match
+/// wins first (every other `/api/attach` caller -- `+Role`/`+NFR`/
+/// `+Screen` -- already passes a real id from a clicked graph node, so
+/// this stays a no-op detour for them); only on a miss does this fall
+/// back to a title lookup, erroring instead of guessing if the title
+/// is ambiguous across more than one unit.
+///
+/// Deliberately distinct from `resolve_code_unit_id` above (the CLI's
+/// `hi link`/`hi impact` resolver, for user-typed `kind:name`
+/// shorthand): that one never tries a literal id match first, so
+/// feeding it an already-real id like `code:fn:x` sends it down the
+/// bare-title branch, where it won't match anything and errors. This
+/// version's id-first check is what keeps `/api/attach`'s existing
+/// real-id callers working unchanged.
+fn resolve_attach_target_id(conn: &Connection, id_or_title: &str) -> Result<String, String> {
+    let exists: bool = conn
+        .prepare("SELECT 1 FROM nodes WHERE id = ?1")
+        .and_then(|mut s| s.exists([id_or_title]))
+        .map_err(|e| e.to_string())?;
+    if exists {
+        return Ok(id_or_title.to_string());
+    }
+    let mut stmt = conn
+        .prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND title = ?1")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt
+        .query_map([id_or_title], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    match ids.as_slice() {
+        [single] => Ok(single.clone()),
+        [] => Err(format!("no node `{id_or_title}` in the hi graph")),
+        _ => Err(format!(
+            "`{id_or_title}` matches more than one unit -- use its full id"
+        )),
+    }
+}
+
+/// Prompt mode's own write path (rfcs/0014's "Build mode — the
+/// interactive Hi graph"): inserts (or, on a name collision with a node
+/// that already exists, refines the driving text of) one `CodeUnit`
+/// candidate. No `.nir` exists yet, so only `driving_text`/`created_by`
+/// are set here; `content_hash`/`source_ref` stay whatever they already
+/// were (`NULL` for a genuinely new candidate) until Generate mode
+/// writes real code and an ordinary `sync` picks it up under the exact
+/// same id -- the same upsert `sync_file` already does, composing for
+/// free because both write paths key off `code_unit_node_id`.
+pub fn add_candidate(
+    conn: &Connection,
+    kind: &str,
+    name: &str,
+    driving_text: &str,
+    created_by: &str,
+) -> Result<String, String> {
+    if !CODE_UNIT_KINDS.contains(&kind) {
+        return Err(format!(
+            "`{kind}` isn't a legal CodeUnit kind -- one of {CODE_UNIT_KINDS:?}"
+        ));
+    }
+    let id = code_unit_node_id(kind, name);
+    conn.execute(
+        "INSERT INTO nodes (id, kind, title, status, content_hash, source_ref, driving_text, created_by)
+         VALUES (?1, 'CodeUnit', ?2, NULL, NULL, NULL, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET driving_text = excluded.driving_text, created_by = excluded.created_by",
+        params![id, name, driving_text, created_by],
+    )
+    .map_err(|e| format!("upserting candidate node {id}: {e}"))?;
+    Ok(id)
+}
+
+/// A structural relationship between two prompt-mode candidates --
+/// deliberately a plain, undirected-in-spirit `RELATES_TO`, not
+/// `IMPLEMENTS`/`IMPLEMENTED_BY` (RFC 0013's requirement<->code link
+/// kind, a different relationship entirely). Silently a no-op on a
+/// duplicate -- population re-running over a refined prompt shouldn't
+/// error on an edge it already recorded.
+pub fn add_relation(conn: &Connection, src: &str, dst: &str) -> Result<(), String> {
+    conn.execute("INSERT INTO edges (src, dst, kind, hash_at_link, flag, flag_reason) VALUES (?1, ?2, 'RELATES_TO', NULL, NULL, NULL) ON CONFLICT(src, dst, kind) DO NOTHING", params![src, dst])
+        .map_err(|e| format!("recording a RELATES_TO edge {src} -> {dst}: {e}"))?;
+    Ok(())
+}
+
+/// Build mode's confirm action (rfcs/0014's "confirmation is an
+/// explicit, dedicated action, never a side effect of anything else in
+/// this list") -- the one-way promotion Generate mode's gate below
+/// requires before a candidate's driving text is trusted enough to
+/// reach the LLM again as something to compile.
+pub fn confirm_node(conn: &Connection, id: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    conn.execute("UPDATE nodes SET confirmed = 1 WHERE id = ?1", [id])
+        .map_err(|e| format!("confirming {id}: {e}"))?;
+    Ok(())
+}
+
+/// The bulk form of `confirm_node`: "everything is to be compiled" --
+/// confirms every still-unconfirmed, non-waived `CodeUnit` in one call,
+/// returning the ids it actually confirmed. An already-confirmed node
+/// isn't touched; neither is a waived one -- waiving stays its own
+/// explicit, separate decision (rfcs/0014's own definition), not
+/// something a blanket confirm silently overrides.
+pub fn confirm_all(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    conn.execute(
+        "UPDATE nodes SET confirmed = 1 WHERE kind = 'CodeUnit' AND confirmed = 0 AND waived = 0",
+        [],
+    )
+    .map_err(|e| format!("confirming all: {e}"))?;
+    Ok(ids)
+}
+
+/// Build mode's delete action -- removes a candidate (and every edge
+/// touching it) outright, for content that's simply wrong, not worth
+/// confirming.
+pub fn delete_node(conn: &Connection, id: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    if let Some(origin) = plugin_origin(conn, id)? {
+        return Err(format!(
+            "cannot delete `{id}`: it is a non-waivable invariant contributed by pack `{origin}` -- revoke the pack with `nirdosha plugin revoke {origin}` if you really want it removed"
+        ));
+    }
+    conn.execute("DELETE FROM edges WHERE src = ?1 OR dst = ?1", [id])
+        .map_err(|e| format!("deleting edges touching {id}: {e}"))?;
+    conn.execute("DELETE FROM nodes WHERE id = ?1", [id])
+        .map_err(|e| format!("deleting node {id}: {e}"))?;
+    Ok(())
+}
+
+fn plugin_origin(conn: &Connection, id: &str) -> Result<Option<String>, String> {
+    conn.query_row("SELECT plugin_origin FROM nodes WHERE id = ?1", [id], |r| {
+        r.get::<_, Option<String>>(0)
+    })
+    .map_err(|e| format!("reading plugin_origin for {id}: {e}"))
+}
+
+/// Edits a candidate's driving text. If the unit had already locked (an
+/// earlier Generate pass materialized real `.nir` from it), this v1
+/// slice unlocks it outright rather than RFC 0014's own finer-grained
+/// `graph-edit-post-lock` edge flag (which would leave the last-known-
+/// good `.nir` runnable while flagging the disagreement) -- a real,
+/// disclosed simplification: the unit just needs regenerating before it
+/// can publish again, same as any other unlocked unit.
+pub fn edit_driving_text(conn: &Connection, id: &str, text: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    conn.execute(
+        "UPDATE nodes SET driving_text = ?2, locked = 0 WHERE id = ?1",
+        params![id, text],
+    )
+    .map_err(|e| format!("editing {id}: {e}"))?;
+    Ok(())
+}
+
+/// Build mode's attribute editor -- appends one free-text attribute
+/// line (e.g. `requires(role: admin)`, `nfr(latency_ms: 200)`) to a
+/// node's running list. Deliberately not parsed/validated against the
+/// language's real annotation grammar here (RFC 0014's own Open
+/// Question 5, "attribute-legality-per-kind," is disclosed as real,
+/// unbuilt work) -- Generate mode's own compile step is what actually
+/// proves an attribute is legal, by rejecting a generated program that
+/// misuses one.
+///
+/// A no-op when `attr` is already present verbatim: callers that
+/// re-attach the same line on every run (`load_domain_pack`'s own doc
+/// comment calls repeat-loading a pack "idempotent") must actually get
+/// idempotence, not an ever-growing list of identical lines -- e.g. a
+/// domain pack re-installed on every `hi serve`/`hi sync` used to pile
+/// up dozens of copies of the same `PROOF DEMAND` line in the Generate
+/// prompt, one per prior run.
+///
+/// A genuine (non-duplicate) attribute write also unlocks the node --
+/// github #57: this used to leave `locked` untouched, so accepting a
+/// Suggest-rail `attribute` suggestion against an already-`locked`
+/// unit silently changed what it requires without ever showing up as
+/// "N changes since last build" (`hi_graph.html`'s `pendingCount`
+/// reads `locked` straight off `/api/nodes`) -- the Rebuild button
+/// stayed disabled over a unit that had, in fact, drifted from what
+/// was last actually built. Mirrors `edit_driving_text`, which already
+/// unlocks on a real change for the exact same reason. Skipped on the
+/// dedupe no-op path above on purpose: a pack reinstalled on every `hi
+/// serve` re-attaching lines it already attached must stay side-effect
+/// free, not spuriously unlock every unit it touches on every restart.
+pub fn attach_attribute(conn: &Connection, id: &str, attr: &str) -> Result<(), String> {
+    let id = &resolve_attach_target_id(conn, id)?;
+    let existing: Option<String> = conn
+        .query_row("SELECT attributes FROM nodes WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| format!("reading {id}: {e}"))?;
+    if let Some(s) = &existing {
+        if s.lines().any(|line| line == attr) {
+            return Ok(());
+        }
+    }
+    let merged = match existing {
+        Some(s) if !s.is_empty() => format!("{s}\n{attr}"),
+        _ => attr.to_string(),
+    };
+    conn.execute(
+        "UPDATE nodes SET attributes = ?2, locked = 0 WHERE id = ?1",
+        params![id, merged],
+    )
+    .map_err(|e| format!("attaching an attribute to {id}: {e}"))?;
+    Ok(())
+}
+
+/// Generate mode's escape hatch for a unit that genuinely cannot lock
+/// (rfcs/0014's "Generate mode"): marks it out-of-scope for this
+/// publish with a required, audit-visible reason -- distinct from
+/// deleting the requirement or hand-authoring `.nir` around it.
+pub fn waive_node(conn: &Connection, id: &str, reason: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    if non_waivable(conn, id)? {
+        return Err(format!(
+            "cannot waive `{id}`: it is a non-waivable invariant contributed by pack `{}`",
+            plugin_origin(conn, id)?.unwrap_or_default()
+        ));
+    }
+    if reason.trim().is_empty() {
+        return Err("a waive reason is required".to_string());
+    }
+    conn.execute(
+        "UPDATE nodes SET waived = 1, waive_reason = ?2 WHERE id = ?1",
+        params![id, reason],
+    )
+    .map_err(|e| format!("waiving {id}: {e}"))?;
+    Ok(())
+}
+
+fn non_waivable(conn: &Connection, id: &str) -> Result<bool, String> {
+    let flag: i64 = conn
+        .query_row("SELECT non_waivable FROM nodes WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| format!("reading non_waivable for {id}: {e}"))?;
+    Ok(flag != 0)
+}
+
+pub fn unwaive_node(conn: &Connection, id: &str) -> Result<(), String> {
+    require_node_exists(conn, id)?;
+    conn.execute(
+        "UPDATE nodes SET waived = 0, waive_reason = NULL WHERE id = ?1",
+        [id],
+    )
+    .map_err(|e| format!("unwaiving {id}: {e}"))?;
+    Ok(())
+}
+
+/// One `CodeUnit` candidate, as Generate mode needs it: enough to build
+/// a prompt from (`driving_text`/`attributes`) and enough to know which
+/// real `fn`/`struct`/`enum`/`screen` declaration it should end up
+/// matching (`kind`/`name`, parsed back out of the node id).
+#[derive(Debug, Clone)]
+pub struct CandidateUnit {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub driving_text: String,
+    pub attributes: Vec<String>,
+}
+
+pub fn parse_code_unit_id(id: &str) -> Option<(String, String)> {
+    let rest = id.strip_prefix("code:")?;
+    let (kind, name) = rest.split_once(':')?;
+    Some((kind.to_string(), name.to_string()))
+}
+
+/// Generate mode's own input set: every `CodeUnit` that's passed Build
+/// mode's review gate (`confirmed = 1` -- rfcs/0014's own "a provisional
+/// unit requires explicit human confirmation before it's eligible to
+/// generate at all") and hasn't already locked or been waived out of
+/// scope. `target` narrows to one specific node id; `None` means every
+/// eligible node. A node `hi sync` found in real code (no
+/// `driving_text` of its own) is never generatable, confirmed or not --
+/// there's nothing here for the LLM to write from.
+fn query_confirmed_units(
+    conn: &Connection,
+    where_extra: &str,
+    target: Option<&str>,
+) -> Result<Vec<CandidateUnit>, String> {
+    let sql = format!(
+        "SELECT id, title, driving_text, attributes FROM nodes WHERE kind = 'CodeUnit' AND confirmed = 1 AND waived = 0 AND {where_extra} AND (?1 IS NULL OR id = ?1)"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+        .query_map(params![target], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let mut units = Vec::new();
+    for (id, title, driving_text, attributes) in rows {
+        let Some((kind, name_from_id)) = parse_code_unit_id(&id) else {
+            continue;
+        };
+        let driving_text = driving_text.unwrap_or_default();
+        if driving_text.trim().is_empty() {
+            continue;
+        }
+        let name = title.unwrap_or(name_from_id);
+        let attrs = attributes
+            .map(|a| a.lines().map(str::to_string).collect())
+            .unwrap_or_default();
+        units.push(CandidateUnit {
+            id,
+            kind,
+            name,
+            driving_text,
+            attributes: attrs,
+        });
+    }
+    Ok(units)
+}
+
+pub fn generatable_units(
+    conn: &Connection,
+    target: Option<&str>,
+) -> Result<Vec<CandidateUnit>, String> {
+    query_confirmed_units(conn, "locked = 0", target)
+}
+
+/// Every confirmed, in-scope `CodeUnit` regardless of lock state --
+/// what a regenerate pass needs to send the LLM so an already-locked
+/// unit's code stays represented in the one combined file this v1
+/// slice regenerates each time (see `hi_llm::generate_program`'s own
+/// "v1 scope cut" doc comment: one file for the whole confirmed set,
+/// not incremental per-unit files), not just the newly-eligible subset
+/// `generatable_units` reports.
+pub fn confirmed_units(
+    conn: &Connection,
+    target: Option<&str>,
+) -> Result<Vec<CandidateUnit>, String> {
+    query_confirmed_units(conn, "1=1", target)
+}
+
+/// One dependency edge between two confirmed code units, in the
+/// prompt-facing name form Generate mode needs -- not raw node ids.
+/// The decompose step (`hi_api::handle_prompt`'s `depends_on`
+/// handling, `add_relation`) stores these as `RELATES_TO` rows at
+/// prompt time, but until 2026-09-11 `generate_program` never read
+/// them back out: the code-writing model got a flat component list
+/// and free-ranged the wiring. That was the root cause of the
+/// "decorative enum" class of failure -- a component designed with
+/// relationships but never wired, because nothing told the generating
+/// model the relationships existed.
+#[derive(Debug)]
+pub struct ConfirmedEdge {
+    pub src: String,
+    pub dst: String,
+    pub kind: String,
+}
+
+/// Every edge whose BOTH endpoints are confirmed, non-waived code
+/// units -- the relational half of the graph that `confirmed_units`
+/// deliberately leaves out (it returns nodes only). Edges touching
+/// unconfirmed/waived nodes are skipped: Generate mode composes only
+/// the confirmed set, so an edge naming a component that will not be
+/// in the program would be noise the model can't act on.
+pub fn confirmed_edges(conn: &Connection) -> Result<Vec<ConfirmedEdge>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.src, e.dst, e.kind FROM edges e \
+             JOIN nodes s ON s.id = e.src \
+             JOIN nodes d ON d.id = e.dst \
+             WHERE s.kind = 'CodeUnit' AND d.kind = 'CodeUnit' \
+               AND s.confirmed = 1 AND d.confirmed = 1 \
+               AND s.waived = 0 AND d.waived = 0",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let mut out = Vec::new();
+    for (src_id, dst_id, kind) in rows {
+        // Both endpoints must be code units with parsable ids -- an
+        // edge into any other node kind has no declaration-side name
+        // to print in a wiring list.
+        let Some((_, src)) = parse_code_unit_id(&src_id) else {
+            continue;
+        };
+        let Some((_, dst)) = parse_code_unit_id(&dst_id) else {
+            continue;
+        };
+        out.push(ConfirmedEdge { src, dst, kind });
+    }
+    Ok(out)
+}
+
+/// Marks a unit locked after Generate mode's whole-composed-program
+/// build actually succeeds, recording the exact per-unit hash `sync`
+/// just computed for it (called right after `sync`, so `content_hash`
+/// already reflects the fresh AST) as `last_materialized_hash`. A
+/// target the generated program didn't actually declare (the LLM
+/// omitted it) has no post-sync `content_hash` to copy and is skipped,
+/// not locked -- left for the caller to report.
+pub fn lock_units_after_sync(conn: &Connection, ids: &[String]) -> Result<Vec<String>, String> {
+    let mut locked = Vec::new();
+    for id in ids {
+        let hash: Option<String> = conn
+            .query_row("SELECT content_hash FROM nodes WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .map_err(|e| format!("reading {id}: {e}"))?;
+        if let Some(h) = hash {
+            conn.execute(
+                "UPDATE nodes SET locked = 1, last_materialized_hash = ?2 WHERE id = ?1",
+                params![id, h],
+            )
+            .map_err(|e| format!("locking {id}: {e}"))?;
+            locked.push(id.clone());
+        }
+    }
+    Ok(locked)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "nirdosha_hi_graph_test_{name}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_nir(dir: &Path, name: &str, src: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, src).unwrap();
+        path
+    }
+
+    #[test]
+    fn scaffolding_is_idempotent_and_creates_expected_layout() {
+        let dir = scratch_dir("scaffold");
+        let conn1 = open(&dir).expect("first open");
+        drop(conn1);
+        let conn2 = open(&dir).expect("second open, same dir");
+        drop(conn2);
+        assert!(hi_dir(&dir).join("hi.db").is_file());
+        assert!(hi_dir(&dir).join("content").is_dir());
+    }
+
+    #[test]
+    fn sync_adds_then_leaves_unchanged_units_alone_on_repeat_sync() {
+        let dir = scratch_dir("sync_repeat");
+        let file = write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
+        let conn = open(&dir).expect("open");
+
+        let first = sync(&conn, &dir, &[]).expect("first sync");
+        assert_eq!(first.units_added, 1);
+        assert_eq!(first.units_changed, 0);
+
+        let second = sync(&conn, &dir, &[]).expect("second sync, no changes");
+        assert_eq!(second.units_added, 0);
+        assert_eq!(second.units_changed, 0);
+        let _ = file;
+    }
+
+    #[test]
+    fn changed_code_flags_its_linked_requirement_as_possibly_stale() {
+        let dir = scratch_dir("flag_stale");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn transfer_funds(amount: i64) -> i64 { return amount }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("initial sync");
+
+        link(&conn, "R17", "fn:transfer_funds").expect("link");
+        let report = impact(&conn, "R17").expect("impact before change");
+        assert!(report.hits.iter().all(|h| h.flag.is_none()));
+
+        // Edit the function body -- same qualified name, different AST.
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn transfer_funds(amount: i64) -> i64 { return amount + 1 }\n",
+        );
+        let resync = sync(&conn, &dir, &[]).expect("resync after edit");
+        assert_eq!(resync.units_changed, 1);
+        // Both directions of the IMPLEMENTS/IMPLEMENTED_BY pair get
+        // flagged -- see sync_file's own comment for why.
+        assert_eq!(resync.edges_flagged, 2);
+
+        let report = impact(&conn, "R17").expect("impact after change");
+        assert!(
+            report
+                .hits
+                .iter()
+                .any(|h| h.flag.as_deref() == Some("possibly_stale")),
+            "expected a possibly_stale hit, got: {:?}",
+            report.hits.iter().map(|h| &h.node_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn impact_reaches_a_requirement_from_its_code_unit_and_back() {
+        let dir = scratch_dir("bidirectional");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn correct_entry(id: i64) -> i64 { return id }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+        link(&conn, "R55", "fn:correct_entry").expect("link");
+
+        let from_code = impact(&conn, "fn:correct_entry").expect("impact from code");
+        assert!(
+            from_code
+                .hits
+                .iter()
+                .any(|h| h.node_id == "requirement:R55")
+        );
+
+        let from_req = impact(&conn, "R55").expect("impact from requirement");
+        assert!(
+            from_req
+                .hits
+                .iter()
+                .any(|h| h.node_id == "code:fn:correct_entry")
+        );
+    }
+
+    #[test]
+    fn link_without_a_prior_sync_reports_the_fix_precisely() {
+        let dir = scratch_dir("link_missing");
+        let conn = open(&dir).expect("open");
+        let err = link(&conn, "R1", "fn:nope").unwrap_err();
+        assert!(
+            err.contains("hi sync"),
+            "error should point at the fix, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ingest_then_ask_finds_a_matching_chunk() {
+        let dir = scratch_dir("ingest_ask");
+        let doc = dir.join("prd.md");
+        std::fs::write(&doc, "The ledger must never be altered once written.\n\nAdministrators may not modify past entries.").unwrap();
+        let conn = open(&dir).expect("open");
+
+        let n = ingest_document(&conn, &doc).expect("ingest");
+        assert_eq!(n, 2);
+
+        let hits = ask(&conn, "ledger").expect("ask");
+        assert!(hits.iter().any(|h| h.content.contains("ledger")));
+    }
+
+    #[test]
+    fn ask_finds_a_code_unit_by_name_even_when_the_question_is_natural_language() {
+        let dir = scratch_dir("ask_code_unit");
+        let conn = open(&dir).expect("open");
+        add_candidate(
+            &conn,
+            "fn",
+            "tick",
+            "advances the game clock by one frame",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+
+        let hits = ask(&conn, "what does tick do ?").expect("ask");
+        assert!(
+            hits.iter().any(|h| h.doc_id == "code:fn:tick"),
+            "expected code:fn:tick among hits, got: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn ask_finds_a_synced_code_unit_with_no_driving_text_at_all() {
+        let dir = scratch_dir("ask_synced_no_text");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn transfer_funds(amount: i64) -> i64 { return amount }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+
+        let hits = ask(&conn, "what does transfer_funds do").expect("ask");
+        let hit = hits
+            .iter()
+            .find(|h| h.doc_id == "code:fn:transfer_funds")
+            .expect("expected a hit for transfer_funds");
+        assert!(
+            hit.content.contains("a.nir"),
+            "should point at the source file when there's no driving text, got: {}",
+            hit.content
+        );
+    }
+
+    #[test]
+    fn ask_ignores_short_common_words() {
+        let dir = scratch_dir("ask_short_words");
+        let conn = open(&dir).expect("open");
+        add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+
+        // "do" is 2 characters and should be dropped rather than
+        // matching every CodeUnit's driving text indiscriminately.
+        let hits = ask(&conn, "do").expect("ask");
+        assert!(
+            hits.is_empty(),
+            "a bare short word should match nothing, got: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn re_ingesting_the_same_document_does_not_duplicate_chunks() {
+        let dir = scratch_dir("ingest_repeat");
+        let doc = dir.join("prd.md");
+        std::fs::write(&doc, "One paragraph only.").unwrap();
+        let conn = open(&dir).expect("open");
+        assert_eq!(ingest_document(&conn, &doc).expect("first ingest"), 1);
+        assert_eq!(ingest_document(&conn, &doc).expect("second ingest"), 0);
+    }
+
+    #[test]
+    fn is_disabled_only_true_for_exactly_one() {
+        let on = |_: &str| Some("1".to_string());
+        let off = |_: &str| Some("0".to_string());
+        let unset = |_: &str| None;
+        assert!(is_disabled(&on));
+        assert!(!is_disabled(&off));
+        assert!(!is_disabled(&unset));
+    }
+
+    #[test]
+    fn code_units_in_file_extracts_fn_struct_and_enum_by_name() {
+        let dir = scratch_dir("code_units_v2");
+        let path = write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\nstruct Point { x: i64, y: i64 }\nenum Color { Red, Green, Blue }\n",
+        );
+        let (units, _file, _facts) = code_units_in_file(&path).expect("code_units_in_file parse");
+        let actual: Vec<(&str, String)> = units
+            .iter()
+            .map(|u| (u.kind, u.qualified_name.clone()))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("fn", "add".to_string()),
+                ("struct", "Point".to_string()),
+                ("enum", "Color".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_macro_syncs_under_its_confirmed_identity() {
+        let dir = scratch_dir("screen_macro_sync");
+        let path = write_nir(
+            &dir,
+            "a.nir",
+            "nirdosha_rt::dashboard! { mount: mount_TaskListScreen, path: \"/tasks\", title: \"Tasks\", widgets {} }\n",
+        );
+        let (units, _, _) = code_units_in_file(&path).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].kind, "screen");
+        assert_eq!(units[0].qualified_name, "TaskListScreen");
+        let conn = open(&dir).unwrap();
+        let id = add_candidate(&conn, "screen", "TaskListScreen", "list tasks", "test").unwrap();
+        confirm_node(&conn, &id).unwrap();
+        sync(&conn, &dir, &[path.display().to_string()]).unwrap();
+        assert_eq!(
+            lock_units_after_sync(&conn, &[id.clone()]).unwrap(),
+            vec![id]
+        );
+    }
+
+    #[test]
+    fn code_unit_span_is_captured_and_surfaced_through_impact() {
+        let dir = scratch_dir("span_capture");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn first() -> i64 { return 1 }\nfn second() -> i64 { return 2 }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+        link(&conn, "R1", "fn:second").expect("link");
+
+        let report = impact(&conn, "R1").expect("impact");
+        let hit = report
+            .hits
+            .iter()
+            .find(|h| h.node_id == "code:fn:second")
+            .expect("second should be reachable");
+        assert_eq!(hit.line, Some(2), "fn second is declared on line 2");
+        assert!(hit.source_ref.as_deref().unwrap_or("").ends_with("a.nir"));
+    }
+
+    /// rfcs/0014's 2026-09-14 amendment: field failure `main` reporting
+    /// zero impact despite calling every other unit in the program --
+    /// `hi sync` used to record no call-graph edges at all for real
+    /// code, only `add_relation`'s LLM-decompose `depends_on` edges and
+    /// `:link`'s manual requirement pairs. `sync_file`'s new pass walks
+    /// each fn body (reusing `contract_check::collect_call_names_stmts`)
+    /// and records a real edge to any call target that's already a
+    /// known `CodeUnit` -- covering both an ordinary fn call and a
+    /// struct construction call (`Expr::Call` covers both, `ast.rs`'s
+    /// own convention).
+    #[test]
+    fn sync_records_real_call_edges_so_main_is_no_longer_falsely_unlinked() {
+        // v2 fixtures are real Rust (syn-parsed -- `requires(...)`
+        // suffixes and statement-less bodies are native-v1 syntax that
+        // no longer parses here).
+        let dir = scratch_dir("call_edges");
+        write_nir(
+            &dir,
+            "a.nir",
+            "struct Account { id: i64 }\n\
+             fn helper(a: Account) -> i64 { return a.id }\n\
+             fn main() {\n\
+                 let acc = Account(1);\n\
+                 let _v: i64 = helper(acc);\n\
+             }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+
+        let report = impact(&conn, "fn:main").expect("impact");
+        let hit_ids: Vec<&str> = report.hits.iter().map(|h| h.node_id.as_str()).collect();
+        assert!(
+            hit_ids.contains(&"code:fn:helper"),
+            "main calls helper -- expected it in impact, got {hit_ids:?}"
+        );
+        assert!(
+            hit_ids.contains(&"code:struct:Account"),
+            "main constructs Account -- expected it in impact, got {hit_ids:?}"
+        );
+    }
+
+    /// rfcs/0014's 2026-09-14 amendment, step 5 -- and its v2 reality
+    /// since the 2026-09-16 extraction: the native `serve { expose ... }`
+    /// list that once drove `nodes.status = 'exposed'` no longer exists,
+    /// and file-at-a-time syn parsing cannot see v2's exposure shape (a
+    /// `#[nirdosha_rt::contract(...)]`-gated fn reached through an
+    /// archetype macro -- see the disclosed-gap comment in `sync_file`).
+    /// The marker is a claim about a real access-control boundary, so it
+    /// must never be stamped speculatively: nothing synced is marked,
+    /// and this test locks that in until v2 exposure is actually
+    /// recognized, at which point this assertion is DELIBERATELY allowed
+    /// to fail and be rewritten.
+    #[test]
+    fn sync_stamps_no_exposed_status_until_v2_exposure_is_recognized() {
+        let dir = scratch_dir("serve_exposed");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn internal_helper() -> i64 { return 1 }\n\
+             fn public_action() -> i64 { return internal_helper() }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+
+        let exposed_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM nodes WHERE id = 'code:fn:public_action'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read status");
+        assert_eq!(
+            exposed_status, None,
+            "v2 sync cannot see exposure -- nothing may be stamped 'exposed' speculatively"
+        );
+        let internal_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM nodes WHERE id = 'code:fn:internal_helper'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read status");
+        assert_eq!(
+            internal_status, None,
+            "an internal helper must NOT be marked exposed itself"
+        );
+    }
+
+    #[test]
+    fn a_candidate_is_unconfirmed_and_ungeneratable_until_confirmed() {
+        let dir = scratch_dir("candidate_confirm");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "transfer_funds",
+            "moves money between two accounts",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        assert_eq!(id, "code:fn:transfer_funds");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "an unconfirmed candidate must not be generatable"
+        );
+
+        confirm_node(&conn, &id).expect("confirm_node");
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].kind, "fn");
+        assert_eq!(units[0].name, "transfer_funds");
+    }
+
+    #[test]
+    fn confirm_all_confirms_every_unconfirmed_candidate_but_not_a_waived_one() {
+        let dir = scratch_dir("confirm_all");
+        let conn = open(&dir).expect("open");
+        let a = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add a");
+        let b = add_candidate(
+            &conn,
+            "fn",
+            "subtract",
+            "subtracts two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add b");
+        let c = add_candidate(
+            &conn,
+            "fn",
+            "risky",
+            "does something risky",
+            "llm-prompt-mode",
+        )
+        .expect("add c");
+        confirm_node(&conn, &a).expect("pre-confirm a"); // already confirmed -- confirm_all must not choke on it
+        waive_node(&conn, &c, "not needed").expect("waive c");
+
+        let confirmed = confirm_all(&conn).expect("confirm_all");
+        assert_eq!(
+            confirmed,
+            vec![b.clone()],
+            "only the genuinely unconfirmed, non-waived candidate should be reported"
+        );
+
+        let generatable: Vec<String> = generatable_units(&conn, None)
+            .expect("generatable_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
+        assert!(generatable.contains(&a));
+        assert!(generatable.contains(&b));
+        assert!(
+            !generatable.contains(&c),
+            "a waived node must stay out of scope even after confirm_all"
+        );
+    }
+
+    #[test]
+    fn add_candidate_rejects_an_unknown_kind() {
+        let dir = scratch_dir("candidate_bad_kind");
+        let conn = open(&dir).expect("open");
+        let err = add_candidate(&conn, "trait", "Foo", "text", "llm-prompt-mode").unwrap_err();
+        assert!(
+            err.contains("trait"),
+            "error should name the bad kind, got: {err}"
+        );
+    }
+
+    #[test]
+    fn re_adding_a_candidate_refines_text_without_resetting_review_state() {
+        let dir = scratch_dir("candidate_refine");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+
+        add_candidate(
+            &conn,
+            "fn",
+            "add",
+            "adds two i64 numbers and returns the sum",
+            "llm-prompt-mode",
+        )
+        .expect("re-add");
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(
+            units.len(),
+            1,
+            "confirming must survive a refined re-population of the same candidate"
+        );
+        assert_eq!(
+            units[0].driving_text,
+            "adds two i64 numbers and returns the sum"
+        );
+    }
+
+    #[test]
+    fn waiving_requires_a_reason_and_removes_a_unit_from_the_generatable_set() {
+        let dir = scratch_dir("candidate_waive");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "risky",
+            "does something risky",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+
+        let err = waive_node(&conn, &id, "").unwrap_err();
+        assert!(err.contains("reason"));
+
+        waive_node(&conn, &id, "not needed for this publish").expect("waive");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty()
+        );
+
+        unwaive_node(&conn, &id).expect("unwaive");
+        assert_eq!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn editing_a_locked_unit_unlocks_it() {
+        let dir = scratch_dir("candidate_edit_unlocks");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+        // Simulate a successful Generate pass without a real compiler run.
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
+        sync(&conn, &dir, &[]).expect("sync");
+        lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "a locked unit isn't generatable"
+        );
+
+        edit_driving_text(&conn, &id, "adds two numbers, but faster").expect("edit");
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(
+            units.len(),
+            1,
+            "editing a locked unit's text must unlock it for regeneration"
+        );
+    }
+
+    #[test]
+    fn confirmed_units_includes_locked_ones_but_generatable_units_does_not() {
+        let dir = scratch_dir("candidate_confirmed_vs_generatable");
+        let conn = open(&dir).expect("open");
+        let locked_id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        let fresh_id = add_candidate(
+            &conn,
+            "fn",
+            "subtract",
+            "subtracts two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        confirm_node(&conn, &locked_id).expect("confirm");
+        confirm_node(&conn, &fresh_id).expect("confirm");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
+        sync(&conn, &dir, &[]).expect("sync");
+        lock_units_after_sync(&conn, &[locked_id.clone()]).expect("lock");
+
+        let confirmed: Vec<String> = confirmed_units(&conn, None)
+            .expect("confirmed_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
+        assert_eq!(
+            confirmed.len(),
+            2,
+            "confirmed_units must include the already-locked unit too"
+        );
+        assert!(confirmed.contains(&locked_id));
+        assert!(confirmed.contains(&fresh_id));
+
+        let generatable: Vec<String> = generatable_units(&conn, None)
+            .expect("generatable_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
+        assert_eq!(
+            generatable,
+            vec![fresh_id],
+            "generatable_units must exclude the already-locked unit"
+        );
+    }
+
+    #[test]
+    fn locking_only_covers_units_the_generated_program_actually_declared() {
+        let dir = scratch_dir("candidate_partial_lock");
+        let conn = open(&dir).expect("open");
+        let declared = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        let omitted = add_candidate(
+            &conn,
+            "fn",
+            "subtract",
+            "subtracts two numbers",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        confirm_node(&conn, &declared).expect("confirm");
+        confirm_node(&conn, &omitted).expect("confirm");
+
+        // The LLM's generated program only actually declared `add`.
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn add(a: i64, b: i64) -> i64 { return a + b }\n",
+        );
+        sync(&conn, &dir, &[]).expect("sync");
+        let locked =
+            lock_units_after_sync(&conn, &[declared.clone(), omitted.clone()]).expect("lock");
+
+        assert_eq!(locked, vec![declared]);
+        let still_generatable: Vec<String> = generatable_units(&conn, None)
+            .expect("generatable_units")
+            .into_iter()
+            .map(|u| u.id)
+            .collect();
+        assert_eq!(still_generatable, vec![omitted]);
+    }
+
+    #[test]
+    fn attach_attribute_appends_rather_than_overwrites() {
+        let dir = scratch_dir("candidate_attach");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 1");
+        attach_attribute(&conn, &id, "nfr(latency_ms: 200)").expect("attach 2");
+
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
+        assert_eq!(attrs, "requires(role: admin)\nnfr(latency_ms: 200)");
+    }
+
+    #[test]
+    fn attach_attribute_is_a_no_op_when_the_exact_line_is_already_present() {
+        // Regression: `load_domain_pack` re-attaches every invariant's
+        // attributes on every run and calls that "idempotent" -- it
+        // only actually is if re-attaching the same line twice doesn't
+        // grow the list. Before this fix, a pack reinstalled/reloaded
+        // N times (every `hi serve`/`hi sync`) piled up N identical
+        // copies of its `PROOF DEMAND` line in the Generate prompt.
+        let dir = scratch_dir("candidate_attach_dedupe");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 1");
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach 2, same line again");
+        attach_attribute(&conn, &id, "nfr(latency_ms: 200)")
+            .expect("attach 3, a genuinely new line");
+        attach_attribute(&conn, &id, "requires(role: admin)")
+            .expect("attach 4, same line a third time");
+
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
+        assert_eq!(
+            attrs, "requires(role: admin)\nnfr(latency_ms: 200)",
+            "re-attaching an identical line must not duplicate it, got:\n{attrs}"
+        );
+    }
+
+    #[test]
+    fn attach_attribute_resolves_a_bare_title_since_suggestion_context_never_shows_the_llm_a_real_id()
+     {
+        // github #49 regression: `suggestion_context` sends the LLM only
+        // a unit's bare title (e.g. `apply_interest`), never its real
+        // `code:fn:apply_interest` id -- so an accepted suggestion's
+        // `target` arrives at `/api/attach` as that bare title. Before
+        // `resolve_attach_target_id`, this always failed with "no node
+        // `apply_interest` in the hi graph" even though the unit existed.
+        let dir = scratch_dir("attach_by_bare_title");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+
+        attach_attribute(&conn, "apply_interest", "requires(role: FinanceDirector)")
+            .expect("attach by bare title should resolve to the real id");
+
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
+        assert_eq!(attrs, "requires(role: FinanceDirector)");
+    }
+
+    #[test]
+    fn attach_attribute_still_accepts_a_real_id_directly() {
+        // The graph's own `+Role`/`+NFR`/`+Screen` affordances already
+        // pass a real id (from a clicked graph node) -- the bare-title
+        // fallback above must stay a no-op detour for them, not change
+        // their behavior.
+        let dir = scratch_dir("attach_by_real_id");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(&conn, "fn", "add", "adds two numbers", "llm-prompt-mode")
+            .expect("add_candidate");
+
+        attach_attribute(&conn, &id, "requires(role: admin)").expect("attach by real id");
+
+        let attrs: String = conn
+            .query_row("SELECT attributes FROM nodes WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .expect("read attributes");
+        assert_eq!(attrs, "requires(role: admin)");
+    }
+
+    #[test]
+    fn attach_attribute_unlocks_a_locked_unit_on_a_real_change() {
+        // github #57: accepting a Suggest-rail `attribute` suggestion
+        // against an already-built unit must make it "N changes since
+        // last build" again (`hi_graph.html`'s `pendingCount`/Rebuild
+        // reactivation reads `locked` straight off `/api/nodes`), the
+        // same way editing a locked unit's driving text already does.
+        let dir = scratch_dir("attach_unlocks_locked");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+        write_nir(&dir, "a.nir", "fn apply_interest() {}\n");
+        sync(&conn, &dir, &[]).expect("sync");
+        lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "sanity: starts locked"
+        );
+
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)").expect("attach");
+
+        let units = generatable_units(&conn, None).expect("generatable_units");
+        assert_eq!(
+            units.len(),
+            1,
+            "a genuine attribute change must unlock the unit for regeneration"
+        );
+    }
+
+    #[test]
+    fn attach_attribute_re_attaching_the_same_line_does_not_unlock_a_locked_unit() {
+        // The dedupe no-op path (`attach_attribute_is_a_no_op_when_the_
+        // exact_line_is_already_present` above) must stay side-effect
+        // free -- a domain pack re-installed on every `hi serve`
+        // re-attaching identical invariant lines must not spuriously
+        // unlock every unit it touches on every restart.
+        let dir = scratch_dir("attach_dedupe_does_not_unlock");
+        let conn = open(&dir).expect("open");
+        let id = add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        confirm_node(&conn, &id).expect("confirm");
+        write_nir(&dir, "a.nir", "fn apply_interest() {}\n");
+        sync(&conn, &dir, &[]).expect("sync");
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)")
+            .expect("attach 1, a real change");
+        lock_units_after_sync(&conn, &[id.clone()]).expect("lock");
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "sanity: starts locked"
+        );
+
+        attach_attribute(&conn, &id, "requires(role: FinanceDirector)")
+            .expect("attach 2, an identical re-attach");
+
+        assert!(
+            generatable_units(&conn, None)
+                .expect("generatable_units")
+                .is_empty(),
+            "re-attaching an identical line must not unlock the unit"
+        );
+    }
+
+    #[test]
+    fn attach_attribute_rejects_a_title_shared_by_more_than_one_unit_rather_than_guessing() {
+        let dir = scratch_dir("attach_ambiguous_title");
+        let conn = open(&dir).expect("open");
+        add_candidate(
+            &conn,
+            "fn",
+            "process",
+            "processes a payment",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate fn");
+        add_candidate(
+            &conn,
+            "struct",
+            "process",
+            "a process record",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate struct");
+
+        let err = attach_attribute(&conn, "process", "requires(role: admin)")
+            .expect_err("an ambiguous bare title must error, not guess");
+        assert!(
+            err.contains("more than one unit"),
+            "expected an ambiguity error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ask_tools_call_search_project_wraps_ask_and_returns_real_hits() {
+        let dir = scratch_dir("ask_tools_search");
+        let conn = open(&dir).expect("open");
+        add_candidate(
+            &conn,
+            "fn",
+            "apply_interest",
+            "applies interest to an account",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+
+        let result = ask_tools_call(
+            &conn,
+            "search_project",
+            &serde_json::json!({ "query": "interest" }),
+        )
+        .expect("search_project");
+        let hits = result["hits"].as_array().expect("hits array");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["doc_id"], "code:fn:apply_interest");
+    }
+
+    #[test]
+    fn ask_tools_call_search_project_requires_a_query_argument() {
+        let dir = scratch_dir("ask_tools_missing_query");
+        let conn = open(&dir).expect("open");
+        let err = ask_tools_call(&conn, "search_project", &serde_json::json!({}))
+            .expect_err("missing `query` must error, not panic");
+        assert!(
+            err.contains("query"),
+            "expected a `query`-shaped error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ask_tools_call_rejects_an_unknown_tool_name() {
+        let dir = scratch_dir("ask_tools_unknown");
+        let conn = open(&dir).expect("open");
+        let err = ask_tools_call(&conn, "delete_everything", &serde_json::json!({}))
+            .expect_err("an unknown tool name must error, not silently no-op");
+        assert!(
+            err.contains("unknown tool"),
+            "expected an unknown-tool error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn suggestion_context_reports_sub_kind_exposure_and_attributes() {
+        // github #49: this is the one input `hi_llm::suggest_gaps` reads
+        // to spot an exposed fn with no role/claim gate -- so the exact
+        // markers it needs (sub-kind, `[API-exposed]`, attribute text)
+        // have to actually survive into the summary line. The `[API-
+        // exposed]` half is exercised directly through `nodes.status`,
+        // the one writer v2 has for it today (v2 sync cannot see the
+        // contract-attr exposure shape itself -- disclosed gap, see the
+        // status test above), so the marker's rendering is still under
+        // test even though nothing stamps it from source right now.
+        let dir = scratch_dir("suggestion_context");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn internal_helper() -> i64 { return 1 }\n\
+             fn public_action() -> i64 { return internal_helper() }\n",
+        );
+        let conn = open(&dir).expect("open");
+        sync(&conn, &dir, &[]).expect("sync");
+        attach_attribute(&conn, "code:fn:internal_helper", "requires(role: admin)")
+            .expect("attach");
+        conn.execute(
+            "UPDATE nodes SET status = 'exposed' WHERE id = 'code:fn:public_action'",
+            [],
+        )
+        .expect("stamp status");
+
+        let context = suggestion_context(&conn).expect("suggestion_context");
+        assert!(
+            context.contains("fn public_action [API-exposed] -- attributes: (none)"),
+            "got: {context}"
+        );
+        assert!(
+            context.contains("fn internal_helper -- attributes: requires(role: admin)"),
+            "got: {context}"
+        );
+    }
+
+    #[test]
+    fn delete_node_removes_it_and_its_edges() {
+        let dir = scratch_dir("candidate_delete");
+        let conn = open(&dir).expect("open");
+        let a = add_candidate(&conn, "fn", "a", "does a", "llm-prompt-mode").expect("add a");
+        let b = add_candidate(&conn, "fn", "b", "does b", "llm-prompt-mode").expect("add b");
+        add_relation(&conn, &a, &b).expect("relate");
+
+        delete_node(&conn, &a).expect("delete");
+        let err = confirm_node(&conn, &a).unwrap_err();
+        assert!(err.contains("no node"));
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE src = ?1 OR dst = ?1",
+                [&a],
+                |r| r.get(0),
+            )
+            .expect("count edges");
+        assert_eq!(
+            edge_count, 0,
+            "deleting a node must also delete edges touching it"
+        );
+    }
+    #[test]
+    fn confirmed_edges_returns_only_both_endpoints_confirmed_pairs_in_name_form() {
+        // 2026-09-11 (a)-RCA regression: the decompose step stores
+        // `depends_on` edges via `add_relation`, and Generate mode
+        // must be able to read exactly those back out -- in prompt
+        // names, not node ids, and never an edge dangling into an
+        // unconfirmed component.
+        let dir = scratch_dir("confirmed_edges");
+        let conn = open(&dir).expect("open");
+        let src_id = add_candidate(
+            &conn,
+            "fn",
+            "authorize_payment_cents",
+            "checks balance and limits",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        let dst_id = add_candidate(
+            &conn,
+            "fn",
+            "channel_daily_limit_cents",
+            "the per-channel cap",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        let unconfirmed_id = add_candidate(
+            &conn,
+            "enum",
+            "PaymentChannel",
+            "the channels",
+            "llm-prompt-mode",
+        )
+        .expect("add_candidate");
+        confirm_node(&conn, &src_id).expect("confirm src");
+        confirm_node(&conn, &dst_id).expect("confirm dst");
+        add_relation(&conn, &src_id, &dst_id).expect("the confirmed edge");
+        add_relation(&conn, &src_id, &unconfirmed_id).expect("the edge into an unconfirmed node");
+
+        let edges = confirmed_edges(&conn).expect("confirmed_edges");
+        assert_eq!(
+            edges.len(),
+            1,
+            "only the both-endpoints-confirmed edge survives, got: {edges:?}"
+        );
+        assert_eq!(edges[0].src, "authorize_payment_cents");
+        assert_eq!(edges[0].dst, "channel_daily_limit_cents");
+        assert_eq!(edges[0].kind, "RELATES_TO");
+    }
+
+    #[test]
+    fn default_banking_pack_installs_on_explicit_ensure_call() {
+        let dir = scratch_dir("plugin_default_banking");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let ids = crate::hi_plugin::installed_pack_ids(&conn).expect("list");
+        assert!(
+            ids.contains(&"banking-v0".to_string()),
+            "banking-v0 must be installed by default, got: {ids:?}"
+        );
+        let units = confirmed_units(&conn, None).expect("confirmed_units");
+        let names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
+        assert!(names.contains(&"charge_cents".to_string()));
+        assert!(names.contains(&"credit_cents".to_string()));
+        assert!(names.contains(&"net_change_cents".to_string()));
+        // Pack nodes are confirmed and locked.
+        let generatable = generatable_units(&conn, None).expect("generatable");
+        assert!(
+            generatable.is_empty(),
+            "pack invariants are locked, never generatable"
+        );
+    }
+
+    #[test]
+    fn non_waivable_pack_nodes_cannot_be_waived_or_deleted() {
+        let dir = scratch_dir("plugin_non_waivable");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let id = code_unit_node_id("fn", "charge_cents");
+
+        let waive_err = waive_node(&conn, &id, "not needed").unwrap_err();
+        assert!(
+            waive_err.contains("non-waivable"),
+            "waive must refuse a pack invariant: {waive_err}"
+        );
+        assert!(waive_err.contains("banking-v0"));
+
+        let delete_err = delete_node(&conn, &id).unwrap_err();
+        assert!(
+            delete_err.contains("non-waivable"),
+            "delete must refuse a pack invariant: {delete_err}"
+        );
+        assert!(delete_err.contains("banking-v0"));
+    }
+
+    #[test]
+    fn plugin_revoke_removes_pack_nodes() {
+        let dir = scratch_dir("plugin_revoke");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let before = confirmed_units(&conn, None).expect("confirmed_units");
+        assert!(before.iter().any(|u| u.name == "charge_cents"));
+
+        crate::hi_plugin::revoke_pack(&conn, &dir, "banking-v0").expect("revoke");
+        let after = confirmed_units(&conn, None).expect("confirmed_units");
+        assert!(
+            !after.iter().any(|u| u.name == "charge_cents"),
+            "revoking the pack must delete its nodes"
+        );
+        let ids = crate::hi_plugin::installed_pack_ids(&conn).expect("list");
+        assert!(
+            !ids.contains(&"banking-v0".to_string()),
+            "revoked pack must not be listed as active"
+        );
+    }
+
+    #[test]
+    fn pack_invariants_render_in_units_prompt() {
+        let dir = scratch_dir("plugin_units_prompt");
+        let conn = open(&dir).expect("open");
+        crate::hi_plugin::ensure_default_packs(&conn, &dir).expect("ensure default packs");
+        let units = confirmed_units(&conn, None).expect("confirmed_units");
+        let prompt = crate::hi_llm::units_prompt(&units, &[]);
+        assert!(
+            prompt.contains("DOMAIN LAW"),
+            "pack units must render in a dedicated section, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("charge_cents_conservation"),
+            "the demand text must appear, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("MUST carry a separate top-level `validate charge_cents`"),
+            "exact validate target must be named, got:\n{prompt}"
+        );
+    }
+
+    // ---- RFC 0022 §2's reverse-engineering pass: hand-registered GET
+    // routes become screen nodes, and the whole screen-navigation edge
+    // set (menus.toml + landing + redirects + inbox detail paths) is
+    // (re)derived per sync.
+
+    #[test]
+    fn hand_registered_get_routes_become_page_screen_nodes() {
+        let dir = scratch_dir("route_screens");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn mount_admin(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/admin/queues\", \"Assignment Rules (18.3)\", |_req, _params, _auth| { nirdosha_rt::Response::html(200, \"q\") })\n\
+             }\n",
+        );
+        let conn = open(&dir).expect("open");
+        let report = sync(&conn, &dir, &[]).expect("sync");
+        assert_eq!(report.nav_edges, 0, "no nav facts in this fixture");
+        let (title, screen_type, path): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT title, screen_type, screen_path FROM nodes WHERE id = 'code:screen:/admin/queues'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("route screen node exists");
+        assert_eq!(title, "Assignment Rules (18.3)");
+        assert_eq!(screen_type, "page");
+        assert_eq!(path.as_deref(), Some("/admin/queues"));
+    }
+
+    #[test]
+    fn nav_edges_derive_from_menus_toml_landing_and_menu_routes() {
+        let dir = scratch_dir("menus_nav");
+        std::fs::write(
+            dir.join("menus.toml"),
+            "[landing]\nAnalyst = \"/my-day\"\n\n[[menu]]\nid = \"nav.day\"\nlabel_key = \"nav.day\"\ngroup = \"work\"\nscreen_id = \"2.2\"\nroute = \"/my-day\"\n\n[[menu]]\nid = \"nav.dynamic\"\nroute = \"@dynamic:scope\"\n",
+        )
+        .expect("write menus.toml");
+        write_nir(
+            &dir,
+            "a.nir",
+            "nirdosha_rt::login! { mount: mount_login, path: \"/login\", mode: demo, demo_users: [{ username: \"a\", password: \"a\", roles: [\"Analyst\"] }], landing: landing_path }\n\
+             nirdosha_rt::dashboard! { mount: mount_my_day, path: \"/my-day\", title: \"My Day\", widgets {} }\n\
+             nirdosha_rt::app_shell_from_toml!(\"menus.toml\", title: \"T\");\n",
+        );
+        let conn = open(&dir).expect("open");
+        let report = sync(&conn, &dir, &[]).expect("sync");
+        // Two real edges (landing + menu); the @dynamic route resolves
+        // to nothing and contributes none.
+        assert_eq!(report.nav_edges, 2, "expected the landing + menu edges");
+        let (src, label): (String, String) = conn
+            .query_row(
+                "SELECT src, label FROM edges WHERE kind = 'NAVIGATES_TO' AND dst = 'code:screen:my_day' AND label LIKE 'landing:%'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("landing edge");
+        assert_eq!(src, "code:screen:login");
+        assert_eq!(label, "landing: Analyst");
+        let (src, _menu_label): (String, String) = conn
+            .query_row(
+                "SELECT src, label FROM edges WHERE kind = 'NAVIGATES_TO' AND dst = 'code:screen:my_day' AND label = 'nav.day'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("menu edge");
+        assert_eq!(src, "code:screen:app_shell");
+        // The shell came from app_shell_from_toml! -- a screen node of
+        // type shell, name app_shell (the generated mount_app_shell).
+        let st: String = conn
+            .query_row(
+                "SELECT screen_type FROM nodes WHERE id = 'code:screen:app_shell'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("shell node");
+        assert_eq!(st, "shell");
+        // Regeneration is wholesale: a second sync with the menu entry
+        // removed must drop the edge, not accumulate a ghost.
+        std::fs::write(dir.join("menus.toml"), "[landing]\nAnalyst = \"/my-day\"\n")
+            .expect("rewrite menus.toml");
+        let again = sync(&conn, &dir, &[]).expect("resync");
+        assert_eq!(again.nav_edges, 1, "only the landing edge remains");
+        let menu_edges: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE kind = 'NAVIGATES_TO' AND label = 'nav.day'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(menu_edges, 0, "the removed menu entry must not linger");
+    }
+
+    #[test]
+    fn redirects_and_inbox_detail_paths_become_nav_edges() {
+        let dir = scratch_dir("redirect_nav");
+        write_nir(
+            &dir,
+            "a.nir",
+            "fn mount_go(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cs/lookup/go\", \"CS redirect\", |_req, params, _auth| {\n\
+             let Some(id) = params.get(\"id\") else { return nirdosha_rt::Response::bad_request(\"id\") };\n\
+             let _ = &id;\n\
+             nirdosha_rt::Response::redirect(format!(\"/cs/payments/{id}\"))\n\
+             })\n\
+             }\n\
+             fn mount_static_redirect(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cs/lookup/go2\", \"CS redirect static\", |_req, _params, _auth| { nirdosha_rt::Response::redirect(\"/cs/payments/x\") })\n\
+             }\n\
+             nirdosha_rt::approval_inbox! { mount: mount_four_eyes, path: \"/four-eyes\", access: requires role \"ComplianceLead\", sources: [{ table: case_table, chain: \"case_review\", resource: \"case\", detail_path: \"/cases/{id}\" }] }\n\
+             fn mount_payments(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cs/payments/{txn}\", \"Payment detail\", |_req, _params, _auth| { nirdosha_rt::Response::html(200, \"p\") })\n\
+             }\n\
+             fn mount_case_detail(router: nirdosha_rt::Router) -> nirdosha_rt::Router {\n\
+             router.get_with_auth(\"/cases/{id}\", \"Case detail\", |_req, _params, _auth| { nirdosha_rt::Response::html(200, \"d\") })\n\
+             }\n",
+        );
+        let conn = open(&dir).expect("open");
+        let report = sync(&conn, &dir, &[]).expect("sync");
+        // redirect: /cs/lookup/go2 -> /cs/payments/x. The STATIC literal
+        // redirect becomes an edge; the format!()-built dynamic one in
+        // the sibling handler is deliberately skipped (its target isn't
+        // a literal, so guessing it would be a lie).
+        let redirect: Option<String> = conn
+            .query_row(
+                "SELECT dst FROM edges WHERE kind = 'NAVIGATES_TO' AND src = 'code:screen:/cs/lookup/go2' AND label = 'redirect'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("redirect edge");
+        assert_eq!(redirect.as_deref(), Some("code:screen:/cs/payments/{txn}"));
+        let dynamic: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE kind = 'NAVIGATES_TO' AND src = 'code:screen:/cs/lookup/go'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            dynamic, 0,
+            "the dynamic format! redirect must be skipped, not guessed"
+        );
+        // detail: /four-eyes -> /cases/{id} via template match.
+        let detail: Option<String> = conn
+            .query_row(
+                "SELECT dst FROM edges WHERE kind = 'NAVIGATES_TO' AND src = 'code:screen:four_eyes' AND label = 'detail'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("detail edge");
+        assert_eq!(detail.as_deref(), Some("code:screen:/cases/{id}"));
+        assert!(report.nav_edges >= 2);
+    }
+}

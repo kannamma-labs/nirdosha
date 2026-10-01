@@ -1,0 +1,1013 @@
+schema: rfc0029-influence-review-symbolic-v1
+compact_grammar:
+  node: "<node_id>:<NodeKind>"
+  edge: "<source_id>-<EdgeKind>-<target_id>"
+  qualified_result: "<result_kind>:<value>"
+  rule: "All tokens are exact case-sensitive identifiers from Revision 1; no omitted token has semantics."
+lossless_expansion:
+  profile: "<name> expands to profile:rfc0029:<name>:candidate-v1"
+  bundle: "bundle:test:v1 expands to {id: bundle:rfc0029-fixtures, version: 1, hash: symbolic:bundle-rfc0029-fixtures-v1}"
+  node_identity: "Each node token <id>:<kind> expands using fixture_id as namespace; stable_id is node:<fixture_id>:<id>."
+  ModelInvocation: "{deployment_id: model:<fixture_id>:v1, receipt_id: receipt:<fixture_id>:<id>:v1}"
+  Fact: "{authority_class: profile_authority, type_id: fact:<fixture_id>:<id>, version: 1} plus fixture.fact_provenance.<id> when present (produced_by_model, produced_by_deployment, valid_until, revoked, authorized_consumers)."
+  fact_requirement: "Decision gains fixture.fact_requirement.<id> attributes verbatim (required_model, required_deployment) when present; checked against a reachable Fact's fact_provenance by a dedicated evaluator, never by compute_influence."
+  Transform: "{transform_id: transform:<fixture_id>:<id>, version: 1}"
+  Rule: "{rule_id: rule:<fixture_id>:<id>, bundle_hash: symbolic:bundle-rfc0029-fixtures-v1}"
+  CandidateSet: "{candidate_type: candidate:<fixture_id>:<id>}"
+  Presentation: "{surface_id: surface:<fixture_id>:<id>, version: 1}"
+  Review: "{review_contract_id: <fixture.review_contract-or-assertion.contract>, mode: mode_from_contract_catalog}"
+  AuthorityAssertion: "Expanded from fixture assertion plus authority/contract catalogs; assertion ID is node stable_id."
+  Decision: "{decision_class: decision:<fixture_id>:<id>}"
+  Obligation: "{obligation_type: obligation:<fixture_id>:<id>}"
+  Capability: "Expanded only from fixture.capabilities.<node_id>; absence is an invalid fixture. Expected output never supplies input."
+  Effect: "Expanded only from fixture.effects.<node_id>; absence is an invalid fixture. Every entry contains effect_id and reversibility_class."
+  Evidence: "{evidence_type: evidence:<fixture_id>:<id>}"
+  edge: "Token expands to {source: node:<fixture_id>:<source>, kind: EdgeKind, target: node:<fixture_id>:<target>}."
+  evaluation: "Boolean shorthand expands to the matching predicate definition and an evaluation with evaluator authority:fixture-review-evaluator:v1, input commitment symbolic:<fixture_id>:<predicate>:inputs, evidence commitment symbolic:<fixture_id>:<predicate>:evidence, evaluated_at 2026-09-27T00:00:00Z, valid_until 2026-09-28T00:00:00Z, revoked false. stale:Deny sets valid_until 2026-09-26T00:00:00Z and failure_behavior Deny."
+  admission_policy: "A fixture declaring fixture.capabilities.<id>.effect_class or fixture.effects.<id>.effect_id gains input.parameters.admission_policy = {effect_class, maximum_model_level: effect_authority_ceilings[effect_class]} — the per-effect-class maximum authority tier RFC 0029.a §13.2 requires every model-influenced path to declare. Until 2026-09-27 this table existed only in the generator, not here; that was a real completeness gap in this file's own lossless_expansion claim, found by an independent second implementation and closed by moving the table below into the normative source."
+
+# Per-effect-class maximum model-authority tier (RFC 0029.a §13.2). Every
+# effect_class referenced by any fixture's capabilities/effects block below
+# MUST have an entry here — this is normative fixture data, not a generator
+# implementation detail, and every entry must be justified by the profile
+# tabletop or canonical-vectors write-up that introduced that effect_class.
+effect_authority_ceilings:
+  application.reject: Recommend
+  clinical.alert: Recommend
+  medication.administer: None
+  order.sign: Draft
+  work_order.approve: Recommend
+  product.quarantine: ExecuteReversible
+  machine.restart: Approve
+  settlement.approve: Recommend
+  claim.approve.bounded: Approve
+  payment.issue: None
+  funds.reserve: None
+  shipment.hold: ExecuteReversible
+  cargo.release: Recommend
+  wire.transfer.hold: Recommend
+  # Added 2026-09-27 for the five-domain positive/negative matrix (readiness
+  # matrix §10/§11): each is an autonomous, model-triggerable effect with a
+  # real reversal path (unfreeze, unflag, resume), matching the same
+  # ExecuteReversible ceiling already justified for product.quarantine and
+  # shipment.hold — introduced by B4/K7/H6 below, not by any other fixture.
+  card.freeze: ExecuteReversible
+  watchlist.flag: ExecuteReversible
+  device.pause: ExecuteReversible
+
+defaults:
+  bundle: bundle:test:v1
+  dependencies: []
+  review_contract: null
+  final_authority: null
+  review: not_required
+  capability: not_issued
+  invalidation: none
+
+equivalence_groups:
+  - id: g-recommend-1
+    fixtures: [EQ1A, EQ1B]
+    normalized:
+      nodes: [m:ModelInvocation, d:Decision]
+      edges: [m-Recommend-d]
+  - id: g-prioritize-1
+    fixtures: [EQ2A, EQ2B]
+    normalized:
+      nodes: [m:ModelInvocation, p:Presentation, v:Review]
+      edges: [m-Rank-p, p-Attention-v]
+  - id: g-draft-human-1
+    fixtures: [EQ3A, EQ3B]
+    normalized:
+      nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision]
+      edges: [m-DraftArtifact-v, v-HumanInput-a, a-AssertDecision-d]
+      assertion: {covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d], contract: rc-independent-pass}
+  - id: g-shadow-1
+    fixtures: [EQ4A, EQ4B]
+    normalized:
+      nodes: [m:ModelInvocation, e:Evidence]
+      edges: [m-ObserveOnly-e]
+      observe_certificate: cert-shadow-current
+
+authority_catalog:
+  clinician: {id: authority:clinician, version: 1}
+  compliance-reviewer: {id: authority:compliance-reviewer, version: 1}
+  maintenance-supervisor: {id: authority:maintenance-supervisor, version: 1}
+  adjuster: {id: authority:adjuster, version: 1}
+  bank: {id: authority:bank, version: 1}
+  customs-authority: {id: authority:customs-authority, version: 1}
+  customs-officer: {id: authority:customs-officer, version: 1}
+
+predicate_definitions:
+  authenticated: {id: predicate:authenticated, version: 1, kind: Qualification, expression: "subject.authenticated == true", input_schema: [subject.authenticated:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  acknowledged: {id: predicate:acknowledged, version: 1, kind: ExplicitAction, expression: "review.acknowledged == true", input_schema: [review.acknowledged:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  authority: {id: predicate:authority, version: 1, kind: Authority, expression: "reviewer.authorized == true", input_schema: [reviewer.authorized:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  qualification: {id: predicate:qualification, version: 1, kind: Qualification, expression: "reviewer.qualified == true", input_schema: [reviewer.qualified:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  independence: {id: predicate:independence, version: 1, kind: Independence, expression: "reviewer.independent == true", input_schema: [reviewer.independent:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  evidence_available: {id: predicate:evidence-available, version: 1, kind: EvidenceAvailable, expression: "evidence.available == true", input_schema: [evidence.available:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  evidence_accessed: {id: predicate:evidence-accessed, version: 1, kind: EvidenceAccessed, expression: "evidence.accessed == true", input_schema: [evidence.accessed:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  limitations_visible: {id: predicate:limitations-visible, version: 1, kind: LimitationVisible, expression: "model.limitations_visible == true", input_schema: [model.limitations_visible:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  explicit_action: {id: predicate:explicit-action, version: 1, kind: ExplicitAction, expression: "review.explicit_action == true", input_schema: [review.explicit_action:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  reason_bound: {id: predicate:reason-bound, version: 1, kind: ReasonBound, expression: "review.reason_bound == true", input_schema: [review.reason_bound:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  override: {id: predicate:override, version: 1, kind: OverrideAvailable, expression: "review.override_available == true", input_schema: [review.override_available:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  escalation: {id: predicate:escalation, version: 1, kind: EscalationAvailable, expression: "review.escalation_available == true", input_schema: [review.escalation_available:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  capacity: {id: predicate:capacity, version: 1, kind: CapacityHealthy, expression: "review.capacity_healthy == true", input_schema: [review.capacity_healthy:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  independent_choice: {id: predicate:independent-choice, version: 1, kind: IndependentOutcomeChoice, expression: "review.independent_choice == true", input_schema: [review.independent_choice:bool], result_type: Bool, authority: authority:fixture-review-policy}
+  sampling: {id: predicate:sampling, version: 1, kind: SamplingAssigned, expression: "review.sampling_assigned == true", input_schema: [review.sampling_assigned:bool], result_type: Bool, authority: authority:fixture-review-policy}
+
+review_contract_catalog:
+  rc-ack: {id: review-contract:ack, version: 1, mode: Acknowledgement, predicates: [authenticated, acknowledged], authority: authority:fixture-review-policy}
+  rc-bounded: {id: review-contract:bounded, version: 1, mode: BoundedApproval, predicates: [authenticated, authority, evidence_available, explicit_action, reason_bound, override, escalation, capacity, sampling], authority: authority:fixture-review-policy}
+  rc-independent: {id: review-contract:independent, version: 1, mode: IndependentDecision, predicates: [authenticated, acknowledged, qualification, authority, independence, evidence_available, evidence_accessed, limitations_visible, explicit_action, reason_bound, override, escalation, capacity, independent_choice, sampling], authority: authority:fixture-review-policy}
+  rc-independent-pass: {id: review-contract:independent-pass, version: 1, mode: IndependentDecision, predicates: [authenticated, acknowledged, qualification, authority, independence, evidence_available, evidence_accessed, limitations_visible, explicit_action, reason_bound, override, escalation, capacity, independent_choice, sampling], evaluation_fixture: R5_PASS, authority: authority:fixture-review-policy}
+  rc-independent-evidence-not-accessed: {id: review-contract:independent-not-accessed, version: 1, mode: IndependentDecision, predicates: [authenticated, acknowledged, qualification, authority, independence, evidence_available, evidence_accessed, limitations_visible, explicit_action, reason_bound, override, escalation, capacity, independent_choice, sampling], evaluation_fixture: R3_NOT_ACCESSED, authority: authority:fixture-review-policy}
+  rc-reason-not-bound: {id: review-contract:reason-not-bound, version: 1, mode: IndependentDecision, predicates: [authenticated, acknowledged, qualification, authority, independence, evidence_available, evidence_accessed, limitations_visible, explicit_action, reason_bound, override, escalation, capacity, independent_choice, sampling], evaluation_fixture: I2, authority: authority:fixture-review-policy}
+  self-review: {id: review-contract:self-review, version: 1, mode: IndependentDecision, predicates: [authenticated, acknowledged, qualification, authority, independence, evidence_available, evidence_accessed, limitations_visible, explicit_action, reason_bound, override, escalation, capacity, independent_choice, sampling], evaluation_fixture: R4_CONFLICT, authority: authority:fixture-review-policy}
+
+observe_certificate_catalog:
+  cert-shadow-current:
+    boundary: {components: [decision-copy-tap, isolated-shadow-sink], protected_targets: [all-fixture-protected-targets]}
+    dependency_graph_hash: symbolic:shadow-dependency-graph-v1
+    model_sink: isolated-shadow-sink
+    allowed_channels: [{source: decision-copy-tap, target: isolated-shadow-sink, direction: one-way}]
+    forbidden_return_classes: [data, control, configuration, scheduling_priority, shared_mutable_state, credential_or_capability]
+    enforcement: {mechanism_id: fixture-one-way-sandbox, version: 1, attestation: symbolic:fixture-sandbox-attestation-v1}
+    shared_resources: []
+    valid_from: 2026-09-27T00:00:00Z
+    valid_until: 2026-09-28T00:00:00Z
+    invalidation: [topology-change, policy-change, credential-change, shared-resource-change]
+    unmodeled_channel_behavior: Indeterminate
+  cert-shadow-stale:
+    boundary: {components: [decision-copy-tap, isolated-shadow-sink], protected_targets: [all-fixture-protected-targets]}
+    dependency_graph_hash: symbolic:shadow-dependency-graph-v1
+    model_sink: isolated-shadow-sink
+    allowed_channels: [{source: decision-copy-tap, target: isolated-shadow-sink, direction: one-way}]
+    forbidden_return_classes: [data, control, configuration, scheduling_priority, shared_mutable_state, credential_or_capability]
+    enforcement: {mechanism_id: fixture-one-way-sandbox, version: 1, attestation: symbolic:fixture-sandbox-attestation-v1}
+    shared_resources: []
+    valid_from: 2026-09-25T00:00:00Z
+    valid_until: 2026-09-26T00:00:00Z
+    invalidation: [topology-change, policy-change, credential-change, shared-resource-change]
+    unmodeled_channel_behavior: Indeterminate
+
+fixtures:
+  - id: EQ1A
+    profile: manufacturing
+    nodes: [m:ModelInvocation, d:Decision]
+    edges: [m-Recommend-d]
+    expected: {graph: g-recommend-1, provenance: true, level: Recommend, model_authorized: true}
+  - id: EQ1B
+    profile: manufacturing
+    nodes: [m:ModelInvocation, t:Transform, r:Rule, d:Decision]
+    edges: [m-DataFlow-t, t-DataFlow-r, r-Recommend-d]
+    expected: {graph: g-recommend-1, provenance: true, level: Recommend, model_authorized: true}
+  - id: EQ2A
+    profile: kyc
+    nodes: [m:ModelInvocation, p:Presentation, v:Review]
+    edges: [m-Rank-p, p-Attention-v]
+    expected: {graph: g-prioritize-1, provenance: true, level: Prioritize, model_authorized: true}
+  - id: EQ2B
+    profile: kyc
+    nodes: [m:ModelInvocation, t:Transform, r:Rule, p:Presentation, v:Review]
+    edges: [m-DataFlow-t, t-DataFlow-r, r-Rank-p, p-Attention-v]
+    expected: {graph: g-prioritize-1, provenance: true, level: Prioritize, model_authorized: true}
+  - id: EQ3A
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [m-DraftArtifact-v, v-HumanInput-a, a-AssertDecision-d]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d], contract: rc-independent-pass}
+    expected: {graph: g-draft-human-1, provenance: true, level: Draft, model_authorized: false, final_authority: clinician, review: pass}
+  - id: EQ3B
+    profile: healthcare
+    nodes: [m:ModelInvocation, t:Transform, r:Rule, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [m-DataFlow-t, t-DataFlow-r, r-DraftArtifact-v, v-HumanInput-a, a-AssertDecision-d]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d], contract: rc-independent-pass}
+    expected: {graph: g-draft-human-1, provenance: true, level: Draft, model_authorized: false, final_authority: clinician, review: pass}
+  - id: EQ4A
+    profile: banking
+    nodes: [m:ModelInvocation, e:Evidence]
+    edges: [m-ObserveOnly-e]
+    observe_certificate: cert-shadow-current
+    expected: {graph: g-shadow-1, provenance: false, level: None, model_authorized: false}
+  - id: EQ4B
+    profile: banking
+    nodes: [m:ModelInvocation, t:Transform, e:Evidence]
+    edges: [m-DataFlow-t, t-ObserveOnly-e]
+    observe_certificate: cert-shadow-current
+    expected: {graph: g-shadow-1, provenance: false, level: None, model_authorized: false}
+
+  - id: B1
+    profile: banking
+    nodes: [f:Fact, r:Rule, d:Decision, c:Capability, x:Effect]
+    edges: [f-DataFlow-r, r-RuleFlow-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: funds.reserve}}
+    effects: {x: {effect_id: funds.reserve, reversibility_class: Reversible}}
+    expected: {graph: banking-no-model, provenance: false, level: None, model_authorized: false, final_authority: bank, admission: accepted, capability: issued:funds.reserve}
+  - id: B2_STALE
+    profile: banking
+    nodes: [m:ModelInvocation, e:Evidence]
+    edges: [m-ObserveOnly-e]
+    observe_certificate: cert-shadow-stale
+    expected: {graph: banking-shadow-stale, provenance: unknown, level: Unknown, model_authorized: unknown, admission: indeterminate:ObserveOnlyAttestationStale}
+  - id: B3
+    profile: banking
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:B3:v1", produced_by_deployment: "deployment:B3:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:B3:v1", required_deployment: "deployment:B3:v1"}
+    capabilities: {c: {effect_class: wire.transfer.hold}}
+    expected: {graph: banking-lineage-asserted, provenance: true, level: Recommend, model_authorized: false, final_authority: bank, review: pass, admission: accepted, capability: issued:wire.transfer.hold}
+
+  - id: K1
+    profile: kyc
+    nodes: [m:ModelInvocation, t:Transform, d:Decision]
+    edges: [m-DataFlow-t, t-Eligibility-d]
+    declared_binding: Classify
+    expected: {graph: kyc-eligibility, provenance: true, level: Classify, model_authorized: true, admission: accepted}
+  - id: K1_STRUCTURAL_ONLY
+    profile: kyc
+    nodes: [m:ModelInvocation, t:Transform, d:Decision]
+    edges: [m-DataFlow-t, t-DataFlow-d]
+    declared_binding: Observe
+    expected: {graph: invalid, provenance: unknown, level: Unknown, model_authorized: unknown, admission: indeterminate:SemanticEdgeMissing}
+  - id: K3
+    profile: kyc
+    nodes: [m:ModelInvocation, d:Decision]
+    edges: [m-ModelApproval-d]
+    declared_binding: Approve
+    review_contract: self-review
+    expected: {graph: kyc-self-close, provenance: true, level: Approve, model_authorized: true, review: fail:SelfCertification, admission: rejected:ReviewSelfCertification}
+  - id: K4
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertDecision-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d, c], contract: rc-independent-pass}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-independent, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: accepted, capability: issued:application.reject}
+  - id: K5
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:K5:v1", produced_by_deployment: "deployment:K5:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:K5:v1", required_deployment: "deployment:K5:v1"}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-lineage-asserted, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: accepted, capability: issued:application.reject}
+
+  - id: H1
+    profile: healthcare
+    nodes: [m:ModelInvocation, d:Decision, c:Capability]
+    edges: [m-Recommend-d, d-Authorize-c]
+    capabilities: {c: {effect_class: clinical.alert}}
+    declared_binding: Recommend
+    expected: {graph: health-alert, provenance: true, level: Recommend, model_authorized: true, admission: accepted, capability: issued:clinical.alert}
+  - id: H1_ORDER_REUSE
+    profile: healthcare
+    nodes: [m:ModelInvocation, d:Decision, c:Capability, x:Effect]
+    edges: [m-Recommend-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: clinical.alert}}
+    effects: {x: {effect_id: medication.administer, reversibility_class: Irreversible}}
+    expected: {graph: health-alert-reuse, provenance: true, level: Recommend, model_authorized: true, admission: rejected:InfluenceLevelExceedsProfile, capability: not_issued}
+  - id: H2
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision, c:Capability]
+    edges: [m-DraftArtifact-v, v-HumanInput-a, a-AssertDecision-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d, c], contract: rc-independent-pass}
+    capabilities: {c: {effect_class: order.sign}}
+    expected: {graph: health-order-human, provenance: true, level: Draft, model_authorized: false, final_authority: clinician, review: pass, admission: accepted, capability: issued:order.sign}
+  - id: H3
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [m-DraftArtifact-v, v-HumanInput-a, a-AssertDecision-d]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d], contract: rc-independent-evidence-not-accessed}
+    expected: {graph: health-summary-only, provenance: true, level: Draft, model_authorized: false, review: fail:RequiredEvidenceNotAccessed, admission: rejected:ReviewProtocolFailed}
+  - id: H4
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:H4:v1", produced_by_deployment: "deployment:H4:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:H4:v1", required_deployment: "deployment:H4:v1"}
+    capabilities: {c: {effect_class: clinical.alert}}
+    expected: {graph: health-lineage-asserted, provenance: true, level: Recommend, model_authorized: false, final_authority: clinician, review: pass, admission: accepted, capability: issued:clinical.alert}
+
+  - id: M1
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertDecision-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d, c], contract: rc-independent-pass}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-human-workorder, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, capability: issued:work_order.approve}
+  - id: M2
+    profile: manufacturing
+    nodes: [m:ModelInvocation, d:Decision, c:Capability, x:Effect]
+    edges: [m-ModelApproval-d, d-Authorize-c, c-Issue-x, d-ModelTrigger-x]
+    capabilities: {c: {effect_class: product.quarantine}}
+    effects: {x: {effect_id: product.quarantine, reversibility_class: Reversible}}
+    expected: {graph: mfg-quarantine, provenance: true, level: ExecuteReversible, model_authorized: true, admission: accepted, capability: issued:product.quarantine}
+  - id: M3
+    profile: manufacturing
+    nodes: [m:ModelInvocation, x:Effect]
+    edges: [m-ModelTrigger-x]
+    effects: {x: {effect_id: machine.restart, reversibility_class: Irreversible}}
+    expected: {graph: mfg-restart, provenance: true, level: ExecuteIrreversible, model_authorized: true, admission: rejected:InfluenceLevelExceedsProfile, capability: not_issued}
+  - id: M4
+    profile: manufacturing
+    nodes: [f:Fact, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [f-DataFlow-d, v-HumanInput-a, a-AssertDecision-d]
+    mandatory_fact: {id: personal-lock-active, value: true, rule: deny-restart}
+    expected: {graph: mfg-lock-deny, provenance: false, level: None, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: rejected:MandatoryDeny}
+  - id: M5
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:M5:v1", produced_by_deployment: "deployment:M5:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:M5:v1", required_deployment: "deployment:M5:v1"}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-lineage-asserted, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: accepted, capability: issued:work_order.approve}
+
+  - id: I1
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertDecision-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d, c], contract: rc-independent-pass}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-settlement, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, capability: issued:settlement.approve}
+  - id: I2
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion]
+    edges: [m-DraftReason-v, v-HumanInput-a]
+    review_contract: rc-reason-not-bound
+    evaluations: [{authenticated: true}, {acknowledged: true}, {qualification: true}, {authority: true}, {independence: true}, {evidence_available: true}, {evidence_accessed: true}, {limitations_visible: true}, {explicit_action: true}, {reason_bound: false}, {override: true}, {escalation: true}, {capacity: true}, {independent_choice: true}, {sampling: true}]
+    expected: {graph: insurance-bad-reason, provenance: true, level: Draft, model_authorized: false, review: fail:ReasonNotEvidenceBound, admission: rejected:ReviewProtocolFailed}
+  - id: I3
+    profile: insurance
+    nodes: [m:ModelInvocation, d:Decision, c:Capability]
+    edges: [m-ModelApproval-d, d-Authorize-c]
+    declared_binding: Approve
+    bounded_class: {product: motor-basic, amount_max_minor: 50000, recovery: true}
+    capabilities: {c: {effect_class: claim.approve.bounded}}
+    expected: {graph: insurance-bounded-approve, provenance: true, level: Approve, model_authorized: true, admission: accepted, capability: issued:claim.approve.bounded}
+  - id: I3_PAYMENT_REUSE
+    profile: insurance
+    nodes: [m:ModelInvocation, d:Decision, c:Capability, x:Effect]
+    edges: [m-ModelApproval-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: claim.approve.bounded}}
+    effects: {x: {effect_id: payment.issue, reversibility_class: Compensatable}}
+    expected: {graph: insurance-payment-reuse, provenance: true, level: Approve, model_authorized: true, admission: rejected:InfluenceLevelExceedsProfile, capability: not_issued}
+  - id: I4
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:I4:v1", produced_by_deployment: "deployment:I4:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:I4:v1", required_deployment: "deployment:I4:v1"}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-lineage-asserted, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, admission: accepted, capability: issued:settlement.approve}
+
+  - id: R1_ACK
+    profile: cross-domain
+    review_contract: rc-ack
+    evaluations: [{authenticated: true}, {acknowledged: true}]
+    expected: {review: pass:Acknowledgement}
+  - id: R2_ACK_FOR_APPROVAL
+    profile: cross-domain
+    required_review_contract: rc-bounded
+    supplied_review_contract: rc-ack
+    evaluations: [{authenticated: true}, {acknowledged: true}]
+    expected: {review: fail:ReviewModeInsufficient}
+  - id: R3_NOT_ACCESSED
+    profile: cross-domain
+    review_contract: rc-independent
+    evaluations: [{authenticated: true}, {acknowledged: true}, {qualification: true}, {authority: true}, {independence: true}, {evidence_available: true}, {evidence_accessed: false}, {limitations_visible: true}, {explicit_action: true}, {reason_bound: true}, {override: true}, {escalation: true}, {capacity: true}, {independent_choice: true}, {sampling: true}]
+    expected: {review: fail:RequiredEvidenceNotAccessed}
+  - id: R4_CONFLICT
+    profile: cross-domain
+    review_contract: rc-independent
+    evaluations: [{authenticated: true}, {acknowledged: true}, {qualification: true}, {authority: true}, {independence: false}, {evidence_available: true}, {evidence_accessed: true}, {limitations_visible: true}, {explicit_action: true}, {reason_bound: true}, {override: true}, {escalation: true}, {capacity: true}, {independent_choice: true}, {sampling: true}]
+    expected: {review: fail:IndependenceConflict}
+  - id: R5_PASS
+    profile: cross-domain
+    review_contract: rc-independent-pass
+    evaluations: [{authenticated: true}, {acknowledged: true}, {qualification: true}, {authority: true}, {independence: true}, {evidence_available: true}, {evidence_accessed: true}, {limitations_visible: true}, {explicit_action: true}, {reason_bound: true}, {override: true}, {escalation: true}, {capacity: true}, {independent_choice: true}, {sampling: true}]
+    expected: {review: pass:IndependentDecision}
+  - id: R6_STALE
+    profile: cross-domain
+    review_contract: rc-independent
+    evaluations: [{qualification: "stale:Deny"}]
+    expected: {review: fail:ReviewPredicateFailedClosed}
+  - id: R7_CAPACITY
+    profile: cross-domain
+    review_contract: rc-independent
+    evaluations: [{capacity: false}]
+    expected: {review: fail:CapacityExceeded, response: SuspendAutomation}
+  - id: R8_MONITOR_MISSING
+    profile: cross-domain
+    review_contract: rc-independent
+    monitor: {health: unknown, missing_data: SuspendClaim}
+    expected: {review_quality_claim: suspended}
+
+  - id: R9_EVALUATION_MISSING
+    profile: cross-domain
+    review_contract: rc-independent
+    evaluations: [{authenticated: true}, {acknowledged: true}, {qualification: true}, {authority: true}, {independence: true}, {evidence_available: true}, {evidence_accessed: true}, {limitations_visible: true}, {explicit_action: true}, {reason_bound: true}, {override: true}, {escalation: true}, {capacity: true}, {independent_choice: true}]
+    expected: {review: fail:ReviewPredicateMissing, missing: sampling}
+
+  - id: INV_PRECOMMIT
+    profile: insurance
+    dependency: {id: payee-version, phase: after_reservation_before_commit, action: Abort}
+    expected: {invalidation: Abort, capability: not_issued}
+  - id: INV_EXTERNAL_UNKNOWN
+    profile: insurance
+    dependency: {id: payee-version, phase: after_external_unknown, action: Reconcile}
+    expected: {invalidation: Reconcile, workflow_state: UnknownOutcome, duplicate_effect: forbidden}
+
+  - id: L1
+    profile: logistics
+    nodes: [f:Fact, r:Rule, d:Decision, c:Capability, x:Effect]
+    edges: [f-DataFlow-r, r-RuleFlow-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: cargo.release}}
+    effects: {x: {effect_id: cargo.release, reversibility_class: Irreversible}}
+    expected: {graph: logistics-no-model, provenance: false, level: None, model_authorized: false, final_authority: customs-authority, admission: accepted, capability: issued:cargo.release}
+  - id: L2
+    profile: logistics
+    nodes: [m:ModelInvocation, d:Decision, c:Capability, x:Effect]
+    edges: [m-ModelApproval-d, d-Authorize-c, c-Issue-x, d-ModelTrigger-x]
+    capabilities: {c: {effect_class: shipment.hold}}
+    effects: {x: {effect_id: shipment.hold, reversibility_class: Reversible}}
+    expected: {graph: logistics-hold, provenance: true, level: ExecuteReversible, model_authorized: true, admission: accepted, capability: issued:shipment.hold}
+  - id: L3
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertDecision-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [d, c], contract: rc-independent-pass}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-human-release, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: accepted, capability: issued:cargo.release}
+  - id: L4
+    profile: logistics
+    nodes: [m:ModelInvocation, x:Effect]
+    edges: [m-ModelTrigger-x]
+    effects: {x: {effect_id: cargo.release, reversibility_class: Irreversible}}
+    expected: {graph: logistics-autonomous-release, provenance: true, level: ExecuteIrreversible, model_authorized: true, admission: rejected:InfluenceLevelExceedsProfile, capability: not_issued}
+  - id: L5
+    profile: logistics
+    nodes: [f:Fact, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [f-DataFlow-d, v-HumanInput-a, a-AssertDecision-d]
+    mandatory_fact: {id: active-seizure-order, value: true, rule: deny-release}
+    expected: {graph: logistics-seizure-deny, provenance: false, level: None, model_authorized: false, final_authority: customs-officer, review: pass, admission: rejected:MandatoryDeny}
+  - id: L6
+    profile: logistics
+    nodes: [m:ModelInvocation, d:Decision]
+    edges: [m-ModelApproval-d]
+    declared_binding: Approve
+    review_contract: self-review
+    expected: {graph: logistics-self-close, provenance: true, level: Approve, model_authorized: true, review: fail:SelfCertification, admission: rejected:ReviewSelfCertification}
+  - id: L7
+    profile: logistics
+    dependency: {id: duty-assessment-version, phase: after_external_unknown, action: Reconcile}
+    expected: {invalidation: Reconcile, workflow_state: UnknownOutcome, duplicate_effect: forbidden}
+
+  - id: L8
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:L8:v1", produced_by_deployment: "deployment:L8:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:L8:v1", required_deployment: "deployment:L8:v1"}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-lineage-asserted, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: accepted, capability: issued:cargo.release}
+  - id: L9
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:L9:v1", produced_by_deployment: "deployment:L9:v1", valid_until: "2026-09-26T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:L9:v1", required_deployment: "deployment:L9:v1"}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-lineage-stale, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: rejected:FactStale, capability: not_issued}
+  - id: L10
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:L10:v1", produced_by_deployment: "deployment:L10:v1", valid_until: "2026-09-28T00:00:00Z", revoked: true, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:L10:v1", required_deployment: "deployment:L10:v1"}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-lineage-revoked, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: rejected:FactRevoked, capability: not_issued}
+  - id: L11
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:L11-imposter:v1", produced_by_deployment: "deployment:L11:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:L11:v1", required_deployment: "deployment:L11:v1"}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-lineage-wrong-model, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: rejected:FactWrongModel, capability: not_issued}
+  - id: L12
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:L12:v1", produced_by_deployment: "deployment:L12-retired:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:L12:v1", required_deployment: "deployment:L12:v1"}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-lineage-wrong-deployment, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: rejected:FactWrongDeployment, capability: not_issued}
+  - id: L13
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:L13:v1", produced_by_deployment: "deployment:L13:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: []}
+    fact_requirement:
+      d: {required_model: "model:L13:v1", required_deployment: "deployment:L13:v1"}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-lineage-unauthorized-consumer, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: rejected:FactUnauthorizedConsumer, capability: not_issued}
+  - id: L14
+    profile: logistics
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_requirement:
+      d: {required_model: "model:L14:v1", required_deployment: "deployment:L14:v1"}
+    capabilities: {c: {effect_class: cargo.release}}
+    expected: {graph: logistics-lineage-missing-provenance, provenance: true, level: Recommend, model_authorized: false, final_authority: customs-officer, review: pass, admission: rejected:FactProvenanceMissing, capability: not_issued}
+
+  # Five-domain positive/negative matrix closure, 2026-09-27 (readiness
+  # matrix §10/§11): banking/kyc/healthcare/manufacturing/insurance each
+  # extended to the same 9-dimension row coverage logistics (L1-L14)
+  # already had, per the cross-domain conformance matrix's honest gap
+  # list. Every node/edge shape below is copied verbatim from an
+  # already-passing fixture in another domain (B1/L1, M2/L2, M3/L4,
+  # M4/L5, K3/L6, L7/INV_*, L9-L14) with only ids, profile, effect_class
+  # and authority swapped — no new EdgeKind combination is introduced.
+  - id: K2
+    profile: kyc
+    nodes: [f:Fact, r:Rule, d:Decision, c:Capability, x:Effect]
+    edges: [f-DataFlow-r, r-RuleFlow-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: application.reject}}
+    effects: {x: {effect_id: application.reject, reversibility_class: Irreversible}}
+    expected: {graph: kyc-no-model, provenance: false, level: None, model_authorized: false, final_authority: compliance-reviewer, admission: accepted, capability: issued:application.reject}
+  - id: H5
+    profile: healthcare
+    nodes: [f:Fact, r:Rule, d:Decision, c:Capability, x:Effect]
+    edges: [f-DataFlow-r, r-RuleFlow-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: order.sign}}
+    effects: {x: {effect_id: order.sign, reversibility_class: Reversible}}
+    expected: {graph: health-no-model, provenance: false, level: None, model_authorized: false, final_authority: clinician, admission: accepted, capability: issued:order.sign}
+  - id: M6
+    profile: manufacturing
+    nodes: [f:Fact, r:Rule, d:Decision, c:Capability, x:Effect]
+    edges: [f-DataFlow-r, r-RuleFlow-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: work_order.approve}}
+    effects: {x: {effect_id: work_order.approve, reversibility_class: Reversible}}
+    expected: {graph: mfg-no-model, provenance: false, level: None, model_authorized: false, final_authority: maintenance-supervisor, admission: accepted, capability: issued:work_order.approve}
+  - id: I5
+    profile: insurance
+    nodes: [f:Fact, r:Rule, d:Decision, c:Capability, x:Effect]
+    edges: [f-DataFlow-r, r-RuleFlow-d, d-Authorize-c, c-Issue-x]
+    capabilities: {c: {effect_class: settlement.approve}}
+    effects: {x: {effect_id: settlement.approve, reversibility_class: Reversible}}
+    expected: {graph: insurance-no-model, provenance: false, level: None, model_authorized: false, final_authority: adjuster, admission: accepted, capability: issued:settlement.approve}
+  - id: B4
+    profile: banking
+    nodes: [m:ModelInvocation, d:Decision, c:Capability, x:Effect]
+    edges: [m-ModelApproval-d, d-Authorize-c, c-Issue-x, d-ModelTrigger-x]
+    capabilities: {c: {effect_class: card.freeze}}
+    effects: {x: {effect_id: card.freeze, reversibility_class: Reversible}}
+    expected: {graph: banking-autonomous-freeze, provenance: true, level: ExecuteReversible, model_authorized: true, admission: accepted, capability: issued:card.freeze}
+  - id: K7
+    profile: kyc
+    nodes: [m:ModelInvocation, d:Decision, c:Capability, x:Effect]
+    edges: [m-ModelApproval-d, d-Authorize-c, c-Issue-x, d-ModelTrigger-x]
+    capabilities: {c: {effect_class: watchlist.flag}}
+    effects: {x: {effect_id: watchlist.flag, reversibility_class: Reversible}}
+    expected: {graph: kyc-autonomous-flag, provenance: true, level: ExecuteReversible, model_authorized: true, admission: accepted, capability: issued:watchlist.flag}
+  - id: H6
+    profile: healthcare
+    nodes: [m:ModelInvocation, d:Decision, c:Capability, x:Effect]
+    edges: [m-ModelApproval-d, d-Authorize-c, c-Issue-x, d-ModelTrigger-x]
+    capabilities: {c: {effect_class: device.pause}}
+    effects: {x: {effect_id: device.pause, reversibility_class: Reversible}}
+    expected: {graph: health-autonomous-pause, provenance: true, level: ExecuteReversible, model_authorized: true, admission: accepted, capability: issued:device.pause}
+  - id: B5
+    profile: banking
+    nodes: [m:ModelInvocation, x:Effect]
+    edges: [m-ModelTrigger-x]
+    effects: {x: {effect_id: wire.transfer.hold, reversibility_class: Irreversible}}
+    expected: {graph: banking-autonomous-exceeds, provenance: true, level: ExecuteIrreversible, model_authorized: true, admission: rejected:InfluenceLevelExceedsProfile, capability: not_issued}
+  - id: K8
+    profile: kyc
+    nodes: [m:ModelInvocation, x:Effect]
+    edges: [m-ModelTrigger-x]
+    effects: {x: {effect_id: application.reject, reversibility_class: Irreversible}}
+    expected: {graph: kyc-autonomous-exceeds, provenance: true, level: ExecuteIrreversible, model_authorized: true, admission: rejected:InfluenceLevelExceedsProfile, capability: not_issued}
+  - id: B6
+    profile: banking
+    nodes: [f:Fact, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [f-DataFlow-d, v-HumanInput-a, a-AssertDecision-d]
+    mandatory_fact: {id: sanctions-hit-active, value: true, rule: deny-transfer}
+    expected: {graph: banking-sanctions-deny, provenance: false, level: None, model_authorized: false, final_authority: bank, review: pass, admission: rejected:MandatoryDeny}
+  - id: K9
+    profile: kyc
+    nodes: [f:Fact, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [f-DataFlow-d, v-HumanInput-a, a-AssertDecision-d]
+    mandatory_fact: {id: adverse-media-confirmed, value: true, rule: deny-onboarding}
+    expected: {graph: kyc-adverse-media-deny, provenance: false, level: None, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: rejected:MandatoryDeny}
+  - id: H7
+    profile: healthcare
+    nodes: [f:Fact, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [f-DataFlow-d, v-HumanInput-a, a-AssertDecision-d]
+    mandatory_fact: {id: allergy-contraindication-active, value: true, rule: deny-administer}
+    expected: {graph: health-allergy-deny, provenance: false, level: None, model_authorized: false, final_authority: clinician, review: pass, admission: rejected:MandatoryDeny}
+  - id: I6
+    profile: insurance
+    nodes: [f:Fact, v:Review, a:AuthorityAssertion, d:Decision]
+    edges: [f-DataFlow-d, v-HumanInput-a, a-AssertDecision-d]
+    mandatory_fact: {id: fraud-hold-active, value: true, rule: deny-settlement}
+    expected: {graph: insurance-fraud-deny, provenance: false, level: None, model_authorized: false, final_authority: adjuster, review: pass, admission: rejected:MandatoryDeny}
+  - id: B7
+    profile: banking
+    nodes: [m:ModelInvocation, d:Decision]
+    edges: [m-ModelApproval-d]
+    declared_binding: Approve
+    review_contract: self-review
+    expected: {graph: banking-self-close, provenance: true, level: Approve, model_authorized: true, review: fail:SelfCertification, admission: rejected:ReviewSelfCertification}
+  - id: H8
+    profile: healthcare
+    nodes: [m:ModelInvocation, d:Decision]
+    edges: [m-ModelApproval-d]
+    declared_binding: Approve
+    review_contract: self-review
+    expected: {graph: health-self-close, provenance: true, level: Approve, model_authorized: true, review: fail:SelfCertification, admission: rejected:ReviewSelfCertification}
+  - id: M7
+    profile: manufacturing
+    nodes: [m:ModelInvocation, d:Decision]
+    edges: [m-ModelApproval-d]
+    declared_binding: Approve
+    review_contract: self-review
+    expected: {graph: mfg-self-close, provenance: true, level: Approve, model_authorized: true, review: fail:SelfCertification, admission: rejected:ReviewSelfCertification}
+  - id: I7
+    profile: insurance
+    nodes: [m:ModelInvocation, d:Decision]
+    edges: [m-ModelApproval-d]
+    declared_binding: Approve
+    review_contract: self-review
+    expected: {graph: insurance-self-close, provenance: true, level: Approve, model_authorized: true, review: fail:SelfCertification, admission: rejected:ReviewSelfCertification}
+  - id: B8
+    profile: banking
+    dependency: {id: settlement-confirmation-version, phase: after_external_unknown, action: Reconcile}
+    expected: {invalidation: Reconcile, workflow_state: UnknownOutcome, duplicate_effect: forbidden}
+  - id: K10
+    profile: kyc
+    dependency: {id: watchlist-refresh-version, phase: after_external_unknown, action: Reconcile}
+    expected: {invalidation: Reconcile, workflow_state: UnknownOutcome, duplicate_effect: forbidden}
+  - id: H9
+    profile: healthcare
+    dependency: {id: lab-result-version, phase: after_external_unknown, action: Reconcile}
+    expected: {invalidation: Reconcile, workflow_state: UnknownOutcome, duplicate_effect: forbidden}
+  - id: M8
+    profile: manufacturing
+    dependency: {id: firmware-attestation-version, phase: after_external_unknown, action: Reconcile}
+    expected: {invalidation: Reconcile, workflow_state: UnknownOutcome, duplicate_effect: forbidden}
+  - id: B9
+    profile: banking
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:B9:v1", produced_by_deployment: "deployment:B9:v1", valid_until: "2026-09-26T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:B9:v1", required_deployment: "deployment:B9:v1"}
+    capabilities: {c: {effect_class: wire.transfer.hold}}
+    expected: {graph: banking-lineage-stale, provenance: true, level: Recommend, model_authorized: false, final_authority: bank, review: pass, admission: rejected:FactStale, capability: not_issued}
+  - id: B10
+    profile: banking
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:B10:v1", produced_by_deployment: "deployment:B10:v1", valid_until: "2026-09-28T00:00:00Z", revoked: true, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:B10:v1", required_deployment: "deployment:B10:v1"}
+    capabilities: {c: {effect_class: wire.transfer.hold}}
+    expected: {graph: banking-lineage-revoked, provenance: true, level: Recommend, model_authorized: false, final_authority: bank, review: pass, admission: rejected:FactRevoked, capability: not_issued}
+  - id: B11
+    profile: banking
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:B11-imposter:v1", produced_by_deployment: "deployment:B11:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:B11:v1", required_deployment: "deployment:B11:v1"}
+    capabilities: {c: {effect_class: wire.transfer.hold}}
+    expected: {graph: banking-lineage-wrong-model, provenance: true, level: Recommend, model_authorized: false, final_authority: bank, review: pass, admission: rejected:FactWrongModel, capability: not_issued}
+  - id: B12
+    profile: banking
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:B12:v1", produced_by_deployment: "deployment:B12-retired:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:B12:v1", required_deployment: "deployment:B12:v1"}
+    capabilities: {c: {effect_class: wire.transfer.hold}}
+    expected: {graph: banking-lineage-wrong-deployment, provenance: true, level: Recommend, model_authorized: false, final_authority: bank, review: pass, admission: rejected:FactWrongDeployment, capability: not_issued}
+  - id: B13
+    profile: banking
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:B13:v1", produced_by_deployment: "deployment:B13:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: []}
+    fact_requirement:
+      d: {required_model: "model:B13:v1", required_deployment: "deployment:B13:v1"}
+    capabilities: {c: {effect_class: wire.transfer.hold}}
+    expected: {graph: banking-lineage-unauthorized-consumer, provenance: true, level: Recommend, model_authorized: false, final_authority: bank, review: pass, admission: rejected:FactUnauthorizedConsumer, capability: not_issued}
+  - id: B14
+    profile: banking
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_requirement:
+      d: {required_model: "model:B14:v1", required_deployment: "deployment:B14:v1"}
+    capabilities: {c: {effect_class: wire.transfer.hold}}
+    expected: {graph: banking-lineage-missing-provenance, provenance: true, level: Recommend, model_authorized: false, final_authority: bank, review: pass, admission: rejected:FactProvenanceMissing, capability: not_issued}
+  - id: K11
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:K11:v1", produced_by_deployment: "deployment:K11:v1", valid_until: "2026-09-26T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:K11:v1", required_deployment: "deployment:K11:v1"}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-lineage-stale, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: rejected:FactStale, capability: not_issued}
+  - id: K12
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:K12:v1", produced_by_deployment: "deployment:K12:v1", valid_until: "2026-09-28T00:00:00Z", revoked: true, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:K12:v1", required_deployment: "deployment:K12:v1"}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-lineage-revoked, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: rejected:FactRevoked, capability: not_issued}
+  - id: K13
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:K13-imposter:v1", produced_by_deployment: "deployment:K13:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:K13:v1", required_deployment: "deployment:K13:v1"}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-lineage-wrong-model, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: rejected:FactWrongModel, capability: not_issued}
+  - id: K14
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:K14:v1", produced_by_deployment: "deployment:K14-retired:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:K14:v1", required_deployment: "deployment:K14:v1"}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-lineage-wrong-deployment, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: rejected:FactWrongDeployment, capability: not_issued}
+  - id: K15
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:K15:v1", produced_by_deployment: "deployment:K15:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: []}
+    fact_requirement:
+      d: {required_model: "model:K15:v1", required_deployment: "deployment:K15:v1"}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-lineage-unauthorized-consumer, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: rejected:FactUnauthorizedConsumer, capability: not_issued}
+  - id: K16
+    profile: kyc
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_requirement:
+      d: {required_model: "model:K16:v1", required_deployment: "deployment:K16:v1"}
+    capabilities: {c: {effect_class: application.reject}}
+    expected: {graph: kyc-lineage-missing-provenance, provenance: true, level: Recommend, model_authorized: false, final_authority: compliance-reviewer, review: pass, admission: rejected:FactProvenanceMissing, capability: not_issued}
+  - id: H10
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:H10:v1", produced_by_deployment: "deployment:H10:v1", valid_until: "2026-09-26T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:H10:v1", required_deployment: "deployment:H10:v1"}
+    capabilities: {c: {effect_class: clinical.alert}}
+    expected: {graph: health-lineage-stale, provenance: true, level: Recommend, model_authorized: false, final_authority: clinician, review: pass, admission: rejected:FactStale, capability: not_issued}
+  - id: H11
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:H11:v1", produced_by_deployment: "deployment:H11:v1", valid_until: "2026-09-28T00:00:00Z", revoked: true, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:H11:v1", required_deployment: "deployment:H11:v1"}
+    capabilities: {c: {effect_class: clinical.alert}}
+    expected: {graph: health-lineage-revoked, provenance: true, level: Recommend, model_authorized: false, final_authority: clinician, review: pass, admission: rejected:FactRevoked, capability: not_issued}
+  - id: H12
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:H12-imposter:v1", produced_by_deployment: "deployment:H12:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:H12:v1", required_deployment: "deployment:H12:v1"}
+    capabilities: {c: {effect_class: clinical.alert}}
+    expected: {graph: health-lineage-wrong-model, provenance: true, level: Recommend, model_authorized: false, final_authority: clinician, review: pass, admission: rejected:FactWrongModel, capability: not_issued}
+  - id: H13
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:H13:v1", produced_by_deployment: "deployment:H13-retired:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:H13:v1", required_deployment: "deployment:H13:v1"}
+    capabilities: {c: {effect_class: clinical.alert}}
+    expected: {graph: health-lineage-wrong-deployment, provenance: true, level: Recommend, model_authorized: false, final_authority: clinician, review: pass, admission: rejected:FactWrongDeployment, capability: not_issued}
+  - id: H14
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:H14:v1", produced_by_deployment: "deployment:H14:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: []}
+    fact_requirement:
+      d: {required_model: "model:H14:v1", required_deployment: "deployment:H14:v1"}
+    capabilities: {c: {effect_class: clinical.alert}}
+    expected: {graph: health-lineage-unauthorized-consumer, provenance: true, level: Recommend, model_authorized: false, final_authority: clinician, review: pass, admission: rejected:FactUnauthorizedConsumer, capability: not_issued}
+  - id: H15
+    profile: healthcare
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_requirement:
+      d: {required_model: "model:H15:v1", required_deployment: "deployment:H15:v1"}
+    capabilities: {c: {effect_class: clinical.alert}}
+    expected: {graph: health-lineage-missing-provenance, provenance: true, level: Recommend, model_authorized: false, final_authority: clinician, review: pass, admission: rejected:FactProvenanceMissing, capability: not_issued}
+  - id: M9
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:M9:v1", produced_by_deployment: "deployment:M9:v1", valid_until: "2026-09-26T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:M9:v1", required_deployment: "deployment:M9:v1"}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-lineage-stale, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: rejected:FactStale, capability: not_issued}
+  - id: M10
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:M10:v1", produced_by_deployment: "deployment:M10:v1", valid_until: "2026-09-28T00:00:00Z", revoked: true, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:M10:v1", required_deployment: "deployment:M10:v1"}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-lineage-revoked, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: rejected:FactRevoked, capability: not_issued}
+  - id: M11
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:M11-imposter:v1", produced_by_deployment: "deployment:M11:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:M11:v1", required_deployment: "deployment:M11:v1"}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-lineage-wrong-model, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: rejected:FactWrongModel, capability: not_issued}
+  - id: M12
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:M12:v1", produced_by_deployment: "deployment:M12-retired:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:M12:v1", required_deployment: "deployment:M12:v1"}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-lineage-wrong-deployment, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: rejected:FactWrongDeployment, capability: not_issued}
+  - id: M13
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:M13:v1", produced_by_deployment: "deployment:M13:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: []}
+    fact_requirement:
+      d: {required_model: "model:M13:v1", required_deployment: "deployment:M13:v1"}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-lineage-unauthorized-consumer, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: rejected:FactUnauthorizedConsumer, capability: not_issued}
+  - id: M14
+    profile: manufacturing
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_requirement:
+      d: {required_model: "model:M14:v1", required_deployment: "deployment:M14:v1"}
+    capabilities: {c: {effect_class: work_order.approve}}
+    expected: {graph: mfg-lineage-missing-provenance, provenance: true, level: Recommend, model_authorized: false, final_authority: maintenance-supervisor, review: pass, admission: rejected:FactProvenanceMissing, capability: not_issued}
+  - id: I8
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:I8:v1", produced_by_deployment: "deployment:I8:v1", valid_until: "2026-09-26T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:I8:v1", required_deployment: "deployment:I8:v1"}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-lineage-stale, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, admission: rejected:FactStale, capability: not_issued}
+  - id: I9
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:I9:v1", produced_by_deployment: "deployment:I9:v1", valid_until: "2026-09-28T00:00:00Z", revoked: true, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:I9:v1", required_deployment: "deployment:I9:v1"}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-lineage-revoked, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, admission: rejected:FactRevoked, capability: not_issued}
+  - id: I10
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:I10-imposter:v1", produced_by_deployment: "deployment:I10:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:I10:v1", required_deployment: "deployment:I10:v1"}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-lineage-wrong-model, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, admission: rejected:FactWrongModel, capability: not_issued}
+  - id: I11
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:I11:v1", produced_by_deployment: "deployment:I11-retired:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: [d]}
+    fact_requirement:
+      d: {required_model: "model:I11:v1", required_deployment: "deployment:I11:v1"}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-lineage-wrong-deployment, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, admission: rejected:FactWrongDeployment, capability: not_issued}
+  - id: I12
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_provenance:
+      f: {produced_by_model: "model:I12:v1", produced_by_deployment: "deployment:I12:v1", valid_until: "2026-09-28T00:00:00Z", revoked: false, authorized_consumers: []}
+    fact_requirement:
+      d: {required_model: "model:I12:v1", required_deployment: "deployment:I12:v1"}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-lineage-unauthorized-consumer, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, admission: rejected:FactUnauthorizedConsumer, capability: not_issued}
+  - id: I13
+    profile: insurance
+    nodes: [m:ModelInvocation, v:Review, a:AuthorityAssertion, f:Fact, d:Decision, c:Capability]
+    edges: [m-Recommend-v, v-HumanInput-a, a-AssertFact-f, f-DataFlow-d, d-Authorize-c]
+    assertion: {id: a, covered_input_origins: [m, v], covered_model_paths: [m], covered_targets: [f, d, c], contract: rc-independent-pass}
+    fact_requirement:
+      d: {required_model: "model:I13:v1", required_deployment: "deployment:I13:v1"}
+    capabilities: {c: {effect_class: settlement.approve}}
+    expected: {graph: insurance-lineage-missing-provenance, provenance: true, level: Recommend, model_authorized: false, final_authority: adjuster, review: pass, admission: rejected:FactProvenanceMissing, capability: not_issued}

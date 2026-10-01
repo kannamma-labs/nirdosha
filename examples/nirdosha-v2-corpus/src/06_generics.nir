@@ -1,0 +1,49 @@
+//! v2 of `examples/features/06_generics.nir` — generic structs and
+//! enums. `.nir`'s "structural-per-instantiation" identity maps to
+//! Rust's monomorphized generics; `Duo(i64, i64)` and `Duo(f64, f64)`
+//! are distinct concrete types either way.
+
+struct Duo<A, B> {
+    first: A,
+    second: B,
+}
+
+enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+fn sum_pair(p: &Duo<i64, i64>) -> i64 {
+    p.first + p.second
+}
+
+fn pick(e: &Either<i64, i64>) -> i64 {
+    match e {
+        Either::Left(n) => *n,
+        Either::Right(n) => *n,
+    }
+}
+
+// a generic function over `Duo(A, B)` itself
+fn swap(p: Duo<i64, bool>) -> Duo<bool, i64> {
+    Duo { first: p.second, second: p.first }
+}
+
+fn main() {
+    let duo = Duo { first: 2, second: 3 };
+    println!("{}", sum_pair(&duo)); // 5
+
+    let left = Either::<i64, i64>::Left(1);
+    let right = Either::<i64, i64>::Right(9);
+    println!("{}", pick(&left)); // 1
+    println!("{}", pick(&right)); // 9
+
+    let flagged = Duo { first: 41, second: true };
+    let swapped = swap(flagged);
+    println!("{}", swapped.first); // true
+    println!("{}", swapped.second); // 41
+
+    // a different instantiation — a real, distinct concrete type
+    let point = Duo { first: 3.0, second: 4.0 };
+    println!("{}", point.first + point.second); // 7
+}

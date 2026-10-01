@@ -213,12 +213,18 @@ already contains a bundled `nirdosha` binary and launcher. Once code
 generation (§3) has populated `<project-name>.nir`, the whole folder can be
 copied to a target machine (same OS/arch) and run with `./run.sh` — no
 separate `nirdosha` install needed there. Real production hardening
-(containerization, orchestration manifests) is now largely built —
-`docs/ROADMAP.md` Track A2, `[PARTIAL]`: a repo-root `Dockerfile`, a Helm
-chart, and a Kustomize base + Postgres-multi-replica overlay
-(`deploy/helm/nirdosha/`, `deploy/kustomize/`) all exist and are
-verified live (container boots, health endpoints answer, graceful
-`SIGTERM` shutdown confirmed against a real signal). For running this
+(containerization, orchestration manifests) was largely built —
+`docs/ROADMAP.md` Track A2, `[PARTIAL]`: a Helm chart, and a Kustomize
+base + Postgres-multi-replica overlay (`deploy/helm/nirdosha/`,
+`deploy/kustomize/`) all exist and were verified live at the time
+(container boots, health endpoints answer, graceful `SIGTERM` shutdown
+confirmed against a real signal) — **but `crates/compiler` (the native
+`.nir` compiler this whole container story packaged) is now
+deprecated, the repo-root `Dockerfile` it built from is deleted, and
+`ghcr.io/protobox/nirdosha-runtime` is no longer published.** The Helm
+chart/Kustomize bases still reference that retired image for their
+main container; they are not currently deployable as-is. See
+`docs/KUBERNETES.md`'s own top-of-doc note. For running this
 on Kubernetes specifically — the full compliance matrix, exactly which
 P0–P3 remediation items landed vs. what's still genuinely open (the
 one disclosed gap: `serve --db`'s table-browser/role-mapping layer has
@@ -369,15 +375,19 @@ Everything below was verified by reading `../protobox`'s actual source
   project's saved `DesignSpec` on every call. Worth a §4-adjacent mention
   here so a future reader of this doc doesn't miss that this exists and
   is already wired, live-reloaded on serve's own 30s TTL.
-- **`docker_image = "ghcr.io/protobox/nirdosha-runtime:latest"` doesn't
-  resolve to anything yet** (self-disclosed in `nirdosha.py`'s own
-  module docstring) — blocks `features/build_app/run_docker_tests.py`'s
-  Docker-based test run end to end for any nirdosha-lane project today.
+- **`docker_image = "ghcr.io/protobox/nirdosha-runtime:latest"` will
+  never resolve to anything now** — not merely "not yet," as this note
+  originally said. `crates/compiler` (the native `.nir` compiler this
+  image packaged) is deprecated; `.github/workflows/docker.yml`'s
+  `runtime` image job and `.github/workflows/release.yml` (its raw
+  binary releases) were both retired, and the root `Dockerfile` this
+  image built from was deleted. `features/build_app/run_docker_tests.py`'s
+  Docker-based test run has no path forward against this specific image
+  any more — protobox's `nirdosha.py` plugin needs to either point
+  `docker_image` at something else or drop that test path, a real,
+  now-permanent prerequisite on protobox's side, not a transient gap.
   Relevant to this doc's §7: the "copy the `init` folder and run"
-  handoff works standalone, but protobox's own containerized test path
-  is separately blocked on publishing this image (bake the `nirdosha`
-  binary + `python3`/`pytest`/`requests`), tracked as a real prerequisite
-  on protobox's side, not a nirdosha-repo gap.
+  handoff works standalone and is unaffected.
 - **Do not start emitting the `target: "web"|"mobile"|"all"` screen key**
   if `nirdosha_screen_plan_prompt.py`/`prompt_rules()` ever grow mobile
   awareness — it's a design proposed in `docs/MOBILE.md`'s "Per-target

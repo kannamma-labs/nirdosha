@@ -1,0 +1,41 @@
+//! v2 of `examples/features/49_nfr.nir` — `nfr(...)` as a first-class
+//! fn annotation: up to four independent thresholds, tracked
+//! automatically, zero code at any call site. In v2 the annotation
+//! rides `nirdosha:contract`'s `nfr` clause (all four thresholds are
+//! model vocabulary); transparent to normal execution — exactly the
+//! guarantee the original regression test pins.
+
+/// nirdosha:contract {"effects":["pure"],"nfr":{"latency_ms":1000,"concurrency_max":10}}
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+// `error_rate_max` additionally requires a `Result` return type —
+// that's the only way the runtime can tell a real error from a real
+// success: the returned value's own tag, not a heuristic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DivError {
+    DivideByZero,
+}
+
+/// nirdosha:contract {"effects":["pure"],"nfr":{"error_rate_max":0.5}}
+fn safe_div(a: i64, b: i64) -> Result<i64, DivError> {
+    if b == 0 {
+        return Err(DivError::DivideByZero);
+    }
+    Ok(a / b)
+}
+
+fn main() {
+    println!("{}", add(2, 3)); // 5
+
+    match safe_div(10, 2) {
+        Ok(v) => println!("{v}"), // 5
+        Err(_e) => println!("-1"),
+    }
+    match safe_div(10, 0) {
+        Ok(v) => println!("{v}"),
+        Err(_e) => println!("-1"), // -1 — a real error, real enough for
+                                    // `nfr(error_rate_max: ...)` to count it
+    }
+}

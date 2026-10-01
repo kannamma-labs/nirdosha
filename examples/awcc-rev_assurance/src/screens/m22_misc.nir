@@ -1,0 +1,56 @@
+//! M22 Misc — my profile/preferences, about/release notes.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{user_profile_table, UserProfileRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn unused_profile_store() -> &'static SharedTable<i64, UserProfileRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, UserProfileRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_self_profile,
+    entity: UserProfileRow,
+    store: unused_profile_store,
+    path: "/preferences/profile",
+    fields: [
+        user_id: String,
+        tenant_id: String,
+        email: String,
+        locale: String,
+        timezone: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: user_profile_table,
+        purpose: "Operations",
+        update_fields: [
+            email: String,
+            locale: String,
+            timezone: String,
+        ],
+    },
+}
+
+pub fn mount_about(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/about", "About / Release Notes (22.3)", |_req, _params, _auth| {
+        let body = r#"<!doctype html>
+<html><head><title>About</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:60ch;margin:2rem auto">
+<h1>AWCC Revenue Assurance Demo</h1>
+<p>Version 0.1.0 — Nirdosha v2 dialect vertical slice.</p>
+<p>Mirrors the RTM AML corpus structure with RA-specific roles, datasets, and screens.</p>
+</body></html>"#;
+        nirdosha_rt::Response::html(200, body)
+    })
+}
+
+pub fn mount_m22_misc(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_about(router);
+    mount_self_profile(router)
+}

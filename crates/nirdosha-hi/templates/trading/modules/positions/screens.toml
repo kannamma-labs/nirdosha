@@ -1,0 +1,31 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-positions"
+version = "1.0.0"
+module = "M4"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "4.1"
+name = "Positions"
+module = "M4"
+archetype = "crud_screens"
+roles = ["Trader", "RiskManager", "Operations"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_positions", route_path = "/positions", generated_files = ["src/screens/m04_positions.nir"] }
+data_binding = { entities = ["Position"], primary_key = "position_id", guard = { table = "position", purpose = "PositionOps" }, fields = [
+    { name = "position_id", type = "String" },
+    { name = "account_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "quantity", type = "String" },
+    { name = "market_value", type = "String" },
+    { name = "currency", type = "String" }
+] }
+policy = { purpose = "PositionOps", allowed_actions = ["read"] }
+file = "src/screens/m04_positions.nir"
+notes = "Current positions and market value."

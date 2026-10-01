@@ -1,0 +1,103 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "trading-core"
+version = "1.0.0"
+module = "M1"
+total_screens = 5
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login"
+roles = ["AllRoles"]
+stage = "built"
+codegen = { template = "login", mount_symbol = "mount_login", route_path = "/login", generated_files = ["src/app_shell.nir"] }
+parameters.demo_users = [
+    { username = "trader1", password = "pass123", roles = ["Trader"] },
+    { username = "risk1", password = "pass123", roles = ["RiskManager"] },
+    { username = "ops1", password = "pass123", roles = ["Operations"] },
+    { username = "compliance1", password = "pass123", roles = ["ComplianceOfficer"] }
+]
+file = "src/app_shell.nir"
+notes = "Demo auth for trading app."
+
+[[screen]]
+id = "1.2"
+name = "Nav Shell"
+module = "M1"
+archetype = "app_shell_from_toml"
+roles = ["AllRoles"]
+stage = "built"
+codegen = { template = "app_shell", mount_symbol = "mount_app_shell", route_path = "/", generated_files = ["src/app_shell.nir"] }
+file = "src/app_shell.nir"
+notes = "Top-level navigation shell."
+
+[[screen]]
+id = "1.3"
+name = "Trading Dashboard"
+module = "M1"
+archetype = "dashboard"
+roles = ["Trader", "RiskManager", "Operations"]
+stage = "built"
+codegen = { template = "dashboard", mount_symbol = "mount_dashboard", route_path = "/", generated_files = ["src/screens/m01_dashboard.nir"] }
+data_binding = { entities = ["Order"], primary_key = "order_id", guard = { table = "order", purpose = "DashboardRead" }, fields = [
+    { name = "order_id", type = "String" },
+    { name = "instrument_id", type = "String" },
+    { name = "side", type = "String" },
+    { name = "quantity", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "DashboardRead", allowed_actions = ["read", "aggregate"] }
+[screen.parameters]
+title = "Trading Dashboard"
+refresh_seconds = 30
+widgets = [
+    { kind = "Metric", label = "Open orders", fn = "open_order_count", source = { table = "order", purpose = "DashboardRead", action = "aggregate" }, target = 100, alert_below = false },
+    { kind = "Metric", label = "Day P/L", fn = "day_pnl", source = { table = "order", purpose = "DashboardRead", action = "aggregate" }, target = 0, alert_below = true }
+]
+file = "src/screens/m01_dashboard.nir"
+notes = "Trading dashboard with order metrics and P/L."
+
+[[screen]]
+id = "1.4"
+name = "Accounts"
+module = "M1"
+archetype = "crud_screens"
+roles = ["Operations", "RiskManager"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_accounts", route_path = "/accounts", generated_files = ["src/screens/m01_accounts.nir"] }
+data_binding = { entities = ["Account"], primary_key = "account_id", guard = { table = "account", purpose = "AccountOps" }, fields = [
+    { name = "account_id", type = "String" },
+    { name = "holder_name", type = "String" },
+    { name = "account_type", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "AccountOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m01_accounts.nir"
+notes = "Trading accounts and holders."
+
+[[screen]]
+id = "1.5"
+name = "Audit Log"
+module = "M1"
+archetype = "crud_screens"
+roles = ["ComplianceOfficer", "Operations"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_audit", route_path = "/audit", generated_files = ["src/screens/m01_audit.nir"] }
+data_binding = { entities = ["AuditEntry"], primary_key = "entry_id", guard = { table = "audit", purpose = "AuditRead" }, fields = [
+    { name = "entry_id", type = "String" },
+    { name = "event_type", type = "String" },
+    { name = "actor", type = "String" },
+    { name = "resource", type = "String" },
+    { name = "timestamp", type = "String" }
+] }
+policy = { purpose = "AuditRead", allowed_actions = ["read", "aggregate"] }
+file = "src/screens/m01_audit.nir"
+notes = "Immutable audit trail of trading operations."

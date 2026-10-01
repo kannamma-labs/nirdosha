@@ -1,0 +1,36 @@
+//! v2 of `examples/features/48_froze.nir` — RFC 0006 Pillar 1's
+//! `Froze<T>`: heap-allocate like `box`, but deliberately NOT affine
+//! — the same handle hands to two separate concurrent computations,
+//! safe because nothing can ever write through it. `.nir`'s `froze
+//! expr` is `Frozen::freeze(expr)`; `*f` is real deref.
+
+use nirdosha_rt::prelude::*;
+
+fn read_it(f: &Frozen<i64>) -> i64 {
+    **f
+}
+
+fn double_it(f: &Frozen<i64>) -> i64 {
+    **f * 2
+}
+
+fn main() {
+    let f = Frozen::freeze(21);
+
+    // Freely shareable: `f` is used twice below with no move error,
+    // unlike a `box i64` (see 14).
+    println!("{}", read_it(&f)); // 21
+    println!("{}", double_it(&f)); // 42
+
+    // The actual Pillar 1 claim: the SAME handle handed to two
+    // separate concurrent computations, each safely reading it
+    // without any lock — nothing can write through a `froze` handle,
+    // so there is nothing for two readers to race on.
+    let f1 = f.clone();
+    let h1 = spawn(move || read_it(&f1));
+    let f2 = f.clone();
+    let h2 = spawn(move || double_it(&f2));
+    let a: i64 = join(h1);
+    let b: i64 = join(h2);
+    println!("{}", a + b); // 63
+}

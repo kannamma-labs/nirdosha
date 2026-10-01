@@ -1,0 +1,145 @@
+//! AWCC Revenue Assurance — entity declarations. Serves: all data screens.
+//!
+//! RA analog of `examples/rtm/src/10_domains.nir`.
+
+use crate::domain_types::*;
+
+// ---- Type classifications ----
+#[nirdosha_rt::classify(RESTRICTED)]   pub struct CardToken(pub String);
+#[nirdosha_rt::classify(RESTRICTED)]   pub struct NationalId(pub String);
+#[nirdosha_rt::classify(CONFIDENTIAL)] pub struct MsisdnClass(pub String);
+#[nirdosha_rt::classify(CONFIDENTIAL)] pub struct ImsiClass(pub String);
+#[nirdosha_rt::classify(CONFIDENTIAL)] pub struct SubscriberName(pub String);
+#[nirdosha_rt::classify(INTERNAL)]     pub struct Money(pub f64);
+
+impl Money {
+    pub fn is_positive(&self) -> bool { self.0 > 0.0 }
+}
+
+// ---- CDR / usage event (topic-as-dataset) ----
+#[nirdosha_rt::dataset(entity = "cdr", store = "kafka_main", kind = "topic")]
+pub struct CdrEvent {
+    pub tenant_id: TenantId,
+    pub msisdn: Msisdn,
+    pub imsi: Imsi,
+    pub iccid: Iccid,
+    pub call_type: String,
+    pub duration_sec: i64,
+    pub bytes: i64,
+    pub occurred_at: Timestamp,
+}
+
+// ---- Billed CDR table ----
+#[nirdosha_rt::dataset(entity = "cdr", store = "pg_primary", kind = "table")]
+pub struct Cdr {
+    pub tenant_id: TenantId,
+    pub msisdn: Msisdn,
+    pub imsi: Imsi,
+    pub account_id: AccountId,
+    pub call_type: String,
+    pub duration_sec: i64,
+    pub bytes: i64,
+    pub amount: Money,
+    pub currency: CurrencyCode,
+    pub status: CdrStatus,
+    pub occurred_at: Timestamp,
+}
+
+// ---- Alert / discrepancy ----
+#[nirdosha_rt::dataset(entity = "alert", store = "pg_primary", kind = "table")]
+pub struct Alert {
+    pub tenant_id: TenantId,
+    pub cdr_id: String,
+    pub score: f64,
+    pub rule_hits: Vec<RuleHit>,
+    pub model_version: String,
+    pub policy_version: PolicyVersion,
+    pub status: AlertStatus,
+    pub assignee: Option<UserId>,
+    pub disposition_code: Option<DispositionCode>,
+    pub rationale: Option<String>,
+    pub case_id: Option<CaseId>,
+    pub atra_linked: bool,
+    pub sla_due_at: Timestamp,
+}
+
+// ---- Leak case (RA equivalent of AML case) ----
+#[nirdosha_rt::dataset(entity = "leak_case", store = "pg_primary", kind = "table")]
+pub struct LeakCase {
+    pub tenant_id: TenantId,
+    pub status: LeakCaseStatus,
+    pub assigned_to: UserId,
+    pub alert_ids: Vec<AlertId>,
+    pub subject_ref: SubjectRef,
+    pub atra_id: Option<AtraBundleId>,
+    pub disposition: Option<String>,
+    pub rationale: Option<String>,
+}
+
+// ---- Subscriber / customer ----
+#[nirdosha_rt::dataset(entity = "subscriber", store = "pg_primary", kind = "table")]
+pub struct Subscriber {
+    pub tenant_id: TenantId,
+    pub name: SubscriberName,
+    pub national_id: NationalId,
+    pub msisdn: Msisdn,
+    pub imsi: Imsi,
+    pub dob: Date,
+    pub address: String,
+    pub account_type: String,
+    pub kyc_status: String,
+    pub risk_rating: String,
+    pub restriction_status: SubscriberRestriction,
+    pub legal_hold: bool,
+}
+
+// ---- Payment / charge ----
+#[nirdosha_rt::dataset(entity = "payment", store = "pg_primary", kind = "table")]
+pub struct Payment {
+    pub tenant_id: TenantId,
+    pub subscriber_id: SubscriberId,
+    pub amount: Money,
+    pub currency: CurrencyCode,
+    pub status: PaymentStatus,
+    pub hold_reason: Option<HoldReason>,
+    pub occurred_at: Timestamp,
+}
+
+// ---- ATRA bundle (RA equivalent of SAR bundle) ----
+#[nirdosha_rt::dataset(entity = "atra_bundle", store = "pg_primary", kind = "table")]
+pub struct AtraBundle {
+    pub tenant_id: TenantId,
+    pub case_id: CaseId,
+    pub subject: SubjectRef,
+    pub status: AtraStatus,
+    pub period_start: Date,
+    pub period_end: Date,
+    pub total_leakage: Money,
+}
+
+// ---- Disposition / reason code vocabularies ----
+pub const DISPOSITION_CODES: &[&str] = &[
+    "missing_cdr",
+    "duplicate_cdr",
+    "rating_mismatch",
+    "unbilled_event",
+    "over_charge",
+    "under_charge",
+    "med_miss",
+    "false_positive",
+    "confirmed_leak",
+    "escalated",
+];
+
+pub const LEAK_CASE_DISPOSITION_CODES: &[&str] = &[
+    "confirmed_leak",
+    "false_positive",
+    "atra_filed",
+];
+
+pub const HOLD_REASON_CODES: &[&str] = &[
+    "suspected_leak",
+    "billing_dispute",
+    "regulatory_hold",
+    "manual_review",
+];

@@ -1,0 +1,29 @@
+// ============================================================================
+// 70_mcp.nir — [RFC §8.8 verbatim structure]. I17 defaults are non-negotiable.
+// Verbatim from examples/rtm/roles-N-guard_policy.md — `mcp_tools!` is real
+// now (see crates/nirdosha-guard-macros), so this file no longer has any
+// skipped/blocked content.
+// ============================================================================
+
+nirdosha_rt::mcp_tools! {
+    server analyst_copilot {
+        identity = "mcp:analyst-copilot";
+        tools = [query_records(Transaction, Alert, Case, Customer),
+                 get_options(AlertStatus, CaseStatus, TxnChannel, DispositionCode),
+                 evaluate,             // dry-run first — mandatory for writes
+                 submit_write];        // gated: requires matching evaluate (plan-hash)
+        delegation { bind user + agent; ttl = 30m; max_tool_calls = 60; rate = 20/min; }
+        defaults {
+            audit = full;              // I17: agent access is never sampled
+            row_cap = 50;
+            destination = llm_context; // policy still governs per field/class
+        }                              // masked fields are ABSENT, not masked-in-place
+    }
+}
+
+// Copilot SAR protection (belt-and-braces over 65_sar denies) [NEW]
+nirdosha_rt::guard_policy! {
+    deny "copilot-no-sar" for McpCopilot
+    when action == "read" && resource == "sar_bundle"
+    reason(tipping_off.llm_context_denied_for_restricted)
+}

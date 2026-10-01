@@ -1,0 +1,185 @@
+//! M6 Transactions (screen.md 6.1/6.2) — [RFC §8.1] search/detail, plus
+//! [§6.6] the analyst flag-transaction update. RTM live-demo plan's
+//! Phase A/B proof module.
+//!
+//! List/export/JSON-list/detail-by-id are real, guard-enforced reads
+//! through `nirdosha_guard_screens::GuardedTable` (`guard:` below) —
+//! per-request `analyst-search-transaction`/`analyst-open-transaction`
+//! evaluation against `rtm`'s own linked-in corpus, tenant-scoped,
+//! masked, capped. `update_fields` wires a real, narrower guarded update
+//! for `analyst-flag-transaction`'s own `field_policy { allowed
+//! (analyst_flag, analyst_flag_reason) forbidden(tenant_id, subject_id,
+//! amount, currency, status, occurred_at, card_token) }` — see
+//! `bridge.nir`'s `TransactionRow` doc comment for why those two fields
+//! exist there and not on the corpus's own `Transaction` struct.
+//!
+//! `create`/`delete` stay unwired for `guard:` — no human role has a
+//! `guard_policy!` allow to create or delete a transaction at all
+//! (`ingest-create-txn` is `SvcIngest`-only; there is no per-row delete
+//! policy anywhere in this corpus) — see `crud_screens.rs`'s
+//! `GuardConfig` doc comment. `store:` only exists because
+//! `crud_screens!` requires one unconditionally even though nothing
+//! guarded ever calls it. Every verb is `public`, not role-gated,
+//! because `crud_screens!`'s `requires role "..."` cannot name any real
+//! RTM role at all today — see `bridge.nir`'s module doc comment for why
+//! (a snake_case-vs-PascalCase mismatch between
+//! `nirdosha-contract-core`'s role-name grammar and every `00_core.nir`
+//! role).
+
+use crate::bridge::agg_bins_table;
+use crate::bridge::device_session_table;
+use crate::bridge::transaction_table;
+use crate::bridge::TransactionRow;
+use nirdosha_rt::prelude::SharedTable;
+use nirdosha_rt::screens::FieldSpec;
+
+fn unused_transaction_store() -> &'static SharedTable<i64, TransactionRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, TransactionRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+/// 6.5 Counterparty Analysis -- `analyst-search-transaction`'s existing
+/// real grant (`Analyst`, `AmlInvestigation`), not a new `aggregate`
+/// policy: this corpus's only `aggregate`-on-`transaction` grant is
+/// `bi-aggregate` (`SvcBi`-only, a service principal, `80_consumers.nir`)
+/// -- there is no human-facing aggregate policy here to invent. The
+/// per-counterparty (`merchant_id`) grouping and cohort floor below run
+/// in-process over the same real, guard-enforced row set
+/// `analyst-search-transaction` already grants a plain read on, the
+/// same "coarse grant + fine in-process shaping" posture
+/// `guard-screens`'s own `apply_condition_filter_in_process` establishes
+/// -- not a second, weaker enforcement path. `cohort_floor`-style
+/// suppression (drop counterparties under 5 txns) is applied here, not
+/// policy-enforced (disclosed, matching this module's own doc comment
+/// on what `crud_screens!` here does and doesn't wire).
+pub fn mount_counterparty_analysis(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/transactions/counterparties", "Counterparty Analysis (6.5)", |_req, _params, auth| {
+        match transaction_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let mut by_merchant: std::collections::BTreeMap<String, (i64, f64, std::collections::BTreeSet<String>)> = std::collections::BTreeMap::new();
+                for r in &rows {
+                    let entry = by_merchant.entry(r.merchant_id.clone()).or_insert((0, 0.0, std::collections::BTreeSet::new()));
+                    entry.0 += 1;
+                    entry.1 += r.amount;
+                    entry.2.insert(r.subject_id.clone());
+                }
+                const COHORT_FLOOR: i64 = 5;
+                let fields = [
+                    FieldSpec { name: "merchant_id", input_type: "text" },
+                    FieldSpec { name: "txn_count", input_type: "number" },
+                    FieldSpec { name: "total_amount", input_type: "number" },
+                    FieldSpec { name: "distinct_payers", input_type: "number" },
+                    FieldSpec { name: "new_payee", input_type: "text" },
+                ];
+                let values: Vec<serde_json::Value> = by_merchant
+                    .into_iter()
+                    .filter(|(_, (count, _, _))| *count >= COHORT_FLOOR)
+                    .map(|(merchant_id, (count, total, payers))| serde_json::json!({
+                        "merchant_id": merchant_id,
+                        "txn_count": count,
+                        "total_amount": total,
+                        "distinct_payers": payers.len() as i64,
+                        "new_payee": payers.len() == 1,
+                    }))
+                    .collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Counterparty Analysis", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 6.7 Structuring Visual -- `agg-bins-read` (`Analyst`). Interim per
+/// `screens.toml`'s own note ("binned table interim ... bars later"):
+/// the real, guard-enforced `agg_bins_table()` rows rendered as a plain
+/// list, not yet the richer bar/heatmap presentation.
+pub fn mount_structuring_visual(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/transactions/structuring", "Structuring Visual (6.7)", |_req, _params, auth| {
+        match agg_bins_table().guarded_snapshot(auth, "AmlInvestigation") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "bin_id", input_type: "text" },
+                    FieldSpec { name: "bucket_start", input_type: "number" },
+                    FieldSpec { name: "bucket_end", input_type: "number" },
+                    FieldSpec { name: "count", input_type: "number" },
+                    FieldSpec { name: "amount_sum", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Structuring Visual", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+/// 6.8 Device & Session Intelligence -- `device-session-read`
+/// (`Analyst`, `OpsAnalyst`).
+pub fn mount_device_intelligence(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/devices", "Device & Session Intelligence (6.8)", |_req, _params, auth| {
+        match device_session_table().guarded_snapshot(auth, "FraudMonitoring") {
+            Ok(rows) => {
+                let fields = [
+                    FieldSpec { name: "session_id", input_type: "text" },
+                    FieldSpec { name: "subject_id", input_type: "text" },
+                    FieldSpec { name: "device_id", input_type: "text" },
+                    FieldSpec { name: "geo", input_type: "text" },
+                    FieldSpec { name: "occurred_at", input_type: "number" },
+                ];
+                let values: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+                nirdosha_rt::Response::html(200, nirdosha_rt::screens::read_only_list_html("Device & Session Intelligence", &fields, &values))
+            }
+            Err(e) => nirdosha_guard_screens::guard_error_response(e),
+        }
+    })
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_transaction_screens,
+    entity: TransactionRow,
+    store: unused_transaction_store,
+    path: "/transactions",
+    fields: [
+        txn_id: String,
+        tenant_id: String,
+        subject_id: String,
+        account_id: String,
+        amount: f64,
+        currency: String,
+        status: String,
+        occurred_at: i64,
+        channel: String,
+        merchant_id: String,
+        card_token: String,
+        device_id: String,
+        geo: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: transaction_table,
+        purpose: "AmlInvestigation",
+        update_fields: [
+            analyst_flag: bool,
+            analyst_flag_reason: String,
+        ],
+    },
+}
+
+/// T-06/B11: 6.2 Transaction Detail's "alert/case links" context need —
+/// every alert opened on this exact transaction
+/// (`related_alerts_for_transaction`, `bridge.nir`), real and
+/// `AmlInvestigation`-purpose, closing the note's own disclosed gap
+/// ("copilot ⛔ alert/case links" — `McpCopilot` still denied per its
+/// own corpus posture; `Analyst`/`OpsAnalyst`/`QaReviewer`/`Auditor`
+/// resolve for real here).
+pub fn mount_transaction_context(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/transactions/{id}/related-alerts", "Transaction Detail: related alerts (6.2)", |_req, params, auth| {
+        let Some(id) = params.get("id").map(|s| s.to_string()) else { return nirdosha_rt::Response::bad_request("id required") };
+        match crate::bridge::related_alerts_for_transaction(auth, &id) {
+            Ok(rows) => nirdosha_rt::Response::json(200, &serde_json::json!(rows)),
+            Err(reason) => nirdosha_rt::Response::html(422, format!("<p>{reason}</p>")),
+        }
+    })
+}

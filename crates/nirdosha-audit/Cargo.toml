@@ -1,0 +1,23 @@
+[package]
+name = "nirdosha-audit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Extracted from crates/compiler (2026-09-16) so both the native
+# compiler crate (certificate/pack signing, `verify_pipeline.rs`) and
+# `crates/nirdosha-hi` (the self-repair loop's tamper-evident hint-cache
+# audit trail, `hint_cache.rs`) can share one Ed25519/SHA-256 backend
+# and one hash-chained JSONL log implementation without either crate
+# depending on the other.
+
+[dependencies]
+ring = "0.17"
+aws-lc-rs = { version = "1", features = ["fips"], optional = true }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[features]
+fips = ["dep:aws-lc-rs"]

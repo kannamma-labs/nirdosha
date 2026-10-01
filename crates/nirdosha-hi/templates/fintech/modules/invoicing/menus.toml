@@ -1,0 +1,19 @@
+[meta]
+version = "1.0.0"
+screens_source = "screens.toml"
+app_title = "Fintech Invoicing"
+
+[[group]]
+id = "invoicing"
+label_key = "nav.group.invoicing"
+order = 100
+
+[[menu]]
+id = "nav.invoices"
+label_key = "nav.invoices"
+group = "invoicing"
+screen_id = "11.1"
+route = "/invoices"
+guard = { action = "read", resource = "invoice" }
+roles = ["PlatformAdmin", "MerchantAdmin"]
+order = 10

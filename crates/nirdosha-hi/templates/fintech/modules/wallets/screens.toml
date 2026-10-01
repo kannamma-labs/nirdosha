@@ -1,0 +1,63 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-wallets"
+version = "1.0.0"
+module = "M5"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "5.1"
+name = "Wallets"
+module = "M5"
+archetype = "crud_screens"
+roles = ["PlatformAdmin", "MerchantAdmin", "Customer"]
+datasets = ["wallets"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_wallets", route_path = "/wallets", generated_files = ["src/screens/m05_wallets.nir"] }
+data_binding = { entities = ["Wallet"], primary_key = "wallet_id", guard = { table = "wallet", purpose = "WalletOps" }, fields = [
+    { name = "wallet_id", type = "String" },
+    { name = "owner_id", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "balance_cents", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "WalletOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m05_wallets.nir"
+notes = "Stored-value wallets and balances. Balance is String; certified primitive does the math."
+
+[[screen]]
+id = "5.2"
+name = "Wallet Top-up"
+module = "M5"
+archetype = "wizard"
+roles = ["Customer", "MerchantAdmin"]
+stage = "blocked"
+blocked_by = ["primitive:wallet_topup", "primitive:payment_intent"]
+codegen = { template = "form", mount_symbol = "mount_wallet_topup", route_path = "/wallets/topup", generated_files = ["src/screens/m05_wallets.nir"] }
+data_binding = { entities = ["Wallet"], primary_key = "wallet_id", guard = { table = "wallet", purpose = "WalletOps" }, fields = [
+    { name = "wallet_id", type = "String" },
+    { name = "amount_cents", type = "String" },
+    { name = "payment_method", type = "String" }
+] }
+[screen.parameters]
+access = "role_gated"
+[[screen.parameters.steps]]
+name = "Amount"
+[[screen.parameters.steps.fields]]
+name = "wallet_id"
+type = "String"
+[[screen.parameters.steps.fields]]
+name = "amount_cents"
+type = "String"
+[[screen.parameters.steps]]
+name = "Method"
+[[screen.parameters.steps.fields]]
+name = "payment_method"
+type = "String"
+file = "src/screens/m05_wallets.nir"
+notes = "BLOCKED: needs payment-intent and wallet top-up primitives."

@@ -1,0 +1,12 @@
+// Adversarial probe 04: Multiple mutable aliases via &
+// Claim under test: & has no full &mut-style exclusivity; only box is fully affine.
+// Expected (per SECURITY.md): this class of program may type-check.
+// Goal: observe whether concurrent mutation through aliases is possible
+// or whether runtime/ownership still prevents observable races.
+
+fn main() {
+    let mut x: i64 = 10
+    // Attempt patterns that would be rejected by a full borrow checker
+    // (exact syntax depends on current language surface for & / mut)
+    print(x)
+}

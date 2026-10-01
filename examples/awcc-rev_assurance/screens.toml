@@ -1,0 +1,1936 @@
+# ============================================================================
+# screens.toml — AWCC Revenue Assurance (RA) screen register (definitive, 152 screens)
+# Consumed by tests/verify_screen_inventory.rs
+#
+# Domain:  AWCC (Afghan Wireless Communication Company) Revenue Assurance product.
+#          Covers CDR/usage reconciliation, billing accuracy, interconnect & roaming,
+#          VAS/digital revenue, leakage & margin, ATRA regulatory reporting, and
+#          adjacent fraud-overlap surfaces surfaced to RA — not the fraud product itself.
+#
+# stage:    built     = rendered today (file must exist)
+#           emittable = all 3 ingredients present; screen not yet written
+#           interim   = partial version shippable now (crud/table), full fidelity blocked
+#           blocked   = nothing shippable until blocked_by closes
+#           delegated = owned by external system (IdP)
+#
+# roles:    "<Role>:R" | "<Role>:R/W" | "<Role>:W"
+#          PascalCase logical roles — runtime idents minted by app_shell!.
+#          RA product roles:
+#            RaAnalyst         (L1 investigator — CDR discrepancies, leak cases)
+#            RaLead            (L2 team lead — four-eyes approver, escalations)
+#            FinanceController (L3 — final ATRA signer, MLRO-equivalent)
+#            OpsEngineer       (real-time wall, holds, intervention queue)
+#            PolicyEngineer    (rule/threshold/model author)
+#            Admin             (system & ops admin)
+#            Auditor           (read-only auditor portal)
+#            QaReviewer        (QA sampling & scorecards)
+#            CsAgent           (CS transaction status lookup — 4 fields only)
+#            RetailLiaison     (business customer status — single field)
+#            McpCopilot        (AI copilot panel; no menus; tools-only surface)
+#            RegulatorViewer   (ATRA inspector — scoped delegation view)
+#
+# datasets: PG.* RDBMS | RD.* refdata | AC.* audit chain | GR.* graph projections
+#           K.* kafka topics | L.* sanctions/watchlist store | O.* object storage
+#           CATALOG.* compiled metadata | RUNTIME.* guard runtime | IDP.* identity
+#           GW.* gateways | STATIC.* signed build docs | EXT.* external integrations
+# blocked_by: ticket:T-xx | dataset:<id> | archetype:<name> | engine:<name>
+#             integration:<name> | external:<name> | phase:<x>
+# ============================================================================
+
+[metadata]
+source_inventory = "examples/awcc-rev_assurance/PROMPT.md"
+version = "1.0.0"
+total_screens = 152
+# NOTE: scope mirrors the RTM AML corpus (152) for parity — RA-specific modules
+# replace AML-specific ones (CDR Reconciliation ↔ Alerts, Leak Cases ↔ Cases,
+# ATRA Reporting ↔ SAR, MSISDN 360 ↔ Customer 360, etc.).
+
+# ---------------------------------------------------------------- M1 Auth (6)
+[[screen]]
+id = "1.1"
+name = "Login"
+module = "M1"
+archetype = "login!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.users_file"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m01_auth.nir"
+notes = "demo avatar picker; production via AWCC_LDAP_USERS (Active Directory against AWCC corporate domain)"
+
+[[screen]]
+id = "1.2"
+name = "MFA Challenge"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.mfa"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+notes = "guard step_up(mfa) on sensitive writes is separate and stays in-app"
+
+[[screen]]
+id = "1.3"
+name = "Forgot/Reset Password"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.reset"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+
+[[screen]]
+id = "1.4"
+name = "First-Login Setup"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.onboarding"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+
+[[screen]]
+id = "1.5"
+name = "Session Timeout / Re-auth"
+module = "M1"
+archetype = "none"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["IDP.session", "AC.delegation_registry"]
+blocked_by = ["external:IdP"]
+stage = "delegated"
+notes = "guard remainder = copilot TTL revoke; surfaces as banner, no screen"
+
+[[screen]]
+id = "1.6"
+name = "Access Denied / Locked"
+module = "M1"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["AC.deny_records", "PG.user_role", "PG.unlock_request"]
+blocked_by = []
+stage = "emittable"
+notes = "GuardError named reasons surfaced natively on every deny"
+
+# -------------------------------------------------------- M2 Dashboards (7)
+[[screen]]
+id = "2.1"
+name = "Global Navigation Shell"
+module = "M2"
+archetype = "app_shell!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["PG.user_role", "PG.user_profile"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m02_shell.nir"
+notes = "nav role-filtered; env badge (prod/staging/demo)"
+
+[[screen]]
+id = "2.2"
+name = "L1 My Day Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["RaAnalyst:R"]
+datasets = ["PG.alert", "PG.case_task"]
+blocked_by = []
+stage = "built"
+notes = "C1: tasks widget real (case-task-read); assignee=me scope, disclosed"
+
+[[screen]]
+id = "2.3"
+name = "Team Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["RaLead:R"]
+datasets = ["PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m02_dashboards.nir"
+notes = "aggregates only; cohort_floor on people-level views (team-size >= 5)"
+
+[[screen]]
+id = "2.4"
+name = "Finance Controller Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["FinanceController:R", "RaLead:R"]
+datasets = ["PG.atra_bundle", "PG.leak_case", "PG.alert"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m02_dashboards.nir"
+notes = "real FC aggregate dashboard at /dashboard/finance — ATRA rows masked for RaLead (V7 tipping-off: absence, not disabled)"
+
+[[screen]]
+id = "2.5"
+name = "Real-Time CDR Monitoring Wall"
+module = "M2"
+archetype = "crud_screens!"
+combo = ["refresh_seconds"]
+roles = ["OpsEngineer:R", "RaLead:R"]
+datasets = ["K.guard.decisions", "PG.cdr"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m02_dashboards.nir"
+notes = "T-09: real /wall over PG.cdr with refresh_seconds/sort/countdown; K.guard.decisions ticker (real-time rate/reject decisions) still future work"
+
+[[screen]]
+id = "2.6"
+name = "Executive KPI Dashboard"
+module = "M2"
+archetype = "dashboard!"
+combo = []
+roles = ["FinanceController:R", "Admin:R"]
+datasets = ["PG.alert", "PG.leak_case", "PG.model_run_stat"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m02_dashboards.nir"
+notes = "C2: model-run-stat-read real (model_run_stat genuinely derived from alert_table — RA anomaly alerts feed the same stat view); period-over-period comparison not built (no historical snapshot retention)"
+
+[[screen]]
+id = "2.7"
+name = "Saved Views Manager"
+module = "M2"
+archetype = "crud_screens!"
+combo = ["app_shell!"]
+roles = ["AllRoles:R/W"]
+datasets = ["PG.saved_view"]
+blocked_by = []
+stage = "emittable"
+
+# ------------------------------------------------ M3 CDR Reconciliation (10)
+# The RA equivalent of the AML M3 Alerts module. Each "alert" is a CDR/usage
+# discrepancy surfaced by the reconciliation engine (missing CDR, duplicate,
+# rating mismatch, unbilled event, etc.).
+[[screen]]
+id = "3.1"
+name = "CDR Discrepancy Work Queue"
+module = "M3"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R", "RaLead:R", "QaReviewer:R", "McpCopilot:R"]
+datasets = ["PG.alert", "RD.disposition_code"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "search q real (I15 predicate_use pushdown, T-12 closed); alert_type ∈ {missing_cdr, duplicate_cdr, rating_mismatch, unbilled_event, over_charge, under_charge, med_miss}"
+
+[[screen]]
+id = "3.2"
+name = "CDR Discrepancy Detail"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["RaAnalyst:R/W", "RaLead:R/W", "QaReviewer:R", "McpCopilot:R/W"]
+datasets = ["PG.alert", "PG.cdr", "PG.subscriber", "AC.alert_chain"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "atra_linked must be absent (T-02 drop-mask — tipping-off rule); copilot: score absent — workspace! real since B11 (related_alerts_for_alert combo lives on 3.4)"
+
+[[screen]]
+id = "3.3"
+name = "Disposition Panel"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workflow_transitions"]
+roles = ["RaAnalyst:R/W", "RaLead:R/W"]
+datasets = ["PG.alert", "RD.disposition_code"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "AlertStatus machine; rationale invariant + closed disposition_code set; evidence checkboxes (linked CDR IDs, charge delta proof)"
+
+[[screen]]
+id = "3.4"
+name = "Related & Linked Discrepancies"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["RaAnalyst:R", "McpCopilot:R"]
+datasets = ["PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "related_alerts_for_alert (B11): same-case discrepancies, or same-subscriber/MSISDN CDR siblings when no case yet — real guarded read at /alerts/{id}/related"
+
+[[screen]]
+id = "3.5"
+name = "Bulk Actions"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["multi_select_form"]
+roles = ["RaLead:R/W", "RaAnalyst:R/W"]
+datasets = ["PG.alert"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "lead cap 100; per-row audit receipts (I1) — no batch rationale shortcut"
+
+[[screen]]
+id = "3.6"
+name = "Reassignment / Pickup"
+module = "M3"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W", "RaLead:R/W"]
+datasets = ["PG.alert", "PG.user_role"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+
+[[screen]]
+id = "3.7"
+name = "Pending Info / RFI"
+module = "M3"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.alert", "PG.case_task"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "C1: real list+create over case_task (item_ref=alert:<id>); SLA-clock-pause is AlertStatus's own pending_info state, set separately"
+
+[[screen]]
+id = "3.8"
+name = "Escalation to Leak Case"
+module = "M3"
+archetype = "wizard!"
+combo = []
+roles = ["RaAnalyst:R/W", "McpCopilot:R/W"]
+datasets = ["PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "escalation form at /alerts/{id}/escalate -> redirect to /cases/new; T-07: single-form by design (no session to lose)"
+
+[[screen]]
+id = "3.9"
+name = "SLA & Aging Monitor"
+module = "M3"
+archetype = "dashboard!"
+combo = []
+roles = ["RaLead:R", "FinanceController:R"]
+datasets = ["PG.alert", "PG.sla_config"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "real SLA config table at /alerts/sla with aging buckets (24h/48h/72h/7d) and auto-escalate flags"
+
+[[screen]]
+id = "3.10"
+name = "CDR Discrepancy Audit History"
+module = "M3"
+archetype = "crud_screens!"
+combo = ["workspace!", "ac_timeline"]
+roles = ["AllRoles:R", "Auditor:R"]
+datasets = ["AC.alert_chain"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m03_alerts.nir"
+notes = "immutable before→after rows — entity_audit_timeline (B11) reuses AC.all_chains real since B8, at /alerts/{id}/audit, purpose(Audit) — real for Auditor/FinanceController/RaLead/Admin; RaAnalyst has no audit_chain grant (96_restricted_views.nir's disclosed gap, not invented around here), so 'AllRoles:R' is aspirational for that one role"
+
+# -------------------------------------------------------------- M4 Leak Cases (14)
+[[screen]]
+id = "4.1"
+name = "Leak Case Queue / Board"
+module = "M4"
+archetype = "kanban_board!"
+combo = ["crud_screens!"]
+roles = ["RaAnalyst:R/W", "RaLead:R/W", "McpCopilot:R"]
+datasets = ["PG.leak_case"]
+blocked_by = []
+stage = "built"
+notes = "drag graying via kanban_board!'s machine: clause, reading the real LeakCaseStatus workflow! transition graph (new→open→in_review→pending_fin→closed)"
+
+[[screen]]
+id = "4.2"
+name = "Leak Case Overview"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R", "RaLead:R", "QaReviewer:R", "McpCopilot:R"]
+datasets = ["PG.leak_case", "PG.alert", "PG.atra_bundle"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "read-only case overview at /cases/{id}/overview"
+
+[[screen]]
+id = "4.3"
+name = "Investigation Workspace"
+module = "M4"
+archetype = "workspace!"
+combo = []
+roles = ["RaAnalyst:R/W", "RaLead:R/W", "McpCopilot:R/W"]
+datasets = ["PG.leak_case", "PG.alert", "PG.cdr", "PG.subscriber", "PG.case_evidence", "AC.case_chain"]
+blocked_by = ["dataset:PG.case_evidence"]
+stage = "interim"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "workspace! real since B11 — related_alerts_for_case + case_cdrs_for_case panels, budget-capped, at /cases/{id}/workspace; evidence pinboard (PG.case_evidence) still unbuilt, sole remaining blocker"
+
+[[screen]]
+id = "4.4"
+name = "Linked Discrepancies Tab"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["RaAnalyst:R", "McpCopilot:R"]
+datasets = ["PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "real guarded read at /cases/{id}/alerts (related_alerts_for_case, B11) — no longer filtered-list interim"
+
+[[screen]]
+id = "4.5"
+name = "Case CDRs / Usage Tab"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["RaAnalyst:R/W", "McpCopilot:R"]
+datasets = ["PG.cdr", "PG.case_txn_scope"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "PG.case_txn_scope real (B11) — derived from the case's linked alerts' cdr_ids, materialized via system_write, read at /cases/{id}/transactions under case-txn-scope-read (RaAnalyst, RevenueInvestigation)"
+
+[[screen]]
+id = "4.6"
+name = "Documents & Evidence"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W", "RaLead:R"]
+datasets = ["O.evidence", "PG.evidence_doc"]
+blocked_by = []
+stage = "emittable"
+notes = "blobs in object store; metadata guarded"
+
+[[screen]]
+id = "4.7"
+name = "Notes & Activity Timeline"
+module = "M4"
+archetype = "communication_feed!"
+combo = []
+roles = ["RaAnalyst:R/W", "RaLead:R/W", "McpCopilot:R/W"]
+datasets = ["PG.case_note"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "4.8"
+name = "Tasks & Checklist"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W", "RaLead:R/W"]
+datasets = ["PG.case_task"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "C1: real list/create/update over case_task (item_ref=case:<id>, task_type=checklist)"
+
+[[screen]]
+id = "4.9"
+name = "Internal RFI"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.case_task"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "C1: real list+create over case_task (item_ref=case:<id>, task_type=rfi); targets Billing/IN/Mediation/PCRF owners"
+
+[[screen]]
+id = "4.10"
+name = "Disposition & Closure"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["workflow_transitions"]
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.leak_case", "RD.disposition_code"]
+blocked_by = []
+stage = "built"
+notes = "LeakCaseStatus machine; alert_ids immutable; closed disposition set; leak_amount_estimate + recovered_amount invariant"
+
+[[screen]]
+id = "4.11"
+name = "Four-Eyes Review"
+module = "M4"
+archetype = "approval_inbox!"
+combo = []
+roles = ["RaLead:R/W"]
+datasets = ["PG.leak_case", "RUNTIME.pending_approvals"]
+blocked_by = []
+stage = "built"
+notes = "maker≠checker enforced; return needs reason; leak_amount > threshold auto-routes to 4.12"
+
+[[screen]]
+id = "4.12"
+name = "Escalation to Finance Controller"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["approval_mint"]
+roles = ["RaLead:R/W"]
+datasets = ["PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "escalation form at /cases/{id}/escalate-fc -> status escalate; leak_amount > AFN 5M auto-escalates"
+
+[[screen]]
+id = "4.13"
+name = "Merge / Link Leak Cases"
+module = "M4"
+archetype = "crud_screens!"
+combo = ["confirm_modal"]
+roles = ["RaLead:R/W"]
+datasets = ["PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m04_cases.nir"
+notes = "merge/link form at /cases/{id}/merge -> alert_ids append; root_case_id invariant"
+
+[[screen]]
+id = "4.14"
+name = "Initiate ATRA"
+module = "M4"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.leak_case", "PG.atra_bundle"]
+blocked_by = []
+stage = "built"
+notes = "mounted at m12_atra.nir's /atra create route (crud_screens! guard.create_fields, not wizard! — batch 2's own judgment call, see m12_atra.nir header); real atra_subject_in_case invariant enforced; case-past-investigating gate not separately checked (disclosed gap)"
+
+# ---------------------------------------------------------- M5 Subscriber (10)
+[[screen]]
+id = "5.1"
+name = "Global Entity Search"
+module = "M5"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R", "RaLead:R", "OpsEngineer:R", "QaReviewer:R", "McpCopilot:R"]
+datasets = ["PG.subscriber", "PG.cdr", "PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m05_subscriber.nir"
+notes = "MSISDN/IMSI/ICCID search at /search (customer axis pending subscriber read grants)"
+
+[[screen]]
+id = "5.2"
+name = "MSISDN 360"
+module = "M5"
+archetype = "workspace!"
+combo = []
+roles = ["RaAnalyst:R", "RaLead:R", "McpCopilot:R"]
+datasets = ["PG.subscriber", "PG.account", "PG.cdr", "L.sanctions_lists", "AC.entity_chain"]
+blocked_by = ["ticket:T-06"]
+stage = "blocked"
+notes = "masked fields ABSENT; national_id partial_last4; copilot restricted set — workspace! archetype real since B11 (dropped from blocked_by), but this screen deliberately NOT mounted: no guard_policy! anywhere in this corpus grants RaAnalyst/RaLead/McpCopilot (this screen's own declared roles) any read on subscriber — only RetailLiaison (one masked field) and Auditor (broad) — m05_subscriber.nir's own doc comment discloses this pre-existing gap; inventing a grant to make this screen 'work' is a policy decision outside this rollout's authority, so the cross-entity-context ticket stays blocking even though this corpus has no dedicated token for 'missing role grant'"
+
+[[screen]]
+id = "5.3"
+name = "KYC/HLR Document Viewer"
+module = "M5"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R", "QaReviewer:R"]
+datasets = ["O.kyc_docs", "PG.kyc_doc"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "5.4"
+name = "Risk Score Breakdown"
+module = "M5"
+archetype = "workspace!"
+combo = ["dashboard!"]
+roles = ["RaAnalyst:R", "PolicyEngineer:R"]
+datasets = ["PG.risk_factor", "PG.risk_history", "PG.subscriber"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "5.5"
+name = "Expected vs Actual Usage"
+module = "M5"
+archetype = "dashboard!"
+combo = []
+roles = ["RaAnalyst:R"]
+datasets = ["PG.subscriber", "PG.cdr"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m05_subscriber.nir"
+notes = "expected usage profile (ARPU band, plan allowance) vs actual CDR-rated usage; delta flag"
+
+[[screen]]
+id = "5.6"
+name = "Related Parties / UBO"
+module = "M5"
+archetype = "crud_screens!"
+combo = ["tree_view"]
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.subscriber_rel", "CATALOG.relation_ubo_closure"]
+blocked_by = ["archetype:tree_view"]
+stage = "interim"
+notes = "table now; ubo_closure Tier-2 materialized; tree = graph renderer later"
+
+[[screen]]
+id = "5.7"
+name = "Adverse / Churn Media Results"
+module = "M5"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.adverse_media", "EXT.news_provider"]
+blocked_by = ["integration:news_provider"]
+stage = "blocked"
+
+[[screen]]
+id = "5.8"
+name = "Entity Discrepancy/Case History"
+module = "M5"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["RaAnalyst:R"]
+datasets = ["PG.alert", "PG.leak_case", "PG.subscriber"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m05_subscriber.nir"
+notes = "subject-scoped alert/case history at /subscribers/{id}/history"
+
+[[screen]]
+id = "5.9"
+name = "Internal Risk Notes/Flags"
+module = "M5"
+archetype = "communication_feed!"
+combo = []
+roles = ["RaAnalyst:R/W", "RaLead:R/W"]
+datasets = ["PG.entity_flag"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "5.10"
+name = "Restriction/Exit Recommendation"
+module = "M5"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["RaAnalyst:R/W", "RaLead:R/W"]
+datasets = ["PG.subscriber_restriction", "PG.subscriber"]
+blocked_by = []
+stage = "emittable"
+
+# ------------------------------------------------------------ M6 CDR Detail (8)
+[[screen]]
+id = "6.1"
+name = "CDR Search"
+module = "M6"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R", "OpsEngineer:R", "McpCopilot:R"]
+datasets = ["PG.cdr", "RD.currency"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m06_cdr.nir"
+notes = "filters real (T-12 closed, predicate_use fields: msisdn, iccid, imei, start_ts, end_ts, service_type, partner_id)"
+
+[[screen]]
+id = "6.2"
+name = "CDR Detail"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["workspace!"]
+roles = ["RaAnalyst:R", "OpsEngineer:R", "QaReviewer:R", "Auditor:R", "McpCopilot:R"]
+datasets = ["PG.cdr", "K.guard.decisions", "PG.screening_hit"]
+blocked_by = []
+stage = "built"
+notes = "crud detail + real alert/case links (B11): related_alerts_for_cdr at /cdrs/{id}/related-alerts; card_token masked; copilot ⛔ alert/case links (unchanged, McpCopilot's own corpus posture)"
+
+[[screen]]
+id = "6.3"
+name = "Ledger View"
+module = "M6"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R"]
+datasets = ["PG.cdr"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m06_cdr.nir"
+notes = "double-entry view: switch-side vs mediation-side vs billing-side CDR counts; reconciliation deltas"
+
+[[screen]]
+id = "6.4"
+name = "Funds Flow Visualization"
+module = "M6"
+archetype = "sankey!"
+combo = []
+roles = ["RaAnalyst:R"]
+datasets = ["GR.flow_edge"]
+blocked_by = ["archetype:sankey!", "dataset:GR.flow_edge"]
+stage = "blocked"
+notes = "interim = 6.5 counterparty table; Watermark completeness honest"
+
+[[screen]]
+id = "6.5"
+name = "Counterparty Analysis"
+module = "M6"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R"]
+datasets = ["PG.cdr"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m06_cdr.nir"
+notes = "agg with cohort_floor; new-payee/partner flag; interconnect partner settlement preview"
+
+[[screen]]
+id = "6.6"
+name = "Pattern/Typology Match Viewer"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["RaAnalyst:R"]
+datasets = ["PG.alert", "K.guard.decisions"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m06_cdr.nir"
+notes = "RA typologies: SIM-box/wangari bypass, IPRS, subscription fraud, premium SMS abuse, STK injection"
+
+[[screen]]
+id = "6.7"
+name = "High-Frequency Structuring Visual"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["heatmap"]
+roles = ["RaAnalyst:R"]
+datasets = ["GR.agg_bins"]
+blocked_by = ["dataset:GR.agg_bins"]
+stage = "interim"
+notes = "binned table interim (precomputed — sidesteps I9); bars later; useful for multi-SIM micro-topup clustering"
+
+[[screen]]
+id = "6.8"
+name = "Device & Session Intelligence"
+module = "M6"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["RaAnalyst:R", "OpsEngineer:R"]
+datasets = ["PG.device_session", "GR.link_edge"]
+blocked_by = []
+stage = "emittable"
+notes = "impossible_travel feature exists (cell-handover velocity); blacklist = guarded admin op"
+
+# ------------------------------------------------------------- M7 Network (5)
+[[screen]]
+id = "7.1"
+name = "Interactive Entity Graph"
+module = "M7"
+archetype = "graph_renderer"
+combo = []
+roles = ["RaAnalyst:R", "RaLead:R"]
+datasets = ["GR.link_edge"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "engine:LinkGraphRuntime"]
+stage = "interim"
+interim = "crud_screens! over link_edge table"
+notes = "caps from policy (depth/nodes/exec); corrected sample's T-03 ref; links via shared IMEI/MSISDN/IBAN/wallet-id"
+
+[[screen]]
+id = "7.2"
+name = "Path Finder"
+module = "M7"
+archetype = "graph_renderer"
+combo = ["form"]
+roles = ["RaAnalyst:R"]
+datasets = ["GR.link_edge"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "engine:LinkGraphRuntime"]
+stage = "blocked"
+notes = "traversal full-audit, never sampled; max depth 5 per policy"
+
+[[screen]]
+id = "7.3"
+name = "Cluster Detection"
+module = "M7"
+archetype = "graph_renderer"
+combo = ["crud_screens!"]
+roles = ["RaAnalyst:R"]
+datasets = ["GR.link_edge"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge", "engine:LinkGraphRuntime"]
+stage = "blocked"
+notes = "communities = capability-gated (V5); unavailable shown honestly; useful for SIM-farm detection"
+
+[[screen]]
+id = "7.4"
+name = "Shared Attributes"
+module = "M7"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R"]
+datasets = ["PG.cdr", "PG.device_session"]
+blocked_by = []
+stage = "interim"
+file = "examples/awcc-rev_assurance/src/screens/m07_network.nir"
+notes = "Stage-0: cdr-only version (device/geo filters) needs only policy"
+
+[[screen]]
+id = "7.5"
+name = "Graph Snapshot Export"
+module = "M7"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["RaAnalyst:R/W"]
+datasets = ["GR.link_edge", "PG.governed_export"]
+blocked_by = ["archetype:graph_renderer", "dataset:GR.link_edge"]
+stage = "blocked"
+notes = "egress path; watermarked"
+
+# --------------------------------------------------------------- M8 Rules (12)
+[[screen]]
+id = "8.1"
+name = "Scenario Library"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["settings_screen!"]
+roles = ["PolicyEngineer:R", "Admin:R", "RaLead:R", "Auditor:R"]
+datasets = ["CATALOG.catalog_projection", "PG.rule_stat"]
+blocked_by = []
+stage = "emittable"
+notes = "rules ARE .nir source; library = compiled-metadata read; catalog_projection_table (real, seeded from awcc_guard_registry::dump()) + rule_stat_table now real — screen not yet written"
+
+[[screen]]
+id = "8.2"
+name = "Rule Builder / Editor"
+module = "M8"
+archetype = "rule_builder!"
+combo = []
+roles = ["PolicyEngineer:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = ["archetype:rule_builder!", "engine:graph_apply_flow"]
+stage = "blocked"
+notes = "interim = textarea proposal via graph_apply; rustc diagnostics = validation UX; RA scenarios = CDR-recon rules + leakage-detection rules"
+
+[[screen]]
+id = "8.3"
+name = "Threshold & Parameter Editor"
+module = "M8"
+archetype = "settings_screen!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "RaLead:R/W"]
+datasets = ["GR.project_graph", "RUNTIME.pending_approvals"]
+blocked_by = ["engine:graph_apply_flow"]
+stage = "interim"
+notes = "action=migrate; dry-run mandatory; simulation attestation; thresholds = missing-CDR-tolerance, rating-delta-band, ARPU-deviation-band"
+
+[[screen]]
+id = "8.4"
+name = "Segmentation & Scope Config"
+module = "M8"
+archetype = "crud_screens!"
+combo = []
+roles = ["PolicyEngineer:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = ["engine:graph_apply_flow"]
+stage = "interim"
+notes = "scope by: plan, service_type (voice/SMS/data/VAS), partner_id, region, prepaid/postpaid"
+
+[[screen]]
+id = "8.5"
+name = "Suppression/Dedup Logic"
+module = "M8"
+archetype = "settings_screen!"
+combo = []
+roles = ["PolicyEngineer:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = ["engine:graph_apply_flow"]
+stage = "interim"
+notes = "dedup window: same MSISDN+same alert_type within T = 1 alert; prevents CDR storm noise"
+
+[[screen]]
+id = "8.6"
+name = "Simulation & Backtesting"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["PolicyEngineer:R/W", "RaLead:R"]
+datasets = ["AC.replay", "PG.sim_result"]
+blocked_by = ["engine:policy_simulation", "phase:RFC0026-P4"]
+stage = "blocked"
+notes = "measures alert_volume/leak_amount_estimate/case_load/escalation_rate"
+
+[[screen]]
+id = "8.7"
+name = "Threshold Sensitivity What-if"
+module = "M8"
+archetype = "whatif!"
+combo = []
+roles = ["PolicyEngineer:R"]
+datasets = ["PG.sim_result"]
+blocked_by = ["archetype:whatif!", "engine:policy_simulation"]
+stage = "blocked"
+
+[[screen]]
+id = "8.8"
+name = "Approval Workflow"
+module = "M8"
+archetype = "approval_inbox!"
+combo = []
+roles = ["RaLead:R/W", "FinanceController:R/W"]
+datasets = ["RUNTIME.pending_approvals", "GR.project_graph"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m08_rules.nir"
+notes = "approval workflow landing at /rules/workflow, real inbox at /rules/approvals"
+
+[[screen]]
+id = "8.9"
+name = "Version History & Diff"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["diff_view"]
+roles = ["PolicyEngineer:R", "Auditor:R"]
+datasets = ["CATALOG.policy_versions", "AC.policy_chain"]
+blocked_by = ["dataset:CATALOG.catalog_projection"]
+stage = "blocked"
+
+[[screen]]
+id = "8.10"
+name = "Scheduling & Go-Live"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "RaLead:R/W"]
+datasets = ["GR.project_graph"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m08_rules.nir"
+notes = "scheduling/go-live landing at /rules/schedule"
+
+[[screen]]
+id = "8.11"
+name = "Whitelist/Allowlist"
+module = "M8"
+archetype = "crud_screens!"
+combo = []
+roles = ["PolicyEngineer:R/W", "RaLead:R/W", "RaAnalyst:R"]
+datasets = ["PG.allowlist"]
+blocked_by = ["dataset:PG.allowlist"]
+stage = "blocked"
+notes = "expiry ≤12mo; maker≠checker; whitelist = test MSISDN, partner_id, service_type"
+
+[[screen]]
+id = "8.12"
+name = "Scenario Performance"
+module = "M8"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["PolicyEngineer:R", "RaLead:R"]
+datasets = ["PG.rule_stat"]
+blocked_by = []
+stage = "emittable"
+notes = "FP%>90 auto-flagged red; leak-detection precision/recall per scenario"
+
+# ------------------------------------------------------------------ M9 ML (6)
+[[screen]]
+id = "9.1"
+name = "Model Registry"
+module = "M9"
+archetype = "crud_screens!"
+combo = []
+roles = ["PolicyEngineer:R/W", "Auditor:R"]
+datasets = ["CATALOG.model_artifacts", "PG.model_run_stat"]
+blocked_by = ["dataset:CATALOG.catalog_projection"]
+stage = "blocked"
+notes = "swap = guarded admin mutation; SignedArtifact; shadow flag; RA models: usage-anomaly, simswap-risk, simbox-risk, premium-rate-abuse"
+
+[[screen]]
+id = "9.2"
+name = "Model Performance Monitor"
+module = "M9"
+archetype = "dashboard!"
+combo = []
+roles = ["PolicyEngineer:R", "RaLead:R"]
+datasets = ["PG.model_run_stat"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m09_ml_models.nir"
+notes = "C2: volume/avg-score/fp-rate-by-version real, derived from alert_table; AUC/precision/recall/F1 not computed — no independent ground-truth signal in this corpus"
+
+[[screen]]
+id = "9.3"
+name = "Drift Monitoring"
+module = "M9"
+archetype = "dashboard!"
+combo = ["heatmap"]
+roles = ["PolicyEngineer:R"]
+datasets = ["PG.feature_stat"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m09_ml_models.nir"
+notes = "drift monitor landing at /models/drift-monitor, real dashboard at /models/drift"
+
+[[screen]]
+id = "9.4"
+name = "Champion/Challenger"
+module = "M9"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["PolicyEngineer:R/W"]
+datasets = ["CATALOG.model_artifacts", "PG.model_run_stat"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m09_ml_models.nir"
+notes = "champion/challenger landing at /models/challenger-landing, real dashboard at /models/challenger"
+
+[[screen]]
+id = "9.5"
+name = "Model Validation & Governance"
+module = "M9"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "FinanceController:R/W", "Auditor:R"]
+datasets = ["PG.model_validation"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m09_ml_models.nir"
+notes = "validator ≠ owner machine-checked (requires invariant(validator_ne_owner) on create); sign-off is a real status transition, not an escalation chain"
+
+[[screen]]
+id = "9.6"
+name = "Score Explainability Viewer"
+module = "M9"
+archetype = "workspace!"
+combo = []
+roles = ["RaAnalyst:R", "McpCopilot:R"]
+datasets = ["PG.model_run_stat"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m09_ml_models.nir"
+notes = "explainability landing at /alerts/{id}/explain-landing, real workspace at /alerts/{id}/explain; SHAP-style top features per anomaly score"
+
+# ---------------------------------------------------- M10 Reference Data (6)
+# RA equivalent of AML screening — but for telecom reference data: rate-plan
+# changes, partner-tier lists, blocked IMEI/MSISDN, sanctioned jurisdictions.
+[[screen]]
+id = "10.1"
+name = "Watchlist Hit Queue"
+module = "M10"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R"]
+datasets = ["PG.screening_hit", "RD.list_labels"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m10_screening.nir"
+notes = "hits against: IMEI blocklist, MSISDN blocklist, sanctioned-jurisdiction prefix list, partner-tier mismatch"
+
+[[screen]]
+id = "10.2"
+name = "Hit Review & Disposition"
+module = "M10"
+archetype = "crud_screens!"
+combo = ["form"]
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.screening_hit", "L.sanctions_lists", "O.evidence"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m10_screening.nir"
+notes = "side-by-side name/IMEI/MSISDN compare; true match auto-escalates to leak case"
+
+[[screen]]
+id = "10.3"
+name = "Screening Configuration"
+module = "M10"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["CATALOG.matcher_records", "PG.list_versions"]
+blocked_by = []
+stage = "emittable"
+notes = "threshold edits via migrate; V5 re-attestation; matchers: Levenshtein, Jaro-Winkler, prefix, IMEI-tac"
+
+[[screen]]
+id = "10.4"
+name = "Watchlist Management"
+module = "M10"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W", "RaAnalyst:R"]
+datasets = ["L.sanctions_lists", "O.uploads", "PG.internal_list"]
+blocked_by = []
+stage = "emittable"
+notes = "signed snapshots via ListProvider drivers; >20% delta confirm"
+
+[[screen]]
+id = "10.5"
+name = "Rescreening Monitor"
+module = "M10"
+archetype = "crud_screens!"
+combo = ["refresh_seconds"]
+roles = ["Admin:R"]
+datasets = ["PG.rescreen_job"]
+blocked_by = []
+stage = "emittable"
+notes = "T-09 half closed (refresh_seconds is real on crud_screens! now); still blocked on PG.rescreen_job (C9)"
+
+[[screen]]
+id = "10.6"
+name = "Historical Rescreen Campaigns"
+module = "M10"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.rescreen_campaign"]
+blocked_by = []
+stage = "emittable"
+
+# ----------------------------------------------------------- M11 Intervention (5)
+# Real-time hold/interception on usage events (zero-rated CDRs, premium-rate
+# SMS, suspicious top-ups) — RA equivalent of payment interception.
+[[screen]]
+id = "11.1"
+name = "Interception Queue"
+module = "M11"
+archetype = "crud_screens!"
+combo = ["refresh_seconds"]
+roles = ["OpsEngineer:R", "RaLead:R"]
+datasets = ["PG.payment"]
+blocked_by = []
+stage = "built"
+notes = "T-09 closed: real refresh_seconds poll, live countdown, sorted by time-remaining; interceptable events = high-value topup, premium-SMS MO, IPRS candidate"
+
+[[screen]]
+id = "11.2"
+name = "Hold Decision"
+module = "M11"
+archetype = "crud_screens!"
+combo = ["workflow_transitions"]
+roles = ["OpsEngineer:R/W"]
+datasets = ["PG.payment", "PG.screening_hit"]
+blocked_by = []
+stage = "built"
+notes = "I3 revalidate at commit; above-authority auto-routes to 11.3; closed hold_reason set"
+
+[[screen]]
+id = "11.3"
+name = "Override/Exception Approval"
+module = "M11"
+archetype = "approval_inbox!"
+combo = []
+roles = ["RaLead:R/W"]
+datasets = ["PG.payment", "RUNTIME.pending_approvals"]
+blocked_by = []
+stage = "built"
+notes = "authority limit vs amount checked; AFN thresholds"
+
+[[screen]]
+id = "11.4"
+name = "Auto-Release/Timeout Config"
+module = "M11"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.timeout_config"]
+blocked_by = []
+stage = "emittable"
+notes = "timeout resolves to DENY structurally — release-on-timeout not expressible (regulatory: must not silently drop CDR)"
+
+[[screen]]
+id = "11.5"
+name = "Hold Outcomes Log & Stats"
+module = "M11"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["RaLead:R", "FinanceController:R"]
+datasets = ["PG.payment"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m11_intervention.nir"
+
+# ------------------------------------------------------- M12 ATRA Reporting (11)
+# AML SAR module ↔ RA ATRA (Afghanistan Telecom Regulatory Authority)
+# reporting module. Tipping-off invariants mirror V7 from the AML corpus:
+# routes ABSENT (not disabled) for CsAgent/RetailLiaison/McpCopilot.
+[[screen]]
+id = "12.1"
+name = "ATRA Workbench Queue"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R", "FinanceController:R", "RaLead:R"]
+datasets = ["PG.atra_bundle", "PG.atra_submission"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m12_atra.nir"
+notes = "CsAgent/RetailLiaison/Copilot hard-deny (cs-no-atra / rm-no-atra / copilot-no-atra)"
+
+[[screen]]
+id = "12.2"
+name = "ATRA Draft Wizard"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.atra_bundle"]
+blocked_by = []
+stage = "built"
+notes = "draft state lives entirely in the guarded atra_bundle row (analyst-draft-atra/analyst-edit-atra), never in memory — no cookie-keyed session exists for ATRA at all, so there is nothing to crash: every field write is already a durable guarded_update addressable by atra_id. RD.jurisdiction/RD.activity_code stay collapsed into the flat activity_codes string field, not separate lookup-backed selects (disclosed gap)"
+
+[[screen]]
+id = "12.3"
+name = "Narrative Editor"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W", "FinanceController:R"]
+datasets = ["PG.atra_bundle"]
+blocked_by = []
+stage = "built"
+notes = "narrative is a single guarded text field (analyst-edit-atra, status==draft only); the six what/when/where/why/how/who attestation sub-fields and a word-count minimum are not separately modeled (disclosed gap, same field-granularity tradeoff as 12.2)"
+
+[[screen]]
+id = "12.4"
+name = "Subjects & Activity Tabs"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W"]
+datasets = ["PG.atra_bundle", "PG.cdr"]
+blocked_by = []
+stage = "built"
+notes = "subject is a single field, not a multi-subject registry; amount_total/cdr_refs are real guarded fields but no invariant yet blocks advance on a totals mismatch against the case's CDR scope (disclosed gap, needs T-06's cross-entity context to compute the comparison for real)"
+
+[[screen]]
+id = "12.5"
+name = "Supporting Attachments"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaAnalyst:R/W"]
+datasets = ["O.evidence", "PG.atra_bundle"]
+blocked_by = []
+stage = "emittable"
+notes = "≥1 statement (mediation extract or billing extract) + redaction confirm to submit"
+
+[[screen]]
+id = "12.6"
+name = "Finance Controller Review & Decision"
+module = "M12"
+archetype = "approval_inbox!"
+combo = []
+roles = ["FinanceController:R/W", "RaLead:R/W"]
+datasets = ["PG.atra_bundle", "RUNTIME.pending_approvals"]
+blocked_by = []
+stage = "built"
+notes = "atra_release quorum(2) timeout(deny); do-not-file needs legal-consult"
+
+[[screen]]
+id = "12.7"
+name = "Submission Tracking"
+module = "M12"
+archetype = "crud_screens!"
+combo = []
+roles = ["FinanceController:R", "RaLead:R"]
+datasets = ["PG.atra_submission", "GW.atra_gateway"]
+blocked_by = ["integration:ATRA"]
+stage = "blocked"
+
+[[screen]]
+id = "12.8"
+name = "Reporting Calendar"
+module = "M12"
+archetype = "dashboard!"
+combo = ["crud_screens!"]
+roles = ["FinanceController:R/W", "RaLead:R"]
+datasets = ["PG.reporting_calendar"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "12.9"
+name = "Continuing Activity ATRA Report"
+module = "M12"
+archetype = "crud_screens!"
+combo = ["dashboard!"]
+roles = ["FinanceController:R/W"]
+datasets = ["PG.atra_bundle", "PG.cdr"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m12_atra.nir"
+notes = "continuing activity ATRA queue at /atra/continuations"
+
+[[screen]]
+id = "12.10"
+name = "Filing Export/Validation"
+module = "M12"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["FinanceController:R/W", "RaLead:R/W"]
+datasets = ["PG.atra_bundle", "O.xml", "GW.atra_gateway"]
+blocked_by = ["integration:ATRA"]
+stage = "blocked"
+notes = "egress: full audit never sampled; 0 schema errors required; format = ATRA XML schema rev 2024-Q1"
+
+[[screen]]
+id = "12.11"
+name = "Tipping-Off Controls"
+module = "M12"
+archetype = "settings_screen!"
+combo = ["ac_timeline"]
+roles = ["FinanceController:R/W", "Auditor:R"]
+datasets = ["PG.atra_visibility", "AC.access_log"]
+blocked_by = []
+stage = "built"
+notes = "read-only this pass; resource-type-level access accounting, not row-level (bridge.nir atra_visibility_table's own doc comment) — FinanceController's write half (acknowledge/dismiss) not built"
+
+# --------------------------------------------------------- M13 Risk Config (5)
+[[screen]]
+id = "13.1"
+name = "Subscriber Risk Model Config"
+module = "M13"
+archetype = "settings_screen!"
+combo = ["approval_inbox!"]
+roles = ["PolicyEngineer:R/W", "RaLead:R/W"]
+datasets = ["CATALOG.classify_records", "PG.risk_factor"]
+blocked_by = []
+stage = "emittable"
+notes = "weights sum=100; no auto-downgrade; factors: ARPU-band, plan, region, tenure, simswap-history, fraud-history"
+
+[[screen]]
+id = "13.2"
+name = "Country Risk Editor"
+module = "M13"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W", "RaAnalyst:R"]
+datasets = ["RD.country_risk"]
+blocked_by = ["dataset:RD.country_risk"]
+stage = "blocked"
+notes = "sanctioned jurisdictions (OFAC/UN/EU consolidated); prefix-level risk for interconnect partners"
+
+[[screen]]
+id = "13.3"
+name = "Product/Channel Risk Config"
+module = "M13"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["RD.product_risk"]
+blocked_by = ["dataset:RD.product_risk"]
+stage = "blocked"
+notes = "prepaid vs postpaid; voice/SMS/data/VAS/MFS channels"
+
+[[screen]]
+id = "13.4"
+name = "PEP Classification & Handling"
+module = "M13"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["RD.pep_category"]
+blocked_by = ["dataset:RD.pep_category"]
+stage = "blocked"
+
+[[screen]]
+id = "13.5"
+name = "Global Parameters"
+module = "M13"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.global_params"]
+blocked_by = []
+stage = "emittable"
+
+# ------------------------------------------------------------------ M14 QA (5)
+[[screen]]
+id = "14.1"
+name = "QA Sampling Queue"
+module = "M14"
+archetype = "crud_screens!"
+combo = ["form"]
+roles = ["QaReviewer:R/W"]
+datasets = ["PG.qa_review", "PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m14_qa.nir"
+notes = "own-work excluded structurally"
+
+[[screen]]
+id = "14.2"
+name = "QA Scorecard"
+module = "M14"
+archetype = "crud_screens!"
+combo = ["linked_detail"]
+roles = ["QaReviewer:R/W"]
+datasets = ["PG.qa_review", "PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m14_qa.nir"
+
+[[screen]]
+id = "14.3"
+name = "Analyst Scorecards"
+module = "M14"
+archetype = "dashboard!"
+combo = []
+roles = ["RaAnalyst:R", "RaLead:R", "QaReviewer:R"]
+datasets = ["PG.qa_review"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m14_qa.nir"
+notes = "self view = own row only"
+
+[[screen]]
+id = "14.4"
+name = "Feedback & Coaching"
+module = "M14"
+archetype = "crud_screens!"
+combo = ["task_form"]
+roles = ["RaLead:R/W", "RaAnalyst:R/W"]
+datasets = ["PG.qa_review", "PG.case_task"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m14_qa.nir"
+notes = "C1: task_form combo real over case_task (item_ref=qa:<id>); archetype corrected communication_feed! -> crud_screens! (never mounted, same stale-label pattern B9 fixed for ATRA); primary resource stays qa_review (/qa/{id}/feedback)"
+
+[[screen]]
+id = "14.5"
+name = "Overturned Decisions Log"
+module = "M14"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["RaLead:R", "FinanceController:R"]
+datasets = ["PG.qa_review", "AC.alert_chain"]
+blocked_by = []
+stage = "built"
+
+# ----------------------------------------------------------- M15 Reporting (5)
+[[screen]]
+id = "15.1"
+name = "Standard Report Library"
+module = "M15"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaLead:R/W", "FinanceController:R", "Admin:R"]
+datasets = ["PG.report_def", "PG.report_run"]
+blocked_by = []
+stage = "emittable"
+notes = "RA-standard reports: CDR-recon-daily, leakage-monthly, partner-settlement-monthly, ATRA-quarterly, margin-Q"
+
+[[screen]]
+id = "15.2"
+name = "Ad-Hoc Report Builder"
+module = "M15"
+archetype = "report_builder!"
+combo = []
+roles = ["RaLead:R/W", "FinanceController:R"]
+datasets = ["PG.alert", "PG.leak_case", "PG.cdr"]
+blocked_by = ["archetype:report_builder!"]
+stage = "blocked"
+notes = "interim = preset reports via 15.1; PII auto-masked in aggregates (MSISDN partial_last4)"
+
+[[screen]]
+id = "15.3"
+name = "Scheduled Reports & Distribution"
+module = "M15"
+archetype = "crud_screens!"
+combo = []
+roles = ["RaLead:R/W"]
+datasets = ["PG.scheduled_report"]
+blocked_by = []
+stage = "emittable"
+notes = "zero new UI work — plain crud"
+
+[[screen]]
+id = "15.4"
+name = "Typology & Trend Analytics"
+module = "M15"
+archetype = "dashboard!"
+combo = ["heatmap"]
+roles = ["FinanceController:R", "RaLead:R"]
+datasets = ["PG.alert", "PG.leak_case"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m15_reporting.nir"
+notes = "typology/trends landing at /reports/typology, aggregates at /reporting/mis"
+
+[[screen]]
+id = "15.5"
+name = "Governed Export Center"
+module = "M15"
+archetype = "crud_screens!"
+combo = ["approval_inbox!"]
+roles = ["RaAnalyst:R/W", "RaLead:R/W", "Auditor:R"]
+datasets = ["PG.governed_export", "O.exports"]
+blocked_by = []
+stage = "built"
+notes = "export center landing at /exports, real propose/confirm paths per resource"
+
+# ------------------------------------------------------ M16 Notifications (5)
+[[screen]]
+id = "16.1"
+name = "Notification Center"
+module = "M16"
+archetype = "communication_feed!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["PG.notification"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m15_reporting.nir"
+
+[[screen]]
+id = "16.2"
+name = "Comments & @Mentions"
+module = "M16"
+archetype = "communication_feed!"
+combo = []
+roles = ["RaAnalyst:R/W", "RaLead:R/W", "McpCopilot:R"]
+datasets = ["PG.case_note"]
+blocked_by = []
+stage = "emittable"
+notes = "mention picker excludes users lacking entity access"
+
+[[screen]]
+id = "16.3"
+name = "Shift Handover"
+module = "M16"
+archetype = "communication_feed!"
+combo = ["checklist_form"]
+roles = ["RaAnalyst:R/W", "RaLead:R/W", "OpsEngineer:R/W"]
+datasets = ["PG.handover"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "16.4"
+name = "My Tasks"
+module = "M16"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["PG.case_task", "PG.alert"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m16_notifications.nir"
+notes = "task list at /tasks (self-scope filter pending)"
+
+[[screen]]
+id = "16.5"
+name = "Notification Preferences"
+module = "M16"
+archetype = "settings_screen!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["PG.user_profile"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m16_notifications.nir"
+
+# ----------------------------------------------------------- M17 Knowledge (4)
+[[screen]]
+id = "17.1"
+name = "Typology Library"
+module = "M17"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m16_notifications.nir"
+notes = "notification preferences at /preferences/notifications"
+
+[[screen]]
+id = "17.2"
+name = "SOP/Procedure Viewer"
+module = "M17"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m17_knowledge.nir"
+
+[[screen]]
+id = "17.3"
+name = "Regulatory Reference (ATRA)"
+module = "M17"
+archetype = "crud_screens!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m17_knowledge.nir"
+notes = "ATRA Telecom Regulation Law + RA-related bylaws; OFAC/UN sanctions lists"
+
+[[screen]]
+id = "17.4"
+name = "In-Context Help"
+module = "M17"
+archetype = "dashboard!"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["STATIC.signed_docs"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m17_knowledge.nir"
+
+# -------------------------------------------------------------- M18 Admin (10)
+[[screen]]
+id = "18.1"
+name = "User Management"
+module = "M18"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.user_role", "IDP.users_file"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m17_knowledge.nir"
+notes = "in-context help at /help/context (shared static glossary)"
+
+[[screen]]
+id = "18.2"
+name = "Role & Permission Matrix"
+module = "M18"
+archetype = "crud_screens!"
+combo = ["diff_view"]
+roles = ["Admin:R"]
+datasets = ["CATALOG.policy_records"]
+blocked_by = ["dataset:CATALOG.catalog_projection"]
+stage = "blocked"
+notes = "READ-ONLY — the guard_policy! set IS the matrix; edits via 8.2/8.3 flow"
+
+[[screen]]
+id = "18.3"
+name = "Queue Assignment Rules"
+module = "M18"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.assignment_rules"]
+blocked_by = []
+stage = "emittable"
+notes = "rules: assign by alert_type, partner_id, region, amount-band, plan"
+
+[[screen]]
+id = "18.4"
+name = "SLA & Workflow Config"
+module = "M18"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.sla_config"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m18_admin.nir"
+
+[[screen]]
+id = "18.5"
+name = "Reason Code Taxonomy"
+module = "M18"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W", "RaAnalyst:R"]
+datasets = ["RD.disposition_code"]
+blocked_by = ["dataset:RD.disposition_code"]
+stage = "blocked"
+notes = "missing=FailClosed on reference"
+
+[[screen]]
+id = "18.6"
+name = "Notification Templates"
+module = "M18"
+archetype = "crud_screens!"
+combo = ["preview"]
+roles = ["Admin:R/W"]
+datasets = ["PG.notif_template", "PG.notification"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "18.7"
+name = "Data Retention & Purge"
+module = "M18"
+archetype = "settings_screen!"
+combo = ["approval_inbox!"]
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.retention_config"]
+blocked_by = []
+stage = "emittable"
+notes = "legal-hold invariant; purge dual-control + type-PURGE confirm; ATRA retention = 7y"
+
+[[screen]]
+id = "18.8"
+name = "Delegate/Proxy Access"
+module = "M18"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.delegation"]
+blocked_by = []
+stage = "emittable"
+notes = "TTL ≤90d; I11 full audit"
+
+[[screen]]
+id = "18.9"
+name = "Privacy/DSAR Handling"
+module = "M18"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["Admin:R/W", "RaLead:R/W"]
+datasets = ["PG.dsar_request", "PG.subscriber", "O.packs"]
+blocked_by = []
+stage = "emittable"
+notes = "30d deadline; legal-hold conflict flag"
+
+[[screen]]
+id = "18.10"
+name = "License & Environment"
+module = "M18"
+archetype = "settings_screen!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.license_info", "CATALOG.manifest"]
+blocked_by = []
+stage = "emittable"
+
+# --------------------------------------------------------------- M19 IT Ops (8)
+[[screen]]
+id = "19.1"
+name = "System Health Dashboard"
+module = "M19"
+archetype = "dashboard!"
+combo = ["refresh_seconds"]
+roles = ["Admin:R"]
+datasets = ["PG.svc_health", "PG.incident"]
+blocked_by = ["ticket:T-09"]
+stage = "blocked"
+notes = "modules self-report via notify(topic) -- not built this pass; dashboard!'s refresh_seconds already existed pre-T-09, so this screen's actual T-09 gap (a real notify(topic) health self-report feed from CDR ingest) is untouched"
+
+[[screen]]
+id = "19.2"
+name = "Data Pipeline Monitor"
+module = "M19"
+archetype = "dashboard!"
+combo = ["crud_screens!"]
+roles = ["Admin:R"]
+datasets = ["PG.pipeline_stat"]
+blocked_by = []
+stage = "emittable"
+notes = "CDR-mediation pipeline (switch→IN→mediation→billing); pause/restart/reprocess = guarded admin mutations"
+
+[[screen]]
+id = "19.3"
+name = "Exception Queue"
+module = "M19"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.ingest_exception"]
+blocked_by = []
+stage = "emittable"
+notes = "CDR ingest exceptions: parse-fail, missing-field, duplicate-seq, late-arrival"
+
+[[screen]]
+id = "19.4"
+name = "Data Reconciliation"
+module = "M19"
+archetype = "dashboard!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.recon_report"]
+blocked_by = []
+stage = "emittable"
+notes = "switch-count vs mediation-count vs billing-count per hour/day"
+
+[[screen]]
+id = "19.5"
+name = "Integration/API Monitor"
+module = "M19"
+archetype = "dashboard!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.integration_stat"]
+blocked_by = []
+stage = "emittable"
+notes = "IN/SMS/HSS/PCRF/mediation/BSS/ATRA gateway status"
+
+[[screen]]
+id = "19.6"
+name = "Batch/EOD Job Monitor"
+module = "M19"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.batch_job"]
+blocked_by = []
+stage = "emittable"
+notes = "EOD rating, partner-settlement batch, ATRA filing batch"
+
+[[screen]]
+id = "19.7"
+name = "Capacity & Performance Trends"
+module = "M19"
+archetype = "dashboard!"
+combo = []
+roles = ["Admin:R"]
+datasets = ["PG.capacity_stat"]
+blocked_by = []
+stage = "emittable"
+
+[[screen]]
+id = "19.8"
+name = "Reference Data Sync"
+module = "M19"
+archetype = "crud_screens!"
+combo = []
+roles = ["Admin:R/W"]
+datasets = ["PG.sync_stat", "RD.all"]
+blocked_by = []
+stage = "emittable"
+notes = "FX (AFN/USD) staleness >24h alerts; fail-open/closed setting"
+
+# ---------------------------------------------------------------- M20 Audit (3)
+[[screen]]
+id = "20.1"
+name = "Audit Log Search"
+module = "M20"
+archetype = "crud_screens!"
+combo = ["timeline"]
+roles = ["Auditor:R", "Admin:R", "FinanceController:R"]
+datasets = ["AC.all_chains"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m20_audit.nir"
+notes = "immutable; export via governed path — AC.all_chains projection + /audit/chains route real since B8; B11's cross-entity context layer closes this ticket for real (no code change needed here — the route was already complete)"
+
+[[screen]]
+id = "20.2"
+name = "Config Change History"
+module = "M20"
+archetype = "crud_screens!"
+combo = ["diff_view"]
+roles = ["Auditor:R", "FinanceController:R"]
+datasets = ["AC.policy_chain", "AC.config_chains"]
+blocked_by = []
+stage = "built"
+notes = "AC.config_chains half real (window_config/user_role/delegation_token audit chains via /audit/config-history); AC.policy_chain has no runtime table — guard_policy! corpus is static, not a runtime-editable dataset in this demo"
+
+[[screen]]
+id = "20.3"
+name = "Regulatory Audit Pack Export"
+module = "M20"
+archetype = "crud_screens!"
+combo = ["governed_export"]
+roles = ["FinanceController:R/W", "Auditor:R/W"]
+datasets = ["AC.all_chains", "O.packs"]
+blocked_by = []
+stage = "built"
+notes = "watermarked + content-hashed via the governed-export path (B7); NOT encrypted-at-rest (export.rs's own disclosed limitation, inherited from B7)"
+
+# ------------------------------------------------------ M21 Restricted (4)
+[[screen]]
+id = "21.1"
+name = "Auditor Read-Only Portal"
+module = "M21"
+archetype = "app_shell!"
+combo = ["all_read_screens_ro"]
+roles = ["Auditor:R"]
+datasets = ["PG.all", "AC.all_chains", "CATALOG.all"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m21_restricted.nir"
+notes = "auditor read-only portal at /auditor with watermarked lists"
+
+[[screen]]
+id = "21.2"
+name = "Regulator Inspection View (ATRA)"
+module = "M21"
+archetype = "app_shell!"
+combo = ["crud_screens!_ro"]
+roles = ["RegulatorViewer:R"]
+datasets = ["PG.leak_case", "PG.atra_bundle", "PG.cdr"]
+blocked_by = ["engine:delegation_mint"]
+stage = "blocked"
+notes = "scoped delegation §9.4 only; export denied; session recorded"
+
+[[screen]]
+id = "21.3"
+name = "CS Transaction Status Lookup"
+module = "M21"
+archetype = "crud_screens!"
+combo = []
+roles = ["CsAgent:R"]
+datasets = ["PG.payment"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m21_restricted.nir"
+notes = "4 fields only (msisdn, amount, ts, status); atra/case/alert hard-deny; full audit per peek"
+
+[[screen]]
+id = "21.4"
+name = "Retail/Business Subscriber Status View"
+module = "M21"
+archetype = "crud_screens!"
+combo = []
+roles = ["RetailLiaison:R"]
+datasets = ["PG.subscriber"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m21_restricted.nir"
+notes = "restriction_status single field only"
+
+# ---------------------------------------------------------------- M22 Misc (3)
+[[screen]]
+id = "22.1"
+name = "My Profile & Preferences"
+module = "M22"
+archetype = "settings_screen!"
+combo = []
+roles = ["AllRoles:R/W"]
+datasets = ["PG.user_profile"]
+blocked_by = []
+stage = "built"
+file = "examples/awcc-rev_assurance/src/screens/m22_misc.nir"
+notes = "password change ⛔ delegated:IdP"
+
+[[screen]]
+id = "22.2"
+name = "Help & Support"
+module = "M22"
+archetype = "crud_screens!"
+combo = ["static_kb"]
+roles = ["AllRoles:R/W"]
+datasets = ["PG.support_ticket", "STATIC.kb"]
+blocked_by = []
+notes = "help/support create at /help/support, support ticket crud at /support-tickets"
+
+
+[[screen]]
+id = "22.3"
+name = "About / Release Notes"
+module = "M22"
+archetype = "static_embed"
+combo = []
+roles = ["AllRoles:R"]
+datasets = ["CATALOG.manifest"]
+blocked_by = []
+stage = "built"

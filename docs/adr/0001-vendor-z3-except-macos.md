@@ -1,7 +1,12 @@
 # 0001: Vendor Z3 for release builds, except macOS (system Z3 there)
 
 Date: 2026-08-25
-Status: accepted
+Status: superseded (2026-09-17) — `crates/compiler` (the native `.nir`
+compiler this ADR's release builds are for) is deprecated in favor of
+the v2 Rust dialect; `.github/workflows/release.yml` and
+`scripts/install.sh` referenced below no longer exist. Kept as an
+accurate historical record of the decision and its rationale, not a
+description of a currently active build pipeline.
 
 ## Context
 

@@ -1,0 +1,110 @@
+# KYC / Identity Verification Platform — root module manifest.
+# Built from the real-world KYC deep-dive: case lifecycle, identity capture,
+# risk rating, maker-checker workflow, re-KYC, audit trail, plus optional
+# third-party vendor modules for document/OCR verification, sanctions/PEP
+# data, government-ID integration, and fuzzy screening-match algorithms.
+
+[template]
+schema = "nirdosha.kyc-manifest/v1"
+app_title = "KYC / Identity Verification Platform"
+app_name = "kyc-identity"
+org_name = "Nirdosha KYC"
+environment_name = "local"
+default_country = "IN"
+
+# Core IP is required and contains the build capabilities:
+#   - application lifecycle
+#   - identity & data capture
+#   - document vault / expiry tracking
+#   - risk rating engine
+#   - review & approval workflow
+#   - re-KYC & expiry management
+#   - audit & reporting
+#
+# Optional modules are external-vendor integrations (Buy / Integrate).
+[modules]
+core = { required = true, description = "Application lifecycle, identity & data capture, document vault, risk rating engine, approval workflow, re-KYC, audit & reporting — all core IP." }
+document_verification = { required = false, default = true, integration = "Buy", description = "Document verification, OCR, liveness and proof-of-address authenticity.", vendors = ["Onfido", "Jumio", "Trulioo", "HyperVerge", "IDfy", "Sumsub"] }
+sanctions_pep = { required = false, default = false, integration = "Buy", description = "Sanctions, PEP and adverse-media screening data and list matching.", vendors = ["Refinitiv World-Check", "ComplyAdvantage", "Dow Jones"] }
+government_id = { required = false, default = false, integration = "Integrate", description = "National government-ID verification (Aadhaar, DigiLocker, eID, etc.).", vendors = ["Aadhaar", "DigiLocker", "eID"] }
+screening_match = { required = false, default = false, integration = "Buy", description = "Fuzzy name-matching and screening match algorithm.", vendors = [] }
+
+# Shared entities. The composer refuses to compose if two modules declare
+# the same entity with different primary keys or field shapes.
+[shared_entities]
+KYCApplication = { owner = "core", pk = "application_id" }
+IdentityDetails = { owner = "core", pk = "identity_id" }
+AddressDetails = { owner = "core", pk = "address_id" }
+KYCDocument = { owner = "core", pk = "document_id" }
+ScreeningResult = { owner = "core", pk = "result_id" }
+RiskAssessment = { owner = "core", pk = "assessment_id" }
+Declaration = { owner = "core", pk = "declaration_id" }
+KYCAuditTrail = { owner = "core", pk = "audit_id" }
+DocumentVerificationConfig = { owner = "document_verification", pk = "config_id" }
+SanctionsConfig = { owner = "sanctions_pep", pk = "config_id" }
+GovernmentIdConfig = { owner = "government_id", pk = "config_id" }
+ScreeningMatchConfig = { owner = "screening_match", pk = "config_id" }
+
+# Country-specific jurisdiction parameters. Currency/limits are carried
+# over from the certified primitive schema; KYC-specific rules (document
+# types, expiry windows, report formats) live in per-country primitives.
+[country.IN]
+currency = "INR"
+decimal_places = 2
+transfer_daily_limit_cents = "5000000"
+large_transfer_threshold_cents = "10000000"
+loan_max_principal_cents = "500000000"
+
+[country.US]
+currency = "USD"
+decimal_places = 2
+transfer_daily_limit_cents = "25000000"
+large_transfer_threshold_cents = "100000000"
+loan_max_principal_cents = "1000000000"
+
+[country.GB]
+currency = "GBP"
+decimal_places = 2
+transfer_daily_limit_cents = "20000000"
+large_transfer_threshold_cents = "80000000"
+loan_max_principal_cents = "800000000"
+
+[country.SG]
+currency = "SGD"
+decimal_places = 2
+transfer_daily_limit_cents = "15000000"
+large_transfer_threshold_cents = "60000000"
+loan_max_principal_cents = "600000000"
+
+# Default logging contract for all generated screen handlers.
+[logging]
+domain = "kyc-identity"
+country = "IN"
+event_class = "audit"
+
+# ---------------------------------------------------------------------------
+# Rough edges discovered while writing this manifest
+# ---------------------------------------------------------------------------
+#
+# E1. Maker-checker enforcement: the same user must never be able to both
+#     submit and approve a KYC case. The UI disables the action, but the
+#     real invariant must be enforced by the service primitive.
+#
+# E2. Third-party vendor switching: a single KYC case may use Onfido for
+#     passports and Aadhaar for government-ID. The composer treats each
+#     vendor module independently; runtime orchestration is needed.
+#
+# E3. Screening disposition: false-positive management (TRUE_MATCH /
+#     FALSE_POSITIVE / NO_RELATION) needs a workflow primitive, not just a
+#     report screen.
+#
+# E4. Jurisdiction-aware document types: US uses SSN/ITIN, India uses
+#     PAN/Aadhaar, UK uses NI/passport. The current country table only
+#     carries monetary primitives; document taxonomy is hard-coded in screens.
+#
+# E5. Risk rule versioning: risk_assessment.factor_breakdown is JSON to
+#     accommodate frequent rule changes, but schema drift must be tracked
+#     explicitly (rule_version field) for audit.
+#
+# E6. Re-KYC triggers: EXPIRY_DUE can be date-driven or event-driven. The
+#     expiry report screen is built; the scheduler primitive is not.

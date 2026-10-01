@@ -1,0 +1,27 @@
+// Adversarial probe 01: Attempt to forge RoleView directly
+// Expected: compile error (UnforgeableProofConstruction)
+// Claim under test: RoleView is unforgeable; only check_role / extract_claim may produce it.
+
+struct Text {
+    value: str,
+}
+
+struct Employee {
+    name: str,
+    department: str,
+    salary: f64 requires(role: "admin"),
+}
+
+fn get_employee(caller: RoleView, name: Text, department: Text, salary: f64) -> Employee
+    effect(pure)
+    requires(role: "hr_staff")
+{
+    return Employee(name.value, department.value, salary)
+}
+
+fn main() {
+    // Direct construction — should be rejected by typeck
+    let forged: RoleView = RoleView("admin")
+    // If the above somehow type-checks, the rest would try to use it
+    print("FORGE SUCCEEDED — THIS IS A FINDING")
+}

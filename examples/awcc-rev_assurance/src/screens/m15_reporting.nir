@@ -1,0 +1,68 @@
+//! M15 Reporting — standard report library, scheduled reports, typology/trend analytics, governed export center.
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{alert_table, report_def_table, ReportDefRow};
+use nirdosha_rt::prelude::SharedTable;
+
+fn typology_counts(auth: &nirdosha_rt::Auth) -> String {
+    let rows = match alert_table().guarded_snapshot(auth, "Analytics") {
+        Ok(rows) => rows,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut by_status: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for r in &rows {
+        *by_status.entry(r.disposition_code.clone()).or_insert(0) += 1;
+    }
+    serde_json::to_string(&by_status.into_iter().map(|(k, v)| serde_json::json!({ "label": k, "value": v })).collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".into())
+}
+
+nirdosha_rt::dashboard! {
+    mount: mount_typology_dashboard,
+    path: "/reports/typologies",
+    title: "Typology & Trend Analytics",
+    refresh_seconds: 300,
+    widgets {
+        Chart { label: "Dispositions by code", fn: typology_counts, mark: bar, guarded: true },
+    }
+}
+
+fn unused_report_store() -> &'static SharedTable<i64, ReportDefRow> {
+    static STORE: std::sync::OnceLock<SharedTable<i64, ReportDefRow>> = std::sync::OnceLock::new();
+    STORE.get_or_init(SharedTable::new)
+}
+
+nirdosha_rt::crud_screens! {
+    mount: mount_report_library,
+    entity: ReportDefRow,
+    store: unused_report_store,
+    path: "/reports/library",
+    fields: [
+        report_id: String,
+        tenant_id: String,
+        name: String,
+        owner: String,
+        schedule: String,
+    ],
+    create: public,
+    read: public,
+    update: public,
+    delete: public,
+    guard: {
+        table: report_def_table,
+        purpose: "Analytics",
+    },
+}
+
+pub fn mount_governed_export(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/reports/export", "Governed Export Center (15.5)", |_req, _params, _auth| {
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "export_status": "requires_approval", "pending_approvals": 0 }))
+    })
+}
+
+pub fn mount_m15_reporting(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_governed_export(router);
+    let router = mount_typology_dashboard(router);
+    mount_report_library(router)
+}

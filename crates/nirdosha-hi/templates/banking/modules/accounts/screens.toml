@@ -1,0 +1,62 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "banking-accounts"
+version = "1.0.0"
+module = "accounts"
+total_screens = 2
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+
+# Module-local approval chain for account-level actions.
+[[approval_chain]]
+name = "large_debit"
+quorum = 1
+approvers = ["BranchManager"]
+
+# ------------------------------------------------------------------ M2 Accounts
+[[screen]]
+id = "2.1"
+name = "Customer Accounts"
+module = "M2"
+archetype = "crud_screens"
+combo = []
+roles = ["Customer:R", "BranchManager:R/W"]
+datasets = ["PG.accounts"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_accounts", route_path = "/accounts", generated_files = ["src/screens/m02_accounts.nir"] }
+data_binding = { entities = ["Account"], primary_key = "account_number", guard = { table = "account_table", purpose = "AccountOps" }, fields = [
+    { name = "account_number", type = "String" },
+    { name = "customer_id", type = "String" },
+    { name = "product_code", type = "String" },
+    { name = "currency", type = "String" },
+    { name = "balance_cents", type = "String" },
+    { name = "status", type = "String" },
+] }
+policy = { purpose = "AccountOps", allowed_actions = ["read", "create", "update"] }
+parameters = { access_create = 'requires role "BranchManager"', access_read = 'requires role "Customer"', access_update = 'requires role "BranchManager"' }
+notes = "balance_cents is stored as String and parsed by certified primitives; generator must not do decimal math"
+
+[[screen]]
+id = "2.2"
+name = "Account Open Wizard"
+module = "M2"
+archetype = "wizard"
+combo = []
+roles = ["BranchManager:R/W"]
+datasets = ["PG.accounts", "PG.customers"]
+stage = "blocked"
+blocked_by = ["primitive:account_open", "primitive:kyc_check"]
+codegen = { template = "wizard", mount_symbol = "mount_account_open_wizard", route_path = "/accounts/open", generated_files = ["src/screens/m02_accounts.nir"] }
+data_binding = { entities = ["Account"], primary_key = "account_number", guard = { table = "account_table", purpose = "AccountOps" }, fields = [
+    { name = "account_number", type = "String" },
+    { name = "customer_id", type = "String" },
+    { name = "product_code", type = "String" },
+] }
+policy = { purpose = "AccountOps", allowed_actions = ["create"] }
+parameters = { access = 'requires role "BranchManager"', steps = [
+    { name = "Customer", fields = [ { name = "customer_id", type = "String" } ] },
+    { name = "Product",  fields = [ { name = "product_code", type = "String" } ] },
+] }
+notes = "BLOCKED: needs KYC status check + unique account number generation primitives"

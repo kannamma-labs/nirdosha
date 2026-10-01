@@ -1,0 +1,31 @@
+[metadata]
+schema = "nirdosha.screen-register/v2"
+register_id = "fintech-psp"
+version = "1.0.0"
+module = "M4"
+total_screens = 1
+canonical_order = "module_then_id"
+codegen_profile = "web-default"
+generator_version = "nirdosha-screen-codegen/1"
+default_timezone = "UTC"
+default_locale = "en"
+
+[[screen]]
+id = "4.1"
+name = "PSP Connections"
+module = "M4"
+archetype = "crud_screens"
+roles = ["PlatformAdmin"]
+datasets = ["psp"]
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_psp", route_path = "/psp", generated_files = ["src/screens/m04_psp.nir"] }
+data_binding = { entities = ["PspConnection"], primary_key = "psp_id", guard = { table = "psp", purpose = "PspOps" }, fields = [
+    { name = "psp_id", type = "String" },
+    { name = "name", type = "String" },
+    { name = "protocol", type = "String" },
+    { name = "endpoint", type = "String" },
+    { name = "status", type = "String" }
+] }
+policy = { purpose = "PspOps", allowed_actions = ["read", "create", "update"] }
+file = "src/screens/m04_psp.nir"
+notes = "Manage direct processor and acquiring bank connections."

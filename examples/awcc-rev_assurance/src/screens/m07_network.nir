@@ -1,0 +1,39 @@
+//! M7 Network — shared attributes, interactive entity graph (Phase B/interim).
+//!
+//! AWCC Revenue Assurance screen module.
+
+use crate::bridge::{subscriber_table, cdr_table};
+
+pub fn mount_shared_attributes(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/network/shared-attrs", "Shared Attributes (7.4)", |_req, _params, auth| {
+        let subs = match subscriber_table().guarded_aggregate(auth, "Analytics") {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let mut shared: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for s in subs {
+            shared.entry(s.imsi.clone()).or_default().push(s.subscriber_id.clone());
+        }
+        let duplicates: std::collections::BTreeMap<String, Vec<String>> = shared.into_iter().filter(|(_, v)| v.len() > 1).collect();
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "shared_imsi_groups": duplicates }))
+    })
+}
+
+pub fn mount_entity_graph(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    router.get_with_auth("/network/graph", "Interactive Entity Graph (7.1)", |_req, _params, auth| {
+        let cdrs = match cdr_table().guarded_aggregate(auth, "Analytics") {
+            Ok(rows) => rows,
+            Err(e) => return nirdosha_guard_screens::guard_error_response(e),
+        };
+        let mut edges: Vec<serde_json::Value> = Vec::new();
+        for r in cdrs.iter().take(100) {
+            edges.push(serde_json::json!({ "source": r.msisdn, "target": r.account_id, "call_type": r.call_type, "amount": r.amount }));
+        }
+        nirdosha_rt::Response::json(200, &serde_json::json!({ "edges": edges }))
+    })
+}
+
+pub fn mount_m07_network(router: nirdosha_rt::Router) -> nirdosha_rt::Router {
+    let router = mount_shared_attributes(router);
+    mount_entity_graph(router)
+}

@@ -1,0 +1,22 @@
+[package]
+name = "nirdosha-graph"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Versioned v2 Nirdosha authoring graph and project MCP service"
+
+[dependencies]
+nirdosha-audit = { path = "../nirdosha-audit" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.2"
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+quote = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[package.metadata.nirdosha-rt]
+toolchain = true

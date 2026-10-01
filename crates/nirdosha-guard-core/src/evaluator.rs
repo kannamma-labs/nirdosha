@@ -1,0 +1,150 @@
+//! Minimal exact-match policy evaluator.
+//!
+//! This is deliberately smaller than a policy frontend. It provides the
+//! deterministic deny-overrides kernel that registry and Cedar adapters can
+//! feed without making the IR depend on either frontend.
+
+use crate::{Action, Cap, Condition, Decision, EscalateTarget, EvaluationContext, FieldMask, FilterExpr, Obligation};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyCandidate {
+    pub effect: PolicyEffect,
+    pub subjects: Vec<String>,
+    pub action: Action,
+    pub resource: String,
+    pub purpose: Option<String>,
+    pub conditions: Vec<Condition>,
+    pub filter: Option<FilterExpr>,
+    pub obligations: Vec<Obligation>,
+    pub escalation: Option<EscalateTarget>,
+    /// Cost/correctness caps this policy grants (`RowCap`, `MaxScanRows`,
+    /// ...) — an execution engine (read-path plan building) needs these;
+    /// the deny-overrides-allow decision itself does not.
+    pub caps: Vec<Cap>,
+    /// Field masks this policy grants — same reasoning as `caps`.
+    pub masks: Vec<FieldMask>,
+    /// `cap(affected_rows = N)` — the write-side counterpart to `caps`
+    /// (see `Cap`'s own doc comment on why it's a separate field, not a
+    /// `Cap` variant).
+    pub affected_row_cap: Option<u64>,
+    /// `grant predicate_use(...)` — I15's exception list: fields named
+    /// here may appear in a non-projection clause (filter/grouping/
+    /// ordering) despite also being masked.
+    pub predicate_use: Vec<String>,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyEffect { Allow, Deny }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationResult {
+    pub decision: Decision,
+    pub obligations: Vec<Obligation>,
+    pub residual_filter: Option<FilterExpr>,
+    pub caps: Vec<Cap>,
+    pub masks: Vec<FieldMask>,
+    pub affected_row_cap: Option<u64>,
+    pub predicate_use: Vec<String>,
+}
+
+pub fn evaluate(context: &EvaluationContext, policies: &[PolicyCandidate]) -> EvaluationResult {
+    let mut matching = policies.iter().filter(|policy| matches_context(context, policy));
+    let mut obligations = Vec::new();
+    let mut residual_filter = None;
+    let mut caps = Vec::new();
+    let mut masks = Vec::new();
+    let mut affected_row_cap = None;
+    let mut predicate_use = Vec::new();
+    let mut allow = false;
+    let mut escalation = None;
+
+    while let Some(policy) = matching.next() {
+        if matches!(policy.effect, PolicyEffect::Deny) {
+            return EvaluationResult { decision: Decision::Deny { reason: format!("policy denied: {}", policy.id) }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new(), affected_row_cap: None, predicate_use: Vec::new() };
+        }
+        allow = true;
+        obligations.extend(policy.obligations.clone());
+        residual_filter = residual_filter.or_else(|| policy.filter.clone());
+        escalation = escalation.or_else(|| policy.escalation.clone());
+        caps.extend(policy.caps.clone());
+        masks.extend(policy.masks.clone());
+        affected_row_cap = affected_row_cap.or(policy.affected_row_cap);
+        predicate_use.extend(policy.predicate_use.iter().cloned());
+    }
+
+    if let Some(target) = escalation {
+        return EvaluationResult { decision: Decision::Escalate { to: target }, obligations, residual_filter, caps, masks, affected_row_cap, predicate_use };
+    }
+    if allow {
+        EvaluationResult { decision: Decision::Allow, obligations, residual_filter, caps, masks, affected_row_cap, predicate_use }
+    } else {
+        EvaluationResult { decision: Decision::Deny { reason: "deny by default".into() }, obligations: Vec::new(), residual_filter: None, caps: Vec::new(), masks: Vec::new(), affected_row_cap: None, predicate_use: Vec::new() }
+    }
+}
+
+fn matches_context(context: &EvaluationContext, policy: &PolicyCandidate) -> bool {
+    let role_match = policy.subjects.is_empty() || policy.subjects.iter().any(|subject| context.subject.roles.iter().any(|role| role == subject));
+    role_match
+        && context.action == policy.action
+        // `"*"` is the real, load-bearing sentinel `nirdosha-guard-macros`'s
+        // `guard_policy!` parser emits for a `when action ...` clause with
+        // no `&& resource ...` at all (`lib.rs`'s `PolicyInput::parse`:
+        // `resources = vec![LitStr::new("*", ...)]` before the optional
+        // `&& resource` branch may overwrite it) -- e.g. RTM's real
+        // `deny "auditor-no-write" for Auditor when action in [...]`
+        // (`96_restricted_views.nir`) and `deny "regulator-no-export"`
+        // (same file), both deliberately resource-agnostic denies. Found
+        // by direct trace, not assumed: before this fix, plain string
+        // equality meant `policy.resource == "*"` could never equal any
+        // real `context.entity`, so both denies were silently inert in
+        // this live evaluator (the static/verify-only "Gate 2" path never
+        // exercises `matches_context` at all, which is why `verify_corpus.rs`
+        // never caught this). No real dataset is ever named `"*"`, so this
+        // is unambiguous, not a guessed-at wildcard convention.
+        && (context.entity == policy.resource || policy.resource == "*")
+        && policy.purpose.as_ref().is_none_or(|purpose| purpose == &context.purpose.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Destination, Environment, Purpose, QueryShape, Subject, Tenant, Classification};
+
+    fn context() -> EvaluationContext {
+        EvaluationContext { subject: Subject { id: "u".into(), roles: vec!["analyst".into()], claims: vec![], clearance: Classification::Internal }, tenant: Tenant("t".into()), entity: "orders".into(), dataset: "db".into(), action: Action::Read, destination: Destination::Browser, environment: Environment { env: "test".into(), ip: None, geo: None, device_posture: None, session_freshness: None }, time_bucket: "now".into(), query_shape: QueryShape { verbs: vec![], aggregate: None, grouping_keys: vec![], subject_dimension: None, ordering: vec![], pagination: crate::PaginationMode::LimitOnly { limit: 10 } }, purpose: Purpose("support".into()), policy_version: "v1".into() }
+    }
+
+    fn candidate(effect: PolicyEffect) -> PolicyCandidate {
+        PolicyCandidate { effect, subjects: vec!["analyst".into()], action: Action::Read, resource: "orders".into(), purpose: Some("support".into()), conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: "orders-read".into() }
+    }
+
+    #[test]
+    fn deny_by_default() { assert!(matches!(evaluate(&context(), &[]).decision, Decision::Deny { .. })); }
+
+    #[test]
+    fn deny_overrides_allow() { assert!(matches!(evaluate(&context(), &[candidate(PolicyEffect::Allow), candidate(PolicyEffect::Deny)]).decision, Decision::Deny { .. })); }
+
+    #[test]
+    fn exact_match_allows() { assert_eq!(evaluate(&context(), &[candidate(PolicyEffect::Allow)]).decision, Decision::Allow); }
+
+    /// Real bug, found tracing RTM's `auditor-no-write`/`regulator-no-export`
+    /// (`examples/rtm/src/96_restricted_views.nir`) -- both are real,
+    /// deliberately resource-agnostic denies (`when action in [...]`, no
+    /// `&& resource ...` clause at all), which `nirdosha-guard-macros`'s
+    /// `guard_policy!` parser lowers to the literal sentinel `resource:
+    /// "*"`. Before this fix, `matches_context`'s plain string equality
+    /// meant a `"*"`-resource policy could never match any real
+    /// `context.entity`, silently making both denies inert.
+    #[test]
+    fn a_resource_agnostic_deny_matches_every_entity() {
+        let wildcard_deny = PolicyCandidate { effect: PolicyEffect::Deny, subjects: vec!["auditor".into()], action: Action::Update, resource: "*".into(), purpose: None, conditions: vec![], filter: None, obligations: vec![], escalation: None, caps: vec![], masks: vec![], affected_row_cap: None, predicate_use: vec![], id: "auditor-no-write".into() };
+        let mut ctx = context();
+        ctx.subject.roles = vec!["auditor".into()];
+        ctx.action = Action::Update;
+        for entity in ["orders", "transaction", "anything_else"] {
+            ctx.entity = entity.into();
+            assert!(matches!(evaluate(&ctx, &[wildcard_deny.clone()]).decision, Decision::Deny { .. }), "a `resource: \"*\"` deny must block every entity, including `{entity}`");
+        }
+    }
+}

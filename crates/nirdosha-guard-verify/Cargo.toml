@@ -1,0 +1,14 @@
+[package]
+name = "nirdosha-guard-verify"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nirdosha-guard-registry = { path = "../nirdosha-guard-registry" }
+nirdosha-guard-core = { path = "../nirdosha-guard-core" }
+nirdosha-audit = { path = "../nirdosha-audit" }
+nirdosha-lineage = { path = "../nirdosha-lineage" }
+nirdosha-guard-mic = { path = "../nirdosha-guard-mic" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
